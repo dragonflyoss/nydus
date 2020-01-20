@@ -1,0 +1,19 @@
+[package]
+name = "nydus-utils"
+version = "0.1.0"
+authors = ["The Ant Financial Nydus Developers"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+libc = "0.2"
+nix = "0.17"
+epoll = ">=4.0.1"
+backtrace = "0.3"
+vmm-sys-util = ">=0.3.1"
+fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true }
+
+[features]
+fusedev = ["fuse-rs/fusedev"]

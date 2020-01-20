@@ -1,0 +1,309 @@
+openapi: 3.0.1
+info:
+  description:
+    RESTful public-facing management API. The API is accessible through
+    HTTP calls on specific URLs carrying JSON modeled data.
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  title: Nydus-rs API
+  version: 0.1.0
+servers:
+  - url: http://localhost/api/v1
+paths:
+  /daemon:
+    get:
+      operationId: describeDaemon
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DaemonInfo"
+          description: Daemon information
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Returns general information about a nydus-rs daemon
+    put:
+      operationId: configureDaemon
+      responses:
+        "204":
+          content:
+            content: {}
+          description: "Successfully configure the daemon!"
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: "Can't configure the daemon!"
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DaemonConf"
+  /mount:
+    put:
+      operationId: createMount
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MountInfo"
+        required: true
+      responses:
+        "204":
+          content: {}
+          description: The mount was successful
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: The mount action cannot be executed due to bad input
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Creates a mount.
+      x-codegen-request-body-name: info
+  /metrics:
+    get:
+      operationId: exportRafsMetrics
+      parameters:
+        - name: id
+          in: query
+          description: "Specify rafs id to get its metrics"
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RafsMetrics"
+          description: Rafs metrics export
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Returns Rafs fop stats
+  /metrics/files:
+    get:
+      operationId: exportRafsFilesMetrics
+      parameters:
+        - name: id
+          in: query
+          description: "Specify rafs id to get its all files metrics"
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RafsFilesMetrics"
+          description: Rafs all opened files metrics export
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Returns Rafs files' fop stats
+  /metrics/pattern:
+    get:
+      operationId: exportRafsFilesAccessPattern
+      parameters:
+        - name: id
+          in: query
+          description: "Specify rafs id to get its all files access patterns"
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RafsFilesAccessPatterns"
+          description: Rafs access pattern exporting
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Returns Rafs files' access patterns
+components:
+  schemas:
+    DaemonInfo:
+      example:
+        id: id
+        state: Starting
+        version: version
+      properties:
+        id:
+          type: string
+        state:
+          enum:
+            - Starting
+            - Running
+            - Stopping
+          type: string
+        version:
+          type: string
+      required:
+        - id
+        - state
+        - version
+      type: object
+    DaemonConf:
+      example:
+        log_level: warn
+      properties:
+        log_level:
+          type: string
+        state:
+          enum:
+            - trace
+            - debug
+            - info
+            - warn
+            - error
+          type: string
+      type: object
+    MountInfo:
+      example:
+        source: /foo/bar/bootstrap
+        fstype: rafs
+        mountpoint: /foo/bar
+        config: /foo/bar/config
+      properties:
+        fstype:
+          description: mount type
+          example: rafs
+          type: string
+        source:
+          description: mount source
+          example: /foo/bar/bootstrap
+          type: string
+        mountpoint:
+          description: mount target
+          example: /foo/bar
+          type: string
+        config:
+          description: backend config file
+          example: /foo/bar/config
+          type: string
+        ops:
+          description: mount operation type
+          example: mount
+          type: string
+      required:
+        - fstype
+        - mountpoint
+        - source
+        - ops
+      type: object
+    Error:
+      properties:
+        fault_message:
+          description: A description of the error condition
+          readOnly: true
+          type: string
+      type: object
+    RafsMetrics:
+      example:
+        files_account_enabled: false
+        measure_latency: false
+        data_read: 1000
+        block_count_read: [0, 0, 0, 0, 0]
+        fop_hits: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        fop_errors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        fop_cumulative_latency_avg: [0, 0, 0, 0, 2831, 0, 0, 0, 0, 0, 0]
+        fop_cumulative_latency_total: [0, 0, 0, 0, 2831, 0, 0, 0, 0, 0, 0]
+        read_latency_dist: [0, 0, 0, 1, 0, 0, 0, 0]
+        nr_opens: 12
+        nr_max_opens: 100
+        last_fop_tp: 0
+      properties:
+        files_account_enabled:
+          type: boolean
+        measure_latency:
+          type: boolean
+        data_read:
+          type: integer
+        block_count_read:
+          type: array
+        fop_hits:
+          type: array
+        fop_errors:
+          type: array
+        fop_cumulative_latency_avg:
+          type: array
+        fop_cumulative_latency_total:
+          type: array
+        read_latency_dist:
+          type: array
+        nr_opens:
+          type: integer
+        nr_max_opens:
+          type: integer
+        last_fop_tp:
+          type: integer
+    RafsFilesMetrics:
+      example:
+        nr_open: 0
+        nr_max_opens: 0
+        total_fops: 2
+        data_read: 4096
+        block_count_read: [0, 0, 0, 0, 0]
+        fop_hits: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        fop_errors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      properties:
+        nr_open:
+          type: integer
+        nr_max_opens:
+          type: integer
+        total_fops:
+          type: integer
+        data_read:
+          type: integer
+        block_count_read:
+          type: array
+        fop_hits:
+          type: array
+        fop_errors:
+          type: array
+    RafsFilesAccessPatterns:
+      example:
+        ino: 100
+        nr_read: 1200
+        first_access_time: 1597664322
+      properties:
+        ino:
+          type: integer
+          description: File inode number to identify which file is against
+        nr_read:
+          type: integer
+          description: How many times a file is read regardless of io block size and request offset
+        first_access_time:
+          type: integer
+          description: Last time point at which this file is read. It's wall-time in unit of seconds
