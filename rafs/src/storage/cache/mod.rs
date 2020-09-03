@@ -193,7 +193,7 @@ pub trait RafsCache {
         chunk: &mut [u8],
     ) -> Result<usize> {
         if cki.is_compressed() {
-            compress::decompress(raw_chunk, chunk)?;
+            compress::decompress(raw_chunk, chunk, self.compressor())?;
         } else if raw_chunk.as_ptr() != chunk.as_ptr() {
             // Sometimes, caller directly put data into consumer provided buffer.
             // Then we don't have to copy data between slices.
