@@ -8,11 +8,13 @@ extern crate stderrlog;
 
 mod builder;
 mod node;
+mod stargz;
 mod tree;
 mod validator;
 
 #[macro_use]
 extern crate log;
+extern crate serde;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
@@ -20,11 +22,13 @@ use clap::{App, Arg, SubCommand};
 use vmm_sys_util::tempfile::TempFile;
 
 use std::collections::BTreeMap;
+use std::fs::metadata;
 use std::fs::rename;
 use std::io::{self, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use builder::SourceType;
 use nydus_utils::einval;
 use nydus_utils::log_level_to_verbosity;
 use rafs::storage::{backend, factory};
@@ -140,6 +144,14 @@ fn main() -> Result<()> {
                         .index(1),
                 )
                 .arg(
+                    Arg::with_name("source-type")
+                        .long("source-type")
+                        .help("source type")
+                        .takes_value(true)
+                        .default_value("directory")
+                        .possible_values(&["directory", "stargz_index"])
+                )
+                .arg(
                     Arg::with_name("blob")
                         .long("blob")
                         .help("blob file path")
@@ -251,11 +263,13 @@ fn main() -> Result<()> {
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         let source_path = Path::new(matches.value_of("SOURCE").expect("SOURCE is required"));
-        let bootstrap_path = Path::new(
-            matches
-                .value_of("bootstrap")
-                .expect("bootstrap is required"),
-        );
+        let source_type: SourceType = matches
+            .value_of("source-type")
+            .expect("source-type is required")
+            .parse()?;
+
+        let source_file = metadata(source_path)
+            .map_err(|e| einval!(format!("failed to get source path {:?}", e)))?;
 
         let mut blob_id = String::new();
         if let Some(p_blob_id) = matches.value_of("blob-id") {
@@ -267,6 +281,28 @@ fn main() -> Result<()> {
                 )));
             }
         }
+
+        match source_type {
+            SourceType::Directory => {
+                if !source_file.is_dir() {
+                    return Err(einval!("source must be a directory"));
+                }
+            }
+            SourceType::StargzIndex => {
+                if !source_file.is_file() {
+                    return Err(einval!("source must be a JSON file"));
+                }
+                if blob_id.trim() == "" {
+                    return Err(einval!("blob-id can't be empty"));
+                }
+            }
+        }
+
+        let bootstrap_path = Path::new(
+            matches
+                .value_of("bootstrap")
+                .expect("bootstrap is required"),
+        );
 
         let compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
         let digester = matches.value_of("digester").unwrap_or_default().parse()?;
@@ -296,6 +332,7 @@ fn main() -> Result<()> {
         };
 
         let mut ib = builder::Builder::new(
+            source_type,
             source_path,
             blob_path,
             bootstrap_path,

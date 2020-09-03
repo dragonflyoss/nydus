@@ -784,6 +784,7 @@ dependencies = [
  "nydus-utils",
  "rafs",
  "rlimit",
+ "serde",
  "serde_json",
  "sha2",
  "stderrlog",

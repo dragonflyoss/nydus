@@ -60,7 +60,7 @@ impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_name_size {} i_symlink_size {} has_xattr {}",
+            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_name_size {} i_symlink_size {} has_xattr {} link {:?}",
             self.file_type(),
             self.rootfs(),
             self.index,
@@ -73,6 +73,7 @@ impl fmt::Display for Node {
             self.inode.i_name_size,
             self.inode.i_symlink_size,
             self.inode.has_xattr(),
+            self.symlink,
         )
     }
 }
@@ -277,6 +278,7 @@ impl Node {
         }
 
         for chunk in &mut self.chunks {
+            trace!("\t\tbuilding chunk: {}", chunk);
             let chunk_size = chunk.store(f_bootstrap)?;
             node_size += chunk_size;
         }
