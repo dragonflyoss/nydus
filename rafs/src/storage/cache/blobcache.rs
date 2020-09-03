@@ -238,7 +238,7 @@ impl BlobCache {
                 c_size
             );
         } else {
-            self.read_by_chunk(blob_id, chunk.as_ref(), one_chunk_buf)?;
+            self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf)?;
             cache_entry.cache(one_chunk_buf);
         }
 

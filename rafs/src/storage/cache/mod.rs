@@ -150,7 +150,7 @@ pub trait RafsCache {
     /// It depends on `cki` how to describe the chunk data.
     /// Moreover, chunk data from backend can be validated per as to nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
-    fn read_by_chunk(
+    fn read_backend_chunk(
         &self,
         blob_id: &str,
         cki: &dyn RafsChunkInfo,
@@ -171,15 +171,11 @@ pub trait RafsCache {
             unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
         };
 
-        self.read_raw_chunk(blob_id, c_offset, raw_chunk)?;
+        self.backend().read(blob_id, raw_chunk, c_offset)?;
         // Try to validate data just fetched from backend inside.
         self.process_raw_chunk(cki, raw_chunk, chunk)?;
 
         Ok(d_size)
-    }
-
-    fn read_raw_chunk(&self, blob_id: &str, offset: u64, raw_chunk: &mut [u8]) -> Result<usize> {
-        self.backend().read(blob_id, raw_chunk, offset)
     }
 
     /// Before storing chunk data into blob cache file. We have cook the raw chunk from
