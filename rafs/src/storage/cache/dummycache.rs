@@ -80,6 +80,10 @@ impl RafsCache for DummyCache {
         }
     }
 
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        self.backend().blob_size(blob_id)
+    }
+
     fn digester(&self) -> digest::Algorithm {
         self.digester
     }

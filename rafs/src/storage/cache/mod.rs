@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cmp;
 use std::io::Result;
 use std::slice;
 use std::sync::Arc;
@@ -134,6 +135,9 @@ pub trait RafsCache {
     /// Write a chunk data through cache
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize>;
 
+    /// Get the size of a blob
+    fn blob_size(&self, blob_id: &str) -> Result<u64>;
+
     fn prefetch(&self, bio: &mut [RafsBio]) -> Result<usize>;
 
     /// Release cache
@@ -163,7 +167,19 @@ pub trait RafsCache {
         let raw_chunk = if cki.is_compressed() {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
             // TODO: Use a buffer pool for lower latency?
-            let c_size = cki.compress_size() as usize;
+            //
+            // gzip is special that it doesn't carry compress_size, instead, we can read as much
+            // as 4MB compressed data per chunk, decompress as much as necessary to fill in chunk
+            // that has the original uncompressed data size.
+            // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
+            // by fixed chunk size instead of RafsChunkInfo.
+            // And it is extremely ineffecient for dummy cache.
+            let c_size = if self.compressor() != compress::Algorithm::GZip {
+                cki.compress_size() as usize
+            } else {
+                let size = self.blob_size(blob_id)? - cki.compress_offset();
+                cmp::min(size, 4 << 20) as usize
+            };
             d = alloc_buf(c_size);
             d.as_mut_slice()
         } else {

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cmp;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result};
@@ -95,14 +96,18 @@ impl BlobCacheEntry {
 #[derive(Default)]
 struct BlobCacheState {
     chunk_map: HashMap<RafsDigest, Arc<Mutex<BlobCacheEntry>>>,
-    file_map: HashMap<String, File>,
+    file_map: HashMap<String, (File, u64)>,
     work_dir: String,
 }
 
 impl BlobCacheState {
-    fn get_blob_fd(&mut self, blob_id: &str) -> Result<RawFd> {
-        if let Some(file) = self.file_map.get(blob_id) {
-            return Ok(file.as_raw_fd());
+    fn get_blob_fd(
+        &mut self,
+        blob_id: &str,
+        backend: &(dyn BlobBackend + Sync + Send),
+    ) -> Result<(RawFd, u64)> {
+        if let Some((file, size)) = self.file_map.get(blob_id) {
+            return Ok((file.as_raw_fd(), *size));
         }
 
         let blob_file_path = format!("{}/{}", self.work_dir, blob_id);
@@ -112,10 +117,11 @@ impl BlobCacheState {
             .read(true)
             .open(blob_file_path)?;
         let fd = file.as_raw_fd();
+        let size = backend.blob_size(blob_id)?;
 
-        self.file_map.insert(blob_id.to_string(), file);
+        self.file_map.insert(blob_id.to_string(), (file, size));
 
-        Ok(fd)
+        Ok((fd, size))
     }
 
     fn get(&self, blk: Arc<dyn RafsChunkInfo>) -> Option<Arc<Mutex<BlobCacheEntry>>> {
@@ -127,13 +133,14 @@ impl BlobCacheState {
         &mut self,
         blob_id: &str,
         cki: Arc<dyn RafsChunkInfo>,
+        backend: &(dyn BlobBackend + Sync + Send),
     ) -> Result<Arc<Mutex<BlobCacheEntry>>> {
         let block_id = cki.block_id();
         // Double check if someone else has inserted the blob chunk concurrently.
         if let Some(entry) = self.chunk_map.get(&block_id) {
             Ok(entry.clone())
         } else {
-            let fd = self.get_blob_fd(blob_id)?;
+            let (fd, _) = self.get_blob_fd(blob_id, backend)?;
             let entry = Arc::new(Mutex::new(BlobCacheEntry::new(cki, fd)));
             self.chunk_map.insert(*block_id, entry.clone());
             Ok(entry)
@@ -191,7 +198,7 @@ impl BlobCache {
 
         // Try to recover cache from blobcache first
         if self
-            .read_blobcache_chunk(cache_entry.fd, chunk.as_ref(), one_chunk_buf)
+            .read_blobcache_chunk(cache_entry.fd, blob_id, chunk.as_ref(), one_chunk_buf)
             .is_ok()
         {
             trace!(
@@ -220,6 +227,7 @@ impl BlobCache {
     fn read_blobcache_chunk(
         &self,
         fd: RawFd,
+        blob_id: &str,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
     ) -> Result<usize> {
@@ -234,7 +242,18 @@ impl BlobCache {
         let raw_chunk = if self.is_compressed {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
             // TODO: Use a buffer pool for lower latency?
-            let c_size = cki.compress_size() as usize;
+            //
+            // gzip is special that it doesn't carry compress_size, instead, we can read as much
+            // as 4MB compressed data per chunk, decompress as much as necessary to fill in chunk
+            // that has the original uncompressed data size.
+            // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
+            // by fixed chunk size instead of RafsChunkInfo.
+            let c_size = if self.compressor() != compress::Algorithm::GZip {
+                cki.compress_size() as usize
+            } else {
+                let size = self.blob_size(blob_id)? - cki.compress_offset();
+                cmp::min(size, 4 << 20) as usize
+            };
             d = alloc_buf(c_size);
             d.as_mut_slice()
         } else {
@@ -313,13 +332,22 @@ impl RafsCache for BlobCache {
         } else {
             drop(cache_read_guard);
             let mut cache_write_guard = self.cache.write().unwrap();
-            let entry = cache_write_guard.set(blob_id, chunk)?;
+            let entry = cache_write_guard.set(blob_id, chunk, self.backend())?;
             self.entry_read(blob_id, &entry, bufs, offset, bio.size)
         }
     }
 
     fn write(&self, _blob_id: &str, _blk: &dyn RafsChunkInfo, _buf: &[u8]) -> Result<usize> {
         Err(enosys!())
+    }
+
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        let (_, size) = self
+            .cache
+            .write()
+            .unwrap()
+            .get_blob_fd(blob_id, self.backend())?;
+        Ok(size)
     }
 
     fn release(&self) {}
@@ -360,10 +388,11 @@ impl RafsCache for BlobCache {
                         // to local file system.
                         for c in continuous_chunks {
                             let d_size = c.decompress_size() as usize;
-                            let entry = cache
-                                .write()
-                                .expect("Expect cache lock not poisoned")
-                                .set(blob_id, c.clone());
+                            let entry = cache.write().expect("Expect cache lock not poisoned").set(
+                                blob_id,
+                                c.clone(),
+                                cache_cloned.backend(),
+                            );
                             if let Ok(entry) = entry {
                                 if entry.lock().unwrap().is_ready() {
                                     continue;
@@ -371,6 +400,7 @@ impl RafsCache for BlobCache {
                                 if cache_cloned
                                     .read_blobcache_chunk(
                                         entry.lock().unwrap().fd,
+                                        blob_id,
                                         entry.lock().unwrap().chunk.as_ref(),
                                         alloc_buf(d_size).as_mut_slice(),
                                     )
@@ -399,7 +429,7 @@ impl RafsCache for BlobCache {
                                     cache.write().expect("Expect cache lock not poisoned");
 
                                 if let Ok(entry) = cache_guard
-                                    .set(blob_id, c.clone())
+                                    .set(blob_id, c.clone(), cache_cloned.backend())
                                     .map_err(|_| error!("Set cache index error!"))
                                 {
                                     entry
@@ -533,6 +563,10 @@ mod blob_cache_tests {
         }
 
         fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> Result<usize> {
+            Ok(0)
+        }
+
+        fn blob_size(&self, _blob_id: &str) -> Result<u64> {
             Ok(0)
         }
     }
