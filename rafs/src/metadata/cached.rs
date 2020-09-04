@@ -552,6 +552,10 @@ impl RafsChunkInfo for CachedChunkInfo {
         self.c_flags.contains(RafsChunkFlags::COMPRESSED)
     }
 
+    fn is_hole(&self) -> bool {
+        self.c_flags.contains(RafsChunkFlags::HOLECHUNK)
+    }
+
     fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
         Ok(OndiskChunkInfo {
             block_id: *self.block_id().as_ref(),

@@ -120,7 +120,7 @@ impl FileReadWriteVolatile for RafsBioDevice<'_> {
         bufs: &[VolatileSlice],
         offset: u64,
     ) -> Result<usize, Error> {
-        if self.bio.chunkinfo.compress_size() == 0 {
+        if self.bio.chunkinfo.is_hole() {
             return self.fill_hole(bufs);
         }
 

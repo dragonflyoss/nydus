@@ -839,6 +839,7 @@ bitflags! {
     pub struct RafsChunkFlags: u32 {
         /// chunk is compressed
         const COMPRESSED = 0x0000_0001;
+        const HOLECHUNK = 0x0000_0002;
     }
 }
 
@@ -878,6 +879,11 @@ impl RafsChunkInfo for OndiskChunkInfo {
     #[inline]
     fn is_compressed(&self) -> bool {
         self.flags.contains(RafsChunkFlags::COMPRESSED)
+    }
+
+    #[inline]
+    fn is_hole(&self) -> bool {
+        self.flags.contains(RafsChunkFlags::HOLECHUNK)
     }
 
     fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {

@@ -186,13 +186,18 @@ impl Node {
             file.read_exact(&mut chunk_data)?;
 
             // Calculate chunk digest
+            // TODO: check for hole chunks. One possible way is to always save
+            // a global hole chunk and check for digest duplication
             chunk.block_id = RafsDigest::from_buf(chunk_data.as_slice(), digester);
             // Calculate inode digest
             inode_hasher.digest_update(chunk.block_id.as_ref());
 
             // Deduplicate chunk if we found a same one from chunk cache
             if let Some(cached_chunk) = chunk_cache.get(&chunk.block_id) {
-                if cached_chunk.decompress_size == chunk_size as u32 {
+                // hole cached_chunk can have zero decompress size
+                if cached_chunk.decompress_size == 0
+                    || cached_chunk.decompress_size == chunk_size as u32
+                {
                     chunk.clone_from(&cached_chunk);
                     chunk.file_offset = file_offset;
                     self.chunks.push(chunk);

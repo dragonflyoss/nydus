@@ -845,4 +845,5 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
     impl_chunkinfo_getter!(decompress_size, u32);
     impl_chunkinfo_getter!(file_offset, u64);
     impl_chunkinfo_getter!(is_compressed, bool);
+    impl_chunkinfo_getter!(is_hole, bool);
 }
