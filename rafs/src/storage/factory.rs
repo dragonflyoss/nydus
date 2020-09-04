@@ -36,6 +36,8 @@ pub struct BackendConfig {
 pub struct CacheConfig {
     #[serde(default, rename = "validate")]
     pub cache_validate: bool,
+    #[serde(default, rename = "compressed")]
+    pub cache_compressed: bool,
     #[serde(default, rename = "type")]
     pub cache_type: String,
     #[serde(default, rename = "config")]

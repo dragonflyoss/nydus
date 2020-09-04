@@ -156,7 +156,7 @@ pub trait RafsCache {
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
     ) -> Result<usize> {
-        let c_offset = cki.compress_offset();
+        let offset = cki.compress_offset();
         let d_size = cki.decompress_size() as usize;
         let mut d;
 
@@ -171,10 +171,10 @@ pub trait RafsCache {
             unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
         };
 
-        self.backend().read(blob_id, raw_chunk, c_offset)?;
+        self.backend().read(blob_id, raw_chunk, offset)?;
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, chunk)?;
-
+        self.process_raw_chunk(cki, raw_chunk, chunk, cki.is_compressed())
+            .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
         Ok(d_size)
     }
 
@@ -187,9 +187,13 @@ pub trait RafsCache {
         cki: &dyn RafsChunkInfo,
         raw_chunk: &[u8],
         chunk: &mut [u8],
+        need_decompress: bool,
     ) -> Result<usize> {
-        if cki.is_compressed() {
-            compress::decompress(raw_chunk, chunk, self.compressor())?;
+        if need_decompress {
+            compress::decompress(raw_chunk, chunk, self.compressor()).map_err(|e| {
+                error!("failed to decompress chunk: {}", e);
+                e
+            })?;
         } else if raw_chunk.as_ptr() != chunk.as_ptr() {
             // Sometimes, caller directly put data into consumer provided buffer.
             // Then we don't have to copy data between slices.
@@ -197,20 +201,11 @@ pub trait RafsCache {
         }
 
         let d_size = cki.decompress_size() as usize;
-
         if chunk.len() != d_size {
-            return Err(eio!(format!(
-                "invalid chunk data, expected size: {} != {}",
-                d_size,
-                chunk.len(),
-            )));
+            return Err(eio!());
         }
-
         if self.need_validate() && !digest_check(chunk, &cki.block_id(), self.digester()) {
-            return Err(eio!(format!(
-                "invalid chunk data, expected digest: {}",
-                cki.block_id()
-            )));
+            return Err(eio!());
         }
 
         Ok(chunk.len())
@@ -251,6 +246,7 @@ pub trait RafsCache {
                 cki.as_ref(),
                 &c_buf[offset_merged..(offset_merged + size_merged)],
                 &mut chunk,
+                cki.is_compressed(),
             )?;
             chunks.push(chunk);
         }

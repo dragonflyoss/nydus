@@ -15,7 +15,12 @@ use vmm_sys_util::tempdir::TempDir;
 mod builder;
 mod nydusd;
 
-fn test(compressor: &str, enable_cache: bool, rafs_mode: &str) -> Result<()> {
+fn test(
+    compressor: &str,
+    enable_cache: bool,
+    cache_compressed: bool,
+    rafs_mode: &str,
+) -> Result<()> {
     info!(
         "\n\n==================== testing run: enable_compress {} enable_cache {} rafs_mode {}",
         enable_compress, enable_cache, rafs_mode
@@ -35,6 +40,7 @@ fn test(compressor: &str, enable_cache: bool, rafs_mode: &str) -> Result<()> {
         let nydusd = nydusd::new(
             &work_dir,
             enable_cache,
+            cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-lower".to_string(),
         )?;
@@ -53,6 +59,7 @@ fn test(compressor: &str, enable_cache: bool, rafs_mode: &str) -> Result<()> {
         let nydusd = nydusd::new(
             &work_dir,
             enable_cache,
+            cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-overlay".to_string(),
         )?;
@@ -66,6 +73,7 @@ fn test(compressor: &str, enable_cache: bool, rafs_mode: &str) -> Result<()> {
         let nydusd = nydusd::new(
             &work_dir,
             enable_cache,
+            cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-overlay".to_string(),
         )?;
@@ -80,6 +88,7 @@ fn test(compressor: &str, enable_cache: bool, rafs_mode: &str) -> Result<()> {
 fn check_compact<'a>(work_dir: &'a PathBuf, bootstrap_name: &str, rafs_mode: &str) -> Result<()> {
     let nydusd = nydusd::new(
         work_dir,
+        false,
         false,
         rafs_mode.parse()?,
         bootstrap_name.to_string(),
@@ -130,13 +139,13 @@ fn integration_run() -> Result<()> {
 
     test_compact()?;
 
-    test("lz4_block", true, "direct")?;
-    test("lz4_block", false, "direct")?;
-    test("gzip", false, "direct")?;
-    test("none", true, "direct")?;
+    test("lz4_block", true, false, "direct")?;
+    test("lz4_block", false, false, "direct")?;
+    test("gzip", false, false, "direct")?;
+    test("none", true, false, "direct")?;
 
-    test("gzip", true, "cached")?;
-    test("none", false, "cached")?;
-    test("lz4_block", false, "cached")?;
-    test("lz4_block", true, "cached")
+    test("gzip", true, true, "cached")?;
+    test("none", false, true, "cached")?;
+    test("lz4_block", false, true, "cached")?;
+    test("lz4_block", true, true, "cached")
 }

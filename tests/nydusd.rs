@@ -22,6 +22,7 @@ pub struct Nydusd {
 pub fn new(
     work_dir: &PathBuf,
     enable_cache: bool,
+    cache_compressed: bool,
     rafs_mode: RafsMode,
     bootstrap_file_name: String,
 ) -> Result<Nydusd> {
@@ -36,10 +37,12 @@ pub fn new(
         ,"cache": {{
             "type": "blobcache",
             "config": {{
+                "compressed": {},
                 "work_dir": {:?}
             }}
         }}
     "###,
+        cache_compressed,
         work_dir.join("cache")
     );
 
