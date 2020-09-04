@@ -187,6 +187,9 @@ impl fmt::Display for RafsSuperFlags {
         if self.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) {
             write!(f, "COMPRESS_LZ4_BLOCK ")?;
         }
+        if self.contains(RafsSuperFlags::COMPRESS_GZIP) {
+            write!(f, "COMPRESS_GZIP ")?;
+        }
         if self.contains(RafsSuperFlags::DIGESTER_BLAKE3) {
             write!(f, "DIGESTER_BLAKE3 ")?;
         }

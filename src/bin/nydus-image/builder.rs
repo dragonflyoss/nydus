@@ -203,6 +203,8 @@ impl Builder {
     fn build_rafs(&mut self, tree: &mut Tree, nodes: &mut Vec<Node>) -> Result<()> {
         let index = nodes.len() as u64;
         let parent = &mut nodes[tree.node.index as usize - 1];
+        let blob_new_index = self.blob_table.entries.len() as u32;
+
         parent.inode.i_child_index = index as u32 + 1;
         parent.inode.i_child_count = tree.children.len() as u32;
 
@@ -221,10 +223,19 @@ impl Builder {
             child.node.index = index;
             child.node.inode.i_parent = parent_ino;
 
-            // Append chunks to node from source, mainly for stargz node
-            if let Some(chunks) = self.replaced_chunk_map.get(&child.node.path) {
-                child.node.chunks = chunks.to_vec();
-                child.node.inode.i_child_count = child.node.chunks.len() as u32;
+            // Add chunks to stargz upper node
+            if self.source_type == SourceType::StargzIndex && !child.node.overlay.lower_layer() {
+                if let Some(chunks) = self.replaced_chunk_map.get(&child.node.path) {
+                    child.node.chunks = chunks
+                        .iter()
+                        .map(|c| {
+                            let mut chunk = *c;
+                            chunk.blob_index = blob_new_index;
+                            chunk
+                        })
+                        .collect();
+                    child.node.inode.i_child_count = child.node.chunks.len() as u32;
+                }
             }
 
             // Hardlink handle, all hardlink nodes' ino, nlink should be the same,
@@ -240,8 +251,14 @@ impl Builder {
                 let first_index = indexes.first().unwrap();
                 let nlink = indexes.len() as u32;
                 child.node.inode.i_ino = *first_index;
-                // Store node for bootstrap & blob dump
-                nodes.push(child.node.clone());
+                // Store node for bootstrap & blob dump.
+                // Put the whiteout file of upper layer in the front,
+                // so that it can be applied to the node tree of lower layer first than other files of upper layer.
+                if child.node.whiteout_type().is_some() {
+                    nodes.insert(0, child.node.clone());
+                } else {
+                    nodes.push(child.node.clone());
+                }
                 // Update nlink for previous hardlink inodes
                 for idx in indexes {
                     nodes[*idx as usize - 1].inode.i_nlink = nlink;
@@ -255,7 +272,11 @@ impl Builder {
                     vec![child.node.index],
                 );
                 // Store node for bootstrap & blob dump
-                nodes.push(child.node.clone());
+                if child.node.whiteout_type().is_some() {
+                    nodes.insert(0, child.node.clone());
+                } else {
+                    nodes.push(child.node.clone());
+                }
             }
 
             if self.need_prefetch(&child.node.rootfs(), child.node.inode.i_ino) {
@@ -327,12 +348,16 @@ impl Builder {
             )));
         }
 
+        // Reuse lower layer blob table,
+        // we need to append the blob entry of upper layer to the table
+        self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
+
         // Build node tree of lower layer from a bootstrap file
         let mut tree = Tree::from_bootstrap(&rs, self.source_type == SourceType::Directory)?;
 
         // Apply new node (upper layer) to node tree (lower layer)
         for node in &self.nodes {
-            tree.apply(&node)?;
+            tree.apply(&node, true)?;
         }
 
         self.lower_inode_map.clear();
@@ -340,16 +365,12 @@ impl Builder {
         self.readahead_files.clear();
         self.build_rafs_wrap(&mut tree)?;
 
-        // Reuse lower layer blob table,
-        // we need to append the blob entry of upper layer to the table
-        self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
-
         Ok(())
     }
 
     /// Build node tree of upper layer from a filesystem directory
-    pub fn build_from_filesystem(&mut self, overlay: bool) -> Result<()> {
-        let mut tree = Tree::from_filesystem(&self.source_path, overlay, self.explicit_uidgid)?;
+    pub fn build_from_filesystem(&mut self) -> Result<()> {
+        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid)?;
 
         self.build_rafs_wrap(&mut tree)?;
 
@@ -357,8 +378,8 @@ impl Builder {
     }
 
     /// Build node tree of upper layer from a stargz index
-    pub fn build_from_stargz_index(&mut self, overlay: bool) -> Result<()> {
-        let (mut tree, chunk_map) = Tree::from_stargz_index(&self.source_path, overlay)?;
+    pub fn build_from_stargz_index(&mut self) -> Result<()> {
+        let (mut tree, chunk_map) = Tree::from_stargz_index(&self.source_path)?;
 
         self.replaced_chunk_map = chunk_map;
         self.build_rafs_wrap(&mut tree)?;
@@ -569,21 +590,21 @@ impl Builder {
             SourceType::Directory => {
                 if self.f_parent_bootstrap.is_some() {
                     // For layered build
-                    self.build_from_filesystem(true)?;
+                    self.build_from_filesystem()?;
                     self.apply_to_bootstrap()?;
                 } else {
                     // For non-layered build
-                    self.build_from_filesystem(false)?;
+                    self.build_from_filesystem()?;
                 }
             }
             SourceType::StargzIndex => {
                 if self.f_parent_bootstrap.is_some() {
                     // For layered build
-                    self.build_from_stargz_index(true)?;
+                    self.build_from_stargz_index()?;
                     self.apply_to_bootstrap()?;
                 } else {
                     // For non-layered build
-                    self.build_from_stargz_index(false)?;
+                    self.build_from_stargz_index()?;
                 }
             }
         }

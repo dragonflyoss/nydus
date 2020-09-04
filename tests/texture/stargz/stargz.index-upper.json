@@ -1,0 +1,176 @@
+{
+	"version": 1,
+	"entries": [
+		{
+			"name": "",
+			"type": "dir",
+			"modtime": "2020-07-31T03:26:58Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/",
+			"type": "dir",
+			"modtime": "2020-08-03T08:38:41Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/more/",
+			"type": "dir",
+			"modtime": "2020-07-24T02:53:36Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/more/more-1",
+			"type": "reg",
+			"size": 13,
+			"modtime": "2020-07-24T02:51:22Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"offset": 180,
+			"NumLink": 0,
+			"digest": "sha256:73404877b88d7758a5eeb03e408df145ddfe477e63d797cbafae208bbfe06cc2"
+		},
+		{
+			"name": "sub/more/.wh..wh..opq",
+			"type": "reg",
+			"modtime": "2020-07-24T02:49:35Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
+			"name": "sub/more/more-sub/",
+			"type": "dir",
+			"modtime": "2020-07-24T02:53:55Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/more/more-sub/more-sub-2",
+			"type": "reg",
+			"size": 17,
+			"modtime": "2020-07-24T02:53:55Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"offset": 366,
+			"NumLink": 0,
+			"digest": "sha256:7d63ec69f1d45dc006c411b9ce4ea2361c7d280fe475ef379b937ecaa6bb5756"
+		},
+		{
+			"name": "sub/some/",
+			"type": "dir",
+			"modtime": "2020-07-24T06:59:27Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/some/some-sub/",
+			"type": "dir",
+			"modtime": "2020-07-24T06:59:42Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/some/some-sub/some-sub-1",
+			"type": "reg",
+			"size": 17,
+			"modtime": "2020-07-24T06:59:42Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"offset": 544,
+			"NumLink": 0,
+			"digest": "sha256:acb5127141ee26968fda10b46fb97fb1d3116837ee5f907e84e15210186ab9ae"
+		},
+		{
+			"name": "sub/other/",
+			"type": "dir",
+			"modtime": "2020-08-03T08:38:52Z",
+			"mode": 509,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/other/.wh..wh..opq",
+			"type": "reg",
+			"modtime": "2020-08-03T08:38:52Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
+			"name": "sub/.wh.sub-2",
+			"type": "reg",
+			"modtime": "2020-07-24T02:50:36Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
+			"name": "sub/.wh.some",
+			"type": "reg",
+			"modtime": "2020-07-24T06:58:20Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
+			"name": "sub/sub-1",
+			"type": "reg",
+			"size": 12,
+			"modtime": "2020-07-24T02:52:06Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"offset": 770,
+			"NumLink": 0,
+			"digest": "sha256:a64323a36f0d52b35472520b7a53db992a396ac04b92192ed87a21b1a6883c76"
+		},
+		{
+			"name": "sub/.wh.sub-root-large-copy-hardlink-1",
+			"type": "reg",
+			"modtime": "2020-07-24T06:55:45Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
+			"name": ".wh.root-large",
+			"type": "reg",
+			"modtime": "2020-07-24T03:49:09Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		}
+	]
+}

@@ -31,7 +31,8 @@ use std::sync::Arc;
 use builder::SourceType;
 use nydus_utils::einval;
 use nydus_utils::log_level_to_verbosity;
-use rafs::storage::{backend, factory};
+use rafs::metadata::digest;
+use rafs::storage::{backend, compress, factory};
 use validator::Validator;
 
 fn upload_blob(
@@ -282,6 +283,10 @@ fn main() -> Result<()> {
             }
         }
 
+        let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
+        let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
+        let repeatable = matches.is_present("repeatable");
+
         match source_type {
             SourceType::Directory => {
                 if !source_file.is_dir() {
@@ -295,6 +300,14 @@ fn main() -> Result<()> {
                 if blob_id.trim() == "" {
                     return Err(einval!("blob-id can't be empty"));
                 }
+                if compressor != compress::Algorithm::GZip {
+                    trace!("compressor set to {}", compress::Algorithm::GZip);
+                }
+                compressor = compress::Algorithm::GZip;
+                if digester != digest::Algorithm::Sha256 {
+                    trace!("digester set to {}", digest::Algorithm::Sha256);
+                }
+                digester = digest::Algorithm::Sha256;
             }
         }
 
@@ -303,10 +316,6 @@ fn main() -> Result<()> {
                 .value_of("bootstrap")
                 .expect("bootstrap is required"),
         );
-
-        let compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
-        let digester = matches.value_of("digester").unwrap_or_default().parse()?;
-        let repeatable = matches.is_present("repeatable");
 
         let temp_file = TempFile::new_with_prefix("").unwrap();
 

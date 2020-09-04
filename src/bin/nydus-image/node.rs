@@ -29,6 +29,15 @@ use rafs::storage::compress;
 
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
+pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
+pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WhiteoutType {
+    Opaque,
+    Removal,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Overlay {
     Lower,
@@ -401,5 +410,18 @@ impl Node {
                 _ => OsString::new(),
             })
             .collect::<Vec<_>>()
+    }
+
+    pub fn whiteout_type(&self) -> Option<WhiteoutType> {
+        let name = self.name();
+        if name == OCISPEC_WHITEOUT_OPAQUE {
+            return Some(WhiteoutType::Opaque);
+        }
+        if let Some(n) = name.to_str() {
+            if n.starts_with(OCISPEC_WHITEOUT_PREFIX) {
+                return Some(WhiteoutType::Removal);
+            }
+        }
+        None
     }
 }

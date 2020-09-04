@@ -11,6 +11,7 @@
 //! 2. Traverse overlay node tree then dump to bootstrap and blob file according to RAFS format.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::DirEntry;
 use std::io::Result;
@@ -26,9 +27,6 @@ use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use crate::node::*;
 use crate::stargz::{self, TocEntry};
-
-const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
-const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
 
 pub type ChunkMap = HashMap<PathBuf, Vec<OndiskChunkInfo>>;
 
@@ -153,12 +151,16 @@ impl StargzIndexTreeBuilder {
             return Err(einval!("the stargz index has no toc entry"));
         }
 
-        let root_node = self.parse_node(&toc_index.entries[0])?;
+        // TODO: handle root node
+        let mut root_entry = TocEntry::default();
+        root_entry.toc_type = String::from("dir");
+        root_entry.mode = 16877;
+        let root_node = self.parse_node(&root_entry)?;
         let mut tree = Tree::new(root_node);
 
         let mut chunk_map: ChunkMap = HashMap::new();
 
-        for entry in toc_index.entries.iter().skip(1) {
+        for entry in toc_index.entries.iter() {
             if !entry.is_supported() {
                 continue;
             }
@@ -192,7 +194,7 @@ impl StargzIndexTreeBuilder {
                 continue;
             }
             let node = self.parse_node(entry)?;
-            tree.apply(&node)?;
+            tree.apply(&node, false)?;
         }
 
         Ok((tree, chunk_map))
@@ -289,17 +291,11 @@ impl FilesystemTreeBuilder {
     }
 
     /// Walk directory to build node tree by DFS,
-    /// support overlay defined in OCI image layer spec (https://github.com/opencontainers/image-spec/blob/master/layer.md)
-    fn load_children(&self, parent: &mut Node, overlay: bool) -> Result<Vec<Tree>> {
+    fn load_children(&self, parent: &mut Node) -> Result<Vec<Tree>> {
         let mut result = Vec::new();
 
         if !parent.is_dir() {
             return Ok(result);
-        }
-
-        // Ignore children of the directory including OCISPEC_WHITEOUT_OPAQUE file
-        if overlay && parent.path.join(OCISPEC_WHITEOUT_OPAQUE).exists() {
-            parent.overlay = Overlay::UpperOpaque;
         }
 
         let children = fs::read_dir(&parent.path)?;
@@ -307,6 +303,7 @@ impl FilesystemTreeBuilder {
 
         for child in children {
             let path = child.path();
+
             let child = Node::new(
                 self.root_path.clone(),
                 path.clone(),
@@ -320,39 +317,8 @@ impl FilesystemTreeBuilder {
             }
 
             let mut child_tree = Tree::new(child);
-            let name = child_tree.node.name();
-
-            // Add overlay flag to node
-            if overlay {
-                // Ignore OCISPEC_WHITEOUT_OPAQUE file
-                if name == OCISPEC_WHITEOUT_OPAQUE {
-                    continue;
-                }
-                // Handle whiteout file
-                if let Some(n) = name.to_str() {
-                    if n.starts_with(OCISPEC_WHITEOUT_PREFIX) {
-                        child_tree.node.path =
-                            parent.path.join(&n[OCISPEC_WHITEOUT_PREFIX.len()..]);
-                        child_tree.node.overlay = Overlay::UpperRemoval;
-                        result.insert(0, child_tree);
-                        continue;
-                    }
-                }
-            }
-
-            child_tree.children = self.load_children(&mut child_tree.node, overlay)?;
-
-            let child_overlay = &child_tree.node.overlay;
-            if overlay
-                && (child_overlay == &Overlay::UpperRemoval
-                    || child_overlay == &Overlay::UpperOpaque)
-            {
-                // Put the whiteout file of upper layer in the front,
-                // so that it can be applied to the node tree of lower layer first than other files of upper layer.
-                result.insert(0, child_tree);
-            } else {
-                result.push(child_tree);
-            }
+            child_tree.children = self.load_children(&mut child_tree.node)?;
+            result.push(child_tree);
         }
 
         Ok(result)
@@ -381,10 +347,7 @@ impl Tree {
     }
 
     /// Build node tree from stargz index json file
-    pub fn from_stargz_index(
-        stargz_index_path: &PathBuf,
-        _overlay: bool,
-    ) -> Result<(Self, ChunkMap)> {
+    pub fn from_stargz_index(stargz_index_path: &PathBuf) -> Result<(Self, ChunkMap)> {
         let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone());
         tree_builder.build()
     }
@@ -403,11 +366,7 @@ impl Tree {
     }
 
     /// Build node tree from a filesystem directory
-    pub fn from_filesystem(
-        root_path: &PathBuf,
-        overlay: bool,
-        explicit_uidgid: bool,
-    ) -> Result<Self> {
+    pub fn from_filesystem(root_path: &PathBuf, explicit_uidgid: bool) -> Result<Self> {
         let tree_builder = FilesystemTreeBuilder::new(root_path.clone());
 
         let node = Node::new(
@@ -418,21 +377,18 @@ impl Tree {
         )?;
         let mut tree = Tree::new(node);
 
-        tree.children = tree_builder.load_children(&mut tree.node, overlay)?;
+        tree.children = tree_builder.load_children(&mut tree.node)?;
 
         Ok(tree)
     }
 
     /// Apply new node (upper layer) to node tree (lower layer),
+    /// support overlay defined in OCI image layer spec (https://github.com/opencontainers/image-spec/blob/master/layer.md),
     /// include change types Additions, Modifications, Removals and Opaques
-    pub fn apply(&mut self, target: &Node) -> Result<Overlay> {
-        if target.overlay == Overlay::UpperRemoval {
-            return self.remove(target, false);
-        }
-
-        if target.overlay == Overlay::UpperOpaque {
-            self.remove(target, true)?;
-            // Continue to handle child nodes
+    pub fn apply(&mut self, target: &Node, handle_whiteout: bool) -> Result<Overlay> {
+        // Handle whiteout file
+        if handle_whiteout && target.whiteout_type().is_some() {
+            return self.remove(target);
         }
 
         let target_paths = target.path_vec();
@@ -467,7 +423,7 @@ impl Tree {
                 }
                 if child.node.is_dir() {
                     // Search the node recursively
-                    let overlay = child.apply(target)?;
+                    let overlay = child.apply(target, handle_whiteout)?;
                     if overlay != Overlay::Lower {
                         return Ok(overlay);
                     }
@@ -490,43 +446,76 @@ impl Tree {
     }
 
     /// Remove node from node tree
-    fn remove(&mut self, target: &Node, children_only: bool) -> Result<Overlay> {
+    fn remove(&mut self, target: &Node) -> Result<Overlay> {
         let target_paths = target.path_vec();
         let target_paths_len = target_paths.len();
         let depth = self.node.path_vec().len();
+        let whiteout_type = target.whiteout_type();
 
         // Opaques for root(/) path
-        if children_only && depth == target_paths_len && target_paths[depth - 1] == self.node.name()
+        if whiteout_type == Some(WhiteoutType::Opaque)
+            && depth == target_paths_len
+            && target_paths[depth - 1] == self.node.name()
         {
             self.node.overlay = Overlay::UpperOpaque;
             self.children.clear();
             return Ok(Overlay::UpperOpaque);
         }
 
+        let mut origin_name = target.name().to_os_string();
+        if whiteout_type == Some(WhiteoutType::Removal) {
+            if let Some(_origin_name) = origin_name.to_str() {
+                origin_name = OsString::from(&_origin_name[OCISPEC_WHITEOUT_PREFIX.len()..]);
+            }
+        }
+
+        let mut parent_name = None;
+        if let Some(parent_path) = target.path.parent() {
+            if let Some(file_name) = parent_path.file_name() {
+                parent_name = Some(file_name);
+            }
+        }
+
         // Don't search if path recursive depth out of target path
         if depth < target_paths_len {
+            let current_name = target_paths[depth].clone();
             // TODO: Search child by binary search
             for idx in 0..self.children.len() {
                 let child = &mut self.children[idx];
+
                 // Skip if path component name not match
-                if target_paths[depth] != child.node.name() {
+                if current_name != child.node.name() && whiteout_type.is_none() {
                     continue;
                 }
-                if depth == target_paths_len - 1 {
-                    // Opaques: Remove children of the node
-                    if children_only {
-                        child.node.overlay = Overlay::UpperOpaque;
-                        // Remove child nodes of lower layer
-                        child.children.clear();
-                        return Ok(Overlay::UpperOpaque);
-                    }
-                    // Removals: Remove the whole lower node
+
+                // Handle Removals
+                if depth == target_paths_len - 1
+                    && whiteout_type == Some(WhiteoutType::Removal)
+                    && origin_name == child.node.name()
+                {
+                    // Remove the whole lower node
                     self.children.remove(idx);
                     return Ok(Overlay::UpperRemoval);
                 }
+
+                // Handle Opaques
+                if target_paths_len >= 2
+                    && depth == target_paths_len - 2
+                    && whiteout_type == Some(WhiteoutType::Opaque)
+                {
+                    if let Some(parent_name) = parent_name {
+                        if parent_name == child.node.name() {
+                            child.node.overlay = Overlay::UpperOpaque;
+                            // Remove children of the lower node
+                            child.children.clear();
+                            return Ok(Overlay::UpperOpaque);
+                        }
+                    }
+                }
+
                 if child.node.is_dir() {
                     // Search the node recursively
-                    let overlay = child.remove(target, children_only)?;
+                    let overlay = child.remove(target)?;
                     if overlay != Overlay::Lower {
                         return Ok(overlay);
                     }
