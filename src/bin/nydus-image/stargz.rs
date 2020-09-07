@@ -4,7 +4,7 @@
 //
 // Stargz support.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use nydus_utils::einval;
+use rafs::metadata::digest::{Algorithm, RafsDigest};
 
 type RcTocEntry = Rc<RefCell<TocEntry>>;
 
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct TocEntry {
     // Name is the tar entry's name. It is the complete path
     // stored in the tar file, not just the base name.
@@ -27,7 +28,7 @@ pub struct TocEntry {
     // The "chunk" type is used for regular file data chunks past the first
     // TOCEntry; the 2nd chunk and on have only Type ("chunk"), Offset,
     // ChunkOffset, and ChunkSize populated.
-    #[serde(rename(deserialize = "type"))]
+    #[serde(rename(serialize = "type", deserialize = "type"))]
     pub toc_type: String,
 
     // Size, for regular files, is the logical size of the file.
@@ -43,7 +44,7 @@ pub struct TocEntry {
     // mod_time: Time,
 
     // LinkName, for symlinks and hardlinks, is the link target.
-    #[serde(default, alias = "linkName")]
+    #[serde(default, rename(serialize = "linkName", deserialize = "linkName"))]
     pub link_name: PathBuf,
 
     // Mode is the permission and mode bits.
@@ -62,14 +63,14 @@ pub struct TocEntry {
     //
     // In the serialized JSON, this field may only be present for
     // the first entry with the same Uid.
-    #[serde(default, alias = "userName")]
+    #[serde(default, rename(serialize = "userName", deserialize = "userName"))]
     pub uname: String,
 
     // Gname is the group name of the owner.
     //
     // In the serialized JSON, this field may only be present for
     // the first entry with the same Gid.
-    #[serde(default, alias = "groupName")]
+    #[serde(default, rename(serialize = "groupName", deserialize = "groupName"))]
     pub gname: String,
 
     // Offset, for regular files, provides the offset in the
@@ -83,11 +84,11 @@ pub struct TocEntry {
     pub next_offset: u64,
 
     // DevMajor is the major device number for "char" and "block" types.
-    #[serde(default, alias = "devMajor")]
+    #[serde(default, rename(serialize = "devMajor", deserialize = "devMajor"))]
     pub dev_major: u64,
 
     // DevMinor is the major device number for "char" and "block" types.
-    #[serde(default, alias = "devMinor")]
+    #[serde(default, rename(serialize = "devMinor", deserialize = "devMinor"))]
     pub dev_minor: u64,
 
     // NumLink is the number of entry names pointing to this entry.
@@ -113,9 +114,12 @@ pub struct TocEntry {
     // from the stargz TOC, though, the ChunkSize is initialized
     // to a non-zero file for when Type is either "reg" or
     // "chunk".
-    #[serde(default, alias = "chunkOffset")]
+    #[serde(
+        default,
+        rename(serialize = "chunkOffset", deserialize = "chunkOffset")
+    )]
     pub chunk_offset: u64,
-    #[serde(default, alias = "chunkSize")]
+    #[serde(default, rename(serialize = "chunkSize", deserialize = "chunkSize"))]
     pub chunk_size: u64,
 
     #[serde(skip)]
@@ -192,6 +196,15 @@ impl TocEntry {
 
     pub fn is_supported(&self) -> bool {
         self.is_dir() || self.is_reg() || self.is_symlink() || self.is_hardlink() || self.is_chunk()
+    }
+
+    pub fn block_id(&self) -> Result<RafsDigest> {
+        if !self.is_reg() && !self.is_chunk() {
+            return Err(einval!("only support chunk or reg entry"));
+        }
+        let data = serde_json::to_string(self)
+            .map_err(|e| einval!(format!("block id calculation failed: {:?}", e)))?;
+        Ok(RafsDigest::from_buf(data.as_bytes(), Algorithm::Sha256))
     }
 
     pub fn new_dir(path: PathBuf) -> Self {

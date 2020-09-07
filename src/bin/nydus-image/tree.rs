@@ -178,8 +178,9 @@ impl StargzIndexTreeBuilder {
                 entry.chunk_size as u32
             };
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
+                let block_id = entry.block_id()?;
                 let chunk = OndiskChunkInfo {
-                    block_id: RafsDigest::default(),
+                    block_id,
                     blob_index: 0,
                     flags: RafsChunkFlags::COMPRESSED,
                     // No available data on entry
@@ -223,6 +224,7 @@ impl StargzIndexTreeBuilder {
         // Parse chunks info
         let chunks = Vec::new();
 
+        let entry_path = entry.path();
         let link_path = entry.link_path();
 
         // Parse symlink
@@ -247,9 +249,7 @@ impl StargzIndexTreeBuilder {
                 let value = base64::decode(value).map_err(|err| {
                     einval!(format!(
                         "parse value of xattr {:?} failed: {:?}, file {:?}",
-                        entry.path(),
-                        name,
-                        err
+                        entry_path, name, err
                     ))
                 })?;
                 xattrs.pairs.insert(name.into(), value);
@@ -263,10 +263,10 @@ impl StargzIndexTreeBuilder {
             if let Some(_ino) = self.path_inode_map.get(&entry.link_path()) {
                 ino = *_ino;
             } else {
-                self.path_inode_map.insert(entry.path(), ino);
+                self.path_inode_map.insert(entry_path, ino);
             }
         } else {
-            self.path_inode_map.insert(entry.path(), ino);
+            self.path_inode_map.insert(entry_path, ino);
         }
 
         // Get file name size
