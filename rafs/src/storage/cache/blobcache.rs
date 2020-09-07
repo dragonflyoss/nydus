@@ -66,12 +66,7 @@ impl BlobCacheEntry {
 
     /// Persist a single chunk into local blob cache file. We have to write to the cache
     /// file in unit of chunk size
-    fn cache(&mut self, buf: &[u8], compressed_cache: bool) {
-        let offset = if compressed_cache {
-            self.chunk.compress_offset()
-        } else {
-            self.chunk.decompress_offset()
-        };
+    fn cache(&mut self, buf: &[u8], offset: u64) -> Result<()> {
         loop {
             let ret = uio::pwrite(self.fd, buf, offset as i64).map_err(|_| last_error!());
 
@@ -83,13 +78,14 @@ impl BlobCacheEntry {
                 Err(err) => {
                     // Retry if the IO is interrupted by signal.
                     if err.kind() != ErrorKind::Interrupted {
-                        return;
+                        return Err(err);
                     }
                 }
             }
         }
 
         self.set_ready();
+        Ok(())
     }
 }
 
@@ -172,6 +168,8 @@ impl BlobCache {
         let chunk = cache_entry.chunk.clone();
         let mut reuse = false;
 
+        trace!("reading blobcache entry {:?}", chunk.cast_ondisk());
+
         // Hit cache if cache ready
         if !self.is_compressed && !self.need_validate() && cache_entry.is_ready() {
             trace!(
@@ -197,9 +195,12 @@ impl BlobCache {
             };
 
         // Try to recover cache from blobcache first
-        if self
-            .read_blobcache_chunk(cache_entry.fd, blob_id, chunk.as_ref(), one_chunk_buf)
-            .is_ok()
+        // For gzip, we can only trust ready blobcache because we cannot validate chunks due to
+        // stargz format limitations (missing chunk level digest)
+        if (self.compressor() != compress::Algorithm::GZip || cache_entry.is_ready())
+            && self
+                .read_blobcache_chunk(cache_entry.fd, blob_id, chunk.as_ref(), one_chunk_buf)
+                .is_ok()
         {
             trace!(
                 "recover blob cache {} {} resue {} offset {} size {}",
@@ -210,8 +211,15 @@ impl BlobCache {
                 size,
             );
         } else {
-            self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf)?;
-            cache_entry.cache(one_chunk_buf, self.is_compressed);
+            self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |c1, c2| {
+                let (chunk, c_offset) = if self.is_compressed {
+                    (c1, cache_entry.chunk.compress_offset())
+                } else {
+                    (c2, cache_entry.chunk.decompress_offset())
+                };
+
+                cache_entry.cache(chunk, c_offset)
+            })?;
         }
 
         if reuse {
@@ -262,7 +270,7 @@ impl BlobCache {
         };
 
         debug!(
-            "reading blob file fd {} offset {} size {}",
+            "reading blobcache file fd {} offset {} size {}",
             fd,
             offset,
             raw_chunk.len()
@@ -431,10 +439,15 @@ impl RafsCache for BlobCache {
                                     .set(blob_id, c.clone(), cache_cloned.backend())
                                     .map_err(|_| error!("Set cache index error!"))
                                 {
-                                    entry
-                                        .lock()
-                                        .unwrap()
-                                        .cache(chunks[i].as_slice(), cache_cloned.is_compressed);
+                                    let offset = if cache_cloned.is_compressed {
+                                        entry.lock().unwrap().chunk.compress_offset()
+                                    } else {
+                                        entry.lock().unwrap().chunk.decompress_offset()
+                                    };
+
+                                    // Ignore cache errors
+                                    let _ =
+                                        entry.lock().unwrap().cache(chunks[i].as_slice(), offset);
                                 }
                             }
                         }

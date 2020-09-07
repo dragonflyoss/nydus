@@ -811,7 +811,7 @@ impl_bootstrap_converter!(OndiskInode);
 
 /// On disk Rafs data chunk information.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct OndiskChunkInfo {
     /// sha256(chunk), [char; RAFS_SHA256_LENGTH]
     pub block_id: RafsDigest,

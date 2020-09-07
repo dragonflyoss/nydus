@@ -129,7 +129,8 @@ pub trait RafsCache {
     /// Flush cache
     fn flush(&self) -> Result<()>;
 
-    /// Read a chunk data through cache, always used in decompressed cache
+    /// Read a chunk data through cache
+    /// offset is relative to chunk start
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize>;
 
     /// Write a chunk data through cache
@@ -154,14 +155,18 @@ pub trait RafsCache {
     /// It depends on `cki` how to describe the chunk data.
     /// Moreover, chunk data from backend can be validated per as to nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
-    fn read_backend_chunk(
+    fn read_backend_chunk<F>(
         &self,
         blob_id: &str,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
-    ) -> Result<usize> {
+        cacher: F,
+    ) -> Result<usize>
+    where
+        F: FnOnce(&[u8], &[u8]) -> Result<()>,
+        Self: Sized,
+    {
         let offset = cki.compress_offset();
-        let d_size = cki.decompress_size() as usize;
         let mut d;
 
         let raw_chunk = if cki.is_compressed() {
@@ -191,7 +196,8 @@ pub trait RafsCache {
         // Try to validate data just fetched from backend inside.
         self.process_raw_chunk(cki, raw_chunk, chunk, cki.is_compressed())
             .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
-        Ok(d_size)
+        cacher(raw_chunk, chunk)?;
+        Ok(chunk.len())
     }
 
     /// Before storing chunk data into blob cache file. We have cook the raw chunk from
