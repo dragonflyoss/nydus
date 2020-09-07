@@ -161,8 +161,10 @@ impl TocEntry {
     }
 
     pub fn name(&self) -> Result<PathBuf> {
-        if self.name == PathBuf::from("") {
-            return Ok(PathBuf::from("/"));
+        let root_path = PathBuf::from("/");
+        let empty_path = PathBuf::from("");
+        if self.name == empty_path || self.name == root_path {
+            return Ok(root_path);
         }
         let name = self
             .name
@@ -191,6 +193,15 @@ impl TocEntry {
 
     pub fn is_supported(&self) -> bool {
         self.is_dir() || self.is_reg() || self.is_symlink() || self.is_hardlink() || self.is_chunk()
+    }
+
+    pub fn new_dir(path: PathBuf) -> Self {
+        let mut entry = TocEntry::default();
+        entry.name = path;
+        entry.toc_type = String::from("dir");
+        entry.mode = 0o755;
+        entry.num_link = 2;
+        entry
     }
 }
 

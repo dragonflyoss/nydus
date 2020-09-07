@@ -33,6 +33,16 @@
 			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 		},
 		{
+			"name": "added/some/new/new-1",
+			"type": "reg",
+			"modtime": "2020-08-11T08:53:46Z",
+			"mode": 436,
+			"uid": 1000,
+			"gid": 1000,
+			"NumLink": 0,
+			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+		{
 			"name": "root-1",
 			"type": "reg",
 			"size": 13,

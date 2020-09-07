@@ -144,6 +144,17 @@ impl StargzIndexTreeBuilder {
         }
     }
 
+    fn make_lost_dirs(&mut self, entry: &TocEntry, dirs: &mut Vec<TocEntry>) {
+        if let Some(parent_path) = entry.path().parent() {
+            let parent_path = parent_path.to_path_buf();
+            if self.path_inode_map.get(&parent_path).is_none() {
+                let dir_entry = TocEntry::new_dir(parent_path);
+                self.make_lost_dirs(&dir_entry, dirs);
+                dirs.push(dir_entry);
+            }
+        }
+    }
+
     fn build(&mut self) -> Result<(Tree, ChunkMap)> {
         let toc_index = stargz::parse_index(&self.stargz_index_path)?;
 
@@ -151,10 +162,7 @@ impl StargzIndexTreeBuilder {
             return Err(einval!("the stargz index has no toc entry"));
         }
 
-        // TODO: handle root node
-        let mut root_entry = TocEntry::default();
-        root_entry.toc_type = String::from("dir");
-        root_entry.mode = 16877;
+        let root_entry = TocEntry::new_dir(PathBuf::from("/"));
         let root_node = self.parse_node(&root_entry)?;
         let mut tree = Tree::new(root_node);
 
@@ -193,6 +201,14 @@ impl StargzIndexTreeBuilder {
             if entry.is_chunk() {
                 continue;
             }
+
+            let mut lost_dirs = Vec::new();
+            self.make_lost_dirs(&entry, &mut lost_dirs);
+            for dir in &lost_dirs {
+                let node = self.parse_node(dir)?;
+                tree.apply(&node, false)?;
+            }
+
             let node = self.parse_node(entry)?;
             tree.apply(&node, false)?;
         }
@@ -239,6 +255,8 @@ impl StargzIndexTreeBuilder {
         if entry.is_hardlink() {
             if let Some(_ino) = self.path_inode_map.get(&entry.link_path()) {
                 ino = *_ino;
+            } else {
+                self.path_inode_map.insert(entry.path(), ino);
             }
         } else {
             self.path_inode_map.insert(entry.path(), ino);
