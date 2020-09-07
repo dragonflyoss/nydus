@@ -155,7 +155,7 @@ impl StargzIndexTreeBuilder {
         }
     }
 
-    fn build(&mut self) -> Result<(Tree, ChunkMap)> {
+    fn build(&mut self, explicit_uidgid: bool) -> Result<(Tree, ChunkMap)> {
         let toc_index = stargz::parse_index(&self.stargz_index_path)?;
 
         if toc_index.entries.is_empty() {
@@ -163,7 +163,7 @@ impl StargzIndexTreeBuilder {
         }
 
         let root_entry = TocEntry::new_dir(PathBuf::from("/"));
-        let root_node = self.parse_node(&root_entry)?;
+        let root_node = self.parse_node(&root_entry, explicit_uidgid)?;
         let mut tree = Tree::new(root_node);
 
         let mut chunk_map: ChunkMap = HashMap::new();
@@ -205,11 +205,11 @@ impl StargzIndexTreeBuilder {
             let mut lost_dirs = Vec::new();
             self.make_lost_dirs(&entry, &mut lost_dirs);
             for dir in &lost_dirs {
-                let node = self.parse_node(dir)?;
+                let node = self.parse_node(dir, explicit_uidgid)?;
                 tree.apply(&node, false)?;
             }
 
-            let node = self.parse_node(entry)?;
+            let node = self.parse_node(entry, explicit_uidgid)?;
             tree.apply(&node, false)?;
         }
 
@@ -217,7 +217,7 @@ impl StargzIndexTreeBuilder {
     }
 
     /// Parse stargz toc entry to Node in builder
-    fn parse_node(&mut self, entry: &TocEntry) -> Result<Node> {
+    fn parse_node(&mut self, entry: &TocEntry, explicit_uidgid: bool) -> Result<Node> {
         let mut flags = RafsInodeFlags::default();
 
         // Parse chunks info
@@ -269,7 +269,11 @@ impl StargzIndexTreeBuilder {
             self.path_inode_map.insert(entry.path(), ino);
         }
 
+        // Get file name size
         let name_size = entry.name()?.as_os_str().as_bytes().len() as u16;
+
+        let uid = if explicit_uidgid { entry.uid } else { 0 };
+        let gid = if explicit_uidgid { entry.gid } else { 0 };
 
         // Parse inode info
         let inode = OndiskInode {
@@ -277,8 +281,8 @@ impl StargzIndexTreeBuilder {
             i_parent: 0,
             i_ino: ino,
             i_projid: 0,
-            i_uid: entry.uid,
-            i_gid: entry.gid,
+            i_uid: uid,
+            i_gid: gid,
             i_mode: entry.mode(),
             i_size: file_size,
             i_nlink: entry.num_link,
@@ -291,13 +295,12 @@ impl StargzIndexTreeBuilder {
             i_reserved: [0; 24],
         };
 
-        // TODO: dev number
         Ok(Node {
             index: 0,
             real_ino: ino,
             dev: u64::MAX,
             overlay: Overlay::UpperAddition,
-            explicit_uidgid: false,
+            explicit_uidgid,
             source: PathBuf::from_str("/").unwrap(),
             path: entry.path(),
             inode,
@@ -374,9 +377,12 @@ impl Tree {
     }
 
     /// Build node tree from stargz index json file
-    pub fn from_stargz_index(stargz_index_path: &PathBuf) -> Result<(Self, ChunkMap)> {
+    pub fn from_stargz_index(
+        stargz_index_path: &PathBuf,
+        explicit_uidgid: bool,
+    ) -> Result<(Self, ChunkMap)> {
         let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone());
-        tree_builder.build()
+        tree_builder.build(explicit_uidgid)
     }
 
     /// Build node tree from a bootstrap file

@@ -2,15 +2,6 @@
 	"version": 1,
 	"entries": [
 		{
-			"name": "",
-			"type": "dir",
-			"modtime": "2020-09-04T02:54:38Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
 			"name": "root-large",
 			"type": "reg",
 			"size": 2000000,

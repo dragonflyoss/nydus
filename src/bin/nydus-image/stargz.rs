@@ -84,11 +84,11 @@ pub struct TocEntry {
 
     // DevMajor is the major device number for "char" and "block" types.
     #[serde(default, alias = "devMajor")]
-    pub dev_major: isize,
+    pub dev_major: u64,
 
     // DevMinor is the major device number for "char" and "block" types.
     #[serde(default, alias = "devMinor")]
-    pub dev_minor: isize,
+    pub dev_minor: u64,
 
     // NumLink is the number of entry names pointing to this entry.
     // Zero means one name references this entry.

@@ -379,7 +379,8 @@ impl Builder {
 
     /// Build node tree of upper layer from a stargz index
     pub fn build_from_stargz_index(&mut self) -> Result<()> {
-        let (mut tree, chunk_map) = Tree::from_stargz_index(&self.source_path)?;
+        let (mut tree, chunk_map) =
+            Tree::from_stargz_index(&self.source_path, self.explicit_uidgid)?;
 
         self.replaced_chunk_map = chunk_map;
         self.build_rafs_wrap(&mut tree)?;
