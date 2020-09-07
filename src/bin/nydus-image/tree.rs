@@ -181,6 +181,7 @@ impl StargzIndexTreeBuilder {
                 let block_id = entry.block_id()?;
                 let chunk = OndiskChunkInfo {
                     block_id,
+                    // Will be set next
                     blob_index: 0,
                     flags: RafsChunkFlags::COMPRESSED,
                     // No available data on entry
@@ -263,10 +264,10 @@ impl StargzIndexTreeBuilder {
             if let Some(_ino) = self.path_inode_map.get(&entry.link_path()) {
                 ino = *_ino;
             } else {
-                self.path_inode_map.insert(entry_path, ino);
+                self.path_inode_map.insert(entry.name.clone(), ino);
             }
         } else {
-            self.path_inode_map.insert(entry_path, ino);
+            self.path_inode_map.insert(entry.name.clone(), ino);
         }
 
         // Get file name size

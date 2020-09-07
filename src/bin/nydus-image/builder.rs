@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::io::{Error, Result};
 use std::mem::size_of;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -223,18 +224,29 @@ impl Builder {
             child.node.index = index;
             child.node.inode.i_parent = parent_ino;
 
-            // Add chunks to stargz upper node
+            // Add chunks and calculate inode digest for stargz upper node
+            // TODO: move these logic to another place
             if self.source_type == SourceType::StargzIndex && !child.node.overlay.lower_layer() {
+                let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
                 if let Some(chunks) = self.replaced_chunk_map.get(&child.node.path) {
                     child.node.chunks = chunks
                         .iter()
                         .map(|c| {
                             let mut chunk = *c;
+                            inode_hasher.digest_update(chunk.block_id.as_ref());
                             chunk.blob_index = blob_new_index;
                             chunk
                         })
                         .collect();
                     child.node.inode.i_child_count = child.node.chunks.len() as u32;
+                }
+                if child.node.is_symlink() {
+                    child.node.inode.i_digest = RafsDigest::from_buf(
+                        child.node.symlink.as_ref().unwrap().as_bytes(),
+                        digest::Algorithm::Sha256,
+                    );
+                } else {
+                    child.node.inode.i_digest = inode_hasher.digest_finalize();
                 }
             }
 
