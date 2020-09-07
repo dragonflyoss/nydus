@@ -322,19 +322,18 @@ impl RafsCache for BlobCache {
 
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
         let blob_id = &bio.blob_id;
-        let chunk = bio.chunkinfo.clone();
 
-        // chge TODO: This can't guarantee atomicity. So a read code path could waste cpu cycles and
-        // reads from backend afterwards.
-        let cache_read_guard = self.cache.read().unwrap();
-        if let Some(entry) = cache_read_guard.get(chunk.clone()) {
-            self.entry_read(blob_id, &entry, bufs, offset, bio.size)
-        } else {
-            drop(cache_read_guard);
-            let mut cache_write_guard = self.cache.write().unwrap();
-            let entry = cache_write_guard.set(blob_id, chunk, self.backend())?;
-            self.entry_read(blob_id, &entry, bufs, offset, bio.size)
-        }
+        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.clone());
+        if entry.is_none() {
+            let en =
+                self.cache
+                    .write()
+                    .unwrap()
+                    .set(blob_id, bio.chunkinfo.clone(), self.backend())?;
+            entry = Some(en);
+        };
+
+        self.entry_read(blob_id, &entry.unwrap(), bufs, offset, bio.size)
     }
 
     fn write(&self, _blob_id: &str, _blk: &dyn RafsChunkInfo, _buf: &[u8]) -> Result<usize> {
