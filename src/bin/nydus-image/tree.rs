@@ -237,22 +237,29 @@ impl StargzIndexTreeBuilder {
             None
         };
 
-        // TOTO: parse xattrs
-        let xattrs = XAttrs {
+        // Parse xattrs
+        let mut xattrs = XAttrs {
             pairs: HashMap::new(),
         };
         if entry.has_xattr() {
-            flags |= RafsInodeFlags::XATTR;
+            for (name, value) in entry.xattrs.iter() {
+                flags |= RafsInodeFlags::XATTR;
+                let value = base64::decode(value).map_err(|err| {
+                    einval!(format!(
+                        "parse value of xattr {:?} failed: {:?}, file {:?}",
+                        entry.path(),
+                        name,
+                        err
+                    ))
+                })?;
+                xattrs.pairs.insert(name.into(), value);
+            }
         }
 
-        if entry.is_hardlink() {
-            flags |= RafsInodeFlags::HARDLINK;
-        }
-
-        let name_size = entry.name()?.as_os_str().as_bytes().len() as u16;
-
+        // Handle hardlink ino
         let mut ino = (self.path_inode_map.len() + 1) as Inode;
         if entry.is_hardlink() {
+            flags |= RafsInodeFlags::HARDLINK;
             if let Some(_ino) = self.path_inode_map.get(&entry.link_path()) {
                 ino = *_ino;
             } else {
@@ -261,6 +268,8 @@ impl StargzIndexTreeBuilder {
         } else {
             self.path_inode_map.insert(entry.path(), ino);
         }
+
+        let name_size = entry.name()?.as_os_str().as_bytes().len() as u16;
 
         // Parse inode info
         let inode = OndiskInode {

@@ -772,6 +772,7 @@ dependencies = [
 name = "nydus-rs"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "epoll",
  "event-manager",

@@ -20,6 +20,7 @@ sha2 = "0.9.1"
 lazy_static = "1.4.0"
 xattr = "0.2.2"
 nix = "0.17"
+base64 = { version = ">=0.12.0" }
 uuid = { version = "0.8", features = ["serde", "v4"] }
 rafs = { path = "rafs", features = ["backend-localfs", "backend-oss", "backend-registry"] }
 nydus-utils = { path = "utils" }

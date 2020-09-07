@@ -7,11 +7,10 @@
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-
 use std::fs::File;
 use std::io::Result;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use nydus_utils::einval;
 
@@ -98,7 +97,7 @@ pub struct TocEntry {
 
     // Xattrs are the extended attribute for the entry.
     #[serde(default)]
-    pub xattrs: HashMap<String, Vec<u8>>,
+    pub xattrs: HashMap<String, String>,
 
     // Digest stores the OCI checksum for regular files payload.
     // It has the form "sha256:abcdef01234....".

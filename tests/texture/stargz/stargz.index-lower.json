@@ -52,6 +52,10 @@
 			"gid": 1000,
 			"offset": 2000965,
 			"NumLink": 0,
+			"xattrs": {
+				"user.a": "YWJj",
+				"user.b": "5Lit5paH"
+			},
 			"digest": "sha256:e48085953387a34be28cc734fc36d5fa0ad7f591fdd28c054f57884611d71c4e"
 		},
 		{
