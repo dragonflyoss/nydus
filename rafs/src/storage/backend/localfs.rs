@@ -446,6 +446,12 @@ impl BlobBackend for LocalFs {
         Ok(())
     }
 
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        let blob_file_path = self.get_blob_path(blob_id);
+        let meta = fs::metadata(blob_file_path)?;
+        Ok(meta.len())
+    }
+
     fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
         let fd = self.get_blob_fd(blob_id, offset, buf.len())?;
 

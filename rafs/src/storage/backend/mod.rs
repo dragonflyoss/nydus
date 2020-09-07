@@ -80,6 +80,9 @@ pub trait BlobBackend {
         0
     }
 
+    /// Get whole blob size
+    fn blob_size(&self, blob_id: &str) -> Result<u64>;
+
     /// Read a range of data from blob into the provided slice
     fn read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
         let mut retry_count = self.retry_limit();
