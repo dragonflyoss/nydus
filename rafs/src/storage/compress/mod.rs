@@ -8,7 +8,7 @@ use std::io::{Error, Result};
 use std::io::{Read, Write};
 use std::str::FromStr;
 
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
@@ -88,7 +88,11 @@ pub fn decompress(src: &[u8], dst: &mut [u8], algorithm: Algorithm) -> Result<us
     match algorithm {
         Algorithm::None => Ok(dst.len()),
         Algorithm::LZ4Block => lz4_decompress(src, dst),
-        Algorithm::GZip => GzDecoder::new(src).read(dst),
+        Algorithm::GZip => {
+            let mut gz = GzDecoder::new(src);
+            gz.read_exact(dst)?;
+            Ok(dst.len())
+        }
     }
 }
 
