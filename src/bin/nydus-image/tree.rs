@@ -10,6 +10,7 @@
 //! 1. Apply FilesystemTree (from upper layer) to MetadataTree (from lower layer) as overlay node tree;
 //! 2. Traverse overlay node tree then dump to bootstrap and blob file according to RAFS format.
 
+use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
@@ -21,14 +22,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use nydus_utils::einval;
-use rafs::metadata::digest::RafsDigest;
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use crate::node::*;
 use crate::stargz::{self, TocEntry};
-
-pub type ChunkMap = HashMap<PathBuf, Vec<OndiskChunkInfo>>;
 
 #[derive(Clone)]
 pub struct Tree {
@@ -155,7 +153,7 @@ impl StargzIndexTreeBuilder {
         }
     }
 
-    fn build(&mut self, explicit_uidgid: bool) -> Result<(Tree, ChunkMap)> {
+    fn build(&mut self, explicit_uidgid: bool) -> Result<Tree> {
         let toc_index = stargz::parse_index(&self.stargz_index_path)?;
 
         if toc_index.entries.is_empty() {
@@ -166,7 +164,8 @@ impl StargzIndexTreeBuilder {
         let root_node = self.parse_node(&root_entry, explicit_uidgid)?;
         let mut tree = Tree::new(root_node);
 
-        let mut chunk_map: ChunkMap = HashMap::new();
+        let mut chunk_map: HashMap<Inode, Vec<OndiskChunkInfo>> = HashMap::new();
+        let mut nodes = Vec::new();
 
         for entry in toc_index.entries.iter() {
             if !entry.is_supported() {
@@ -177,6 +176,7 @@ impl StargzIndexTreeBuilder {
             } else {
                 entry.chunk_size as u32
             };
+            let mut _chunks = Vec::new();
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
                 let block_id = entry.block_id()?;
                 let chunk = OndiskChunkInfo {
@@ -193,12 +193,7 @@ impl StargzIndexTreeBuilder {
                     file_offset: entry.chunk_offset as u64,
                     reserved: 0u64,
                 };
-                let path = entry.path();
-                if let Some(chunks) = chunk_map.get_mut(&path) {
-                    chunks.push(chunk);
-                } else {
-                    chunk_map.insert(path, vec![chunk]);
-                }
+                _chunks.push(chunk);
             }
             if entry.is_chunk() {
                 continue;
@@ -208,14 +203,29 @@ impl StargzIndexTreeBuilder {
             self.make_lost_dirs(&entry, &mut lost_dirs);
             for dir in &lost_dirs {
                 let node = self.parse_node(dir, explicit_uidgid)?;
-                tree.apply(&node, false)?;
+                nodes.push(node);
             }
 
             let node = self.parse_node(entry, explicit_uidgid)?;
-            tree.apply(&node, false)?;
+
+            if let Some(chunks) = chunk_map.get_mut(&node.inode.i_ino) {
+                chunks.append(&mut _chunks);
+            } else {
+                chunk_map.insert(node.inode.i_ino, _chunks);
+            }
+
+            nodes.push(node);
         }
 
-        Ok((tree, chunk_map))
+        for node in &mut nodes {
+            if let Some(chunks) = chunk_map.get(&node.inode.i_ino) {
+                node.chunks = chunks.clone();
+                node.inode.i_child_count = node.chunks.len() as u32;
+            }
+            tree.apply(node, false)?;
+        }
+
+        Ok(tree)
     }
 
     /// Parse stargz toc entry to Node in builder
@@ -226,16 +236,16 @@ impl StargzIndexTreeBuilder {
         let chunks = Vec::new();
 
         let entry_path = entry.path();
-        let link_path = entry.link_path();
+        let origin_link_path = entry.origin_link_path();
 
         // Parse symlink
         let mut file_size = entry.size;
         let mut symlink_size = 0;
         let symlink = if entry.is_symlink() {
             flags |= RafsInodeFlags::SYMLINK;
-            symlink_size = link_path.as_os_str().as_bytes().len() as u16;
+            symlink_size = origin_link_path.as_os_str().as_bytes().len() as u16;
             file_size = symlink_size.into();
-            Some(link_path.as_os_str().to_owned())
+            Some(origin_link_path.as_os_str().to_owned())
         } else {
             None
         };
@@ -264,10 +274,10 @@ impl StargzIndexTreeBuilder {
             if let Some(_ino) = self.path_inode_map.get(&entry.link_path()) {
                 ino = *_ino;
             } else {
-                self.path_inode_map.insert(entry.name.clone(), ino);
+                self.path_inode_map.insert(entry.path(), ino);
             }
         } else {
-            self.path_inode_map.insert(entry.name.clone(), ino);
+            self.path_inode_map.insert(entry.path(), ino);
         }
 
         // Get file name size
@@ -378,10 +388,7 @@ impl Tree {
     }
 
     /// Build node tree from stargz index json file
-    pub fn from_stargz_index(
-        stargz_index_path: &PathBuf,
-        explicit_uidgid: bool,
-    ) -> Result<(Self, ChunkMap)> {
+    pub fn from_stargz_index(stargz_index_path: &PathBuf, explicit_uidgid: bool) -> Result<Self> {
         let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone());
         tree_builder.build(explicit_uidgid)
     }

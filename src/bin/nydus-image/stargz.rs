@@ -191,6 +191,11 @@ impl TocEntry {
     }
 
     pub fn link_path(&self) -> PathBuf {
+        let root_path = Path::new("/");
+        root_path.join(&self.link_name)
+    }
+
+    pub fn origin_link_path(&self) -> PathBuf {
         self.link_name.clone()
     }
 
