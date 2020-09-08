@@ -718,10 +718,15 @@ impl RafsInode for OndiskInodeWrapper {
             0
         };
         let index_end = if !self.has_hole() {
-            cmp::min((end / blksize) as u32 + 1, inode.i_child_count)
+            cmp::min(((end - 1) / blksize) as u32 + 1, inode.i_child_count)
         } else {
             inode.i_child_count
         };
+
+        debug!(
+            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
+            offset, size, inode.i_size, blksize, index_start, index_end, inode.i_child_count
+        );
 
         for idx in index_start..index_end {
             let chunk = self.get_chunk_info(idx)?;
