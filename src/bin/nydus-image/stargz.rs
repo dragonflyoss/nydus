@@ -15,6 +15,8 @@ use std::rc::Rc;
 use nydus_utils::einval;
 use rafs::metadata::digest::{Algorithm, RafsDigest};
 
+pub const DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
+
 type RcTocEntry = Rc<RefCell<TocEntry>>;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]

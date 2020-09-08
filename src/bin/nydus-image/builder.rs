@@ -22,6 +22,8 @@ use rafs::metadata::{Inode, RafsMode, RafsStore, RafsSuper};
 use rafs::storage::compress;
 use rafs::{RafsIoRead, RafsIoWrite};
 
+use crate::stargz;
+
 use crate::node::*;
 use crate::tree::Tree;
 
@@ -512,6 +514,9 @@ impl Builder {
         super_block.set_digester(self.digester);
         if self.explicit_uidgid {
             super_block.set_explicit_uidgid();
+        }
+        if self.source_type == SourceType::StargzIndex {
+            super_block.set_block_size(stargz::DEFAULT_BLOCK_SIZE);
         }
         super_block.set_prefetch_table_entries(prefetch_table_entries);
 
