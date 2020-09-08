@@ -164,19 +164,26 @@ impl StargzIndexTreeBuilder {
         let root_node = self.parse_node(&root_entry, explicit_uidgid)?;
         let mut tree = Tree::new(root_node);
 
-        let mut chunk_map: HashMap<Inode, Vec<OndiskChunkInfo>> = HashMap::new();
+        let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let mut chunk_map: HashMap<PathBuf, Vec<OndiskChunkInfo>> = HashMap::new();
         let mut nodes = Vec::new();
 
+        let mut last_reg_entry: Option<&TocEntry> = None;
         for entry in toc_index.entries.iter() {
             if !entry.is_supported() {
                 continue;
             }
-            let decompress_size = if entry.chunk_size == 0 {
-                entry.size as u32
-            } else {
-                entry.chunk_size as u32
-            };
-            let mut _chunks = Vec::new();
+
+            let mut decompress_size = entry.chunk_size;
+            if entry.is_chunk() && entry.chunk_size == 0 {
+                if let Some(reg_entry) = last_reg_entry {
+                    decompress_size = reg_entry.size - entry.chunk_offset;
+                }
+            }
+            if entry.chunk_size == 0 && entry.size != 0 {
+                decompress_size = entry.size;
+            }
+
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
                 let block_id = entry.block_id()?;
                 let chunk = OndiskChunkInfo {
@@ -186,14 +193,21 @@ impl StargzIndexTreeBuilder {
                     flags: RafsChunkFlags::COMPRESSED,
                     // No available data on entry
                     compress_size: 0,
-                    decompress_size,
+                    decompress_size: decompress_size as u32,
                     compress_offset: entry.offset as u64,
                     // No available data on entry
                     decompress_offset: 0,
                     file_offset: entry.chunk_offset as u64,
                     reserved: 0u64,
                 };
-                _chunks.push(chunk);
+                if let Some(chunks) = chunk_map.get_mut(&entry.path()) {
+                    chunks.push(chunk);
+                } else {
+                    chunk_map.insert(entry.path(), vec![chunk]);
+                }
+            }
+            if entry.is_reg() {
+                last_reg_entry = Some(&entry);
             }
             if entry.is_chunk() {
                 continue;
@@ -206,19 +220,17 @@ impl StargzIndexTreeBuilder {
                 nodes.push(node);
             }
 
-            let node = self.parse_node(entry, explicit_uidgid)?;
-
-            if let Some(chunks) = chunk_map.get_mut(&node.inode.i_ino) {
-                chunks.append(&mut _chunks);
-            } else {
-                chunk_map.insert(node.inode.i_ino, _chunks);
+            if entry.is_hardlink() {
+                hardlink_map.insert(entry.path(), entry.link_path());
             }
 
+            let node = self.parse_node(entry, explicit_uidgid)?;
             nodes.push(node);
         }
 
         for node in &mut nodes {
-            if let Some(chunks) = chunk_map.get(&node.inode.i_ino) {
+            let link_path = hardlink_map.get(&node.path).unwrap_or(&node.path);
+            if let Some(chunks) = chunk_map.get(link_path) {
                 node.chunks = chunks.clone();
                 node.inode.i_child_count = node.chunks.len() as u32;
             }
