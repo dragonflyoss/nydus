@@ -174,7 +174,7 @@ pub trait RafsCache {
             // TODO: Use a buffer pool for lower latency?
             //
             // gzip is special that it doesn't carry compress_size, instead, we can read as much
-            // as 4MB compressed data per chunk, decompress as much as necessary to fill in chunk
+            // as chunk_decompress_size compressed data per chunk, decompress as much as necessary to fill in chunk
             // that has the original uncompressed data size.
             // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
             // by fixed chunk size instead of RafsChunkInfo.
@@ -183,7 +183,8 @@ pub trait RafsCache {
                 cki.compress_size() as usize
             } else {
                 let size = self.blob_size(blob_id)? - cki.compress_offset();
-                cmp::min(size, 4 << 20) as usize
+                // gzip head is at least 10 bytes. Let's just read minimal 512 bytes
+                cmp::max(cmp::min(size, chunk.len() as u64), 512) as usize
             };
             d = alloc_buf(c_size);
             d.as_mut_slice()
