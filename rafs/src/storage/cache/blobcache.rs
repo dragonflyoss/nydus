@@ -5,12 +5,13 @@
 use std::cmp;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Result};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::io::{ErrorKind, Result, Seek, SeekFrom};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use nix::sys::uio;
+use nix::unistd::dup;
 extern crate spmc;
 use vm_memory::VolatileSlice;
 
@@ -270,19 +271,31 @@ impl BlobCache {
             unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
         };
 
-        debug!(
-            "reading blobcache file fd {} offset {} size {}",
-            fd,
-            offset,
-            raw_chunk.len()
-        );
-        let nr_read = uio::pread(fd, raw_chunk, offset as i64).map_err(|_| last_error!())?;
-        if nr_read == 0 || nr_read != raw_chunk.len() {
-            return Err(einval!());
+        let mut raw_stream = None;
+        if self.compressor() != compress::Algorithm::GZip {
+            debug!(
+                "reading blobcache file fd {} offset {} size {}",
+                fd,
+                offset,
+                raw_chunk.len()
+            );
+            let nr_read = uio::pread(fd, raw_chunk, offset as i64).map_err(|_| last_error!())?;
+            if nr_read == 0 || nr_read != raw_chunk.len() {
+                return Err(einval!());
+            }
+        } else {
+            debug!(
+                "using blobcache file fd {} offset {} as data stream",
+                fd, offset,
+            );
+            let fd = dup(fd).map_err(|_| last_error!())?;
+            let mut f = unsafe { File::from_raw_fd(fd) };
+            f.seek(SeekFrom::Start(offset)).map_err(|_| last_error!())?;
+            raw_stream = Some(f)
         }
 
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, chunk, self.is_compressed)?;
+        self.process_raw_chunk(cki, raw_chunk, raw_stream, chunk, self.is_compressed)?;
 
         Ok(d_size)
     }

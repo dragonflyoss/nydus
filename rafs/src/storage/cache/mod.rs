@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp;
+use std::fs::File;
 use std::io::Result;
 use std::slice;
 use std::sync::Arc;
@@ -195,7 +196,7 @@ pub trait RafsCache {
 
         self.backend().read(blob_id, raw_chunk, offset)?;
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, chunk, cki.is_compressed())
+        self.process_raw_chunk(cki, raw_chunk, None, chunk, cki.is_compressed())
             .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
         cacher(raw_chunk, chunk)?;
         Ok(chunk.len())
@@ -209,11 +210,12 @@ pub trait RafsCache {
         &self,
         cki: &dyn RafsChunkInfo,
         raw_chunk: &[u8],
+        raw_stream: Option<File>,
         chunk: &mut [u8],
         need_decompress: bool,
     ) -> Result<usize> {
         if need_decompress {
-            compress::decompress(raw_chunk, chunk, self.compressor()).map_err(|e| {
+            compress::decompress(raw_chunk, raw_stream, chunk, self.compressor()).map_err(|e| {
                 error!("failed to decompress chunk: {}", e);
                 e
             })?;
@@ -268,6 +270,7 @@ pub trait RafsCache {
             self.process_raw_chunk(
                 cki.as_ref(),
                 &c_buf[offset_merged..(offset_merged + size_merged)],
+                None,
                 &mut chunk,
                 cki.is_compressed(),
             )?;
