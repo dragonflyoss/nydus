@@ -22,8 +22,8 @@ fn test(
     rafs_mode: &str,
 ) -> Result<()> {
     info!(
-        "\n\n==================== testing run: enable_compress {} enable_cache {} rafs_mode {}",
-        enable_compress, enable_cache, rafs_mode
+        "\n\n==================== testing run: compressor={} enable_cache={} cache_compressed={} rafs_mode={}",
+        compressor, enable_cache, cache_compressed, rafs_mode
     );
 
     let tmp_dir = TempDir::new().map_err(|e| eother!(e))?;
