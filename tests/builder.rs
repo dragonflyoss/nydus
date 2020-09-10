@@ -193,16 +193,14 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub fn build_stargz_lower(&mut self, blob_id: &str, index_file: &str) -> Result<()> {
-        let index_path = self.work_dir.join(index_file).to_path_buf();
-
+    pub fn build_stargz_lower(&mut self) -> Result<()> {
         exec(
             format!(
                 "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level info {:?}",
                 NYDUS_IMAGE,
-                self.work_dir.join("bootstrap-stargz-lower"),
-                blob_id,
-                index_path,
+                self.work_dir.join("bootstrap-lower"),
+                "lower.stargz",
+                self.work_dir.join("stargz.index-lower.json"),
             )
             .as_str(),
             false,
@@ -211,17 +209,15 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub fn build_stargz_upper(&mut self, blob_id: &str, index_file: &str) -> Result<()> {
-        let index_path = self.work_dir.join(index_file).to_path_buf();
-
+    pub fn build_stargz_upper(&mut self) -> Result<()> {
         exec(
             format!(
                 "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
                 NYDUS_IMAGE,
-                self.work_dir.join("bootstrap-stargz-lower"),
-                self.work_dir.join("bootstrap-stargz-overlay"),
-                blob_id,
-                index_path,
+                self.work_dir.join("bootstrap-lower"),
+                self.work_dir.join("bootstrap-overlay"),
+                "upper.stargz",
+                self.work_dir.join("stargz.index-upper.json"),
             )
             .as_str(),
             false,

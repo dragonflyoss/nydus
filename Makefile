@@ -28,8 +28,8 @@ static-release:
 
 test: release
 	# Run smoke test and unit tests
-	RUST_BACKTRACE=1 cargo test --features=virtiofsd --target-dir target-virtiofsd --workspace -- --nocapture --skip integration
-	RUST_BACKTRACE=1 cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture
+	RUST_BACKTRACE=1 cargo test --features=virtiofsd --target-dir target-virtiofsd --workspace -- --nocapture --test-threads=15 --skip integration
+	RUST_BACKTRACE=1 cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
 
 docker-smoke:
 	docker build -t nydus-rs-smoke misc/smoke

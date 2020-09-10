@@ -197,15 +197,15 @@ fn integration_test_stargz() -> Result<()> {
 
     let mut builder = builder::new(&work_dir);
 
-    builder.build_stargz_lower("lower.stargz", "stargz.index-lower.json")?;
-    builder.build_stargz_upper("upper.stargz", "stargz.index-upper.json")?;
+    builder.build_stargz_lower()?;
+    builder.build_stargz_upper()?;
 
     let nydusd = nydusd::new(
         &work_dir,
         true,
         true,
         "direct".parse()?,
-        "bootstrap-stargz-overlay".to_string(),
+        "bootstrap-overlay".to_string(),
         false,
     )?;
 
