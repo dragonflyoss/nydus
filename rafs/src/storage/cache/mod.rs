@@ -177,15 +177,53 @@ pub trait RafsCache {
             // gzip is special that it doesn't carry compress_size, instead, we can read as much
             // as chunk_decompress_size compressed data per chunk, decompress as much as necessary to fill in chunk
             // that has the original uncompressed data size.
-            // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
-            // by fixed chunk size instead of RafsChunkInfo.
-            // And it is extremely ineffecient for dummy cache.
             let c_size = if self.compressor() != compress::Algorithm::GZip {
                 cki.compress_size() as usize
             } else {
-                let size = self.blob_size(blob_id)? - cki.compress_offset();
-                // gzip head is at least 10 bytes. Let's just read minimal 512 bytes
-                cmp::max(cmp::min(size, chunk.len() as u64), 512) as usize
+                // Per man(1) gzip
+                // The worst case expansion is a few bytes for the gzip file header,
+                // plus 5 bytes every 32K block, or an expansion ratio of 0.015% for
+                // large files.
+                //
+                // Per http://www.zlib.org/rfc-gzip.html#header-trailer
+                // Each member has the following structure:
+                // +---+---+---+---+---+---+---+---+---+---+
+                // |ID1|ID2|CM |FLG|     MTIME     |XFL|OS | (more-->)
+                // +---+---+---+---+---+---+---+---+---+---+
+                // (if FLG.FEXTRA set)
+                // +---+---+=================================+
+                // | XLEN  |...XLEN bytes of "extra field"...| (more-->)
+                // +---+---+=================================+
+                // (if FLG.FNAME set)
+                // +=========================================+
+                // |...original file name, zero-terminated...| (more-->)
+                // +=========================================+
+                // (if FLG.FCOMMENT set)
+                // +===================================+
+                // |...file comment, zero-terminated...| (more-->)
+                // +===================================+
+                // (if FLG.FHCRC set)
+                // +---+---+
+                // | CRC16 |
+                // +---+---+
+                // +=======================+
+                // |...compressed blocks...| (more-->)
+                // +=======================+
+                //   0   1   2   3   4   5   6   7
+                // +---+---+---+---+---+---+---+---+
+                // |     CRC32     |     ISIZE     |
+                // +---+---+---+---+---+---+---+---+
+                // gzip head+footer is at least 10+8 bytes, stargz header doesn't include any flags
+                // so it's 18 bytes. Let's read at least 128 bytes more, to allow the decompressor to
+                // find out end of the gzip stream.
+                //
+                // Ideally we should introduce a streaming cache for stargz that maintains internal
+                // chunks and expose stream APIs.
+                let size = chunk.len() + 10 + 8 + 5 + (chunk.len() / (16 << 10)) * 5 + 128;
+                cmp::min(
+                    size as u64,
+                    self.blob_size(blob_id)? - cki.compress_offset(),
+                ) as usize
             };
             d = alloc_buf(c_size);
             d.as_mut_slice()

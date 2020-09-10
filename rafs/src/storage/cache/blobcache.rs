@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cmp;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
@@ -200,7 +199,7 @@ impl BlobCache {
         // stargz format limitations (missing chunk level digest)
         if (self.compressor() != compress::Algorithm::GZip || cache_entry.is_ready())
             && self
-                .read_blobcache_chunk(cache_entry.fd, blob_id, chunk.as_ref(), one_chunk_buf)
+                .read_blobcache_chunk(cache_entry.fd, chunk.as_ref(), one_chunk_buf)
                 .is_ok()
         {
             trace!(
@@ -236,34 +235,23 @@ impl BlobCache {
     fn read_blobcache_chunk(
         &self,
         fd: RawFd,
-        blob_id: &str,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
-    ) -> Result<usize> {
+    ) -> Result<()> {
         let offset = if self.is_compressed {
             cki.compress_offset()
         } else {
             cki.decompress_offset()
         };
-        let d_size = cki.decompress_size() as usize;
 
         let mut d;
-        let raw_chunk = if self.is_compressed {
+        let raw_chunk = if self.is_compressed && self.compressor() != compress::Algorithm::GZip {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
             // TODO: Use a buffer pool for lower latency?
             //
-            // gzip is special that it doesn't carry compress_size, instead, we can read as much
-            // as chunk_decompress_size compressed data per chunk, decompress as much as necessary to fill in chunk
-            // that has the original uncompressed data size.
-            // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
-            // by fixed chunk size instead of RafsChunkInfo.
-            let c_size = if self.compressor() != compress::Algorithm::GZip {
-                cki.compress_size() as usize
-            } else {
-                let size = self.blob_size(blob_id)? - cki.compress_offset();
-                // gzip head is at least 10 bytes. Let's just read minimal 512 bytes
-                cmp::max(cmp::min(size, chunk.len() as u64), 512) as usize
-            };
+            // gzip is special that it doesn't carry compress_size, instead, we make an IO stream out
+            // of the blobcache file. So no need for an internal buffer here.
+            let c_size = cki.compress_size() as usize;
             d = alloc_buf(c_size);
             d.as_mut_slice()
         } else {
@@ -297,7 +285,7 @@ impl BlobCache {
         // Try to validate data just fetched from backend inside.
         self.process_raw_chunk(cki, raw_chunk, raw_stream, chunk, self.is_compressed)?;
 
-        Ok(d_size)
+        Ok(())
     }
 }
 
@@ -421,7 +409,6 @@ impl RafsCache for BlobCache {
                                 if cache_cloned
                                     .read_blobcache_chunk(
                                         entry.lock().unwrap().fd,
-                                        blob_id,
                                         entry.lock().unwrap().chunk.as_ref(),
                                         alloc_buf(d_size).as_mut_slice(),
                                     )
