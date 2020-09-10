@@ -2,77 +2,49 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Read;
 use std::io::{Result, Write};
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-use sha2::digest::Digest;
-use sha2::Sha256;
-
-use nydus_utils::{einval, exec};
+use nydus_utils::exec;
 
 const NYDUS_IMAGE: &str = "./target-fusedev/release/nydus-image";
 
-pub fn hash(data: &[u8]) -> String {
-    let mut hash = Sha256::new();
-    hash.update(data);
-    String::from_utf8_lossy(&hash.finalize()).to_string()
-}
-
-#[allow(dead_code)]
-pub struct FileInfo {
-    hash: String,
-}
-
 pub struct Builder<'a> {
     work_dir: &'a PathBuf,
-    files: HashMap<PathBuf, FileInfo>,
 }
 
 pub fn new<'a>(work_dir: &'a PathBuf) -> Builder<'a> {
-    Builder {
-        work_dir,
-        files: HashMap::new(),
-    }
+    Builder { work_dir }
 }
 
 impl<'a> Builder<'a> {
-    pub fn record(&mut self, path: &PathBuf, file_info: FileInfo) {
-        self.files.insert(path.clone(), file_info);
-    }
-
-    pub fn create_dir(&mut self, path: &PathBuf) -> Result<()> {
+    fn create_dir(&mut self, path: &PathBuf) -> Result<()> {
         fs::create_dir_all(path)?;
-        self.record(path, FileInfo { hash: hash(b"") });
         Ok(())
     }
 
-    pub fn create_file(&mut self, path: &PathBuf, data: &[u8]) -> Result<()> {
+    fn create_file(&mut self, path: &PathBuf, data: &[u8]) -> Result<()> {
         File::create(path)?.write_all(data)?;
-        self.record(path, FileInfo { hash: hash(data) });
         Ok(())
     }
 
-    pub fn copy_file(&mut self, src: &PathBuf, dst: &PathBuf) -> Result<u64> {
+    fn copy_file(&mut self, src: &PathBuf, dst: &PathBuf) -> Result<u64> {
         fs::copy(src, dst)
     }
 
-    pub fn create_symlink(&mut self, src: &PathBuf, dst: &PathBuf) -> Result<()> {
+    fn create_symlink(&mut self, src: &PathBuf, dst: &PathBuf) -> Result<()> {
         unix_fs::symlink(src, dst)?;
-        self.record(dst, FileInfo { hash: hash(b"") });
         Ok(())
     }
 
-    pub fn create_hardlink(&mut self, src: &PathBuf, dst: &PathBuf) -> Result<()> {
+    fn create_hardlink(&mut self, src: &PathBuf, dst: &PathBuf) -> Result<()> {
         fs::hard_link(src, dst)?;
-        self.record(dst, FileInfo { hash: hash(b"") });
         Ok(())
     }
 
-    pub fn create_large_file(&mut self, path: &PathBuf, size_in_mb: u8) -> Result<()> {
+    fn create_large_file(&mut self, path: &PathBuf, size_in_mb: u8) -> Result<()> {
         let mut file = File::create(path)?;
 
         for i in 1..size_in_mb + 1 {
@@ -83,7 +55,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub fn set_xattr(&mut self, path: &PathBuf, key: &str, value: &[u8]) -> Result<()> {
+    fn set_xattr(&mut self, path: &PathBuf, key: &str, value: &[u8]) -> Result<()> {
         xattr::set(path, key, value)?;
         Ok(())
     }
@@ -180,25 +152,10 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub fn build_lower(&mut self, compressor: &str) -> Result<String> {
+    pub fn build_lower(&mut self, compressor: &str) -> Result<()> {
         let lower_dir = self.work_dir.join("lower");
 
         self.create_dir(&self.work_dir.join("blobs"))?;
-
-        let tree_ret = exec(
-            format!("tree -a -J --sort=name {:?}", lower_dir).as_str(),
-            true,
-        )?;
-        let md5_ret = exec(
-            format!("find {:?} -type f -exec md5sum {{}} + | sort", lower_dir).as_str(),
-            true,
-        )?;
-
-        let ret = format!(
-            "{}{}",
-            tree_ret.replace(lower_dir.to_str().unwrap(), ""),
-            md5_ret.replace(lower_dir.to_str().unwrap(), "")
-        );
 
         exec(
             format!(
@@ -213,7 +170,7 @@ impl<'a> Builder<'a> {
             false,
         )?;
 
-        Ok(ret)
+        Ok(())
     }
 
     pub fn build_upper(&mut self, compressor: &str) -> Result<()> {
@@ -241,7 +198,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level trace {:?}",
+                "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level info {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-stargz-lower"),
                 blob_id,
@@ -259,7 +216,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level trace {:?}",
+                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-stargz-lower"),
                 self.work_dir.join("bootstrap-stargz-overlay"),
@@ -269,32 +226,6 @@ impl<'a> Builder<'a> {
             .as_str(),
             false,
         )?;
-
-        Ok(())
-    }
-
-    pub fn mount_check(&mut self, expect_texture: &str) -> Result<()> {
-        let mount_path = self.work_dir.join("mnt");
-
-        let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true)?;
-        let md5_ret = exec(
-            format!("find {:?} -type f -exec md5sum {{}} + | sort", mount_path).as_str(),
-            true,
-        )?;
-
-        let ret = format!(
-            "{}{}",
-            tree_ret.replace(mount_path.to_str().unwrap(), ""),
-            md5_ret.replace(mount_path.to_str().unwrap(), "")
-        );
-
-        let texture_file = format!("./tests/texture/{}", expect_texture);
-        let mut texture = File::open(texture_file.clone())
-            .map_err(|_| einval!(format!("invalid texture file path: {:?}", texture_file)))?;
-        let mut expected = String::new();
-        texture.read_to_string(&mut expected)?;
-
-        assert_eq!(ret.trim(), expected.trim());
 
         Ok(())
     }

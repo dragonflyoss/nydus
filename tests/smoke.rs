@@ -21,6 +21,8 @@ fn test(
     cache_compressed: bool,
     rafs_mode: &str,
 ) -> Result<()> {
+    // std::thread::sleep(std::time::Duration::from_secs(1000));
+
     info!(
         "\n\n==================== testing run: compressor={} enable_cache={} cache_compressed={} rafs_mode={}",
         compressor, enable_cache, cache_compressed, rafs_mode
@@ -46,7 +48,7 @@ fn test(
             true,
         )?;
         nydusd.start()?;
-        builder.mount_check("source/lower.result")?;
+        nydusd.check("source/lower.result")?;
         nydusd.stop();
     }
 
@@ -66,7 +68,7 @@ fn test(
             true,
         )?;
         nydusd.start()?;
-        builder.mount_check("source/overlay.result")?;
+        nydusd.check("source/overlay.result")?;
         nydusd.stop();
     }
 
@@ -81,12 +83,67 @@ fn test(
             true,
         )?;
         nydusd.start()?;
-        builder.mount_check("source/overlay.result")?;
+        nydusd.check("source/overlay.result")?;
         nydusd.stop();
     }
 
     Ok(())
 }
+
+#[test]
+fn integration_test_init() -> Result<()> {
+    stderrlog::new()
+        .quiet(false)
+        .timestamp(stderrlog::Timestamp::Second)
+        .verbosity(log::LevelFilter::Trace as usize - 1)
+        .init()
+        .map_err(|e| eother!(e))
+}
+
+#[test]
+fn integration_test_directory_1() -> Result<()> {
+    test("lz4_block", true, false, "direct")
+}
+
+#[test]
+fn integration_test_directory_2() -> Result<()> {
+    test("lz4_block", false, false, "direct")
+}
+
+#[test]
+fn integration_test_directory_3() -> Result<()> {
+    test("gzip", false, false, "direct")
+}
+
+#[test]
+fn integration_test_directory_4() -> Result<()> {
+    test("none", true, false, "direct")
+}
+
+#[test]
+fn integration_test_directory_5() -> Result<()> {
+    test("gzip", true, true, "cached")
+}
+
+#[test]
+fn integration_test_directory_6() -> Result<()> {
+    test("none", false, true, "cached")
+}
+
+#[test]
+fn integration_test_directory_7() -> Result<()> {
+    test("lz4_block", false, true, "cached")
+}
+
+#[test]
+fn integration_test_directory_8() -> Result<()> {
+    test("lz4_block", true, true, "cached")
+}
+
+const COMPAT_BOOTSTRAPS: &'static [&'static str] = &[
+    "blake3-lz4_block-non_repeatable",
+    "sha256-nocompress-repeatable",
+];
 
 fn check_compact<'a>(work_dir: &'a PathBuf, bootstrap_name: &str, rafs_mode: &str) -> Result<()> {
     let nydusd = nydusd::new(
@@ -97,22 +154,17 @@ fn check_compact<'a>(work_dir: &'a PathBuf, bootstrap_name: &str, rafs_mode: &st
         bootstrap_name.to_string(),
         true,
     )?;
-    let mut builder = builder::new(&work_dir);
 
     nydusd.start()?;
     let result_path = format!("repeatable/{}.result", bootstrap_name);
-    builder.mount_check(result_path.as_str())?;
+    nydusd.check(result_path.as_str())?;
     nydusd.stop();
 
     Ok(())
 }
 
-const COMPAT_BOOTSTRAPS: &'static [&'static str] = &[
-    "blake3-lz4_block-non_repeatable",
-    "sha256-nocompress-repeatable",
-];
-
-fn test_compact() -> Result<()> {
+#[test]
+fn integration_test_compact() -> Result<()> {
     info!("\n\n==================== testing run: compact test");
 
     let tmp_dir = TempDir::new().map_err(|e| eother!(e))?;
@@ -131,7 +183,10 @@ fn test_compact() -> Result<()> {
     Ok(())
 }
 
-fn test_stargz() -> Result<()> {
+#[test]
+fn integration_test_stargz() -> Result<()> {
+    info!("\n\n==================== testing run: stargz test");
+
     let tmp_dir = TempDir::new().map_err(|e| eother!(e))?;
     let work_dir = tmp_dir.as_path().to_path_buf();
 
@@ -155,35 +210,8 @@ fn test_stargz() -> Result<()> {
     )?;
 
     nydusd.start()?;
-    builder.mount_check("stargz/overlay.result")?;
+    nydusd.check("stargz/overlay.result")?;
     nydusd.stop();
 
     Ok(())
-}
-
-#[test]
-fn integration_run() -> Result<()> {
-    stderrlog::new()
-        .quiet(false)
-        .timestamp(stderrlog::Timestamp::Second)
-        .verbosity(log::LevelFilter::Trace as usize - 1)
-        .init()
-        .map_err(|e| eother!(e))
-        .unwrap();
-
-    // std::thread::sleep(std::time::Duration::from_secs(1000));
-
-    test_compact()?;
-
-    test("lz4_block", true, false, "direct")?;
-    test("lz4_block", false, false, "direct")?;
-    test("gzip", false, false, "direct")?;
-    test("none", true, false, "direct")?;
-
-    test("gzip", true, true, "cached")?;
-    test("none", false, true, "cached")?;
-    test("lz4_block", false, true, "cached")?;
-    test("lz4_block", true, true, "cached")?;
-
-    test_stargz()
 }

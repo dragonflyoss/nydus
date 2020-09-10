@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::{self, File};
-use std::io::{Result, Write};
+use std::io::{Read, Result, Write};
 use std::path::PathBuf;
 use std::thread::*;
 use std::time;
 
-use nydus_utils::{eother, exec};
+use nydus_utils::{einval, eother, exec};
 use rafs::metadata::RafsMode;
 
 const NYDUSD: &str = "./target-fusedev/release/nydusd";
@@ -89,7 +89,7 @@ impl Nydusd {
         spawn(move || {
             exec(
                 format!(
-                    "{} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level trace",
+                    "{} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level info",
                     NYDUSD,
                     work_dir.join("config.json"),
                     work_dir.join("api.sock"),
@@ -106,6 +106,32 @@ impl Nydusd {
         if !self.is_mounted()? {
             return Err(eother!("nydusd mount failed"));
         }
+
+        Ok(())
+    }
+
+    pub fn check(&self, expect_texture: &str) -> Result<()> {
+        let mount_path = self.work_dir.join("mnt");
+
+        let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true)?;
+        let md5_ret = exec(
+            format!("find {:?} -type f -exec md5sum {{}} + | sort", mount_path).as_str(),
+            true,
+        )?;
+
+        let ret = format!(
+            "{}{}",
+            tree_ret.replace(mount_path.to_str().unwrap(), ""),
+            md5_ret.replace(mount_path.to_str().unwrap(), "")
+        );
+
+        let texture_file = format!("./tests/texture/{}", expect_texture);
+        let mut texture = File::open(texture_file.clone())
+            .map_err(|_| einval!(format!("invalid texture file path: {:?}", texture_file)))?;
+        let mut expected = String::new();
+        texture.read_to_string(&mut expected)?;
+
+        assert_eq!(ret.trim(), expected.trim());
 
         Ok(())
     }
