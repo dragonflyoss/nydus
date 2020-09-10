@@ -43,6 +43,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-lower".to_string(),
+            true,
         )?;
         nydusd.start()?;
         builder.mount_check("source/lower.result")?;
@@ -62,6 +63,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-overlay".to_string(),
+            true,
         )?;
         nydusd.start()?;
         builder.mount_check("source/overlay.result")?;
@@ -76,6 +78,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-overlay".to_string(),
+            true,
         )?;
         nydusd.start()?;
         builder.mount_check("source/overlay.result")?;
@@ -92,6 +95,7 @@ fn check_compact<'a>(work_dir: &'a PathBuf, bootstrap_name: &str, rafs_mode: &st
         false,
         rafs_mode.parse()?,
         bootstrap_name.to_string(),
+        true,
     )?;
     let mut builder = builder::new(&work_dir);
 
@@ -127,6 +131,36 @@ fn test_compact() -> Result<()> {
     Ok(())
 }
 
+fn test_stargz() -> Result<()> {
+    let tmp_dir = TempDir::new().map_err(|e| eother!(e))?;
+    let work_dir = tmp_dir.as_path().to_path_buf();
+
+    let _ = exec(
+        format!("cp -a tests/texture/stargz/* {:?}", work_dir).as_str(),
+        false,
+    )?;
+
+    let mut builder = builder::new(&work_dir);
+
+    builder.build_stargz_lower("lower.stargz", "stargz.index-lower.json")?;
+    builder.build_stargz_upper("upper.stargz", "stargz.index-upper.json")?;
+
+    let nydusd = nydusd::new(
+        &work_dir,
+        true,
+        true,
+        "direct".parse()?,
+        "bootstrap-stargz-overlay".to_string(),
+        false,
+    )?;
+
+    nydusd.start()?;
+    builder.mount_check("stargz/overlay.result")?;
+    nydusd.stop();
+
+    Ok(())
+}
+
 #[test]
 fn integration_run() -> Result<()> {
     stderrlog::new()
@@ -136,6 +170,8 @@ fn integration_run() -> Result<()> {
         .init()
         .map_err(|e| eother!(e))
         .unwrap();
+
+    // std::thread::sleep(std::time::Duration::from_secs(1000));
 
     test_compact()?;
 
@@ -147,5 +183,7 @@ fn integration_run() -> Result<()> {
     test("gzip", true, true, "cached")?;
     test("none", false, true, "cached")?;
     test("lz4_block", false, true, "cached")?;
-    test("lz4_block", true, true, "cached")
+    test("lz4_block", true, true, "cached")?;
+
+    test_stargz()
 }

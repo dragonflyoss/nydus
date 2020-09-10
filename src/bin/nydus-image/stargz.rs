@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use nydus_utils::einval;
@@ -156,13 +156,18 @@ impl TocEntry {
         !self.xattrs.is_empty()
     }
 
-    pub fn path(&self) -> PathBuf {
-        let root_path = Path::new("/");
-        let path = root_path.join(&self.name);
-        if self.is_dir() && path != root_path {
-            return path.parent().unwrap().join(path.file_name().unwrap());
+    pub fn mode(&self) -> u32 {
+        let mut mode = self.mode;
+
+        if self.is_dir() {
+            mode |= libc::S_IFDIR;
+        } else if self.is_reg() || self.is_hardlink() {
+            mode |= libc::S_IFREG;
+        } else if self.is_symlink() {
+            mode |= libc::S_IFLNK;
         }
-        path
+
+        mode
     }
 
     pub fn name(&self) -> Result<PathBuf> {
@@ -178,23 +183,19 @@ impl TocEntry {
         Ok(PathBuf::from(name))
     }
 
-    pub fn mode(&self) -> u32 {
-        let mut mode = self.mode;
-
-        if self.is_dir() {
-            mode |= libc::S_IFDIR;
-        } else if self.is_reg() || self.is_hardlink() {
-            mode |= libc::S_IFREG;
-        } else if self.is_symlink() {
-            mode |= libc::S_IFLNK;
-        }
-
-        mode
+    pub fn path(&self) -> PathBuf {
+        let path = self.name.strip_prefix("../").unwrap_or(&self.name);
+        let path = path.strip_prefix("./").unwrap_or(&path);
+        PathBuf::from("/").join(path)
     }
 
     pub fn link_path(&self) -> PathBuf {
-        let root_path = Path::new("/");
-        root_path.join(&self.link_name)
+        let path = self
+            .link_name
+            .strip_prefix("../")
+            .unwrap_or(&self.link_name);
+        let path = path.strip_prefix("./").unwrap_or(&path);
+        PathBuf::from("/").join(path)
     }
 
     pub fn origin_link_path(&self) -> PathBuf {

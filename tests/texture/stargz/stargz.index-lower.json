@@ -2,277 +2,224 @@
 	"version": 1,
 	"entries": [
 		{
+			"name": "",
+			"type": "dir",
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 493,
+			"userName": "root",
+			"groupName": "root",
+			"NumLink": 0
+		},
+		{
 			"name": "root-large",
 			"type": "reg",
-			"size": 2000000,
-			"modtime": "2020-06-02T05:56:05Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 149,
+			"size": 13631488,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 247,
 			"NumLink": 0,
-			"digest": "sha256:bb614c35cf00ca690128c93d88955f9018113513c3e3f236509e52ba565a9221"
-		},
-		{
-			"name": "\ufffd",
-			"type": "reg",
-			"modtime": "2020-08-11T08:53:46Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0,
-			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-		},
-		{
-			"name": "added/some/new/new-1",
-			"type": "reg",
-			"modtime": "2020-08-11T08:53:46Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0,
-			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-		},
-		{
-			"name": "root-1",
-			"type": "reg",
-			"size": 13,
-			"modtime": "2020-07-24T02:02:05Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 2000965,
-			"NumLink": 0,
-			"xattrs": {
-				"user.a": "YWJj",
-				"user.b": "5Lit5paH"
-			},
-			"digest": "sha256:e48085953387a34be28cc734fc36d5fa0ad7f591fdd28c054f57884611d71c4e"
-		},
-		{
-			"name": "sub/",
-			"type": "dir",
-			"modtime": "2020-08-03T08:37:34Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/more/",
-			"type": "dir",
-			"modtime": "2020-07-24T02:14:49Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/more/more-1",
-			"type": "reg",
-			"size": 13,
-			"modtime": "2020-07-24T02:09:01Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 2001145,
-			"NumLink": 0,
-			"digest": "sha256:30036aa1a4a22b5aaabb2568a99e0ff13765a19b3c9971f80c6c1116d691a132"
-		},
-		{
-			"name": "sub/more/more-sub/",
-			"type": "dir",
-			"modtime": "2020-07-24T02:15:16Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/more/more-sub/more-sub-1",
-			"type": "reg",
-			"size": 17,
-			"modtime": "2020-07-24T02:15:16Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 2001309,
-			"NumLink": 0,
-			"digest": "sha256:5d510452cac8501db1f2eae54b615bac7c384ca1aa2f236a8bec1cf5613c9126"
-		},
-		{
-			"name": "sub/some/",
-			"type": "dir",
-			"modtime": "2020-07-24T06:57:49Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/some/some-1",
-			"type": "reg",
-			"size": 13,
-			"modtime": "2020-07-24T06:57:49Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 2001473,
-			"NumLink": 0,
-			"digest": "sha256:a6b9cf68b872bdfa38ad69e52fdfdab2dc87d0d308041bf5f80fa85f981da898"
-		},
-		{
-			"name": "sub/other/",
-			"type": "dir",
-			"modtime": "2020-08-03T08:41:28Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/other/other-sub/",
-			"type": "dir",
-			"modtime": "2020-08-03T08:38:10Z",
-			"mode": 509,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/other/other-sub/other-sub-1",
-			"type": "reg",
-			"modtime": "2020-08-03T08:38:10Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0,
-			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-		},
-		{
-			"name": "sub/other/other-1",
-			"type": "reg",
-			"modtime": "2020-08-03T08:41:28Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0,
-			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-		},
-		{
-			"name": "sub/sub-root-large-copy-hardlink",
-			"type": "reg",
-			"size": 2000000,
-			"modtime": "2020-06-17T08:51:29Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 2001709,
-			"NumLink": 0,
-			"digest": "sha256:bb614c35cf00ca690128c93d88955f9018113513c3e3f236509e52ba565a9221"
-		},
-		{
-			"name": "sub/sub-1",
-			"type": "reg",
-			"size": 12,
-			"modtime": "2020-07-24T02:05:45Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 4002500,
-			"NumLink": 0,
-			"digest": "sha256:e5e8a28409bedb4682e973c5aa1d90fd7c6557f873c4298762a2266895de7e7b"
-		},
-		{
-			"name": "sub/sub-root-large-symlink",
-			"type": "symlink",
-			"modtime": "2020-07-24T02:05:00Z",
-			"linkName": "../root-large",
-			"mode": 511,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/sub-2",
-			"type": "reg",
-			"size": 12,
-			"modtime": "2020-07-24T02:05:58Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 4002680,
-			"NumLink": 0,
-			"digest": "sha256:78165bdc8fcc9934c92c5f071a9e03d99c25f63d96398811a78fbc11b5c3a9fe"
-		},
-		{
-			"name": "sub/sub-root-large-copy-hardlink-1",
-			"type": "hardlink",
-			"modtime": "2020-06-17T08:51:29Z",
-			"linkName": "sub/sub-root-large-copy-hardlink",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/sub-root-large-hardlink",
-			"type": "hardlink",
-			"modtime": "2020-06-02T05:56:05Z",
-			"linkName": "root-large",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"NumLink": 0
-		},
-		{
-			"name": "root-huge",
-			"type": "reg",
-			"size": 80000000,
-			"modtime": "2020-09-04T03:00:24Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 4002896,
-			"NumLink": 0,
-			"digest": "sha256:e43908bc09c890a50fbf78256e238e57d6c8d32c7a5c5fe80a41bf57c4685ab5",
+			"digest": "sha256:7252d1b37ba331cfb78ed939d9edda7ebeebf0ba3523877c86a77e1f54688cc7",
 			"chunkSize": 4194304
 		},
 		{
-			"name": "root-huge",
+			"name": "root-large",
 			"type": "chunk",
-			"offset": 8198503,
+			"offset": 4356,
 			"NumLink": 0,
 			"chunkOffset": 4194304,
 			"chunkSize": 4194304
 		},
 		{
-			"name": "root-huge",
+			"name": "root-large",
 			"type": "chunk",
-			"offset": 83719429,
+			"offset": 8465,
 			"NumLink": 0,
-			"chunkOffset": 79691776
+			"chunkOffset": 8388608,
+			"chunkSize": 4194304
+		},
+		{
+			"name": "root-large",
+			"type": "chunk",
+			"offset": 12574,
+			"NumLink": 0,
+			"chunkOffset": 12582912
+		},
+		{
+			"name": "root-1",
+			"type": "reg",
+			"size": 12,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 13802,
+			"NumLink": 0,
+			"digest": "sha256:d7c8625a79b839c6369c5474d2ff8d45f9ee1303a2efd7f1cbbc2a906a9bffc0"
+		},
+		{
+			"name": "sub/",
+			"type": "dir",
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 493,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/more/",
+			"type": "dir",
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 493,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/more/more-1",
+			"type": "reg",
+			"size": 12,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 14078,
+			"NumLink": 0,
+			"digest": "sha256:148e9b4712140e176d25aec1d3e768a5926dc4fd84d30ff58d5e192fe81e1a37"
+		},
+		{
+			"name": "sub/more/more-sub/",
+			"type": "dir",
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 493,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/more/more-sub/more-sub-1",
+			"type": "reg",
+			"size": 16,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 14332,
+			"NumLink": 0,
+			"digest": "sha256:6b37adf01775bae52f0a0c32f91d30827e593e2b336697b1bdbe1b6cfd319941"
+		},
+		{
+			"name": "sub/some/",
+			"type": "dir",
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 493,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/some/some-1",
+			"type": "reg",
+			"size": 12,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 14585,
+			"NumLink": 0,
+			"digest": "sha256:9fbf331469949742e1ecccaea9dc3ab068064d5eba97a661a6ffa0e299bfafce"
+		},
+		{
+			"name": "sub/sub-root-large-copy-hardlink",
+			"type": "reg",
+			"size": 13631488,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 14807,
+			"NumLink": 0,
+			"digest": "sha256:7252d1b37ba331cfb78ed939d9edda7ebeebf0ba3523877c86a77e1f54688cc7",
+			"chunkSize": 4194304
+		},
+		{
+			"name": "sub/sub-root-large-copy-hardlink",
+			"type": "chunk",
+			"offset": 18916,
+			"NumLink": 0,
+			"chunkOffset": 4194304,
+			"chunkSize": 4194304
+		},
+		{
+			"name": "sub/sub-root-large-copy-hardlink",
+			"type": "chunk",
+			"offset": 23025,
+			"NumLink": 0,
+			"chunkOffset": 8388608,
+			"chunkSize": 4194304
+		},
+		{
+			"name": "sub/sub-root-large-copy-hardlink",
+			"type": "chunk",
+			"offset": 27134,
+			"NumLink": 0,
+			"chunkOffset": 12582912
+		},
+		{
+			"name": "sub/sub-1",
+			"type": "reg",
+			"size": 11,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 28412,
+			"NumLink": 0,
+			"xattrs": {
+				"user.key-bar": "dmFsdWUtYmFy",
+				"user.key-foo": "dmFsdWUtZm9v"
+			},
+			"digest": "sha256:b5cde5a600c1e5a29e00ee690abd3667367f6012e65c1c4477ab6aaaf64e02ea"
+		},
+		{
+			"name": "sub/sub-root-large-symlink",
+			"type": "symlink",
+			"modtime": "2020-09-10T07:40:29Z",
+			"linkName": "../root-large",
+			"mode": 511,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/sub-2",
+			"type": "reg",
+			"size": 11,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 28680,
+			"NumLink": 0,
+			"digest": "sha256:842948d90b1c96d20afc8e5de84d4dfc48d0271126a5b6bed49ad64170cb6588"
+		},
+		{
+			"name": "sub/sub-root-large-copy-hardlink-1",
+			"type": "hardlink",
+			"modtime": "2020-09-10T07:40:29Z",
+			"linkName": "sub/sub-root-large-copy-hardlink",
+			"mode": 420,
+			"NumLink": 0
+		},
+		{
+			"name": "sub/sub-root-large-hardlink",
+			"type": "hardlink",
+			"modtime": "2020-09-10T07:40:29Z",
+			"linkName": "root-large",
+			"mode": 420,
+			"NumLink": 0
+		},
+		{
+			"name": "test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.",
+			"type": "reg",
+			"size": 15,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 29043,
+			"NumLink": 0,
+			"digest": "sha256:2979eee289298d9354b75034c0f255c48d1be8063d94da2cd1f47aa8b5a27353"
 		},
 		{
 			"name": "root-2",
 			"type": "reg",
-			"size": 13,
-			"modtime": "2020-07-24T02:02:35Z",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
-			"offset": 84027915,
+			"size": 12,
+			"modtime": "2020-09-10T07:40:29Z",
+			"mode": 420,
+			"offset": 29246,
 			"NumLink": 0,
-			"digest": "sha256:71e4dac0f1ba75d82b51ce92497f294485bd629c3f96afaaac130bc1662023b4"
+			"digest": "sha256:cfc471d8bc2996af57609748e38fef7f91b9d34dff9a3b6ca1a91d045e1e6f52"
 		},
 		{
 			"name": "root-large-copy",
 			"type": "hardlink",
-			"modtime": "2020-06-17T08:51:29Z",
+			"modtime": "2020-09-10T07:40:29Z",
 			"linkName": "sub/sub-root-large-copy-hardlink",
-			"mode": 436,
-			"uid": 1000,
-			"gid": 1000,
+			"mode": 420,
 			"NumLink": 0
 		}
 	]

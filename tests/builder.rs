@@ -94,7 +94,7 @@ impl<'a> Builder<'a> {
 
         self.create_file(&dir.join("root-1"), b"lower:root-1")?;
         self.create_file(&dir.join("root-2"), b"lower:root-2")?;
-        self.create_large_file(&dir.join("root-large"), 3)?;
+        self.create_large_file(&dir.join("root-large"), 13)?;
         self.copy_file(&dir.join("root-large"), &dir.join("root-large-copy"))?;
 
         self.create_dir(&dir.join("sub"))?;
@@ -150,7 +150,7 @@ impl<'a> Builder<'a> {
         let dir = self.work_dir.join("upper");
         self.create_dir(&dir)?;
 
-        self.create_large_file(&dir.join("root-large"), 3)?;
+        self.create_large_file(&dir.join("root-large"), 13)?;
         self.create_file(&dir.join(".wh.root-large"), b"")?;
         self.create_file(&dir.join("root-2"), b"upper:root-2")?;
         self.create_file(&dir.join(".wh.root-2"), b"")?;
@@ -236,6 +236,43 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    pub fn build_stargz_lower(&mut self, blob_id: &str, index_file: &str) -> Result<()> {
+        let index_path = self.work_dir.join(index_file).to_path_buf();
+
+        exec(
+            format!(
+                "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level trace {:?}",
+                NYDUS_IMAGE,
+                self.work_dir.join("bootstrap-stargz-lower"),
+                blob_id,
+                index_path,
+            )
+            .as_str(),
+            false,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn build_stargz_upper(&mut self, blob_id: &str, index_file: &str) -> Result<()> {
+        let index_path = self.work_dir.join(index_file).to_path_buf();
+
+        exec(
+            format!(
+                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level trace {:?}",
+                NYDUS_IMAGE,
+                self.work_dir.join("bootstrap-stargz-lower"),
+                self.work_dir.join("bootstrap-stargz-overlay"),
+                blob_id,
+                index_path,
+            )
+            .as_str(),
+            false,
+        )?;
+
+        Ok(())
+    }
+
     pub fn mount_check(&mut self, expect_texture: &str) -> Result<()> {
         let mount_path = self.work_dir.join("mnt");
 
@@ -256,8 +293,6 @@ impl<'a> Builder<'a> {
             .map_err(|_| einval!(format!("invalid texture file path: {:?}", texture_file)))?;
         let mut expected = String::new();
         texture.read_to_string(&mut expected)?;
-
-        // std::thread::sleep(std::time::Duration::from_secs(1000));
 
         assert_eq!(ret.trim(), expected.trim());
 

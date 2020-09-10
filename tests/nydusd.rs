@@ -25,6 +25,7 @@ pub fn new(
     cache_compressed: bool,
     rafs_mode: RafsMode,
     bootstrap_file_name: String,
+    digest_validate: bool,
 ) -> Result<Nydusd> {
     let mount_path = work_dir.join("mnt");
     fs::create_dir_all(mount_path.clone())?;
@@ -60,13 +61,14 @@ pub fn new(
                 {}
             }},
             "mode": "{}",
-            "digest_validate": true,
+            "digest_validate": {},
             "iostats_files": true
         }}
         "###,
         work_dir.join("blobs"),
         if enable_cache { cache } else { String::new() },
         rafs_mode,
+        digest_validate,
     );
 
     File::create(work_dir.join("config.json"))?.write_all(config.as_bytes())?;
@@ -87,7 +89,7 @@ impl Nydusd {
         spawn(move || {
             exec(
                 format!(
-                    "{} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level info",
+                    "{} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level trace",
                     NYDUSD,
                     work_dir.join("config.json"),
                     work_dir.join("api.sock"),

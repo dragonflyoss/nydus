@@ -165,7 +165,7 @@ impl StargzIndexTreeBuilder {
         let mut tree = Tree::new(root_node);
 
         let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
-        let mut chunk_map: HashMap<PathBuf, Vec<OndiskChunkInfo>> = HashMap::new();
+        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<OndiskChunkInfo>)> = HashMap::new();
         let mut nodes = Vec::new();
 
         let mut last_reg_entry: Option<&TocEntry> = None;
@@ -200,10 +200,14 @@ impl StargzIndexTreeBuilder {
                     file_offset: entry.chunk_offset as u64,
                     reserved: 0u64,
                 };
-                if let Some(chunks) = chunk_map.get_mut(&entry.path()) {
+                if let Some((size, chunks)) = file_chunk_map.get_mut(&entry.path()) {
                     chunks.push(chunk);
+                    if entry.is_reg() {
+                        *size = entry.size;
+                    }
                 } else {
-                    chunk_map.insert(entry.path(), vec![chunk]);
+                    let size = if entry.is_reg() { entry.size } else { 0 };
+                    file_chunk_map.insert(entry.path(), (size, vec![chunk]));
                 }
             }
             if entry.is_reg() {
@@ -230,9 +234,10 @@ impl StargzIndexTreeBuilder {
 
         for node in &mut nodes {
             let link_path = hardlink_map.get(&node.path).unwrap_or(&node.path);
-            if let Some(chunks) = chunk_map.get(link_path) {
+            if let Some((size, chunks)) = file_chunk_map.get(link_path) {
                 node.chunks = chunks.clone();
                 node.inode.i_child_count = node.chunks.len() as u32;
+                node.inode.i_size = *size;
             }
             tree.apply(node, false)?;
         }
