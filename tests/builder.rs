@@ -14,7 +14,7 @@ use sha2::Sha256;
 
 use nydus_utils::{einval, exec};
 
-const NYDUS_IMAGE: &str = "./target-fusedev/debug/nydus-image";
+const NYDUS_IMAGE: &str = "./target-fusedev/release/nydus-image";
 
 pub fn hash(data: &[u8]) -> String {
     let mut hash = Sha256::new();

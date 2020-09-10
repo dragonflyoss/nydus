@@ -26,7 +26,7 @@ static-release:
 	cargo build --target x86_64-unknown-linux-musl --features=fusedev --release --target-dir target-fusedev
 	cargo build --target x86_64-unknown-linux-musl --features=virtiofsd --release --target-dir target-virtiofsd
 
-test: build
+test: release
 	# Run smoke test and unit tests
 	RUST_BACKTRACE=1 cargo test --features=virtiofsd --target-dir target-virtiofsd --workspace -- --nocapture --skip integration
 	RUST_BACKTRACE=1 cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture
