@@ -44,13 +44,8 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 
     /// Build node tree by loading bootstrap file
-    fn load_children(
-        &self,
-        ino: Inode,
-        parent: Option<&PathBuf>,
-        digest_validate: bool,
-    ) -> Result<Vec<Tree>> {
-        let inode = self.rs.get_inode(ino, digest_validate)?;
+    fn load_children(&self, ino: Inode, parent: Option<&PathBuf>) -> Result<Vec<Tree>> {
+        let inode = self.rs.get_inode(ino, true)?;
         let child_index = inode.get_child_index()?;
         let child_count = inode.get_child_count();
 
@@ -63,12 +58,11 @@ impl<'a> MetadataTreeBuilder<'a> {
         let mut children = Vec::new();
         if inode.is_dir() {
             for idx in child_index..(child_index + child_count) {
-                let child = self.rs.get_inode(idx as Inode, digest_validate)?;
+                let child = self.rs.get_inode(idx as Inode, true)?;
                 let child_path = parent_path.join(child.name()?);
                 let child = self.parse_node(child, child_path.clone())?;
                 let mut child = Tree::new(child);
-                child.children =
-                    self.load_children(idx as Inode, Some(&parent_path), digest_validate)?;
+                child.children = self.load_children(idx as Inode, Some(&parent_path))?;
                 children.push(child);
             }
         }
@@ -142,6 +136,8 @@ impl StargzIndexTreeBuilder {
         }
     }
 
+    // Create middle directory nodes which is not in entry list,
+    // for example `/a/b/c`, we need to create `/a`, `/a/b` nodes first.
     fn make_lost_dirs(&mut self, entry: &TocEntry, dirs: &mut Vec<TocEntry>) {
         if let Some(parent_path) = entry.path().parent() {
             let parent_path = parent_path.to_path_buf();
@@ -154,6 +150,7 @@ impl StargzIndexTreeBuilder {
     }
 
     fn build(&mut self, explicit_uidgid: bool) -> Result<Tree> {
+        // Parse stargz TOC index from a file
         let toc_index = stargz::parse_index(&self.stargz_index_path)?;
 
         if toc_index.entries.is_empty() {
@@ -164,7 +161,10 @@ impl StargzIndexTreeBuilder {
         let root_node = self.parse_node(&root_entry, explicit_uidgid)?;
         let mut tree = Tree::new(root_node);
 
+        // Map hardlink path to linked path: HashMap<<hardlink_path>, <linked_path>>
         let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
+
+        // Map regular file path to chunks: HashMap<<file_path>, <(file_size, chunks)>>
         let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<OndiskChunkInfo>)> = HashMap::new();
         let mut nodes = Vec::new();
 
@@ -174,12 +174,14 @@ impl StargzIndexTreeBuilder {
                 continue;
             }
 
+            // Figure out decompress_size for the last chunk entry of regular file
             let mut decompress_size = entry.chunk_size;
             if entry.is_chunk() && entry.chunk_size == 0 {
                 if let Some(reg_entry) = last_reg_entry {
                     decompress_size = reg_entry.size - entry.chunk_offset;
                 }
             }
+            // Figure out decompress_size for regular file entry
             if entry.chunk_size == 0 && entry.size != 0 {
                 decompress_size = entry.size;
             }
@@ -188,7 +190,7 @@ impl StargzIndexTreeBuilder {
                 let block_id = entry.block_id()?;
                 let chunk = OndiskChunkInfo {
                     block_id,
-                    // Will be set next
+                    // Will be set later
                     blob_index: 0,
                     flags: RafsChunkFlags::COMPRESSED,
                     // No available data on entry
@@ -232,6 +234,7 @@ impl StargzIndexTreeBuilder {
             nodes.push(node);
         }
 
+        // Set chunks and i_size to hardlink nodes
         for node in &mut nodes {
             let link_path = hardlink_map.get(&node.path).unwrap_or(&node.path);
             if let Some((size, chunks)) = file_chunk_map.get(link_path) {
@@ -247,13 +250,11 @@ impl StargzIndexTreeBuilder {
 
     /// Parse stargz toc entry to Node in builder
     fn parse_node(&mut self, entry: &TocEntry, explicit_uidgid: bool) -> Result<Node> {
-        let mut flags = RafsInodeFlags::default();
-
-        // Parse chunks info
         let chunks = Vec::new();
-
         let entry_path = entry.path();
         let origin_link_path = entry.origin_link_path();
+
+        let mut flags = RafsInodeFlags::default();
 
         // Parse symlink
         let mut file_size = entry.size;
@@ -411,14 +412,14 @@ impl Tree {
     }
 
     /// Build node tree from a bootstrap file
-    pub fn from_bootstrap(rs: &RafsSuper, digest_validate: bool) -> Result<Self> {
+    pub fn from_bootstrap(rs: &RafsSuper) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(&rs);
 
-        let root_inode = rs.get_inode(RAFS_ROOT_INODE, digest_validate)?;
+        let root_inode = rs.get_inode(RAFS_ROOT_INODE, true)?;
         let root_node = tree_builder.parse_node(root_inode, PathBuf::from_str("/").unwrap())?;
         let mut tree = Tree::new(root_node);
 
-        tree.children = tree_builder.load_children(RAFS_ROOT_INODE, None, digest_validate)?;
+        tree.children = tree_builder.load_children(RAFS_ROOT_INODE, None)?;
 
         Ok(tree)
     }

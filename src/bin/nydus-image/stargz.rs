@@ -206,6 +206,7 @@ impl TocEntry {
         self.is_dir() || self.is_reg() || self.is_symlink() || self.is_hardlink() || self.is_chunk()
     }
 
+    // TODO: think about chunk deduplicate
     pub fn block_id(&self) -> Result<RafsDigest> {
         if !self.is_reg() && !self.is_chunk() {
             return Err(einval!("only support chunk or reg entry"));
@@ -235,5 +236,11 @@ pub fn parse_index(path: &PathBuf) -> Result<TocIndex> {
     let index_file = File::open(path)?;
     let toc_index: TocIndex = serde_json::from_reader(index_file)
         .map_err(|e| einval!(format!("invalid stargz index json file {:?}", e)))?;
+    if toc_index.version != 1 {
+        return Err(einval!(format!(
+            "unsupported index version {}",
+            toc_index.version
+        )));
+    }
     Ok(toc_index)
 }

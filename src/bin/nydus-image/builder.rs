@@ -28,9 +28,11 @@ use crate::node::*;
 use crate::tree::Tree;
 
 pub struct Builder {
-    /// Source root path.
+    /// Source type: Directory | StargzIndex
     source_type: SourceType,
-    /// Source root path.
+    /// Source path, for different source type:
+    /// Directory: should be a directory path
+    /// StargzIndex: should be a stargz index json file path
     source_path: PathBuf,
     /// Blob id (user specified or sha256(blob)).
     blob_id: String,
@@ -101,7 +103,7 @@ impl FromStr for SourceType {
         match s {
             "directory" => Ok(Self::Directory),
             "stargz_index" => Ok(Self::StargzIndex),
-            _ => Err(einval!("Invalid source type string got.")),
+            _ => Err(einval!("Invalid source type.")),
         }
     }
 }
@@ -235,16 +237,12 @@ impl Builder {
                 let first_index = indexes.first().unwrap();
                 let nlink = indexes.len() as u32;
                 child.node.inode.i_ino = *first_index;
-                // Store node for bootstrap & blob dump.
-                // Put the whiteout file of upper layer in the front,
-                // so that it can be applied to the node tree of lower layer first than other files of upper layer.
-                if child.node.whiteout_type().is_some() {
-                    nodes.insert(0, child.node.clone());
-                } else {
-                    nodes.push(child.node.clone());
-                }
+                child.node.inode.i_nlink = nlink;
                 // Update nlink for previous hardlink inodes
                 for idx in indexes {
+                    if index == *idx {
+                        continue;
+                    }
                     nodes[*idx as usize - 1].inode.i_nlink = nlink;
                 }
             } else {
@@ -255,12 +253,15 @@ impl Builder {
                     (child.node.real_ino, child.node.dev),
                     vec![child.node.index],
                 );
-                // Store node for bootstrap & blob dump
-                if child.node.whiteout_type().is_some() {
-                    nodes.insert(0, child.node.clone());
-                } else {
-                    nodes.push(child.node.clone());
-                }
+            }
+
+            // Store node for bootstrap & blob dump.
+            // Put the whiteout file of upper layer in the front,
+            // so that it can be applied to the node tree of lower layer first than other files of upper layer.
+            if child.node.whiteout_type().is_some() {
+                nodes.insert(0, child.node.clone());
+            } else {
+                nodes.push(child.node.clone());
             }
 
             if self.need_prefetch(&child.node.rootfs(), child.node.inode.i_ino) {
@@ -337,7 +338,7 @@ impl Builder {
         self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
 
         // Build node tree of lower layer from a bootstrap file
-        let mut tree = Tree::from_bootstrap(&rs, self.source_type == SourceType::Directory)?;
+        let mut tree = Tree::from_bootstrap(&rs)?;
 
         // Apply new node (upper layer) to node tree (lower layer)
         for node in &self.nodes {
@@ -433,9 +434,14 @@ impl Builder {
                 }
             }
             SourceType::StargzIndex => {
-                // Set chunk and inode digest for upper nodes
+                // Set chunks and inode digest for upper nodes
                 for node in &mut self.nodes {
                     if node.overlay.lower_layer() {
+                        if log::max_level() >= log::LevelFilter::Debug {
+                            for chunk in node.chunks.iter_mut() {
+                                trace!("\t\tbuilding chunk: {}", chunk);
+                            }
+                        }
                         continue;
                     }
 
@@ -443,6 +449,7 @@ impl Builder {
 
                     for chunk in node.chunks.iter_mut() {
                         (*chunk).blob_index = blob_index;
+                        trace!("\t\tbuilding chunk: {}", chunk);
                         inode_hasher.digest_update(chunk.block_id.as_ref());
                     }
 

@@ -48,7 +48,7 @@ fn test(
             true,
         )?;
         nydusd.start()?;
-        nydusd.check("source/lower.result")?;
+        nydusd.check("directory/lower.result")?;
         nydusd.stop();
     }
 
@@ -68,7 +68,7 @@ fn test(
             true,
         )?;
         nydusd.start()?;
-        nydusd.check("source/overlay.result")?;
+        nydusd.check("directory/overlay.result")?;
         nydusd.stop();
     }
 
@@ -83,7 +83,7 @@ fn test(
             true,
         )?;
         nydusd.start()?;
-        nydusd.check("source/overlay.result")?;
+        nydusd.check("directory/overlay.result")?;
         nydusd.stop();
     }
 
@@ -210,7 +210,7 @@ fn integration_test_stargz() -> Result<()> {
     )?;
 
     nydusd.start()?;
-    nydusd.check("stargz/overlay.result")?;
+    nydusd.check("directory/overlay.result")?;
     nydusd.stop();
 
     Ok(())

@@ -288,7 +288,6 @@ impl Node {
         }
 
         for chunk in &mut self.chunks {
-            trace!("\t\tbuilding chunk: {}", chunk);
             let chunk_size = chunk.store(f_bootstrap)?;
             node_size += chunk_size;
         }
