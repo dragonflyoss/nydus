@@ -94,6 +94,7 @@ struct BlobCacheState {
     chunk_map: HashMap<RafsDigest, Arc<Mutex<BlobCacheEntry>>>,
     file_map: HashMap<String, (File, u64)>,
     work_dir: String,
+    backend_size_valid: bool,
 }
 
 impl BlobCacheState {
@@ -113,7 +114,11 @@ impl BlobCacheState {
             .read(true)
             .open(blob_file_path)?;
         let fd = file.as_raw_fd();
-        let size = backend.blob_size(blob_id)?;
+
+        let mut size = 0;
+        if self.backend_size_valid {
+            size = backend.blob_size(blob_id)?;
+        }
 
         self.file_map.insert(blob_id.to_string(), (file, size));
 
@@ -532,6 +537,7 @@ pub fn new(
             chunk_map: HashMap::new(),
             file_map: HashMap::new(),
             work_dir: work_dir.to_string(),
+            backend_size_valid: compressor == compress::Algorithm::GZip,
         })),
         validate: config.cache_validate,
         is_compressed: config.cache_compressed,
