@@ -234,7 +234,7 @@ impl StargzIndexTreeBuilder {
             nodes.push(node);
         }
 
-        // Set chunks and i_size to hardlink nodes
+        // Set chunks and i_size to nodes
         for node in &mut nodes {
             let link_path = hardlink_map.get(&node.path).unwrap_or(&node.path);
             if let Some((size, chunks)) = file_chunk_map.get(link_path) {

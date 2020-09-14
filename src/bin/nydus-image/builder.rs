@@ -206,8 +206,10 @@ impl Builder {
         let index = nodes.len() as u64;
         let parent = &mut nodes[tree.node.index as usize - 1];
 
-        parent.inode.i_child_index = index as u32 + 1;
-        parent.inode.i_child_count = tree.children.len() as u32;
+        if parent.is_dir() {
+            parent.inode.i_child_index = index as u32 + 1;
+            parent.inode.i_child_count = tree.children.len() as u32;
+        }
 
         let parent_ino = parent.inode.i_ino;
 
@@ -256,9 +258,9 @@ impl Builder {
             }
 
             // Store node for bootstrap & blob dump.
-            // Put the whiteout file of upper layer in the front,
+            // Put the whiteout file of upper layer in the front of node list for layered build,
             // so that it can be applied to the node tree of lower layer first than other files of upper layer.
-            if child.node.whiteout_type().is_some() {
+            if self.f_parent_bootstrap.is_some() && child.node.whiteout_type().is_some() {
                 nodes.insert(0, child.node.clone());
             } else {
                 nodes.push(child.node.clone());
@@ -434,14 +436,9 @@ impl Builder {
                 }
             }
             SourceType::StargzIndex => {
-                // Set chunks and inode digest for upper nodes
+                // Set blob index and inode digest for upper nodes
                 for node in &mut self.nodes {
                     if node.overlay.lower_layer() {
-                        if log::max_level() >= log::LevelFilter::Debug {
-                            for chunk in node.chunks.iter_mut() {
-                                trace!("\t\tbuilding chunk: {}", chunk);
-                            }
-                        }
                         continue;
                     }
 
@@ -449,7 +446,6 @@ impl Builder {
 
                     for chunk in node.chunks.iter_mut() {
                         (*chunk).blob_index = blob_index;
-                        trace!("\t\tbuilding chunk: {}", chunk);
                         inode_hasher.digest_update(chunk.block_id.as_ref());
                     }
 
@@ -567,6 +563,11 @@ impl Builder {
         for node in &mut self.nodes {
             if self.source_type == SourceType::StargzIndex {
                 debug!("[{}]\t{}", node.overlay, node);
+                if log::max_level() >= log::LevelFilter::Debug {
+                    for chunk in node.chunks.iter_mut() {
+                        trace!("\t\tbuilding chunk: {}", chunk);
+                    }
+                }
             }
             node.dump_bootstrap(&mut self.f_bootstrap)?;
         }
