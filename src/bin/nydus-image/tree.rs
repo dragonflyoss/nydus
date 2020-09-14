@@ -126,13 +126,15 @@ impl<'a> MetadataTreeBuilder<'a> {
 struct StargzIndexTreeBuilder {
     stargz_index_path: PathBuf,
     path_inode_map: HashMap<PathBuf, Inode>,
+    blob_id: String,
 }
 
 impl StargzIndexTreeBuilder {
-    fn new(stargz_index_path: PathBuf) -> Self {
+    fn new(stargz_index_path: PathBuf, blob_id: &str) -> Self {
         Self {
             stargz_index_path,
             path_inode_map: HashMap::new(),
+            blob_id: blob_id.to_owned(),
         }
     }
 
@@ -187,7 +189,7 @@ impl StargzIndexTreeBuilder {
             }
 
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
-                let block_id = entry.block_id()?;
+                let block_id = entry.block_id(&self.blob_id)?;
                 let chunk = OndiskChunkInfo {
                     block_id,
                     // Will be set later
@@ -406,8 +408,12 @@ impl Tree {
     }
 
     /// Build node tree from stargz index json file
-    pub fn from_stargz_index(stargz_index_path: &PathBuf, explicit_uidgid: bool) -> Result<Self> {
-        let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone());
+    pub fn from_stargz_index(
+        stargz_index_path: &PathBuf,
+        blob_id: &str,
+        explicit_uidgid: bool,
+    ) -> Result<Self> {
+        let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone(), blob_id);
         tree_builder.build(explicit_uidgid)
     }
 

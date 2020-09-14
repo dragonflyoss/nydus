@@ -207,13 +207,16 @@ impl TocEntry {
     }
 
     // TODO: think about chunk deduplicate
-    pub fn block_id(&self) -> Result<RafsDigest> {
+    pub fn block_id(&self, blob_id: &str) -> Result<RafsDigest> {
         if !self.is_reg() && !self.is_chunk() {
             return Err(einval!("only support chunk or reg entry"));
         }
         let data = serde_json::to_string(self)
             .map_err(|e| einval!(format!("block id calculation failed: {:?}", e)))?;
-        Ok(RafsDigest::from_buf(data.as_bytes(), Algorithm::Sha256))
+        Ok(RafsDigest::from_buf(
+            (data + blob_id).as_bytes(),
+            Algorithm::Sha256,
+        ))
     }
 
     pub fn new_dir(path: PathBuf) -> Self {
