@@ -38,6 +38,7 @@ pub struct FuseSession {
     subtype: String,
     file: Option<File>,
     bufsize: usize,
+    fuse_fd: RawFd,
 }
 
 const EXIT_FUSE_SERVICE: u64 = 1;
@@ -62,6 +63,7 @@ impl FuseSession {
             flags |= MsFlags::MS_RDONLY;
         }
         let file = fuse_kern_mount(&dest, fsname, subtype, flags)?;
+        let fuse_fd = file.as_raw_fd();
 
         fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| einval!(e))?;
 
@@ -71,7 +73,12 @@ impl FuseSession {
             subtype: subtype.to_owned(),
             file: Some(file),
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
+            fuse_fd,
         })
+    }
+
+    pub fn expose_fuse_fd(&self) -> RawFd {
+        self.fuse_fd
     }
 
     /// destroy a fuse session
