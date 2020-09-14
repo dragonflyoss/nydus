@@ -46,7 +46,7 @@ pub struct TocEntry {
     // mod_time: Time,
 
     // LinkName, for symlinks and hardlinks, is the link target.
-    #[serde(default, rename(serialize = "linkName", deserialize = "linkName"))]
+    #[serde(default, rename = "linkName")]
     pub link_name: PathBuf,
 
     // Mode is the permission and mode bits.
@@ -170,35 +170,41 @@ impl TocEntry {
         mode
     }
 
+    // Convert entry name to file name
+    // For example: `` to `/`, `a/b` to `b`, `a/b/` to `b`
     pub fn name(&self) -> Result<PathBuf> {
-        let root_path = PathBuf::from("/");
-        let empty_path = PathBuf::from("");
-        if self.name == empty_path || self.name == root_path {
-            return Ok(root_path);
-        }
-        let name = self
-            .name
+        let path = self.path()?;
+        let name = path
             .file_name()
             .ok_or_else(|| einval!("invalid entry name"))?;
         Ok(PathBuf::from(name))
     }
 
-    pub fn path(&self) -> PathBuf {
-        let path = self.name.strip_prefix("../").unwrap_or(&self.name);
-        let path = path.strip_prefix("./").unwrap_or(&path);
-        PathBuf::from("/").join(path)
+    // Convert entry name to rootfs absolute path
+    // For example: `` to `/`, `a/b` to `/a/b`, `a/b/` to `/a/b`
+    pub fn path(&self) -> Result<PathBuf> {
+        let root_path = PathBuf::from("/");
+        let empty_path = PathBuf::from("");
+        if self.name == empty_path || self.name == root_path {
+            return Ok(root_path);
+        }
+        let path = PathBuf::from("/").join(&self.name);
+        Ok(path
+            .parent()
+            .ok_or_else(|| einval!("invalid entry path"))?
+            .join(
+                path.file_name()
+                    .ok_or_else(|| einval!("invalid entry name"))?,
+            ))
     }
 
-    pub fn link_path(&self) -> PathBuf {
-        let path = self
-            .link_name
-            .strip_prefix("../")
-            .unwrap_or(&self.link_name);
-        let path = path.strip_prefix("./").unwrap_or(&path);
-        PathBuf::from("/").join(path)
+    // Convert link path of hardlink entry to rootfs absolute path
+    // For example: `a/b` to `/a/b`
+    pub fn hardlink_link_path(&self) -> PathBuf {
+        PathBuf::from("/").join(&self.link_name)
     }
 
-    pub fn origin_link_path(&self) -> PathBuf {
+    pub fn symlink_link_path(&self) -> PathBuf {
         self.link_name.clone()
     }
 

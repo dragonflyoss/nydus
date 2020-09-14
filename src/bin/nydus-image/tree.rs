@@ -140,15 +140,16 @@ impl StargzIndexTreeBuilder {
 
     // Create middle directory nodes which is not in entry list,
     // for example `/a/b/c`, we need to create `/a`, `/a/b` nodes first.
-    fn make_lost_dirs(&mut self, entry: &TocEntry, dirs: &mut Vec<TocEntry>) {
-        if let Some(parent_path) = entry.path().parent() {
+    fn make_lost_dirs(&mut self, entry: &TocEntry, dirs: &mut Vec<TocEntry>) -> Result<()> {
+        if let Some(parent_path) = entry.path()?.parent() {
             let parent_path = parent_path.to_path_buf();
             if self.path_inode_map.get(&parent_path).is_none() {
                 let dir_entry = TocEntry::new_dir(parent_path);
-                self.make_lost_dirs(&dir_entry, dirs);
+                self.make_lost_dirs(&dir_entry, dirs)?;
                 dirs.push(dir_entry);
             }
         }
+        Ok(())
     }
 
     fn build(&mut self, explicit_uidgid: bool) -> Result<Tree> {
@@ -204,14 +205,14 @@ impl StargzIndexTreeBuilder {
                     file_offset: entry.chunk_offset as u64,
                     reserved: 0u64,
                 };
-                if let Some((size, chunks)) = file_chunk_map.get_mut(&entry.path()) {
+                if let Some((size, chunks)) = file_chunk_map.get_mut(&entry.path()?) {
                     chunks.push(chunk);
                     if entry.is_reg() {
                         *size = entry.size;
                     }
                 } else {
                     let size = if entry.is_reg() { entry.size } else { 0 };
-                    file_chunk_map.insert(entry.path(), (size, vec![chunk]));
+                    file_chunk_map.insert(entry.path()?, (size, vec![chunk]));
                 }
             }
             if entry.is_reg() {
@@ -222,14 +223,14 @@ impl StargzIndexTreeBuilder {
             }
 
             let mut lost_dirs = Vec::new();
-            self.make_lost_dirs(&entry, &mut lost_dirs);
+            self.make_lost_dirs(&entry, &mut lost_dirs)?;
             for dir in &lost_dirs {
                 let node = self.parse_node(dir, explicit_uidgid)?;
                 nodes.push(node);
             }
 
             if entry.is_hardlink() {
-                hardlink_map.insert(entry.path(), entry.link_path());
+                hardlink_map.insert(entry.path()?, entry.hardlink_link_path());
             }
 
             let node = self.parse_node(entry, explicit_uidgid)?;
@@ -253,8 +254,8 @@ impl StargzIndexTreeBuilder {
     /// Parse stargz toc entry to Node in builder
     fn parse_node(&mut self, entry: &TocEntry, explicit_uidgid: bool) -> Result<Node> {
         let chunks = Vec::new();
-        let entry_path = entry.path();
-        let origin_link_path = entry.origin_link_path();
+        let entry_path = entry.path()?;
+        let symlink_link_path = entry.symlink_link_path();
 
         let mut flags = RafsInodeFlags::default();
 
@@ -263,9 +264,9 @@ impl StargzIndexTreeBuilder {
         let mut symlink_size = 0;
         let symlink = if entry.is_symlink() {
             flags |= RafsInodeFlags::SYMLINK;
-            symlink_size = origin_link_path.as_os_str().as_bytes().len() as u16;
+            symlink_size = symlink_link_path.as_os_str().as_bytes().len() as u16;
             file_size = symlink_size.into();
-            Some(origin_link_path.as_os_str().to_owned())
+            Some(symlink_link_path.as_os_str().to_owned())
         } else {
             None
         };
@@ -291,13 +292,13 @@ impl StargzIndexTreeBuilder {
         let mut ino = (self.path_inode_map.len() + 1) as Inode;
         if entry.is_hardlink() {
             flags |= RafsInodeFlags::HARDLINK;
-            if let Some(_ino) = self.path_inode_map.get(&entry.link_path()) {
+            if let Some(_ino) = self.path_inode_map.get(&entry.hardlink_link_path()) {
                 ino = *_ino;
             } else {
-                self.path_inode_map.insert(entry.path(), ino);
+                self.path_inode_map.insert(entry.path()?, ino);
             }
         } else {
-            self.path_inode_map.insert(entry.path(), ino);
+            self.path_inode_map.insert(entry.path()?, ino);
         }
 
         // Get file name size
@@ -333,7 +334,7 @@ impl StargzIndexTreeBuilder {
             overlay: Overlay::UpperAddition,
             explicit_uidgid,
             source: PathBuf::from_str("/").unwrap(),
-            path: entry.path(),
+            path: entry.path()?,
             inode,
             chunks,
             symlink,
