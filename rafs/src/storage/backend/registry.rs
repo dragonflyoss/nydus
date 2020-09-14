@@ -9,14 +9,13 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use reqwest::blocking::Response;
-use reqwest::header::HeaderValue;
+pub use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::Url;
 
 use crate::storage::backend::default_http_scheme;
-use crate::storage::backend::request::{
-    is_success_status, respond, HeaderMap, Progress, ReqBody, Request,
-};
+use crate::storage::backend::request::{is_success_status, respond, Progress, ReqBody, Request};
 use crate::storage::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 
 use nydus_utils::{einval, epipe};
@@ -525,8 +524,16 @@ impl BlobBackend for Registry {
         let resp =
             self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?;
 
-        resp.content_length()
-            .ok_or_else(|| einval!("invalid content length"))
+        let content_length = resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .ok_or_else(|| einval!("invalid content length"))?;
+
+        content_length
+            .to_str()
+            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))?
+            .parse::<u64>()
+            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))
     }
 
     fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {

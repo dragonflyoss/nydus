@@ -115,10 +115,11 @@ impl BlobCacheState {
             .open(blob_file_path)?;
         let fd = file.as_raw_fd();
 
-        let mut size = 0;
-        if self.backend_size_valid {
-            size = backend.blob_size(blob_id)?;
-        }
+        let size = if self.backend_size_valid {
+            backend.blob_size(blob_id)?
+        } else {
+            0
+        };
 
         self.file_map.insert(blob_id.to_string(), (file, size));
 
