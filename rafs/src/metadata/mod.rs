@@ -218,7 +218,7 @@ impl RafsSuper {
         self.meta.prefetch_table_offset = sb.prefetch_table_offset();
         self.meta.prefetch_table_entries = sb.prefetch_table_entries();
 
-        info!("rafs superblock features: {}", self.meta.flags);
+        debug!("rafs superblock features: {}", self.meta.flags);
 
         match self.meta.version {
             RAFS_SUPER_VERSION_V4 => {

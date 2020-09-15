@@ -9,6 +9,7 @@ extern crate stderrlog;
 mod builder;
 mod node;
 mod tree;
+mod validator;
 
 #[macro_use]
 extern crate log;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use nydus_utils::einval;
 use nydus_utils::log_level_to_verbosity;
 use rafs::storage::{backend, factory};
+use validator::Validator;
 
 fn upload_blob(
     backend: Arc<dyn backend::BlobBackendUploader>,
@@ -205,6 +207,23 @@ fn main() -> Result<()> {
                     .takes_value(false)
                     .required(false),
                 )
+                .arg(
+                    Arg::with_name("disable-check")
+                    .long("disable-check")
+                    .help("Disable to validate bootstrap file after building")
+                    .takes_value(false)
+                    .required(false)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("check")
+                .about("validate image bootstrap")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .help("bootstrap file path (required)")
+                        .takes_value(true),
+                )
         )
         .arg(
             Arg::with_name("log-level")
@@ -290,6 +309,21 @@ fn main() -> Result<()> {
         )?;
         let (blob_ids, blob_size) = ib.build()?;
 
+        // Validate output bootstrap file
+        if !matches.is_present("disable-check") {
+            let mut validator = Validator::new(&bootstrap_path)?;
+            match validator.check(false) {
+                Ok(valid) => {
+                    if !valid {
+                        return Err(einval!("Failed to build bootstrap from source"));
+                    }
+                }
+                Err(err) => {
+                    return Err(err);
+                }
+            }
+        }
+
         // Upload blob file
         if blob_size > 0 {
             let blob_id = blob_ids.last().unwrap();
@@ -323,6 +357,27 @@ fn main() -> Result<()> {
             );
         } else {
             info!("build finished, blob id: {:?}", blob_ids);
+        }
+    }
+
+    if let Some(matches) = cmd.subcommand_matches("check") {
+        let bootstrap_path = Path::new(
+            matches
+                .value_of("bootstrap")
+                .expect("bootstrap is required"),
+        );
+        let mut validator = Validator::new(bootstrap_path)?;
+        match validator.check(true) {
+            Ok(valid) => {
+                if valid {
+                    info!("Bootstrap is valid");
+                } else {
+                    return Err(einval!("Bootstrap is invalid"));
+                }
+            }
+            Err(err) => {
+                return Err(err);
+            }
         }
     }
 

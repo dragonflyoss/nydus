@@ -209,6 +209,19 @@ impl Tree {
         }
     }
 
+    pub fn iterate<F>(&self, cb: &F) -> Result<()>
+    where
+        F: Fn(&Node) -> bool,
+    {
+        if !cb(&self.node) {
+            return Ok(());
+        }
+        for child in &self.children {
+            child.iterate(cb)?;
+        }
+        Ok(())
+    }
+
     /// Build node tree from a bootstrap file
     pub fn from_bootstrap(rs: &RafsSuper) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(&rs);

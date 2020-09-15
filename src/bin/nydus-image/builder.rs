@@ -528,6 +528,8 @@ impl Builder {
         }
 
         // Dump blob and bootstrap file
-        self.dump_to_file()
+        let (blob_ids, blob_size) = self.dump_to_file()?;
+
+        Ok((blob_ids, blob_size))
     }
 }
