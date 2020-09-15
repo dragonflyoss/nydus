@@ -36,49 +36,47 @@ pub struct FuseSession {
     mountpoint: PathBuf,
     fsname: String,
     subtype: String,
-    file: Option<File>,
+    pub file: Option<File>,
     bufsize: usize,
-    fuse_fd: RawFd,
+    pub fuse_fd: Option<RawFd>,
 }
 
 const EXIT_FUSE_SERVICE: u64 = 1;
 
 impl FuseSession {
-    /// create a new fuse session
-    pub fn new(
-        mountpoint: &Path,
-        fsname: &str,
-        subtype: &str,
-        readonly: bool,
-    ) -> io::Result<FuseSession> {
+    pub fn new(mountpoint: &Path, fsname: &str, subtype: &str) -> io::Result<FuseSession> {
         let dest = mountpoint.canonicalize()?;
         if !dest.is_dir() {
-            return Err(einval!(format!(
-                "{} is not a directory",
-                dest.to_str().unwrap()
-            )));
+            return Err(enotdir!(format!("{:?} is not a directory", dest)));
         }
-        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME;
-        if readonly {
-            flags |= MsFlags::MS_RDONLY;
-        }
-        let file = fuse_kern_mount(&dest, fsname, subtype, flags)?;
-        let fuse_fd = file.as_raw_fd();
-
-        fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| einval!(e))?;
 
         Ok(FuseSession {
             mountpoint: dest,
             fsname: fsname.to_owned(),
             subtype: subtype.to_owned(),
-            file: Some(file),
+            file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
-            fuse_fd,
+            fuse_fd: None,
         })
     }
 
+    pub fn mount(&mut self) -> io::Result<()> {
+        let flags =
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME | MsFlags::MS_RDONLY;
+
+        let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, flags)?;
+        let fuse_fd = file.as_raw_fd();
+
+        fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| einval!(e))?;
+
+        self.fuse_fd = Some(fuse_fd);
+        self.file = Some(file);
+
+        Ok(())
+    }
+
     pub fn expose_fuse_fd(&self) -> RawFd {
-        self.fuse_fd
+        self.fuse_fd.unwrap()
     }
 
     /// destroy a fuse session
@@ -129,7 +127,6 @@ impl Drop for FuseSession {
 pub struct FuseChannel {
     fd: c_int,
     epoll_fd: RawFd,
-    exit_evtfd: EventFd,
     bufsize: usize,
     events: RefCell<Vec<Event>>,
     // XXX: Ideally we should have write buffer as well
@@ -159,13 +156,16 @@ impl FuseChannel {
         Ok(FuseChannel {
             fd: dup(fd).map_err(|e| last_error!(e))?,
             epoll_fd,
-            exit_evtfd,
             bufsize,
             events: RefCell::new(vec![Event::new(Events::empty(), 0); EPOLL_EVENTS_LEN]),
         })
     }
 
-    pub fn get_reader<'b>(&self, buf: &'b mut Vec<u8>) -> io::Result<Option<Reader<'b>>> {
+    pub fn get_reader<'b>(
+        &self,
+        buf: &'b mut Vec<u8>,
+        exit: &mut bool,
+    ) -> io::Result<Option<Reader<'b>>> {
         loop {
             let num_events = epoll::wait(self.epoll_fd, -1, &mut self.events.borrow_mut())?;
 
@@ -182,11 +182,19 @@ impl FuseChannel {
                 match evset {
                     Events::EPOLLIN => {
                         if event.data == EXIT_FUSE_SERVICE {
+                            // Trick is we don't read the event fd so as to make each thread exit.
+                            /*
                             self.exit_evtfd.read().map_err(|e| {
                                 error!("Read event fd failed. {:?}", e);
                                 e
                             })?;
-                            return Err(ebadf!());
+                            */
+                            // We don't directly exit from here because we may already read
+                            // a fuse message previously, which must be handled.
+                            info!("Will exit from fuse service");
+                            *exit = true;
+                            // Directly return from here is reliable as we handle
+                            return Ok(None);
                         }
 
                         match read(self.fd, buf.as_mut_slice()) {
