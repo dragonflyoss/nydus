@@ -33,9 +33,9 @@ test: build
 
 docker-smoke:
 	docker build -t nydus-rs-smoke misc/smoke
-	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/usr/local/cargo -v fuse-targets:/nydus-rs/target-fusedev -v virtiofsd-targets:/nydus-rs/target-virtiofsd nydus-rs-smoke
+	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs nydus-rs-smoke make test
 
 docker-static:
 	# For static build with musl
 	docker build -t nydus-rs-static misc/musl-static
-	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/root/.cargo nydus-rs-static
+	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs nydus-rs-static make static-release
