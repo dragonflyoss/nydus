@@ -263,6 +263,14 @@ impl Node {
         }
 
         // Dump chunk info
+        if self.is_reg() && self.inode.i_child_count as usize != self.chunks.len() {
+            return Err(einval!(format!(
+                "invalid chunks count {}: {}",
+                self.chunks.len(),
+                self
+            )));
+        }
+
         for chunk in &mut self.chunks {
             let chunk_size = chunk.store(f_bootstrap)?;
             node_size += chunk_size;
