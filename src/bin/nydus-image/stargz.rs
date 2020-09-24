@@ -30,7 +30,7 @@ pub struct TocEntry {
     // The "chunk" type is used for regular file data chunks past the first
     // TOCEntry; the 2nd chunk and on have only Type ("chunk"), Offset,
     // ChunkOffset, and ChunkSize populated.
-    #[serde(rename(serialize = "type", deserialize = "type"))]
+    #[serde(rename = "type")]
     pub toc_type: String,
 
     // Size, for regular files, is the logical size of the file.
@@ -65,14 +65,14 @@ pub struct TocEntry {
     //
     // In the serialized JSON, this field may only be present for
     // the first entry with the same Uid.
-    #[serde(default, rename(serialize = "userName", deserialize = "userName"))]
+    #[serde(default, rename = "userName")]
     pub uname: String,
 
     // Gname is the group name of the owner.
     //
     // In the serialized JSON, this field may only be present for
     // the first entry with the same Gid.
-    #[serde(default, rename(serialize = "groupName", deserialize = "groupName"))]
+    #[serde(default, rename = "groupName")]
     pub gname: String,
 
     // Offset, for regular files, provides the offset in the
@@ -86,11 +86,11 @@ pub struct TocEntry {
     pub next_offset: u64,
 
     // DevMajor is the major device number for "char" and "block" types.
-    #[serde(default, rename(serialize = "devMajor", deserialize = "devMajor"))]
+    #[serde(default, rename = "devMajor")]
     pub dev_major: u64,
 
     // DevMinor is the major device number for "char" and "block" types.
-    #[serde(default, rename(serialize = "devMinor", deserialize = "devMinor"))]
+    #[serde(default, rename = "devMinor")]
     pub dev_minor: u64,
 
     // NumLink is the number of entry names pointing to this entry.
@@ -116,12 +116,9 @@ pub struct TocEntry {
     // from the stargz TOC, though, the ChunkSize is initialized
     // to a non-zero file for when Type is either "reg" or
     // "chunk".
-    #[serde(
-        default,
-        rename(serialize = "chunkOffset", deserialize = "chunkOffset")
-    )]
+    #[serde(default, rename = "chunkOffset")]
     pub chunk_offset: u64,
-    #[serde(default, rename(serialize = "chunkSize", deserialize = "chunkSize"))]
+    #[serde(default, rename = "chunkSize")]
     pub chunk_size: u64,
 
     #[serde(skip)]
@@ -171,9 +168,13 @@ impl TocEntry {
     }
 
     // Convert entry name to file name
-    // For example: `` to `/`, `a/b` to `b`, `a/b/` to `b`
+    // For example: `` to `/`, `/` to `/`, `a/b` to `b`, `a/b/` to `b`
     pub fn name(&self) -> Result<PathBuf> {
         let path = self.path()?;
+        let root_path = PathBuf::from("/");
+        if path == root_path {
+            return Ok(root_path);
+        }
         let name = path
             .file_name()
             .ok_or_else(|| einval!("invalid entry name"))?;
