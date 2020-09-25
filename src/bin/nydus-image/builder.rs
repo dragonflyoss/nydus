@@ -385,7 +385,7 @@ impl Builder {
         let blob_index = self.blob_table.entries.len() as u32;
 
         let mut blob_readahead_size = 0usize;
-        let mut blob_size = blob_readahead_size;
+        let mut blob_size = 0usize;
         let mut compress_offset = 0u64;
         let mut decompress_offset = 0u64;
         let mut blob_hash = Sha256::new();
@@ -411,6 +411,8 @@ impl Builder {
                         )?;
                     }
                 }
+
+                blob_size += blob_readahead_size;
 
                 // Dump other nodes
                 for node in &mut self.nodes {
