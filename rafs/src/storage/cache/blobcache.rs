@@ -205,7 +205,12 @@ impl BlobCache {
         // stargz format limitations (missing chunk level digest)
         if (self.compressor() != compress::Algorithm::GZip || cache_entry.is_ready())
             && self
-                .read_blobcache_chunk(cache_entry.fd, chunk.as_ref(), one_chunk_buf)
+                .read_blobcache_chunk(
+                    cache_entry.fd,
+                    chunk.as_ref(),
+                    one_chunk_buf,
+                    !cache_entry.is_ready() || self.need_validate(),
+                )
                 .is_ok()
         {
             trace!(
@@ -243,6 +248,7 @@ impl BlobCache {
         fd: RawFd,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
+        need_validate: bool,
     ) -> Result<()> {
         let offset = if self.is_compressed {
             cki.compress_offset()
@@ -289,7 +295,14 @@ impl BlobCache {
         }
 
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, raw_stream, chunk, self.is_compressed)?;
+        self.process_raw_chunk(
+            cki,
+            raw_chunk,
+            raw_stream,
+            chunk,
+            self.is_compressed,
+            need_validate,
+        )?;
 
         Ok(())
     }
@@ -417,6 +430,7 @@ impl RafsCache for BlobCache {
                                         entry.lock().unwrap().fd,
                                         entry.lock().unwrap().chunk.as_ref(),
                                         alloc_buf(d_size).as_mut_slice(),
+                                        cache_cloned.need_validate(),
                                     )
                                     .is_err()
                                 {
