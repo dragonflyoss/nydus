@@ -422,13 +422,17 @@ impl RafsCache for BlobCache {
                                 cache_cloned.backend(),
                             );
                             if let Ok(entry) = entry {
-                                if entry.lock().unwrap().is_ready() {
+                                let entry = entry.lock().unwrap();
+                                if entry.is_ready() {
                                     continue;
                                 }
+                                let fd = entry.fd;
+                                let chunk = entry.chunk.clone();
+                                drop(entry);
                                 if cache_cloned
                                     .read_blobcache_chunk(
-                                        entry.lock().unwrap().fd,
-                                        entry.lock().unwrap().chunk.as_ref(),
+                                        fd,
+                                        chunk.as_ref(),
                                         alloc_buf(d_size).as_mut_slice(),
                                         cache_cloned.need_validate(),
                                     )

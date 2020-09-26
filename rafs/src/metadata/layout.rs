@@ -475,12 +475,20 @@ impl PrefetchTable {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.inode_indexes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inode_indexes.len() == 0
+    }
+
     pub fn add_entry(&mut self, inode_idx: u32) {
         self.inode_indexes.push(inode_idx);
     }
 
-    pub fn table_aligned_size(&self) -> usize {
-        self.inode_indexes.len() * size_of::<u32>()
+    pub fn size(&self) -> usize {
+        align_to_rafs(self.len() * size_of::<u32>())
     }
 
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
@@ -518,10 +526,6 @@ impl PrefetchTable {
         r.read_exact(data)?;
 
         Ok(())
-    }
-
-    pub fn entry_size() -> usize {
-        size_of::<u32>() as usize
     }
 }
 

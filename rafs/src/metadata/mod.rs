@@ -325,6 +325,9 @@ impl RafsSuper {
                         head_desc.bi_size += desc.bi_size;
                     }
                 } else {
+                    if inode.size() == 0 {
+                        return Ok(());
+                    }
                     if inode.is_hardlink() {
                         if hardlinks.contains(&inode.ino()) {
                             return Ok(());

@@ -761,6 +761,9 @@ impl RafsInode for OndiskInodeWrapper {
                 trace!("Got dir {:?}", child_inode.name().unwrap());
                 child_inode.collect_descendants_inodes(descendants)?;
             } else {
+                if child_inode.size() == 0 {
+                    continue;
+                }
                 descendants.push(child_inode);
             }
         }
