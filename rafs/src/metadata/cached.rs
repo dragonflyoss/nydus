@@ -459,7 +459,7 @@ impl RafsInode for CachedInode {
                 trace!("Got dir {:?}", child_inode.name().unwrap());
                 child_inode.collect_descendants_inodes(descendants)?;
             } else {
-                if child_inode.size() == 0 {
+                if child_inode.is_empty_size() {
                     continue;
                 }
                 descendants.push(child_inode.clone());

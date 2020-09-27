@@ -38,6 +38,7 @@ pub enum WhiteoutType {
     Removal,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Overlay {
     Lower,
@@ -413,6 +414,9 @@ impl Node {
     }
 
     pub fn whiteout_type(&self) -> Option<WhiteoutType> {
+        if self.overlay == Overlay::Lower {
+            return None;
+        }
         let name = self.name();
         if name == OCISPEC_WHITEOUT_OPAQUE {
             return Some(WhiteoutType::Opaque);

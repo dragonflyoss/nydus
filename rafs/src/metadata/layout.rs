@@ -411,7 +411,7 @@ impl OndiskInodeTable {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.data.len() == 0
+        self.data.is_empty()
     }
 
     pub fn set(&mut self, ino: Inode, inode_offset: u32) -> Result<()> {
@@ -480,7 +480,7 @@ impl PrefetchTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inode_indexes.len() == 0
+        self.inode_indexes.is_empty()
     }
 
     pub fn add_entry(&mut self, inode_idx: u32) {

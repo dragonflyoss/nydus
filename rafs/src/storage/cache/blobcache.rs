@@ -464,15 +464,18 @@ impl RafsCache for BlobCache {
                                     .set(blob_id, c.clone(), cache_cloned.backend())
                                     .map_err(|_| error!("Set cache index error!"))
                                 {
-                                    let offset = if cache_cloned.is_compressed {
-                                        entry.lock().unwrap().chunk.compress_offset()
-                                    } else {
-                                        entry.lock().unwrap().chunk.decompress_offset()
-                                    };
-
-                                    // Ignore cache errors
-                                    let _ =
-                                        entry.lock().unwrap().cache(chunks[i].as_slice(), offset);
+                                    let mut entry = entry.lock().unwrap();
+                                    if !entry.is_ready() {
+                                        let offset = if cache_cloned.is_compressed {
+                                            entry.chunk.compress_offset()
+                                        } else {
+                                            entry.chunk.decompress_offset()
+                                        };
+                                        if let Err(err) = entry.cache(chunks[i].as_slice(), offset)
+                                        {
+                                            error!("Failed to cache chunk: {}", err);
+                                        }
+                                    }
                                 }
                             }
                         }

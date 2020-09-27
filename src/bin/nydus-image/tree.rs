@@ -450,8 +450,8 @@ impl Tree {
 
     /// Apply new node (upper layer) to node tree (lower layer),
     /// support overlay defined in OCI image layer spec (https://github.com/opencontainers/image-spec/blob/master/layer.md),
-    /// include change types Additions, Modifications, Removals and Opaques
-    pub fn apply(&mut self, target: &Node, handle_whiteout: bool) -> Result<Overlay> {
+    /// include change types Additions, Modifications, Removals and Opaques, return true if applied
+    pub fn apply(&mut self, target: &Node, handle_whiteout: bool) -> Result<bool> {
         // Handle whiteout file
         if handle_whiteout && target.whiteout_type().is_some() {
             return self.remove(target);
@@ -466,7 +466,7 @@ impl Tree {
             let mut node = target.clone();
             node.overlay = Overlay::UpperModification;
             self.node = node;
-            return Ok(Overlay::UpperModification);
+            return Ok(true);
         }
 
         // Don't search if path recursive depth out of target path
@@ -485,13 +485,13 @@ impl Tree {
                         node,
                         children: child.children.clone(),
                     };
-                    return Ok(Overlay::UpperModification);
+                    return Ok(true);
                 }
                 if child.node.is_dir() {
                     // Search the node recursively
-                    let overlay = child.apply(target, handle_whiteout)?;
-                    if overlay != Overlay::Lower {
-                        return Ok(overlay);
+                    let found = child.apply(target, handle_whiteout)?;
+                    if found {
+                        return Ok(true);
                     }
                 }
             }
@@ -505,27 +505,30 @@ impl Tree {
                 node,
                 children: Vec::new(),
             });
-            return Ok(Overlay::UpperAddition);
+            return Ok(true);
         }
 
-        Ok(Overlay::Lower)
+        Ok(false)
     }
 
-    /// Remove node from node tree
-    fn remove(&mut self, target: &Node) -> Result<Overlay> {
+    /// Remove node from node tree, return true if removed
+    fn remove(&mut self, target: &Node) -> Result<bool> {
         let target_paths = target.path_vec();
         let target_paths_len = target_paths.len();
-        let depth = self.node.path_vec().len();
+        let node_paths = self.node.path_vec();
+        let depth = node_paths.len();
         let whiteout_type = target.whiteout_type();
 
-        // Opaques for root(/) path
-        if whiteout_type == Some(WhiteoutType::Opaque)
-            && depth == target_paths_len
-            && target_paths[depth - 1] == self.node.name()
-        {
+        // Don't continue to search if current path not matched with target path or recursive depth out of target path
+        if depth >= target_paths_len || node_paths[depth - 1] != target_paths[depth - 1] {
+            return Ok(false);
+        }
+
+        // Handle Opaques for root path (/)
+        if whiteout_type == Some(WhiteoutType::Opaque) && depth == 1 && target_paths_len == 2 {
             self.node.overlay = Overlay::UpperOpaque;
             self.children.clear();
-            return Ok(Overlay::UpperOpaque);
+            return Ok(true);
         }
 
         let mut origin_name = target.name().to_os_string();
@@ -542,53 +545,44 @@ impl Tree {
             }
         }
 
-        // Don't search if path recursive depth out of target path
-        if depth < target_paths_len {
-            let current_name = target_paths[depth].clone();
-            // TODO: Search child by binary search
-            for idx in 0..self.children.len() {
-                let child = &mut self.children[idx];
+        // TODO: Search child by binary search
+        for idx in 0..self.children.len() {
+            let child = &mut self.children[idx];
 
-                // Skip if path component name not match
-                if current_name != child.node.name() && whiteout_type.is_none() {
-                    continue;
-                }
+            // Handle Removals
+            if depth == target_paths_len - 1
+                && whiteout_type == Some(WhiteoutType::Removal)
+                && origin_name == child.node.name()
+            {
+                // Remove the whole lower node
+                self.children.remove(idx);
+                return Ok(true);
+            }
 
-                // Handle Removals
-                if depth == target_paths_len - 1
-                    && whiteout_type == Some(WhiteoutType::Removal)
-                    && origin_name == child.node.name()
-                {
-                    // Remove the whole lower node
-                    self.children.remove(idx);
-                    return Ok(Overlay::UpperRemoval);
-                }
-
-                // Handle Opaques
-                if target_paths_len >= 2
-                    && depth == target_paths_len - 2
-                    && whiteout_type == Some(WhiteoutType::Opaque)
-                {
-                    if let Some(parent_name) = parent_name {
-                        if parent_name == child.node.name() {
-                            child.node.overlay = Overlay::UpperOpaque;
-                            // Remove children of the lower node
-                            child.children.clear();
-                            return Ok(Overlay::UpperOpaque);
-                        }
+            // Handle Opaques
+            if target_paths_len >= 2
+                && depth == target_paths_len - 2
+                && whiteout_type == Some(WhiteoutType::Opaque)
+            {
+                if let Some(parent_name) = parent_name {
+                    if parent_name == child.node.name() {
+                        child.node.overlay = Overlay::UpperOpaque;
+                        // Remove children of the lower node
+                        child.children.clear();
+                        return Ok(true);
                     }
                 }
+            }
 
-                if child.node.is_dir() {
-                    // Search the node recursively
-                    let overlay = child.remove(target)?;
-                    if overlay != Overlay::Lower {
-                        return Ok(overlay);
-                    }
+            if child.node.is_dir() {
+                // Search the node recursively
+                let found = child.remove(target)?;
+                if found {
+                    return Ok(true);
                 }
             }
         }
 
-        Ok(Overlay::Lower)
+        Ok(false)
     }
 }

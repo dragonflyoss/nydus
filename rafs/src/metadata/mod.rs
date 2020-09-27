@@ -325,7 +325,7 @@ impl RafsSuper {
                         head_desc.bi_size += desc.bi_size;
                     }
                 } else {
-                    if inode.size() == 0 {
+                    if inode.is_empty_size() {
                         return Ok(());
                     }
                     if inode.is_hardlink() {
@@ -513,6 +513,9 @@ pub trait RafsInode {
     fn ino(&self) -> u64;
     fn parent(&self) -> u64;
     fn size(&self) -> u64;
+    fn is_empty_size(&self) -> bool {
+        self.size() == 0
+    }
 
     fn cast_ondisk(&self) -> Result<OndiskInode>;
 }
