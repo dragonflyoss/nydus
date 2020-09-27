@@ -17,7 +17,6 @@
 /// The bootstrap file may be provided by untrusted parties, so we must ensure strong validations
 /// before making use of any bootstrap, especially we are using them in memory-mapped mode. The
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
-use std::cmp;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Result;
@@ -427,39 +426,6 @@ impl OndiskInodeWrapper {
 
         Ok((xattr_data, xattr_size))
     }
-
-    fn add_chunk_to_bio_desc(
-        &self,
-        offset: u64,
-        end: u64,
-        chunk: Arc<dyn RafsChunkInfo>,
-        desc: &mut RafsBioDesc,
-    ) -> Result<()> {
-        let state = self.mapping.state.load();
-        let blob_id = self.get_chunk_blob_id(chunk.blob_index())?;
-        let chunk_start = if offset > chunk.file_offset() {
-            offset - chunk.file_offset()
-        } else {
-            0
-        };
-        let chunk_end = if end < (chunk.file_offset() + chunk.decompress_size() as u64) {
-            end - chunk.file_offset()
-        } else {
-            chunk.decompress_size() as u64
-        };
-
-        let bio = RafsBio::new(
-            chunk,
-            blob_id,
-            chunk_start as u32,
-            (chunk_end - chunk_start) as usize,
-            state.meta.block_size,
-        );
-
-        desc.bi_size += bio.size;
-        desc.bi_vec.push(bio);
-        Ok(())
-    }
 }
 
 impl RafsInode for OndiskInodeWrapper {
@@ -702,44 +668,9 @@ impl RafsInode for OndiskInodeWrapper {
         inode.i_child_count
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
-        let state = self.mapping.state.load();
-        let inode = self.inode(state.deref());
-        let blksize = state.meta.block_size as u64;
-        let end = offset
-            .checked_add(size as u64)
-            .ok_or_else(|| einval!("invalid read size"))?;
-
-        let mut desc = RafsBioDesc::new();
-
-        let index_start = if !self.has_hole() {
-            (offset / blksize) as u32
-        } else {
-            0
-        };
-        let index_end = if !self.has_hole() {
-            cmp::min(((end - 1) / blksize) as u32 + 1, inode.i_child_count)
-        } else {
-            inode.i_child_count
-        };
-
-        debug!(
-            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
-            offset, size, inode.i_size, blksize, index_start, index_end, inode.i_child_count
-        );
-
-        for idx in index_start..index_end {
-            let chunk = self.get_chunk_info(idx)?;
-            if (chunk.file_offset() + blksize) <= offset {
-                continue;
-            } else if chunk.file_offset() >= end {
-                break;
-            }
-
-            self.add_chunk_to_bio_desc(offset, end, chunk, &mut desc)?;
-        }
-
-        Ok(desc)
+    #[inline]
+    fn get_blocksize(&self) -> u32 {
+        self.mapping.state.load().meta.block_size
     }
 
     fn collect_descendants_inodes(

@@ -5,6 +5,7 @@
 
 //! Structs and Traits for RAFS file system meta data management.
 
+use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -497,7 +498,8 @@ pub trait RafsInode {
     fn get_attr(&self) -> Attr;
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;
     fn get_xattrs(&self) -> Result<Vec<XattrName>>;
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc>;
+    fn get_blocksize(&self) -> u32;
+
     fn collect_descendants_inodes(
         &self,
         descendants: &mut Vec<Arc<dyn RafsInode>>,
@@ -518,6 +520,119 @@ pub trait RafsInode {
     }
 
     fn cast_ondisk(&self) -> Result<OndiskInode>;
+
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
+        // Do not process zero size bio
+        let mut desc = RafsBioDesc::new();
+        if size == 0 {
+            return Ok(desc);
+        }
+
+        let end = offset
+            .checked_add(size as u64)
+            .ok_or_else(|| einval!("invalid read size"))?;
+
+        let blksize = self.get_blocksize() as u64;
+        let (index_start, index_end) = calculate_bio_chunk_index(
+            offset,
+            end,
+            blksize,
+            self.get_child_count(),
+            self.has_hole(),
+        );
+
+        debug!(
+            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
+            offset, size, self.size(), blksize, index_start, index_end, self.get_child_count()
+        );
+
+        for idx in index_start..index_end {
+            let chunk = self.get_chunk_info(idx)?;
+            let blob_id = self.get_chunk_blob_id(chunk.blob_index())?;
+            if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob_id) {
+                break;
+            }
+        }
+
+        Ok(desc)
+    }
+}
+
+/// Add a new bio covering the IO range into the provided bio desc. Returns
+/// true if caller should continue checking more chunks.
+///
+/// offset: IO offset to the file start, inclusive.
+/// end: IO end to the file start, exclusive.
+/// chunk: a data chunk overlapping with the IO range.
+/// desc: the targeting bio desc.
+/// blksize: chunk size.
+/// blob_id: chunk data blob id.
+pub(crate) fn add_chunk_to_bio_desc(
+    offset: u64,
+    end: u64,
+    chunk: Arc<dyn RafsChunkInfo>,
+    desc: &mut RafsBioDesc,
+    blksize: u32,
+    blob_id: String,
+) -> bool {
+    if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
+        return true;
+    }
+    if end <= chunk.file_offset() {
+        return false;
+    }
+
+    let chunk_start = if offset > chunk.file_offset() {
+        offset - chunk.file_offset()
+    } else {
+        0
+    };
+    let chunk_end = if end < (chunk.file_offset() + chunk.decompress_size() as u64) {
+        end - chunk.file_offset()
+    } else {
+        chunk.decompress_size() as u64
+    };
+
+    let bio = RafsBio::new(
+        chunk,
+        blob_id,
+        chunk_start as u32,
+        (chunk_end - chunk_start) as usize,
+        blksize,
+    );
+
+    desc.bi_size += bio.size;
+    desc.bi_vec.push(bio);
+    true
+}
+
+/// Calculate bio chunk indices that overlaps with the provided IO range.
+///
+/// offset: IO offset to the file start, inclusive.
+/// end: IO end to the file start, exclusive.
+/// blksize: chunk block size.
+/// has_hole: whether a file has holes in it.
+pub(crate) fn calculate_bio_chunk_index(
+    offset: u64,
+    end: u64,
+    blksize: u64,
+    chunk_cnt: u32,
+    has_hole: bool,
+) -> (u32, u32) {
+    debug_assert!(offset < end);
+
+    let index_start = if !has_hole {
+        (offset / blksize) as u32
+    } else {
+        0
+    };
+    let index_end = if !has_hole {
+        cmp::min(((end - 1) / blksize) as u32 + 1, chunk_cnt)
+    } else {
+        chunk_cnt
+    };
+
+    (index_start, index_end)
 }
 
 /// Trait to access Rafs Data Chunk Information.
@@ -549,5 +664,110 @@ pub trait RafsStore {
             return Err(einval!("unaligned data"));
         }
         Ok(size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::metadata::{add_chunk_to_bio_desc, calculate_bio_chunk_index, OndiskChunkInfo};
+    use crate::storage::device::RafsBioDesc;
+
+    #[test]
+    fn test_add_chunk_to_bio_desc() {
+        let mut chunk = OndiskChunkInfo::new();
+        let offset = 4096;
+        let size: u64 = 1024;
+        // [offset, offset + size)
+        chunk.file_offset = offset;
+        chunk.decompress_size = size as u32;
+
+        // (offset, end, expected_chunk_start, expected_size)
+        let data = vec![
+            // Non-overlapping IO
+            (0, 0, 0, 0, false),
+            (0, offset, 0, 0, false),
+            (offset + size, 0, 0, 0, true),
+            (offset + size + 1, 0, 0, 0, true),
+            // Overlapping IO
+            (0, offset + 1, 0, 1, true),
+            (0, offset + size, 0, size, true),
+            (0, offset + size + 1, 0, size, true),
+            (0, offset + size - 1, 0, size - 1, true),
+            (offset, offset + 1, 0, 1, true),
+            (offset, offset + size, 0, size, true),
+            (offset, offset + size - 1, 0, size - 1, true),
+            (offset, offset + size + 1, 0, size, true),
+            (offset + 1, offset + 2, 1, 1, true),
+            (offset + 1, offset + size, 1, size - 1, true),
+            (offset + 1, offset + size - 1, 1, size - 2, true),
+            (offset + 1, offset + size + 1, 1, size - 1, true),
+        ];
+
+        for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
+            let mut desc = RafsBioDesc::new();
+            let res = add_chunk_to_bio_desc(
+                *offset,
+                *end,
+                Arc::new(chunk),
+                &mut desc,
+                100,
+                "blobid".to_string(),
+            );
+            assert_eq!(*result, res);
+            if !desc.bi_vec.is_empty() {
+                assert_eq!(desc.bi_vec.len(), 1);
+                let bio = &desc.bi_vec[0];
+                assert_eq!(*expected_chunk_start, bio.offset);
+                assert_eq!(*expected_size as usize, bio.size);
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_bio_chunk_index() {
+        let (blksize, chunk_cnt) = (1024, 4);
+
+        let io_range: Vec<(u64, u64, u32, u64)> = vec![
+            (0, 1, 0, 1),
+            (0, blksize - 1, 0, 1),
+            (0, blksize, 0, 1),
+            (0, blksize + 1, 0, 2),
+            (0, blksize * chunk_cnt, 0, chunk_cnt),
+            (0, blksize * chunk_cnt + 1, 0, chunk_cnt),
+            (0, blksize * chunk_cnt - 1, 0, chunk_cnt),
+            (blksize - 1, 1, 0, 1),
+            (blksize - 1, 2, 0, 2),
+            (blksize - 1, 3, 0, 2),
+            (blksize - 1, blksize - 1, 0, 2),
+            (blksize - 1, blksize, 0, 2),
+            (blksize - 1, blksize + 1, 0, 2),
+            (blksize - 1, blksize * chunk_cnt, 0, chunk_cnt),
+            (blksize, 1, 1, 2),
+            (blksize, 2, 1, 2),
+            (blksize, blksize - 1, 1, 2),
+            (blksize, blksize + 1, 1, 3),
+            (blksize, blksize + 2, 1, 3),
+            (blksize, blksize * chunk_cnt, 1, chunk_cnt),
+            (blksize + 1, 1, 1, 2),
+            (blksize + 1, blksize - 2, 1, 2),
+            (blksize + 1, blksize - 1, 1, 2),
+            (blksize + 1, blksize, 1, 3),
+            (blksize + 1, blksize * chunk_cnt, 1, chunk_cnt),
+        ];
+
+        for (io_start, io_size, expected_start, expected_end) in io_range.iter() {
+            let (start, end) = calculate_bio_chunk_index(
+                *io_start,
+                *io_start + *io_size,
+                blksize,
+                chunk_cnt as u32,
+                false,
+            );
+
+            assert_eq!(start, *expected_start);
+            assert_eq!(end, *expected_end as u32);
+        }
     }
 }

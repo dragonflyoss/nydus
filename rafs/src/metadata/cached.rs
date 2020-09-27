@@ -7,7 +7,7 @@
 //!
 //! All file system bootstrap will be loaded, validated and cached into memory when loading the
 //! file system. And currently the cache layer only supports readonly file systems.
-use std::cmp;
+
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Read, Result};
@@ -18,7 +18,6 @@ use fuse_rs::api::filesystem::Entry;
 
 use crate::metadata::layout::*;
 use crate::metadata::*;
-use crate::storage::device::{RafsBio, RafsBioDesc};
 use crate::RafsIoReader;
 
 use nydus_utils::{einval, enoent, enotdir};
@@ -370,56 +369,8 @@ impl RafsInode for CachedInode {
             .collect::<Vec<XattrName>>())
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
-        let mut desc = RafsBioDesc::new();
-        let blksize = self.i_blksize as u64;
-        let end = offset
-            .checked_add(size as u64)
-            .ok_or_else(|| einval!("invalid read size"))?;
-
-        let index_start = if !self.has_hole() {
-            (offset / blksize) as usize
-        } else {
-            0
-        };
-
-        let index_end = if !self.has_hole() {
-            cmp::min((end / blksize) as usize + 1, self.i_data.len())
-        } else {
-            self.i_data.len()
-        };
-
-        trace!(
-            "inode {:?} offset:{} size:{} index_start:{} index_end:{} i_data_len:{}",
-            self.i_name,
-            offset,
-            size,
-            index_start,
-            index_end,
-            self.i_data.len()
-        );
-        for blk in self.i_data[index_start..index_end].iter() {
-            if (blk.file_offset() + blksize) <= offset {
-                continue;
-            } else if blk.file_offset() >= end {
-                break;
-            }
-            let bio_offset = cmp::max(blk.file_offset(), offset);
-            let bio = RafsBio::new(
-                blk.clone(),
-                self.get_chunk_blob_id(blk.blob_index())?,
-                (bio_offset - blk.file_offset()) as u32,
-                cmp::min(
-                    cmp::min(end, self.i_size) - bio_offset,
-                    blk.file_offset() + blksize - bio_offset,
-                ) as usize,
-                self.i_blksize,
-            );
-            desc.bi_size += bio.size;
-            desc.bi_vec.push(bio);
-        }
-
-        Ok(desc)
+    fn get_blocksize(&self) -> u32 {
+        self.i_blksize
     }
 
     fn is_dir(&self) -> bool {
