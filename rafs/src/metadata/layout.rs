@@ -556,6 +556,9 @@ impl OndiskBlobTable {
 
     /// Get blob table size, aligned with RAFS_ALIGNMENT bytes
     pub fn size(&self) -> usize {
+        if self.entries.is_empty() {
+            return 0;
+        }
         // Blob entry split with '\0'
         align_to_rafs(
             self.entries
