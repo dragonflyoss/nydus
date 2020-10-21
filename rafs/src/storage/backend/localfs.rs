@@ -239,7 +239,7 @@ impl LocalFsAccessLog {
             }
             return;
         }
-        r.sort();
+        r.sort_unstable();
         r.dedup();
 
         // record is valid as long as LocalFsAccessLog is not dropped

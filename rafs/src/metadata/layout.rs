@@ -483,7 +483,7 @@ impl PrefetchTable {
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
         // Sort prefetch table by inode index, hopefully, it can save time when mounting rafs
         // Because file data is dumped in the order of inode index.
-        self.inode_indexes.sort();
+        self.inode_indexes.sort_unstable();
 
         let (_, data, _) = unsafe { self.inode_indexes.align_to::<u8>() };
 
