@@ -5,7 +5,7 @@ a container image format that improves over the current OCI image
 specification. Its key features include:
 
 * Container images are downloaded on demand
-* Chunk level data duplication
+* Chunk level data deduplication
 * Flatten image metadata and data to remove all intermediate layers
 * Only usable image data is saved when building a container image
 * Only usable image data is downloaded when running a container
