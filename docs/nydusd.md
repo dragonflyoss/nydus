@@ -69,15 +69,14 @@ mount -t virtiofs nydus /mnt
 
 #### Common Fields In Config
 
-``` JSON
+```
 {
   "device": {
     "backend": {
       // localfs | oss | registry
-      "type": "...",
+      "type": "localfs",
       "config": {
-        ...
-        // Access remote storage backend via P2P proxy, for example Dragonfly client address
+        // Access remote storage backend via P2P proxy, e.g. Dragonfly client
         "proxy": "http://p2p-proxy:65001",
         // Fallback to remote storage backend if P2P proxy ping failed
         "proxy_fallback": true,
@@ -90,7 +89,8 @@ mount -t virtiofs nydus /mnt
         // Drop the read request once http connection timeout, in seconds
         "connect_timeout": 5,
         // Retry count when read request failed
-        "retry_limit": 0
+        "retry_limit": 0,
+        ...
       }
     },
     "cache": {
@@ -103,25 +103,24 @@ mount -t virtiofs nydus /mnt
         // Directory of cache files, only for blobcache
         "work_dir": "/cache"
       }
-    },
-    // direct | cached
-    "mode": "direct",
-    // Validate inode tree digest and chunk digest on demand
-    "digest_validate": false,
-    // Enable file IO metric
-    "iostats_files": true,
-    // Enable support of fs extended attributes
-    "enable_xattr": false,
-    "fs_prefetch": {
-      // Enable blob prefetch
-      "enable": false,
-      // Prefetch thread count
-      "threads_count": 10,
-      // Maximal read size per prefetch request, for example 128kb
-      "merging_size": 131072
     }
   },
-  ...
+  // direct | cached
+  "mode": "direct",
+  // Validate inode tree digest and chunk digest on demand
+  "digest_validate": false,
+  // Enable file IO metric
+  "iostats_files": true,
+  // Enable support of fs extended attributes
+  "enable_xattr": false,
+  "fs_prefetch": {
+    // Enable blob prefetch
+    "enable": false,
+    // Prefetch thread count
+    "threads_count": 10,
+    // Maximal read size per prefetch request, e.g. 128kb
+    "merging_size": 131072
+  }
 }
 ```
 
@@ -129,7 +128,7 @@ mount -t virtiofs nydus /mnt
 
 ##### Localfs Backend
 
-``` JSON
+```
 {
   "device": {
     "backend": {
@@ -151,12 +150,13 @@ mount -t virtiofs nydus /mnt
 
 ##### OSS backend with blobcache
 
-``` JSON
+```
 {
   "device": {
     "backend": {
       "type": "oss",
       "config": {
+        ...
         "endpoint": "region.aliyuncs.com",
         "access_key_id": "",
         "access_key_secret": "",
@@ -171,18 +171,18 @@ mount -t virtiofs nydus /mnt
 
 ##### Registry backend
 
-``` JSON
+```
 {
   "device": {
     "backend": {
       "type": "registry",
       "config": {
-        "scheme": "https",
+        ...
+        "scheme": "http",
         "host": "my-registry:5000",
         "repo": "test/repo",
         // Base64(username:password)
-        "auth": "<base64_encoded_auth>",
-        "blob_url_scheme": "http"
+        "auth": "<base64_encoded_auth>"
       }
     },
     ...
