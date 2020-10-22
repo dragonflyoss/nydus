@@ -40,3 +40,9 @@ Convert OCI image to Nydus image: [Nydusify](./docs/nydusify.md).
 ## Run Nydusd Daemon
 
 Run `nydusd` Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
+
+## Learn Concepts and Commands
+
+Browse the documentation to learn more. Here are some topics you may be interested in:
+
+- [A Nydus Tutorial for Beginners](./docs/tutorial.md)
