@@ -44,7 +44,7 @@ Build and run Nydus snapshotter: [Nydus Snapshotter](./contrib/nydus-snapshotter
 
 ## Run Nydusd Daemon
 
-Run `nydusd` Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
+Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
 
 ## Learn Concepts and Commands
 
