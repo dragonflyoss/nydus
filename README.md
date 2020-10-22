@@ -10,7 +10,7 @@ specification. Its key features include:
 * Only usable image data is saved when building a container image
 * Only usable image data is downloaded when running a container
 * End-to-end image data integrity
-* Compactible with the OCI artifacts spec and distribution spec
+* Compatible with the OCI artifacts spec and distribution spec
 * Integrated with existing CNCF project Dragonfly to support image distribution in large clusters
 * Different container image storage backends are supported
 
@@ -39,4 +39,4 @@ Convert OCI image to Nydus image: [Nydusify](./docs/nydusify.md).
 
 ## Run Nydusd Daemon
 
-Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
+Run `nydusd` Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
