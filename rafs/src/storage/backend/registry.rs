@@ -503,6 +503,8 @@ impl Registry {
                         }
                     }
                 };
+            } else {
+                resp = respond(resp)?;
             }
         }
 
