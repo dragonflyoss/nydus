@@ -345,11 +345,12 @@ impl StargzIndexTreeBuilder {
 
 struct FilesystemTreeBuilder {
     root_path: PathBuf,
+    layered: bool,
 }
 
 impl FilesystemTreeBuilder {
-    fn new(root_path: PathBuf) -> Self {
-        Self { root_path }
+    fn new(root_path: PathBuf, layered: bool) -> Self {
+        Self { root_path, layered }
     }
 
     /// Walk directory to build node tree by DFS,
@@ -372,6 +373,12 @@ impl FilesystemTreeBuilder {
                 Overlay::UpperAddition,
                 parent.explicit_uidgid,
             )?;
+
+            // Per as to OCI spec, whiteout file should not be present within final image
+            // or filesystem, only existed in layers.
+            if child.whiteout_type().is_some() && !self.layered {
+                continue;
+            }
 
             // Ignore special file
             if child.file_type() == "" {
@@ -432,8 +439,12 @@ impl Tree {
     }
 
     /// Build node tree from a filesystem directory
-    pub fn from_filesystem(root_path: &PathBuf, explicit_uidgid: bool) -> Result<Self> {
-        let tree_builder = FilesystemTreeBuilder::new(root_path.clone());
+    pub fn from_filesystem(
+        root_path: &PathBuf,
+        explicit_uidgid: bool,
+        layered: bool,
+    ) -> Result<Self> {
+        let tree_builder = FilesystemTreeBuilder::new(root_path.clone(), layered);
 
         let node = Node::new(
             root_path.clone(),

@@ -308,7 +308,7 @@ impl Builder {
         tree.node.index = index;
         tree.node.inode.i_ino = index;
 
-        // Fs walk skip root inode within below while loop and we allow
+        // Filesystem walking skips root inode within subsequent while loop, however, we allow
         // user to pass the source root as prefetch hint. Check it here.
         let root_path = Path::new("/").to_path_buf();
         if self.need_prefetch(&tree.node) {
@@ -359,8 +359,8 @@ impl Builder {
     }
 
     /// Build node tree of upper layer from a filesystem directory
-    pub fn build_from_filesystem(&mut self) -> Result<()> {
-        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid)?;
+    pub fn build_from_filesystem(&mut self, layered: bool) -> Result<()> {
+        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid, layered)?;
 
         self.build_rafs_wrap(&mut tree)?;
 
@@ -617,7 +617,7 @@ impl Builder {
     pub fn build(&mut self) -> Result<(Vec<String>, usize)> {
         match self.source_type {
             SourceType::Directory => {
-                self.build_from_filesystem()?;
+                self.build_from_filesystem(self.f_parent_bootstrap.is_some())?;
             }
             SourceType::StargzIndex => {
                 self.build_from_stargz_index()?;
