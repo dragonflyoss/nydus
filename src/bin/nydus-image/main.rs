@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#[macro_use(crate_version, crate_authors)]
+#[macro_use(crate_authors, crate_version)]
 extern crate clap;
 extern crate stderrlog;
 
@@ -130,6 +130,13 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
 }
 
 fn main() -> Result<()> {
+    let bti: String = BuildTimeInfo::new(
+        crate_version!(),
+        built_info::GIT_COMMIT_HASH.unwrap_or_default(),
+        built_info::BUILT_TIME_UTC,
+    )
+    .into();
+
     let cmd = App::new("nydus image builder")
         .version(crate_version!())
         .author(crate_authors!())

@@ -33,6 +33,17 @@ pub fn round_down_4k(x: u64) -> u64 {
     x & (!4095u64)
 }
 
+pub struct BuildTimeInfo {}
+
+impl<'a> BuildTimeInfo {
+    pub fn dump(package_ver: &'a str, commit_hash: &'a str, build_time: &'a str) -> String {
+        format!(
+            "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}",
+            package_ver, commit_hash, build_time
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
