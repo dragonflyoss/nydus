@@ -209,13 +209,13 @@ sudo target-fusedev/debug/nydusd \
   --mountpoint /path/to/mountpoint
 ```
 
-Then use curl to call the mount api:
+Then use curl to mount a bootstrap to `/path/to/mountpoint/sub`:
 
 ``` shell
 curl --unix-socket api.sock \
-     -X PUT "http://localhost/api/v1/mount" -H "accept: */*" \
+     -X POST "http://localhost/api/v1/mount" \
      -H "Content-Type: application/json" \
-     -d "{\"source\":\"<path-to-bootstrap>\",\"fstype\":\"rafs\",\"mountpoint\":\"/path/to/mnt\","config\":\"/path/to/config.json\"}"
+     -d '{"source":"<path-to-bootstrap>","fstype":"rafs","mountpoint":"/sub","config":"/path/to/config.json"}'
 ```
 
 ### Multiple Pseudo Mounts
