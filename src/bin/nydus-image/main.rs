@@ -29,8 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use builder::SourceType;
-use nydus_utils::einval;
-use nydus_utils::log_level_to_verbosity;
+use nydus_utils::{einval, log_level_to_verbosity, BuildTimeInfo};
 use rafs::metadata::digest;
 use rafs::storage::{backend, compress, factory};
 use validator::Validator;
@@ -129,16 +128,19 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
     Ok(files)
 }
 
+pub mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
 fn main() -> Result<()> {
-    let bti: String = BuildTimeInfo::new(
+    let bti: String = BuildTimeInfo::dump(
         crate_version!(),
         built_info::GIT_COMMIT_HASH.unwrap_or_default(),
         built_info::BUILT_TIME_UTC,
-    )
-    .into();
+    );
 
     let cmd = App::new("nydus image builder")
-        .version(crate_version!())
+        .version(bti.as_str())
         .author(crate_authors!())
         .about("Build image using nydus format.")
         .subcommand(
