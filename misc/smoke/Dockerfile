@@ -1,8 +1,8 @@
 FROM rust:1.49.0
 
 RUN echo '[source.crates-io] \n\
-registry = "https://github.com/rust-lang/crates.io-index"'\
->> /usr/local/cargo/config
+  registry = "https://github.com/rust-lang/crates.io-index"'\
+  >> /usr/local/cargo/config
 
 RUN rustup component add clippy
 RUN rustup component add rustfmt
