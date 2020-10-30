@@ -172,7 +172,6 @@ pub trait RafsCache {
 
         let raw_chunk = if cki.is_compressed() {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
-            // TODO: Use a buffer pool for lower latency?
             //
             // gzip is special that it doesn't carry compress_size, instead, we can read as much
             // as chunk_decompress_size compressed data per chunk, decompress as much as necessary to fill in chunk

@@ -112,7 +112,6 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
                         .to_path_buf(),
                 );
 
-                // FIXME: Temporarily raise log level up, for devel/debug sake.
                 debug!(
                     "readahead file: {}, trimmed file name {}",
                     file_name,

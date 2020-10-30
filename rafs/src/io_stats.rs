@@ -82,7 +82,6 @@ pub struct GlobalIOStats {
     nr_max_opens: AtomicUsize,
     // Record last rafs fop timestamp, this helps us with detecting backend hang or
     // inside dead-lock, etc.
-    // TODO: To be implemented, should not be hard.
     last_fop_tp: AtomicUsize,
     // Rwlock closes the race that more than one threads are creating counters concurrently.
     #[serde(skip_serializing, skip_deserializing)]
@@ -134,7 +133,6 @@ impl InodeStatsCounter for InodeIOStats {
     fn stats_fop_inc(&self, fop: StatsFop) {
         self.fop_hits[fop as usize].fetch_add(1, Ordering::Relaxed);
         self.total_fops.fetch_add(1, Ordering::Relaxed);
-        // TODO: It seems no Open fop arrives before any read.
         if fop == StatsFop::Open {
             self.nr_open.fetch_add(1, Ordering::Relaxed);
             // Below can't guarantee that load and store are atomic but it should be OK

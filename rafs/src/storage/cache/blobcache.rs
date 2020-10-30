@@ -259,7 +259,6 @@ impl BlobCache {
         let mut d;
         let raw_chunk = if self.is_compressed && self.compressor() != compress::Algorithm::GZip {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
-            // TODO: Use a buffer pool for lower latency?
             //
             // gzip is special that it doesn't carry compress_size, instead, we make an IO stream out
             // of the blobcache file. So no need for an internal buffer here.
