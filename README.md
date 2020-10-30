@@ -46,3 +46,4 @@ Run `nydusd` Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
 Browse the documentation to learn more. Here are some topics you may be interested in:
 
 - [A Nydus Tutorial for Beginners](./docs/tutorial.md)
+- Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
