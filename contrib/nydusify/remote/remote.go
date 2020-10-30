@@ -261,7 +261,7 @@ func (remote *Remote) Pull() error {
 	platform := platforms.Default()
 	var sourceManifestDesc *ocispec.Descriptor
 	for _, desc := range descs {
-		if platform.Match(*desc.Platform) {
+		if desc.Platform == nil || platform.Match(*desc.Platform) {
 			sourceManifestDesc = &desc
 			break
 		}
