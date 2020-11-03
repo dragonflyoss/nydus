@@ -5,7 +5,12 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::io::{Error, Result};
+use std::io::{Read, Write};
 use std::str::FromStr;
+
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 mod lz4_standard;
 use self::lz4_standard::*;
@@ -18,6 +23,7 @@ const COMPRESSION_MINIMUM_RATIO: usize = 100;
 pub enum Algorithm {
     None,
     LZ4Block,
+    GZip,
 }
 
 impl fmt::Display for Algorithm {
@@ -33,6 +39,7 @@ impl FromStr for Algorithm {
         match s {
             "none" => Ok(Self::None),
             "lz4_block" => Ok(Self::LZ4Block),
+            "gzip" => Ok(Self::GZip),
             _ => Err(einval!("compression algorithm should be none or lz4_block")),
         }
     }
@@ -56,31 +63,53 @@ pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
     if src_size == 0 {
         return Ok((Cow::Borrowed(src), false));
     }
-    match algorithm {
-        Algorithm::None => Ok((Cow::Borrowed(src), false)),
-        Algorithm::LZ4Block => {
-            let compressed = lz4_compress(src)?;
-            // Abandon compressed data when compression ratio greater than COMPRESSION_MINIMUM_RATIO
-            if (COMPRESSION_MINIMUM_RATIO == 100 && compressed.len() >= src_size)
-                || ((100 * compressed.len() / src_size) >= COMPRESSION_MINIMUM_RATIO)
-            {
-                return Ok((Cow::Borrowed(src), false));
-            }
-            Ok((Cow::Owned(compressed), true))
+
+    let compressed = match algorithm {
+        Algorithm::None => return Ok((Cow::Borrowed(src), false)),
+        Algorithm::LZ4Block => lz4_compress(src)?,
+        Algorithm::GZip => {
+            let dst: Vec<u8> = Vec::new();
+            let mut gz = GzEncoder::new(dst, Compression::default());
+            gz.write_all(src)?;
+            gz.finish()?
         }
+    };
+
+    // Abandon compressed data when compression ratio greater than COMPRESSION_MINIMUM_RATIO
+    if (COMPRESSION_MINIMUM_RATIO == 100 && compressed.len() >= src_size)
+        || ((100 * compressed.len() / src_size) >= COMPRESSION_MINIMUM_RATIO)
+    {
+        return Ok((Cow::Borrowed(src), false));
     }
+    Ok((Cow::Owned(compressed), true))
 }
 
 pub fn decompress(src: &[u8], dst: &mut [u8], algorithm: Algorithm) -> Result<usize> {
     match algorithm {
-        Algorithm::None => Ok(src.len()),
+        Algorithm::None => Ok(dst.len()),
         Algorithm::LZ4Block => lz4_decompress(src, dst),
+        Algorithm::GZip => GzDecoder::new(src).read(dst),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compress_algorithm_gzip() {
+        let buf = vec![0x2u8; 4095];
+        let compressed = compress(&buf, Algorithm::GZip).unwrap();
+        assert_eq!(compressed.1, true);
+        let (compressed, _) = compressed;
+        assert_ne!(compressed.len(), 0);
+
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(&compressed, decompressed.as_mut_slice(), Algorithm::GZip).unwrap();
+
+        assert_eq!(sz, 4095);
+        assert_eq!(buf, decompressed);
+    }
 
     #[test]
     fn test_compress_algorithm_none() {

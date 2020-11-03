@@ -15,7 +15,7 @@ use vmm_sys_util::tempdir::TempDir;
 mod builder;
 mod nydusd;
 
-fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()> {
+fn test(compressor: &str, enable_cache: bool, rafs_mode: &str) -> Result<()> {
     info!(
         "\n\n==================== testing run: enable_compress {} enable_cache {} rafs_mode {}",
         enable_compress, enable_cache, rafs_mode
@@ -29,7 +29,7 @@ fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()
     {
         // Create & build lower rootfs
         builder.make_lower()?;
-        builder.build_lower(enable_compress)?;
+        builder.build_lower(compressor)?;
 
         // Mount lower rootfs and check
         let nydusd = nydusd::new(
@@ -47,7 +47,7 @@ fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()
     {
         // Create & build upper rootfs based lower
         builder.make_upper()?;
-        builder.build_upper(enable_compress)?;
+        builder.build_upper(compressor)?;
 
         // Mount overlay rootfs and check
         let nydusd = nydusd::new(
@@ -130,13 +130,13 @@ fn integration_run() -> Result<()> {
 
     test_compact()?;
 
-    test(true, true, "direct")?;
-    test(false, false, "direct")?;
-    test(true, false, "direct")?;
-    test(false, true, "direct")?;
+    test("lz4_block", true, "direct")?;
+    test("lz4_block", false, "direct")?;
+    test("gzip", false, "direct")?;
+    test("none", true, "direct")?;
 
-    test(true, true, "cached")?;
-    test(false, false, "cached")?;
-    test(true, false, "cached")?;
-    test(false, true, "cached")
+    test("gzip", true, "cached")?;
+    test("none", false, "cached")?;
+    test("lz4_block", false, "cached")?;
+    test("lz4_block", true, "cached")
 }

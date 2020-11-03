@@ -168,6 +168,8 @@ bitflags! {
         /// If unset, nydusd may return ENOSYS for getxattr/listxattr
         /// calls.
         const HAS_XATTR = 0x0000_0020;
+        // Data chunks are compressed with gzip
+        const COMPRESS_GZIP = 0x0000_0040;
     }
 }
 
@@ -225,6 +227,7 @@ impl Into<compress::Algorithm> for RafsSuperFlags {
         match self {
             x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
             x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::LZ4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
             _ => compress::Algorithm::LZ4Block,
         }
     }
@@ -235,6 +238,7 @@ impl From<compress::Algorithm> for RafsSuperFlags {
         match c {
             compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
             compress::Algorithm::LZ4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
         }
     }
 }
