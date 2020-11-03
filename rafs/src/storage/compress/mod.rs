@@ -91,17 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lz4_compress_decompress_0_byte() {
-        let buf = Vec::new();
-        let compressed = lz4_compress(&buf).unwrap();
-        let mut decompressed = vec![0; buf.len()];
-        let sz = decompress(&compressed, decompressed.as_mut_slice()).unwrap();
-
-        assert_eq!(sz, 0);
-        assert_eq!(buf, decompressed);
-    }
-
-    #[test]
     fn test_lz4_compress_decompress_1_byte() {
         let buf = vec![0x1u8];
         let compressed = lz4_compress(&buf).unwrap();
