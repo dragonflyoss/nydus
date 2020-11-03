@@ -71,13 +71,17 @@ impl RafsCache for DummyCache {
             d.as_mut_slice()
         };
 
-        self.read_by_chunk(blob_id, chunk.as_ref(), one_chunk_buf)?;
+        self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |_, _| Ok(()))?;
 
         if reuse {
             Ok(one_chunk_buf.len())
         } else {
             copyv(one_chunk_buf, bufs, offset, bio.size)
         }
+    }
+
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        self.backend().blob_size(blob_id)
     }
 
     fn digester(&self) -> digest::Algorithm {

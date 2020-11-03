@@ -54,16 +54,22 @@ pub fn readv(fd: RawFd, bufs: &[VolatileSlice], offset: u64, max_size: usize) ->
     }
 }
 
-pub fn copyv(src: &[u8], dst: &[VolatileSlice], offset: u64, max_size: usize) -> Result<usize> {
+pub fn copyv(src: &[u8], dst: &[VolatileSlice], offset: u64, mut max_size: usize) -> Result<usize> {
     let mut offset = offset as usize;
     let mut size: usize = 0;
+    if max_size > src.len() {
+        max_size = src.len()
+    }
 
     for s in dst.iter() {
-        let len = if size + s.len() > max_size {
-            max_size - size
-        } else {
-            s.len()
-        };
+        if offset >= src.len() || size >= src.len() {
+            break;
+        }
+        let mut len = max_size - size;
+        if offset + len > src.len() {
+            len = src.len() - offset;
+        }
+
         s.write_slice(&src[offset..offset + len], 0)
             .map_err(|e| einval!(e))?;
         offset += len;

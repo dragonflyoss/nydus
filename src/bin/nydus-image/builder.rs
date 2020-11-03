@@ -307,6 +307,7 @@ impl Builder {
 
         self.lower_inode_map.clear();
         self.upper_inode_map.clear();
+        self.readahead_files.clear();
         self.build_rafs_wrap(&mut tree)?;
 
         // Reuse lower layer blob table,
@@ -345,7 +346,7 @@ impl Builder {
         let mut blob_readahead_size = 0usize;
         for index in &readahead_files {
             let node = self.nodes.get_mut(**index as usize - 1).unwrap();
-            debug!("readahead {}", node);
+            debug!("[{}]\treadahead {}", node.overlay, node,);
             if node.overlay == Overlay::UpperAddition || node.overlay == Overlay::UpperModification
             {
                 blob_readahead_size += node.dump_blob(

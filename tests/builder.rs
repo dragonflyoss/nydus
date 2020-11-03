@@ -180,7 +180,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub fn build_lower(&mut self, enable_compress: bool) -> Result<String> {
+    pub fn build_lower(&mut self, compressor: &str) -> Result<String> {
         let lower_dir = self.work_dir.join("lower");
 
         self.create_dir(&self.work_dir.join("blobs"))?;
@@ -202,11 +202,11 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info {} {:?}",
+                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info --compressor {} {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("blobs"),
-                if enable_compress { "" } else { "--compressor none" },
+                compressor,
                 lower_dir,
             )
             .as_str(),
@@ -216,17 +216,17 @@ impl<'a> Builder<'a> {
         Ok(ret)
     }
 
-    pub fn build_upper(&mut self, enable_compress: bool) -> Result<()> {
+    pub fn build_upper(&mut self, compressor: &str) -> Result<()> {
         let upper_dir = self.work_dir.join("upper").to_path_buf();
 
         exec(
             format!(
-                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info {} {:?}",
+                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info --compressor {} {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("bootstrap-overlay"),
                 self.work_dir.join("blobs"),
-                if enable_compress { "" } else { "--compressor none" },
+                compressor,
                 upper_dir,
             )
             .as_str(),

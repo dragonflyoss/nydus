@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cmp;
 use std::io::Result;
 use std::slice;
 use std::sync::Arc;
@@ -128,11 +129,15 @@ pub trait RafsCache {
     /// Flush cache
     fn flush(&self) -> Result<()>;
 
-    /// Read a chunk data through cache, always used in decompressed cache
+    /// Read a chunk data through cache
+    /// offset is relative to chunk start
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize>;
 
     /// Write a chunk data through cache
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize>;
+
+    /// Get the size of a blob
+    fn blob_size(&self, blob_id: &str) -> Result<u64>;
 
     fn prefetch(&self, bio: &mut [RafsBio]) -> Result<usize>;
 
@@ -150,20 +155,36 @@ pub trait RafsCache {
     /// It depends on `cki` how to describe the chunk data.
     /// Moreover, chunk data from backend can be validated per as to nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
-    fn read_by_chunk(
+    fn read_backend_chunk<F>(
         &self,
         blob_id: &str,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
-    ) -> Result<usize> {
-        let c_offset = cki.compress_offset();
-        let d_size = cki.decompress_size() as usize;
+        cacher: F,
+    ) -> Result<usize>
+    where
+        F: FnOnce(&[u8], &[u8]) -> Result<()>,
+        Self: Sized,
+    {
+        let offset = cki.compress_offset();
         let mut d;
 
         let raw_chunk = if cki.is_compressed() {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
             // TODO: Use a buffer pool for lower latency?
-            let c_size = cki.compress_size() as usize;
+            //
+            // gzip is special that it doesn't carry compress_size, instead, we can read as much
+            // as 4MB compressed data per chunk, decompress as much as necessary to fill in chunk
+            // that has the original uncompressed data size.
+            // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
+            // by fixed chunk size instead of RafsChunkInfo.
+            // And it is extremely ineffecient for dummy cache.
+            let c_size = if self.compressor() != compress::Algorithm::GZip {
+                cki.compress_size() as usize
+            } else {
+                let size = self.blob_size(blob_id)? - cki.compress_offset();
+                cmp::min(size, 4 << 20) as usize
+            };
             d = alloc_buf(c_size);
             d.as_mut_slice()
         } else {
@@ -171,15 +192,12 @@ pub trait RafsCache {
             unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
         };
 
-        self.read_raw_chunk(blob_id, c_offset, raw_chunk)?;
+        self.backend().read(blob_id, raw_chunk, offset)?;
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, chunk)?;
-
-        Ok(d_size)
-    }
-
-    fn read_raw_chunk(&self, blob_id: &str, offset: u64, raw_chunk: &mut [u8]) -> Result<usize> {
-        self.backend().read(blob_id, raw_chunk, offset)
+        self.process_raw_chunk(cki, raw_chunk, chunk, cki.is_compressed())
+            .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
+        cacher(raw_chunk, chunk)?;
+        Ok(chunk.len())
     }
 
     /// Before storing chunk data into blob cache file. We have cook the raw chunk from
@@ -191,9 +209,13 @@ pub trait RafsCache {
         cki: &dyn RafsChunkInfo,
         raw_chunk: &[u8],
         chunk: &mut [u8],
+        need_decompress: bool,
     ) -> Result<usize> {
-        if cki.is_compressed() {
-            compress::decompress(raw_chunk, chunk)?;
+        if need_decompress {
+            compress::decompress(raw_chunk, chunk, self.compressor()).map_err(|e| {
+                error!("failed to decompress chunk: {}", e);
+                e
+            })?;
         } else if raw_chunk.as_ptr() != chunk.as_ptr() {
             // Sometimes, caller directly put data into consumer provided buffer.
             // Then we don't have to copy data between slices.
@@ -201,20 +223,11 @@ pub trait RafsCache {
         }
 
         let d_size = cki.decompress_size() as usize;
-
         if chunk.len() != d_size {
-            return Err(eio!(format!(
-                "invalid chunk data, expected size: {} != {}",
-                d_size,
-                chunk.len(),
-            )));
+            return Err(eio!());
         }
-
         if self.need_validate() && !digest_check(chunk, &cki.block_id(), self.digester()) {
-            return Err(eio!(format!(
-                "invalid chunk data, expected digest: {}",
-                cki.block_id()
-            )));
+            return Err(eio!());
         }
 
         Ok(chunk.len())
@@ -255,6 +268,7 @@ pub trait RafsCache {
                 cki.as_ref(),
                 &c_buf[offset_merged..(offset_merged + size_merged)],
                 &mut chunk,
+                cki.is_compressed(),
             )?;
             chunks.push(chunk);
         }

@@ -519,6 +519,16 @@ impl BlobBackend for Registry {
         self.retry_limit
     }
 
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        let url = self.url(&format!("/blobs/sha256:{}", blob_id), &[])?;
+
+        let resp =
+            self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?;
+
+        resp.content_length()
+            .ok_or_else(|| einval!("invalid content length"))
+    }
+
     fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
         self._try_read(blob_id, buf, offset, true)
     }

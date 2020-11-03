@@ -185,6 +185,19 @@ impl BlobBackend for OSS {
         self.retry_limit
     }
 
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        let (resource, url) = self.url(blob_id, &[])?;
+        let headers = HeaderMap::new();
+        let headers = self.sign(Method::HEAD, headers, resource.as_str())?;
+
+        let resp = self
+            .request
+            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, true)?;
+
+        resp.content_length()
+            .ok_or_else(|| einval!("invalid content length"))
+    }
+
     /// read ranged data from oss object
     fn try_read(&self, blob_id: &str, mut buf: &mut [u8], offset: u64) -> Result<usize> {
         let query = &[];

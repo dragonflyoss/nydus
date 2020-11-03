@@ -168,6 +168,8 @@ bitflags! {
         /// If unset, nydusd may return ENOSYS for getxattr/listxattr
         /// calls.
         const HAS_XATTR = 0x0000_0020;
+        // Data chunks are compressed with gzip
+        const COMPRESS_GZIP = 0x0000_0040;
     }
 }
 
@@ -225,6 +227,7 @@ impl Into<compress::Algorithm> for RafsSuperFlags {
         match self {
             x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
             x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::LZ4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
             _ => compress::Algorithm::LZ4Block,
         }
     }
@@ -235,6 +238,7 @@ impl From<compress::Algorithm> for RafsSuperFlags {
         match c {
             compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
             compress::Algorithm::LZ4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
         }
     }
 }
@@ -807,7 +811,7 @@ impl_bootstrap_converter!(OndiskInode);
 
 /// On disk Rafs data chunk information.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct OndiskChunkInfo {
     /// sha256(chunk), [char; RAFS_SHA256_LENGTH]
     pub block_id: RafsDigest,
@@ -835,6 +839,7 @@ bitflags! {
     pub struct RafsChunkFlags: u32 {
         /// chunk is compressed
         const COMPRESSED = 0x0000_0001;
+        const HOLECHUNK = 0x0000_0002;
     }
 }
 
@@ -874,6 +879,11 @@ impl RafsChunkInfo for OndiskChunkInfo {
     #[inline]
     fn is_compressed(&self) -> bool {
         self.flags.contains(RafsChunkFlags::COMPRESSED)
+    }
+
+    #[inline]
+    fn is_hole(&self) -> bool {
+        self.flags.contains(RafsChunkFlags::HOLECHUNK)
     }
 
     fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {

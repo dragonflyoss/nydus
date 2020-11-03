@@ -15,10 +15,15 @@ use vmm_sys_util::tempdir::TempDir;
 mod builder;
 mod nydusd;
 
-fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()> {
+fn test(
+    compressor: &str,
+    enable_cache: bool,
+    cache_compressed: bool,
+    rafs_mode: &str,
+) -> Result<()> {
     info!(
-        "\n\n==================== testing run: enable_compress {} enable_cache {} rafs_mode {}",
-        enable_compress, enable_cache, rafs_mode
+        "\n\n==================== testing run: compressor={} enable_cache={} cache_compressed={} rafs_mode={}",
+        compressor, enable_cache, cache_compressed, rafs_mode
     );
 
     let tmp_dir = TempDir::new().map_err(|e| eother!(e))?;
@@ -29,12 +34,13 @@ fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()
     {
         // Create & build lower rootfs
         builder.make_lower()?;
-        builder.build_lower(enable_compress)?;
+        builder.build_lower(compressor)?;
 
         // Mount lower rootfs and check
         let nydusd = nydusd::new(
             &work_dir,
             enable_cache,
+            cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-lower".to_string(),
         )?;
@@ -47,12 +53,13 @@ fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()
     {
         // Create & build upper rootfs based lower
         builder.make_upper()?;
-        builder.build_upper(enable_compress)?;
+        builder.build_upper(compressor)?;
 
         // Mount overlay rootfs and check
         let nydusd = nydusd::new(
             &work_dir,
             enable_cache,
+            cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-overlay".to_string(),
         )?;
@@ -66,6 +73,7 @@ fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()
         let nydusd = nydusd::new(
             &work_dir,
             enable_cache,
+            cache_compressed,
             rafs_mode.parse()?,
             "bootstrap-overlay".to_string(),
         )?;
@@ -80,6 +88,7 @@ fn test(enable_compress: bool, enable_cache: bool, rafs_mode: &str) -> Result<()
 fn check_compact<'a>(work_dir: &'a PathBuf, bootstrap_name: &str, rafs_mode: &str) -> Result<()> {
     let nydusd = nydusd::new(
         work_dir,
+        false,
         false,
         rafs_mode.parse()?,
         bootstrap_name.to_string(),
@@ -130,13 +139,13 @@ fn integration_run() -> Result<()> {
 
     test_compact()?;
 
-    test(true, true, "direct")?;
-    test(false, false, "direct")?;
-    test(true, false, "direct")?;
-    test(false, true, "direct")?;
+    test("lz4_block", true, false, "direct")?;
+    test("lz4_block", false, false, "direct")?;
+    test("gzip", false, false, "direct")?;
+    test("none", true, false, "direct")?;
 
-    test(true, true, "cached")?;
-    test(false, false, "cached")?;
-    test(true, false, "cached")?;
-    test(false, true, "cached")
+    test("gzip", true, true, "cached")?;
+    test("none", false, true, "cached")?;
+    test("lz4_block", false, true, "cached")?;
+    test("lz4_block", true, true, "cached")
 }
