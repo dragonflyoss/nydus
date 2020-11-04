@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::Error;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -359,8 +360,14 @@ impl GlobalIOStats {
         }
     }
 
-    pub fn export_files_stats(&self) -> String {
-        serde_json::to_string(&*self.file_counters.read().unwrap()).unwrap()
+    pub fn export_files_stats(&self) -> Result<String, IoStatsError> {
+        serde_json::to_string(
+            self.file_counters
+                .read()
+                .expect("Not expect poisoned lock")
+                .deref(),
+        )
+        .map_err(IoStatsError::Serialize)
     }
 
     pub fn export_files_access_patterns(&self) -> String {
@@ -384,21 +391,21 @@ impl GlobalIOStats {
     }
 }
 
-pub fn export_files_stats(name: &Option<String>) -> Result<String, String> {
+pub fn export_files_stats(name: &Option<String>) -> Result<String, IoStatsError> {
     let ios_set = IOS_SET.read().unwrap();
 
     match name {
         Some(k) => ios_set
             .get(k)
-            .ok_or_else(|| "No such id".to_string())
-            .map(|v| v.export_files_stats()),
+            .ok_or_else(|| IoStatsError::NoCounter)
+            .map(|v| v.export_files_stats())?,
         None => {
             if ios_set.len() == 1 {
                 if let Some(ios) = ios_set.values().next() {
-                    return Ok(ios.export_files_stats());
+                    return ios.export_files_stats();
                 }
             }
-            Err("No metrics counter was specified.".to_string())
+            Err(IoStatsError::NoCounter)
         }
     }
 }
