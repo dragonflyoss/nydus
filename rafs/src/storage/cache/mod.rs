@@ -234,8 +234,15 @@ pub trait RafsCache {
 
         self.backend().read(blob_id, raw_chunk, offset)?;
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, None, chunk, cki.is_compressed())
-            .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
+        self.process_raw_chunk(
+            cki,
+            raw_chunk,
+            None,
+            chunk,
+            cki.is_compressed(),
+            self.need_validate(),
+        )
+        .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
         cacher(raw_chunk, chunk)?;
         Ok(chunk.len())
     }
@@ -251,6 +258,7 @@ pub trait RafsCache {
         raw_stream: Option<File>,
         chunk: &mut [u8],
         need_decompress: bool,
+        need_validate: bool,
     ) -> Result<usize> {
         if need_decompress {
             compress::decompress(raw_chunk, raw_stream, chunk, self.compressor()).map_err(|e| {
@@ -267,7 +275,7 @@ pub trait RafsCache {
         if chunk.len() != d_size {
             return Err(eio!());
         }
-        if self.need_validate() && !digest_check(chunk, &cki.block_id(), self.digester()) {
+        if need_validate && !digest_check(chunk, &cki.block_id(), self.digester()) {
             return Err(eio!());
         }
 
@@ -311,6 +319,7 @@ pub trait RafsCache {
                 None,
                 &mut chunk,
                 cki.is_compressed(),
+                self.need_validate(),
             )?;
             chunks.push(chunk);
         }

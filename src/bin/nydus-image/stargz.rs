@@ -30,7 +30,7 @@ pub struct TocEntry {
     // The "chunk" type is used for regular file data chunks past the first
     // TOCEntry; the 2nd chunk and on have only Type ("chunk"), Offset,
     // ChunkOffset, and ChunkSize populated.
-    #[serde(rename(serialize = "type", deserialize = "type"))]
+    #[serde(rename = "type")]
     pub toc_type: String,
 
     // Size, for regular files, is the logical size of the file.
@@ -46,7 +46,7 @@ pub struct TocEntry {
     // mod_time: Time,
 
     // LinkName, for symlinks and hardlinks, is the link target.
-    #[serde(default, rename(serialize = "linkName", deserialize = "linkName"))]
+    #[serde(default, rename = "linkName")]
     pub link_name: PathBuf,
 
     // Mode is the permission and mode bits.
@@ -65,14 +65,14 @@ pub struct TocEntry {
     //
     // In the serialized JSON, this field may only be present for
     // the first entry with the same Uid.
-    #[serde(default, rename(serialize = "userName", deserialize = "userName"))]
+    #[serde(default, rename = "userName")]
     pub uname: String,
 
     // Gname is the group name of the owner.
     //
     // In the serialized JSON, this field may only be present for
     // the first entry with the same Gid.
-    #[serde(default, rename(serialize = "groupName", deserialize = "groupName"))]
+    #[serde(default, rename = "groupName")]
     pub gname: String,
 
     // Offset, for regular files, provides the offset in the
@@ -86,11 +86,11 @@ pub struct TocEntry {
     pub next_offset: u64,
 
     // DevMajor is the major device number for "char" and "block" types.
-    #[serde(default, rename(serialize = "devMajor", deserialize = "devMajor"))]
+    #[serde(default, rename = "devMajor")]
     pub dev_major: u64,
 
     // DevMinor is the major device number for "char" and "block" types.
-    #[serde(default, rename(serialize = "devMinor", deserialize = "devMinor"))]
+    #[serde(default, rename = "devMinor")]
     pub dev_minor: u64,
 
     // NumLink is the number of entry names pointing to this entry.
@@ -116,12 +116,9 @@ pub struct TocEntry {
     // from the stargz TOC, though, the ChunkSize is initialized
     // to a non-zero file for when Type is either "reg" or
     // "chunk".
-    #[serde(
-        default,
-        rename(serialize = "chunkOffset", deserialize = "chunkOffset")
-    )]
+    #[serde(default, rename = "chunkOffset")]
     pub chunk_offset: u64,
-    #[serde(default, rename(serialize = "chunkSize", deserialize = "chunkSize"))]
+    #[serde(default, rename = "chunkSize")]
     pub chunk_size: u64,
 
     #[serde(skip)]
@@ -170,35 +167,45 @@ impl TocEntry {
         mode
     }
 
+    // Convert entry name to file name
+    // For example: `` to `/`, `/` to `/`, `a/b` to `b`, `a/b/` to `b`
     pub fn name(&self) -> Result<PathBuf> {
+        let path = self.path()?;
         let root_path = PathBuf::from("/");
-        let empty_path = PathBuf::from("");
-        if self.name == empty_path || self.name == root_path {
+        if path == root_path {
             return Ok(root_path);
         }
-        let name = self
-            .name
+        let name = path
             .file_name()
             .ok_or_else(|| einval!("invalid entry name"))?;
         Ok(PathBuf::from(name))
     }
 
-    pub fn path(&self) -> PathBuf {
-        let path = self.name.strip_prefix("../").unwrap_or(&self.name);
-        let path = path.strip_prefix("./").unwrap_or(&path);
-        PathBuf::from("/").join(path)
+    // Convert entry name to rootfs absolute path
+    // For example: `` to `/`, `a/b` to `/a/b`, `a/b/` to `/a/b`
+    pub fn path(&self) -> Result<PathBuf> {
+        let root_path = PathBuf::from("/");
+        let empty_path = PathBuf::from("");
+        if self.name == empty_path || self.name == root_path {
+            return Ok(root_path);
+        }
+        let path = PathBuf::from("/").join(&self.name);
+        Ok(path
+            .parent()
+            .ok_or_else(|| einval!("invalid entry path"))?
+            .join(
+                path.file_name()
+                    .ok_or_else(|| einval!("invalid entry name"))?,
+            ))
     }
 
-    pub fn link_path(&self) -> PathBuf {
-        let path = self
-            .link_name
-            .strip_prefix("../")
-            .unwrap_or(&self.link_name);
-        let path = path.strip_prefix("./").unwrap_or(&path);
-        PathBuf::from("/").join(path)
+    // Convert link path of hardlink entry to rootfs absolute path
+    // For example: `a/b` to `/a/b`
+    pub fn hardlink_link_path(&self) -> PathBuf {
+        PathBuf::from("/").join(&self.link_name)
     }
 
-    pub fn origin_link_path(&self) -> PathBuf {
+    pub fn symlink_link_path(&self) -> PathBuf {
         self.link_name.clone()
     }
 
@@ -207,13 +214,16 @@ impl TocEntry {
     }
 
     // TODO: think about chunk deduplicate
-    pub fn block_id(&self) -> Result<RafsDigest> {
+    pub fn block_id(&self, blob_id: &str) -> Result<RafsDigest> {
         if !self.is_reg() && !self.is_chunk() {
             return Err(einval!("only support chunk or reg entry"));
         }
         let data = serde_json::to_string(self)
             .map_err(|e| einval!(format!("block id calculation failed: {:?}", e)))?;
-        Ok(RafsDigest::from_buf(data.as_bytes(), Algorithm::Sha256))
+        Ok(RafsDigest::from_buf(
+            (data + blob_id).as_bytes(),
+            Algorithm::Sha256,
+        ))
     }
 
     pub fn new_dir(path: PathBuf) -> Self {

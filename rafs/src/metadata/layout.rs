@@ -371,6 +371,10 @@ impl OndiskSuperBlock {
 
 impl RafsStore for OndiskSuperBlock {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+        info!(
+            "rafs superblock features: {}",
+            RafsSuperFlags::from_bits(self.s_flags).unwrap_or_default()
+        );
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
     }
@@ -411,7 +415,7 @@ impl OndiskInodeTable {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.data.len() == 0
+        self.data.is_empty()
     }
 
     pub fn set(&mut self, ino: Inode, inode_offset: u32) -> Result<()> {
@@ -475,12 +479,20 @@ impl PrefetchTable {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.inode_indexes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inode_indexes.is_empty()
+    }
+
     pub fn add_entry(&mut self, inode_idx: u32) {
         self.inode_indexes.push(inode_idx);
     }
 
-    pub fn table_aligned_size(&self) -> usize {
-        self.inode_indexes.len() * size_of::<u32>()
+    pub fn size(&self) -> usize {
+        align_to_rafs(self.len() * size_of::<u32>())
     }
 
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
@@ -519,10 +531,6 @@ impl PrefetchTable {
 
         Ok(())
     }
-
-    pub fn entry_size() -> usize {
-        size_of::<u32>() as usize
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -552,6 +560,9 @@ impl OndiskBlobTable {
 
     /// Get blob table size, aligned with RAFS_ALIGNMENT bytes
     pub fn size(&self) -> usize {
+        if self.entries.is_empty() {
+            return 0;
+        }
         // Blob entry split with '\0'
         align_to_rafs(
             self.entries

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use hmac::{Hmac, Mac, NewMac};
+use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Method, StatusCode};
 use sha1::Sha1;
 use url::Url;
@@ -194,8 +195,16 @@ impl BlobBackend for OSS {
             .request
             .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, true)?;
 
-        resp.content_length()
-            .ok_or_else(|| einval!("invalid content length"))
+        let content_length = resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .ok_or_else(|| einval!("invalid content length"))?;
+
+        content_length
+            .to_str()
+            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))?
+            .parse::<u64>()
+            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))
     }
 
     /// read ranged data from oss object

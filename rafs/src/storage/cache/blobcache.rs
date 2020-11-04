@@ -94,6 +94,7 @@ struct BlobCacheState {
     chunk_map: HashMap<RafsDigest, Arc<Mutex<BlobCacheEntry>>>,
     file_map: HashMap<String, (File, u64)>,
     work_dir: String,
+    backend_size_valid: bool,
 }
 
 impl BlobCacheState {
@@ -113,7 +114,12 @@ impl BlobCacheState {
             .read(true)
             .open(blob_file_path)?;
         let fd = file.as_raw_fd();
-        let size = backend.blob_size(blob_id)?;
+
+        let size = if self.backend_size_valid {
+            backend.blob_size(blob_id)?
+        } else {
+            0
+        };
 
         self.file_map.insert(blob_id.to_string(), (file, size));
 
@@ -199,7 +205,12 @@ impl BlobCache {
         // stargz format limitations (missing chunk level digest)
         if (self.compressor() != compress::Algorithm::GZip || cache_entry.is_ready())
             && self
-                .read_blobcache_chunk(cache_entry.fd, chunk.as_ref(), one_chunk_buf)
+                .read_blobcache_chunk(
+                    cache_entry.fd,
+                    chunk.as_ref(),
+                    one_chunk_buf,
+                    !cache_entry.is_ready() || self.need_validate(),
+                )
                 .is_ok()
         {
             trace!(
@@ -237,6 +248,7 @@ impl BlobCache {
         fd: RawFd,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
+        need_validate: bool,
     ) -> Result<()> {
         let offset = if self.is_compressed {
             cki.compress_offset()
@@ -283,7 +295,14 @@ impl BlobCache {
         }
 
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, raw_stream, chunk, self.is_compressed)?;
+        self.process_raw_chunk(
+            cki,
+            raw_chunk,
+            raw_stream,
+            chunk,
+            self.is_compressed,
+            need_validate,
+        )?;
 
         Ok(())
     }
@@ -403,14 +422,19 @@ impl RafsCache for BlobCache {
                                 cache_cloned.backend(),
                             );
                             if let Ok(entry) = entry {
-                                if entry.lock().unwrap().is_ready() {
+                                let entry = entry.lock().unwrap();
+                                if entry.is_ready() {
                                     continue;
                                 }
+                                let fd = entry.fd;
+                                let chunk = entry.chunk.clone();
+                                drop(entry);
                                 if cache_cloned
                                     .read_blobcache_chunk(
-                                        entry.lock().unwrap().fd,
-                                        entry.lock().unwrap().chunk.as_ref(),
+                                        fd,
+                                        chunk.as_ref(),
                                         alloc_buf(d_size).as_mut_slice(),
+                                        cache_cloned.need_validate(),
                                     )
                                     .is_err()
                                 {
@@ -440,15 +464,18 @@ impl RafsCache for BlobCache {
                                     .set(blob_id, c.clone(), cache_cloned.backend())
                                     .map_err(|_| error!("Set cache index error!"))
                                 {
-                                    let offset = if cache_cloned.is_compressed {
-                                        entry.lock().unwrap().chunk.compress_offset()
-                                    } else {
-                                        entry.lock().unwrap().chunk.decompress_offset()
-                                    };
-
-                                    // Ignore cache errors
-                                    let _ =
-                                        entry.lock().unwrap().cache(chunks[i].as_slice(), offset);
+                                    let mut entry = entry.lock().unwrap();
+                                    if !entry.is_ready() {
+                                        let offset = if cache_cloned.is_compressed {
+                                            entry.chunk.compress_offset()
+                                        } else {
+                                            entry.chunk.decompress_offset()
+                                        };
+                                        if let Err(err) = entry.cache(chunks[i].as_slice(), offset)
+                                        {
+                                            error!("Failed to cache chunk: {}", err);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -532,6 +559,7 @@ pub fn new(
             chunk_map: HashMap::new(),
             file_map: HashMap::new(),
             work_dir: work_dir.to_string(),
+            backend_size_valid: compressor == compress::Algorithm::GZip,
         })),
         validate: config.cache_validate,
         is_compressed: config.cache_compressed,

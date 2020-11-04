@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -296,6 +297,17 @@ func (remote *Remote) Pull() error {
 
 // Unpack layer tar file to directory and not ignore OCI whiteout file
 func (remote *Remote) Unpack(workDir string, callback func(string) error) error {
+	// Write manifest.json to source directory
+	manifestFile := filepath.Join(workDir, remote.source, "manifest.json")
+	manifest, err := json.Marshal(remote.sourceManifest)
+	if err != nil {
+		return err
+	}
+
+	if err := ioutil.WriteFile(manifestFile, manifest, 0644); err != nil {
+		return err
+	}
+
 	sourceDir := filepath.Join(workDir, remote.source)
 	cs := remote.sourceImage.ContentStore()
 

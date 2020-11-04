@@ -172,8 +172,11 @@ impl Builder {
     }
 
     /// Gain file or directory inode indexes which will be put into prefetch table.
-    fn need_prefetch(&mut self, path: &PathBuf, index: u64) -> bool {
-        if self.prefetch_policy == PrefetchPolicy::None {
+    fn need_prefetch(&mut self, node: &Node) -> bool {
+        let path = &node.rootfs();
+        let index = node.inode.i_ino;
+
+        if self.prefetch_policy == PrefetchPolicy::None || node.inode.i_size == 0 {
             return false;
         }
 
@@ -266,7 +269,7 @@ impl Builder {
                 nodes.push(child.node.clone());
             }
 
-            if self.need_prefetch(&child.node.rootfs(), child.node.inode.i_ino) {
+            if self.need_prefetch(&child.node) {
                 self.readahead_files
                     .insert(child.node.rootfs(), Some(child.node.index));
             }
@@ -305,10 +308,10 @@ impl Builder {
         tree.node.index = index;
         tree.node.inode.i_ino = index;
 
-        // Fs walk skip root inode within below while loop and we allow
+        // Filesystem walking skips root inode within subsequent while loop, however, we allow
         // user to pass the source root as prefetch hint. Check it here.
         let root_path = Path::new("/").to_path_buf();
-        if self.need_prefetch(&root_path, index) {
+        if self.need_prefetch(&tree.node) {
             self.readahead_files.insert(root_path, Some(index));
         }
 
@@ -356,8 +359,8 @@ impl Builder {
     }
 
     /// Build node tree of upper layer from a filesystem directory
-    pub fn build_from_filesystem(&mut self) -> Result<()> {
-        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid)?;
+    pub fn build_from_filesystem(&mut self, layered: bool) -> Result<()> {
+        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid, layered)?;
 
         self.build_rafs_wrap(&mut tree)?;
 
@@ -366,7 +369,8 @@ impl Builder {
 
     /// Build node tree of upper layer from a stargz index
     pub fn build_from_stargz_index(&mut self) -> Result<()> {
-        let mut tree = Tree::from_stargz_index(&self.source_path, self.explicit_uidgid)?;
+        let mut tree =
+            Tree::from_stargz_index(&self.source_path, &self.blob_id, self.explicit_uidgid)?;
         self.build_rafs_wrap(&mut tree)?;
         Ok(())
     }
@@ -384,7 +388,7 @@ impl Builder {
         let blob_index = self.blob_table.entries.len() as u32;
 
         let mut blob_readahead_size = 0usize;
-        let mut blob_size = blob_readahead_size;
+        let mut blob_size = 0usize;
         let mut compress_offset = 0u64;
         let mut decompress_offset = 0u64;
         let mut blob_hash = Sha256::new();
@@ -410,6 +414,8 @@ impl Builder {
                         )?;
                     }
                 }
+
+                blob_size += blob_readahead_size;
 
                 // Dump other nodes
                 for node in &mut self.nodes {
@@ -490,11 +496,20 @@ impl Builder {
         let inode_table_entries = self.nodes.len() as u32;
         let mut inode_table = OndiskInodeTable::new(inode_table_entries as usize);
         let inode_table_size = inode_table.size();
-        let mut prefetch_table_size = 0;
+
+        // Set prefetch table
         let mut prefetch_table = PrefetchTable::new();
+        let mut prefetch_table_size = 0;
         let prefetch_table_entries = if self.prefetch_policy == PrefetchPolicy::Fs {
-            prefetch_table_size = align_to_rafs(self.hint_readahead_files.len() * size_of::<u32>());
-            self.hint_readahead_files.len() as u32
+            for i in self
+                .hint_readahead_files
+                .iter()
+                .filter_map(|(_, v)| v.as_ref())
+            {
+                prefetch_table.add_entry(*i as u32);
+            }
+            prefetch_table_size = prefetch_table.size();
+            prefetch_table.len() as u32
         } else {
             0u32
         };
@@ -550,12 +565,7 @@ impl Builder {
         // Dump bootstrap
         super_block.store(&mut self.f_bootstrap)?;
         inode_table.store(&mut self.f_bootstrap)?;
-
         if self.prefetch_policy == PrefetchPolicy::Fs {
-            for (p, i) in self.hint_readahead_files.iter() {
-                let i = i.ok_or_else(|| einval!(format!("Path {:?} is not gathered!", p)))?;
-                prefetch_table.add_entry(i as u32);
-            }
             prefetch_table.store(&mut self.f_bootstrap)?;
         }
         self.blob_table.store(&mut self.f_bootstrap)?;
@@ -607,7 +617,7 @@ impl Builder {
     pub fn build(&mut self) -> Result<(Vec<String>, usize)> {
         match self.source_type {
             SourceType::Directory => {
-                self.build_from_filesystem()?;
+                self.build_from_filesystem(self.f_parent_bootstrap.is_some())?;
             }
             SourceType::StargzIndex => {
                 self.build_from_stargz_index()?;
