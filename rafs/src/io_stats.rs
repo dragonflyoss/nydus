@@ -370,17 +370,18 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
-    pub fn export_files_access_patterns(&self) -> String {
+    pub fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(
-            &*self
+            &self
                 .access_patterns
                 .read()
-                .unwrap()
+                .expect("Not poisoned lock")
+                .deref()
                 .values()
                 .filter(|r| r.nr_read.load(Ordering::Relaxed) != 0)
                 .collect::<Vec<&Arc<AccessPattern>>>(),
         )
-        .unwrap()
+        .map_err(IoStatsError::Serialize)
     }
 
     pub fn export_global_stats(&self) -> String {
@@ -410,20 +411,20 @@ pub fn export_files_stats(name: &Option<String>) -> Result<String, IoStatsError>
     }
 }
 
-pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, String> {
+pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoStatsError> {
     let ios_set = IOS_SET.read().unwrap();
     match name {
         Some(k) => ios_set
             .get(k)
-            .ok_or_else(|| "No such Id".to_string())
-            .map(|v| v.export_files_access_patterns()),
+            .ok_or_else(|| IoStatsError::NoCounter)
+            .map(|v| v.export_files_access_patterns())?,
         None => {
             if ios_set.len() == 1 {
                 if let Some(ios) = ios_set.values().next() {
-                    return Ok(ios.export_files_access_patterns());
+                    return ios.export_files_access_patterns();
                 }
             }
-            Err("No records was specified.".to_string())
+            Err(IoStatsError::NoCounter)
         }
     }
 }
