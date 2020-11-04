@@ -384,11 +384,8 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
-    pub fn export_global_stats(&self) -> String {
-        match serde_json::to_string(self) {
-            Ok(s) => s,
-            Err(e) => format!("Failed in serializing global metrics {}", e),
-        }
+    pub fn export_global_stats(&self) -> Result<String, IoStatsError> {
+        serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
 
@@ -440,22 +437,22 @@ pub fn toggle_files_recording(name: &Option<String>, switch: bool) -> Result<(),
     }
 }
 
-pub fn export_global_stats(name: &Option<String>) -> Result<String, String> {
+pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError> {
     // With only one rafs instance, we allow caller to ask for an unknown ios name.
     let ios_set = IOS_SET.read().unwrap();
 
     match name {
         Some(k) => ios_set
             .get(k)
-            .ok_or_else(|| "No such id".to_string())
-            .map(|v| v.export_global_stats()),
+            .ok_or_else(|| IoStatsError::NoCounter)
+            .map(|v| v.export_global_stats())?,
         None => {
             if ios_set.len() == 1 {
                 if let Some(ios) = ios_set.values().next() {
-                    return Ok(ios.export_global_stats());
+                    return ios.export_global_stats();
                 }
             }
-            Err("No metrics counter was specified.".to_string())
+            Err(IoStatsError::NoCounter)
         }
     }
 }
