@@ -272,6 +272,7 @@ dependencies = [
  "cfg-if",
  "crc32fast",
  "libc",
+ "miniz-sys",
  "miniz_oxide",
 ]
 
@@ -636,6 +637,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "miniz-sys"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e9e3ae51cea1576ceba0dde3d484d30e6e5b86dee0b2d412fe3a16a15c98202"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -772,6 +783,7 @@ dependencies = [
 name = "nydus-rs"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "epoll",
  "event-manager",
@@ -784,6 +796,7 @@ dependencies = [
  "nydus-utils",
  "rafs",
  "rlimit",
+ "serde",
  "serde_json",
  "sha2",
  "stderrlog",

@@ -4,8 +4,8 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::io::{Error, Result};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufReader, Error, Read, Result, Write};
 use std::str::FromStr;
 
 use flate2::bufread::GzDecoder;
@@ -84,13 +84,25 @@ pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
     Ok((Cow::Owned(compressed), true))
 }
 
-pub fn decompress(src: &[u8], dst: &mut [u8], algorithm: Algorithm) -> Result<usize> {
+/// Decompress a source slice or file stream into destination slice, with provided compression algorithm.
+/// Use the file as decompress source if provided.
+pub fn decompress(
+    src: &[u8],
+    src_file: Option<File>,
+    dst: &mut [u8],
+    algorithm: Algorithm,
+) -> Result<usize> {
     match algorithm {
         Algorithm::None => Ok(dst.len()),
         Algorithm::LZ4Block => lz4_decompress(src, dst),
         Algorithm::GZip => {
-            let mut gz = GzDecoder::new(src);
-            gz.read_exact(dst)?;
+            if let Some(f) = src_file {
+                let mut gz = GzDecoder::new(BufReader::new(f));
+                gz.read_exact(dst)?;
+            } else {
+                let mut gz = GzDecoder::new(src);
+                gz.read_exact(dst)?;
+            };
             Ok(dst.len())
         }
     }
@@ -99,6 +111,8 @@ pub fn decompress(src: &[u8], dst: &mut [u8], algorithm: Algorithm) -> Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Seek, SeekFrom};
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_compress_algorithm_gzip() {
@@ -109,8 +123,28 @@ mod tests {
         assert_ne!(compressed.len(), 0);
 
         let mut decompressed = vec![0; buf.len()];
-        let sz = decompress(&compressed, decompressed.as_mut_slice(), Algorithm::GZip).unwrap();
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::GZip,
+        )
+        .unwrap();
+        assert_eq!(sz, 4095);
+        assert_eq!(buf, decompressed);
 
+        let mut tmp_file = TempFile::new().unwrap().into_file();
+        tmp_file.write_all(&compressed).unwrap();
+        tmp_file.seek(SeekFrom::Start(0)).unwrap();
+
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            Some(tmp_file),
+            decompressed.as_mut_slice(),
+            Algorithm::GZip,
+        )
+        .unwrap();
         assert_eq!(sz, 4095);
         assert_eq!(buf, decompressed);
     }
@@ -133,6 +167,7 @@ mod tests {
         let mut decompressed = vec![0; buf.len()];
         let sz = decompress(
             &compressed,
+            None,
             decompressed.as_mut_slice(),
             Algorithm::LZ4Block,
         )
@@ -149,6 +184,7 @@ mod tests {
         let mut decompressed = vec![0; buf.len()];
         let sz = decompress(
             &compressed,
+            None,
             decompressed.as_mut_slice(),
             Algorithm::LZ4Block,
         )
@@ -168,6 +204,7 @@ mod tests {
         let mut decompressed = vec![0; buf.len()];
         let sz = decompress(
             &compressed,
+            None,
             decompressed.as_mut_slice(),
             Algorithm::LZ4Block,
         )
@@ -184,6 +221,7 @@ mod tests {
         let mut decompressed = vec![0; buf.len()];
         let sz = decompress(
             &compressed,
+            None,
             decompressed.as_mut_slice(),
             Algorithm::LZ4Block,
         )
@@ -200,6 +238,7 @@ mod tests {
         let mut decompressed = vec![0; buf.len()];
         let sz = decompress(
             &compressed,
+            None,
             decompressed.as_mut_slice(),
             Algorithm::LZ4Block,
         )
@@ -216,6 +255,7 @@ mod tests {
         let mut decompressed = vec![0; buf.len()];
         let sz = decompress(
             &compressed,
+            None,
             decompressed.as_mut_slice(),
             Algorithm::LZ4Block,
         )

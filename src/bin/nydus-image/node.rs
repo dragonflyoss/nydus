@@ -29,6 +29,15 @@ use rafs::storage::compress;
 
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
+pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
+pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WhiteoutType {
+    Opaque,
+    Removal,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Overlay {
     Lower,
@@ -60,7 +69,7 @@ impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_name_size {} i_symlink_size {} has_xattr {}",
+            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_size {} i_name_size {} i_symlink_size {} has_xattr {} link {:?}",
             self.file_type(),
             self.rootfs(),
             self.index,
@@ -70,9 +79,11 @@ impl fmt::Display for Node {
             self.inode.i_child_index,
             self.inode.i_child_count,
             self.inode.i_nlink,
+            self.inode.i_size,
             self.inode.i_name_size,
             self.inode.i_symlink_size,
             self.inode.has_xattr(),
+            self.symlink,
         )
     }
 }
@@ -399,5 +410,18 @@ impl Node {
                 _ => OsString::new(),
             })
             .collect::<Vec<_>>()
+    }
+
+    pub fn whiteout_type(&self) -> Option<WhiteoutType> {
+        let name = self.name();
+        if name == OCISPEC_WHITEOUT_OPAQUE {
+            return Some(WhiteoutType::Opaque);
+        }
+        if let Some(n) = name.to_str() {
+            if n.starts_with(OCISPEC_WHITEOUT_PREFIX) {
+                return Some(WhiteoutType::Removal);
+            }
+        }
+        None
     }
 }

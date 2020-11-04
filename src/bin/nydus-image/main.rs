@@ -8,10 +8,13 @@ extern crate stderrlog;
 
 mod builder;
 mod node;
+mod stargz;
 mod tree;
+mod validator;
 
 #[macro_use]
 extern crate log;
+extern crate serde;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
@@ -19,14 +22,18 @@ use clap::{App, Arg, SubCommand};
 use vmm_sys_util::tempfile::TempFile;
 
 use std::collections::BTreeMap;
+use std::fs::metadata;
 use std::fs::rename;
 use std::io::{self, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use builder::SourceType;
 use nydus_utils::einval;
 use nydus_utils::log_level_to_verbosity;
-use rafs::storage::{backend, factory};
+use rafs::metadata::digest;
+use rafs::storage::{backend, compress, factory};
+use validator::Validator;
 
 fn upload_blob(
     backend: Arc<dyn backend::BlobBackendUploader>,
@@ -138,6 +145,14 @@ fn main() -> Result<()> {
                         .index(1),
                 )
                 .arg(
+                    Arg::with_name("source-type")
+                        .long("source-type")
+                        .help("source type")
+                        .takes_value(true)
+                        .default_value("directory")
+                        .possible_values(&["directory", "stargz_index"])
+                )
+                .arg(
                     Arg::with_name("blob")
                         .long("blob")
                         .help("blob file path")
@@ -205,6 +220,23 @@ fn main() -> Result<()> {
                     .takes_value(false)
                     .required(false),
                 )
+                .arg(
+                    Arg::with_name("disable-check")
+                    .long("disable-check")
+                    .help("Disable to validate bootstrap file after building")
+                    .takes_value(false)
+                    .required(false)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("check")
+                .about("validate image bootstrap")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .help("bootstrap file path (required)")
+                        .takes_value(true),
+                )
         )
         .arg(
             Arg::with_name("log-level")
@@ -232,11 +264,13 @@ fn main() -> Result<()> {
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         let source_path = Path::new(matches.value_of("SOURCE").expect("SOURCE is required"));
-        let bootstrap_path = Path::new(
-            matches
-                .value_of("bootstrap")
-                .expect("bootstrap is required"),
-        );
+        let source_type: SourceType = matches
+            .value_of("source-type")
+            .expect("source-type is required")
+            .parse()?;
+
+        let source_file = metadata(source_path)
+            .map_err(|e| einval!(format!("failed to get source path {:?}", e)))?;
 
         let mut blob_id = String::new();
         if let Some(p_blob_id) = matches.value_of("blob-id") {
@@ -249,9 +283,39 @@ fn main() -> Result<()> {
             }
         }
 
-        let compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
-        let digester = matches.value_of("digester").unwrap_or_default().parse()?;
+        let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
+        let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
         let repeatable = matches.is_present("repeatable");
+
+        match source_type {
+            SourceType::Directory => {
+                if !source_file.is_dir() {
+                    return Err(einval!("source must be a directory"));
+                }
+            }
+            SourceType::StargzIndex => {
+                if !source_file.is_file() {
+                    return Err(einval!("source must be a JSON file"));
+                }
+                if blob_id.trim() == "" {
+                    return Err(einval!("blob-id can't be empty"));
+                }
+                if compressor != compress::Algorithm::GZip {
+                    trace!("compressor set to {}", compress::Algorithm::GZip);
+                }
+                compressor = compress::Algorithm::GZip;
+                if digester != digest::Algorithm::Sha256 {
+                    trace!("digester set to {}", digest::Algorithm::Sha256);
+                }
+                digester = digest::Algorithm::Sha256;
+            }
+        }
+
+        let bootstrap_path = Path::new(
+            matches
+                .value_of("bootstrap")
+                .expect("bootstrap is required"),
+        );
 
         let temp_file = TempFile::new_with_prefix("").unwrap();
 
@@ -277,6 +341,7 @@ fn main() -> Result<()> {
         };
 
         let mut ib = builder::Builder::new(
+            source_type,
             source_path,
             blob_path,
             bootstrap_path,
@@ -289,6 +354,21 @@ fn main() -> Result<()> {
             !repeatable,
         )?;
         let (blob_ids, blob_size) = ib.build()?;
+
+        // Validate output bootstrap file
+        if !matches.is_present("disable-check") {
+            let mut validator = Validator::new(&bootstrap_path)?;
+            match validator.check(false) {
+                Ok(valid) => {
+                    if !valid {
+                        return Err(einval!("Failed to build bootstrap from source"));
+                    }
+                }
+                Err(err) => {
+                    return Err(err);
+                }
+            }
+        }
 
         // Upload blob file
         if blob_size > 0 {
@@ -323,6 +403,27 @@ fn main() -> Result<()> {
             );
         } else {
             info!("build finished, blob id: {:?}", blob_ids);
+        }
+    }
+
+    if let Some(matches) = cmd.subcommand_matches("check") {
+        let bootstrap_path = Path::new(
+            matches
+                .value_of("bootstrap")
+                .expect("bootstrap is required"),
+        );
+        let mut validator = Validator::new(bootstrap_path)?;
+        match validator.check(true) {
+            Ok(valid) => {
+                if valid {
+                    info!("Bootstrap is valid");
+                } else {
+                    return Err(einval!("Bootstrap is invalid"));
+                }
+            }
+            Err(err) => {
+                return Err(err);
+            }
         }
     }
 

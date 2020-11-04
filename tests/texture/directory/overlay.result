@@ -30,9 +30,9 @@
 271a8b07f790ae6b059bfcb9ea6efb08  /root-2
 6680188f2ec4da0fd3cfc4adc414664f  /sub/sub-1
 7764cf3537c4d8dc29457de8cf469cb4  /sub/more/more-sub/more-sub-2
+a832eab60623f115363cc100a8862c23  /root-large
+a832eab60623f115363cc100a8862c23  /root-large-copy
+a832eab60623f115363cc100a8862c23  /sub/sub-root-large-copy-hardlink
+a832eab60623f115363cc100a8862c23  /sub/sub-root-large-hardlink
 b2021d22d9a3f195c04f20c00c1ebee7  /sub/more/more-1
-c1c5a1f780723675d3029d0b785ba1d5  /root-large
-c1c5a1f780723675d3029d0b785ba1d5  /root-large-copy
-c1c5a1f780723675d3029d0b785ba1d5  /sub/sub-root-large-copy-hardlink
-c1c5a1f780723675d3029d0b785ba1d5  /sub/sub-root-large-hardlink
 c23de3d6d035ef386af6b63c3562bde5  /sub/some/some-sub/some-sub-1

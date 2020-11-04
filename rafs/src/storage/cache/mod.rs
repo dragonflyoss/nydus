@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp;
+use std::fs::File;
 use std::io::Result;
 use std::slice;
 use std::sync::Arc;
@@ -174,16 +175,55 @@ pub trait RafsCache {
             // TODO: Use a buffer pool for lower latency?
             //
             // gzip is special that it doesn't carry compress_size, instead, we can read as much
-            // as 4MB compressed data per chunk, decompress as much as necessary to fill in chunk
+            // as chunk_decompress_size compressed data per chunk, decompress as much as necessary to fill in chunk
             // that has the original uncompressed data size.
-            // FIXME: This is ineffecient! Eventually we should have a streaming blob cache that is managed
-            // by fixed chunk size instead of RafsChunkInfo.
-            // And it is extremely ineffecient for dummy cache.
             let c_size = if self.compressor() != compress::Algorithm::GZip {
                 cki.compress_size() as usize
             } else {
-                let size = self.blob_size(blob_id)? - cki.compress_offset();
-                cmp::min(size, 4 << 20) as usize
+                // Per man(1) gzip
+                // The worst case expansion is a few bytes for the gzip file header,
+                // plus 5 bytes every 32K block, or an expansion ratio of 0.015% for
+                // large files.
+                //
+                // Per http://www.zlib.org/rfc-gzip.html#header-trailer
+                // Each member has the following structure:
+                // +---+---+---+---+---+---+---+---+---+---+
+                // |ID1|ID2|CM |FLG|     MTIME     |XFL|OS | (more-->)
+                // +---+---+---+---+---+---+---+---+---+---+
+                // (if FLG.FEXTRA set)
+                // +---+---+=================================+
+                // | XLEN  |...XLEN bytes of "extra field"...| (more-->)
+                // +---+---+=================================+
+                // (if FLG.FNAME set)
+                // +=========================================+
+                // |...original file name, zero-terminated...| (more-->)
+                // +=========================================+
+                // (if FLG.FCOMMENT set)
+                // +===================================+
+                // |...file comment, zero-terminated...| (more-->)
+                // +===================================+
+                // (if FLG.FHCRC set)
+                // +---+---+
+                // | CRC16 |
+                // +---+---+
+                // +=======================+
+                // |...compressed blocks...| (more-->)
+                // +=======================+
+                //   0   1   2   3   4   5   6   7
+                // +---+---+---+---+---+---+---+---+
+                // |     CRC32     |     ISIZE     |
+                // +---+---+---+---+---+---+---+---+
+                // gzip head+footer is at least 10+8 bytes, stargz header doesn't include any flags
+                // so it's 18 bytes. Let's read at least 128 bytes more, to allow the decompressor to
+                // find out end of the gzip stream.
+                //
+                // Ideally we should introduce a streaming cache for stargz that maintains internal
+                // chunks and expose stream APIs.
+                let size = chunk.len() + 10 + 8 + 5 + (chunk.len() / (16 << 10)) * 5 + 128;
+                cmp::min(
+                    size as u64,
+                    self.blob_size(blob_id)? - cki.compress_offset(),
+                ) as usize
             };
             d = alloc_buf(c_size);
             d.as_mut_slice()
@@ -194,7 +234,7 @@ pub trait RafsCache {
 
         self.backend().read(blob_id, raw_chunk, offset)?;
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(cki, raw_chunk, chunk, cki.is_compressed())
+        self.process_raw_chunk(cki, raw_chunk, None, chunk, cki.is_compressed())
             .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
         cacher(raw_chunk, chunk)?;
         Ok(chunk.len())
@@ -208,11 +248,12 @@ pub trait RafsCache {
         &self,
         cki: &dyn RafsChunkInfo,
         raw_chunk: &[u8],
+        raw_stream: Option<File>,
         chunk: &mut [u8],
         need_decompress: bool,
     ) -> Result<usize> {
         if need_decompress {
-            compress::decompress(raw_chunk, chunk, self.compressor()).map_err(|e| {
+            compress::decompress(raw_chunk, raw_stream, chunk, self.compressor()).map_err(|e| {
                 error!("failed to decompress chunk: {}", e);
                 e
             })?;
@@ -267,6 +308,7 @@ pub trait RafsCache {
             self.process_raw_chunk(
                 cki.as_ref(),
                 &c_buf[offset_merged..(offset_merged + size_merged)],
+                None,
                 &mut chunk,
                 cki.is_compressed(),
             )?;

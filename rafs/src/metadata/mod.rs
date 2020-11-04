@@ -218,7 +218,7 @@ impl RafsSuper {
         self.meta.prefetch_table_offset = sb.prefetch_table_offset();
         self.meta.prefetch_table_entries = sb.prefetch_table_entries();
 
-        info!("rafs superblock features: {}", self.meta.flags);
+        debug!("rafs superblock features: {}", self.meta.flags);
 
         match self.meta.version {
             RAFS_SUPER_VERSION_V4 => {
@@ -436,12 +436,10 @@ pub trait RafsSuperInodes {
         let mut hasher = RafsDigest::hasher(digester);
 
         if inode.is_symlink() {
-            // trace!("\tdigest symlink {}", inode.get_symlink()?);
             hasher.digest_update(inode.get_symlink()?.as_os_str().as_bytes());
         } else {
             for idx in 0..child_count {
                 if inode.is_dir() {
-                    // trace!("\tdigest child {}", idx);
                     let child = inode.get_child_by_index(idx as u64)?;
                     if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
                         && !self.digest_validate(child.clone(), recursive, digester)?
@@ -452,7 +450,6 @@ pub trait RafsSuperInodes {
                     let child_digest = child_digest.as_ref().as_ref();
                     hasher.digest_update(child_digest);
                 } else {
-                    // trace!("\tdigest chunk {}", idx);
                     let chunk = inode.get_chunk_info(idx as u32)?;
                     let chunk_digest = chunk.block_id();
                     let chunk_digest = chunk_digest.as_ref().as_ref();
@@ -465,8 +462,9 @@ pub trait RafsSuperInodes {
         let result = expected_digest == digest;
         if !result {
             error!(
-                "invalid inode digest {}, ino: {} name: {:?}",
+                "invalid inode digest {}, expected {}, ino: {} name: {:?}",
                 digest,
+                expected_digest,
                 inode.ino(),
                 inode.name()?
             );

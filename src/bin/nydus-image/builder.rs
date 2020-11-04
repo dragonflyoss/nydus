@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::io::{Error, Result};
 use std::mem::size_of;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -21,12 +22,18 @@ use rafs::metadata::{Inode, RafsMode, RafsStore, RafsSuper};
 use rafs::storage::compress;
 use rafs::{RafsIoRead, RafsIoWrite};
 
+use crate::stargz;
+
 use crate::node::*;
 use crate::tree::Tree;
 
 pub struct Builder {
-    /// Source root path.
-    root: PathBuf,
+    /// Source type: Directory | StargzIndex
+    source_type: SourceType,
+    /// Source path, for different source type:
+    /// Directory: should be a directory path
+    /// StargzIndex: should be a stargz index json file path
+    source_path: PathBuf,
     /// Blob id (user specified or sha256(blob)).
     blob_id: String,
     /// Blob file writer.
@@ -84,10 +91,28 @@ impl FromStr for PrefetchPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SourceType {
+    Directory,
+    StargzIndex,
+}
+
+impl FromStr for SourceType {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "directory" => Ok(Self::Directory),
+            "stargz_index" => Ok(Self::StargzIndex),
+            _ => Err(einval!("Invalid source type.")),
+        }
+    }
+}
+
 impl Builder {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        root: &Path,
+        source_type: SourceType,
+        source_path: &Path,
         blob_path: &Path,
         bootstrap_path: &Path,
         parent_bootstrap_path: &Path,
@@ -126,7 +151,8 @@ impl Builder {
             };
 
         Ok(Builder {
-            root: PathBuf::from(root),
+            source_type,
+            source_path: PathBuf::from(source_path),
             blob_id,
             f_blob,
             f_bootstrap,
@@ -179,8 +205,11 @@ impl Builder {
     fn build_rafs(&mut self, tree: &mut Tree, nodes: &mut Vec<Node>) -> Result<()> {
         let index = nodes.len() as u64;
         let parent = &mut nodes[tree.node.index as usize - 1];
-        parent.inode.i_child_index = index as u32 + 1;
-        parent.inode.i_child_count = tree.children.len() as u32;
+
+        if parent.is_dir() {
+            parent.inode.i_child_index = index as u32 + 1;
+            parent.inode.i_child_count = tree.children.len() as u32;
+        }
 
         let parent_ino = parent.inode.i_ino;
 
@@ -210,10 +239,12 @@ impl Builder {
                 let first_index = indexes.first().unwrap();
                 let nlink = indexes.len() as u32;
                 child.node.inode.i_ino = *first_index;
-                // Store node for bootstrap & blob dump
-                nodes.push(child.node.clone());
+                child.node.inode.i_nlink = nlink;
                 // Update nlink for previous hardlink inodes
                 for idx in indexes {
+                    if index == *idx {
+                        continue;
+                    }
                     nodes[*idx as usize - 1].inode.i_nlink = nlink;
                 }
             } else {
@@ -224,7 +255,14 @@ impl Builder {
                     (child.node.real_ino, child.node.dev),
                     vec![child.node.index],
                 );
-                // Store node for bootstrap & blob dump
+            }
+
+            // Store node for bootstrap & blob dump.
+            // Put the whiteout file of upper layer in the front of node list for layered build,
+            // so that it can be applied to the node tree of lower layer first than other files of upper layer.
+            if self.f_parent_bootstrap.is_some() && child.node.whiteout_type().is_some() {
+                nodes.insert(0, child.node.clone());
+            } else {
                 nodes.push(child.node.clone());
             }
 
@@ -297,12 +335,16 @@ impl Builder {
             )));
         }
 
+        // Reuse lower layer blob table,
+        // we need to append the blob entry of upper layer to the table
+        self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
+
         // Build node tree of lower layer from a bootstrap file
         let mut tree = Tree::from_bootstrap(&rs)?;
 
         // Apply new node (upper layer) to node tree (lower layer)
         for node in &self.nodes {
-            tree.apply(&node)?;
+            tree.apply(&node, true)?;
         }
 
         self.lower_inode_map.clear();
@@ -310,29 +352,27 @@ impl Builder {
         self.readahead_files.clear();
         self.build_rafs_wrap(&mut tree)?;
 
-        // Reuse lower layer blob table,
-        // we need to append the blob entry of upper layer to the table
-        self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
-
         Ok(())
     }
 
     /// Build node tree of upper layer from a filesystem directory
-    pub fn build_from_filesystem(&mut self, overlay: bool) -> Result<()> {
-        let mut tree = Tree::from_filesystem(&self.root, overlay, self.explicit_uidgid)?;
+    pub fn build_from_filesystem(&mut self) -> Result<()> {
+        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid)?;
 
         self.build_rafs_wrap(&mut tree)?;
 
         Ok(())
     }
 
-    /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
-    fn dump_to_file(&mut self) -> Result<(Vec<String>, usize)> {
-        let mut compress_offset = 0u64;
-        let mut decompress_offset = 0u64;
-        let mut blob_hash = Sha256::new();
-        let blob_new_index = self.blob_table.entries.len() as u32;
+    /// Build node tree of upper layer from a stargz index
+    pub fn build_from_stargz_index(&mut self) -> Result<()> {
+        let mut tree = Tree::from_stargz_index(&self.source_path, self.explicit_uidgid)?;
+        self.build_rafs_wrap(&mut tree)?;
+        Ok(())
+    }
 
+    /// Dump blob file and generate chunks
+    fn dump_blob(&mut self) -> Result<(Sha256, usize, usize)> {
         // Sort readahead list by file size for better prefetch
         let mut readahead_files = self
             .readahead_files
@@ -341,71 +381,103 @@ impl Builder {
             .collect::<Vec<&u64>>();
         readahead_files.sort_by_key(|index| self.nodes[**index as usize - 1].inode.i_size);
 
-        // Dump readahead nodes
-        let blob_readahead_offset = 0;
+        let blob_index = self.blob_table.entries.len() as u32;
+
         let mut blob_readahead_size = 0usize;
-        for index in &readahead_files {
-            let node = self.nodes.get_mut(**index as usize - 1).unwrap();
-            debug!("[{}]\treadahead {}", node.overlay, node,);
-            if node.overlay == Overlay::UpperAddition || node.overlay == Overlay::UpperModification
-            {
-                blob_readahead_size += node.dump_blob(
-                    &mut self.f_blob,
-                    &mut blob_hash,
-                    &mut compress_offset,
-                    &mut decompress_offset,
-                    &mut self.chunk_cache,
-                    self.compressor,
-                    self.digester,
-                    blob_new_index,
-                )?;
+        let mut blob_size = blob_readahead_size;
+        let mut compress_offset = 0u64;
+        let mut decompress_offset = 0u64;
+        let mut blob_hash = Sha256::new();
+
+        match self.source_type {
+            SourceType::Directory => {
+                // Dump readahead nodes
+                for index in &readahead_files {
+                    let node = self.nodes.get_mut(**index as usize - 1).unwrap();
+                    debug!("[{}]\treadahead {}", node.overlay, node);
+                    if node.overlay == Overlay::UpperAddition
+                        || node.overlay == Overlay::UpperModification
+                    {
+                        blob_readahead_size += node.dump_blob(
+                            &mut self.f_blob,
+                            &mut blob_hash,
+                            &mut compress_offset,
+                            &mut decompress_offset,
+                            &mut self.chunk_cache,
+                            self.compressor,
+                            self.digester,
+                            blob_index,
+                        )?;
+                    }
+                }
+
+                // Dump other nodes
+                for node in &mut self.nodes {
+                    if self.readahead_files.get(&node.rootfs()).is_some() {
+                        continue;
+                    }
+                    // Ignore lower layer node when dump blob
+                    debug!("[{}]\t{}", node.overlay, node);
+                    if !node.is_dir()
+                        && (node.overlay == Overlay::UpperAddition
+                            || node.overlay == Overlay::UpperModification)
+                    {
+                        blob_size += node.dump_blob(
+                            &mut self.f_blob,
+                            &mut blob_hash,
+                            &mut compress_offset,
+                            &mut decompress_offset,
+                            &mut self.chunk_cache,
+                            self.compressor,
+                            self.digester,
+                            blob_index,
+                        )?;
+                    }
+                }
+            }
+            SourceType::StargzIndex => {
+                // Set blob index and inode digest for upper nodes
+                for node in &mut self.nodes {
+                    if node.overlay.lower_layer() {
+                        continue;
+                    }
+
+                    let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+
+                    for chunk in node.chunks.iter_mut() {
+                        (*chunk).blob_index = blob_index;
+                        inode_hasher.digest_update(chunk.block_id.as_ref());
+                    }
+
+                    if node.is_symlink() {
+                        node.inode.i_digest = RafsDigest::from_buf(
+                            node.symlink.as_ref().unwrap().as_bytes(),
+                            digest::Algorithm::Sha256,
+                        );
+                    } else {
+                        node.inode.i_digest = inode_hasher.digest_finalize();
+                    }
+                }
             }
         }
 
-        // Dump other nodes
-        let mut blob_size = blob_readahead_size;
-        let mut has_xattr = false;
-        for node in &mut self.nodes {
-            if let Some(Some(_)) = self.readahead_files.get(&node.rootfs()) {
-                // Prepare readahead node for bootstrap dump
-                // node.clone_from(&self.nodes[*index as usize - 1]);
-            } else {
-                // Ignore lower layer node when dump blob
-                debug!("[{}]\t{}", node.overlay, node);
-                if !node.is_dir()
-                    && (node.overlay == Overlay::UpperAddition
-                        || node.overlay == Overlay::UpperModification)
-                {
-                    blob_size += node.dump_blob(
-                        &mut self.f_blob,
-                        &mut blob_hash,
-                        &mut compress_offset,
-                        &mut decompress_offset,
-                        &mut self.chunk_cache,
-                        self.compressor,
-                        self.digester,
-                        blob_new_index,
-                    )?;
-                }
-            }
-            if node.inode.has_xattr() {
-                has_xattr = true;
-            }
-        }
+        Ok((blob_hash, blob_size, blob_readahead_size))
+    }
+
+    /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
+    fn dump_to_file(&mut self) -> Result<(Vec<String>, usize)> {
+        let (blob_hash, blob_size, mut blob_readahead_size) = self.dump_blob()?;
 
         // Set blob hash as blob id if not specified.
         if self.blob_id == "" {
             self.blob_id = format!("{:x}", blob_hash.finalize());
         }
-        if blob_size > 0 {
+        if blob_size > 0 || (self.source_type == SourceType::StargzIndex && self.blob_id != "") {
             if self.prefetch_policy != PrefetchPolicy::Blob {
                 blob_readahead_size = 0;
             }
-            self.blob_table.add(
-                self.blob_id.clone(),
-                blob_readahead_offset,
-                blob_readahead_size as u32,
-            );
+            self.blob_table
+                .add(self.blob_id.clone(), 0, blob_readahead_size as u32);
         }
 
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
@@ -446,26 +518,33 @@ impl Builder {
         if self.explicit_uidgid {
             super_block.set_explicit_uidgid();
         }
-        if has_xattr {
-            super_block.set_has_xattr();
+        if self.source_type == SourceType::StargzIndex {
+            super_block.set_block_size(stargz::DEFAULT_BLOCK_SIZE);
         }
         super_block.set_prefetch_table_entries(prefetch_table_entries);
 
         let mut inode_offset =
             (super_block_size + inode_table_size + prefetch_table_size + blob_table_size) as u32;
 
+        let mut has_xattr = false;
         for node in &mut self.nodes {
             inode_table.set(node.index, inode_offset)?;
             // Add inode size
             inode_offset += node.inode.size() as u32;
-            if node.inode.has_xattr() && !node.xattrs.pairs.is_empty() {
-                inode_offset += (size_of::<OndiskXAttrs>() + node.xattrs.aligned_size()) as u32;
+            if node.inode.has_xattr() {
+                has_xattr = true;
+                if !node.xattrs.pairs.is_empty() {
+                    inode_offset += (size_of::<OndiskXAttrs>() + node.xattrs.aligned_size()) as u32;
+                }
             }
             // Add chunks size
             if node.is_reg() {
                 inode_offset +=
                     (node.inode.i_child_count as usize * size_of::<OndiskChunkInfo>()) as u32;
             }
+        }
+        if has_xattr {
+            super_block.set_has_xattr();
         }
 
         // Dump bootstrap
@@ -482,6 +561,14 @@ impl Builder {
         self.blob_table.store(&mut self.f_bootstrap)?;
 
         for node in &mut self.nodes {
+            if self.source_type == SourceType::StargzIndex {
+                debug!("[{}]\t{}", node.overlay, node);
+                if log::max_level() >= log::LevelFilter::Debug {
+                    for chunk in node.chunks.iter_mut() {
+                        trace!("\t\tbuilding chunk: {}", chunk);
+                    }
+                }
+            }
             node.dump_bootstrap(&mut self.f_bootstrap)?;
         }
 
@@ -518,16 +605,21 @@ impl Builder {
 
     /// Build workflow, return (Vec<blob_id>, blob_size)
     pub fn build(&mut self) -> Result<(Vec<String>, usize)> {
+        match self.source_type {
+            SourceType::Directory => {
+                self.build_from_filesystem()?;
+            }
+            SourceType::StargzIndex => {
+                self.build_from_stargz_index()?;
+            }
+        }
         if self.f_parent_bootstrap.is_some() {
             // For layered build
-            self.build_from_filesystem(true)?;
             self.apply_to_bootstrap()?;
-        } else {
-            // For non-layered build
-            self.build_from_filesystem(false)?;
         }
-
         // Dump blob and bootstrap file
-        self.dump_to_file()
+        let (blob_ids, blob_size) = self.dump_to_file()?;
+
+        Ok((blob_ids, blob_size))
     }
 }

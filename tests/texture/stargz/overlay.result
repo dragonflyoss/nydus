@@ -8,33 +8,31 @@
       {"type":"directory","name":"more","contents":[
         {"type":"file","name":"more-1"},
         {"type":"directory","name":"more-sub","contents":[
-          {"type":"file","name":"more-sub-1"}
+          {"type":"file","name":"more-sub-2"}
         ]}
       ]},
       {"type":"directory","name":"some","contents":[
-        {"type":"file","name":"some-1"}
+        {"type":"directory","name":"some-sub","contents":[
+          {"type":"file","name":"some-sub-1"}
+        ]}
       ]},
       {"type":"file","name":"sub-1"},
-      {"type":"file","name":"sub-2"},
       {"type":"file","name":"sub-root-large-copy-hardlink"},
-      {"type":"file","name":"sub-root-large-copy-hardlink-1"},
       {"type":"file","name":"sub-root-large-hardlink"},
       {"type":"link","name":"sub-root-large-symlink","target":"../root-large","contents":[]}
     ]},
     {"type":"file","name":"test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name."}
   ]},
-  {"type":"report","directories":4,"files":14}
+  {"type":"report","directories":5,"files":12}
 ]
-1db49cdc205866ae03c1bf1c0c569964  /sub/some/some-1
 1fc133b570f60d1a13f2c97e179a7e8b  /root-1
 2655622de6a29f06e0684f55ddc45cc5  /test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.
-34fd810de15e465479ff2d6ff859b5f2  /sub/sub-2
-8593f734ad273015e2376857d02e6b0d  /root-2
-9eb85482ce4c00a585f1dc96070b7c6d  /sub/more/more-1
-c1c5a1f780723675d3029d0b785ba1d5  /root-large
-c1c5a1f780723675d3029d0b785ba1d5  /root-large-copy
-c1c5a1f780723675d3029d0b785ba1d5  /sub/sub-root-large-copy-hardlink
-c1c5a1f780723675d3029d0b785ba1d5  /sub/sub-root-large-copy-hardlink-1
-c1c5a1f780723675d3029d0b785ba1d5  /sub/sub-root-large-hardlink
-cca7b08b6c36f4adce54108e0ec23fe7  /sub/more/more-sub/more-sub-1
-fb99fe44d7d0c4486fdb707dc260b2c8  /sub/sub-1
+271a8b07f790ae6b059bfcb9ea6efb08  /root-2
+6680188f2ec4da0fd3cfc4adc414664f  /sub/sub-1
+7764cf3537c4d8dc29457de8cf469cb4  /sub/more/more-sub/more-sub-2
+a832eab60623f115363cc100a8862c23  /root-large
+a832eab60623f115363cc100a8862c23  /root-large-copy
+a832eab60623f115363cc100a8862c23  /sub/sub-root-large-copy-hardlink
+a832eab60623f115363cc100a8862c23  /sub/sub-root-large-hardlink
+b2021d22d9a3f195c04f20c00c1ebee7  /sub/more/more-1
+c23de3d6d035ef386af6b63c3562bde5  /sub/some/some-sub/some-sub-1

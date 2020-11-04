@@ -187,6 +187,9 @@ impl fmt::Display for RafsSuperFlags {
         if self.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) {
             write!(f, "COMPRESS_LZ4_BLOCK ")?;
         }
+        if self.contains(RafsSuperFlags::COMPRESS_GZIP) {
+            write!(f, "COMPRESS_GZIP ")?;
+        }
         if self.contains(RafsSuperFlags::DIGESTER_BLAKE3) {
             write!(f, "DIGESTER_BLAKE3 ")?;
         }
@@ -368,10 +371,6 @@ impl OndiskSuperBlock {
 
 impl RafsStore for OndiskSuperBlock {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        info!(
-            "rafs superblock features: {}",
-            RafsSuperFlags::from_bits(self.s_flags).unwrap_or_default()
-        );
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
     }
@@ -904,7 +903,7 @@ impl fmt::Display for OndiskChunkInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "file_offset {}, compress_offset {}, compress_size {}, decompress_offset {}, decompress_size {}, blob_index {}, block_id {:?}, is_compressed {}",
+            "file_offset {}, compress_offset {}, compress_size {}, decompress_offset {}, decompress_size {}, blob_index {}, block_id {}, is_compressed {}",
             self.file_offset,
             self.compress_offset,
             self.compress_size,
