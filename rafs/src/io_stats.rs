@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+use serde_json::Error as SerdeError;
+
 pub type Inode = u64;
 
 #[derive(PartialEq, Copy)]
@@ -27,6 +29,12 @@ pub enum StatsFop {
     Lookup,
     Readdir,
     Max,
+}
+
+#[derive(Debug)]
+pub enum IoStatsError {
+    NoCounter,
+    Serialize(SerdeError),
 }
 
 impl Clone for StatsFop {
