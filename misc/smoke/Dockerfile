@@ -15,4 +15,6 @@ RUN apt update && apt install -y tree
 
 WORKDIR /nydus-rs
 
+ENV RUSTFLAGS="-D warnings"
+
 CMD chmod 400 /root/.ssh/id_rsa && eval `ssh-agent` && ssh-add && make test
