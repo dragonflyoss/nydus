@@ -148,11 +148,11 @@ impl Rafs {
     }
 
     /// update backend meta and blob file.
-    pub fn update(&self, r: &mut RafsIoReader, conf: RafsConfig) -> Result<()> {
+    pub fn update(&self, r: &mut RafsIoReader, conf: RafsConfig) -> RafsResult<()> {
         info!("update");
         if !self.initialized {
             warn!("Rafs is not yet initialized");
-            return Err(enoent!("Rafs is not yet initialized"));
+            return Err(RafsError::Uninitialized);
         }
 
         // step 1: update sb.
@@ -165,11 +165,13 @@ impl Rafs {
         info!("update sb is successful");
 
         // step 2: update device (only localfs is supported)
-        self.device.update(
-            conf.device,
-            self.sb.meta.get_compressor(),
-            self.sb.meta.get_digester(),
-        )?;
+        self.device
+            .update(
+                conf.device,
+                self.sb.meta.get_compressor(),
+                self.sb.meta.get_digester(),
+            )
+            .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
         Ok(())

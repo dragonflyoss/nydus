@@ -13,8 +13,7 @@ extern crate bitflags;
 
 use std::any::Any;
 use std::fs::File;
-use std::io::Result;
-use std::io::{Read, Seek, Write};
+use std::io::{Error, Read, Result, Seek, Write};
 use std::os::unix::io::AsRawFd;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
@@ -31,6 +30,16 @@ use std::io::SeekFrom;
 extern crate lazy_static;
 #[allow(dead_code)]
 pub mod io_stats;
+
+#[derive(Debug)]
+pub enum RafsError {
+    Unsupported,
+    Uninitialized,
+    ReadMetadata(Error),
+    SwapBackend(Error),
+}
+
+pub type RafsResult<T> = std::result::Result<T, RafsError>;
 
 /// A helper trait for RafsIoReader.
 pub trait RafsIoRead: Read + AsRawFd + Seek {}

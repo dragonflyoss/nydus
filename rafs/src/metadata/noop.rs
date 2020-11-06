@@ -44,7 +44,7 @@ impl RafsSuperInodes for NoopInodes {
         unimplemented!()
     }
 
-    fn update(&self, _r: &mut RafsIoReader) -> Result<()> {
+    fn update(&self, _r: &mut RafsIoReader) -> RafsResult<()> {
         unimplemented!()
     }
 }

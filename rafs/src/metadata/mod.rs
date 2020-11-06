@@ -196,10 +196,10 @@ impl RafsSuper {
         self.inodes.destroy();
     }
 
-    pub fn update(&self, r: &mut RafsIoReader) -> Result<()> {
+    pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
         let mut sb = OndiskSuperBlock::new();
 
-        r.read_exact(sb.as_mut())?;
+        r.read_exact(sb.as_mut()).map_err(RafsError::ReadMetadata)?;
         self.inodes.update(r)
     }
 
@@ -424,7 +424,7 @@ pub trait RafsSuperInodes {
 
     fn get_blob_table(&self) -> Arc<OndiskBlobTable>;
 
-    fn update(&self, r: &mut RafsIoReader) -> Result<()>;
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
 
     /// Validate child, chunk and symlink digest on inode tree.
     /// The chunk data digest for regular file will only validate on fs read.

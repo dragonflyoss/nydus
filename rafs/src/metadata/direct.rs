@@ -351,8 +351,8 @@ impl RafsSuperInodes for DirectMapping {
         Arc::new(state.blob_table.clone())
     }
 
-    fn update(&self, r: &mut RafsIoReader) -> Result<()> {
-        self.update_state(r)
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
+        self.update_state(r).map_err(RafsError::SwapBackend)
     }
 }
 

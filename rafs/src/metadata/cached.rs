@@ -145,8 +145,8 @@ impl RafsSuperInodes for CachedInodes {
         self.s_blob.clone()
     }
 
-    fn update(&self, _r: &mut RafsIoReader) -> Result<()> {
-        unimplemented!()
+    fn update(&self, _r: &mut RafsIoReader) -> RafsResult<()> {
+        Err(RafsError::Unsupported)
     }
 }
 
