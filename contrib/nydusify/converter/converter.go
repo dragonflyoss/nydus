@@ -17,10 +17,8 @@ import (
 )
 
 type Option struct {
-	Source         string
-	Target         string
-	SourceInsecure bool
-	TargetInsecure bool
+	Source string
+	Target string
 
 	WorkDir          string
 	PrefetchDir      string
@@ -68,11 +66,9 @@ func (converter *Converter) Convert() error {
 	}
 
 	reg, err := registry.New(registry.RegistryOption{
-		WorkDir:        converter.WorkDir,
-		Source:         converter.Source,
-		Target:         converter.Target,
-		SourceInsecure: converter.SourceInsecure,
-		TargetInsecure: converter.TargetInsecure,
+		WorkDir: converter.WorkDir,
+		Source:  converter.Source,
+		Target:  converter.Target,
 	})
 	if err != nil {
 		return err

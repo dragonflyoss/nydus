@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2020 Ant Financial. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -15,10 +15,10 @@ import (
 	"github.com/containerd/containerd/archive/compression"
 )
 
-func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error) {
+func CompressTargz(src string, name string, writer io.Writer) error {
 	fi, err := os.Stat(src)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	hdr := &tar.Header{
@@ -27,49 +27,27 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 		Size: fi.Size(),
 	}
 
-	reader, writer := io.Pipe()
+	gzw := gzip.NewWriter(writer)
+	defer gzw.Close()
 
-	go func() error {
-		// Prepare targz writer
-		var tw *tar.Writer
-		var gw *gzip.Writer
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
 
-		if compress {
-			gw = gzip.NewWriter(writer)
-			tw = tar.NewWriter(gw)
-		} else {
-			tw = tar.NewWriter(writer)
-		}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
 
-		file, err := os.Open(src)
-		if err != nil {
-			return writer.CloseWithError(err)
-		}
-		defer file.Close()
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
-		// Write targz stream
-		if err := tw.WriteHeader(hdr); err != nil {
-			return writer.CloseWithError(err)
-		}
+	if _, err := io.Copy(tw, f); err != nil {
+		return err
+	}
 
-		if _, err := io.Copy(tw, file); err != nil {
-			return writer.CloseWithError(err)
-		}
-
-		// Close all resources
-		if err := tw.Close(); err != nil {
-			return writer.CloseWithError(err)
-		}
-		if gw != nil {
-			if err := gw.Close(); err != nil {
-				return writer.CloseWithError(err)
-			}
-		}
-
-		return writer.CloseWithError(nil)
-	}()
-
-	return reader, nil
+	return nil
 }
 
 func DecompressTargz(dst string, r io.Reader) error {

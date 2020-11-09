@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2020 Ant Financial. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -79,16 +79,16 @@ func (job *LayerJob) SetSourceLayer(sourceLayer v1.Layer) {
 }
 
 func (job *LayerJob) SetTargetLayer(
-	sourcePath,
-	name string,
+	compressedPath,
+	decompressedPath string,
 	mediaType types.MediaType,
 	annotations map[string]string,
 ) {
 	layer := Layer{
-		name:        name,
-		sourcePath:  sourcePath,
-		mediaType:   mediaType,
-		annotations: annotations,
+		mediaType:        mediaType,
+		compressedPath:   compressedPath,
+		decompressedPath: decompressedPath,
+		annotations:      annotations,
 	}
 	job.TargetLayer = &layer
 }
@@ -110,8 +110,10 @@ func (job *LayerJob) Pull() error {
 		}
 	}
 
-	pr := utils.NewProgressReader(reader, func(total int) {
-		job.Progress.SetCurrent(int(total))
+	var total int
+	pr := utils.NewProgressReader(reader, func(count int) {
+		total += count
+		job.Progress.SetCurrent(total)
 	})
 
 	// Decompress layer from source stream
@@ -143,17 +145,25 @@ func (job *LayerJob) Push() error {
 		return errors.Wrap(err, "push target layer")
 	}
 
-	targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
-		Layer: job.TargetLayer,
-		History: v1.History{
-			CreatedBy: fmt.Sprintf("nydusify"),
-		},
-		Annotations: job.TargetLayer.(*Layer).annotations,
-	})
+	hash, err := job.TargetLayer.Digest()
 	if err != nil {
-		return errors.Wrap(err, "append target layer")
+		return err
 	}
-	*job.Target.Img = targetImage
+
+	existLayer, _ := (*job.Target.Img).LayerByDigest(hash)
+	if existLayer == nil {
+		targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
+			Layer: job.TargetLayer,
+			History: v1.History{
+				CreatedBy: fmt.Sprintf("nydusify"),
+			},
+			Annotations: job.TargetLayer.(*Layer).annotations,
+		})
+		if err != nil {
+			return errors.Wrap(err, "append target layer")
+		}
+		*job.Target.Img = targetImage
+	}
 
 	job.Progress.SetFinish()
 	job.Progress.SetStatus(StatusPushed)

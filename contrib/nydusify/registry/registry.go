@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2020 Ant Financial. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,6 +7,7 @@ package registry
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -44,11 +45,9 @@ type Image struct {
 }
 
 type RegistryOption struct {
-	WorkDir        string
-	Source         string
-	Target         string
-	SourceInsecure bool
-	TargetInsecure bool
+	WorkDir string
+	Source  string
+	Target  string
 }
 
 type Registry struct {
@@ -63,19 +62,12 @@ func withDefaultAuth() authn.Keychain {
 
 func New(option RegistryOption) (*Registry, error) {
 	// Parse source & image reference from provided
-	sourceOpts := []name.Option{}
-	if option.SourceInsecure {
-		sourceOpts = append(sourceOpts, name.Insecure)
-	}
-	sourceRef, err := name.ParseReference(option.Source, sourceOpts...)
+	sourceRef, err := name.ParseReference(option.Source)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse source reference")
 	}
-	targetOpts := []name.Option{}
-	if option.TargetInsecure {
-		targetOpts = append(targetOpts, name.Insecure)
-	}
-	targetRef, err := name.ParseReference(option.Target, targetOpts...)
+
+	targetRef, err := name.ParseReference(option.Target)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse target reference")
 	}
@@ -135,19 +127,6 @@ func (registry *Registry) dumpManifest(image *Image) error {
 	return nil
 }
 
-func (registry *Registry) dumpConfig(image *Image) error {
-	rawConfig, err := (*image.Img).RawConfigFile()
-	if err != nil {
-		return errors.Wrap(err, "get image config")
-	}
-	manifestFile := filepath.Join(image.WorkDir, "config.json")
-	if err := ioutil.WriteFile(manifestFile, rawConfig, 0644); err != nil {
-		return errors.Wrap(err, "write image config")
-	}
-
-	return nil
-}
-
 func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 	// Write source manifest to json file
 	if err := registry.dumpManifest(&registry.source); err != nil {
@@ -196,6 +175,18 @@ func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 }
 
 func (registry *Registry) PushBootstrapLayer(bootstrapPath string, privateKeyPath string) error {
+	// Create tar gzip of bootstrap file
+	compressedBootstrapPath := bootstrapPath + ".tar.gz"
+	file, err := os.Create(compressedBootstrapPath)
+	if err != nil {
+		return errors.Wrap(err, "create bootstrap targz")
+	}
+	defer file.Close()
+
+	if err := utils.CompressTargz(bootstrapPath, BootstrapFileNameInLayer, file); err != nil {
+		return errors.Wrap(err, "compress bootstrap targz")
+	}
+
 	// Append signature of bootstap file
 	layerAnnotations := map[string]string{
 		LayerAnnotationNydusBootstrap: "true",
@@ -214,7 +205,7 @@ func (registry *Registry) PushBootstrapLayer(bootstrapPath string, privateKeyPat
 	if err != nil {
 		return err
 	}
-	layerJob.SetTargetLayer(bootstrapPath, BootstrapFileNameInLayer, types.OCILayer, layerAnnotations)
+	layerJob.SetTargetLayer(compressedBootstrapPath, bootstrapPath, types.OCILayer, layerAnnotations)
 	if err := layerJob.SetProgress(LayerTarget, "BOOT"); err != nil {
 		return errors.Wrap(err, "create bootstrap layer progress")
 	}
@@ -298,23 +289,13 @@ func (registry *Registry) PushManifest(multiPlatform bool) error {
 		}
 	}
 
+	pushProgress.SetStatus(StatusPushed)
+	pushProgress.SetFinish()
+
 	// Write target manifest to json file
 	if err := registry.dumpManifest(&registry.target); err != nil {
 		return err
 	}
-
-	// Write target config to json file
-	if err := registry.dumpConfig(&registry.target); err != nil {
-		return err
-	}
-
-	// Write manifest index to json file
-	if err := registry.dumpConfig(&registry.target); err != nil {
-		return err
-	}
-
-	pushProgress.SetStatus(StatusPushed)
-	pushProgress.SetFinish()
 
 	return nil
 }

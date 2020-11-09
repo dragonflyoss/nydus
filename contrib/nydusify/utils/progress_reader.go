@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2020 Ant Financial. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +9,6 @@ import (
 )
 
 type ProgressReader struct {
-	total    int
 	reader   io.ReadCloser
 	callback func(int)
 }
@@ -23,8 +22,7 @@ func NewProgressReader(reader io.ReadCloser, callback func(int)) *ProgressReader
 
 func (pr *ProgressReader) Read(p []byte) (count int, err error) {
 	count, err = pr.reader.Read(p)
-	pr.total += len(p)
-	pr.callback(pr.total)
+	pr.callback(len(p))
 	return
 }
 
