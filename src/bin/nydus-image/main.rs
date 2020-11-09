@@ -128,16 +128,8 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
     Ok(files)
 }
 
-pub mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/built.rs"));
-}
-
 fn main() -> Result<()> {
-    let bti: String = BuildTimeInfo::dump(
-        crate_version!(),
-        built_info::GIT_COMMIT_HASH.unwrap_or_default(),
-        built_info::BUILT_TIME_UTC,
-    );
+    let bti: String = BuildTimeInfo::dump(crate_version!());
 
     let cmd = App::new("nydus image builder")
         .version(bti.as_str())
