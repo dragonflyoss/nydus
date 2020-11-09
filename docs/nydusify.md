@@ -5,7 +5,6 @@ The Nydusify CLI tool converts an OCI container image from source registry into 
 ## Dependencies
 
 - Golang 1.14 or above
-- Containerd: Nydusify uses containerd service to pull & push image.
 
 ## Build
 
@@ -26,7 +25,6 @@ make build-release
 ```
 cmd/nydusify convert \
   --nydus-image ../../target-fusedev/debug/nydus-image \
-  --source-auth <base64-encoded-auth> \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
 ```

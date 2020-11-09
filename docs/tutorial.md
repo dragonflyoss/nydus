@@ -48,8 +48,7 @@ You can pull an image from Docker Hub and push it to your local registry. The fo
   $ sudo cmd/nydusify convert \
   --nydus-image ../../target-fusedev/debug/nydus-image \
   --source docker.io/library/ubuntu:16.04 \
-  --target localhost:5000/ubuntu:16.04-nydus \
-  --target-insecure=true
+  --target localhost:5000/ubuntu:16.04-nydus
 
 INFO[2020-10-22T19:16:57+08:00] Pulling image docker.io/library/ubuntu:16.04 with platform linux/amd64
 INFO[2020-10-22T19:17:04+08:00] Unpacking layer sha256:4f53fa4d2cf0e29c6a522433e0ac71a7ce0fdab158481052b2198b5518b83248

@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 )
 
-type Option struct {
+type BuilderOption struct {
 	ParentBootstrapPath string
 	BootstrapPath       string
 	BlobPath            string
@@ -22,20 +22,20 @@ type Option struct {
 }
 
 type Builder struct {
-	BinaryPath string
-	Stdout     io.Writer
-	Stderr     io.Writer
+	binaryPath string
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 func NewBuilder(binaryPath string) *Builder {
 	return &Builder{
-		BinaryPath: binaryPath,
-		Stdout:     os.Stdout,
-		Stderr:     os.Stderr,
+		binaryPath: binaryPath,
+		stdout:     os.Stdout,
+		stderr:     os.Stderr,
 	}
 }
 
-func (builder *Builder) Run(option Option) error {
+func (builder *Builder) Run(option BuilderOption) error {
 	var args []string
 	if option.ParentBootstrapPath == "" {
 		args = []string{
@@ -58,7 +58,7 @@ func (builder *Builder) Run(option Option) error {
 		option.BackendConfig,
 		option.RootfsPath,
 		"--log-level",
-		"info")
+		"warn")
 
 	if option.BlobPath != "" {
 		args = append(args, "--blob", option.BlobPath)
@@ -69,14 +69,15 @@ func (builder *Builder) Run(option Option) error {
 		args = append(args, "--prefetch-policy", "fs")
 	}
 
-	cmd := exec.Command(builder.BinaryPath, args...)
-	cmd.Stdout = builder.Stdout
-	cmd.Stderr = builder.Stderr
+	cmd := exec.Command(builder.binaryPath, args...)
+	cmd.Stdout = builder.stdout
+	cmd.Stderr = builder.stderr
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
 	}
+
 	io.WriteString(stdin, option.PrefetchDir)
 	stdin.Close()
 

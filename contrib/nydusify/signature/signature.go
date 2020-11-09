@@ -12,26 +12,12 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
-	"errors"
 	"io"
 	"io/ioutil"
-)
+	"os"
 
-func Sign(privateKeyFile string, input io.Reader) ([]byte, error) {
-	pk, err := loadRsaPrivateKey(privateKeyFile)
-	if err != nil {
-		return nil, err
-	}
-	digestBytes, err := calculateDigest(input)
-	if err != nil {
-		return nil, err
-	}
-	signature, err := rsa.SignPKCS1v15(rand.Reader, pk, crypto.SHA256, digestBytes)
-	if err != nil {
-		return nil, err
-	}
-	return []byte(base64.StdEncoding.EncodeToString(signature)), nil
-}
+	"github.com/pkg/errors"
+)
 
 func loadRsaPrivateKey(privateKeyFile string) (*rsa.PrivateKey, error) {
 	bytes, err := ioutil.ReadFile(privateKeyFile)
@@ -56,4 +42,29 @@ func calculateDigest(input io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return h.Sum(nil), nil
+}
+
+func Sign(privateKeyFile string, input io.Reader) ([]byte, error) {
+	pk, err := loadRsaPrivateKey(privateKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	digestBytes, err := calculateDigest(input)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := rsa.SignPKCS1v15(rand.Reader, pk, crypto.SHA256, digestBytes)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(base64.StdEncoding.EncodeToString(signature)), nil
+}
+
+func SignFile(privateKeyFile, filePath string) ([]byte, error) {
+	file, err := os.OpenFile(filePath, os.O_RDONLY, 0666)
+	if err != nil {
+		return nil, errors.Wrap(err, "open bootstrap file")
+	}
+
+	return Sign(privateKeyFile, file)
 }
