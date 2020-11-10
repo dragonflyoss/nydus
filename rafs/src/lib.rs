@@ -17,7 +17,7 @@ use std::io::{Error, Read, Result, Seek, Write};
 use std::os::unix::io::AsRawFd;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
-use nydus_utils::einval;
+use nydus_utils::{einval, last_error};
 
 #[macro_use]
 mod error;
@@ -35,8 +35,14 @@ pub mod io_stats;
 pub enum RafsError {
     Unsupported,
     Uninitialized,
+    AlreadyMounted,
     ReadMetadata(Error),
+    LoadConfig(Error),
+    ParseConfig(serde_json::Error),
     SwapBackend(Error),
+    FillSuperblock(Error),
+    CreateDevice(Error),
+    Prefetch(Error),
 }
 
 pub type RafsResult<T> = std::result::Result<T, RafsError>;
@@ -74,6 +80,13 @@ impl dyn RafsIoRead {
             (align_to_rafs(last_read_len) - last_read_len) as i64,
         ))
         .unwrap();
+    }
+
+    pub fn from_file(path: &str) -> RafsResult<Box<dyn RafsIoRead>> {
+        Ok(Box::new(File::open(path).map_err(|err| {
+            last_error!(format!("Failed to open file {:?}: {:?}", path, err));
+            RafsError::ReadMetadata(err)
+        })?))
     }
 }
 

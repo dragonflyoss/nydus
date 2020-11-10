@@ -30,7 +30,7 @@ use crate::storage::device;
 use crate::storage::*;
 use crate::*;
 
-use nydus_utils::{eacces, ealready, enoent, eother};
+use nydus_utils::{eacces, enoent};
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -84,6 +84,11 @@ impl RafsConfig {
             ..Default::default()
         }
     }
+
+    pub fn from_file(path: &str) -> RafsResult<RafsConfig> {
+        let file = File::open(path).map_err(RafsError::LoadConfig)?;
+        serde_json::from_reader::<File, RafsConfig>(file).map_err(RafsError::ParseConfig)
+    }
 }
 
 impl fmt::Display for RafsConfig {
@@ -112,21 +117,22 @@ pub struct Rafs {
 }
 
 impl Rafs {
-    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> Result<Self> {
+    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
         let mut device_conf = conf.device.clone();
         device_conf.cache.cache_validate = conf.digest_validate;
         device_conf.cache.prefetch_worker.threads_count = conf.fs_prefetch.threads_count;
         device_conf.cache.prefetch_worker.merging_size = conf.fs_prefetch.merging_size;
 
-        let mut sb = RafsSuper::new(&conf)?;
-        sb.load(r)?;
+        let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
+        sb.load(r).map_err(RafsError::FillSuperblock)?;
 
         let rafs = Rafs {
             device: device::RafsDevice::new(
                 device_conf,
                 sb.meta.get_compressor(),
                 sb.meta.get_digester(),
-            )?,
+            )
+            .map_err(RafsError::CreateDevice)?,
             sb,
             initialized: false,
             ios: io_stats::new(id),
@@ -182,13 +188,14 @@ impl Rafs {
         &mut self,
         r: &mut RafsIoReader,
         prefetch_files: Option<Vec<&Path>>,
-    ) -> Result<()> {
+    ) -> RafsResult<()> {
         if self.initialized {
-            return Err(ealready!("rafs already mounted"));
+            return Err(RafsError::AlreadyMounted);
         }
 
         self.device
-            .init(&self.sb.meta, &self.sb.inodes.get_blobs())?;
+            .init(&self.sb.meta, &self.sb.inodes.get_blobs())
+            .map_err(RafsError::CreateDevice)?;
 
         // Device should be ready before any prefetch.
         if self.fs_prefetch {
@@ -209,7 +216,7 @@ impl Rafs {
 
             if let Ok(ref mut desc) = self.sb.prefetch_hint_files(r, inodes) {
                 if self.device.prefetch(desc).is_err() {
-                    eother!("Prefetch error");
+                    warn!("Prefetch error");
                 }
             }
         }
