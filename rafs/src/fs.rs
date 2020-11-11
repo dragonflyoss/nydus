@@ -519,7 +519,7 @@ impl FileSystem for Rafs {
         ino: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
-        let mut recorder = FopRecorder::settle(StatsFop::Read, ino, &self.ios);
+        let mut recorder = FopRecorder::settle(StatsFop::Getattr, ino, &self.ios);
         let attr = self.get_inode_attr(ino).map(|r| {
             recorder.mark_success(0);
             r

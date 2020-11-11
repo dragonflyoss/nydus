@@ -17,7 +17,7 @@ pub type Inode = u64;
 
 #[derive(PartialEq, Copy)]
 pub enum StatsFop {
-    Stat,
+    Getattr,
     Readlink,
     Open,
     Release,
@@ -26,7 +26,6 @@ pub enum StatsFop {
     Getxattr,
     Listxattr,
     Opendir,
-    Fstat,
     Lookup,
     Readdir,
     Readdirplus,
