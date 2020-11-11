@@ -23,8 +23,10 @@ use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 use std::time::SystemTime;
 
-use crate::io_stats;
-use crate::io_stats::StatsFop;
+use crate::io_stats::{
+    self, FopRecorder,
+    StatsFop::{self, *},
+};
 use crate::metadata::{Inode, RafsInode, RafsSuper};
 use crate::storage::device;
 use crate::storage::*;
@@ -517,10 +519,12 @@ impl FileSystem for Rafs {
         ino: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
-        let attr = self.get_inode_attr(ino)?;
-        let r = Ok((attr.into(), self.sb.meta.attr_timeout));
-        self.ios.file_stats_update(ino, StatsFop::Stat, 0, &r);
-        r
+        let mut recorder = FopRecorder::settle(StatsFop::Read, ino, &self.ios);
+        let attr = self.get_inode_attr(ino).map(|r| {
+            recorder.mark_success(0);
+            r
+        })?;
+        Ok((attr.into(), self.sb.meta.attr_timeout))
     }
 
     fn readlink(&self, _ctx: Context, ino: u64) -> Result<Vec<u8>> {
@@ -541,15 +545,17 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
+        let mut recorder = FopRecorder::settle(StatsFop::Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
         if offset >= inode.size() {
             return Ok(0);
         }
         let desc = inode.alloc_bio_desc(offset, size as usize)?;
         let start = self.ios.latency_start();
-        let r = self.device.read_to(w, desc);
-        self.ios
-            .file_stats_update(ino, StatsFop::Read, size as usize, &r);
+        let r = self.device.read_to(w, desc).map(|r| {
+            recorder.mark_success(r);
+            r
+        });
         self.ios.latency_end(&start, io_stats::StatsFop::Read);
         r
     }
