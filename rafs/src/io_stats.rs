@@ -5,8 +5,7 @@
 // Rafs fop stats accounting and exporting.
 
 use std::collections::HashMap;
-use std::io::Error;
-use std::ops::Deref;
+use std::ops::{Deref, Drop};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -24,7 +23,7 @@ pub enum StatsFop {
     Release,
     Read,
     Statfs,
-    Getxatr,
+    Getxattr,
     Opendir,
     Fstat,
     Lookup,
@@ -250,14 +249,8 @@ impl GlobalIOStats {
         }
     }
 
-    pub fn file_stats_update<T>(
-        &self,
-        ino: Inode,
-        fop: StatsFop,
-        bsize: usize,
-        r: &Result<T, Error>,
-    ) {
-        self.global_update(fop, bsize, &r);
+    fn file_stats_update(&self, ino: Inode, fop: StatsFop, bsize: usize, success: bool) {
+        self.global_update(fop, bsize, success);
 
         if self.files_enabled() {
             let counters = self.file_counters.read().unwrap();
@@ -290,7 +283,7 @@ impl GlobalIOStats {
         }
     }
 
-    fn global_update<T>(&self, fop: StatsFop, value: usize, r: &Result<T, Error>) {
+    fn global_update(&self, fop: StatsFop, value: usize, success: bool) {
         self.last_fop_tp.store(
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -315,18 +308,17 @@ impl GlobalIOStats {
             };
         }
 
-        match r {
-            Ok(_) => {
-                self.fop_hits[fop as usize].fetch_add(1, Ordering::Relaxed);
-                match fop {
-                    StatsFop::Read => self.data_read.fetch_add(value, Ordering::Relaxed),
-                    StatsFop::Open => self.nr_opens.fetch_add(1, Ordering::Relaxed),
-                    StatsFop::Release => self.nr_opens.fetch_sub(1, Ordering::Relaxed),
-                    _ => 0,
-                }
-            }
-            Err(_) => self.fop_errors[fop as usize].fetch_add(1, Ordering::Relaxed),
-        };
+        if success {
+            self.fop_hits[fop as usize].fetch_add(1, Ordering::Relaxed);
+            match fop {
+                StatsFop::Read => self.data_read.fetch_add(value, Ordering::Relaxed),
+                StatsFop::Open => self.nr_opens.fetch_add(1, Ordering::Relaxed),
+                StatsFop::Release => self.nr_opens.fetch_sub(1, Ordering::Relaxed),
+                _ => 0,
+            };
+        } else {
+            self.fop_errors[fop as usize].fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Paired with `latency_end` to record elapsed time for a certain type of fop.
@@ -386,6 +378,48 @@ impl GlobalIOStats {
 
     pub fn export_global_stats(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(self).map_err(IoStatsError::Serialize)
+    }
+}
+
+/// If you need FOP recorder count file system operations.
+/// Call its `settle()` method to generate an on-stack recorder.
+/// If the operation succeeds, call `mark_success()` to change the recorder's internal state.
+/// If the operation fails, its internal state will not be changed.
+/// Finally, when the recorder is being destroyed, iostats counter will be updated.
+pub struct FopRecorder<'a> {
+    fop: StatsFop,
+    inode: u64,
+    success: bool,
+    // Now, the size only makes sense for `Read` FOP.
+    size: usize,
+    ios: &'a GlobalIOStats,
+}
+
+impl<'a> Drop for FopRecorder<'a> {
+    fn drop(&mut self) {
+        self.ios
+            .file_stats_update(self.inode, self.fop, self.size, self.success);
+    }
+}
+
+impl<'a> FopRecorder<'a> {
+    pub fn settle<'b, T>(fop: StatsFop, inode: u64, ios: &'b T) -> Self
+    where
+        T: AsRef<GlobalIOStats>,
+        'b: 'a,
+    {
+        FopRecorder {
+            fop,
+            inode,
+            success: false,
+            size: 0,
+            ios: ios.as_ref(),
+        }
+    }
+
+    pub fn mark_success(&mut self, size: usize) {
+        self.success = true;
+        self.size = size;
     }
 }
 
@@ -465,22 +499,22 @@ mod tests {
     fn test_block_read_count() {
         let g = GlobalIOStats::default();
         g.init();
-        g.global_update(StatsFop::Read, 4000, &Ok(()));
+        g.global_update(StatsFop::Read, 4000, true);
         assert_eq!(g.block_count_read[1].load(Ordering::Relaxed), 1);
 
-        g.global_update(StatsFop::Read, 4096, &Ok(()));
+        g.global_update(StatsFop::Read, 4096, true);
         assert_eq!(g.block_count_read[1].load(Ordering::Relaxed), 1);
 
-        g.global_update(StatsFop::Read, 65535, &Ok(()));
+        g.global_update(StatsFop::Read, 65535, true);
         assert_eq!(g.block_count_read[3].load(Ordering::Relaxed), 1);
 
-        g.global_update(StatsFop::Read, 131072, &Ok(()));
+        g.global_update(StatsFop::Read, 131072, true);
         assert_eq!(g.block_count_read[4].load(Ordering::Relaxed), 1);
 
-        g.global_update(StatsFop::Read, 65520, &Ok(()));
+        g.global_update(StatsFop::Read, 65520, true);
         assert_eq!(g.block_count_read[3].load(Ordering::Relaxed), 2);
 
-        g.global_update(StatsFop::Read, 2015520, &Ok(()));
+        g.global_update(StatsFop::Read, 2015520, true);
         assert_eq!(g.block_count_read[3].load(Ordering::Relaxed), 2);
     }
 }
