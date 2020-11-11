@@ -326,35 +326,6 @@ impl Rafs {
         }
     }
 
-    fn lookup_wrapped(&self, ino: u64, name: &CStr) -> Result<Entry> {
-        let target = OsStr::from_bytes(name.to_bytes());
-        let parent = self.sb.get_inode(ino, self.digest_validate)?;
-        if !parent.is_dir() {
-            return Err(err_not_directory!());
-        }
-
-        if target == DOT || (ino == ROOT_ID && target == DOTDOT) {
-            let mut entry = self.get_inode_entry(parent);
-            entry.inode = ino;
-            Ok(entry)
-        } else if target == DOTDOT {
-            Ok(self
-                .sb
-                .get_inode(parent.parent(), self.digest_validate)
-                .map(|i| self.get_inode_entry(i))
-                .unwrap_or_else(|_| self.negative_entry()))
-        } else {
-            Ok(parent
-                .get_child_by_name(target)
-                .map(|i| {
-                    self.ios
-                        .new_file_counter(i.ino(), |i| self.path_from_ino(i).unwrap());
-                    self.get_inode_entry(i)
-                })
-                .unwrap_or_else(|_| self.negative_entry()))
-        }
-    }
-
     fn get_inode_attr(&self, ino: u64) -> Result<Attr> {
         let inode = self.sb.get_inode(ino, false)?;
         let mut attr = inode.get_attr();
@@ -498,11 +469,34 @@ impl FileSystem for Rafs {
     fn destroy(&self) {}
 
     fn lookup(&self, _ctx: Context, ino: u64, name: &CStr) -> Result<Entry> {
-        let start = self.ios.latency_start();
-        let r = self.lookup_wrapped(ino, name);
-        //self.ios.file_stats_update(ino, StatsFop::Lookup, 0, &r);
-        self.ios.latency_end(&start, StatsFop::Lookup);
-        r
+        let mut rec = FopRecorder::settle(Lookup, ino, &self.ios);
+        let target = OsStr::from_bytes(name.to_bytes());
+        let parent = self.sb.get_inode(ino, self.digest_validate)?;
+        if !parent.is_dir() {
+            return Err(err_not_directory!());
+        }
+
+        rec.mark_success(0);
+        if target == DOT || (ino == ROOT_ID && target == DOTDOT) {
+            let mut entry = self.get_inode_entry(parent);
+            entry.inode = ino;
+            Ok(entry)
+        } else if target == DOTDOT {
+            Ok(self
+                .sb
+                .get_inode(parent.parent(), self.digest_validate)
+                .map(|i| self.get_inode_entry(i))
+                .unwrap_or_else(|_| self.negative_entry()))
+        } else {
+            Ok(parent
+                .get_child_by_name(target)
+                .map(|i| {
+                    self.ios
+                        .new_file_counter(i.ino(), |i| self.path_from_ino(i).unwrap());
+                    self.get_inode_entry(i)
+                })
+                .unwrap_or_else(|_| self.negative_entry()))
+        }
     }
 
     fn forget(&self, _ctx: Context, _inode: u64, _count: u64) {}
