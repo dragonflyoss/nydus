@@ -500,7 +500,7 @@ impl FileSystem for Rafs {
     fn lookup(&self, _ctx: Context, ino: u64, name: &CStr) -> Result<Entry> {
         let start = self.ios.latency_start();
         let r = self.lookup_wrapped(ino, name);
-        self.ios.file_stats_update(ino, StatsFop::Lookup, 0, &r);
+        //self.ios.file_stats_update(ino, StatsFop::Lookup, 0, &r);
         self.ios.latency_end(&start, StatsFop::Lookup);
         r
     }
@@ -528,9 +528,16 @@ impl FileSystem for Rafs {
     }
 
     fn readlink(&self, _ctx: Context, ino: u64) -> Result<Vec<u8>> {
+        let mut rec = FopRecorder::settle(Readlink, ino, &self.ios);
         let inode = self.sb.get_inode(ino, self.digest_validate)?;
-
-        Ok(inode.get_symlink()?.as_bytes().to_vec())
+        Ok(inode
+            .get_symlink()
+            .map(|r| {
+                rec.mark_success(0);
+                r
+            })?
+            .as_bytes()
+            .to_vec())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -556,7 +563,7 @@ impl FileSystem for Rafs {
             recorder.mark_success(r);
             r
         });
-        self.ios.latency_end(&start, io_stats::StatsFop::Read);
+        self.ios.latency_end(&start, StatsFop::Read);
         r
     }
 
@@ -588,6 +595,8 @@ impl FileSystem for Rafs {
     }
 
     fn getxattr(&self, _ctx: Context, inode: u64, name: &CStr, size: u32) -> Result<GetxattrReply> {
+        let mut recorder = FopRecorder::settle(Getxattr, inode, &self.ios);
+
         if !self.xattr_supported() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -596,17 +605,23 @@ impl FileSystem for Rafs {
         let inode = self.sb.get_inode(inode, false)?;
 
         let value = inode.get_xattr(name)?;
-        match value {
+        let r = match value {
             Some(value) => match size {
                 0 => Ok(GetxattrReply::Count((value.len() + 1) as u32)),
                 x if x < value.len() as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
                 _ => Ok(GetxattrReply::Value(value)),
             },
             None => Err(std::io::Error::from_raw_os_error(libc::ENODATA)),
-        }
+        };
+
+        r.map(|v| {
+            recorder.mark_success(0);
+            v
+        })
     }
 
     fn listxattr(&self, _ctx: Context, inode: u64, size: u32) -> Result<ListxattrReply> {
+        let mut rec = FopRecorder::settle(StatsFop::Listxattr, inode, &self.ios);
         if !self.xattr_supported() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -624,6 +639,8 @@ impl FileSystem for Rafs {
             }
         }
 
+        rec.mark_success(0);
+
         match size {
             0 => Ok(ListxattrReply::Count(count as u32)),
             x if x < count as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
@@ -640,7 +657,11 @@ impl FileSystem for Rafs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
     ) -> Result<()> {
-        self.do_readdir(inode, size, offset, add_entry)
+        let mut rec = FopRecorder::settle(StatsFop::Readdir, inode, &self.ios);
+        self.do_readdir(inode, size, offset, add_entry).map(|r| {
+            rec.mark_success(0);
+            r
+        })
     }
 
     fn readdirplus(
@@ -652,9 +673,14 @@ impl FileSystem for Rafs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry, Entry) -> Result<usize>,
     ) -> Result<()> {
+        let mut rec = FopRecorder::settle(StatsFop::Readdirplus, ino, &self.ios);
         self.do_readdir(ino, size, offset, |dir_entry| {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
+        })
+        .map(|r| {
+            rec.mark_success(0);
+            r
         })
     }
 
@@ -663,10 +689,12 @@ impl FileSystem for Rafs {
     }
 
     fn access(&self, ctx: Context, ino: u64, mask: u32) -> Result<()> {
+        let mut rec = FopRecorder::settle(Access, ino, &self.ios);
         let st = self.get_inode_attr(ino)?;
         let mode = mask as i32 & (libc::R_OK | libc::W_OK | libc::X_OK);
 
         if mode == libc::F_OK {
+            rec.mark_success(0);
             return Ok(());
         }
 
@@ -699,6 +727,7 @@ impl FileSystem for Rafs {
             return Err(eacces!("permission denied"));
         }
 
+        rec.mark_success(0);
         Ok(())
     }
 }

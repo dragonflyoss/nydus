@@ -24,10 +24,15 @@ pub enum StatsFop {
     Read,
     Statfs,
     Getxattr,
+    Listxattr,
     Opendir,
     Fstat,
     Lookup,
     Readdir,
+    Readdirplus,
+    Access,
+    Forget,
+    BatchForget,
     Max,
 }
 
