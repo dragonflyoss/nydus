@@ -210,11 +210,11 @@ impl GlobalIOStats {
         self.measure_latency.store(true, Ordering::Relaxed);
     }
 
-    pub fn files_enabled(&self) -> bool {
+    fn files_enabled(&self) -> bool {
         self.files_account_enabled.load(Ordering::Relaxed)
     }
 
-    pub fn access_pattern_enabled(&self) -> bool {
+    fn access_pattern_enabled(&self) -> bool {
         self.access_pattern_enabled.load(Ordering::Relaxed)
     }
 
@@ -356,7 +356,7 @@ impl GlobalIOStats {
         }
     }
 
-    pub fn export_files_stats(&self) -> Result<String, IoStatsError> {
+    fn export_files_stats(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(
             self.file_counters
                 .read()
@@ -366,7 +366,7 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
-    pub fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
+    fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(
             &self
                 .access_patterns
@@ -380,7 +380,7 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
-    pub fn export_global_stats(&self) -> Result<String, IoStatsError> {
+    fn export_global_stats(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
