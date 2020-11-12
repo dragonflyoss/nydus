@@ -464,17 +464,6 @@ pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoSt
     }
 }
 
-pub fn toggle_files_recording(name: &Option<String>, switch: bool) -> Result<(), String> {
-    if let Some(name) = name {
-        let ios_set = IOS_SET.read().unwrap();
-        let v = ios_set.get(name).ok_or_else(|| "No such id".to_string())?;
-        v.toggle_files_recording(switch);
-        Ok(())
-    } else {
-        Err("Invalid id passed!".to_string())
-    }
-}
-
 pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError> {
     // With only one rafs instance, we allow caller to ask for an unknown ios name.
     let ios_set = IOS_SET.read().unwrap();
