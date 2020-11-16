@@ -42,7 +42,7 @@ pub enum RafsError {
     SwapBackend(Error),
     FillSuperblock(Error),
     CreateDevice(Error),
-    Prefetch(Error),
+    Prefetch(String),
 }
 
 pub type RafsResult<T> = std::result::Result<T, RafsError>;

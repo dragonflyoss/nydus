@@ -357,50 +357,58 @@ impl RafsSuper {
     ///     involved.
     /// Each inode passed into should correspond to directory. And it already does the file type
     /// check inside.
+    ///
     pub fn prefetch_hint_files(
         &self,
         r: &mut RafsIoReader,
         files: Option<Vec<Inode>>,
-    ) -> Result<RafsBioDesc> {
+    ) -> RafsResult<RafsBioDesc> {
         let hint_entries = self.meta.prefetch_table_entries as usize;
 
         if hint_entries == 0 && files.is_none() {
-            return Err(enoent!("Prefetch table is empty!"));
-        }
-
-        let mut prefetch_table = PrefetchTable::new();
-        if prefetch_table
-            .load_from(r, self.meta.prefetch_table_offset, hint_entries)
-            .is_err()
-        {
-            einval!(format!(
-                "Failed in load hint prefetch table at {}",
-                self.meta.prefetch_table_offset
+            return Err(RafsError::Prefetch(
+                "Prefetch table is empty and no file was ever specified".to_string(),
             ));
         }
 
+        // No need to prefetch blob data for each alias as they share the same range,
+        // we do it once.
+        let mut hardlinks: HashSet<u64> = HashSet::new();
+        let mut prefetch_table = PrefetchTable::new();
         let mut head_desc = RafsBioDesc {
             bi_size: 0,
             bi_flags: 0,
             bi_vec: Vec::new(),
         };
 
-        // No need to prefetch blob data for each alias as they share the same range,
-        // we do it once.
-        let mut hardlinks: HashSet<u64> = HashSet::new();
+        // First, try to prefetch according to on-disk prefetch table. If an error happens,
+        // abort prefetch even if a prefetch files list is specified when nydusd starts since
+        // something ugly may stand on the disk.
+        if hint_entries != 0 {
+            prefetch_table
+                .load_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .map_err(|e| {
+                    RafsError::Prefetch(format!(
+                        "Failed in loading hint prefetch table at offset {}. {:?}",
+                        self.meta.prefetch_table_offset, e
+                    ))
+                })?;
 
-        for inode_idx in prefetch_table.inode_indexes.iter() {
-            // index 0 is invalid, it was added because prefetch table has to be aligned.
-            if *inode_idx == 0 {
-                break;
+            for inode_idx in prefetch_table.inode_indexes.iter() {
+                // index 0 is invalid, it was added because prefetch table has to be aligned.
+                if *inode_idx == 0 {
+                    break;
+                }
+                debug!("hint prefetch inode {}", inode_idx);
+                self.build_prefetch_desc(*inode_idx as u64, &mut head_desc, &mut hardlinks)
+                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
-            debug!("hint prefetch inode {}", inode_idx);
-            self.build_prefetch_desc(*inode_idx as u64, &mut head_desc, &mut hardlinks)?;
         }
 
         if let Some(files) = files {
             for f_ino in files {
-                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks)?;
+                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks)
+                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
         }
 

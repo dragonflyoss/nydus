@@ -213,10 +213,15 @@ impl Rafs {
                 None => None,
             };
 
-            if let Ok(ref mut desc) = self.sb.prefetch_hint_files(r, inodes) {
-                if self.device.prefetch(desc).is_err() {
-                    warn!("Prefetch error");
-                }
+            // Prefetch procedure does not affect rafs mounting
+            if let Ok(ref mut desc) = self.sb.prefetch_hint_files(r, inodes).map_err(|e| {
+                info!("No file to be prefetched {:?}", e);
+                e
+            }) {
+                self.device.prefetch(desc).unwrap_or_else(|e| {
+                    warn!("Prefetch error, {:?}", e);
+                    0
+                });
             }
         }
 
