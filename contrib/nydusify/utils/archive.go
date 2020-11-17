@@ -15,10 +15,10 @@ import (
 	"github.com/containerd/containerd/archive/compression"
 )
 
-func CompressTargz(src string, name string, writer io.Writer) error {
+func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error) {
 	fi, err := os.Stat(src)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	hdr := &tar.Header{
@@ -27,27 +27,49 @@ func CompressTargz(src string, name string, writer io.Writer) error {
 		Size: fi.Size(),
 	}
 
-	gzw := gzip.NewWriter(writer)
-	defer gzw.Close()
+	reader, writer := io.Pipe()
 
-	tw := tar.NewWriter(gzw)
-	defer tw.Close()
+	go func() error {
+		// Prepare targz writer
+		var tw *tar.Writer
+		var gw *gzip.Writer
 
-	if err := tw.WriteHeader(hdr); err != nil {
-		return err
-	}
+		if compress {
+			gw = gzip.NewWriter(writer)
+			tw = tar.NewWriter(gw)
+		} else {
+			tw = tar.NewWriter(writer)
+		}
 
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+		file, err := os.Open(src)
+		if err != nil {
+			return writer.CloseWithError(err)
+		}
+		defer file.Close()
 
-	if _, err := io.Copy(tw, f); err != nil {
-		return err
-	}
+		// Write targz stream
+		if err := tw.WriteHeader(hdr); err != nil {
+			return writer.CloseWithError(err)
+		}
 
-	return nil
+		if _, err := io.Copy(tw, file); err != nil {
+			return writer.CloseWithError(err)
+		}
+
+		// Close all resources
+		if err := tw.Close(); err != nil {
+			return writer.CloseWithError(err)
+		}
+		if gw != nil {
+			if err := gw.Close(); err != nil {
+				return writer.CloseWithError(err)
+			}
+		}
+
+		return writer.CloseWithError(nil)
+	}()
+
+	return reader, nil
 }
 
 func DecompressTargz(dst string, r io.Reader) error {
