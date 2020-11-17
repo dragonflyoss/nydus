@@ -5,6 +5,7 @@
 package utils
 
 import (
+	"sync"
 	"sync/atomic"
 )
 
@@ -65,6 +66,7 @@ func NewQueueWorkerPool(jobs []Job, worker uint, method int) []chan JobRet {
 
 type WorkerPool struct {
 	err   error
+	wg    sync.WaitGroup
 	queue chan JobRet
 }
 
@@ -73,6 +75,7 @@ func NewWorkerPool(worker uint, method int) *WorkerPool {
 
 	workerPool := WorkerPool{
 		queue: queue,
+		wg:    sync.WaitGroup{},
 	}
 
 	for count := uint(0); count < worker; count++ {
@@ -84,6 +87,7 @@ func NewWorkerPool(worker uint, method int) *WorkerPool {
 				}
 				err := jobRet.Job.Do(method)
 				jobRet.Err = err
+				workerPool.wg.Done()
 				if err != nil {
 					workerPool.err = err
 					close(queue)
@@ -100,20 +104,19 @@ func (pool *WorkerPool) AddJob(job Job) error {
 	if pool.err != nil {
 		return pool.err
 	}
-	pool.queue <- JobRet{
-		idx: 0,
-		Job: job,
-		Err: nil,
-	}
+	pool.wg.Add(1)
+	go func() {
+		pool.queue <- JobRet{
+			idx: 0,
+			Job: job,
+			Err: nil,
+		}
+	}()
 	return nil
 }
 
 func (pool *WorkerPool) Wait() error {
+	pool.wg.Wait()
 	close(pool.queue)
-	for jobRet := range pool.queue {
-		if jobRet.Err != nil {
-			return jobRet.Err
-		}
-	}
 	return nil
 }
