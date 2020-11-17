@@ -79,16 +79,16 @@ func (job *LayerJob) SetSourceLayer(sourceLayer v1.Layer) {
 }
 
 func (job *LayerJob) SetTargetLayer(
-	compressedPath,
-	decompressedPath string,
+	sourcePath,
+	name string,
 	mediaType types.MediaType,
 	annotations map[string]string,
 ) {
 	layer := Layer{
-		mediaType:        mediaType,
-		compressedPath:   compressedPath,
-		decompressedPath: decompressedPath,
-		annotations:      annotations,
+		name:        name,
+		sourcePath:  sourcePath,
+		mediaType:   mediaType,
+		annotations: annotations,
 	}
 	job.TargetLayer = &layer
 }
@@ -110,10 +110,8 @@ func (job *LayerJob) Pull() error {
 		}
 	}
 
-	var total int
-	pr := utils.NewProgressReader(reader, func(count int) {
-		total += count
-		job.Progress.SetCurrent(total)
+	pr := utils.NewProgressReader(reader, func(total int) {
+		job.Progress.SetCurrent(int(total))
 	})
 
 	// Decompress layer from source stream
@@ -145,25 +143,17 @@ func (job *LayerJob) Push() error {
 		return errors.Wrap(err, "push target layer")
 	}
 
-	hash, err := job.TargetLayer.Digest()
+	targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
+		Layer: job.TargetLayer,
+		History: v1.History{
+			CreatedBy: fmt.Sprintf("nydusify"),
+		},
+		Annotations: job.TargetLayer.(*Layer).annotations,
+	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "append target layer")
 	}
-
-	existLayer, _ := (*job.Target.Img).LayerByDigest(hash)
-	if existLayer == nil {
-		targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
-			Layer: job.TargetLayer,
-			History: v1.History{
-				CreatedBy: fmt.Sprintf("nydusify"),
-			},
-			Annotations: job.TargetLayer.(*Layer).annotations,
-		})
-		if err != nil {
-			return errors.Wrap(err, "append target layer")
-		}
-		*job.Target.Img = targetImage
-	}
+	*job.Target.Img = targetImage
 
 	job.Progress.SetFinish()
 	job.Progress.SetStatus(StatusPushed)

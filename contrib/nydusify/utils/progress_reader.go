@@ -9,6 +9,7 @@ import (
 )
 
 type ProgressReader struct {
+	total    int
 	reader   io.ReadCloser
 	callback func(int)
 }
@@ -22,7 +23,8 @@ func NewProgressReader(reader io.ReadCloser, callback func(int)) *ProgressReader
 
 func (pr *ProgressReader) Read(p []byte) (count int, err error) {
 	count, err = pr.reader.Read(p)
-	pr.callback(len(p))
+	pr.total += len(p)
+	pr.callback(pr.total)
 	return
 }
 
