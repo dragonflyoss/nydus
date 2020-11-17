@@ -23,10 +23,7 @@ use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 use std::time::SystemTime;
 
-use crate::io_stats::{
-    self, FopRecorder,
-    StatsFop::{self, *},
-};
+use crate::io_stats::{self, FopRecorder, StatsFop::*};
 use crate::metadata::{Inode, RafsInode, RafsSuper};
 use crate::storage::device;
 use crate::storage::*;
@@ -513,7 +510,7 @@ impl FileSystem for Rafs {
         ino: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
-        let mut recorder = FopRecorder::settle(StatsFop::Getattr, ino, &self.ios);
+        let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
         let attr = self.get_inode_attr(ino).map(|r| {
             recorder.mark_success(0);
             r
@@ -546,7 +543,7 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
-        let mut recorder = FopRecorder::settle(StatsFop::Read, ino, &self.ios);
+        let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
         if offset >= inode.size() {
             return Ok(0);
@@ -557,7 +554,7 @@ impl FileSystem for Rafs {
             recorder.mark_success(r);
             r
         });
-        self.ios.latency_end(&start, StatsFop::Read);
+        self.ios.latency_end(&start, Read);
         r
     }
 
@@ -615,7 +612,7 @@ impl FileSystem for Rafs {
     }
 
     fn listxattr(&self, _ctx: Context, inode: u64, size: u32) -> Result<ListxattrReply> {
-        let mut rec = FopRecorder::settle(StatsFop::Listxattr, inode, &self.ios);
+        let mut rec = FopRecorder::settle(Listxattr, inode, &self.ios);
         if !self.xattr_supported() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -651,7 +648,7 @@ impl FileSystem for Rafs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
     ) -> Result<()> {
-        let mut rec = FopRecorder::settle(StatsFop::Readdir, inode, &self.ios);
+        let mut rec = FopRecorder::settle(Readdir, inode, &self.ios);
         self.do_readdir(inode, size, offset, add_entry).map(|r| {
             rec.mark_success(0);
             r
@@ -667,7 +664,7 @@ impl FileSystem for Rafs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry, Entry) -> Result<usize>,
     ) -> Result<()> {
-        let mut rec = FopRecorder::settle(StatsFop::Readdirplus, ino, &self.ios);
+        let mut rec = FopRecorder::settle(Readdirplus, ino, &self.ios);
         self.do_readdir(ino, size, offset, |dir_entry| {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
