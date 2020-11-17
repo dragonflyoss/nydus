@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/pkg/errors"
 
@@ -32,6 +31,7 @@ type BuildFlow struct {
 	parentBootstrapPath string
 	blobPushWorker      *utils.WorkerPool
 	builder             *Builder
+	blobIDs             []string
 }
 
 func (build *BuildFlow) getLatestBlobPath() (string, error) {
@@ -40,14 +40,22 @@ func (build *BuildFlow) getLatestBlobPath() (string, error) {
 		return "", err
 	}
 
-	sort.Slice(blobs, func(i, j int) bool {
-		return blobs[i].ModTime().UnixNano() < blobs[j].ModTime().UnixNano()
-	})
+	for _, blobPath := range blobs {
+		blobID := blobPath.Name()
+		exist := false
+		for _, existBlobID := range build.blobIDs {
+			if existBlobID == blobID {
+				exist = true
+				break
+			}
+		}
+		if !exist {
+			build.blobIDs = append(build.blobIDs, blobID)
+			return filepath.Join(build.blobsDir, blobID), nil
+		}
+	}
 
-	blobID := blobs[len(blobs)-1].Name()
-	blobPath := filepath.Join(build.blobsDir, blobID)
-
-	return blobPath, nil
+	return "", nil
 }
 
 func NewBuildFlow(option BuildFlowOption) (*BuildFlow, error) {
@@ -108,13 +116,16 @@ func (build *BuildFlow) Build(layerJob *registry.LayerJob) error {
 	// Push nydus blob layer
 	blobPath, err := build.getLatestBlobPath()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "get latest blob")
 	}
-	layerJob.SetTargetLayer(blobPath, blobPath, registry.MediaTypeNydusBlob, map[string]string{
-		registry.LayerAnnotationNydusBlob: "true",
-	})
+	if blobPath != "" {
+		layerJob.SetTargetLayer(blobPath, "", registry.MediaTypeNydusBlob, map[string]string{
+			registry.LayerAnnotationNydusBlob: "true",
+		})
+		return build.blobPushWorker.AddJob(layerJob)
+	}
 
-	return build.blobPushWorker.AddJob(layerJob)
+	return nil
 }
 
 func (build *BuildFlow) Wait() error {
