@@ -14,6 +14,7 @@ use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +77,14 @@ pub struct RafsConfig {
     pub enable_xattr: bool,
     #[serde(default)]
     pub access_pattern: bool,
+}
+
+impl FromStr for RafsConfig {
+    type Err = RafsError;
+
+    fn from_str(s: &str) -> RafsResult<RafsConfig> {
+        serde_json::from_str(s).map_err(RafsError::ParseConfig)
+    }
 }
 
 impl RafsConfig {
