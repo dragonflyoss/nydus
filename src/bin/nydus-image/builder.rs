@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
-use std::io::{Error, Result};
+use std::io::{BufWriter, Error, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,9 @@ use crate::stargz;
 
 use crate::node::*;
 use crate::tree::Tree;
+
+// TODO: select BufWriter capacity by performance testing.
+const BUF_WRITER_CAPACITY: usize = 2 << 17;
 
 pub struct Builder {
     /// Source type: Directory | StargzIndex
@@ -123,20 +126,23 @@ impl Builder {
         prefetch_policy: PrefetchPolicy,
         explicit_uidgid: bool,
     ) -> Result<Builder> {
-        let f_blob = Box::new(
+        let f_blob = Box::new(BufWriter::with_capacity(
+            BUF_WRITER_CAPACITY,
             OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(blob_path)?,
-        );
-        let f_bootstrap = Box::new(
+        ));
+
+        let f_bootstrap = Box::new(BufWriter::with_capacity(
+            BUF_WRITER_CAPACITY,
             OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(bootstrap_path)?,
-        );
+        ));
 
         let f_parent_bootstrap: Option<Box<dyn RafsIoRead>> =
             if parent_bootstrap_path != Path::new("") {
@@ -593,6 +599,10 @@ impl Builder {
             .iter()
             .map(|entry| entry.blob_id.clone())
             .collect();
+
+        // Flush remaining data in BufWriter to file
+        self.f_bootstrap.flush()?;
+        self.f_blob.flush()?;
 
         Ok((blob_ids, blob_size))
     }

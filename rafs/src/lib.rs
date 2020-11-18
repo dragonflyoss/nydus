@@ -13,7 +13,7 @@ extern crate bitflags;
 
 use std::any::Any;
 use std::fs::File;
-use std::io::{Error, Read, Result, Seek, Write};
+use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
@@ -24,7 +24,6 @@ mod error;
 pub mod fs;
 pub mod metadata;
 pub mod storage;
-use std::io::SeekFrom;
 
 #[macro_use]
 extern crate lazy_static;
@@ -57,6 +56,15 @@ pub trait RafsIoWrite: Write + Seek {
 
 impl RafsIoRead for File {}
 impl RafsIoWrite for File {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// Rust file I/O is unbuffered by default. If we have many small write calls
+// to a file, should use BufWriter. BufWriter maintains an in-memory buffer
+// for writing, minimizing the number of system calls required.
+impl RafsIoWrite for BufWriter<File> {
     fn as_any(&self) -> &dyn Any {
         self
     }
