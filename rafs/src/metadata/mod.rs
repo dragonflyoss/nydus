@@ -110,6 +110,7 @@ impl RafsSuperMeta {
     }
 }
 
+#[derive(Clone)]
 pub enum RafsMode {
     Direct,
     Cached,
@@ -141,7 +142,7 @@ pub struct RafsSuper {
     pub mode: RafsMode,
     pub digest_validate: bool,
     pub meta: RafsSuperMeta,
-    pub inodes: Box<dyn RafsSuperInodes + Sync + Send>,
+    pub inodes: Arc<dyn RafsSuperInodes + Sync + Send>,
 }
 
 impl Default for RafsSuper {
@@ -168,7 +169,7 @@ impl Default for RafsSuper {
                 attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
                 entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
             },
-            inodes: Box::new(NoopInodes::new()),
+            inodes: Arc::new(NoopInodes::new()),
         }
     }
 }
@@ -197,7 +198,9 @@ impl RafsSuper {
     }
 
     pub fn destroy(&mut self) {
-        self.inodes.destroy();
+        Arc::get_mut(&mut self.inodes)
+            .expect("Inodes are no longer used.")
+            .destroy();
     }
 
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
@@ -246,22 +249,18 @@ impl RafsSuper {
             }
             RAFS_SUPER_VERSION_V5 => match self.mode {
                 RafsMode::Direct => {
-                    let mut inodes = Box::new(DirectMapping::new(&self.meta, self.digest_validate));
+                    let mut inodes = DirectMapping::new(&self.meta, self.digest_validate);
                     inodes.load(r)?;
-                    self.inodes = inodes;
+                    self.inodes = Arc::new(inodes);
                 }
                 RafsMode::Cached => {
                     r.seek(SeekFrom::Start(sb.blob_table_offset()))?;
                     let mut blob_table = OndiskBlobTable::new();
                     blob_table.load(r, sb.blob_table_size() as usize)?;
 
-                    let mut inodes = Box::new(CachedInodes::new(
-                        self.meta,
-                        blob_table,
-                        self.digest_validate,
-                    ));
+                    let mut inodes = CachedInodes::new(self.meta, blob_table, self.digest_validate);
                     inodes.load(r)?;
-                    self.inodes = inodes;
+                    self.inodes = Arc::new(inodes);
                 }
             },
             _ => return Err(einval!("invalid superblock version number")),

@@ -12,7 +12,8 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::io::FromRawFd;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,7 +104,7 @@ impl fmt::Display for RafsConfig {
 /// Main entrance of the RAFS readonly FUSE file system.
 pub struct Rafs {
     device: device::RafsDevice,
-    sb: RafsSuper,
+    sb: Arc<RafsSuper>,
     digest_validate: bool,
     fs_prefetch: bool,
     initialized: bool,
@@ -132,7 +133,7 @@ impl Rafs {
                 sb.meta.get_digester(),
             )
             .map_err(RafsError::CreateDevice)?,
-            sb,
+            sb: Arc::new(sb),
             initialized: false,
             ios: io_stats::new(id),
             digest_validate: conf.digest_validate,
@@ -186,7 +187,7 @@ impl Rafs {
     pub fn import(
         &mut self,
         r: &mut RafsIoReader,
-        prefetch_files: Option<Vec<&Path>>,
+        prefetch_files: Option<Vec<PathBuf>>,
     ) -> RafsResult<()> {
         if self.initialized {
             return Err(RafsError::AlreadyMounted);
@@ -198,31 +199,41 @@ impl Rafs {
 
         // Device should be ready before any prefetch.
         if self.fs_prefetch {
-            let inodes = match prefetch_files {
-                Some(files) => {
-                    let mut inodes = Vec::<Inode>::new();
-                    for f in files {
-                        if let Ok(inode) = self.sb.ino_from_path(f) {
-                            inodes.push(inode);
-                        } else {
-                            continue;
-                        }
-                    }
-                    Some(inodes)
-                }
-                None => None,
-            };
+            // We have to this unsafe conversion because RafsIoReader as a Box pointer can't
+            // be shared between threads safely, even after cloning.
+            let _f: File = unsafe { FromRawFd::from_raw_fd(r.as_raw_fd()) };
+            let underlying_file = _f.try_clone().unwrap();
+            let sb = self.sb.clone();
+            let device = self.device.clone();
 
-            // Prefetch procedure does not affect rafs mounting
-            if let Ok(ref mut desc) = self.sb.prefetch_hint_files(r, inodes).map_err(|e| {
-                info!("No file to be prefetched {:?}", e);
-                e
-            }) {
-                self.device.prefetch(desc).unwrap_or_else(|e| {
-                    warn!("Prefetch error, {:?}", e);
-                    0
-                });
-            }
+            let _ = std::thread::spawn(move || {
+                let mut reader = Box::new(underlying_file) as RafsIoReader;
+                let inodes = match prefetch_files {
+                    Some(files) => {
+                        let mut inodes = Vec::<Inode>::new();
+                        for f in files {
+                            if let Ok(inode) = sb.ino_from_path(f.as_path()) {
+                                inodes.push(inode);
+                            } else {
+                                continue;
+                            }
+                        }
+                        Some(inodes)
+                    }
+                    None => None,
+                };
+
+                // Prefetch procedure does not affect rafs mounting
+                if let Ok(ref mut desc) = sb.prefetch_hint_files(&mut reader, inodes).map_err(|e| {
+                    info!("No file to be prefetched {:?}", e);
+                    e
+                }) {
+                    device.prefetch(desc).unwrap_or_else(|e| {
+                        warn!("Prefetch error, {:?}", e);
+                        0
+                    });
+                }
+            });
         }
 
         self.initialized = true;
@@ -236,7 +247,9 @@ impl Rafs {
         info! {"Destroy rafs"}
 
         if self.initialized {
-            self.sb.destroy();
+            Arc::get_mut(&mut self.sb)
+                .expect("Superblock is no longer used")
+                .destroy();
             self.device.close()?;
             self.initialized = false;
         }

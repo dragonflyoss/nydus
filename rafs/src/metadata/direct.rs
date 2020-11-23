@@ -320,7 +320,6 @@ impl RafsSuperInodes for DirectMapping {
 
     fn destroy(&mut self) {
         let state = DirectMappingState::new(&RafsSuperMeta::default(), false);
-
         self.state.store(Arc::new(state));
     }
 
