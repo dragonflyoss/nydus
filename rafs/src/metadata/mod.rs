@@ -11,12 +11,14 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Error, Result, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::Entry;
+use fuse_rs::api::filesystem::ROOT_ID;
 
 use self::digest::RafsDigest;
 use self::direct::DirectMapping;
@@ -42,6 +44,8 @@ pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
 pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
+const DOT: &str = ".";
+const DOTDOT: &str = "..";
 
 /// Type of RAFS inode.
 pub type Inode = u64;
@@ -347,6 +351,76 @@ impl RafsSuper {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
+        if ino == ROOT_ID {
+            return Ok(self.get_inode(ino, false)?.name()?.into());
+        }
+
+        let mut path = PathBuf::new();
+        let mut cur_ino = ino;
+        let mut inode;
+
+        loop {
+            inode = self.get_inode(cur_ino, false)?;
+            let e: PathBuf = inode.name()?.into();
+            path = e.join(path);
+
+            if inode.ino() == ROOT_ID {
+                break;
+            } else {
+                cur_ino = inode.parent();
+            }
+        }
+
+        Ok(path)
+    }
+
+    pub(crate) fn ino_from_path(&self, f: &Path) -> Result<u64> {
+        if f == Path::new("/") {
+            return Ok(ROOT_ID);
+        }
+
+        if !f.starts_with("/") {
+            return Err(einval!());
+        }
+
+        let mut parent = self.get_inode(ROOT_ID, self.digest_validate)?;
+
+        let entries = f
+            .components()
+            .filter(|comp| *comp != Component::RootDir)
+            .map(|comp| match comp {
+                Component::Normal(name) => Some(name),
+                Component::ParentDir => Some(OsStr::from_bytes(DOTDOT.as_bytes())),
+                Component::CurDir => Some(OsStr::from_bytes(DOT.as_bytes())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            warn!("Path can't be parsed {:?}", f);
+            return Err(enoent!());
+        }
+
+        for p in entries {
+            if p.is_none() {
+                error!("Illegal specified path {:?}", f);
+                return Err(einval!());
+            }
+
+            // Safe because it already checks if p is None above.
+            match parent.get_child_by_name(p.unwrap()) {
+                Ok(p) => parent = p,
+                Err(_) => {
+                    warn!("File {:?} not in rafs", p.unwrap());
+                    return Err(enoent!());
+                }
+            }
+        }
+
+        Ok(parent.ino())
     }
 
     /// This is fs layer prefetch entry point where 2 kinds of prefetch can be started:

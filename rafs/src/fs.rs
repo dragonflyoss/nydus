@@ -12,7 +12,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use crate::storage::device;
 use crate::storage::*;
 use crate::*;
 
-use nydus_utils::{eacces, enoent};
+use nydus_utils::eacces;
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -202,7 +202,7 @@ impl Rafs {
                 Some(files) => {
                     let mut inodes = Vec::<Inode>::new();
                     for f in files {
-                        if let Ok(inode) = self.ino_from_path(f) {
+                        if let Ok(inode) = self.sb.ino_from_path(f) {
                             inodes.push(inode);
                         } else {
                             continue;
@@ -300,13 +300,13 @@ impl Rafs {
             }) {
                 Ok(0) => {
                     self.ios
-                        .new_file_counter(child.ino(), |i| self.path_from_ino(i).unwrap());
+                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap());
                     break;
                 }
                 Ok(_) => {
                     idx += 1;
                     self.ios
-                        .new_file_counter(child.ino(), |i| self.path_from_ino(i).unwrap())
+                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap())
                 } // TODO: should we check `size` here?
                 Err(r) => return Err(r),
             }
@@ -361,83 +361,13 @@ impl Rafs {
 
         entry
     }
-
-    fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
-        if ino == ROOT_ID {
-            return Ok(self.sb.get_inode(ino, false)?.name()?.into());
-        }
-
-        let mut path = PathBuf::new();
-        let mut cur_ino = ino;
-        let mut inode;
-
-        loop {
-            inode = self.sb.get_inode(cur_ino, false)?;
-            let e: PathBuf = inode.name()?.into();
-            path = e.join(path);
-
-            if inode.ino() == ROOT_ID {
-                break;
-            } else {
-                cur_ino = inode.parent();
-            }
-        }
-
-        Ok(path)
-    }
-
-    fn ino_from_path(&self, f: &Path) -> Result<u64> {
-        if f == Path::new("/") {
-            return Ok(ROOT_ID);
-        }
-
-        if !f.starts_with("/") {
-            return Err(einval!());
-        }
-
-        let mut parent = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
-
-        let entries = f
-            .components()
-            .filter(|comp| *comp != Component::RootDir)
-            .map(|comp| match comp {
-                Component::Normal(name) => Some(name),
-                Component::ParentDir => Some(OsStr::from_bytes(DOTDOT.as_bytes())),
-                Component::CurDir => Some(OsStr::from_bytes(DOT.as_bytes())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        if entries.is_empty() {
-            warn!("Path can't be parsed {:?}", f);
-            return Err(enoent!());
-        }
-
-        for p in entries {
-            if p.is_none() {
-                error!("Illegal specified path {:?}", f);
-                return Err(einval!());
-            }
-
-            // Safe because it already checks if p is None above.
-            match parent.get_child_by_name(p.unwrap()) {
-                Ok(p) => parent = p,
-                Err(_) => {
-                    warn!("File {:?} not in rafs", p.unwrap());
-                    return Err(enoent!());
-                }
-            }
-        }
-
-        Ok(parent.ino())
-    }
 }
 
 impl BackendFileSystem for Rafs {
     fn mount(&self) -> Result<(Entry, u64)> {
         let root_inode = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
         self.ios
-            .new_file_counter(root_inode.ino(), |i| self.path_from_ino(i).unwrap());
+            .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
         let entry = self.get_inode_entry(root_inode);
         Ok((entry, self.sb.get_max_ino()))
     }
@@ -494,7 +424,7 @@ impl FileSystem for Rafs {
                 .get_child_by_name(target)
                 .map(|i| {
                     self.ios
-                        .new_file_counter(i.ino(), |i| self.path_from_ino(i).unwrap());
+                        .new_file_counter(i.ino(), |i| self.sb.path_from_ino(i).unwrap());
                     self.get_inode_entry(i)
                 })
                 .unwrap_or_else(|_| self.negative_entry()))
