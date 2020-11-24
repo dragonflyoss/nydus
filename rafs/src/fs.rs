@@ -59,7 +59,16 @@ pub struct FsPrefetchControl {
     #[serde(default = "default_threads_count")]
     threads_count: usize,
     #[serde(default = "default_merging_size")]
+    // In unit of Bytes
     merging_size: usize,
+    #[serde(default)]
+    // In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
+    // reduce congestion with normal user IO.
+    // bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
+    // bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
+    //                        Please note that if the value is less than Rafs chunk size,
+    //                        it will be raised to the chunk size.
+    bandwidth_rate: u32,
 }
 
 /// Rafs storage backend configuration information.
@@ -131,6 +140,7 @@ impl Rafs {
         device_conf.cache.cache_validate = conf.digest_validate;
         device_conf.cache.prefetch_worker.threads_count = conf.fs_prefetch.threads_count;
         device_conf.cache.prefetch_worker.merging_size = conf.fs_prefetch.merging_size;
+        device_conf.cache.prefetch_worker.bandwidth_rate = conf.fs_prefetch.bandwidth_rate;
 
         let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
         sb.load(r).map_err(RafsError::FillSuperblock)?;

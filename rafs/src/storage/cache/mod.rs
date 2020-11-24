@@ -111,10 +111,12 @@ fn generate_merged_requests(
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default)]
 pub struct PrefetchWorker {
     pub threads_count: usize,
     pub merging_size: usize,
+    // In unit of Bytes and Zero means no rate limit is set.
+    pub bandwidth_rate: u32,
 }
 
 pub trait RafsCache {
