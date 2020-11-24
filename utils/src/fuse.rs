@@ -266,7 +266,7 @@ fn fuse_kern_mount(
     );
     let mut fstype = String::from(FUSE_FSTYPE);
     if !subtype.is_empty() {
-        fstype.push_str(".");
+        fstype.push('.');
         fstype.push_str(subtype);
     }
 
