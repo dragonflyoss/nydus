@@ -110,7 +110,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         Ok(Node {
             index: 0,
             real_ino: ondisk_inode.i_ino,
-            dev: u64::MAX,
+            dev: std::u64::MAX,
             overlay: Overlay::Lower,
             explicit_uidgid: self.rs.meta.explicit_uidgid(),
             source: PathBuf::from_str("/").unwrap(),
@@ -330,7 +330,7 @@ impl StargzIndexTreeBuilder {
         Ok(Node {
             index: 0,
             real_ino: ino,
-            dev: u64::MAX,
+            dev: std::u64::MAX,
             overlay: Overlay::UpperAddition,
             explicit_uidgid,
             source: PathBuf::from_str("/").unwrap(),
