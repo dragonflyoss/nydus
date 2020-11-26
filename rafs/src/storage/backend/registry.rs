@@ -32,8 +32,8 @@ struct Cache(RwLock<String>);
 struct HashCache(RwLock<HashMap<String, String>>);
 
 impl Cache {
-    fn new() -> Self {
-        Cache(RwLock::new(String::new()))
+    fn new(val: String) -> Self {
+        Cache(RwLock::new(val))
     }
     fn get(&self) -> String {
         let cached_guard = self.0.read().unwrap();
@@ -76,7 +76,7 @@ pub struct Registry {
     // Image repo name like: library/ubuntu
     repo: String,
     // Base64 encoded registry auth
-    auth: String,
+    auth: Option<String>,
     username: String,
     password: String,
     // Still upload even if blob exists on blob server
@@ -102,8 +102,14 @@ struct RegistryConfig {
     scheme: String,
     host: String,
     repo: String,
+    // Base64_encoded(username:password), the field should be
+    // sent to registry auth server to get a bearer token.
     #[serde(default)]
-    auth: String,
+    auth: Option<String>,
+    // The field is a bearer token to be sent to registry
+    // to authorize registry requests.
+    #[serde(default)]
+    registry_token: Option<String>,
     #[serde(default)]
     blob_url_scheme: String,
 }
@@ -131,6 +137,21 @@ enum Auth {
     Bearer(BearerAuth),
 }
 
+fn trim(val: Option<String>) -> Option<String> {
+    if let Some(ref _val) = val {
+        let trimmed_val = _val.trim();
+        if trimmed_val.is_empty() {
+            None
+        } else if trimmed_val.len() == _val.len() {
+            val
+        } else {
+            Some(trimmed_val.to_string())
+        }
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::useless_let_if_seq)]
 pub fn new(config: serde_json::value::Value) -> Result<Registry> {
     let common_config: CommonConfig =
@@ -141,14 +162,11 @@ pub fn new(config: serde_json::value::Value) -> Result<Registry> {
 
     let config: RegistryConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
 
-    let username;
-    let password;
+    let auth = trim(config.auth);
+    let registry_token = trim(config.registry_token);
 
-    if config.auth.trim().is_empty() {
-        username = String::new();
-        password = String::new();
-    } else {
-        let auth = base64::decode(config.auth.as_bytes()).map_err(|e| {
+    let (username, password) = if let Some(auth) = &auth {
+        let auth = base64::decode(auth.as_bytes()).map_err(|e| {
             einval!(format!(
                 "Invalid base64 encoded registry auth config: {:?}",
                 e
@@ -164,22 +182,31 @@ pub fn new(config: serde_json::value::Value) -> Result<Registry> {
         if auth.len() < 2 {
             return Err(einval!("Invalid registry auth config"));
         }
-        username = auth[0].to_string();
-        password = auth[1].to_string();
-    }
+        (auth[0].to_string(), auth[1].to_string())
+    } else {
+        (String::new(), String::new())
+    };
+
+    let cached_auth = if let Some(registry_token) = registry_token {
+        // Store the registry bearer token to cached_auth, prefer to
+        // use the token stored in cached_auth to request registry.
+        Cache::new(format!("Bearer {}", registry_token))
+    } else {
+        Cache::new(String::new())
+    };
 
     Ok(Registry {
         request,
         scheme: config.scheme,
         host: config.host,
         repo: config.repo,
-        auth: config.auth,
+        auth,
+        cached_auth,
         username,
         password,
         force_upload,
         retry_limit,
         blob_url_scheme: config.blob_url_scheme,
-        cached_auth: Cache::new(),
         cached_redirect: HashCache::new(),
     })
 }
@@ -255,7 +282,11 @@ impl Registry {
 
     fn get_auth_header(&self, auth: Auth) -> Result<String> {
         match auth {
-            Auth::Basic(_) => Ok(format!("Basic {}", self.auth)),
+            Auth::Basic(_) => self
+                .auth
+                .as_ref()
+                .map(|auth| format!("Basic {}", auth))
+                .ok_or_else(|| einval!("invalid auth config")),
             Auth::Bearer(auth) => {
                 let token = self.get_token(auth)?;
                 Ok(format!("Bearer {}", token))
