@@ -127,7 +127,7 @@ impl Node {
         let mut node = Node {
             index: 0,
             real_ino: 0,
-            dev: u64::MAX,
+            dev: std::u64::MAX,
             source,
             path,
             overlay,
