@@ -1,10 +1,7 @@
 FROM rust:1.43
 
 RUN echo '[source.crates-io] \n\
-registry = "https://github.com/rust-lang/crates.io-index" \n\
-replace-with = "thu" \n\
-[source.thu] \n\
-registry = "https://mirrors.tuna.tsinghua.edu.cn/git/crates.io-index.git"'\
+registry = "https://github.com/rust-lang/crates.io-index"'\
 >> /usr/local/cargo/config
 
 RUN rustup component add clippy
