@@ -433,7 +433,7 @@ pub fn export_files_stats(name: &Option<String>) -> Result<String, IoStatsError>
     match name {
         Some(k) => ios_set
             .get(k)
-            .ok_or_else(|| IoStatsError::NoCounter)
+            .ok_or(IoStatsError::NoCounter)
             .map(|v| v.export_files_stats())?,
         None => {
             if ios_set.len() == 1 {
@@ -451,7 +451,7 @@ pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoSt
     match name {
         Some(k) => ios_set
             .get(k)
-            .ok_or_else(|| IoStatsError::NoCounter)
+            .ok_or(IoStatsError::NoCounter)
             .map(|v| v.export_files_access_patterns())?,
         None => {
             if ios_set.len() == 1 {
@@ -471,7 +471,7 @@ pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError
     match name {
         Some(k) => ios_set
             .get(k)
-            .ok_or_else(|| IoStatsError::NoCounter)
+            .ok_or(IoStatsError::NoCounter)
             .map(|v| v.export_global_stats())?,
         None => {
             if ios_set.len() == 1 {
