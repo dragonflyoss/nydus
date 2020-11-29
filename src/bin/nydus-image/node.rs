@@ -4,17 +4,19 @@
 
 //! File node for RAFS format
 
+use nix::sys::stat;
 use rafs::RafsIoWriter;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::io::Result;
+use std::io::{Error, Result};
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str;
+use std::str::FromStr;
 
 use sha2::digest::Digest;
 use sha2::Sha256;
@@ -36,6 +38,34 @@ pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
 pub enum WhiteoutType {
     OCIOpaque,
     OCIRemoval,
+    OverlayFSOpaque,
+    OverlayFSRemoval,
+}
+
+impl WhiteoutType {
+    pub fn is_removal(&self) -> bool {
+        *self == WhiteoutType::OCIRemoval || *self == WhiteoutType::OverlayFSRemoval
+    }
+}
+
+#[derive(PartialEq)]
+pub enum WhiteoutSpec {
+    /// https://github.com/opencontainers/image-spec/blob/master/layer.md#whiteouts
+    Oci,
+    /// "whiteouts and opaque directories" in https://www.kernel.org/doc/Documentation/filesystems/overlayfs.txt
+    Overlayfs,
+}
+
+impl FromStr for WhiteoutSpec {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "oci" => Ok(Self::Oci),
+            "overlayfs" => Ok(Self::Overlayfs),
+            _ => Err(einval!("Invalid whiteout spec")),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -97,6 +127,8 @@ pub struct Node {
     /// dev number is required because a source root directory can have multiple
     /// partitions mounted. Files from different partition can have unique inode number.
     pub dev: u64,
+    /// device ID (if special file), describes the device that this file (inode) represents.
+    pub rdev: u64,
     /// Overlay type for layered build
     pub overlay: Overlay,
     /// Absolute path to root directory where start to build image.
@@ -127,7 +159,8 @@ impl Node {
         let mut node = Node {
             index: 0,
             real_ino: 0,
-            dev: std::u64::MAX,
+            dev: u64::MAX,
+            rdev: u64::MAX,
             source,
             path,
             overlay,
@@ -315,6 +348,7 @@ impl Node {
 
         self.real_ino = meta.st_ino();
         self.dev = meta.st_dev();
+        self.rdev = meta.st_rdev();
 
         Ok(())
     }
@@ -404,6 +438,22 @@ impl Node {
         }
     }
 
+    pub fn origin_name(&self, t: &WhiteoutType) -> Option<&OsStr> {
+        if let Some(name) = self.name().to_str() {
+            if *t == WhiteoutType::OCIRemoval {
+                // the whiteout filename prefixes the basename of the path to be deleted with ".wh.".
+                return Some(OsStr::from_bytes(
+                    name[OCISPEC_WHITEOUT_PREFIX.len()..].as_bytes(),
+                ));
+            } else if *t == WhiteoutType::OverlayFSRemoval {
+                // the whiteout file has the same name as the file to be deleted.
+                return Some(name.as_ref());
+            }
+        }
+
+        None
+    }
+
     pub fn path_vec(&self) -> Vec<OsString> {
         self.rootfs()
             .components()
@@ -415,19 +465,60 @@ impl Node {
             .collect::<Vec<_>>()
     }
 
-    pub fn whiteout_type(&self) -> Option<WhiteoutType> {
+    pub fn is_overlayfs_whiteout(&self, spec: &WhiteoutSpec) -> bool {
+        if *spec != WhiteoutSpec::Overlayfs {
+            return false;
+        }
+
+        (self.inode.i_mode & libc::S_IFMT == libc::S_IFCHR)
+            && stat::major(self.rdev) == 0
+            && stat::minor(self.rdev) == 0
+    }
+
+    fn is_overlayfs_opaque(&self, spec: &WhiteoutSpec) -> bool {
+        if *spec != WhiteoutSpec::Overlayfs {
+            return false;
+        }
+
+        // A directory is made opaque by setting the xattr
+        // "trusted.overlay.opaque" to "y".
+        if let Some(v) = self
+            .xattrs
+            .pairs
+            .get(&OsString::from("trusted.overlay.opaque"))
+        {
+            if let Ok(v) = std::str::from_utf8(v.as_slice()) {
+                return v == "y";
+            }
+        }
+
+        false
+    }
+
+    pub fn whiteout_type(&self, spec: &WhiteoutSpec) -> Option<WhiteoutType> {
         if self.overlay == Overlay::Lower {
             return None;
         }
-        let name = self.name();
-        if name == OCISPEC_WHITEOUT_OPAQUE {
-            return Some(WhiteoutType::OCIOpaque);
-        }
-        if let Some(n) = name.to_str() {
-            if n.starts_with(OCISPEC_WHITEOUT_PREFIX) {
-                return Some(WhiteoutType::OCIRemoval);
+
+        match spec {
+            WhiteoutSpec::Oci => {
+                if let Some(name) = self.name().to_str() {
+                    if name == OCISPEC_WHITEOUT_OPAQUE {
+                        return Some(WhiteoutType::OCIOpaque);
+                    } else if name.starts_with(OCISPEC_WHITEOUT_PREFIX) {
+                        return Some(WhiteoutType::OCIRemoval);
+                    }
+                }
+            }
+            WhiteoutSpec::Overlayfs => {
+                if self.is_overlayfs_whiteout(spec) {
+                    return Some(WhiteoutType::OverlayFSRemoval);
+                } else if self.is_overlayfs_opaque(spec) {
+                    return Some(WhiteoutType::OverlayFSOpaque);
+                }
             }
         }
+
         None
     }
 }

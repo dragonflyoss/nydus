@@ -51,6 +51,8 @@ pub struct Builder {
     digester: digest::Algorithm,
     /// Save host uid gid in each inode.
     explicit_uidgid: bool,
+    /// whiteout spec: overlayfs or oci
+    whiteout_spec: WhiteoutSpec,
     /// Cache node index for hardlinks, HashMap<Inode, Vec<index>>.
     lower_inode_map: HashMap<(Inode, u64), Vec<u64>>,
     upper_inode_map: HashMap<(Inode, u64), Vec<u64>>,
@@ -125,6 +127,7 @@ impl Builder {
         hint_readahead_files: BTreeMap<PathBuf, Option<u64>>,
         prefetch_policy: PrefetchPolicy,
         explicit_uidgid: bool,
+        whiteout_spec: WhiteoutSpec,
     ) -> Result<Builder> {
         let f_blob = Box::new(BufWriter::with_capacity(
             BUF_WRITER_CAPACITY,
@@ -166,6 +169,7 @@ impl Builder {
             compressor,
             digester,
             explicit_uidgid,
+            whiteout_spec,
             lower_inode_map: HashMap::new(),
             upper_inode_map: HashMap::new(),
             chunk_cache: HashMap::new(),
@@ -269,7 +273,9 @@ impl Builder {
             // Store node for bootstrap & blob dump.
             // Put the whiteout file of upper layer in the front of node list for layered build,
             // so that it can be applied to the node tree of lower layer first than other files of upper layer.
-            if self.f_parent_bootstrap.is_some() && child.node.whiteout_type().is_some() {
+            if self.f_parent_bootstrap.is_some()
+                && child.node.whiteout_type(&self.whiteout_spec).is_some()
+            {
                 nodes.insert(0, child.node.clone());
             } else {
                 nodes.push(child.node.clone());
@@ -356,7 +362,7 @@ impl Builder {
 
         // Apply new node (upper layer) to node tree (lower layer)
         for node in &self.nodes {
-            tree.apply(&node, true)?;
+            tree.apply(&node, true, &self.whiteout_spec)?;
         }
 
         self.lower_inode_map.clear();
@@ -369,7 +375,12 @@ impl Builder {
 
     /// Build node tree of upper layer from a filesystem directory
     pub fn build_from_filesystem(&mut self, layered: bool) -> Result<()> {
-        let mut tree = Tree::from_filesystem(&self.source_path, self.explicit_uidgid, layered)?;
+        let mut tree = Tree::from_filesystem(
+            &self.source_path,
+            self.explicit_uidgid,
+            layered,
+            &self.whiteout_spec,
+        )?;
 
         self.build_rafs_wrap(&mut tree)?;
 
@@ -378,8 +389,12 @@ impl Builder {
 
     /// Build node tree of upper layer from a stargz index
     pub fn build_from_stargz_index(&mut self) -> Result<()> {
-        let mut tree =
-            Tree::from_stargz_index(&self.source_path, &self.blob_id, self.explicit_uidgid)?;
+        let mut tree = Tree::from_stargz_index(
+            &self.source_path,
+            &self.blob_id,
+            self.explicit_uidgid,
+            &self.whiteout_spec,
+        )?;
         self.build_rafs_wrap(&mut tree)?;
         Ok(())
     }

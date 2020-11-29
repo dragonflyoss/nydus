@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use builder::SourceType;
+use node::WhiteoutSpec;
 use nydus_utils::{einval, log_level_to_verbosity, BuildTimeInfo};
 use rafs::metadata::digest;
 use rafs::storage::{backend, compress, factory};
@@ -227,6 +228,15 @@ fn main() -> Result<()> {
                     .takes_value(false)
                     .required(false)
                 )
+                .arg(
+                    Arg::with_name("whiteout-spec")
+                    .long("whiteout-spec")
+                    .help("decide which whiteout spec to follow: \"oci\" or \"overlayfs\"")
+                    .takes_value(true)
+                    .required(true)
+                    .possible_values(&["oci", "overlayfs"])
+                    .default_value("oci")
+                )
         )
         .subcommand(
             SubCommand::with_name("check")
@@ -340,6 +350,11 @@ fn main() -> Result<()> {
             BTreeMap::new()
         };
 
+        let whiteout_spec: WhiteoutSpec = matches
+            .value_of("whiteout-spec")
+            .unwrap_or_default()
+            .parse()?;
+
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
@@ -352,6 +367,7 @@ fn main() -> Result<()> {
             hint_readahead_files,
             prefetch_policy,
             !repeatable,
+            whiteout_spec,
         )?;
         let (blob_ids, blob_size) = ib.build()?;
 

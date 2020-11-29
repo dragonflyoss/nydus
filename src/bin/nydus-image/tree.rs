@@ -12,7 +12,6 @@
 
 use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
 use std::fs::DirEntry;
 use std::io::Result;
@@ -110,7 +109,8 @@ impl<'a> MetadataTreeBuilder<'a> {
         Ok(Node {
             index: 0,
             real_ino: ondisk_inode.i_ino,
-            dev: std::u64::MAX,
+            dev: u64::MAX,
+            rdev: u64::MAX,
             overlay: Overlay::Lower,
             explicit_uidgid: self.rs.meta.explicit_uidgid(),
             source: PathBuf::from_str("/").unwrap(),
@@ -152,7 +152,7 @@ impl StargzIndexTreeBuilder {
         Ok(())
     }
 
-    fn build(&mut self, explicit_uidgid: bool) -> Result<Tree> {
+    fn build(&mut self, explicit_uidgid: bool, whiteout_spec: &WhiteoutSpec) -> Result<Tree> {
         // Parse stargz TOC index from a file
         let toc_index = stargz::parse_index(&self.stargz_index_path)?;
 
@@ -245,7 +245,7 @@ impl StargzIndexTreeBuilder {
                 node.inode.i_child_count = node.chunks.len() as u32;
                 node.inode.i_size = *size;
             }
-            tree.apply(node, false)?;
+            tree.apply(node, false, whiteout_spec)?;
         }
 
         Ok(tree)
@@ -330,7 +330,8 @@ impl StargzIndexTreeBuilder {
         Ok(Node {
             index: 0,
             real_ino: ino,
-            dev: std::u64::MAX,
+            dev: u64::MAX,
+            rdev: u64::MAX,
             overlay: Overlay::UpperAddition,
             explicit_uidgid,
             source: PathBuf::from_str("/").unwrap(),
@@ -354,7 +355,7 @@ impl FilesystemTreeBuilder {
     }
 
     /// Walk directory to build node tree by DFS,
-    fn load_children(&self, parent: &mut Node) -> Result<Vec<Tree>> {
+    fn load_children(&self, parent: &mut Node, whiteout_spec: &WhiteoutSpec) -> Result<Vec<Tree>> {
         let mut result = Vec::new();
 
         if !parent.is_dir() {
@@ -376,17 +377,18 @@ impl FilesystemTreeBuilder {
 
             // Per as to OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
-            if child.whiteout_type().is_some() && !self.layered {
+            if child.whiteout_type(whiteout_spec).is_some() && !self.layered {
                 continue;
             }
 
-            // Ignore special file
-            if child.file_type() == "" {
+            // Ignore special file, except overlayfs whiteout file
+            // which is a char device with major:minor(0:0).
+            if child.file_type() == "" && !child.is_overlayfs_whiteout(whiteout_spec) {
                 continue;
             }
 
             let mut child_tree = Tree::new(child);
-            child_tree.children = self.load_children(&mut child_tree.node)?;
+            child_tree.children = self.load_children(&mut child_tree.node, whiteout_spec)?;
             result.push(child_tree);
         }
 
@@ -420,9 +422,10 @@ impl Tree {
         stargz_index_path: &PathBuf,
         blob_id: &str,
         explicit_uidgid: bool,
+        whiteout_spec: &WhiteoutSpec,
     ) -> Result<Self> {
         let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone(), blob_id);
-        tree_builder.build(explicit_uidgid)
+        tree_builder.build(explicit_uidgid, whiteout_spec)
     }
 
     /// Build node tree from a bootstrap file
@@ -443,6 +446,7 @@ impl Tree {
         root_path: &PathBuf,
         explicit_uidgid: bool,
         layered: bool,
+        whiteout_spec: &WhiteoutSpec,
     ) -> Result<Self> {
         let tree_builder = FilesystemTreeBuilder::new(root_path.clone(), layered);
 
@@ -454,7 +458,7 @@ impl Tree {
         )?;
         let mut tree = Tree::new(node);
 
-        tree.children = tree_builder.load_children(&mut tree.node)?;
+        tree.children = tree_builder.load_children(&mut tree.node, whiteout_spec)?;
 
         Ok(tree)
     }
@@ -462,10 +466,15 @@ impl Tree {
     /// Apply new node (upper layer) to node tree (lower layer),
     /// support overlay defined in OCI image layer spec (https://github.com/opencontainers/image-spec/blob/master/layer.md),
     /// include change types Additions, Modifications, Removals and Opaques, return true if applied
-    pub fn apply(&mut self, target: &Node, handle_whiteout: bool) -> Result<bool> {
+    pub fn apply(
+        &mut self,
+        target: &Node,
+        handle_whiteout: bool,
+        whiteout_spec: &WhiteoutSpec,
+    ) -> Result<bool> {
         // Handle whiteout file
-        if handle_whiteout && target.whiteout_type().is_some() {
-            return self.remove(target);
+        if handle_whiteout && target.whiteout_type(whiteout_spec).is_some() {
+            return self.remove(target, whiteout_spec);
         }
 
         let target_paths = target.path_vec();
@@ -500,7 +509,7 @@ impl Tree {
                 }
                 if child.node.is_dir() {
                     // Search the node recursively
-                    let found = child.apply(target, handle_whiteout)?;
+                    let found = child.apply(target, handle_whiteout, whiteout_spec)?;
                     if found {
                         return Ok(true);
                     }
@@ -523,30 +532,28 @@ impl Tree {
     }
 
     /// Remove node from node tree, return true if removed
-    fn remove(&mut self, target: &Node) -> Result<bool> {
+    fn remove(&mut self, target: &Node, whiteout_spec: &WhiteoutSpec) -> Result<bool> {
         let target_paths = target.path_vec();
         let target_paths_len = target_paths.len();
         let node_paths = self.node.path_vec();
         let depth = node_paths.len();
-        let whiteout_type = target.whiteout_type();
 
         // Don't continue to search if current path not matched with target path or recursive depth out of target path
         if depth >= target_paths_len || node_paths[depth - 1] != target_paths[depth - 1] {
             return Ok(false);
         }
 
+        // safe because it's checked before calling into here
+        let whiteout_type = target.whiteout_type(whiteout_spec).unwrap();
+
         // Handle Opaques for root path (/)
-        if whiteout_type == Some(WhiteoutType::OCIOpaque) && depth == 1 && target_paths_len == 2 {
+        if depth == 1
+            && (whiteout_type == WhiteoutType::OCIOpaque && target_paths_len == 2
+                || whiteout_type == WhiteoutType::OverlayFSOpaque && target_paths_len == 1)
+        {
             self.node.overlay = Overlay::UpperOpaque;
             self.children.clear();
             return Ok(true);
-        }
-
-        let mut origin_name = target.name().to_os_string();
-        if whiteout_type == Some(WhiteoutType::OCIRemoval) {
-            if let Some(_origin_name) = origin_name.to_str() {
-                origin_name = OsString::from(&_origin_name[OCISPEC_WHITEOUT_PREFIX.len()..]);
-            }
         }
 
         let mut parent_name = None;
@@ -555,6 +562,7 @@ impl Tree {
                 parent_name = Some(file_name);
             }
         }
+        let origin_name = target.origin_name(&whiteout_type);
 
         // TODO: Search child by binary search
         for idx in 0..self.children.len() {
@@ -562,8 +570,8 @@ impl Tree {
 
             // Handle Removals
             if depth == target_paths_len - 1
-                && whiteout_type == Some(WhiteoutType::OCIRemoval)
-                && origin_name == child.node.name()
+                && whiteout_type.is_removal()
+                && origin_name == Some(child.node.name())
             {
                 // Remove the whole lower node
                 self.children.remove(idx);
@@ -571,9 +579,9 @@ impl Tree {
             }
 
             // Handle Opaques
-            if target_paths_len >= 2
+            if whiteout_type == WhiteoutType::OCIOpaque
+                && target_paths_len >= 2
                 && depth == target_paths_len - 2
-                && whiteout_type == Some(WhiteoutType::OCIOpaque)
             {
                 if let Some(parent_name) = parent_name {
                     if parent_name == child.node.name() {
@@ -583,11 +591,19 @@ impl Tree {
                         return Ok(true);
                     }
                 }
+            } else if whiteout_type == WhiteoutType::OverlayFSOpaque
+                && depth == target_paths_len - 1
+                && target.name() == child.node.name()
+            {
+                // Remove all children under the opaque directory
+                child.node.overlay = Overlay::UpperOpaque;
+                child.children.clear();
+                return Ok(true);
             }
 
             if child.node.is_dir() {
                 // Search the node recursively
-                let found = child.remove(target)?;
+                let found = child.remove(target, whiteout_spec)?;
                 if found {
                     return Ok(true);
                 }
