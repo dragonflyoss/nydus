@@ -34,8 +34,8 @@ pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WhiteoutType {
-    Opaque,
-    Removal,
+    OCIOpaque,
+    OCIRemoval,
 }
 
 #[allow(dead_code)]
@@ -421,11 +421,11 @@ impl Node {
         }
         let name = self.name();
         if name == OCISPEC_WHITEOUT_OPAQUE {
-            return Some(WhiteoutType::Opaque);
+            return Some(WhiteoutType::OCIOpaque);
         }
         if let Some(n) = name.to_str() {
             if n.starts_with(OCISPEC_WHITEOUT_PREFIX) {
-                return Some(WhiteoutType::Removal);
+                return Some(WhiteoutType::OCIRemoval);
             }
         }
         None

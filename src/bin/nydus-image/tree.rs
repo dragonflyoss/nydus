@@ -536,14 +536,14 @@ impl Tree {
         }
 
         // Handle Opaques for root path (/)
-        if whiteout_type == Some(WhiteoutType::Opaque) && depth == 1 && target_paths_len == 2 {
+        if whiteout_type == Some(WhiteoutType::OCIOpaque) && depth == 1 && target_paths_len == 2 {
             self.node.overlay = Overlay::UpperOpaque;
             self.children.clear();
             return Ok(true);
         }
 
         let mut origin_name = target.name().to_os_string();
-        if whiteout_type == Some(WhiteoutType::Removal) {
+        if whiteout_type == Some(WhiteoutType::OCIRemoval) {
             if let Some(_origin_name) = origin_name.to_str() {
                 origin_name = OsString::from(&_origin_name[OCISPEC_WHITEOUT_PREFIX.len()..]);
             }
@@ -562,7 +562,7 @@ impl Tree {
 
             // Handle Removals
             if depth == target_paths_len - 1
-                && whiteout_type == Some(WhiteoutType::Removal)
+                && whiteout_type == Some(WhiteoutType::OCIRemoval)
                 && origin_name == child.node.name()
             {
                 // Remove the whole lower node
@@ -573,7 +573,7 @@ impl Tree {
             // Handle Opaques
             if target_paths_len >= 2
                 && depth == target_paths_len - 2
-                && whiteout_type == Some(WhiteoutType::Opaque)
+                && whiteout_type == Some(WhiteoutType::OCIOpaque)
             {
                 if let Some(parent_name) = parent_name {
                     if parent_name == child.node.name() {
