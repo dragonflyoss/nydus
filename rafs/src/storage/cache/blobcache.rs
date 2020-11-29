@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
+use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -12,11 +13,15 @@ use std::thread;
 use nix::sys::uio;
 use nix::unistd::dup;
 extern crate spmc;
+use futures::executor::block_on;
+use governor::{
+    clock::QuantaClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
+};
 use vm_memory::VolatileSlice;
 
 use crate::metadata::digest::{self, RafsDigest};
 use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
+use crate::metadata::{RafsChunkInfo, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::storage::backend::BlobBackend;
 use crate::storage::cache::RafsCache;
 use crate::storage::cache::*;
@@ -159,6 +164,10 @@ pub struct BlobCache {
     is_compressed: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    // TODO: Directly using Governor RateLimiter makes code a little hard to read as
+    // some concepts come from GCRA like "cells". GCRA is a sort of improved "Leaky Bucket"
+    // firstly invented from ATM network technology. Wrap the limiter into Throttle!
+    limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
 }
 
 impl BlobCache {
@@ -407,6 +416,23 @@ impl RafsCache for BlobCache {
                             blob_size
                         );
 
+                        if blob_size == 0 {
+                            continue;
+                        }
+
+                        if let Some(ref limiter) = cache_cloned.limiter {
+                            let cells = NonZeroU32::new(blob_size).unwrap();
+                            if let Err(e) = limiter
+                                .check_n(cells)
+                                .or_else(|_| block_on(limiter.until_n_ready(cells)))
+                            {
+                                // `InsufficientCapacity` is the only possible error
+                                // Have to give up to avoid dead-loop
+                                // Drop alarm from here, printing errors makes piles of lines.
+                                trace!("{}: give up rate-limiting", e);
+                            }
+                        }
+
                         issue_batch = false;
                         // An immature trick here to detect if chunk already resides in
                         // blob cache file. Hopefully, we can have a more clever and agile
@@ -553,6 +579,24 @@ pub fn new(
         }
     }?;
 
+    // If the given value is less than blob chunk size, it exceeds burst size of the limiter ending
+    // up with throttling all throughput.
+    // TODO: We get the chunk size by a constant which is the default value and it's not
+    // easy to get real value now. Perhaps we should have a configuration center?
+    let tweaked_bw_limit = if config.prefetch_worker.bandwidth_rate != 0 {
+        std::cmp::max(
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+            config.prefetch_worker.bandwidth_rate,
+        )
+    } else {
+        0
+    };
+
+    let limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
+        info!("Prefetch bandwidth will be limited at {}Bytes/S", v);
+        Arc::new(RateLimiter::direct(Quota::per_second(v)))
+    });
+
     Ok(BlobCache {
         cache: Arc::new(RwLock::new(BlobCacheState {
             chunk_map: HashMap::new(),
@@ -566,6 +610,7 @@ pub fn new(
         prefetch_worker: config.prefetch_worker,
         compressor,
         digester,
+        limiter,
     })
 }
 

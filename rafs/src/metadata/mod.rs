@@ -42,6 +42,7 @@ pub const RAFS_DIGEST_LENGTH: usize = 32;
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
+// FIXME: u64 for this constant is extremely large, which is unnecessary as `u32` can represent block size 4GB.
 pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
 const DOT: &str = ".";

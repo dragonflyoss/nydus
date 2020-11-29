@@ -186,6 +186,8 @@ impl Node {
         for i in 0..self.inode.i_child_count {
             // Init chunk info
             let mut chunk = OndiskChunkInfo::new();
+            // FIXME: Should not assume that block size must be the default one.
+            // Use the configured value instead!
             let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
             let chunk_size = if i == self.inode.i_child_count - 1 {
                 file_size as usize - (RAFS_DEFAULT_BLOCK_SIZE as usize * i as usize)

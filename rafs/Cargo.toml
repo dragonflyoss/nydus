@@ -18,6 +18,8 @@ spmc = "0.3.0"
 lz4-sys = "1.9.2"
 nix = "0.17.0"
 blake3 = "0.3.6"
+governor = "0.3.1"
+futures = "0.3"
 flate2 = { version = "1.0", features = ["miniz-sys"], default-features = false }
 reqwest = { version = "0.10.4", features = ["blocking", "json"], optional = true }
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
