@@ -428,8 +428,7 @@ impl RafsCache for BlobCache {
                             {
                                 // `InsufficientCapacity` is the only possible error
                                 // Have to give up to avoid dead-loop
-                                // Drop alarm from here, printing errors makes piles of lines.
-                                trace!("{}: give up rate-limiting", e);
+                                error!("{}: give up rate-limiting", e);
                             }
                         }
 

@@ -7,8 +7,8 @@
 //! RAFS: a readonly FUSE file system designed for Cloud Native.
 
 use std::any::Any;
-use std::ffi::CStr;
-use std::ffi::OsStr;
+use std::convert::TryFrom;
+use std::ffi::{CStr, OsStr};
 use std::fmt;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
@@ -26,9 +26,9 @@ use serde::Deserialize;
 use std::time::SystemTime;
 
 use crate::io_stats::{self, FopRecorder, StatsFop::*};
-use crate::metadata::{Inode, RafsInode, RafsSuper};
-use crate::storage::device;
+use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::storage::*;
+use crate::storage::{cache::PrefetchWorker, device};
 use crate::*;
 
 use nydus_utils::eacces;
@@ -134,13 +134,29 @@ pub struct Rafs {
     i_time: u64,
 }
 
+impl TryFrom<&RafsConfig> for PrefetchWorker {
+    type Error = RafsError;
+    fn try_from(c: &RafsConfig) -> RafsResult<Self> {
+        if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_BLOCK_SIZE {
+            return Err(RafsError::Configure(
+                "Merging size can't exceed chunk size".to_string(),
+            ));
+        }
+
+        Ok(PrefetchWorker {
+            threads_count: c.fs_prefetch.threads_count,
+            merging_size: c.fs_prefetch.merging_size,
+            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
+        })
+    }
+}
+
 impl Rafs {
     pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
         let mut device_conf = conf.device.clone();
+
         device_conf.cache.cache_validate = conf.digest_validate;
-        device_conf.cache.prefetch_worker.threads_count = conf.fs_prefetch.threads_count;
-        device_conf.cache.prefetch_worker.merging_size = conf.fs_prefetch.merging_size;
-        device_conf.cache.prefetch_worker.bandwidth_rate = conf.fs_prefetch.bandwidth_rate;
+        device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
 
         let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
         sb.load(r).map_err(RafsError::FillSuperblock)?;
