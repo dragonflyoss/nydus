@@ -1,0 +1,29 @@
+{
+  "device": {
+    "backend": {
+      "type": "registry",
+      "config": {
+        "scheme": "https",
+        "auth": "",
+        "timeout": 5,
+        "connect_timeout": 5,
+        "retry_limit": 0
+      }
+    },
+    "cache": {
+      "type": "blobcache",
+      "config": {
+        "work_dir": "/tmp/nydus-rs/cache"
+      }
+    }
+  },
+  "mode": "direct",
+  "digest_validate": true,
+  "iostats_files": true,
+  "enable_xattr": true,
+  "fs_prefetch": {
+    "enable": true,
+    "threads_count": 10,
+    "merging_size": 131072
+  }
+}

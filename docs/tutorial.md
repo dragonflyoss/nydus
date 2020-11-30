@@ -21,9 +21,9 @@ This tutorial aims to be the one-stop shop for getting your hands dirty with Nyd
 
 The getting started guide on Docker has detailed instructions for setting up Docker on [Linux](https://docs.docker.com/engine/install/centos/).
 
-### Build the three tools in this repository
+### Build tools in this repository
 
-Please refer to [README](../README.md) to build the `nydusd` and `nydus-image`. And refer to [nydusify document](./nydusify.md) to build the `nydusify`.
+Please refer to [README](../README.md) to build the `nydusd` and `nydus-image`. And refer to [nydusify document](./nydusify.md) to build the `nydusify`. And refert to [nydus snapshotter document](../contrib/nydus-snapshotter/README.md) to build `containerd-nydus-grpc`.
 
 ## Build Nydus Image through nydusify
 
