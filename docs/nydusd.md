@@ -123,7 +123,9 @@ We are working on enabling cloud-hypervisor support for nydus.
     // Prefetch thread count
     "threads_count": 10,
     // Maximal read size per prefetch request, e.g. 128kb
-    "merging_size": 131072
+    "merging_size": 131072,
+    // Limit prefetch bandwidth to 1MB/S, it aims at reducing congestion with normal user io
+    "bandwidth_rate": 1048576
   }
 }
 ```
