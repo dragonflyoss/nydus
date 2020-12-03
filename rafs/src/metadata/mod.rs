@@ -311,7 +311,19 @@ impl RafsSuper {
         ino: u64,
         head_desc: &mut RafsBioDesc,
         hardlinks: &mut HashSet<u64>,
+        fetcher: &dyn Fn(&mut RafsBioDesc),
     ) -> Result<()> {
+        let try_prefetch = |desc: &mut RafsBioDesc| {
+            // Issue a prefetch request since target is large enough.
+            // As files belonging to the same directory are arranged in adjacent,
+            // it should fetch a range of blob in batch.
+            if desc.bi_size >= RAFS_DEFAULT_BLOCK_SIZE as usize {
+                fetcher(desc);
+                desc.bi_size = 0;
+                desc.bi_vec.truncate(0);
+            }
+        };
+
         match self.inodes.get_inode(ino, self.digest_validate) {
             Ok(inode) => {
                 if inode.is_dir() {
@@ -328,6 +340,8 @@ impl RafsSuper {
                         let mut desc = i.alloc_bio_desc(0, i.size() as usize)?;
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
+
+                        try_prefetch(head_desc);
                     }
                 } else {
                     if inode.is_empty_size() {
@@ -343,12 +357,16 @@ impl RafsSuper {
                     let mut desc = inode.alloc_bio_desc(0, inode.size() as usize)?;
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
+
+                    try_prefetch(head_desc);
                 }
             }
             Err(_) => {
                 return Err(enoent!("Can't find inode"));
             }
         }
+
+        fetcher(head_desc);
 
         Ok(())
     }
@@ -436,7 +454,8 @@ impl RafsSuper {
         &self,
         r: &mut RafsIoReader,
         files: Option<Vec<Inode>>,
-    ) -> RafsResult<RafsBioDesc> {
+        fetcher: &dyn Fn(&mut RafsBioDesc),
+    ) -> RafsResult<()> {
         let hint_entries = self.meta.prefetch_table_entries as usize;
 
         if hint_entries == 0 && files.is_none() {
@@ -474,19 +493,24 @@ impl RafsSuper {
                     break;
                 }
                 debug!("hint prefetch inode {}", inode_idx);
-                self.build_prefetch_desc(*inode_idx as u64, &mut head_desc, &mut hardlinks)
-                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
+                self.build_prefetch_desc(
+                    *inode_idx as u64,
+                    &mut head_desc,
+                    &mut hardlinks,
+                    fetcher,
+                )
+                .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
         }
 
         if let Some(files) = files {
             for f_ino in files {
-                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks)
+                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks, fetcher)
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
         }
 
-        Ok(head_desc)
+        Ok(())
     }
 }
 

@@ -168,6 +168,8 @@ pub struct BlobCache {
     // some concepts come from GCRA like "cells". GCRA is a sort of improved "Leaky Bucket"
     // firstly invented from ATM network technology. Wrap the limiter into Throttle!
     limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
+    mr_sender: Arc<Mutex<spmc::Sender<MergedBackendRequest>>>,
+    mr_receiver: spmc::Receiver<MergedBackendRequest>,
 }
 
 impl BlobCache {
@@ -314,91 +316,14 @@ impl BlobCache {
 
         Ok(())
     }
-}
 
-impl RafsCache for BlobCache {
-    fn backend(&self) -> &(dyn BlobBackend + Sync + Send) {
-        self.backend.as_ref()
-    }
-
-    fn has(&self, blk: Arc<dyn RafsChunkInfo>) -> bool {
-        // Doesn't expected poisoned lock here.
-        self.cache
-            .read()
-            .unwrap()
-            .chunk_map
-            .contains_key(&blk.block_id())
-    }
-
-    fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
-        for b in blobs {
-            let _ = self.backend.prefetch_blob(
-                b.blob_id.as_str(),
-                b.readahead_offset,
-                b.readahead_size,
-            );
-        }
-        // TODO start blob cache level prefetch
-        Ok(())
-    }
-
-    fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
-        // Doesn't expected poisoned lock here.
-        self.cache
-            .write()
-            .unwrap()
-            .chunk_map
-            .remove(&blk.block_id());
-
-        Ok(())
-    }
-
-    fn flush(&self) -> Result<()> {
-        Err(enosys!())
-    }
-
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
-        let blob_id = &bio.blob_id;
-
-        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.clone());
-        if entry.is_none() {
-            let en =
-                self.cache
-                    .write()
-                    .unwrap()
-                    .set(blob_id, bio.chunkinfo.clone(), self.backend())?;
-            entry = Some(en);
-        };
-
-        self.entry_read(blob_id, &entry.unwrap(), bufs, offset, bio.size)
-    }
-
-    fn write(&self, _blob_id: &str, _blk: &dyn RafsChunkInfo, _buf: &[u8]) -> Result<usize> {
-        Err(enosys!())
-    }
-
-    fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        let (_, size) = self
-            .cache
-            .write()
-            .unwrap()
-            .get_blob_fd(blob_id, self.backend())?;
-        Ok(size)
-    }
-
-    fn release(&self) {}
-    /// Bypass memory blob cache index, fetch blocks from backend and directly
-    /// mirror them into blob cache file.
-    /// Continuous chunks may be compressed or not.
-    fn prefetch(&self, bios: &mut [RafsBio]) -> Result<usize> {
-        let (mut tx, rx) = spmc::channel::<MergedBackendRequest>();
-
+    fn kick_prefetch_workers(&self) {
         for num in 0..self.prefetch_worker.threads_count {
             let cache = Arc::clone(&self.cache);
             // Clone cache fulfils our requirement that invoke `read_chunks` and it's
             // hard to move `self` into closure.
             let cache_cloned = Arc::new(self.clone());
-            let rx = rx.clone();
+            let rx = self.mr_receiver.clone();
             let _thread = thread::Builder::new()
                 .name(format!("prefetch_thread_{}", num))
                 .spawn(move || {
@@ -507,17 +432,89 @@ impl RafsCache for BlobCache {
                     info!("Prefetch thread exits.")
                 });
         }
+    }
+}
 
+impl RafsCache for BlobCache {
+    fn backend(&self) -> &(dyn BlobBackend + Sync + Send) {
+        self.backend.as_ref()
+    }
+
+    fn has(&self, blk: Arc<dyn RafsChunkInfo>) -> bool {
+        // Doesn't expected poisoned lock here.
+        self.cache
+            .read()
+            .unwrap()
+            .chunk_map
+            .contains_key(&blk.block_id())
+    }
+
+    fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
+        for b in blobs {
+            let _ = self.backend.prefetch_blob(
+                b.blob_id.as_str(),
+                b.readahead_offset,
+                b.readahead_size,
+            );
+        }
+        // TODO start blob cache level prefetch
+        Ok(())
+    }
+
+    fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
+        // Doesn't expected poisoned lock here.
+        self.cache
+            .write()
+            .unwrap()
+            .chunk_map
+            .remove(&blk.block_id());
+
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<()> {
+        Err(enosys!())
+    }
+
+    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+        let blob_id = &bio.blob_id;
+
+        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.clone());
+        if entry.is_none() {
+            let en =
+                self.cache
+                    .write()
+                    .unwrap()
+                    .set(blob_id, bio.chunkinfo.clone(), self.backend())?;
+            entry = Some(en);
+        };
+
+        self.entry_read(blob_id, &entry.unwrap(), bufs, offset, bio.size)
+    }
+
+    fn write(&self, _blob_id: &str, _blk: &dyn RafsChunkInfo, _buf: &[u8]) -> Result<usize> {
+        Err(enosys!())
+    }
+
+    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+        let (_, size) = self
+            .cache
+            .write()
+            .unwrap()
+            .get_blob_fd(blob_id, self.backend())?;
+        Ok(size)
+    }
+
+    fn release(&self) {}
+    /// Bypass memory blob cache index, fetch blocks from backend and directly
+    /// mirror them into blob cache file.
+    /// Continuous chunks may be compressed or not.
+    fn prefetch(&self, bios: &mut [RafsBio]) -> Result<usize> {
         // Ideally, prefetch task can run within a separated thread from loading prefetch table.
         // However, due to current implementation, doing so needs modifying key data structure like
         // `Superblock` on `Rafs`. So let's suspend this action.
-        let mut bios = bios.to_vec();
         let merging_size = self.prefetch_worker.merging_size;
-        let _thread = thread::Builder::new().spawn({
-            move || {
-                generate_merged_requests(bios.as_mut_slice(), &mut tx, merging_size);
-            }
-        });
+        generate_merged_requests(bios, &mut self.mr_sender.lock().unwrap(), merging_size);
 
         Ok(0)
     }
@@ -596,7 +593,9 @@ pub fn new(
         Arc::new(RateLimiter::direct(Quota::per_second(v)))
     });
 
-    Ok(BlobCache {
+    let (tx, rx) = spmc::channel::<MergedBackendRequest>();
+
+    let cache = BlobCache {
         cache: Arc::new(RwLock::new(BlobCacheState {
             chunk_map: HashMap::new(),
             file_map: HashMap::new(),
@@ -610,7 +609,13 @@ pub fn new(
         compressor,
         digester,
         limiter,
-    })
+        mr_sender: Arc::new(Mutex::new(tx)),
+        mr_receiver: rx,
+    };
+
+    cache.kick_prefetch_workers();
+
+    Ok(cache)
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, un
 // A rafs storage device
 #[derive(Clone)]
 pub struct RafsDevice {
-    rw_layer: ArcSwap<Box<dyn RafsCache + Send + Sync>>,
+    rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
 }
 
 impl RafsDevice {

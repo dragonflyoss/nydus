@@ -100,18 +100,18 @@ pub fn new_rw_layer(
     config: Config,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
-) -> Result<Box<dyn RafsCache + Send + Sync>> {
+) -> Result<Arc<dyn RafsCache + Send + Sync>> {
     let backend = new_backend(config.backend)?;
     match config.cache.cache_type.as_str() {
         "blobcache" => Ok(
-            Box::new(blobcache::new(config.cache, backend, compressor, digester)?)
-                as Box<dyn RafsCache + Send + Sync>,
+            Arc::new(blobcache::new(config.cache, backend, compressor, digester)?)
+                as Arc<dyn RafsCache + Send + Sync>,
         ),
-        _ => Ok(Box::new(dummycache::new(
+        _ => Ok(Arc::new(dummycache::new(
             config.cache,
             backend,
             compressor,
             digester,
-        )?) as Box<dyn RafsCache + Send + Sync>),
+        )?) as Arc<dyn RafsCache + Send + Sync>),
     }
 }
