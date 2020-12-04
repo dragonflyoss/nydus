@@ -386,13 +386,14 @@ impl Builder {
 
     /// Dump blob file and generate chunks
     fn dump_blob(&mut self) -> Result<(Sha256, usize, usize)> {
-        // Sort readahead list by file size for better prefetch
-        let mut readahead_files = self
+        // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
+        // belonging to the same directory arranged in adjacent in blob file. Together with
+        // BFS style collecting descendants inodes, it will have a higher merging possibility.
+        let readahead_files = self
             .readahead_files
             .values()
             .filter_map(|index| index.as_ref())
             .collect::<Vec<&u64>>();
-        readahead_files.sort_by_key(|index| self.nodes[**index as usize - 1].inode.i_size);
 
         let blob_index = self.blob_table.entries.len() as u32;
 
