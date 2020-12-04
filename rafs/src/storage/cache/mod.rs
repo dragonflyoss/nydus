@@ -25,6 +25,7 @@ pub mod dummycache;
 
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
+    seq: u64,
     // Chunks that are continuous to each other.
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
     pub blob_offset: u64,
@@ -32,7 +33,14 @@ struct MergedBackendRequest {
     pub blob_id: String,
 }
 
-impl<'a> MergedBackendRequest {
+impl MergedBackendRequest {
+    fn new(seq: u64) -> Self {
+        MergedBackendRequest {
+            seq,
+            ..Default::default()
+        }
+    }
+
     fn reset(&mut self) {
         self.blob_offset = 0;
         self.blob_size = 0;
@@ -71,6 +79,7 @@ fn generate_merged_requests(
     bios: &mut [RafsBio],
     tx: &mut spmc::Sender<MergedBackendRequest>,
     merging_size: usize,
+    seq: u64,
 ) {
     bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
     let mut index: usize = 1;
@@ -78,7 +87,7 @@ fn generate_merged_requests(
         return;
     }
     let first_cki = &bios[0].chunkinfo;
-    let mut mr = MergedBackendRequest::default();
+    let mut mr = MergedBackendRequest::new(seq);
     mr.merge_begin(Arc::clone(first_cki), &bios[0].blob_id);
 
     if bios.len() == 1 {

@@ -136,7 +136,7 @@ impl RafsCache for DummyCache {
         let merging_size = self.prefetch_worker.merging_size;
         let _thread = thread::Builder::new().spawn({
             move || {
-                generate_merged_requests(bios.as_mut_slice(), &mut tx, merging_size);
+                generate_merged_requests(bios.as_mut_slice(), &mut tx, merging_size, 0);
             }
         });
 

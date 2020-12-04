@@ -103,10 +103,8 @@ pub fn new_rw_layer(
 ) -> Result<Arc<dyn RafsCache + Send + Sync>> {
     let backend = new_backend(config.backend)?;
     match config.cache.cache_type.as_str() {
-        "blobcache" => Ok(
-            Arc::new(blobcache::new(config.cache, backend, compressor, digester)?)
-                as Arc<dyn RafsCache + Send + Sync>,
-        ),
+        "blobcache" => Ok(blobcache::new(config.cache, backend, compressor, digester)?
+            as Arc<dyn RafsCache + Send + Sync>),
         _ => Ok(Arc::new(dummycache::new(
             config.cache,
             backend,

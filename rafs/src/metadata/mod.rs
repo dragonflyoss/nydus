@@ -317,7 +317,8 @@ impl RafsSuper {
             // Issue a prefetch request since target is large enough.
             // As files belonging to the same directory are arranged in adjacent,
             // it should fetch a range of blob in batch.
-            if desc.bi_size >= RAFS_DEFAULT_BLOCK_SIZE as usize {
+            if desc.bi_size >= (4 * RAFS_DEFAULT_BLOCK_SIZE) as usize {
+                trace!("fetching head bio size {}", desc.bi_size);
                 fetcher(desc);
                 desc.bi_size = 0;
                 desc.bi_vec.truncate(0);
@@ -328,6 +329,9 @@ impl RafsSuper {
             Ok(inode) => {
                 if inode.is_dir() {
                     let mut descendants = Vec::new();
+                    // FIXME: Collecting descendants in DFS(Deep-First-Search) way impacts merging
+                    // possibility, which means a single Merging Request spans multiple directories.
+                    // But only files in the same directly are located closely in blob.
                     let _ = inode.collect_descendants_inodes(&mut descendants)?;
                     for i in descendants {
                         if i.is_hardlink() {
