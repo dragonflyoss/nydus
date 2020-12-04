@@ -144,6 +144,7 @@ impl TryFrom<&RafsConfig> for PrefetchWorker {
         }
 
         Ok(PrefetchWorker {
+            enable: c.fs_prefetch.enable,
             threads_count: c.fs_prefetch.threads_count,
             merging_size: c.fs_prefetch.merging_size,
             bandwidth_rate: c.fs_prefetch.bandwidth_rate,
@@ -265,10 +266,16 @@ impl Rafs {
                         0
                     });
                 })
-                .map_err(|e| {
+                .unwrap_or_else(|e| {
                     info!("No file to be prefetched {:?}", e);
-                    e
-                })
+                });
+
+                // For now, we only have hinted prefetch. So stopping prefetch workers once
+                // it's done is Okay. But if we involve more policies someday, we have to be
+                // careful when to stop prefetch progresses.
+                device
+                    .stop_prefetch()
+                    .unwrap_or_else(|_| error!("Failed in stopping prefetch workers"));
             });
         }
 

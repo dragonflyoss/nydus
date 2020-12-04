@@ -170,8 +170,8 @@ pub struct BlobCache {
     // some concepts come from GCRA like "cells". GCRA is a sort of improved "Leaky Bucket"
     // firstly invented from ATM network technology. Wrap the limiter into Throttle!
     limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
-    mr_sender: Arc<Mutex<spmc::Sender<MergedBackendRequest>>>,
-    mr_receiver: spmc::Receiver<MergedBackendRequest>,
+    mr_sender: Arc<Mutex<Option<spmc::Sender<MergedBackendRequest>>>>,
+    mr_receiver: Option<spmc::Receiver<MergedBackendRequest>>,
     prefetch_seq: AtomicU64,
 }
 
@@ -337,7 +337,8 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
         let _thread = thread::Builder::new()
             .name(format!("prefetch_thread_{}", num))
             .spawn(move || {
-                'wait_mr: while let Ok(mr) = rx.recv() {
+                // Safe because channel must be established before prefetch workers
+                'wait_mr: while let Ok(mr) = rx.as_ref().unwrap().recv() {
                     let blob_offset = mr.blob_offset;
                     let blob_size = mr.blob_size;
                     let continuous_chunks = &mr.chunks;
@@ -473,7 +474,7 @@ impl RafsCache for BlobCache {
     }
 
     fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
-        // Doesn't expected poisoned lock here.
+        // Doesn't expect poisoned lock here.
         self.cache
             .write()
             .unwrap()
@@ -517,18 +518,20 @@ impl RafsCache for BlobCache {
     }
 
     fn release(&self) {}
-    /// Bypass memory blob cache index, fetch blocks from backend and directly
-    /// mirror them into blob cache file.
-    /// Continuous chunks may be compressed or not.
-    fn prefetch(&self, bios: &mut [RafsBio]) -> Result<usize> {
-        // Ideally, prefetch task can run within a separated thread from loading prefetch table.
-        // However, due to current implementation, doing so needs modifying key data structure like
-        // `Superblock` on `Rafs`. So let's suspend this action.
+    fn prefetch(&self, bios: &mut [RafsBio]) -> RafsResult<usize> {
         let merging_size = self.prefetch_worker.merging_size;
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
-        generate_merged_requests(bios, &mut self.mr_sender.lock().unwrap(), merging_size, seq);
+
+        if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
+            generate_merged_requests(bios, mr_sender, merging_size, seq);
+        }
 
         Ok(0)
+    }
+
+    fn stop_prefetch(&self) -> RafsResult<()> {
+        drop(self.mr_sender.lock().unwrap().take().unwrap());
+        Ok(())
     }
 
     #[inline]
@@ -605,7 +608,14 @@ pub fn new(
         Arc::new(RateLimiter::direct(Quota::per_second(v)))
     });
 
-    let (tx, rx) = spmc::channel::<MergedBackendRequest>();
+    let mut enabled = false;
+    let (tx, rx) = if config.prefetch_worker.enable {
+        let (send, recv) = spmc::channel::<MergedBackendRequest>();
+        enabled = true;
+        (Some(send), Some(recv))
+    } else {
+        (None, None)
+    };
 
     let cache = Arc::new(BlobCache {
         cache: Arc::new(RwLock::new(BlobCacheState {
@@ -626,7 +636,9 @@ pub fn new(
         prefetch_seq: AtomicU64::new(0),
     });
 
-    kick_prefetch_workers(&cache);
+    if enabled {
+        kick_prefetch_workers(&cache);
+    }
 
     Ok(cache)
 }

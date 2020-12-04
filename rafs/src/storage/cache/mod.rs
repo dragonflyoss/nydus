@@ -122,6 +122,7 @@ fn generate_merged_requests(
 
 #[derive(Clone, Default)]
 pub struct PrefetchWorker {
+    pub enable: bool,
     pub threads_count: usize,
     pub merging_size: usize,
     // In unit of Bytes and Zero means no rate limit is set.
@@ -151,7 +152,8 @@ pub trait RafsCache {
     /// Get the size of a blob
     fn blob_size(&self, blob_id: &str) -> Result<u64>;
 
-    fn prefetch(&self, bio: &mut [RafsBio]) -> Result<usize>;
+    fn prefetch(&self, bio: &mut [RafsBio]) -> RafsResult<usize>;
+    fn stop_prefetch(&self) -> RafsResult<()>;
 
     /// Release cache
     fn release(&self);

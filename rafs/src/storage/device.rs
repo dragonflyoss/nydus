@@ -81,10 +81,14 @@ impl RafsDevice {
         Ok(count)
     }
 
-    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> io::Result<usize> {
+    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> RafsResult<usize> {
         self.rw_layer.load().prefetch(desc.bi_vec.as_mut_slice())?;
 
         Ok(desc.bi_size)
+    }
+
+    pub fn stop_prefetch(&self) -> RafsResult<()> {
+        self.rw_layer.load().stop_prefetch()
     }
 }
 
