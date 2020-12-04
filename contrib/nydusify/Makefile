@@ -9,3 +9,6 @@ release:
 
 test:
 	@CGO_ENABLED=0 GOOS=linux go test ./tests
+
+static-release:
+	@CGO_ENABLED=0 GOOS=linux go build -ldflags '-extldflags "-static"' -o ./cmd ./cmd/nydusify.go
