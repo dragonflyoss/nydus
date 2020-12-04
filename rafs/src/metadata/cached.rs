@@ -405,16 +405,22 @@ impl RafsInode for CachedInode {
             return Err(enotdir!(""));
         }
 
+        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
+
         for child_inode in &self.i_child {
             if child_inode.is_dir() {
                 trace!("Got dir {:?}", child_inode.name().unwrap());
-                child_inode.collect_descendants_inodes(descendants)?;
+                child_dirs.push(child_inode.clone());
             } else {
                 if child_inode.is_empty_size() {
                     continue;
                 }
                 descendants.push(child_inode.clone());
             }
+        }
+
+        for d in child_dirs {
+            d.collect_descendants_inodes(descendants)?;
         }
 
         Ok(0)

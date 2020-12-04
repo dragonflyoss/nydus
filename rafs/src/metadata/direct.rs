@@ -684,18 +684,23 @@ impl RafsInode for OndiskInodeWrapper {
         let inode = self.inode(state.deref());
         let child_count = inode.i_child_count as u64;
         let child_index = inode.i_child_index as u64;
+        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
 
         for idx in child_index..(child_index + child_count) {
             let child_inode = self.mapping.get_inode(idx, false).unwrap();
             if child_inode.is_dir() {
                 trace!("Got dir {:?}", child_inode.name().unwrap());
-                child_inode.collect_descendants_inodes(descendants)?;
+                child_dirs.push(child_inode);
             } else {
                 if child_inode.is_empty_size() {
                     continue;
                 }
                 descendants.push(child_inode);
             }
+        }
+
+        for d in child_dirs {
+            d.collect_descendants_inodes(descendants)?;
         }
 
         Ok(0)

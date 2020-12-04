@@ -331,7 +331,7 @@ impl RafsSuper {
                     let mut descendants = Vec::new();
                     // FIXME: Collecting descendants in DFS(Deep-First-Search) way impacts merging
                     // possibility, which means a single Merging Request spans multiple directories.
-                    // But only files in the same directly are located closely in blob.
+                    // But only files in the same directory are located closely in blob.
                     let _ = inode.collect_descendants_inodes(&mut descendants)?;
                     for i in descendants {
                         if i.is_hardlink() {
