@@ -512,22 +512,19 @@ impl PrefetchTable {
         Ok(data.len() + padding_bytes)
     }
 
-    /// Note: This method changes file offset.
-    /// `len` as u32 hint entries reside in this prefetch table.
-    pub fn load_from(
+    /// Note: Generally, prefetch happens after loading bootstrap, so with methods operating
+    /// files with changing their offset won't bring errors. But we still use `pread` now so as
+    /// to make this method more stable and robust. Even dup(2) can't give us a separated file struct.
+    pub fn load_prefetch_table_from(
         &mut self,
         r: &mut RafsIoReader,
         offset: u64,
         table_size: usize,
-    ) -> Result<()> {
-        // Map prefetch table in.
-        // TODO: Need to consider about backend switch?
-        r.seek(SeekFrom::Start(offset))?;
-
+    ) -> RafsResult<()> {
         self.inode_indexes = vec![0u32; table_size];
-
         let (_, data, _) = unsafe { self.inode_indexes.align_to_mut::<u8>() };
-        r.read_exact(data)?;
+        nix::sys::uio::pread(r.as_raw_fd(), data, offset as i64)
+            .map_err(|e| RafsError::Prefetch(e.to_string()))?;
 
         Ok(())
     }

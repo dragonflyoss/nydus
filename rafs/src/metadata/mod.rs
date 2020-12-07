@@ -460,7 +460,7 @@ impl RafsSuper {
         // something ugly may stand on the disk.
         if hint_entries != 0 {
             prefetch_table
-                .load_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
                 .map_err(|e| {
                     RafsError::Prefetch(format!(
                         "Failed in loading hint prefetch table at offset {}. {:?}",
