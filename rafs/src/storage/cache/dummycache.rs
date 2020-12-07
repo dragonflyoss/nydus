@@ -4,7 +4,6 @@
 
 use std::io::Result;
 use std::sync::Arc;
-use std::thread;
 
 use vm_memory::VolatileSlice;
 
@@ -17,11 +16,11 @@ use crate::storage::compress;
 use crate::storage::device::RafsBio;
 use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv};
+use crate::{RafsError, RafsResult};
 
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,
     validate: bool,
-    prefetch_worker: PrefetchWorker,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
 }
@@ -129,7 +128,6 @@ pub fn new(
     Ok(DummyCache {
         backend,
         validate: config.cache_validate,
-        prefetch_worker: config.prefetch_worker,
         compressor,
         digester,
     })

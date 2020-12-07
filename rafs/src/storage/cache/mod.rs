@@ -17,6 +17,7 @@ use crate::storage::backend::BlobBackend;
 use crate::storage::compress;
 use crate::storage::device::RafsBio;
 use crate::storage::utils::{alloc_buf, digest_check};
+use crate::RafsResult;
 
 use nydus_utils::eio;
 

@@ -17,6 +17,7 @@ use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::cache::RafsCache;
 use crate::storage::{compress, factory};
+use crate::RafsResult;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
