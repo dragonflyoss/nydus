@@ -124,7 +124,7 @@ impl BlobCacheState {
         let fd = file.as_raw_fd();
 
         let size = if self.backend_size_valid {
-            backend.blob_size(blob_id)?
+            backend.blob_size(blob_id).map_err(|e| einval!(e))?
         } else {
             0
         };
@@ -705,7 +705,6 @@ pub fn new(
 #[cfg(test)]
 mod blob_cache_tests {
     use std::alloc::{alloc, dealloc, Layout};
-    use std::io::Result;
     use std::slice::from_raw_parts;
     use std::sync::Arc;
 
@@ -715,7 +714,7 @@ mod blob_cache_tests {
     use crate::metadata::digest::{self, RafsDigest};
     use crate::metadata::layout::OndiskChunkInfo;
     use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
-    use crate::storage::backend::BlobBackend;
+    use crate::storage::backend::{BackendResult, BlobBackend};
     use crate::storage::cache::blobcache;
     use crate::storage::cache::PrefetchWorker;
     use crate::storage::cache::RafsCache;
@@ -726,7 +725,7 @@ mod blob_cache_tests {
     struct MockBackend {}
 
     impl BlobBackend for MockBackend {
-        fn try_read(&self, _blob_id: &str, buf: &mut [u8], _offset: u64) -> Result<usize> {
+        fn try_read(&self, _blob_id: &str, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
             let mut i = 0;
             while i < buf.len() {
                 buf[i] = i as u8;
@@ -735,12 +734,21 @@ mod blob_cache_tests {
             Ok(i)
         }
 
-        fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> Result<usize> {
+        fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
             Ok(0)
         }
 
-        fn blob_size(&self, _blob_id: &str) -> Result<u64> {
+        fn blob_size(&self, _blob_id: &str) -> BackendResult<u64> {
             Ok(0)
+        }
+
+        fn prefetch_blob(
+            &self,
+            _blob_id: &str,
+            _blob_readahead_offset: u32,
+            _blob_readahead_size: u32,
+        ) -> BackendResult<()> {
+            Ok(())
         }
     }
 

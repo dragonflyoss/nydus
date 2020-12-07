@@ -186,7 +186,9 @@ pub trait RafsCache {
             unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
         };
 
-        self.backend().read(blob_id, raw_chunk, offset)?;
+        self.backend()
+            .read(blob_id, raw_chunk, offset)
+            .map_err(|e| eio!(e))?;
         // Try to validate data just fetched from backend inside.
         self.process_raw_chunk(
             cki,
@@ -253,7 +255,8 @@ pub trait RafsCache {
         // Do we need to split it into smaller pieces like 128K or 256K?
         let nr_read = self
             .backend()
-            .read(blob_id, c_buf.as_mut_slice(), blob_offset)?;
+            .read(blob_id, c_buf.as_mut_slice(), blob_offset)
+            .map_err(|e| eio!(e))?;
 
         if nr_read != blob_size {
             return Err(eio!(format!(

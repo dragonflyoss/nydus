@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, remove_file, File, OpenOptions};
-use std::io::{self, Result};
+use std::io::{self, Error, Result};
 use std::mem::{size_of, ManuallyDrop};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -14,10 +14,10 @@ use std::{thread, time};
 use nix::sys::uio;
 use vm_memory::VolatileSlice;
 
-use crate::storage::backend::{BlobBackend, BlobBackendUploader};
+use crate::storage::backend::{BackendError, BackendResult, BlobBackend, BlobBackendUploader};
 use crate::storage::utils::{readahead, readv};
 
-use nydus_utils::{ebadf, einval, eio, enoent, last_error};
+use nydus_utils::{ebadf, einval, eio, last_error};
 use nydus_utils::{round_down_4k, round_up_4k};
 
 const BLOB_ACCESSED_SUFFIX: &str = ".access";
@@ -30,6 +30,24 @@ const MAX_ACCESS_RECORD_FILE_SIZE: usize = 32768;
 const MAX_ACCESS_RECORD: usize = MAX_ACCESS_RECORD_FILE_SIZE / ACCESS_RECORD_ENTRY_SIZE;
 
 type FileTableEntry = (File, Option<Arc<LocalFsAccessLog>>);
+
+#[derive(Debug)]
+pub enum LocalFsError {
+    BlobFile(Error),
+    ReadVecBlob(Error),
+    ReadBlob(nix::Error),
+    CopyData(Error),
+    Readahead(Error),
+    AccessLog(Error),
+}
+
+type LocalFsResult<T> = std::result::Result<T, LocalFsError>;
+
+impl From<LocalFsError> for BackendError {
+    fn from(error: LocalFsError) -> Self {
+        BackendError::LocalFs(error)
+    }
+}
 
 #[derive(Default)]
 pub struct LocalFs {
@@ -94,7 +112,7 @@ type AccessLogEntry = (u64, u32, u32);
 struct LocalFsAccessLog {
     log_path: String,                                  // log file path
     log_fd: RawFd,                                     // log file fd
-    log_base: *const u8,                               // mmaped access log base
+    log_base: *const u8,                               // mmapped access log base
     log_size: usize,                                   // log file size
     blob_fd: RawFd,                                    // blob fd for readahead
     blob_size: usize,                                  // blob file size
@@ -204,7 +222,7 @@ impl LocalFsAccessLog {
     }
 
     fn record(&self, offset: u64, len: u32) -> bool {
-        // Never modify mmaped records
+        // Never modify mmapped records
         if !self.log_base.is_null() {
             return false;
         }
@@ -300,7 +318,7 @@ impl LocalFs {
         }
     }
 
-    fn get_blob_fd(&self, blob_id: &str, offset: u64, len: usize) -> Result<RawFd> {
+    fn get_blob_fd(&self, blob_id: &str, offset: u64, len: usize) -> LocalFsResult<RawFd> {
         let blob_file_path = self.get_blob_path(blob_id);
 
         let mut drop_access_log = false;
@@ -317,7 +335,7 @@ impl LocalFs {
                 return Ok(file.as_raw_fd());
             }
             // need to drop access log file, clone the blob file first
-            blob_file = file.try_clone()?;
+            blob_file = file.try_clone().map_err(LocalFsError::BlobFile)?;
             drop(table_guard);
 
             let fd = blob_file.as_raw_fd();
@@ -332,7 +350,8 @@ impl LocalFs {
         let file = OpenOptions::new()
             .read(true)
             .open(&blob_file_path)
-            .map_err(|e| last_error!(format!("failed to open blob {}: {}", blob_id, e)))?;
+            .map_err(LocalFsError::BlobFile)?;
+
         let fd = file.as_raw_fd();
 
         // Don't expect poisoned lock here.
@@ -362,14 +381,13 @@ impl BlobBackend for LocalFs {
         blob_id: &str,
         blob_readahead_offset: u32,
         blob_readahead_size: u32,
-    ) -> Result<()> {
+    ) -> BackendResult<()> {
         if !self.readahead {
             return Ok(());
         }
 
-        let _ = self
-            .get_blob_fd(blob_id, 0, 0)
-            .map_err(|e| enoent!(format!("failed to find blob {}: {}", blob_id, e)))?;
+        let _ = self.get_blob_fd(blob_id, 0, 0)?;
+
         // Do not expect get failure as we just added it above in get_blob_fd
         let blob_file = self
             .file_table
@@ -378,8 +396,10 @@ impl BlobBackend for LocalFs {
             .get(blob_id)
             .unwrap()
             .0
-            .try_clone()?;
-        let blob_size = blob_file.metadata()?.len() as usize;
+            .try_clone()
+            .map_err(LocalFsError::BlobFile)?;
+
+        let blob_size = blob_file.metadata().map_err(LocalFsError::BlobFile)?.len() as usize;
         let blob_fd = blob_file.as_raw_fd();
         let blob_path = self.get_blob_path(blob_id);
 
@@ -390,10 +410,17 @@ impl BlobBackend for LocalFs {
             .open(Path::new(&access_file_path))
         {
             // Found access log, kick off readahead
-            if access_file.metadata()?.len() > 0 {
+            if access_file
+                .metadata()
+                .map_err(LocalFsError::AccessLog)?
+                .len()
+                > 0
+            {
                 // Don't expect poisoned lock here.
                 let mut access_log = LocalFsAccessLog::new();
-                access_log.init(access_file, access_file_path, blob_fd, blob_size, true)?;
+                access_log
+                    .init(access_file, access_file_path, blob_fd, blob_size, true)
+                    .map_err(LocalFsError::AccessLog)?;
                 let _ = thread::Builder::new()
                     .name("nydus-localfs-readahead".to_string())
                     .spawn(move || {
@@ -425,7 +452,9 @@ impl BlobBackend for LocalFs {
             .open(Path::new(&access_file_path))
         {
             let mut access_log = LocalFsAccessLog::new();
-            access_log.init(access_file, access_file_path, blob_fd, blob_size, false)?;
+            access_log
+                .init(access_file, access_file_path, blob_fd, blob_size, false)
+                .map_err(LocalFsError::AccessLog)?;
             let access_log = Arc::new(access_log);
             // Do not expect poisoned lock here
             self.file_table
@@ -446,13 +475,13 @@ impl BlobBackend for LocalFs {
         Ok(())
     }
 
-    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+    fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
         let blob_file_path = self.get_blob_path(blob_id);
-        let meta = fs::metadata(blob_file_path)?;
+        let meta = fs::metadata(blob_file_path).map_err(LocalFsError::BlobFile)?;
         Ok(meta.len())
     }
 
-    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
+    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let fd = self.get_blob_fd(blob_id, offset, buf.len())?;
 
         debug!(
@@ -461,8 +490,8 @@ impl BlobBackend for LocalFs {
             buf.len(),
             blob_id,
         );
-        let len = uio::pread(fd, buf, offset as i64)
-            .map_err(|_| last_error!("failed to read blob file"))?;
+        let len = uio::pread(fd, buf, offset as i64).map_err(LocalFsError::ReadBlob)?;
+
         debug!("local blob file read {} bytes", len);
 
         Ok(len)
@@ -474,12 +503,12 @@ impl BlobBackend for LocalFs {
         bufs: &[VolatileSlice],
         offset: u64,
         max_size: usize,
-    ) -> Result<usize> {
+    ) -> BackendResult<usize> {
         let fd = self.get_blob_fd(blob_id, offset, max_size)?;
-        readv(fd, bufs, offset, max_size)
+        Ok(readv(fd, bufs, offset, max_size).map_err(LocalFsError::ReadVecBlob)?)
     }
 
-    fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> Result<usize> {
+    fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
         unimplemented!("write operation not supported with localfs");
     }
 }

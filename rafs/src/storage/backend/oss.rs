@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::OpenOptions;
-use std::io::Result;
+use std::io::{Error, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -14,16 +14,34 @@ use reqwest::{Method, StatusCode};
 use sha1::Sha1;
 use url::Url;
 
-use crate::storage::backend::default_http_scheme;
-use crate::storage::backend::request::{HeaderMap, Progress, ReqBody, Request};
+use crate::storage::backend::request::{HeaderMap, Progress, ReqBody, Request, RequestError};
+use crate::storage::backend::{default_http_scheme, BackendError, BackendResult};
 use crate::storage::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 
-use nydus_utils::{einval, epipe};
+use nydus_utils::einval;
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
 type HmacSha1 = Hmac<Sha1>;
+
+#[derive(Debug)]
+pub enum OssError {
+    Auth(Error),
+    Url(String),
+    Request(RequestError),
+    ConstructHeader(String),
+    CopyData(reqwest::Error),
+    Response(String),
+}
+
+type OssResult<T> = std::result::Result<T, OssError>;
+
+impl From<OssError> for BackendError {
+    fn from(error: OssError) -> Self {
+        BackendError::Oss(error)
+    }
+}
 
 #[derive(Debug)]
 pub struct OSS {
@@ -106,16 +124,18 @@ impl OSS {
         }
     }
 
-    fn url(&self, object_key: &str, query: &[&str]) -> Result<(String, String)> {
+    fn url(&self, object_key: &str, query: &[&str]) -> OssResult<(String, String)> {
         let url = if !self.bucket_name.is_empty() {
             format!("{}://{}.{}", self.scheme, self.bucket_name, self.endpoint)
         } else {
             format!("{}://{}", self.scheme, self.endpoint)
         };
-        let mut url = Url::parse(url.as_str()).map_err(|e| einval!(e))?;
+        let mut url = Url::parse(url.as_str()).map_err(|e| OssError::Url(e.to_string()))?;
 
+        // TODO: Parsed url can be cached, we can only attach `object_key` part for each
+        // backend request. Then it can save cpu cycles and the returned error can be `ParseError`
         url.path_segments_mut()
-            .map_err(|e| einval!(e))?
+            .map_err(|_| OssError::Url("Path segments".to_string()))?
             .push(object_key);
 
         if query.is_empty() {
@@ -130,26 +150,32 @@ impl OSS {
     }
 
     #[allow(dead_code)]
-    fn create_bucket(&self) -> Result<()> {
+    fn create_bucket(&self) -> OssResult<()> {
         let query = &[];
         let (resource, url) = self.url("", query)?;
-        let headers = self.sign(Method::PUT, HeaderMap::new(), resource.as_str())?;
+        let headers = self
+            .sign(Method::PUT, HeaderMap::new(), resource.as_str())
+            .map_err(OssError::Auth)?;
 
         // Safe because the the call() is a synchronous operation.
         self.request
-            .call::<&[u8]>(Method::PUT, url.as_str(), None, headers, true)?;
+            .call::<&[u8]>(Method::PUT, url.as_str(), None, headers, true)
+            .map_err(OssError::Request)?;
 
         Ok(())
     }
 
-    fn blob_exists(&self, blob_id: &str) -> Result<bool> {
+    fn blob_exists(&self, blob_id: &str) -> OssResult<bool> {
         let (resource, url) = self.url(blob_id, &[])?;
         let headers = HeaderMap::new();
-        let headers = self.sign(Method::HEAD, headers, resource.as_str())?;
+        let headers = self
+            .sign(Method::HEAD, headers, resource.as_str())
+            .map_err(OssError::Auth)?;
 
         let resp = self
             .request
-            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, false)?;
+            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, false)
+            .map_err(OssError::Request)?;
 
         if resp.status() == StatusCode::OK {
             return Ok(true);
@@ -186,59 +212,85 @@ impl BlobBackend for OSS {
         self.retry_limit
     }
 
-    fn blob_size(&self, blob_id: &str) -> Result<u64> {
+    fn prefetch_blob(
+        &self,
+        _blob_id: &str,
+        _blob_readahead_offset: u32,
+        _blob_readahead_size: u32,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "Oss backend does not support prefetch per as to on-disk blob entries".to_string(),
+        ))
+    }
+
+    fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
         let (resource, url) = self.url(blob_id, &[])?;
         let headers = HeaderMap::new();
-        let headers = self.sign(Method::HEAD, headers, resource.as_str())?;
+        let headers = self
+            .sign(Method::HEAD, headers, resource.as_str())
+            .map_err(OssError::Auth)?;
 
         let resp = self
             .request
-            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, true)?;
+            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, true)
+            .map_err(OssError::Request)?;
 
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)
-            .ok_or_else(|| einval!("invalid content length"))?;
+            .ok_or_else(|| OssError::Response("invalid content length".to_string()))?;
 
-        content_length
+        Ok(content_length
             .to_str()
-            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))?
+            .map_err(|err| OssError::Response(format!("invalid content length: {:?}", err)))?
             .parse::<u64>()
-            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))
+            .map_err(|err| OssError::Response(format!("invalid content length: {:?}", err)))?)
     }
 
     /// read ranged data from oss object
-    fn try_read(&self, blob_id: &str, mut buf: &mut [u8], offset: u64) -> Result<usize> {
+    fn try_read(&self, blob_id: &str, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let query = &[];
         let (resource, url) = self.url(blob_id, query)?;
 
         let mut headers = HeaderMap::new();
         let end_at = offset + buf.len() as u64 - 1;
         let range = format!("bytes={}-{}", offset, end_at);
-        headers.insert("Range", range.as_str().parse().map_err(|e| einval!(e))?);
-        let headers = self.sign(Method::GET, headers, resource.as_str())?;
+        headers.insert(
+            "Range",
+            range
+                .as_str()
+                .parse()
+                .map_err(|e| OssError::ConstructHeader(format!("{}", e)))?,
+        );
+        let headers = self
+            .sign(Method::GET, headers, resource.as_str())
+            .map_err(OssError::Auth)?;
 
         // Safe because the the call() is a synchronous operation.
         let mut resp = self
             .request
             .call::<&[u8]>(Method::GET, url.as_str(), None, headers, true)
-            .map_err(|e| epipe!(format!("oss req failed {:?}", e)))?;
+            .map_err(OssError::Request)?;
 
-        resp.copy_to(&mut buf)
-            .map_err(|err| epipe!(format!("oss read failed {:?}", err)))
-            .map(|size| size as usize)
+        Ok(resp
+            .copy_to(&mut buf)
+            .map_err(OssError::CopyData)
+            .map(|size| size as usize)?)
     }
 
     /// append data to oss object
-    fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> Result<usize> {
+    fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize> {
         let position = format!("position={}", offset);
         let query = &["append", position.as_str()];
         let (resource, url) = self.url(blob_id, query)?;
-        let headers = self.sign(Method::POST, HeaderMap::new(), resource.as_str())?;
+        let headers = self
+            .sign(Method::POST, HeaderMap::new(), resource.as_str())
+            .map_err(OssError::Auth)?;
 
         // Safe because the the call() is a synchronous operation.
         self.request
-            .call::<&[u8]>(Method::POST, url.as_str(), None, headers, true)?;
+            .call::<&[u8]>(Method::POST, url.as_str(), None, headers, true)
+            .map_err(OssError::Request)?;
 
         Ok(buf.len())
     }
@@ -251,12 +303,12 @@ impl BlobBackendUploader for OSS {
         blob_path: &Path,
         callback: fn((usize, usize)),
     ) -> Result<usize> {
-        if !self.force_upload && self.blob_exists(blob_id)? {
+        if !self.force_upload && self.blob_exists(blob_id).map_err(|e| einval!(e))? {
             return Ok(0);
         }
 
         let query = &[];
-        let (resource, url) = self.url(blob_id, query)?;
+        let (resource, url) = self.url(blob_id, query).map_err(|e| einval!(e))?;
         let headers = self.sign(Method::PUT, HeaderMap::new(), resource.as_str())?;
 
         let blob_file = OpenOptions::new()
@@ -271,13 +323,15 @@ impl BlobBackendUploader for OSS {
 
         let body = Progress::new(blob_file, size, callback);
 
-        self.request.call(
-            Method::PUT,
-            url.as_str(),
-            Some(ReqBody::Read(body, size)),
-            headers,
-            true,
-        )?;
+        self.request
+            .call(
+                Method::PUT,
+                url.as_str(),
+                Some(ReqBody::Read(body, size)),
+                headers,
+                true,
+            )
+            .map_err(|e| einval!(e))?;
 
         Ok(size as usize)
     }

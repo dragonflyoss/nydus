@@ -528,6 +528,7 @@ impl PrefetchTable {
 
 #[derive(Clone, Debug, Default)]
 pub struct OndiskBlobTableEntry {
+    // Blob's own meta should be put onto its head, so `u32` should be sufficient.
     pub readahead_offset: u32,
     pub readahead_size: u32,
     pub blob_id: String,

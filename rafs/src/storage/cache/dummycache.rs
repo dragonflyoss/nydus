@@ -18,6 +18,8 @@ use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv};
 use crate::{RafsError, RafsResult};
 
+use nydus_utils::eother;
+
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,
     validate: bool,
@@ -80,7 +82,7 @@ impl RafsCache for DummyCache {
     }
 
     fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        self.backend().blob_size(blob_id)
+        self.backend().blob_size(blob_id).map_err(|e| eother!(e))
     }
 
     fn digester(&self) -> digest::Algorithm {
@@ -113,7 +115,9 @@ impl RafsCache for DummyCache {
             unsafe { slice::from_raw_parts(buf.as_ptr(), buf.len()) }
         };
 
-        self.backend.write(blob_id, wbuf, blk.compress_offset())
+        self.backend
+            .write(blob_id, wbuf, blk.compress_offset())
+            .map_err(|e| eother!(e))
     }
 
     fn release(&self) {}
