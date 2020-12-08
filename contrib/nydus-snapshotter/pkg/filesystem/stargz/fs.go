@@ -144,7 +144,7 @@ func (f *filesystem) Support(ctx context.Context, labels map[string]string) bool
 	return err == nil && off > 0
 }
 
-func (f *filesystem) createNewDaemon(snapshotID string, imageID string, sharedDaemon *daemon.Daemon) (*daemon.Daemon, error) {
+func (f *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
 	d, err := daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithSocketDir(f.SocketRoot()),
@@ -153,7 +153,6 @@ func (f *filesystem) createNewDaemon(snapshotID string, imageID string, sharedDa
 		daemon.WithLogDir(f.LogRoot()),
 		daemon.WithCacheDir(f.CacheRoot()),
 		daemon.WithImageID(imageID),
-		daemon.WithSharedDaemon(sharedDaemon),
 	)
 	if err != nil {
 		return nil, err
@@ -165,12 +164,12 @@ func (f *filesystem) createNewDaemon(snapshotID string, imageID string, sharedDa
 	return d, nil
 }
 
-func (f *filesystem) Mount(ctx context.Context, snapshotID string, labels map[string]string, sharedDaemon *daemon.Daemon) error {
+func (f *filesystem) Mount(ctx context.Context, snapshotID string, labels map[string]string) error {
 	imageID, ok := labels[label.ImageRef]
 	if !ok {
 		return fmt.Errorf("failed to find image ref of snapshot %s, labels %v", snapshotID, labels)
 	}
-	d, err := f.createNewDaemon(snapshotID, imageID, sharedDaemon)
+	d, err := f.createNewDaemon(snapshotID, imageID)
 	// if daemon already exists for snapshotID, just return
 	if err != nil {
 		if errdefs.IsAlreadyExists(err) {
@@ -183,23 +182,29 @@ func (f *filesystem) Mount(ctx context.Context, snapshotID string, labels map[st
 			_ = f.manager.DestroyDaemon(d)
 		}
 	}()
-	err = f.manager.StartDaemon(d, f.generateDaemonConfig(labels))
+	err = f.mount(d, labels)
 	if err != nil {
 		return errors.Wrapf(err, "failed to start daemon %s", d.ID)
 	}
 	return nil
 }
 
-func (f *filesystem) generateDaemonConfig(labels map[string]string) func(d *daemon.Daemon) error {
-	return func(d *daemon.Daemon) error {
-		cfg, err := nydus.NewDaemonConfig(f.daemonCfg, d, f.vpcRegistry, labels)
-		if err != nil {
-			return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
-		}
-		cfg.Device.Cache.Compressed = true
-		cfg.DigestValidate = false
-		return nydus.SaveConfig(cfg, d.ConfigFile())
+func (f *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
+	err := f.generateDaemonConfig(d, labels)
+	if err != nil {
+		return err
 	}
+	return f.manager.StartDaemon(d)
+}
+
+func (f *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]string) error {
+	cfg, err := nydus.NewDaemonConfig(f.daemonCfg, d, f.vpcRegistry, labels)
+	if err != nil {
+		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
+	}
+	cfg.Device.Cache.Compressed = true
+	cfg.DigestValidate = false
+	return nydus.SaveConfig(cfg, d.ConfigFile())
 }
 
 func (f *filesystem) WaitUntilReady(ctx context.Context, snapshotID string) error {
@@ -241,9 +246,8 @@ func (f *filesystem) Cleanup(ctx context.Context) error {
 }
 
 func (f *filesystem) MountPoint(snapshotID string) (string, error) {
-	d, err := f.manager.GetBySnapshotID(snapshotID)
-	if err != nil {
-		return "", err
+	if d, err := f.manager.GetBySnapshotID(snapshotID); err == nil {
+		return d.MountPoint(), nil
 	}
-	return d.MountPoint(), nil
+	return "", fmt.Errorf("failed to find mountpoint of snapshot %s", snapshotID)
 }

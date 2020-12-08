@@ -21,35 +21,33 @@ import (
 type NewDaemonOpt func(d *Daemon) error
 
 type Daemon struct {
-	ID            string
-	SnapshotID    string
-	ConfigDir     string
-	SocketDir     string
-	LogDir        string
-	Stdout        io.WriteCloser
-	Stderr        io.WriteCloser
-	CacheDir      string
-	SnapshotDir   string
-	Process       *os.Process
-	client        nydussdk.Interface
-	ImageID       string
-	SharedDaemon  bool
-	SharedApiSock string
-	SharedMnt     string
-	mu            sync.Mutex
+	ID             string
+	SnapshotID     string
+	ConfigDir      string
+	SocketDir      string
+	LogDir         string
+	Stdout         io.WriteCloser
+	Stderr         io.WriteCloser
+	CacheDir       string
+	SnapshotDir    string
+	Process        *os.Process
+	client         nydussdk.Interface
+	ImageID        string
+	SharedDaemon   bool
+	apiSock        *string
+	RootMountPoint *string
+	mu             sync.Mutex
+}
+
+func (d *Daemon) SharedMountPoint() string {
+	return filepath.Join(*d.RootMountPoint, d.SnapshotID, "fs")
 }
 
 func (d *Daemon) MountPoint() string {
-	if d.SharedDaemon {
-		return filepath.Join(d.SharedMnt, d.SharedMountPoint())
-	} else {
-		return filepath.Join(d.SnapshotDir, d.SnapshotID, "fs")
+	if d.RootMountPoint != nil {
+		return filepath.Join("/", d.SnapshotID, "fs")
 	}
-}
-
-// Used for curl mount
-func (d *Daemon) SharedMountPoint() string {
-	return filepath.Join("/", d.SnapshotID, "mnt")
+	return filepath.Join(d.SnapshotDir, d.SnapshotID, "fs")
 }
 
 func (d *Daemon) BootstrapFile() (string, error) {
@@ -75,11 +73,10 @@ func (d *Daemon) ConfigFile() string {
 }
 
 func (d *Daemon) APISock() string {
-	if d.SharedDaemon {
-		return d.SharedApiSock
-	} else {
-		return filepath.Join(d.SocketDir, "api.sock")
+	if d.apiSock != nil {
+		return *d.apiSock
 	}
+	return filepath.Join(d.SocketDir, "api.sock")
 }
 
 func (d *Daemon) binary() string {
@@ -103,7 +100,7 @@ func (d *Daemon) SharedMount() error {
 	if err != nil {
 		return err
 	}
-	return client.SharedMount(d.SharedMountPoint(), bootstrap, d.ConfigFile())
+	return client.SharedMount(d.MountPoint(), bootstrap, d.ConfigFile())
 }
 
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {

@@ -29,6 +29,7 @@ func Start(ctx context.Context, cfg Config) error {
 		nydus.WithDaemonConfig(cfg.DaemonCfg),
 		nydus.WithVPCRegistry(cfg.ConvertVpcRegistry),
 		nydus.WithVerifier(verifier),
+		nydus.WithSharedDaemon(cfg.SharedDaemon),
 	)
 	if err != nil {
 		return errors.Wrap(err, "failed to initialize nydus filesystem")
@@ -44,7 +45,7 @@ func Start(ctx context.Context, cfg Config) error {
 		return errors.Wrap(err, "failed to initialize stargz filesystem")
 	}
 
-	rs, err := snapshot.NewSnapshotter(ctx, cfg.RootDir, cfg.NydusdBinaryPath, fs, stargzFs, cfg.SharedDaemon, snapshot.AsynchronousRemove)
+	rs, err := snapshot.NewSnapshotter(ctx, cfg.RootDir, cfg.NydusdBinaryPath, fs, stargzFs, snapshot.AsynchronousRemove)
 	if err != nil {
 		return errors.Wrap(err, "failed to initialize snapshotter")
 	}

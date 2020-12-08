@@ -29,14 +29,10 @@ import (
 	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/snapshot"
 )
 
-const (
-	NydusDaemonID = "shared_daemon"
-)
-
 var _ snapshots.Snapshotter = &snapshotter{}
 
 type FileSystem interface {
-	Mount(ctx context.Context, snapshotID string, labels map[string]string, d *daemon.Daemon) error
+	Mount(ctx context.Context, snapshotID string, labels map[string]string) error
 	WaitUntilReady(ctx context.Context, snapshotID string) error
 	Umount(ctx context.Context, mountPoint string) error
 	Cleanup(ctx context.Context) error
@@ -83,7 +79,7 @@ func (o *snapshotter) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-func NewSnapshotter(ctx context.Context, root, nydusdPath string, targetFs, stargzFs FileSystem, sharedDaemon bool, opts ...Opt) (snapshots.Snapshotter, error) {
+func NewSnapshotter(ctx context.Context, root, nydusdPath string, targetFs, stargzFs FileSystem, opts ...Opt) (snapshots.Snapshotter, error) {
 	var config SnapshotterConfig
 	for _, opt := range opts {
 		if err := opt(&config); err != nil {
@@ -105,11 +101,9 @@ func NewSnapshotter(ctx context.Context, root, nydusdPath string, targetFs, star
 	if err != nil {
 		return nil, err
 	}
-
 	if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
-
 	rs := &snapshotter{
 		context:     ctx,
 		root:        root,
@@ -119,13 +113,6 @@ func NewSnapshotter(ctx context.Context, root, nydusdPath string, targetFs, star
 		fs:          targetFs,
 		stargzFs:    stargzFs,
 	}
-
-	if sharedDaemon {
-		if err := rs.startDaemon(); err != nil {
-			return nil, errors.Wrap(err, "failed to start a nydus daemon")
-		}
-	}
-
 	return rs, nil
 }
 
@@ -140,22 +127,17 @@ func (o *snapshotter) Update(ctx context.Context, info snapshots.Info, fieldpath
 
 func (o *snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, error) {
 	id, info, usage, err := snapshot.GetSnapshotInfo(ctx, o.ms, key)
-
 	if err != nil {
 		return snapshots.Usage{}, err
 	}
-
 	upperPath := o.upperPath(id)
-
 	if info.Kind == snapshots.KindActive {
 		du, err := fs.DiskUsage(ctx, upperPath)
 		if err != nil {
 			return snapshots.Usage{}, err
 		}
-
 		usage = snapshots.Usage(du)
 	}
-
 	return usage, nil
 }
 
@@ -188,12 +170,12 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 
 func (o *snapshotter) prepareRemoteSnapshot(ctx context.Context, id string, labels map[string]string) error {
 	log.G(ctx).Infof("remote snapshot mountpoint %s, labels %v", o.upperPath(id), labels)
-	return o.fs.Mount(o.context, id, labels, o.daemon)
+	return o.fs.Mount(o.context, id, labels)
 }
 
 func (o *snapshotter) prepareStargzRemoteSnapshot(ctx context.Context, id string, labels map[string]string) error {
 	log.G(ctx).Infof("prepare stargz remote snapshot mountpoint %s, labels %v", o.upperPath(id), labels)
-	return o.stargzFs.Mount(o.context, id, labels, o.daemon)
+	return o.stargzFs.Mount(o.context, id, labels)
 }
 
 func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
@@ -598,11 +580,7 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 		if _, ok := ids[d]; ok {
 			continue
 		}
-		// Never remove the shared nydusd directory
 		// When it quits, there will be nothing inside
-		if d == NydusDaemonID {
-			continue
-		}
 		cleanup = append(cleanup, o.snapshotDir(d))
 	}
 
@@ -655,48 +633,4 @@ func (o *snapshotter) configRoot() string {
 
 func (o *snapshotter) logRoot() string {
 	return filepath.Join(o.root, "logs")
-}
-
-func (o *snapshotter) startDaemon() error {
-	o.manager = process.NewManager(process.Opt{
-		NydusdBinaryPath: o.nydusdPath,
-	})
-
-	d, err := o.createNewDaemon()
-	// if daemon already exists for snapshotID, just return
-	if err != nil {
-		if errdefs.IsAlreadyExists(err) {
-			return nil
-		}
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = o.manager.DestroyDaemon(d)
-		}
-	}()
-
-	err = o.manager.StartDaemon(d, nil)
-	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("failed start shared daemon %s", d.ID))
-	}
-	o.daemon = d
-	return nil
-}
-
-func (o *snapshotter) createNewDaemon() (*daemon.Daemon, error) {
-	d, err := daemon.NewDaemon(
-		daemon.WithSnapshotID(NydusDaemonID),
-		daemon.WithSocketDir(o.socketRoot()),
-		daemon.WithSnapshotDir(o.snapshotRoot()),
-		daemon.WithLogDir(o.logRoot()),
-	)
-	if err != nil {
-		return nil, err
-	}
-	err = o.manager.NewDaemon(d)
-	if err != nil {
-		return nil, err
-	}
-	return d, nil
 }

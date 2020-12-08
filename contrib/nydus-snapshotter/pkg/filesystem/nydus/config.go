@@ -61,3 +61,13 @@ func WithVPCRegistry(vpcRegistry bool) NewFSOpt {
 	}
 }
 
+func WithSharedDaemon(sharedDaemon bool) NewFSOpt {
+	return func(d *filesystem) error {
+		if sharedDaemon {
+			d.mode = SingleInstance
+		} else {
+			d.mode = MultiInstance
+		}
+		return nil
+	}
+}

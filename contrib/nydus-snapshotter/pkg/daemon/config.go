@@ -21,6 +21,13 @@ func WithSnapshotID(id string) NewDaemonOpt {
 	}
 }
 
+func WithID(id string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.ID = id
+		return nil
+	}
+}
+
 func WithConfigDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		s := filepath.Join(dir, d.ID)
@@ -74,6 +81,17 @@ func WithCacheDir(dir string) NewDaemonOpt {
 	}
 }
 
+func WithRootMountPoint(rootMountPoint string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		if err := os.MkdirAll(rootMountPoint, 0755); err != nil {
+			return errors.Wrapf(err, "failed to create rootMountPoint %s", rootMountPoint)
+		}
+		d.RootMountPoint = &rootMountPoint
+		return nil
+	}
+}
+
+
 func WithSnapshotDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		d.SnapshotDir = dir
@@ -87,6 +105,21 @@ func WithImageID(imageID string) NewDaemonOpt {
 		return nil
 	}
 }
+
+func WithSharedDaemon() NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.SharedDaemon = true
+		return nil
+	}
+}
+
+func WithAPISock(apiSock string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.apiSock = &apiSock
+		return nil
+	}
+}
+
 
 func prepareDaemonLogs(logDir string) ([]*os.File, error) {
 	var (
@@ -103,13 +136,3 @@ func prepareDaemonLogs(logDir string) ([]*os.File, error) {
 	return logFiles, nil
 }
 
-func WithSharedDaemon(d *Daemon) NewDaemonOpt {
-	return func(newd *Daemon) error {
-		if d != nil {
-			newd.SharedDaemon = true
-			newd.SharedApiSock = d.APISock()
-			newd.SharedMnt = d.MountPoint()
-		}
-		return nil
-	}
-}

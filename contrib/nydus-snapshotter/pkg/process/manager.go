@@ -7,6 +7,7 @@
 package process
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,6 +69,10 @@ func (m *Manager) GetBySnapshotID(id string) (*daemon.Daemon, error) {
 	return m.store.GetBySnapshot(id)
 }
 
+func (m *Manager) GetByID(id string) (*daemon.Daemon, error) {
+	return m.store.Get(id)
+}
+
 func (m *Manager) DeleteDaemon(daemon *daemon.Daemon) {
 	if daemon == nil {
 		return
@@ -82,58 +87,74 @@ func (m *Manager) ListDaemons() []*daemon.Daemon {
 func (m *Manager) CleanUpDaemonResource(d *daemon.Daemon) {
 	_ = d.Stderr.Close()
 	_ = d.Stdout.Close()
-	for _, dir := range []string{d.ConfigDir, d.SocketDir, d.LogDir} {
-		if err := os.RemoveAll(d.ConfigDir); err != nil {
+	resource := []string{d.ConfigDir, d.LogDir}
+	if !d.SharedDaemon {
+		resource = append(resource, d.SocketDir)
+	}
+	for _, dir := range resource {
+		if err := os.RemoveAll(dir); err != nil {
 			log.L.Errorf("failed to remove dir %s err %v", dir, err)
 		}
 	}
 }
-func (m *Manager) StartDaemon(d *daemon.Daemon, cg configGenerator) error {
-	if cg != nil {
-		err := cg(d)
-		if err != nil {
-			return err
-		}
-	}
-	if d.SharedDaemon {
-		if err := os.MkdirAll(d.MountPoint(), 0755); err != nil {
-			return err
-		}
-		err := d.SharedMount()
-		if err != nil {
-			return errors.Wrapf(err, "failed to start shared nydusd %s", d.ID)
-		}
-		return nil
-	}
+
+func (m *Manager) StartDaemon(d *daemon.Daemon) error {
+	// if cg != nil {
+	// 	err := cg(d)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
 	cmd, err := m.buildStartCommand(d)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("failed to create start command for daemon %s", d.ID))
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("failed to get stderr pipe for daemon %s", d.ID))
 	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	d.Process = cmd.Process
 	// make sure to wait after start
-	go cmd.Wait()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.L.WithField("daemon", d.ID).Debug(scanner.Text())
+		}
+		log.L.WithField("daemon", d.ID).Info("quits")
+		cmd.Wait()
+	}()
 	return nil
 }
 
 func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
-	bootstrap, err := d.BootstrapFile()
-	if err != nil {
-		return nil, err
-	}
 	args := []string{
 		"--apisock", d.APISock(),
 		"--log-level", "info",
 		"--thread-num", "10",
-		"--mountpoint", d.MountPoint(),
-		"--config", d.ConfigFile(),
-		"--bootstrap", bootstrap,
 	}
-
-	cmd := exec.Command(m.nydusdBinaryPath, args...)
-	return cmd, nil
+	if !d.SharedDaemon {
+		bootstrap, err := d.BootstrapFile()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args,
+			"--config",
+			d.ConfigFile(),
+			"--bootstrap",
+			bootstrap,
+			"--mountpoint",
+			d.MountPoint(),
+		)
+	} else {
+		args = append(args,
+			"--mountpoint",
+			*d.RootMountPoint,
+		)
+	}
+	return exec.Command(m.nydusdBinaryPath, args...), nil
 }
 
 func (m *Manager) DestroyBySnapshotID(id string) error {

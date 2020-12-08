@@ -49,7 +49,7 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 		resolver:    nil,
 		vpcRegistry: false,
 	}
-	_, err = f.createNewDaemon("1", "example.com/test/testimage:0.1", nil)
+	_, err = f.createNewDaemon("1", "example.com/test/testimage:0.1")
 	require.Nil(t, err)
 }
 
@@ -77,11 +77,11 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 		resolver:    nil,
 		vpcRegistry: false,
 	}
-	d, err := f.createNewDaemon("1", "example.com/test/testimage:0.1", nil)
-	err = f.generateDaemonConfig(map[string]string{
+	d, err := f.createNewDaemon("1", "example.com/test/testimage:0.1")
+	err = f.generateDaemonConfig(d, map[string]string{
 		label.ImagePullUsername: "mock",
 		label.ImagePullSecret:   "mock",
-	})(d)
+	})
 	require.Nil(t, err)
 	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "config", d.ID, "config.json")))
 	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "cache")))
