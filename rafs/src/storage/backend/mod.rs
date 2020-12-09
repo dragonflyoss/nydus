@@ -7,6 +7,7 @@ use std::path::Path;
 
 use vm_memory::VolatileSlice;
 
+use crate::io_stats::BackendMetrics;
 use crate::storage::backend::{localfs::LocalFsError, oss::OssError, registry::RegistryError};
 use crate::storage::utils::copyv;
 
@@ -87,16 +88,20 @@ pub trait BlobBackend {
         0
     }
 
+    fn metrics(&self) -> &BackendMetrics;
+
     /// Get whole blob size
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64>;
 
     /// Read a range of data from blob into the provided slice
     fn read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let mut retry_count = self.retry_limit();
+        let begin_time = self.metrics().begin();
         loop {
             let ret = self.try_read(blob_id, buf, offset);
             match ret {
                 Ok(size) => {
+                    self.metrics().end(&begin_time, buf.len(), false);
                     return Ok(size);
                 }
                 Err(err) => {
@@ -107,6 +112,7 @@ pub trait BlobBackend {
                         );
                         retry_count -= 1;
                     } else {
+                        self.metrics().end(&begin_time, buf.len(), true);
                         break Err(err);
                     }
                 }

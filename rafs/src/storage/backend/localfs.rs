@@ -14,6 +14,7 @@ use std::{thread, time};
 use nix::sys::uio;
 use vm_memory::VolatileSlice;
 
+use crate::io_stats::BackendMetrics;
 use crate::storage::backend::{BackendError, BackendResult, BlobBackend, BlobBackendUploader};
 use crate::storage::utils::{readahead, readv};
 
@@ -61,6 +62,7 @@ pub struct LocalFs {
     readahead_sec: u32,
     // blobid-File map
     file_table: RwLock<HashMap<String, FileTableEntry>>,
+    metrics: Option<Arc<BackendMetrics>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -79,7 +81,7 @@ fn default_readahead_sec() -> u32 {
     BLOB_ACCESS_RECORD_SECOND
 }
 
-pub fn new(config: serde_json::value::Value) -> Result<LocalFs> {
+pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs> {
     let config: LocalFsConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
 
     if config.blob_file.is_empty() && config.dir.is_empty() {
@@ -101,6 +103,7 @@ pub fn new(config: serde_json::value::Value) -> Result<LocalFs> {
         readahead: config.readahead,
         readahead_sec: config.readahead_sec,
         file_table: RwLock::new(HashMap::new()),
+        metrics: id.map(|i| BackendMetrics::new(i, "localfs")),
         ..Default::default()
     })
 }
@@ -473,6 +476,12 @@ impl BlobBackend for LocalFs {
         }
 
         Ok(())
+    }
+
+    fn metrics(&self) -> &BackendMetrics {
+        // Safe because nydusd must have backend attached with id, only image builder can no id
+        // but use backend instance to upload blob.
+        self.metrics.as_ref().unwrap()
     }
 
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {

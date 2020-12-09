@@ -121,6 +121,7 @@ impl fmt::Display for RafsConfig {
 
 /// Main entrance of the RAFS readonly FUSE file system.
 pub struct Rafs {
+    id: String,
     device: device::RafsDevice,
     sb: Arc<RafsSuper>,
     digest_validate: bool,
@@ -163,10 +164,12 @@ impl Rafs {
         sb.load(r).map_err(RafsError::FillSuperblock)?;
 
         let rafs = Rafs {
+            id: id.to_string(),
             device: device::RafsDevice::new(
                 device_conf,
                 sb.meta.get_compressor(),
                 sb.meta.get_digester(),
+                id,
             )
             .map_err(RafsError::CreateDevice)?,
             sb: Arc::new(sb),
@@ -212,6 +215,7 @@ impl Rafs {
                 conf.device,
                 self.sb.meta.get_compressor(),
                 self.sb.meta.get_digester(),
+                self.id.as_str(),
             )
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");

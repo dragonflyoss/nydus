@@ -69,22 +69,17 @@ pub struct CacheConfig {
     pub prefetch_worker: PrefetchWorker,
 }
 
-pub fn new_backend(config: BackendConfig) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
+pub fn new_backend(
+    config: BackendConfig,
+    id: &str,
+) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
     match config.backend_type.as_str() {
         #[cfg(feature = "backend-oss")]
-        "oss" => {
-            Ok(Arc::new(oss::new(config.backend_config)?) as Arc<dyn BlobBackend + Send + Sync>)
-        }
+        "oss" => Ok(Arc::new(oss::new(config.backend_config, Some(id))?)),
         #[cfg(feature = "backend-registry")]
-        "registry" => {
-            Ok(Arc::new(registry::new(config.backend_config)?)
-                as Arc<dyn BlobBackend + Send + Sync>)
-        }
+        "registry" => Ok(Arc::new(registry::new(config.backend_config, Some(id))?)),
         #[cfg(feature = "backend-localfs")]
-        "localfs" => {
-            Ok(Arc::new(localfs::new(config.backend_config)?)
-                as Arc<dyn BlobBackend + Send + Sync>)
-        }
+        "localfs" => Ok(Arc::new(localfs::new(config.backend_config, Some(id))?)),
         _ => Err(einval!(format!(
             "unsupported backend type '{}'",
             config.backend_type
@@ -99,17 +94,17 @@ pub fn new_uploader(mut config: BackendConfig) -> IOResult<Arc<dyn BlobBackendUp
     match config.backend_type.as_str() {
         #[cfg(feature = "backend-oss")]
         "oss" => {
-            let backend = oss::new(config.backend_config)?;
+            let backend = oss::new(config.backend_config, None)?;
             Ok(Arc::new(backend) as Arc<dyn BlobBackendUploader>)
         }
         #[cfg(feature = "backend-registry")]
         "registry" => {
-            let backend = registry::new(config.backend_config)?;
+            let backend = registry::new(config.backend_config, None)?;
             Ok(Arc::new(backend) as Arc<dyn BlobBackendUploader>)
         }
         #[cfg(feature = "backend-localfs")]
         "localfs" => {
-            let backend = localfs::new(config.backend_config)?;
+            let backend = localfs::new(config.backend_config, None)?;
             Ok(Arc::new(backend) as Arc<dyn BlobBackendUploader>)
         }
         _ => Err(einval!(format!(
@@ -123,16 +118,22 @@ pub fn new_rw_layer(
     config: Config,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    id: &str,
 ) -> IOResult<Arc<dyn RafsCache + Send + Sync>> {
-    let backend = new_backend(config.backend)?;
+    let backend = new_backend(config.backend, id)?;
     match config.cache.cache_type.as_str() {
-        "blobcache" => Ok(blobcache::new(config.cache, backend, compressor, digester)?
-            as Arc<dyn RafsCache + Send + Sync>),
+        "blobcache" => Ok(blobcache::new(
+            config.cache,
+            backend,
+            compressor,
+            digester,
+            id,
+        )?),
         _ => Ok(Arc::new(dummycache::new(
             config.cache,
             backend,
             compressor,
             digester,
-        )?) as Arc<dyn RafsCache + Send + Sync>),
+        )?)),
     }
 }

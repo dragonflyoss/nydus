@@ -14,6 +14,7 @@ use reqwest::{Method, StatusCode};
 use sha1::Sha1;
 use url::Url;
 
+use crate::io_stats::BackendMetrics;
 use crate::storage::backend::request::{HeaderMap, Progress, ReqBody, Request, RequestError};
 use crate::storage::backend::{default_http_scheme, BackendError, BackendResult};
 use crate::storage::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
@@ -53,6 +54,7 @@ pub struct OSS {
     bucket_name: String,
     force_upload: bool,
     retry_limit: u8,
+    metrics: Option<Arc<BackendMetrics>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -185,7 +187,7 @@ impl OSS {
     }
 }
 
-pub fn new(config: serde_json::value::Value) -> Result<OSS> {
+pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
     let force_upload = common_config.force_upload;
@@ -203,6 +205,8 @@ pub fn new(config: serde_json::value::Value) -> Result<OSS> {
         request,
         force_upload,
         retry_limit,
+        metrics: id.map(|i| BackendMetrics::new(i, "oss")),
+        id: id.map(|i| i.to_string()),
     })
 }
 
@@ -210,6 +214,12 @@ impl BlobBackend for OSS {
     #[inline]
     fn retry_limit(&self) -> u8 {
         self.retry_limit
+    }
+
+    fn metrics(&self) -> &BackendMetrics {
+        // Safe because nydusd must have backend attached with id, only image builder can no id
+        // but use backend instance to upload blob.
+        self.metrics.as_ref().unwrap()
     }
 
     fn prefetch_blob(

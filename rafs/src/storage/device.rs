@@ -32,10 +32,11 @@ impl RafsDevice {
         config: factory::Config,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
+        id: &str,
     ) -> io::Result<RafsDevice> {
         Ok(RafsDevice {
             rw_layer: ArcSwap::new(Arc::new(factory::new_rw_layer(
-                config, compressor, digester,
+                config, compressor, digester, id,
             )?)),
         })
     }
@@ -45,9 +46,10 @@ impl RafsDevice {
         config: factory::Config,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
+        id: &str,
     ) -> io::Result<()> {
         self.rw_layer.store(Arc::new(factory::new_rw_layer(
-            config, compressor, digester,
+            config, compressor, digester, id,
         )?));
         Ok(())
     }

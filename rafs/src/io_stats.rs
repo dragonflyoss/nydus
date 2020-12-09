@@ -41,6 +41,8 @@ pub enum IoStatsError {
     Serialize(SerdeError),
 }
 
+type IoStatsResult<T> = Result<T, IoStatsError>;
+
 impl Clone for StatsFop {
     fn clone(&self) -> Self {
         *self
@@ -50,14 +52,18 @@ impl Clone for StatsFop {
 type FilesStatsCounters = RwLock<Vec<Arc<Option<InodeIOStats>>>>;
 
 /// Block size separated counters.
-/// 1K; 4K; 16K; 64K, 128K.
-const BLOCK_READ_COUNT_MAX: usize = 5;
+/// 1K; 4K; 16K; 64K, 128K, 512K, 1M
+const BLOCK_READ_COUNT_MAX: usize = 8;
 
 /// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
 const READ_LATENCY_RANGE_MAX: usize = 8;
 
 lazy_static! {
-    pub static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIOStats>>> = Default::default();
+    static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIOStats>>> = Default::default();
+}
+
+lazy_static! {
+    static ref BACKEND_METRICS: RwLock<HashMap<String, Arc<BackendMetrics>>> = Default::default();
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -189,7 +195,7 @@ pub fn new(id: &str) -> Arc<GlobalIOStats> {
 }
 
 /// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
-fn latency_range_index(elapsed: isize) -> usize {
+fn latency_range_index(elapsed: usize) -> usize {
     match elapsed {
         _ if elapsed <= 200 => 0,
         _ if elapsed <= 500 => 1,
@@ -198,6 +204,27 @@ fn latency_range_index(elapsed: isize) -> usize {
         _ if elapsed <= 50_000 => 4,
         _ if elapsed <= 100_000 => 5,
         _ if elapsed <= 500_000 => 6,
+        _ => 7,
+    }
+}
+
+fn request_size_index(size: usize) -> usize {
+    match size {
+        // <=1K
+        _ if size >> 10 == 0 => 0,
+        // <=4K
+        _ if size >> 12 == 0 => 1,
+        // <=16K
+        _ if size >> 14 == 0 => 2,
+        // <=64K
+        _ if size >> 16 == 0 => 3,
+        // <=128K
+        _ if size >> 17 == 0 => 4,
+        // <=512K
+        _ if size >> 19 == 0 => 5,
+        // <=1M
+        _ if size >> 20 == 0 => 6,
+        // > 1M
         _ => 7,
     }
 }
@@ -348,8 +375,6 @@ impl GlobalIOStats {
                 if fop_cnt == 0 {
                     return;
                 }
-                let new_avg = || avg + (elapsed - avg) / fop_cnt;
-                self.fop_cumulative_latency_avg[fop as usize].store(new_avg(), Ordering::Relaxed);
             }
         }
     }
@@ -479,6 +504,125 @@ pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError
             }
             Err(IoStatsError::NoCounter)
         }
+    }
+}
+
+pub fn export_backend_metrics(name: &Option<String>) -> IoStatsResult<String> {
+    let metrics = BACKEND_METRICS.read().unwrap();
+
+    match name {
+        Some(k) => metrics
+            .get(k)
+            .ok_or(IoStatsError::NoCounter)
+            .map(|v| v.export_metrics())?,
+        None => {
+            if metrics.len() == 1 {
+                if let Some(m) = metrics.values().next() {
+                    return m.export_metrics();
+                }
+            }
+            Err(IoStatsError::NoCounter)
+        }
+    }
+}
+
+pub trait Metric {
+    /// Adds `value` to the current counter.
+    fn add(&self, value: usize);
+    /// Increments by 1 unit the current counter.
+    fn inc(&self) {
+        self.add(1);
+    }
+    /// Returns current value of the counter.
+    fn count(&self) -> usize;
+}
+
+#[derive(Default, Serialize, Debug)]
+struct BasicMetric(AtomicUsize);
+
+/*
+Exported backend metrics look like:
+```json
+{'read_count': 901, 'read_errors': 0, 'read_amount_total': 28650387, 'read_cumulative_latency_total': 4776473,
+'read_latency_dist':   [[0, 0, 0, 72, 1, 0, 0, 0],
+                        [0, 0, 0, 203, 1, 1, 0, 0],
+                        [0, 0, 0, 545, 3, 1, 0, 0],
+                        [0, 0, 0, 10, 0, 0, 0, 0],
+                        [0, 0, 0, 45, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 2, 0, 0, 0],
+                        [0, 0, 0, 0, 17, 0, 0, 0]]
+}
+*/
+#[derive(Default, Serialize, Debug)]
+pub struct BackendMetrics {
+    #[serde(skip_serializing, skip_deserializing)]
+    id: String,
+    // TODO: Turn this into enum?
+    backend_type: String,
+    // Cumulative count of read request to backend
+    read_count: BasicMetric,
+    // Cumulative count of read failure to backend
+    read_errors: BasicMetric,
+    // Cumulative amount of data from to backend in unit of Bytes. External tools
+    // is responsible for calculating BPS from this field.
+    read_amount_total: BasicMetric,
+    read_cumulative_latency_total: BasicMetric,
+    // Categorize metrics per as to their latency and request size
+    read_latency_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_COUNT_MAX],
+    // TODO: Allocate memory ring-buffer to keep error messages.
+}
+
+impl Metric for BasicMetric {
+    fn add(&self, value: usize) {
+        self.0.fetch_add(value, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl BackendMetrics {
+    pub fn new(id: &str, backend_type: &str) -> Arc<Self> {
+        let backend_metrics = Arc::new(Self {
+            id: id.to_string(),
+            backend_type: backend_type.to_string(),
+            ..Default::default()
+        });
+
+        BACKEND_METRICS
+            .write()
+            .unwrap()
+            .insert(id.to_string(), backend_metrics.clone());
+
+        backend_metrics
+    }
+
+    pub fn begin(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    pub fn end(&self, begin: &SystemTime, size: usize, error: bool) {
+        if let Ok(d) = SystemTime::elapsed(begin) {
+            // FIXME: converting u128 to usize is fragile.
+            let elapsed = d.as_micros() as usize;
+            self.read_count.inc();
+            self.read_cumulative_latency_total.add(elapsed);
+            self.read_amount_total.add(size);
+
+            if error {
+                self.read_errors.inc();
+            }
+
+            let lat_idx = latency_range_index(elapsed);
+            let size_idx = request_size_index(size);
+            self.read_latency_dist[size_idx][lat_idx].inc();
+        }
+    }
+
+    fn export_metrics(&self) -> IoStatsResult<String> {
+        serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
 

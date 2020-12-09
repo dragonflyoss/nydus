@@ -624,6 +624,7 @@ pub fn new(
     backend: Arc<dyn BlobBackend + Sync + Send>,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    _id: &str,
 ) -> Result<Arc<BlobCache>> {
     let blob_config: BlobCacheConfig =
         serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
@@ -774,7 +775,9 @@ mod blob_cache_tests {
         };
         let blob_cache = blobcache::new(
             cache_config,
-            Arc::new(MockBackend {}) as Arc<dyn BlobBackend + Send + Sync>,
+            Arc::new(MockBackend {
+                metrics: BackendMetrics::new("id", "mock"),
+            }) as Arc<dyn BlobBackend + Send + Sync>,
             compress::Algorithm::LZ4Block,
             digest::Algorithm::Blake3,
         )

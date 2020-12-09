@@ -14,6 +14,7 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
+use crate::io_stats::BackendMetrics;
 use crate::storage::backend::request::{
     is_success_status, respond, Progress, ReqBody, Request, RequestError,
 };
@@ -116,6 +117,7 @@ pub struct Registry {
     // Cache 30X redirect url
     // Example: RwLock<HashMap<"<blob_id>", "<redirected_url>">>
     cached_redirect: HashCache,
+    metrics: Option<Arc<BackendMetrics>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -175,7 +177,7 @@ fn trim(val: Option<String>) -> Option<String> {
 }
 
 #[allow(clippy::useless_let_if_seq)]
-pub fn new(config: serde_json::value::Value) -> Result<Registry> {
+pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
     let force_upload = common_config.force_upload;
@@ -230,6 +232,7 @@ pub fn new(config: serde_json::value::Value) -> Result<Registry> {
         retry_limit,
         blob_url_scheme: config.blob_url_scheme,
         cached_redirect: HashCache::new(),
+        metrics: id.map(|i| BackendMetrics::new(i, "registry")),
     })
 }
 
@@ -574,6 +577,12 @@ impl BlobBackend for Registry {
     #[inline]
     fn retry_limit(&self) -> u8 {
         self.retry_limit
+    }
+
+    fn metrics(&self) -> &BackendMetrics {
+        // Safe because nydusd must have backend attached with id, only image builder can no id
+        // but use backend instance to upload blob.
+        self.metrics.as_ref().unwrap()
     }
 
     fn prefetch_blob(
