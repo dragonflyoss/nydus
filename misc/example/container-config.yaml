@@ -1,0 +1,9 @@
+metadata:
+  name: nydus-container
+image:
+  image: localhost:5000/busybox-nydus:latest
+command:
+- /bin/sleep
+args:
+- 600
+log_path: container.1.log
