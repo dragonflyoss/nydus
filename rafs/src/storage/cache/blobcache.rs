@@ -22,6 +22,7 @@ use governor::{
 };
 use vm_memory::VolatileSlice;
 
+use crate::io_stats::BlobcacheMetrics;
 use crate::metadata::digest::{self, RafsDigest};
 use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
@@ -173,6 +174,7 @@ pub struct BlobCache {
     mr_sender: Arc<Mutex<Option<spmc::Sender<MergedBackendRequest>>>>,
     mr_receiver: Option<spmc::Receiver<MergedBackendRequest>>,
     prefetch_seq: AtomicU64,
+    metrics: Arc<BlobcacheMetrics>,
 }
 
 impl BlobCache {
@@ -581,6 +583,8 @@ impl RafsCache for BlobCache {
         let merging_size = self.prefetch_worker.merging_size;
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
 
+        self.metrics.prefetch_unmerged_chunks.add(bios.len());
+
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
             self.generate_merged_requests(bios, mr_sender, merging_size, seq);
         }
@@ -624,7 +628,7 @@ pub fn new(
     backend: Arc<dyn BlobBackend + Sync + Send>,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
-    _id: &str,
+    id: &str,
 ) -> Result<Arc<BlobCache>> {
     let blob_config: BlobCacheConfig =
         serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
@@ -694,6 +698,7 @@ pub fn new(
         mr_sender: Arc::new(Mutex::new(tx)),
         mr_receiver: rx,
         prefetch_seq: AtomicU64::new(0),
+        metrics: BlobcacheMetrics::new(id),
     });
 
     if enabled {

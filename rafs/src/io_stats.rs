@@ -66,6 +66,11 @@ lazy_static! {
     static ref BACKEND_METRICS: RwLock<HashMap<String, Arc<BackendMetrics>>> = Default::default();
 }
 
+lazy_static! {
+    static ref BLOBCACHE_METRICS: RwLock<HashMap<String, Arc<BlobcacheMetrics>>> =
+        Default::default();
+}
+
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct GlobalIOStats {
     // Whether to enable each file accounting switch.
@@ -623,6 +628,35 @@ impl BackendMetrics {
 
     fn export_metrics(&self) -> IoStatsResult<String> {
         serde_json::to_string(self).map_err(IoStatsError::Serialize)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct BlobcacheMetrics {
+    underlying_files: Vec<String>,
+    hits: BasicMetric,
+    total: BasicMetric,
+    // In unit of Bytes
+    prefetch_data_amount: BasicMetric,
+    blob_size: usize,
+    prefetch_workers: u32,
+    prefetch_policy: Vec<String>,
+    prefetch_mr_count: BasicMetric,
+    pub prefetch_unmerged_chunks: BasicMetric,
+}
+
+impl BlobcacheMetrics {
+    pub fn new(id: &str) -> Arc<Self> {
+        let metrics = Arc::new(Self {
+            ..Default::default()
+        });
+
+        BLOBCACHE_METRICS
+            .write()
+            .unwrap()
+            .insert(id.to_string(), metrics.clone());
+
+        metrics
     }
 }
 
