@@ -712,6 +712,7 @@ mod blob_cache_tests {
     use vm_memory::{VolatileMemory, VolatileSlice};
     use vmm_sys_util::tempdir::TempDir;
 
+    use crate::io_stats::BackendMetrics;
     use crate::metadata::digest::{self, RafsDigest};
     use crate::metadata::layout::OndiskChunkInfo;
     use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
@@ -723,7 +724,9 @@ mod blob_cache_tests {
     use crate::storage::device::RafsBio;
     use crate::storage::factory::CacheConfig;
 
-    struct MockBackend {}
+    struct MockBackend {
+        metrics: Arc<BackendMetrics>,
+    }
 
     impl BlobBackend for MockBackend {
         fn try_read(&self, _blob_id: &str, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
@@ -750,6 +753,12 @@ mod blob_cache_tests {
             _blob_readahead_size: u32,
         ) -> BackendResult<()> {
             Ok(())
+        }
+
+        fn metrics(&self) -> &BackendMetrics {
+            // Safe because nydusd must have backend attached with id, only image builder can no id
+            // but use backend instance to upload blob.
+            &self.metrics
         }
     }
 
@@ -780,6 +789,7 @@ mod blob_cache_tests {
             }) as Arc<dyn BlobBackend + Send + Sync>,
             compress::Algorithm::LZ4Block,
             digest::Algorithm::Blake3,
+            "id",
         )
         .unwrap();
 
