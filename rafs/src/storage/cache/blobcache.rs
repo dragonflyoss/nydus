@@ -22,7 +22,7 @@ use governor::{
 };
 use vm_memory::VolatileSlice;
 
-use crate::io_stats::BlobcacheMetrics;
+use crate::io_stats::{BlobcacheMetrics, Metric};
 use crate::metadata::digest::{self, RafsDigest};
 use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
@@ -111,6 +111,7 @@ impl BlobCacheState {
         &mut self,
         blob_id: &str,
         backend: &(dyn BlobBackend + Sync + Send),
+        metrics: &Arc<BlobcacheMetrics>,
     ) -> Result<(RawFd, u64)> {
         if let Some((file, size)) = self.file_map.get(blob_id) {
             return Ok((file.as_raw_fd(), *size));
@@ -131,6 +132,11 @@ impl BlobCacheState {
         };
 
         self.file_map.insert(blob_id.to_string(), (file, size));
+        metrics
+            .underlying_files
+            .lock()
+            .unwrap()
+            .insert(blob_id.to_string());
 
         Ok((fd, size))
     }
@@ -145,15 +151,17 @@ impl BlobCacheState {
         blob_id: &str,
         cki: Arc<dyn RafsChunkInfo>,
         backend: &(dyn BlobBackend + Sync + Send),
+        metrics: &Arc<BlobcacheMetrics>,
     ) -> Result<Arc<Mutex<BlobCacheEntry>>> {
         let block_id = cki.block_id();
         // Double check if someone else has inserted the blob chunk concurrently.
         if let Some(entry) = self.chunk_map.get(&block_id) {
             Ok(entry.clone())
         } else {
-            let (fd, _) = self.get_blob_fd(blob_id, backend)?;
+            let (fd, _) = self.get_blob_fd(blob_id, backend, metrics)?;
             let entry = Arc::new(Mutex::new(BlobCacheEntry::new(cki, fd)));
             self.chunk_map.insert(*block_id, entry.clone());
+            metrics.entries_count.inc();
             Ok(entry)
         }
     }
@@ -199,6 +207,7 @@ impl BlobCache {
                 chunk.block_id().to_string(),
                 chunk.compress_size()
             );
+            self.metrics.partial_hits.inc();
             return cache_entry.read_partial_chunk(bufs, offset + chunk.decompress_offset(), size);
         }
 
@@ -229,8 +238,9 @@ impl BlobCache {
                 )
                 .is_ok()
         {
+            self.metrics.whole_hits.inc();
             trace!(
-                "recover blob cache {} {} resue {} offset {} size {}",
+                "recover blob cache {} {} reuse {} offset {} size {}",
                 chunk.block_id(),
                 d_size,
                 reuse,
@@ -410,6 +420,10 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
         let _thread = thread::Builder::new()
             .name(format!("prefetch_thread_{}", num))
             .spawn(move || {
+                blobcache
+                    .metrics
+                    .prefetch_workers
+                    .fetch_add(1, Ordering::Relaxed);
                 // Safe because channel must be established before prefetch workers
                 'wait_mr: while let Ok(mr) = rx.as_ref().unwrap().recv() {
                     let blob_offset = mr.blob_offset;
@@ -430,6 +444,31 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                         continue;
                     }
 
+                    if continuous_chunks.len() > 2 {
+                        blobcache
+                            .metrics
+                            .prefetch_total_size
+                            .add(blob_size as usize);
+                        blobcache.metrics.prefetch_mr_count.inc();
+                    }
+
+                    if let Some(ref limiter) = blobcache.limiter {
+                        let cells = NonZeroU32::new(blob_size).unwrap();
+                        if let Err(e) = limiter
+                            .check_n(cells)
+                            .or_else(|_| block_on(limiter.until_n_ready(cells)))
+                        {
+                            // `InsufficientCapacity` is the only possible error
+                            // Have to give up to avoid dead-loop
+                            error!("{}: give up rate-limiting", e);
+                        }
+                    }
+
+                    blobcache
+                        .metrics
+                        .prefetch_data_amount
+                        .add(blob_size as usize);
+
                     issue_batch = false;
                     // An immature trick here to detect if chunk already resides in
                     // blob cache file. Hopefully, we can have a more clever and agile
@@ -442,7 +481,7 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                             .cache
                             .write()
                             .expect("Expect cache lock not poisoned")
-                            .set(blob_id, c.clone(), blobcache.backend());
+                            .set(blob_id, c.clone(), blobcache.backend(), &blobcache.metrics);
                         if let Ok(entry) = entry {
                             let entry = entry.lock().unwrap();
                             if entry.is_ready() {
@@ -485,7 +524,7 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                                 .expect("Expect cache lock not poisoned");
 
                             if let Ok(entry) = cache_guard
-                                .set(blob_id, c.clone(), blobcache.backend())
+                                .set(blob_id, c.clone(), blobcache.backend(), &blobcache.metrics)
                                 .map_err(|_| error!("Set cache index error!"))
                             {
                                 let mut entry = entry.lock().unwrap();
@@ -503,6 +542,10 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                         }
                     }
                 }
+                blobcache
+                    .metrics
+                    .prefetch_workers
+                    .fetch_sub(1, Ordering::Relaxed);
                 info!("Prefetch thread exits.")
             });
     }
@@ -552,13 +595,16 @@ impl RafsCache for BlobCache {
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
         let blob_id = &bio.blob_id;
 
+        self.metrics.total.inc();
+
         let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.clone());
         if entry.is_none() {
-            let en =
-                self.cache
-                    .write()
-                    .unwrap()
-                    .set(blob_id, bio.chunkinfo.clone(), self.backend())?;
+            let en = self.cache.write().unwrap().set(
+                blob_id,
+                bio.chunkinfo.clone(),
+                self.backend(),
+                &self.metrics,
+            )?;
             entry = Some(en);
         };
 
@@ -570,11 +616,11 @@ impl RafsCache for BlobCache {
     }
 
     fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        let (_, size) = self
-            .cache
-            .write()
-            .unwrap()
-            .get_blob_fd(blob_id, self.backend())?;
+        let (_, size) =
+            self.cache
+                .write()
+                .unwrap()
+                .get_blob_fd(blob_id, self.backend(), &self.metrics)?;
         Ok(size)
     }
 
@@ -698,8 +744,15 @@ pub fn new(
         mr_sender: Arc::new(Mutex::new(tx)),
         mr_receiver: rx,
         prefetch_seq: AtomicU64::new(0),
-        metrics: BlobcacheMetrics::new(id),
+        metrics: BlobcacheMetrics::new(id, work_dir),
     });
+
+    cache
+        .metrics
+        .prefetch_policy
+        .lock()
+        .unwrap()
+        .insert("hinted".to_string());
 
     if enabled {
         kick_prefetch_workers(&cache);

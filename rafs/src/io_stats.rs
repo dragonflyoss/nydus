@@ -4,11 +4,11 @@
 //
 // Rafs fop stats accounting and exporting.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Drop};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use serde_json::Error as SerdeError;
@@ -531,6 +531,25 @@ pub fn export_backend_metrics(name: &Option<String>) -> IoStatsResult<String> {
     }
 }
 
+pub fn export_blobcache_metrics(id: &Option<String>) -> IoStatsResult<String> {
+    let metrics = BLOBCACHE_METRICS.read().unwrap();
+
+    match id {
+        Some(k) => metrics
+            .get(k)
+            .ok_or(IoStatsError::NoCounter)
+            .map(|v| v.export_metrics())?,
+        None => {
+            if metrics.len() == 1 {
+                if let Some(m) = metrics.values().next() {
+                    return m.export_metrics();
+                }
+            }
+            Err(IoStatsError::NoCounter)
+        }
+    }
+}
+
 pub trait Metric {
     /// Adds `value` to the current counter.
     fn add(&self, value: usize);
@@ -543,7 +562,7 @@ pub trait Metric {
 }
 
 #[derive(Default, Serialize, Debug)]
-struct BasicMetric(AtomicUsize);
+pub struct BasicMetric(AtomicUsize);
 
 /*
 Exported backend metrics look like:
@@ -631,23 +650,34 @@ impl BackendMetrics {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct BlobcacheMetrics {
-    underlying_files: Vec<String>,
-    hits: BasicMetric,
-    total: BasicMetric,
+    // Prefer to let external tool get file's state like file size and disk usage.
+    // Because stat(2) file may get blocked.
+    pub underlying_files: Mutex<HashSet<String>>,
+    pub store_path: String,
+    // Cache hit percentage = (partial_hits + whole_hits) / total
+    pub partial_hits: BasicMetric,
+    pub whole_hits: BasicMetric,
+    pub total: BasicMetric,
+    // Scale of blobcache. Blobcache does not evict entries.
+    pub entries_count: BasicMetric,
     // In unit of Bytes
-    prefetch_data_amount: BasicMetric,
-    blob_size: usize,
-    prefetch_workers: u32,
-    prefetch_policy: Vec<String>,
-    prefetch_mr_count: BasicMetric,
+    pub prefetch_data_amount: BasicMetric,
+    pub prefetch_workers: AtomicUsize,
+    pub prefetch_policy: Mutex<HashSet<String>>,
+    // Together with below two fields, we can figure out average merging size thus
+    // to estimate the possibility to merge backend IOs.
+    pub prefetch_total_size: BasicMetric,
+    pub prefetch_mr_count: BasicMetric,
     pub prefetch_unmerged_chunks: BasicMetric,
 }
 
 impl BlobcacheMetrics {
-    pub fn new(id: &str) -> Arc<Self> {
+    pub fn new(id: &str, store_path: &str) -> Arc<Self> {
         let metrics = Arc::new(Self {
+            id: id.to_string(),
+            store_path: store_path.to_string(),
             ..Default::default()
         });
 
@@ -657,6 +687,10 @@ impl BlobcacheMetrics {
             .insert(id.to_string(), metrics.clone());
 
         metrics
+    }
+
+    pub fn export_metrics(&self) -> IoStatsResult<String> {
+        serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
 
