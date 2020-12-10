@@ -34,6 +34,9 @@ func main() {
 				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
 				&cli.StringFlag{Name: "target", Required: true, Usage: "Target image reference", EnvVars: []string{"TARGET"}},
 
+				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
+				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+
 				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image conversion", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "prefetch-dir", Value: "/", Usage: "Prefetch directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
@@ -43,8 +46,10 @@ func main() {
 			},
 			Action: func(c *cli.Context) error {
 				converter, err := converter.New(converter.Option{
-					Source: c.String("source"),
-					Target: c.String("target"),
+					Source:         c.String("source"),
+					Target:         c.String("target"),
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
 
 					WorkDir:          c.String("work-dir"),
 					PrefetchDir:      c.String("prefetch-dir"),
