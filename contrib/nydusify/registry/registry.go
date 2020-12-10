@@ -44,9 +44,11 @@ type Image struct {
 }
 
 type RegistryOption struct {
-	WorkDir string
-	Source  string
-	Target  string
+	WorkDir        string
+	Source         string
+	Target         string
+	SourceInsecure bool
+	TargetInsecure bool
 }
 
 type Registry struct {
@@ -61,12 +63,19 @@ func withDefaultAuth() authn.Keychain {
 
 func New(option RegistryOption) (*Registry, error) {
 	// Parse source & image reference from provided
-	sourceRef, err := name.ParseReference(option.Source)
+	sourceOpts := []name.Option{}
+	if option.SourceInsecure {
+		sourceOpts = append(sourceOpts, name.Insecure)
+	}
+	sourceRef, err := name.ParseReference(option.Source, sourceOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse source reference")
 	}
-
-	targetRef, err := name.ParseReference(option.Target)
+	targetOpts := []name.Option{}
+	if option.TargetInsecure {
+		targetOpts = append(targetOpts, name.Insecure)
+	}
+	targetRef, err := name.ParseReference(option.Target, targetOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse target reference")
 	}
