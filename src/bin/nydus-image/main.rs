@@ -98,10 +98,10 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
 }
 
 fn main() -> Result<()> {
-    let bti: String = BuildTimeInfo::dump(crate_version!());
+    let (bti_string, _) = BuildTimeInfo::dump(crate_version!());
 
     let cmd = App::new("nydus image builder")
-        .version(bti.as_str())
+        .version(bti_string.as_str())
         .author(crate_authors!())
         .about("Build image using nydus format.")
         .subcommand(
