@@ -32,7 +32,7 @@ pub enum OssError {
     Url(String),
     Request(RequestError),
     ConstructHeader(String),
-    CopyData(reqwest::Error),
+    Transport(reqwest::Error),
     Response(String),
 }
 
@@ -284,7 +284,7 @@ impl BlobBackend for OSS {
 
         Ok(resp
             .copy_to(&mut buf)
-            .map_err(OssError::CopyData)
+            .map_err(OssError::Transport)
             .map(|size| size as usize)?)
     }
 

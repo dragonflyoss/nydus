@@ -199,16 +199,16 @@ pub fn new(id: &str) -> Arc<GlobalIOStats> {
     c
 }
 
-/// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
+/// <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
 fn latency_range_index(elapsed: usize) -> usize {
     match elapsed {
-        _ if elapsed <= 200 => 0,
-        _ if elapsed <= 500 => 1,
-        _ if elapsed <= 1000 => 2,
-        _ if elapsed <= 20_000 => 3,
-        _ if elapsed <= 50_000 => 4,
-        _ if elapsed <= 100_000 => 5,
-        _ if elapsed <= 500_000 => 6,
+        _ if elapsed <= 1000 => 0,
+        _ if elapsed <= 20_000 => 1,
+        _ if elapsed <= 50_000 => 2,
+        _ if elapsed <= 100_000 => 3,
+        _ if elapsed <= 500_000 => 4,
+        _ if elapsed <= 1_000_000 => 5,
+        _ if elapsed <= 2_000_000 => 6,
         _ => 7,
     }
 }
@@ -373,13 +373,6 @@ impl GlobalIOStats {
                     .fetch_add(1, Ordering::Relaxed);
                 self.fop_cumulative_latency_total[fop as usize]
                     .fetch_add(elapsed as usize, Ordering::Relaxed);
-                let fop_cnt = self.fop_hits[fop as usize].load(Ordering::Relaxed);
-
-                // Zero fop count is hardly to meet, but still check here in
-                // case callers misuses ios-latency
-                if fop_cnt == 0 {
-                    return;
-                }
             }
         }
     }

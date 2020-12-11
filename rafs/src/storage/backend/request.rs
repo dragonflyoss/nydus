@@ -27,8 +27,9 @@ const HEADER_AUTHORIZATION: &str = "Authorization";
 
 #[derive(Debug)]
 pub enum RequestError {
-    Common(String),
-    Transform(reqwest::Error),
+    ErrorWithMsg(String),
+    Common(reqwest::Error),
+    Format(reqwest::Error),
 }
 
 pub type RequestResult<T> = std::result::Result<T, RequestError>;
@@ -113,10 +114,8 @@ pub fn respond(resp: Response) -> RequestResult<Response> {
     if is_success_status(resp.status()) {
         return Ok(resp);
     }
-
-    let msg = resp.text().map_err(RequestError::Transform)?;
-
-    Err(RequestError::Common(msg))
+    let msg = resp.text().map_err(RequestError::Format)?;
+    Err(RequestError::ErrorWithMsg(msg))
 }
 
 impl Request {
@@ -203,18 +202,18 @@ impl Request {
         catch_status: bool,
         proxy: bool,
     ) -> RequestResult<Response> {
-        if log::max_level() >= log::LevelFilter::Debug {
-            let mut display_headers = headers.clone();
-            display_headers.remove(HEADER_AUTHORIZATION);
-            debug!(
-                "Request: {} {} headers: {:?}, proxy: {}, data: {}",
-                method,
-                url,
-                display_headers,
-                proxy,
-                data.is_some(),
-            );
-        }
+        debug!(
+            "Request: {} {} headers: {:?}, proxy: {}, data: {}",
+            method,
+            url,
+            {
+                let mut display_headers = headers.clone();
+                display_headers.remove(HEADER_AUTHORIZATION);
+                display_headers
+            },
+            proxy,
+            data.is_some(),
+        );
 
         let rb = client.request(method, url).headers(headers);
 
@@ -243,7 +242,7 @@ impl Request {
                 }
                 respond(resp)
             }
-            Err(err) => Err(RequestError::Common(err.to_string())),
+            Err(err) => Err(RequestError::Common(err)),
         }
     }
 

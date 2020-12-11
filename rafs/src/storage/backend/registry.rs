@@ -43,7 +43,7 @@ pub enum RegistryError {
     Auth(String),
     ResponseHead(String),
     Response(Error),
-    CopyData(reqwest::Error),
+    Transport(reqwest::Error),
 }
 
 impl From<RegistryError> for BackendError {
@@ -568,7 +568,7 @@ impl Registry {
         }
 
         resp.copy_to(&mut buf)
-            .map_err(RegistryError::CopyData)
+            .map_err(RegistryError::Transport)
             .map(|size| size as usize)
     }
 }
