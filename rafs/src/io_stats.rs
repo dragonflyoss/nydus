@@ -13,6 +13,8 @@ use std::time::SystemTime;
 
 use serde_json::Error as SerdeError;
 
+use nydus_utils::logger::ErrorHolder;
+
 pub type Inode = u64;
 
 #[derive(PartialEq, Copy)]
@@ -69,6 +71,11 @@ lazy_static! {
 lazy_static! {
     static ref BLOBCACHE_METRICS: RwLock<HashMap<String, Arc<BlobcacheMetrics>>> =
         Default::default();
+}
+
+lazy_static! {
+    pub static ref ERROR_HOLDER: Arc<Mutex<ErrorHolder>> =
+        Arc::new(Mutex::new(ErrorHolder::init(500, 50 * 1024)));
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -543,6 +550,10 @@ pub fn export_blobcache_metrics(id: &Option<String>) -> IoStatsResult<String> {
     }
 }
 
+pub fn export_events() -> IoStatsResult<String> {
+    serde_json::to_string(ERROR_HOLDER.lock().unwrap().deref()).map_err(IoStatsError::Serialize)
+}
+
 pub trait Metric {
     /// Adds `value` to the current counter.
     fn add(&self, value: usize);
@@ -587,7 +598,6 @@ pub struct BackendMetrics {
     read_cumulative_latency_total: BasicMetric,
     // Categorize metrics per as to their latency and request size
     read_latency_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_COUNT_MAX],
-    // TODO: Allocate memory ring-buffer to keep error messages.
 }
 
 impl Metric for BasicMetric {

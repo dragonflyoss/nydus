@@ -7,7 +7,7 @@ use std::path::Path;
 
 use vm_memory::VolatileSlice;
 
-use crate::io_stats::BackendMetrics;
+use crate::io_stats::{BackendMetrics, ERROR_HOLDER};
 use crate::storage::backend::{localfs::LocalFsError, oss::OssError, registry::RegistryError};
 use crate::storage::utils::copyv;
 
@@ -113,6 +113,11 @@ pub trait BlobBackend {
                         retry_count -= 1;
                     } else {
                         self.metrics().end(&begin_time, buf.len(), true);
+                        ERROR_HOLDER
+                            .lock()
+                            .unwrap()
+                            .push(&format!("{:?}", err))
+                            .unwrap_or_else(|_| error!("Failed when try to hold error"));
                         break Err(err);
                     }
                 }
