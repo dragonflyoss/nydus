@@ -55,6 +55,7 @@ pub struct OSS {
     force_upload: bool,
     retry_limit: u8,
     metrics: Option<Arc<BackendMetrics>>,
+    id: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -220,6 +221,12 @@ impl BlobBackend for OSS {
         // Safe because nydusd must have backend attached with id, only image builder can no id
         // but use backend instance to upload blob.
         self.metrics.as_ref().unwrap()
+    }
+
+    fn release(&self) {
+        self.metrics()
+            .release()
+            .unwrap_or_else(|e| error!("{:?}", e))
     }
 
     fn prefetch_blob(

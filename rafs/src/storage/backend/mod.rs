@@ -83,6 +83,8 @@ pub trait BlobBackend {
         blob_readahead_size: u32,
     ) -> BackendResult<()>;
 
+    fn release(&self);
+
     #[inline]
     fn retry_limit(&self) -> u8 {
         0

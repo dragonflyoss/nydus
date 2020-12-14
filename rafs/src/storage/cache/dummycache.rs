@@ -120,7 +120,9 @@ impl RafsCache for DummyCache {
             .map_err(|e| eother!(e))
     }
 
-    fn release(&self) {}
+    fn release(&self) {
+        self.backend().release()
+    }
 }
 
 pub fn new(

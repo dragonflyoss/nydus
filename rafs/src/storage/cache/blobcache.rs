@@ -624,7 +624,12 @@ impl RafsCache for BlobCache {
         Ok(size)
     }
 
-    fn release(&self) {}
+    fn release(&self) {
+        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
+
+        // TODO: Cache is responsible to release backend's resources.1
+        self.backend().release()
+    }
     fn prefetch(&self, bios: &mut [RafsBio]) -> RafsResult<usize> {
         let merging_size = self.prefetch_worker.merging_size;
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);

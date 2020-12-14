@@ -484,6 +484,12 @@ impl BlobBackend for LocalFs {
         self.metrics.as_ref().unwrap()
     }
 
+    fn release(&self) {
+        self.metrics()
+            .release()
+            .unwrap_or_else(|e| error!("{:?}", e))
+    }
+
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
         let blob_file_path = self.get_blob_path(blob_id);
         let meta = fs::metadata(blob_file_path).map_err(LocalFsError::BlobFile)?;

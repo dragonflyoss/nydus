@@ -585,6 +585,12 @@ impl BlobBackend for Registry {
         self.metrics.as_ref().unwrap()
     }
 
+    fn release(&self) {
+        self.metrics()
+            .release()
+            .unwrap_or_else(|e| error!("{:?}", e))
+    }
+
     fn prefetch_blob(
         &self,
         _blob_id: &str,

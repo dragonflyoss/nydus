@@ -626,6 +626,15 @@ impl BackendMetrics {
         backend_metrics
     }
 
+    pub fn release(&self) -> IoStatsResult<()> {
+        BACKEND_METRICS
+            .write()
+            .unwrap()
+            .remove(&self.id)
+            .map(|_| ())
+            .ok_or(IoStatsError::NoCounter)
+    }
+
     pub fn begin(&self) -> SystemTime {
         SystemTime::now()
     }
@@ -655,6 +664,8 @@ impl BackendMetrics {
 
 #[derive(Debug, Default, Serialize)]
 pub struct BlobcacheMetrics {
+    #[serde(skip_serializing, skip_deserializing)]
+    id: String,
     // Prefer to let external tool get file's state like file size and disk usage.
     // Because stat(2) file may get blocked.
     pub underlying_files: Mutex<HashSet<String>>,
@@ -690,6 +701,15 @@ impl BlobcacheMetrics {
             .insert(id.to_string(), metrics.clone());
 
         metrics
+    }
+
+    pub fn release(&self) -> IoStatsResult<()> {
+        BLOBCACHE_METRICS
+            .write()
+            .unwrap()
+            .remove(&self.id)
+            .map(|_| ())
+            .ok_or(IoStatsError::NoCounter)
     }
 
     pub fn export_metrics(&self) -> IoStatsResult<String> {
