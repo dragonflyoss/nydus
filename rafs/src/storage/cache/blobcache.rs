@@ -627,7 +627,7 @@ impl RafsCache for BlobCache {
     fn release(&self) {
         self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
 
-        // TODO: Cache is responsible to release backend's resources.1
+        // TODO: Cache is responsible to release backend's resources
         self.backend().release()
     }
     fn prefetch(&self, bios: &mut [RafsBio]) -> RafsResult<usize> {
@@ -808,6 +808,8 @@ mod blob_cache_tests {
         fn blob_size(&self, _blob_id: &str) -> BackendResult<u64> {
             Ok(0)
         }
+
+        fn release(&self) {}
 
         fn prefetch_blob(
             &self,

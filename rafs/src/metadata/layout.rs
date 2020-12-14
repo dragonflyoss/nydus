@@ -38,6 +38,8 @@ use std::io::{Error, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 
+use serde::Serialize;
+
 use nydus_utils::{einval, enoent};
 
 use super::*;
@@ -151,6 +153,7 @@ pub struct OndiskSuperBlock {
 }
 
 bitflags! {
+    #[derive(Serialize)]
     pub struct RafsSuperFlags: u64 {
         /// Data chunks are not compressed.
         const COMPRESS_NONE = 0x0000_0001;
@@ -181,27 +184,7 @@ impl Default for RafsSuperFlags {
 
 impl fmt::Display for RafsSuperFlags {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.contains(RafsSuperFlags::COMPRESS_NONE) {
-            write!(f, "COMPRESS_NONE ")?;
-        }
-        if self.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) {
-            write!(f, "COMPRESS_LZ4_BLOCK ")?;
-        }
-        if self.contains(RafsSuperFlags::COMPRESS_GZIP) {
-            write!(f, "COMPRESS_GZIP ")?;
-        }
-        if self.contains(RafsSuperFlags::DIGESTER_BLAKE3) {
-            write!(f, "DIGESTER_BLAKE3 ")?;
-        }
-        if self.contains(RafsSuperFlags::DIGESTER_SHA256) {
-            write!(f, "DIGESTER_SHA256 ")?;
-        }
-        if self.contains(RafsSuperFlags::EXPLICIT_UID_GID) {
-            write!(f, "EXPLICIT_UID_GID ")?;
-        }
-        if self.contains(RafsSuperFlags::HAS_XATTR) {
-            write!(f, "HAS_XATTR ")?;
-        }
+        write!(f, "{}", format!("{:?}", self))?;
         Ok(())
     }
 }

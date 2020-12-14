@@ -16,6 +16,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
+use serde_with::{serde_as, DisplayFromStr};
+
 use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::Entry;
 use fuse_rs::api::filesystem::ROOT_ID;
@@ -74,7 +77,8 @@ macro_rules! impl_getter {
 }
 
 /// Cached Rafs super block bootstrap.
-#[derive(Clone, Copy, Default, Debug)]
+#[serde_as]
+#[derive(Clone, Copy, Default, Debug, Serialize)]
 pub struct RafsSuperMeta {
     pub magic: u32,
     pub version: u32,
@@ -83,6 +87,7 @@ pub struct RafsSuperMeta {
     pub block_size: u32,
     pub inodes_count: u64,
     // Use u64 as [u8; 8] => [.., digest::Algorithm, compress::Algorithm]
+    #[serde_as(as = "DisplayFromStr")]
     pub flags: RafsSuperFlags,
     pub inode_table_entries: u32,
     pub inode_table_offset: u64,
