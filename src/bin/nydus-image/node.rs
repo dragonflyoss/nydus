@@ -11,18 +11,17 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::io::{Error, Result};
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str;
 use std::str::FromStr;
 
+use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
 use nydus_utils::div_round_up;
-use nydus_utils::{einval, last_error};
 
 use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
@@ -63,7 +62,7 @@ impl FromStr for WhiteoutSpec {
         match s {
             "oci" => Ok(Self::Oci),
             "overlayfs" => Ok(Self::Overlayfs),
-            _ => Err(einval!("Invalid whiteout spec")),
+            _ => Err(anyhow!("invalid whiteout spec")),
         }
     }
 }
@@ -170,7 +169,7 @@ impl Node {
             xattrs: XAttrs::default(),
             explicit_uidgid,
         };
-        node.build_inode()?;
+        node.build_inode().context("failed to build inode")?;
         Ok(node)
     }
 
@@ -181,13 +180,14 @@ impl Node {
                 if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
                     return Ok(());
                 } else {
-                    return Err(e);
+                    return Err(anyhow!("failed to list xattr of {:?}", self.path));
                 }
             }
         };
 
         for key in file_xattrs {
-            let value = xattr::get(&self.path, &key)?;
+            let value = xattr::get(&self.path, &key)
+                .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
             self.xattrs.pairs.insert(key, value.unwrap_or_default());
         }
 
@@ -223,7 +223,8 @@ impl Node {
         let file_size = self.inode.i_size;
         let mut blob_size = 0usize;
         let mut inode_hasher = RafsDigest::hasher(digester);
-        let mut file = File::open(&self.path).map_err(|e| last_error!(e))?;
+        let mut file = File::open(&self.path)
+            .with_context(|| format!("failed to open node file {:?}", self.path))?;
 
         for i in 0..self.inode.i_child_count {
             // Init chunk info
@@ -239,7 +240,8 @@ impl Node {
 
             // Read chunk data
             let mut chunk_data = vec![0; chunk_size];
-            file.read_exact(&mut chunk_data)?;
+            file.read_exact(&mut chunk_data)
+                .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
             // Calculate chunk digest
             // TODO: check for hole chunks. One possible way is to always save
@@ -267,7 +269,8 @@ impl Node {
             }
 
             // Compress chunk data
-            let (compressed, is_compressed) = compress::compress(&chunk_data, compressor)?;
+            let (compressed, is_compressed) = compress::compress(&chunk_data, compressor)
+                .with_context(|| format!("failed to compress node file {:?}", self.path))?;
             let compressed_size = compressed.len();
             if is_compressed {
                 chunk.flags |= RafsChunkFlags::COMPRESSED;
@@ -289,7 +292,9 @@ impl Node {
             blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
-            f_blob.write_all(&compressed)?;
+            f_blob
+                .write_all(&compressed)
+                .context("failed to write blob")?;
 
             // Cache chunk digest info
             chunk_cache.insert(chunk.block_id, chunk);
@@ -314,26 +319,29 @@ impl Node {
             symlink: self.symlink.as_deref(),
             inode: &self.inode,
         };
-        let inode_size = inode.store(f_bootstrap)?;
+        let inode_size = inode
+            .store(f_bootstrap)
+            .context("failed to dump inode to bootstrap")?;
         node_size += inode_size;
 
         // Dump inode xattr
         if !self.xattrs.pairs.is_empty() {
-            let xattr_size = self.xattrs.store(f_bootstrap)?;
+            let xattr_size = self
+                .xattrs
+                .store(f_bootstrap)
+                .context("failed to dump xattr to bootstrap")?;
             node_size += xattr_size;
         }
 
         // Dump chunk info
         if self.is_reg() && self.inode.i_child_count as usize != self.chunks.len() {
-            return Err(einval!(format!(
-                "invalid chunks count {}: {}",
-                self.chunks.len(),
-                self
-            )));
+            bail!("invalid chunks count {}: {}", self.chunks.len(), self);
         }
 
         for chunk in &mut self.chunks {
-            let chunk_size = chunk.store(f_bootstrap)?;
+            let chunk_size = chunk
+                .store(f_bootstrap)
+                .context("failed to dump chunk info to bootstrap")?;
             node_size += chunk_size;
         }
 
@@ -364,7 +372,8 @@ impl Node {
 
     fn build_inode(&mut self) -> Result<()> {
         self.inode.set_name_size(self.name().as_bytes().len());
-        self.build_inode_stat()?;
+        self.build_inode_stat()
+            .with_context(|| format!("failed to build inode {:?}", self.path))?;
 
         if self.is_reg() {
             self.inode.i_child_count = self.chunk_count() as u32;
@@ -382,7 +391,9 @@ impl Node {
     }
 
     pub fn meta(&self) -> Result<impl MetadataExt> {
-        self.path.symlink_metadata().map_err(|e| einval!(e))
+        self.path
+            .symlink_metadata()
+            .with_context(|| format!("failed to get metadata from {:?}", self.path))
     }
 
     /// Generate the path relative to original rootfs.

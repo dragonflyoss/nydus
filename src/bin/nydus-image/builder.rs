@@ -6,16 +6,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
-use std::io::{BufWriter, Error, Result};
+use std::io::BufWriter;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
-use nydus_utils::einval;
 use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsMode, RafsStore, RafsSuper};
@@ -91,7 +91,7 @@ impl FromStr for PrefetchPolicy {
             "none" => Ok(Self::None),
             "fs" => Ok(Self::Fs),
             "blob" => Ok(Self::Blob),
-            _ => Err(einval!("Invalid ra-policy string got.")),
+            _ => Err(anyhow!("invalid prefetch policy")),
         }
     }
 }
@@ -108,7 +108,7 @@ impl FromStr for SourceType {
         match s {
             "directory" => Ok(Self::Directory),
             "stargz_index" => Ok(Self::StargzIndex),
-            _ => Err(einval!("Invalid source type.")),
+            _ => Err(anyhow!("invalid source type")),
         }
     }
 }
@@ -135,7 +135,8 @@ impl Builder {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open(blob_path)?,
+                .open(blob_path)
+                .with_context(|| format!("failed to create blob file {:?}", blob_path))?,
         ));
 
         let f_bootstrap = Box::new(BufWriter::with_capacity(
@@ -144,7 +145,8 @@ impl Builder {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open(bootstrap_path)?,
+                .open(bootstrap_path)
+                .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
         ));
 
         let f_parent_bootstrap: Option<Box<dyn RafsIoRead>> =
@@ -153,7 +155,13 @@ impl Builder {
                     OpenOptions::new()
                         .read(true)
                         .write(false)
-                        .open(parent_bootstrap_path)?,
+                        .open(parent_bootstrap_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to open parent bootstrap file {:?}",
+                                parent_bootstrap_path
+                            )
+                        })?,
                 ))
             } else {
                 None
@@ -215,7 +223,7 @@ impl Builder {
 
     /// Traverse node tree, set inode index, ino, child_index and
     /// child_count etc according to RAFS format, then store to nodes collection.
-    fn build_rafs(&mut self, tree: &mut Tree, nodes: &mut Vec<Node>) -> Result<()> {
+    fn build_rafs(&mut self, tree: &mut Tree, nodes: &mut Vec<Node>) {
         let index = nodes.len() as u64;
         let parent = &mut nodes[tree.node.index as usize - 1];
 
@@ -309,13 +317,11 @@ impl Builder {
         }
 
         for dir in dirs {
-            self.build_rafs(dir, nodes)?;
+            self.build_rafs(dir, nodes);
         }
-
-        Ok(())
     }
 
-    fn build_rafs_wrap(&mut self, mut tree: &mut Tree) -> Result<()> {
+    fn build_rafs_wrap(&mut self, mut tree: &mut Tree) {
         let index = RAFS_ROOT_INODE;
         tree.node.index = index;
         tree.node.inode.i_ino = index;
@@ -328,10 +334,8 @@ impl Builder {
         }
 
         let mut nodes = vec![tree.node.clone()];
-        self.build_rafs(&mut tree, &mut nodes)?;
+        self.build_rafs(&mut tree, &mut nodes);
         self.nodes = nodes;
-
-        Ok(())
     }
 
     /// Apply new node (upper layer from filesystem directory) to
@@ -343,14 +347,16 @@ impl Builder {
             ..Default::default()
         };
 
-        rs.load(self.f_parent_bootstrap.as_mut().unwrap())?;
+        rs.load(self.f_parent_bootstrap.as_mut().unwrap())
+            .context("failed to load superblock from bootstrap")?;
 
         let lower_compressor = rs.meta.get_compressor();
         if self.compressor != lower_compressor {
-            return Err(einval!(format!(
-                "Inconsistent compressor with the lower layer, current {}, lower: {}.",
-                self.compressor, lower_compressor
-            )));
+            bail!(
+                "inconsistent compressor with the lower layer, current {}, lower: {}.",
+                self.compressor,
+                lower_compressor
+            );
         }
 
         // Reuse lower layer blob table,
@@ -358,17 +364,18 @@ impl Builder {
         self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
 
         // Build node tree of lower layer from a bootstrap file
-        let mut tree = Tree::from_bootstrap(&rs)?;
+        let mut tree = Tree::from_bootstrap(&rs).context("failed to build tree from bootstrap")?;
 
         // Apply new node (upper layer) to node tree (lower layer)
         for node in &self.nodes {
-            tree.apply(&node, true, &self.whiteout_spec)?;
+            tree.apply(&node, true, &self.whiteout_spec)
+                .context("failed to apply tree")?;
         }
 
         self.lower_inode_map.clear();
         self.upper_inode_map.clear();
         self.readahead_files.clear();
-        self.build_rafs_wrap(&mut tree)?;
+        self.build_rafs_wrap(&mut tree);
 
         Ok(())
     }
@@ -380,9 +387,10 @@ impl Builder {
             self.explicit_uidgid,
             layered,
             &self.whiteout_spec,
-        )?;
+        )
+        .context("failed to build tree from filesystem")?;
 
-        self.build_rafs_wrap(&mut tree)?;
+        self.build_rafs_wrap(&mut tree);
 
         Ok(())
     }
@@ -394,8 +402,11 @@ impl Builder {
             &self.blob_id,
             self.explicit_uidgid,
             &self.whiteout_spec,
-        )?;
-        self.build_rafs_wrap(&mut tree)?;
+        )
+        .context("failed to build tree from stargz index")?;
+
+        self.build_rafs_wrap(&mut tree);
+
         Ok(())
     }
 
@@ -427,16 +438,18 @@ impl Builder {
                     if node.overlay == Overlay::UpperAddition
                         || node.overlay == Overlay::UpperModification
                     {
-                        blob_readahead_size += node.dump_blob(
-                            &mut self.f_blob,
-                            &mut blob_hash,
-                            &mut compress_offset,
-                            &mut decompress_offset,
-                            &mut self.chunk_cache,
-                            self.compressor,
-                            self.digester,
-                            blob_index,
-                        )?;
+                        blob_readahead_size += node
+                            .dump_blob(
+                                &mut self.f_blob,
+                                &mut blob_hash,
+                                &mut compress_offset,
+                                &mut decompress_offset,
+                                &mut self.chunk_cache,
+                                self.compressor,
+                                self.digester,
+                                blob_index,
+                            )
+                            .context("failed to dump readahead blob chunks")?;
                     }
                 }
 
@@ -453,16 +466,18 @@ impl Builder {
                         && (node.overlay == Overlay::UpperAddition
                             || node.overlay == Overlay::UpperModification)
                     {
-                        blob_size += node.dump_blob(
-                            &mut self.f_blob,
-                            &mut blob_hash,
-                            &mut compress_offset,
-                            &mut decompress_offset,
-                            &mut self.chunk_cache,
-                            self.compressor,
-                            self.digester,
-                            blob_index,
-                        )?;
+                        blob_size += node
+                            .dump_blob(
+                                &mut self.f_blob,
+                                &mut blob_hash,
+                                &mut compress_offset,
+                                &mut decompress_offset,
+                                &mut self.chunk_cache,
+                                self.compressor,
+                                self.digester,
+                                blob_index,
+                            )
+                            .context("failed to dump remaining blob chunks")?;
                     }
                 }
             }
@@ -515,7 +530,7 @@ impl Builder {
 
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
         for idx in (0..self.nodes.len()).rev() {
-            self.nodes[idx].inode.i_digest = self.digest_node(&self.nodes[idx])?;
+            self.nodes[idx].inode.i_digest = self.digest_node(&self.nodes[idx]);
         }
 
         // Set inode table
@@ -590,12 +605,18 @@ impl Builder {
         }
 
         // Dump bootstrap
-        super_block.store(&mut self.f_bootstrap)?;
-        inode_table.store(&mut self.f_bootstrap)?;
+        super_block
+            .store(&mut self.f_bootstrap)
+            .context("failed to store superblock")?;
+        inode_table
+            .store(&mut self.f_bootstrap)
+            .context("failed to store inode table")?;
         if self.prefetch_policy == PrefetchPolicy::Fs {
             prefetch_table.store(&mut self.f_bootstrap)?;
         }
-        self.blob_table.store(&mut self.f_bootstrap)?;
+        self.blob_table
+            .store(&mut self.f_bootstrap)
+            .context("failed to store blob table")?;
 
         for node in &mut self.nodes {
             if self.source_type == SourceType::StargzIndex {
@@ -606,7 +627,8 @@ impl Builder {
                     }
                 }
             }
-            node.dump_bootstrap(&mut self.f_bootstrap)?;
+            node.dump_bootstrap(&mut self.f_bootstrap)
+                .context("failed to dump bootstrap")?;
         }
 
         let blob_ids: Vec<String> = self
@@ -624,10 +646,10 @@ impl Builder {
     }
 
     /// Calculate inode digest
-    fn digest_node(&self, node: &Node) -> Result<RafsDigest> {
+    fn digest_node(&self, node: &Node) -> RafsDigest {
         // We have set digest for non-directory inode in the previous dump_blob workflow, so just return digest here.
         if !node.is_dir() {
-            return Ok(node.inode.i_digest);
+            return node.inode.i_digest;
         }
 
         let child_index = node.inode.i_child_index;
@@ -639,9 +661,7 @@ impl Builder {
             inode_hasher.digest_update(child.inode.i_digest.as_ref());
         }
 
-        let inode_hash = inode_hasher.digest_finalize();
-
-        Ok(inode_hash)
+        inode_hasher.digest_finalize()
     }
 
     /// Build workflow, return (Vec<blob_id>, blob_size)

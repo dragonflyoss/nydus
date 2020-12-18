@@ -4,15 +4,15 @@
 //
 // Stargz support.
 
+use anyhow::{anyhow, bail, Context, Result};
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Result;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use nydus_utils::einval;
 use rafs::metadata::digest::{Algorithm, RafsDigest};
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
@@ -177,7 +177,7 @@ impl TocEntry {
         }
         let name = path
             .file_name()
-            .ok_or_else(|| einval!("invalid entry name"))?;
+            .ok_or_else(|| anyhow!("invalid entry name"))?;
         Ok(PathBuf::from(name))
     }
 
@@ -192,10 +192,10 @@ impl TocEntry {
         let path = PathBuf::from("/").join(&self.name);
         Ok(path
             .parent()
-            .ok_or_else(|| einval!("invalid entry path"))?
+            .ok_or_else(|| anyhow!("invalid entry path"))?
             .join(
                 path.file_name()
-                    .ok_or_else(|| einval!("invalid entry name"))?,
+                    .ok_or_else(|| anyhow!("invalid entry name"))?,
             ))
     }
 
@@ -216,10 +216,9 @@ impl TocEntry {
     // TODO: think about chunk deduplicate
     pub fn block_id(&self, blob_id: &str) -> Result<RafsDigest> {
         if !self.is_reg() && !self.is_chunk() {
-            return Err(einval!("only support chunk or reg entry"));
+            bail!("only support chunk or reg entry");
         }
-        let data = serde_json::to_string(self)
-            .map_err(|e| einval!(format!("block id calculation failed: {:?}", e)))?;
+        let data = serde_json::to_string(self).context("block id calculation failed")?;
         Ok(RafsDigest::from_buf(
             (data + blob_id).as_bytes(),
             Algorithm::Sha256,
@@ -244,14 +243,12 @@ pub struct TocIndex {
 }
 
 pub fn parse_index(path: &PathBuf) -> Result<TocIndex> {
-    let index_file = File::open(path)?;
+    let index_file =
+        File::open(path).with_context(|| format!("failed to open stargz index file {:?}", path))?;
     let toc_index: TocIndex = serde_json::from_reader(index_file)
-        .map_err(|e| einval!(format!("invalid stargz index json file {:?}", e)))?;
+        .with_context(|| format!("invalid stargz index file {:?}", path))?;
     if toc_index.version != 1 {
-        return Err(einval!(format!(
-            "unsupported index version {}",
-            toc_index.version
-        )));
+        bail!("unsupported index version {}", toc_index.version);
     }
     Ok(toc_index)
 }

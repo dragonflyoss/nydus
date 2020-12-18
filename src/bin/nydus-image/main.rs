@@ -18,19 +18,20 @@ extern crate serde;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
+use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 use vmm_sys_util::tempfile::TempFile;
 
 use std::collections::BTreeMap;
 use std::fs::metadata;
 use std::fs::rename;
-use std::io::{self, Result, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
-use nydus_utils::{einval, log_level_to_verbosity, BuildTimeInfo};
+use nydus_utils::{log_level_to_verbosity, BuildTimeInfo};
 use rafs::metadata::digest;
 use rafs::storage::{backend, compress, factory};
 use validator::Validator;
@@ -51,10 +52,7 @@ fn upload_blob(
                 current * 100 / total,
             );
         })
-        .map_err(|e| {
-            error!("upload_blob backend.upload {:?}", e);
-            e
-        })?;
+        .context("failed to upload blob")?;
 
     print!("\r");
     io::stdout().flush().unwrap();
@@ -68,7 +66,7 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
     let mut files = BTreeMap::new();
 
     // Can't fail since source must be a legal input option.
-    let source_path = source.canonicalize().unwrap();
+    let source_path = source.canonicalize()?;
 
     loop {
         let mut file = String::new();
@@ -77,53 +75,48 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
         // Absolute path must point to a file in source rootfs.
         // Relative path must point to a file in source rootfs.
         // All paths must conform to format `/rootfs/dir/file` when added to BTree.
-        let ret = stdin.read_line(&mut file);
-        match ret {
-            Ok(size) => {
-                if size == 0 {
-                    break;
-                }
-                let file_name = file.trim();
-                if file_name.is_empty() {
-                    continue;
-                }
-                let path = Path::new(file_name);
-                // Will follow symlink.
-                if !path.exists() {
-                    warn!("{} does not exist, ignore it!", path.to_str().unwrap());
-                    continue;
-                }
-
-                let canonicalized_name;
-                match path.canonicalize() {
-                    Ok(p) => {
-                        if !p.starts_with(&source_path) {
-                            continue;
-                        }
-                        canonicalized_name = p;
-                    }
-                    Err(_) => continue,
-                }
-
-                let file_name_trimmed = Path::new("/").join(
-                    canonicalized_name
-                        .strip_prefix(&source_path)
-                        .unwrap()
-                        .to_path_buf(),
-                );
-
-                debug!(
-                    "readahead file: {}, trimmed file name {}",
-                    file_name,
-                    file_name_trimmed.to_str().unwrap()
-                );
-                // The inode index is not decided yet, but will do during fs-walk.
-                files.insert(file_name_trimmed, None);
-            }
-            Err(err) => {
-                error!("Failed to parse readahead files: {}", err);
-            }
+        let size = stdin
+            .read_line(&mut file)
+            .context(format!("failed to parse readahead files from {:?}", source))?;
+        if size == 0 {
+            break;
         }
+        let file_name = file.trim();
+        if file_name.is_empty() {
+            continue;
+        }
+        let path = Path::new(file_name);
+        // Will follow symlink.
+        if !path.exists() {
+            warn!("{} does not exist, ignore it!", path.to_str().unwrap());
+            continue;
+        }
+
+        let canonicalized_name;
+        match path.canonicalize() {
+            Ok(p) => {
+                if !p.starts_with(&source_path) {
+                    continue;
+                }
+                canonicalized_name = p;
+            }
+            Err(_) => continue,
+        }
+
+        let file_name_trimmed = Path::new("/").join(
+            canonicalized_name
+                .strip_prefix(&source_path)
+                .unwrap()
+                .to_path_buf(),
+        );
+
+        debug!(
+            "readahead file: {}, trimmed file name {}",
+            file_name,
+            file_name_trimmed.to_str().unwrap()
+        );
+        // The inode index is not decided yet, but will do during fs-walk.
+        files.insert(file_name_trimmed, None);
     }
 
     Ok(files)
@@ -270,7 +263,7 @@ fn main() -> Result<()> {
         .verbosity(log_level_to_verbosity(v))
         .timestamp(stderrlog::Timestamp::Second)
         .init()
-        .unwrap();
+        .context("failed to init logger")?;
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         let source_path = Path::new(matches.value_of("SOURCE").expect("SOURCE is required"));
@@ -280,16 +273,13 @@ fn main() -> Result<()> {
             .parse()?;
 
         let source_file = metadata(source_path)
-            .map_err(|e| einval!(format!("failed to get source path {:?}", e)))?;
+            .context(format!("failed to get source path {:?}", source_path))?;
 
         let mut blob_id = String::new();
         if let Some(p_blob_id) = matches.value_of("blob-id") {
             blob_id = String::from(p_blob_id);
             if blob_id.len() > BLOB_ID_MAXIMUM_LENGTH {
-                return Err(einval!(format!(
-                    "blob id is limited to length {}",
-                    BLOB_ID_MAXIMUM_LENGTH
-                )));
+                bail!("blob id is limited to length {}", BLOB_ID_MAXIMUM_LENGTH);
             }
         }
 
@@ -300,15 +290,15 @@ fn main() -> Result<()> {
         match source_type {
             SourceType::Directory => {
                 if !source_file.is_dir() {
-                    return Err(einval!("source must be a directory"));
+                    bail!("source {:?} must be a directory", source_path);
                 }
             }
             SourceType::StargzIndex => {
                 if !source_file.is_file() {
-                    return Err(einval!("source must be a JSON file"));
+                    bail!("source {:?} must be a JSON file", source_path);
                 }
                 if blob_id.trim() == "" {
-                    return Err(einval!("blob-id can't be empty"));
+                    bail!("blob-id can't be empty");
                 }
                 if compressor != compress::Algorithm::GZip {
                     trace!("compressor set to {}", compress::Algorithm::GZip);
@@ -327,7 +317,8 @@ fn main() -> Result<()> {
                 .expect("bootstrap is required"),
         );
 
-        let temp_file = TempFile::new_with_prefix("").unwrap();
+        let temp_file = TempFile::new_with_prefix("")
+            .context("failed to create temp file in current directory")?;
 
         let mut blob_path = matches
             .value_of("blob")
@@ -345,7 +336,7 @@ fn main() -> Result<()> {
             .parse()?;
 
         let hint_readahead_files = if prefetch_policy != builder::PrefetchPolicy::None {
-            get_readahead_files(source_path)?
+            get_readahead_files(source_path).context("failed to get readahead files")?
         } else {
             BTreeMap::new()
         };
@@ -369,20 +360,16 @@ fn main() -> Result<()> {
             !repeatable,
             whiteout_spec,
         )?;
-        let (blob_ids, blob_size) = ib.build()?;
+        let (blob_ids, blob_size) = ib.build().context("build failed")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(&bootstrap_path)?;
-            match validator.check(false) {
-                Ok(valid) => {
-                    if !valid {
-                        return Err(einval!("Failed to build bootstrap from source"));
-                    }
-                }
-                Err(err) => {
-                    return Err(err);
-                }
+            let valid = validator
+                .check(false)
+                .context("failed to validate bootstrap")?;
+            if !valid {
+                bail!("failed to build bootstrap");
             }
         }
 
@@ -394,20 +381,23 @@ fn main() -> Result<()> {
                 if let Some(backend_config) = matches.value_of("backend-config") {
                     let config = factory::BackendConfig {
                         backend_type: backend_type.to_owned(),
-                        backend_config: serde_json::from_str(backend_config).map_err(|e| {
-                            error!("failed to parse backend_config json: {}", e);
-                            e
-                        })?,
+                        backend_config: serde_json::from_str(backend_config)
+                            .context("failed to parse backend_config json")?,
                     };
-                    let blob_backend = factory::new_uploader(config).unwrap();
-                    upload_blob(blob_backend, blob_id.as_str(), blob_path)?;
+                    let blob_backend =
+                        factory::new_uploader(config).context("failed to init uploader")?;
+                    upload_blob(blob_backend, blob_id.as_str(), blob_path)
+                        .context("failed to upload blob")?;
                     uploaded = true;
                 }
             }
             // blob not uploaded to backend, let's save it to local file system
             if !uploaded && blob_path == temp_file.as_path() {
                 trace!("rename {:?} to {}", blob_path, blob_id);
-                rename(blob_path, blob_id)?;
+                rename(blob_path, blob_id).context(format!(
+                    "failed to move blob from {:?} to {}",
+                    blob_path, blob_id,
+                ))?;
                 blob_path = Path::new(blob_id);
             }
         }
@@ -429,17 +419,13 @@ fn main() -> Result<()> {
                 .expect("bootstrap is required"),
         );
         let mut validator = Validator::new(bootstrap_path)?;
-        match validator.check(true) {
-            Ok(valid) => {
-                if valid {
-                    info!("Bootstrap is valid");
-                } else {
-                    return Err(einval!("Bootstrap is invalid"));
-                }
-            }
-            Err(err) => {
-                return Err(err);
-            }
+        let valid = validator
+            .check(true)
+            .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
+        if valid {
+            info!("bootstrap is valid");
+        } else {
+            bail!("bootstrap is invalid");
         }
     }
 

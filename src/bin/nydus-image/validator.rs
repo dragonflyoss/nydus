@@ -4,8 +4,8 @@
 
 //! Validator for RAFS format
 
+use anyhow::{Context, Result};
 use std::fs::OpenOptions;
-use std::io::Result;
 use std::path::Path;
 
 use rafs::metadata::{RafsMode, RafsSuper};
@@ -24,7 +24,11 @@ impl Validator {
             OpenOptions::new()
                 .read(true)
                 .write(false)
-                .open(bootstrap_path)?,
+                .open(bootstrap_path)
+                .context(format!(
+                    "failed to open bootstrap file {:?} for validator",
+                    bootstrap_path
+                ))?,
         );
         Ok(Self { f_bootstrap })
     }
@@ -35,9 +39,9 @@ impl Validator {
             digest_validate: true,
             ..Default::default()
         };
-        rs.load(&mut self.f_bootstrap)?;
+        rs.load(&mut self.f_bootstrap).context(err)?;
 
-        let tree = Tree::from_bootstrap(&rs)?;
+        let tree = Tree::from_bootstrap(&rs).context(err)?;
         tree.iterate(&|node| {
             if verbosity {
                 info!("{}", node);

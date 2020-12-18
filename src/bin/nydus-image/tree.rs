@@ -10,17 +10,17 @@
 //! 1. Apply FilesystemTree (from upper layer) to MetadataTree (from lower layer) as overlay node tree;
 //! 2. Traverse overlay node tree then dump to bootstrap and blob file according to RAFS format.
 
+use anyhow::{bail, Context, Result};
+
 use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::DirEntry;
-use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use nydus_utils::einval;
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
@@ -157,7 +157,7 @@ impl StargzIndexTreeBuilder {
         let toc_index = stargz::parse_index(&self.stargz_index_path)?;
 
         if toc_index.entries.is_empty() {
-            return Err(einval!("the stargz index has no toc entry"));
+            bail!("the stargz index has no toc entry");
         }
 
         let root_entry = TocEntry::new_dir(PathBuf::from("/"));
@@ -278,11 +278,11 @@ impl StargzIndexTreeBuilder {
         if entry.has_xattr() {
             for (name, value) in entry.xattrs.iter() {
                 flags |= RafsInodeFlags::XATTR;
-                let value = base64::decode(value).map_err(|err| {
-                    einval!(format!(
-                        "parse value of xattr {:?} failed: {:?}, file {:?}",
-                        entry_path, name, err
-                    ))
+                let value = base64::decode(value).with_context(|| {
+                    format!(
+                        "parse xattr name {:?} of file {:?} failed",
+                        entry_path, name,
+                    )
                 })?;
                 xattrs.pairs.insert(name.into(), value);
             }
@@ -362,8 +362,9 @@ impl FilesystemTreeBuilder {
             return Ok(result);
         }
 
-        let children = fs::read_dir(&parent.path)?;
-        let children = children.collect::<Result<Vec<DirEntry>>>()?;
+        let children = fs::read_dir(&parent.path)
+            .with_context(|| format!("failed to read dir {:?}", parent.path))?;
+        let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
 
         for child in children {
             let path = child.path();
@@ -373,7 +374,8 @@ impl FilesystemTreeBuilder {
                 path.clone(),
                 Overlay::UpperAddition,
                 parent.explicit_uidgid,
-            )?;
+            )
+            .with_context(|| format!("failed to create node {:?}", path))?;
 
             // Per as to OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
