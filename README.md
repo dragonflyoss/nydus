@@ -17,6 +17,7 @@ specification. Its key features include:
 Currently the repository includes following tools:
 
 * A `nydusify` tool to convert an OCI format container image into a nydus format container image
+* A `containerd-nydus-grpc` daemon to serve as containerd remote snapshotter and setup container rootfs with nydus
 * A `nydus-image` tool to convert an unpacked container image into a nydus format image
 * A `nydusd` daemon to parse a nydus format image and expose a FUSE mountpoint for containers to access
 
@@ -36,6 +37,10 @@ make docker-static
 Build Nydus image from directory source: [Nydus Image Builder](./docs/nydus-image.md).
 
 Convert OCI image to Nydus image: [Nydusify](./docs/nydusify.md).
+
+## Build Nydus Snapshotter
+
+Build and run Nydus snapshotter: [Nydus Snapshotter](./contrib/nydus-snapshotter/README.md)
 
 ## Run Nydusd Daemon
 

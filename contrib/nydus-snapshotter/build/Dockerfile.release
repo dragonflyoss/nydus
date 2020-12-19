@@ -1,0 +1,15 @@
+FROM golang:1.14 as builder
+ARG VERSION
+
+WORKDIR /src
+
+COPY . /src
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod vendor -a --ldflags="-s -w -X 'main.Version=${VERSION}'" -o /bin/nydus-snapshotter ./cmd/containerd-nydus-grpc
+
+FROM centos:7
+
+COPY --from=builder /src/build/bin/* /bin/
+COPY --from=builder /bin/nydus-snapshotter /bin/nydus-snapshotter
+
+ENTRYPOINT ["/bin/nydus-snapshotter"]

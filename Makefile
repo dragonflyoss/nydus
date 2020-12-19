@@ -39,3 +39,24 @@ docker-static:
 	# For static build with musl
 	docker build -t nydus-rs-static misc/musl-static
 	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs nydus-rs-static make static-release
+
+nydusify:
+	make -C contrib/nydusify
+
+nydusify-static:
+	make -C contrib/nydusify static-release
+
+nydus-snapshotter:
+	make -C contrib/nydus-snapshotter
+
+nydus-snapshotter-static:
+	make -C contrib/nydus-snapshotter static-release
+
+all-static-release: static-release nydusify-static nydus-snapshotter-static
+
+docker-example: all-static-release
+	cp target-fusedev/x86_64-unknown-linux-musl/release/nydusd misc/example
+	cp target-fusedev/x86_64-unknown-linux-musl/release/nydus-image misc/example
+	cp contrib/nydusify/cmd/nydusify misc/example
+	cp contrib/nydus-snapshotter/bin/containerd-nydus-grpc misc/example
+	docker build -t nydus-rs-example misc/example

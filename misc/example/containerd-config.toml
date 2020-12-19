@@ -1,0 +1,25 @@
+# Plug nydus snapshotter into containerd
+# Containerd recognizes nydus snapshotter through specified socket address.
+# The specified address below is the default which nydus snapshotter listen to.
+
+root = "/var/lib/containerd-test"
+state = "/run/containerd-test"
+
+[proxy_plugins]
+  [proxy_plugins.nydus]
+    type = "snapshot"
+    address = "/run/containerd-test/containerd-nydus-grpc.sock"
+
+[plugins]
+[plugins.cri.cni]
+   bin_dir = "/opt/cni/bin"
+   conf_dir = "/etc/cni/net.d"
+# Use nydus as default snapshot through CRI
+  [plugins.cri]
+    [plugins.cri.containerd]
+      snapshotter = "nydus"
+      disable_snapshot_annotations = false
+    [plugins.cri.registry]
+      [plugins.cri.registry.mirrors]
+        [plugins.cri.registry.mirrors."localhost:5000"]
+          endpoint = ["http://localhost:5000"]
