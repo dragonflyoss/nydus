@@ -15,9 +15,9 @@ nydus-image create \
   /path/to/source/dir
 ```
 
-## Use Different Storage Backend
+## Output Blob
 
-Some examples with backend config in JSON string:
+We can upload the blob to a storage backend or specify an output path, here are some examples with backend config in JSON string:
 
 Localfs Backend:
 
@@ -44,6 +44,12 @@ Or using a backend JSON config file:
 
 ``` shell
 --backend-type registry --backend-config-file /path/to/config.json
+```
+
+Or using `--blob` option to specify an output path:
+
+``` shell
+--blob /path/to/blob
 ```
 
 ## Layered Build Nydus Image

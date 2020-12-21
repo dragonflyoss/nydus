@@ -371,10 +371,6 @@ impl OndiskSuperBlock {
 
 impl RafsStore for OndiskSuperBlock {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        info!(
-            "rafs superblock features: {}",
-            RafsSuperFlags::from_bits(self.s_flags).unwrap_or_default()
-        );
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
     }
