@@ -5,6 +5,8 @@ authors = ["The Nydus Developers"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[build-dependencies]
+built = { version = "=0.4.3", features = ["git2", "chrono"] }
 
 [dependencies]
 log = "0.4"
