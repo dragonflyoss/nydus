@@ -40,7 +40,7 @@ pub struct Builder {
     /// Blob id (user specified or sha256(blob)).
     blob_id: String,
     /// Blob file writer.
-    f_blob: Box<dyn RafsIoWrite>,
+    f_blob: Option<Box<dyn RafsIoWrite>>,
     /// Bootstrap file writer.
     f_bootstrap: Box<dyn RafsIoWrite>,
     /// Parent bootstrap file reader.
@@ -118,7 +118,7 @@ impl Builder {
     pub fn new(
         source_type: SourceType,
         source_path: &Path,
-        blob_path: &Path,
+        blob_path: Option<&Path>,
         bootstrap_path: &Path,
         parent_bootstrap_path: &Path,
         blob_id: String,
@@ -129,15 +129,19 @@ impl Builder {
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
     ) -> Result<Builder> {
-        let f_blob = Box::new(BufWriter::with_capacity(
-            BUF_WRITER_CAPACITY,
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(blob_path)
-                .with_context(|| format!("failed to create blob file {:?}", blob_path))?,
-        ));
+        let f_blob = if let Some(blob_path) = blob_path {
+            Some(Box::new(BufWriter::with_capacity(
+                BUF_WRITER_CAPACITY,
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(blob_path)
+                    .with_context(|| format!("failed to create blob file {:?}", blob_path))?,
+            )) as Box<dyn RafsIoWrite>)
+        } else {
+            None
+        };
 
         let f_bootstrap = Box::new(BufWriter::with_capacity(
             BUF_WRITER_CAPACITY,
@@ -440,7 +444,7 @@ impl Builder {
                     {
                         blob_readahead_size += node
                             .dump_blob(
-                                &mut self.f_blob,
+                                self.f_blob.as_mut(),
                                 &mut blob_hash,
                                 &mut compress_offset,
                                 &mut decompress_offset,
@@ -468,7 +472,7 @@ impl Builder {
                     {
                         blob_size += node
                             .dump_blob(
-                                &mut self.f_blob,
+                                self.f_blob.as_mut(),
                                 &mut blob_hash,
                                 &mut compress_offset,
                                 &mut decompress_offset,
@@ -640,7 +644,9 @@ impl Builder {
 
         // Flush remaining data in BufWriter to file
         self.f_bootstrap.flush()?;
-        self.f_blob.flush()?;
+        if let Some(f_blob) = self.f_blob.as_mut() {
+            f_blob.flush()?;
+        }
 
         Ok((blob_ids, blob_size))
     }
