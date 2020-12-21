@@ -79,15 +79,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3441f0f7b02788e948e47f457ca01f1d7e6d92c693bc132c22b087d3141c03ff"
 
 [[package]]
-name = "bimap"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "783204f24fd7724ea274d327619cfa6a6018047bb0561a68aadff6f56787591b"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -316,10 +307,9 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 [[package]]
 name = "fuse-rs"
 version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git#53183b9b8f048e417ff0c0fa4929d9d0c1126325"
+source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git#5aaf9036c35e3ec3a489ae0ebb377fcc84c3d83d"
 dependencies = [
  "arc-swap",
- "bimap",
  "bitflags",
  "libc",
  "log",
