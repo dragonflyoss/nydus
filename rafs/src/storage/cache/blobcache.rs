@@ -319,6 +319,77 @@ impl BlobCache {
 
         Ok(())
     }
+
+    fn is_chunk_continuous(prior: &RafsBio, cur: &RafsBio) -> bool {
+        let prior_cki = &prior.chunkinfo;
+        let cur_cki = &cur.chunkinfo;
+        let prior_end = prior_cki.compress_offset() + prior_cki.compress_size() as u64;
+        let cur_offset = cur_cki.compress_offset();
+        if prior_end == cur_offset && prior.blob_id == cur.blob_id {
+            return true;
+        }
+        false
+    }
+    fn generate_merged_requests(
+        &self,
+        bios: &mut [RafsBio],
+        tx: &mut spmc::Sender<MergedBackendRequest>,
+        merging_size: usize,
+        seq: u64,
+    ) {
+        let limiter = |merged_size: u32| {
+            if let Some(ref limiter) = self.limiter {
+                let cells = NonZeroU32::new(merged_size).unwrap();
+                if let Err(e) = limiter
+                    .check_n(cells)
+                    .or_else(|_| block_on(limiter.until_n_ready(cells)))
+                {
+                    // `InsufficientCapacity` is the only possible error
+                    // Have to give up to avoid dead-loop
+                    error!("{}: give up rate-limiting", e);
+                }
+            }
+        };
+
+        bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
+        let mut index: usize = 1;
+        if bios.is_empty() {
+            return;
+        }
+        let first_cki = &bios[0].chunkinfo;
+        let mut mr = MergedBackendRequest::new(seq);
+        mr.merge_begin(Arc::clone(first_cki), &bios[0].blob_id);
+
+        if bios.len() == 1 {
+            limiter(mr.blob_size);
+            tx.send(mr).unwrap();
+            return;
+        }
+
+        loop {
+            let cki = &bios[index].chunkinfo;
+            let prior_bio = &bios[index - 1];
+            let cur_bio = &bios[index];
+            // Even more chunks are continuous, still split them per as certain size.
+            // So that to achieve an appropriate request size to backend.
+            if Self::is_chunk_continuous(prior_bio, cur_bio) && mr.blob_size <= merging_size as u32
+            {
+                mr.merge_one_chunk(Arc::clone(&cki));
+            } else {
+                // New a MR if a non-continuous chunk is met.
+                limiter(mr.blob_size);
+                tx.send(mr.clone()).unwrap();
+                mr.reset();
+                mr.merge_begin(Arc::clone(&cki), &cur_bio.blob_id);
+            }
+            index += 1;
+            if index >= bios.len() {
+                limiter(mr.blob_size);
+                tx.send(mr).unwrap();
+                break;
+            }
+        }
+    }
 }
 
 // TODO: This function is too long... :-(
@@ -355,18 +426,6 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
 
                     if blob_size == 0 {
                         continue;
-                    }
-
-                    if let Some(ref limiter) = blobcache.limiter {
-                        let cells = NonZeroU32::new(blob_size).unwrap();
-                        if let Err(e) = limiter
-                            .check_n(cells)
-                            .or_else(|_| block_on(limiter.until_n_ready(cells)))
-                        {
-                            // `InsufficientCapacity` is the only possible error
-                            // Have to give up to avoid dead-loop
-                            error!("{}: give up rate-limiting", e);
-                        }
                     }
 
                     issue_batch = false;
@@ -523,7 +582,7 @@ impl RafsCache for BlobCache {
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
 
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
-            generate_merged_requests(bios, mr_sender, merging_size, seq);
+            self.generate_merged_requests(bios, mr_sender, merging_size, seq);
         }
 
         Ok(0)
