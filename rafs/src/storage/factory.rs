@@ -2,9 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Result;
+use std::fs::File;
+use std::io::Result as IOResult;
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::value::Value;
 
@@ -32,6 +34,27 @@ pub struct BackendConfig {
     pub backend_config: Value,
 }
 
+impl BackendConfig {
+    pub fn from_str(backend_type: &str, json_str: &str) -> Result<BackendConfig> {
+        let backend_config = serde_json::from_str(json_str)
+            .context("failed to parse backend config in JSON string")?;
+        Ok(Self {
+            backend_type: backend_type.to_string(),
+            backend_config,
+        })
+    }
+    pub fn from_file(backend_type: &str, file_path: &str) -> Result<BackendConfig> {
+        let file = File::open(file_path)
+            .with_context(|| format!("failed to open backend config file {}", file_path))?;
+        let backend_config = serde_json::from_reader(file)
+            .with_context(|| format!("failed to parse backend config file {}", file_path))?;
+        Ok(Self {
+            backend_type: backend_type.to_string(),
+            backend_config,
+        })
+    }
+}
+
 #[derive(Default, Clone, Deserialize)]
 pub struct CacheConfig {
     #[serde(default, rename = "validate")]
@@ -46,7 +69,7 @@ pub struct CacheConfig {
     pub prefetch_worker: PrefetchWorker,
 }
 
-pub fn new_backend(config: BackendConfig) -> Result<Arc<dyn BlobBackend + Send + Sync>> {
+pub fn new_backend(config: BackendConfig) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
     match config.backend_type.as_str() {
         #[cfg(feature = "backend-oss")]
         "oss" => {
@@ -69,7 +92,7 @@ pub fn new_backend(config: BackendConfig) -> Result<Arc<dyn BlobBackend + Send +
     }
 }
 
-pub fn new_uploader(mut config: BackendConfig) -> Result<Arc<dyn BlobBackendUploader>> {
+pub fn new_uploader(mut config: BackendConfig) -> IOResult<Arc<dyn BlobBackendUploader>> {
     // Disable http timeout for upload request
     config.backend_config["connect_timeout"] = 0.into();
     config.backend_config["timeout"] = 0.into();
@@ -100,7 +123,7 @@ pub fn new_rw_layer(
     config: Config,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
-) -> Result<Arc<dyn RafsCache + Send + Sync>> {
+) -> IOResult<Arc<dyn RafsCache + Send + Sync>> {
     let backend = new_backend(config.backend)?;
     match config.cache.cache_type.as_str() {
         "blobcache" => Ok(blobcache::new(config.cache, backend, compressor, digester)?
