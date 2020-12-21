@@ -175,7 +175,16 @@ impl Node {
     }
 
     fn build_inode_xattr(&mut self) -> Result<()> {
-        let file_xattrs = xattr::list(&self.path)?;
+        let file_xattrs = match xattr::list(&self.path) {
+            Ok(x) => x,
+            Err(e) => {
+                if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                    return Ok(());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
 
         for key in file_xattrs {
             let value = xattr::get(&self.path, &key)?;
