@@ -196,7 +196,14 @@ fn main() -> Result<()> {
                 .arg(
                     Arg::with_name("backend-config")
                         .long("backend-config")
-                        .help("blob storage backend config (json)")
+                        .help("blob storage backend config (JSON string)")
+                        .takes_value(true)
+                        .conflicts_with("backend-config-file"),
+                )
+                .arg(
+                    Arg::with_name("backend-config-file")
+                        .long("backend-config-file")
+                        .help("blob storage backend config (JSON file)")
                         .takes_value(true),
                 )
                 .arg(
@@ -378,14 +385,24 @@ fn main() -> Result<()> {
             let blob_id = blob_ids.last().unwrap();
             let mut uploaded = false;
             if let Some(backend_type) = matches.value_of("backend-type") {
-                if let Some(backend_config) = matches.value_of("backend-config") {
-                    let config = factory::BackendConfig {
-                        backend_type: backend_type.to_owned(),
-                        backend_config: serde_json::from_str(backend_config)
-                            .context("failed to parse backend_config json")?,
-                    };
+                let backend_config = if let Some(backend_config) =
+                    matches.value_of("backend-config")
+                {
+                    Some(
+                        factory::BackendConfig::from_str(backend_type, backend_config)
+                            .context("failed to parse backend config from JSON string")?,
+                    )
+                } else if let Some(backend_config_file) = matches.value_of("backend-config-file") {
+                    Some(
+                        factory::BackendConfig::from_file(backend_type, backend_config_file)
+                            .context("failed to parse backend config from JSON file")?,
+                    )
+                } else {
+                    None
+                };
+                if let Some(backend_config) = backend_config {
                     let blob_backend =
-                        factory::new_uploader(config).context("failed to init uploader")?;
+                        factory::new_uploader(backend_config).context("failed to init uploader")?;
                     upload_blob(blob_backend, blob_id.as_str(), blob_path)
                         .context("failed to upload blob")?;
                     uploaded = true;
