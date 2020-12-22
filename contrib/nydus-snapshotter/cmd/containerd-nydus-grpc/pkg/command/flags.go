@@ -10,8 +10,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/config"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/config"
+	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"os"
 )
 
