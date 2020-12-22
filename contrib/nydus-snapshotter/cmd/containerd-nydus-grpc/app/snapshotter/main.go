@@ -11,6 +11,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"contrib/nydus-snapshotter/config"
 	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"contrib/nydus-snapshotter/pkg/filesystem/stargz"
 	"contrib/nydus-snapshotter/pkg/signature"
@@ -18,7 +19,7 @@ import (
 	"contrib/nydus-snapshotter/snapshot"
 )
 
-func Start(ctx context.Context, cfg Config) error {
+func Start(ctx context.Context, cfg config.Config) error {
 	verifier, err := signature.NewVerifier(cfg.PublicKeyFile, cfg.ValidateSignature)
 	if err != nil {
 		return errors.Wrap(err, "failed to initialize verifier")

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package snapshotter
+package config
 
 import (
 	"os"

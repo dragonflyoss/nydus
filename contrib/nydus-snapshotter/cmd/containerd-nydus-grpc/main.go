@@ -16,6 +16,7 @@ import (
 	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/app/snapshotter"
 	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
 	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/logging"
+	"contrib/nydus-snapshotter/config"
 	"contrib/nydus-snapshotter/pkg/errdefs"
 )
 
@@ -32,8 +33,8 @@ func main() {
 				return errors.Wrap(err, "failed to prepare logger")
 			}
 
-			var cfg snapshotter.Config
-			if err := snapshotter.Validate(flags.Args, &cfg); err != nil {
+			var cfg config.Config
+			if err := config.Validate(flags.Args, &cfg); err != nil {
 				return errors.Wrap(err, "invalid argument")
 			}
 			return snapshotter.Start(ctx, cfg)
