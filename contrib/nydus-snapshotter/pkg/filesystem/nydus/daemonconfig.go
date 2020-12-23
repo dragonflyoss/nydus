@@ -51,10 +51,10 @@ type DeviceConfig struct {
 		} `json:"config"`
 	} `json:"backend"`
 	Cache struct {
-		CacheType string `json:"type"`
+		CacheType  string `json:"type"`
 		Compressed bool   `json:"compressed,omitempty"`
-		Config    struct {
-			WorkDir    string `json:"work_dir"`
+		Config     struct {
+			WorkDir string `json:"work_dir"`
 		} `json:"config"`
 	} `json:"cache"`
 }

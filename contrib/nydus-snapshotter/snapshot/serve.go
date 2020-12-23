@@ -62,4 +62,3 @@ func ensureSocketNotExists(listeningSocketPath string) error {
 	}
 	return nil
 }
-

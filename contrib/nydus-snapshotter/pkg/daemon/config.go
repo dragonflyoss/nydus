@@ -91,7 +91,6 @@ func WithRootMountPoint(rootMountPoint string) NewDaemonOpt {
 	}
 }
 
-
 func WithSnapshotDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		d.SnapshotDir = dir
@@ -120,7 +119,6 @@ func WithAPISock(apiSock string) NewDaemonOpt {
 	}
 }
 
-
 func prepareDaemonLogs(logDir string) ([]*os.File, error) {
 	var (
 		err      error
@@ -135,4 +133,3 @@ func prepareDaemonLogs(logDir string) ([]*os.File, error) {
 	}
 	return logFiles, nil
 }
-

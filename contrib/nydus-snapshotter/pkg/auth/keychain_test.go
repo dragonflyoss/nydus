@@ -15,9 +15,9 @@ import (
 )
 
 func TestFromLabels(t *testing.T) {
-	labels := map[string]string {
+	labels := map[string]string{
 		label.ImagePullUsername: "mock",
-		label.ImagePullSecret: "mock",
+		label.ImagePullSecret:   "mock",
 	}
 	kc, err := FromLabels(labels)
 	assert.Nil(t, err)
@@ -30,7 +30,7 @@ func TestFromLabels(t *testing.T) {
 	assert.Equal(t, kc.Username, "mock")
 	assert.Equal(t, kc.Password, "mock")
 
-	labels = map[string]string {}
+	labels = map[string]string{}
 	kc, err = FromLabels(labels)
 	assert.Nil(t, err)
 	assert.Equal(t, "", kc.ToBase64())

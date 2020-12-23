@@ -28,7 +28,7 @@ const (
 	mountEndpoint = "/api/v1/mount"
 
 	defaultHttpClientTimeout = 100 * time.Millisecond
-	contentType = "application/json"
+	contentType              = "application/json"
 )
 
 type Interface interface {

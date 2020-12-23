@@ -13,7 +13,6 @@ import (
 	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
 )
 
-
 type DaemonStore struct {
 	sync.Mutex
 	idxBySnapshotID map[string]*daemon.Daemon // index by snapshot ID per image
@@ -95,4 +94,3 @@ func (s *DaemonStore) filterOutDeletedDaemon(d *daemon.Daemon) []*daemon.Daemon 
 	}
 	return res
 }
-
