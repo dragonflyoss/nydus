@@ -3,7 +3,9 @@ module contrib/nydusify
 go 1.14
 
 require (
-	github.com/containerd/containerd v1.3.0
+	github.com/Microsoft/hcsshim v0.8.14 // indirect
+	github.com/aliyun/aliyun-oss-go-sdk v2.1.5+incompatible
+	github.com/containerd/containerd v1.3.2
 	github.com/containerd/continuity v0.0.0-20200928162600-f2cc35102c2a // indirect
 	github.com/dustin/go-humanize v1.0.0
 	github.com/google/go-containerregistry v0.1.4

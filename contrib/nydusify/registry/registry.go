@@ -5,6 +5,7 @@
 package registry
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"path/filepath"
@@ -20,6 +21,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/pkg/errors"
 
+	blobbackend "contrib/nydusify/backend"
+
 	"contrib/nydusify/signature"
 	"contrib/nydusify/utils"
 )
@@ -30,6 +33,7 @@ const (
 	BootstrapFileNameInLayer = "image.boot"
 
 	LayerAnnotationNydusBlob      = "containerd.io/snapshot/nydus-blob"
+	LayerAnnotationNydusBlobIDs   = "containerd.io/snapshot/nydus-blob-ids"
 	LayerAnnotationNydusBootstrap = "containerd.io/snapshot/nydus-bootstrap"
 	LayerAnnotationNydusSignature = "containerd.io/snapshot/nydus-signature"
 
@@ -49,6 +53,7 @@ type RegistryOption struct {
 	Target         string
 	SourceInsecure bool
 	TargetInsecure bool
+	Backend        blobbackend.Backend
 }
 
 type Registry struct {
@@ -162,7 +167,8 @@ func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 
 	layerJobs := []utils.Job{}
 	for _, layer := range layers {
-		layerJob, err := NewLayerJob(&registry.source, &registry.target)
+		// Create layer job for nydus blob upload
+		layerJob, err := NewLayerJob(&registry.source, &registry.target, registry.Backend)
 		if err != nil {
 			return err
 		}
@@ -195,10 +201,20 @@ func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 	return nil
 }
 
-func (registry *Registry) PushBootstrapLayer(bootstrapPath string, privateKeyPath string) error {
+func (registry *Registry) PushBootstrapLayer(bootstrapPath string, blobIDs []string, privateKeyPath string) error {
 	// Append signature of bootstap file
 	layerAnnotations := map[string]string{
 		LayerAnnotationNydusBootstrap: "true",
+	}
+
+	// Append blob digest to annotation if blob files
+	// were uploaded to foreign storage backend
+	if registry.Backend != nil {
+		annotation, err := json.Marshal(blobIDs)
+		if err != nil {
+			return err
+		}
+		layerAnnotations[LayerAnnotationNydusBlobIDs] = string(annotation)
 	}
 
 	if strings.TrimSpace(privateKeyPath) != "" {
@@ -210,7 +226,7 @@ func (registry *Registry) PushBootstrapLayer(bootstrapPath string, privateKeyPat
 	}
 
 	// Push nydus bootstrap layer
-	layerJob, err := NewLayerJob(&registry.source, &registry.target)
+	layerJob, err := NewLayerJob(&registry.source, &registry.target, nil)
 	if err != nil {
 		return err
 	}

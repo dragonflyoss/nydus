@@ -10,6 +10,8 @@ import (
 	"io"
 	"path/filepath"
 
+	blobbackend "contrib/nydusify/backend"
+
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -35,12 +37,15 @@ type LayerJob struct {
 
 	SourceLayer v1.Layer
 	TargetLayer v1.Layer
+
+	Backend blobbackend.Backend
 }
 
-func NewLayerJob(source *Image, target *Image) (*LayerJob, error) {
+func NewLayerJob(source *Image, target *Image, backend blobbackend.Backend) (*LayerJob, error) {
 	layerJob := LayerJob{
-		Source: source,
-		Target: target,
+		Source:  source,
+		Target:  target,
+		Backend: backend,
 	}
 
 	return &layerJob, nil
@@ -139,21 +144,39 @@ func (job *LayerJob) Push() error {
 
 	target := job.Target.Ref.Context()
 
-	if err := remote.WriteLayer(target, job.TargetLayer, remote.WithAuthFromKeychain(withDefaultAuth())); err != nil {
-		return errors.Wrap(err, "push target layer")
+	if job.Backend != nil {
+		// Upload layer to foreign storage backend
+		digest, err := job.TargetLayer.Digest()
+		if err != nil {
+			return errors.Wrap(err, "get digest before upload layer")
+		}
+		reader, err := job.TargetLayer.Uncompressed()
+		if err != nil {
+			return errors.Wrap(err, "decompress before upload layer")
+		}
+		defer reader.Close()
+		if err := job.Backend.Put(digest.Hex, reader, func(cur int) {
+			job.Progress.SetCurrent(cur)
+		}); err != nil {
+			return errors.Wrap(err, "upload layer")
+		}
+	} else {
+		// Upload layer to remote registry
+		if err := remote.WriteLayer(target, job.TargetLayer, remote.WithAuthFromKeychain(withDefaultAuth())); err != nil {
+			return errors.Wrap(err, "push target layer")
+		}
+		targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
+			Layer: job.TargetLayer,
+			History: v1.History{
+				CreatedBy: fmt.Sprintf("nydusify"),
+			},
+			Annotations: job.TargetLayer.(*Layer).annotations,
+		})
+		if err != nil {
+			return errors.Wrap(err, "append target layer")
+		}
+		*job.Target.Img = targetImage
 	}
-
-	targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
-		Layer: job.TargetLayer,
-		History: v1.History{
-			CreatedBy: fmt.Sprintf("nydusify"),
-		},
-		Annotations: job.TargetLayer.(*Layer).annotations,
-	})
-	if err != nil {
-		return errors.Wrap(err, "append target layer")
-	}
-	*job.Target.Img = targetImage
 
 	job.Progress.SetFinish()
 	job.Progress.SetStatus(StatusPushed)

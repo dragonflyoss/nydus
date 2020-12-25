@@ -88,6 +88,9 @@ func NewWorkerPool(worker uint, method int) *WorkerPool {
 				err := jobRet.Job.Do(method)
 				jobRet.Err = err
 				workerPool.wg.Done()
+				if workerPool.err != nil {
+					return
+				}
 				if err != nil {
 					workerPool.err = err
 					close(queue)
@@ -118,5 +121,5 @@ func (pool *WorkerPool) AddJob(job Job) error {
 func (pool *WorkerPool) Wait() error {
 	pool.wg.Wait()
 	close(pool.queue)
-	return nil
+	return pool.err
 }

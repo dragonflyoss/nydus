@@ -12,6 +12,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	blobbackend "contrib/nydusify/backend"
 	"contrib/nydusify/nydus"
 	"contrib/nydusify/registry"
 )
@@ -28,10 +29,14 @@ type Option struct {
 	NydusImagePath   string
 	MultiPlatform    bool
 	Silent           bool
+
+	BackendType   string
+	BackendConfig string
 }
 
 type Converter struct {
 	Option
+	backend   blobbackend.Backend
 	sourceDir string
 	targetDir string
 }
@@ -52,8 +57,15 @@ func New(option Option) (*Converter, error) {
 		return nil, err
 	}
 
+	// Parse blob storage backend config
+	backend, err := blobbackend.NewBackend(option.BackendType, option.BackendConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	converter := Converter{
 		Option:    option,
+		backend:   backend,
 		sourceDir: sourceDir,
 		targetDir: targetDir,
 	}
@@ -73,6 +85,7 @@ func (converter *Converter) Convert() error {
 		Target:         converter.Target,
 		SourceInsecure: converter.SourceInsecure,
 		TargetInsecure: converter.TargetInsecure,
+		Backend:        converter.backend,
 	})
 	if err != nil {
 		return err
@@ -104,6 +117,7 @@ func (converter *Converter) Convert() error {
 	// Push bootstrap layer
 	if err := reg.PushBootstrapLayer(
 		buildFlow.GetBootstrap(),
+		buildFlow.GetBlobIDs(),
 		converter.SignatureKeyPath,
 	); err != nil {
 		return err

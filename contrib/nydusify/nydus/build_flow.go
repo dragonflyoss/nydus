@@ -135,3 +135,7 @@ func (build *BuildFlow) Wait() error {
 func (build *BuildFlow) GetBootstrap() string {
 	return build.bootstrapPath
 }
+
+func (build *BuildFlow) GetBlobIDs() []string {
+	return build.blobIDs
+}
