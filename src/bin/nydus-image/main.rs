@@ -214,6 +214,12 @@ fn main() -> Result<()> {
                     .possible_values(&["oci", "overlayfs"])
                     .default_value("oci")
                 )
+                .arg(
+                    Arg::with_name("output-json")
+                        .long("output-json")
+                        .help("JSON output path for build result")
+                        .takes_value(true)
+                )
         )
         .subcommand(
             SubCommand::with_name("check")
@@ -345,6 +351,10 @@ fn main() -> Result<()> {
             .unwrap_or_default()
             .parse()?;
 
+        let output_json = matches
+            .value_of("output-json")
+            .map(|o| o.to_string().into());
+
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
@@ -358,6 +368,7 @@ fn main() -> Result<()> {
             prefetch_policy,
             !repeatable,
             whiteout_spec,
+            output_json,
         )?;
         let (blob_ids, blob_size) = ib.build().context("build failed")?;
 
