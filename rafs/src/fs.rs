@@ -18,12 +18,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fuse_rs::abi::linux_abi::Attr;
-use fuse_rs::api::filesystem::*;
-use fuse_rs::api::{BackendFileSystem, BackendFileSystemType};
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 use std::time::SystemTime;
+
+use fuse_rs::abi::linux_abi::Attr;
+use fuse_rs::api::filesystem::*;
+use fuse_rs::api::BackendFileSystem;
 
 use crate::io_stats::{self, FopRecorder, StatsFop::*};
 use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
@@ -430,10 +431,6 @@ impl BackendFileSystem for Rafs {
             .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
         let entry = self.get_inode_entry(root_inode);
         Ok((entry, self.sb.get_max_ino()))
-    }
-
-    fn fstype(&self) -> BackendFileSystemType {
-        BackendFileSystemType::Rafs
     }
 
     fn as_any(&self) -> &dyn Any {
