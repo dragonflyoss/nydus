@@ -62,7 +62,7 @@ func NewBuildFlow(option BuildFlowOption) (*BuildFlow, error) {
 	// Prepare bootstrap and blobs path for build
 	blobsDir := filepath.Join(option.TargetDir, "blobs")
 	if err := os.MkdirAll(blobsDir, 0770); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "create blob directory")
 	}
 
 	bootstrapPath := filepath.Join(option.TargetDir, "bootstrap")
@@ -94,7 +94,7 @@ func (build *BuildFlow) Build(layerJob *registry.LayerJob) error {
 	// Build nydus bootstrap and blob
 	if build.parentBootstrapPath != "" {
 		if err := os.Rename(build.bootstrapPath, build.parentBootstrapPath); err != nil {
-			return err
+			return errors.Wrap(err, "rename bootstrap file")
 		}
 	}
 

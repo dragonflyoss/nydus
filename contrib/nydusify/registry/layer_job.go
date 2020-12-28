@@ -41,14 +41,12 @@ type LayerJob struct {
 	Backend blobbackend.Backend
 }
 
-func NewLayerJob(source *Image, target *Image, backend blobbackend.Backend) (*LayerJob, error) {
-	layerJob := LayerJob{
+func NewLayerJob(source *Image, target *Image, backend blobbackend.Backend) *LayerJob {
+	return &LayerJob{
 		Source:  source,
 		Target:  target,
 		Backend: backend,
 	}
-
-	return &layerJob, nil
 }
 
 func (job *LayerJob) SetProgress(layerFor int, name string) error {

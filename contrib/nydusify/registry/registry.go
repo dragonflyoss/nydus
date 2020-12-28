@@ -156,7 +156,7 @@ func (registry *Registry) dumpConfig(image *Image) error {
 func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 	// Write source manifest to json file
 	if err := registry.dumpManifest(&registry.source); err != nil {
-		return err
+		return errors.Wrap(err, "dump source manifest")
 	}
 
 	// Start worker pool for pulling & decompressing
@@ -168,10 +168,7 @@ func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 	layerJobs := []utils.Job{}
 	for _, layer := range layers {
 		// Create layer job for nydus blob upload
-		layerJob, err := NewLayerJob(&registry.source, &registry.target, registry.Backend)
-		if err != nil {
-			return err
-		}
+		layerJob := NewLayerJob(&registry.source, &registry.target, registry.Backend)
 		layerJob.SetSourceLayer(layer)
 		if err := layerJob.SetProgress(LayerSource, "BLOB"); err != nil {
 			return errors.Wrap(err, "create blob layer progress")
@@ -226,10 +223,7 @@ func (registry *Registry) PushBootstrapLayer(bootstrapPath string, blobIDs []str
 	}
 
 	// Push nydus bootstrap layer
-	layerJob, err := NewLayerJob(&registry.source, &registry.target, nil)
-	if err != nil {
-		return err
-	}
+	layerJob := NewLayerJob(&registry.source, &registry.target, nil)
 	layerJob.SetTargetLayer(bootstrapPath, BootstrapFileNameInLayer, types.OCILayer, layerAnnotations)
 	if err := layerJob.SetProgress(LayerTarget, "BOOT"); err != nil {
 		return errors.Wrap(err, "create bootstrap layer progress")
@@ -316,17 +310,12 @@ func (registry *Registry) PushManifest(multiPlatform bool) error {
 
 	// Write target manifest to json file
 	if err := registry.dumpManifest(&registry.target); err != nil {
-		return err
+		return errors.Wrap(err, "dump target manifest")
 	}
 
 	// Write target config to json file
 	if err := registry.dumpConfig(&registry.target); err != nil {
-		return err
-	}
-
-	// Write manifest index to json file
-	if err := registry.dumpConfig(&registry.target); err != nil {
-		return err
+		return errors.Wrap(err, "dump target config")
 	}
 
 	pushProgress.SetStatus(StatusPushed)

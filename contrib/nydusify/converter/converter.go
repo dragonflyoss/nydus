@@ -47,8 +47,8 @@ func New(option Option) (*Converter, error) {
 	if err := os.RemoveAll(sourceDir); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(sourceDir, 0666); err != nil {
-		return nil, err
+	if err := os.MkdirAll(sourceDir, 0770); err != nil {
+		return nil, errors.Wrap(err, "create source directory")
 	}
 
 	// Make directory for target image
@@ -60,7 +60,7 @@ func New(option Option) (*Converter, error) {
 	// Parse blob storage backend config
 	backend, err := blobbackend.NewBackend(option.BackendType, option.BackendConfig)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "init blob backend")
 	}
 
 	converter := Converter{
@@ -106,7 +106,7 @@ func (converter *Converter) Convert() error {
 		// Start building once the layer has been pulled
 		return buildFlow.Build(layerJob)
 	}); err != nil {
-		return err
+		return errors.Wrap(err, "pull source layer")
 	}
 
 	// Wait all layers to be built and pushed
@@ -120,12 +120,12 @@ func (converter *Converter) Convert() error {
 		buildFlow.GetBlobIDs(),
 		converter.SignatureKeyPath,
 	); err != nil {
-		return err
+		return errors.Wrap(err, "push bootstrap layer")
 	}
 
 	// Push target manifest or index
 	if err := reg.PushManifest(converter.MultiPlatform); err != nil {
-		return err
+		return errors.Wrap(err, "push manifest")
 	}
 
 	if !converter.Silent {
