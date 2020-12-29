@@ -7,8 +7,12 @@
 package command
 
 import (
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/config"
+	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
+	"os"
 )
 
 const (
@@ -108,4 +112,27 @@ func NewFlags() *Flags {
 		Args: &args,
 		F:    buildFlags(&args),
 	}
+}
+
+func Validate(args *Args, cfg *config.Config) error {
+	var daemonCfg nydus.DaemonConfig
+	if err := nydus.LoadConfig(args.ConfigPath, &daemonCfg); err != nil {
+		return errors.Wrapf(err, "failed to load config file %q", args.ConfigPath)
+	}
+
+	if args.ValidateSignature && args.PublicKeyFile != "" {
+		if _, err := os.Stat(args.PublicKeyFile); err != nil {
+			return errors.Wrapf(err, "failed to find publicKey file %q", args.PublicKeyFile)
+		}
+	}
+	cfg.DaemonCfg = daemonCfg
+	cfg.RootDir = args.RootDir
+	cfg.ValidateSignature = args.ValidateSignature
+	cfg.PublicKeyFile = args.PublicKeyFile
+	cfg.ConvertVpcRegistry = args.ConvertVpcRegistry
+	cfg.Address = args.Address
+	cfg.NydusdBinaryPath = args.NydusdBinaryPath
+	cfg.NydusImageBinaryPath = args.NydusImageBinaryPath
+	cfg.SharedDaemon = args.SharedDaemon
+	return nil
 }

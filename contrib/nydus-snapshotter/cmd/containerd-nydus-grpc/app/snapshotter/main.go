@@ -54,8 +54,8 @@ func Start(ctx context.Context, cfg config.Config) error {
 	}
 
 	stopSignal := signals.SetupSignalHandler()
-	opt := snapshot.ServeOptions{
+	opt := ServeOptions{
 		ListeningSocketPath: cfg.Address,
 	}
-	return snapshot.Serve(ctx, rs, opt, stopSignal)
+	return Serve(ctx, rs, opt, stopSignal)
 }

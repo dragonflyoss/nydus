@@ -34,7 +34,7 @@ func main() {
 			}
 
 			var cfg config.Config
-			if err := config.Validate(flags.Args, &cfg); err != nil {
+			if err := command.Validate(flags.Args, &cfg); err != nil {
 				return errors.Wrap(err, "invalid argument")
 			}
 			return snapshotter.Start(ctx, cfg)
