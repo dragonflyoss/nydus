@@ -334,4 +334,4 @@ As in the previous section, we could verify the setup by accessing a file in the
 There is a [simple example](../misc/example/README.md) to run containers with nydus images in a docker container environment.
 
 ### More Detailed Example
-Please refer to the [nydus environment setup document](env-setup.md).
+Please refer to the [nydus environment setup document](containerd-env-setup.md).
