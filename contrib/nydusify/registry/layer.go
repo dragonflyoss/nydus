@@ -13,13 +13,14 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 type Layer struct {
 	name            string
 	sourcePath      string
 	mediaType       types.MediaType
-	annotations     map[string]string
 	progressHandler func(int)
 
 	compressedSize     *int64
@@ -160,4 +161,44 @@ func (layer *Layer) MediaType() (types.MediaType, error) {
 // SetProgressHandler sets progress handler for layer pull or push
 func (layer *Layer) SetProgressHandler(handler func(int)) {
 	layer.progressHandler = handler
+}
+
+func DescToLayer(desc ocispec.Descriptor, diffID digest.Digest) (*Layer, error) {
+	layerDigest, err := v1.NewHash(desc.Digest.String())
+	if err != nil {
+		return nil, err
+	}
+	layerDiffID, err := v1.NewHash(diffID.String())
+	if err != nil {
+		return nil, err
+	}
+	return &Layer{
+		mediaType:          types.MediaType(desc.MediaType),
+		compressedSize:     &desc.Size,
+		compressedDigest:   &layerDigest,
+		decompressedDigest: &layerDiffID,
+	}, nil
+}
+
+func (layer *Layer) Desc() (*ocispec.Descriptor, error) {
+	mediaType, err := layer.MediaType()
+	if err != nil {
+		return nil, err
+	}
+
+	layerDigest, err := layer.Digest()
+	if err != nil {
+		return nil, err
+	}
+
+	size, err := layer.Size()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ocispec.Descriptor{
+		MediaType: string(mediaType),
+		Digest:    digest.Digest(layerDigest.String()),
+		Size:      size,
+	}, nil
 }

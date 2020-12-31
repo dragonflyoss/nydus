@@ -120,6 +120,8 @@ func (pool *WorkerPool) AddJob(job Job) error {
 
 func (pool *WorkerPool) Wait() error {
 	pool.wg.Wait()
-	close(pool.queue)
+	if pool.err == nil {
+		close(pool.queue)
+	}
 	return pool.err
 }

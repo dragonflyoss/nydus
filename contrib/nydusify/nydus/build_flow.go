@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/pkg/errors"
 
 	"contrib/nydusify/registry"
@@ -27,9 +28,10 @@ type BuildFlow struct {
 	BuildFlowOption
 	bootstrapPath       string
 	blobsDir            string
+	bootstrapsDir       string
 	backendConfig       string
 	parentBootstrapPath string
-	blobPushWorker      *utils.WorkerPool
+	layerPushWorker     *utils.WorkerPool
 	builder             *Builder
 	blobIDs             []string
 }
@@ -65,36 +67,41 @@ func NewBuildFlow(option BuildFlowOption) (*BuildFlow, error) {
 		return nil, errors.Wrap(err, "create blob directory")
 	}
 
-	bootstrapPath := filepath.Join(option.TargetDir, "bootstrap")
+	bootstrapsDir := filepath.Join(option.TargetDir, "bootstraps")
+	if err := os.MkdirAll(bootstrapsDir, 0770); err != nil {
+		return nil, errors.Wrap(err, "create bootstrap directory")
+	}
+	bootstrapPath := filepath.Join(bootstrapsDir, "bootstrap")
+
 	backendConfig := fmt.Sprintf(`{"dir": "%s"}`, blobsDir)
-	blobPushWorker := utils.NewWorkerPool(registry.LayerPushWorkerCount, registry.MethodPush)
+	layerPushWorker := utils.NewWorkerPool(registry.LayerPushWorkerCount, registry.MethodPush)
 	builder := NewBuilder(option.NydusImagePath)
 
 	return &BuildFlow{
 		BuildFlowOption:     option,
 		bootstrapPath:       bootstrapPath,
 		blobsDir:            blobsDir,
-		blobPushWorker:      blobPushWorker,
+		bootstrapsDir:       bootstrapsDir,
+		layerPushWorker:     layerPushWorker,
 		parentBootstrapPath: "",
 		backendConfig:       backendConfig,
 		builder:             builder,
 	}, nil
 }
 
-func (build *BuildFlow) Build(layerJob *registry.LayerJob) error {
-	layerJob.Progress.SetStatus(registry.StatusBuilding)
-
-	hash, err := layerJob.SourceLayer.Digest()
+func (build *BuildFlow) Build(layerJob *registry.LayerJob, pullParentBootstrap func(string) (string, error)) error {
+	layerDigest, err := layerJob.SourceLayer.Digest()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "get source layer digest")
 	}
-	hashStr := hash.String()
-	layerDir := filepath.Join(layerJob.Source.WorkDir, hashStr)
+	layerDir := filepath.Join(layerJob.Source.WorkDir, layerDigest.String())
 
-	// Build nydus bootstrap and blob
-	if build.parentBootstrapPath != "" {
-		if err := os.Rename(build.bootstrapPath, build.parentBootstrapPath); err != nil {
-			return errors.Wrap(err, "rename bootstrap file")
+	if layerJob.Parent != nil && layerJob.Parent.Cached {
+		// If parent layer hits cache record, use the bootstrap layer
+		// recorded in the cache as the parent bootstrap of current layer
+		build.parentBootstrapPath, err = pullParentBootstrap(build.bootstrapsDir)
+		if err != nil {
+			return errors.Wrap(err, "pull parent bootstrap")
 		}
 	}
 
@@ -106,36 +113,33 @@ func (build *BuildFlow) Build(layerJob *registry.LayerJob) error {
 		BackendConfig:       build.backendConfig,
 		PrefetchDir:         build.PrefetchDir,
 	}); err != nil {
-		return errors.Wrap(err, fmt.Sprintf("build layer %s", hashStr))
+		return errors.Wrap(err, fmt.Sprintf("build layer %s", layerDigest))
 	}
 
-	if build.parentBootstrapPath == "" {
-		build.parentBootstrapPath = filepath.Join(build.TargetDir, "bootstrap-parent")
-	}
-
-	// Push nydus blob layer
 	blobPath, err := build.getLatestBlobPath()
 	if err != nil {
 		return errors.Wrap(err, "get latest blob")
 	}
+
+	parentBootstrapPath := filepath.Join(build.bootstrapsDir, layerJob.SourceLayerChainID.String())
+	if err := os.Rename(build.bootstrapPath, parentBootstrapPath); err != nil {
+		return errors.Wrap(err, "rename bootstrap to parent bootstrap")
+	}
+	build.parentBootstrapPath = parentBootstrapPath
+
+	// Push nydus blob layer
 	if blobPath != "" {
-		layerJob.SetTargetLayer(blobPath, "", registry.MediaTypeNydusBlob, map[string]string{
-			registry.LayerAnnotationNydusBlob: "true",
-		})
-		return build.blobPushWorker.AddJob(layerJob)
+		layerJob.SetTargetBlobLayer(blobPath, "", utils.MediaTypeNydusBlob)
 	}
 
-	return nil
+	// TODO: bootstrap layer signature
+	layerJob.SetTargetBootstrapLayer(
+		parentBootstrapPath, utils.BootstrapFileNameInLayer, types.OCILayer,
+	)
+
+	return build.layerPushWorker.AddJob(layerJob)
 }
 
 func (build *BuildFlow) Wait() error {
-	return build.blobPushWorker.Wait()
-}
-
-func (build *BuildFlow) GetBootstrap() string {
-	return build.bootstrapPath
-}
-
-func (build *BuildFlow) GetBlobIDs() []string {
-	return build.blobIDs
+	return build.layerPushWorker.Wait()
 }

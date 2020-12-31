@@ -12,11 +12,11 @@ import (
 )
 
 type OSSBackend struct {
-	bucket   *oss.Bucket
-	progress func(cur int)
+	objectPrefix string
+	bucket       *oss.Bucket
 }
 
-func newOSSBackend(endpoint, bucket, accessKeyID, accessKeySecret string) (*OSSBackend, error) {
+func newOSSBackend(endpoint, bucket, objectPrefix, accessKeyID, accessKeySecret string) (*OSSBackend, error) {
 	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)
 	if err != nil {
 		return nil, errors.Wrap(err, "init oss backend")
@@ -28,15 +28,13 @@ func newOSSBackend(endpoint, bucket, accessKeyID, accessKeySecret string) (*OSSB
 	}
 
 	return &OSSBackend{
-		bucket: _bucket,
+		objectPrefix: objectPrefix,
+		bucket:       _bucket,
 	}, nil
 }
 
-func (backend *OSSBackend) ProgressChanged(event *oss.ProgressEvent) {
-	backend.progress(int(event.ConsumedBytes))
-}
-
-func (backend *OSSBackend) Put(blobID string, reader io.Reader, progress func(cur int)) error {
+func (backend *OSSBackend) Put(blobID string, reader io.Reader) error {
+	blobID = backend.objectPrefix + blobID
 	exist, err := backend.bucket.IsObjectExist(blobID)
 	if err != nil {
 		return err
@@ -44,6 +42,5 @@ func (backend *OSSBackend) Put(blobID string, reader io.Reader, progress func(cu
 	if exist {
 		return nil
 	}
-	backend.progress = progress
-	return backend.bucket.PutObject(blobID, reader, oss.Progress(backend))
+	return backend.bucket.PutObject(blobID, reader)
 }

@@ -13,7 +13,7 @@ import (
 )
 
 type Backend interface {
-	Put(blobID string, reader io.Reader, progress func(cur int)) error
+	Put(blobID string, reader io.Reader) error
 }
 
 func NewBackend(backendType, backendConfig string) (Backend, error) {
@@ -28,6 +28,7 @@ func NewBackend(backendType, backendConfig string) (Backend, error) {
 		return newOSSBackend(
 			config["endpoint"],
 			config["bucket_name"],
+			config["object_prefix"],
 			config["access_key_id"],
 			config["access_key_secret"],
 		)

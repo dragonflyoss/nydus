@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gosuri/uiprogress"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
@@ -28,10 +27,13 @@ type Option struct {
 	SignatureKeyPath string
 	NydusImagePath   string
 	MultiPlatform    bool
-	Silent           bool
+	DockerV2Format   bool
 
 	BackendType   string
 	BackendConfig string
+
+	BuildCache         string
+	BuildCacheInsecure bool
 }
 
 type Converter struct {
@@ -75,17 +77,18 @@ func New(option Option) (*Converter, error) {
 
 // Convert source image to nydus(target) image
 func (converter *Converter) Convert() error {
-	if !converter.Silent {
-		uiprogress.Start()
-	}
-
 	reg, err := registry.New(registry.RegistryOption{
-		WorkDir:        converter.WorkDir,
-		Source:         converter.Source,
-		Target:         converter.Target,
-		SourceInsecure: converter.SourceInsecure,
-		TargetInsecure: converter.TargetInsecure,
-		Backend:        converter.backend,
+		WorkDir:            converter.WorkDir,
+		Source:             converter.Source,
+		Target:             converter.Target,
+		SourceInsecure:     converter.SourceInsecure,
+		TargetInsecure:     converter.TargetInsecure,
+		Backend:            converter.backend,
+		BuildCache:         converter.BuildCache,
+		BuildCacheInsecure: converter.BuildCacheInsecure,
+		SignatureKeyPath:   converter.SignatureKeyPath,
+		MultiPlatform:      converter.MultiPlatform,
+		DockerV2Format:     converter.DockerV2Format,
 	})
 	if err != nil {
 		return err
@@ -101,10 +104,21 @@ func (converter *Converter) Convert() error {
 		return err
 	}
 
+	// Pull Nydus cache image from registry
+	if err := reg.PullCache(); err != nil {
+		logrus.Warnf("Pull cache image %s: %s", converter.BuildCache, err)
+	}
+
 	// Pull source layers
-	if err = reg.Pull(func(layerJob *registry.LayerJob) error {
+	if err = reg.Pull(func(
+		layerJob *registry.LayerJob,
+		parentBootstrapFunc func(string) (string, error),
+	) error {
 		// Start building once the layer has been pulled
-		return buildFlow.Build(layerJob)
+		if err := buildFlow.Build(layerJob, parentBootstrapFunc); err != nil {
+			return errors.Wrap(err, "build source layer")
+		}
+		return nil
 	}); err != nil {
 		return errors.Wrap(err, "pull source layer")
 	}
@@ -114,29 +128,17 @@ func (converter *Converter) Convert() error {
 		return errors.Wrap(err, "build source layer")
 	}
 
-	// Push bootstrap layer
-	if err := reg.PushBootstrapLayer(
-		buildFlow.GetBootstrap(),
-		buildFlow.GetBlobIDs(),
-		converter.SignatureKeyPath,
-	); err != nil {
-		return errors.Wrap(err, "push bootstrap layer")
+	// Push Nydus cache image
+	if err := reg.PushCache(); err != nil {
+		return errors.Wrap(err, "push cache image")
 	}
 
 	// Push target manifest or index
-	if err := reg.PushManifest(converter.MultiPlatform); err != nil {
+	if err := reg.PushManifest(); err != nil {
 		return errors.Wrap(err, "push manifest")
 	}
 
-	if !converter.Silent {
-		uiprogress.Stop()
-	}
-
-	logrus.Infof(
-		"Success convert image %s to %s",
-		converter.Source,
-		converter.Target,
-	)
+	logrus.Infof("Converted image %s to %s", converter.Source, converter.Target)
 
 	return nil
 }

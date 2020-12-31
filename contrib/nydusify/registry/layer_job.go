@@ -13,10 +13,11 @@ import (
 	blobbackend "contrib/nydusify/backend"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -30,77 +31,55 @@ const (
 )
 
 type LayerJob struct {
-	Progress *Progress
-
 	Source *Image
 	Target *Image
 
-	SourceLayer v1.Layer
-	TargetLayer v1.Layer
+	SourceLayerChainID   digest.Digest
+	SourceLayer          v1.Layer
+	TargetBlobLayer      v1.Layer
+	TargetBootstrapLayer v1.Layer
+	Cached               bool
+	Parent               *LayerJob
 
 	Backend blobbackend.Backend
-}
-
-func NewLayerJob(source *Image, target *Image, backend blobbackend.Backend) *LayerJob {
-	return &LayerJob{
-		Source:  source,
-		Target:  target,
-		Backend: backend,
-	}
-}
-
-func (job *LayerJob) SetProgress(layerFor int, name string) error {
-	var layer *v1.Layer
-	if layerFor == LayerSource {
-		layer = &job.SourceLayer
-	} else {
-		layer = &job.TargetLayer
-	}
-
-	size, err := (*layer).Size()
-	if err != nil {
-		return errors.Wrap(err, "get image layer size")
-	}
-
-	hash, err := (*layer).Digest()
-	if err != nil {
-		return errors.Wrap(err, "get image layer digest")
-	}
-
-	progress, err := NewProgress(hash.String(), name, StatusPulling, int(size))
-	if err != nil {
-		return err
-	}
-
-	job.Progress = progress
-
-	return nil
 }
 
 func (job *LayerJob) SetSourceLayer(sourceLayer v1.Layer) {
 	job.SourceLayer = sourceLayer
 }
 
-func (job *LayerJob) SetTargetLayer(
+func (job *LayerJob) SetTargetBlobLayer(
 	sourcePath,
 	name string,
 	mediaType types.MediaType,
-	annotations map[string]string,
 ) {
 	layer := Layer{
-		name:        name,
-		sourcePath:  sourcePath,
-		mediaType:   mediaType,
-		annotations: annotations,
+		name:       name,
+		sourcePath: sourcePath,
+		mediaType:  mediaType,
 	}
-	job.TargetLayer = &layer
+	job.TargetBlobLayer = &layer
+}
+
+func (job *LayerJob) SetTargetBootstrapLayer(
+	sourcePath,
+	name string,
+	mediaType types.MediaType,
+) {
+	layer := Layer{
+		name:       name,
+		sourcePath: sourcePath,
+		mediaType:  mediaType,
+	}
+	job.TargetBootstrapLayer = &layer
 }
 
 func (job *LayerJob) Pull() error {
-	hash, err := job.SourceLayer.Digest()
+	sourceLayerDigest, err := job.SourceLayer.Digest()
 	if err != nil {
 		return err
 	}
+	logrus.WithField("Digest", sourceLayerDigest).Infof("[SOUR] Pulling")
 
 	// Pull the layer from source, we need to retry in case of
 	// the layer is compressed or uncompressed
@@ -109,75 +88,65 @@ func (job *LayerJob) Pull() error {
 	if err != nil {
 		reader, err = job.SourceLayer.Uncompressed()
 		if err != nil {
-			return errors.Wrap(err, fmt.Sprintf("decompress source layer %s", hash.String()))
+			return errors.Wrap(err, fmt.Sprintf("decompress source layer %s", sourceLayerDigest.String()))
 		}
 	}
 
-	pr := utils.NewProgressReader(reader, func(total int) {
-		job.Progress.SetCurrent(int(total))
-	})
-
 	// Decompress layer from source stream
-	layerDir := filepath.Join(job.Source.WorkDir, hash.String())
-	if err := utils.DecompressTargz(layerDir, pr); err != nil {
-		return errors.Wrap(err, fmt.Sprintf("decompress source layer %s", hash.String()))
+	layerDir := filepath.Join(job.Source.WorkDir, sourceLayerDigest.String())
+	if err := utils.DecompressTargz(layerDir, reader); err != nil {
+		return errors.Wrap(err, fmt.Sprintf("decompress source layer %s", sourceLayerDigest.String()))
 	}
 
-	job.Progress.SetFinish()
+	logrus.WithField("Digest", sourceLayerDigest).Infof("[SOUR] Pulled")
 
 	return nil
 }
 
 func (job *LayerJob) Push() error {
-	job.Progress.SetStatus(StatusPushing)
-	size, err := job.TargetLayer.Size()
-	if err != nil {
-		return err
+	if job.TargetBlobLayer == nil {
+		return nil
 	}
-	job.Progress.SetTotal(int(size))
-
-	job.TargetLayer.(*Layer).SetProgressHandler(func(cur int) {
-		job.Progress.SetCurrent(cur)
-	})
 
 	target := job.Target.Ref.Context()
+	authKeychain := remote.WithAuthFromKeychain(withDefaultAuth())
 
-	if job.Backend != nil {
-		// Upload layer to foreign storage backend
-		digest, err := job.TargetLayer.Digest()
-		if err != nil {
-			return errors.Wrap(err, "get digest before upload layer")
-		}
-		reader, err := job.TargetLayer.Uncompressed()
-		if err != nil {
-			return errors.Wrap(err, "decompress before upload layer")
-		}
-		defer reader.Close()
-		if err := job.Backend.Put(digest.Hex, reader, func(cur int) {
-			job.Progress.SetCurrent(cur)
-		}); err != nil {
-			return errors.Wrap(err, "upload layer")
-		}
-	} else {
-		// Upload layer to remote registry
-		if err := remote.WriteLayer(target, job.TargetLayer, remote.WithAuthFromKeychain(withDefaultAuth())); err != nil {
-			return errors.Wrap(err, "push target layer")
-		}
-		targetImage, err := mutate.Append(*job.Target.Img, mutate.Addendum{
-			Layer: job.TargetLayer,
-			History: v1.History{
-				CreatedBy: fmt.Sprintf("nydusify"),
-			},
-			Annotations: job.TargetLayer.(*Layer).annotations,
-		})
-		if err != nil {
-			return errors.Wrap(err, "append target layer")
-		}
-		*job.Target.Img = targetImage
+	blobDigest, err := job.TargetBlobLayer.Digest()
+	if err != nil {
+		return errors.Wrap(err, "get blob layer digest before upload")
 	}
 
-	job.Progress.SetFinish()
-	job.Progress.SetStatus(StatusPushed)
+	if job.Backend != nil {
+		// Upload blob layer to foreign storage backend
+		reader, err := job.TargetBlobLayer.Uncompressed()
+		if err != nil {
+			return errors.Wrap(err, "decompress blob layer before upload")
+		}
+		defer reader.Close()
+		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Uploading")
+		if err := job.Backend.Put(blobDigest.Hex, reader); err != nil {
+			return errors.Wrap(err, "upload blob layer")
+		}
+		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Uploaded")
+	} else {
+		// Upload blob layer to remote registry
+		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Pushing")
+		if err := remote.WriteLayer(target, job.TargetBlobLayer, authKeychain); err != nil {
+			return errors.Wrap(err, "push target blob layer")
+		}
+		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Pushed")
+	}
+
+	// Upload boostrap layer to remote registry
+	bootstrapDigest, err := job.TargetBootstrapLayer.Digest()
+	if err != nil {
+		return errors.Wrap(err, "get blob layer digest before upload")
+	}
+	logrus.WithField("Digest", bootstrapDigest).Infof("[BOOT] Pushing")
+	if err := remote.WriteLayer(target, job.TargetBootstrapLayer, authKeychain); err != nil {
+		return errors.Wrap(err, "push target bootstrap layer")
+	}
+	logrus.WithField("Digest", bootstrapDigest).Infof("[BOOT] Pushed")
 
 	return nil
 }

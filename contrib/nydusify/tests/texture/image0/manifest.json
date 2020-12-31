@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 2,
+  "config": {
+    "mediaType": "application/vnd.docker.container.image.v1+json",
+    "digest": "sha256:05a25da71097c10c730296387f2cdba158cedfef526c3751495fe8ae53976ad5",
+    "size": 1346
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:e326ec63a06e6a322e5351cd78a29d2efe53f23dd2bc649c5d620c882150440b",
+      "size": 3691647,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:a98665e859e4dff99d5ac2181b20e8e6be83a8332baccbdd0e1f603a7477a3d7",
+      "size": 425276,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:5ece17685fbfbe4e121aec9ee55feab51c3c897783c529b51ef28fdcccbb128d",
+      "size": 9670345,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:80ce945afa59e96da2cb34941b743683d1680e5711cd77d15a837ca9bac144c9",
+      "size": 275,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:9962c19bcc2ee2c2436aeed84fef96628ed0a4cf2e80a48be1714b16d7323379",
+      "size": 133,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:8582b04461b546804699befbf0b8c2c85110adf4a47cd30d04174762f8c95fda",
+      "size": 53450,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob-ids": "[\"e326ec63a06e6a322e5351cd78a29d2efe53f23dd2bc649c5d620c882150440b\",\"a98665e859e4dff99d5ac2181b20e8e6be83a8332baccbdd0e1f603a7477a3d7\",\"5ece17685fbfbe4e121aec9ee55feab51c3c897783c529b51ef28fdcccbb128d\",\"80ce945afa59e96da2cb34941b743683d1680e5711cd77d15a837ca9bac144c9\",\"9962c19bcc2ee2c2436aeed84fef96628ed0a4cf2e80a48be1714b16d7323379\"]",
+        "containerd.io/snapshot/nydus-bootstrap": "true"
+      }
+    }
+  ]
+}

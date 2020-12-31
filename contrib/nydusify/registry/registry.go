@@ -10,7 +10,6 @@ import (
 	"io/ioutil"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -19,24 +18,19 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/identity"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	blobbackend "contrib/nydusify/backend"
-
-	"contrib/nydusify/signature"
+	"contrib/nydusify/cache"
+	buildcache "contrib/nydusify/cache"
 	"contrib/nydusify/utils"
 )
 
 const (
-	ManifestOSFeatureNydus   = "nydus.remoteimage.v1"
-	MediaTypeNydusBlob       = "application/vnd.oci.image.layer.nydus.blob.v1"
-	BootstrapFileNameInLayer = "image.boot"
-
-	LayerAnnotationNydusBlob      = "containerd.io/snapshot/nydus-blob"
-	LayerAnnotationNydusBlobIDs   = "containerd.io/snapshot/nydus-blob-ids"
-	LayerAnnotationNydusBootstrap = "containerd.io/snapshot/nydus-bootstrap"
-	LayerAnnotationNydusSignature = "containerd.io/snapshot/nydus-signature"
-
 	LayerPullWorkerCount = 5
 	LayerPushWorkerCount = 5
 )
@@ -48,22 +42,42 @@ type Image struct {
 }
 
 type RegistryOption struct {
-	WorkDir        string
-	Source         string
-	Target         string
-	SourceInsecure bool
-	TargetInsecure bool
-	Backend        blobbackend.Backend
+	WorkDir            string
+	Source             string
+	Target             string
+	SourceInsecure     bool
+	TargetInsecure     bool
+	Backend            blobbackend.Backend
+	BuildCache         string
+	BuildCacheInsecure bool
+	SignatureKeyPath   string
+	MultiPlatform      bool
+	DockerV2Format     bool
 }
 
 type Registry struct {
 	RegistryOption
-	source Image
-	target Image
+	source    Image
+	target    Image
+	cache     *cache.Cache
+	layerJobs []*LayerJob
 }
 
 func withDefaultAuth() authn.Keychain {
 	return authn.DefaultKeychain
+}
+
+func getLayerChainID(layers []v1.Layer) (*digest.Digest, error) {
+	digests := []digest.Digest{}
+	for _, layer := range layers {
+		layerDigest, err := layer.DiffID()
+		if err != nil {
+			return nil, errors.Wrap(err, "get layer ChainID")
+		}
+		digests = append(digests, digest.Digest(layerDigest.String()))
+	}
+	chainID := identity.ChainID(digests)
+	return &chainID, nil
 }
 
 func New(option RegistryOption) (*Registry, error) {
@@ -110,7 +124,25 @@ func New(option RegistryOption) (*Registry, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "prepare target image")
 	}
-	targetImage = mutate.MediaType(targetImage, types.OCIManifestSchema1)
+
+	if option.DockerV2Format {
+		targetImage = mutate.MediaType(targetImage, types.DockerManifestSchema2)
+	} else {
+		targetImage = mutate.MediaType(targetImage, types.OCIManifestSchema1)
+	}
+
+	// Init Nydus build cache
+	var cache *buildcache.Cache
+	if option.BuildCache != "" {
+		cache, err = buildcache.New(buildcache.Opt{
+			Ref:            option.BuildCache,
+			Insecure:       option.BuildCacheInsecure,
+			DockerV2Format: option.DockerV2Format,
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "init build cache")
+		}
+	}
 
 	return &Registry{
 		RegistryOption: option,
@@ -124,6 +156,7 @@ func New(option RegistryOption) (*Registry, error) {
 			Ref:     targetRef,
 			Img:     &targetImage,
 		},
+		cache: cache,
 	}, nil
 }
 
@@ -153,7 +186,106 @@ func (registry *Registry) dumpConfig(image *Image) error {
 	return nil
 }
 
-func (registry *Registry) Pull(callback func(*LayerJob) error) error {
+func (registry *Registry) makeLayerJobByCache(sourceLayerChainID digest.Digest) (*LayerJob, error) {
+	if registry.cache == nil {
+		return nil, nil
+	}
+
+	record, err := registry.cache.Check(sourceLayerChainID)
+	if err != nil {
+		return nil, errors.Wrap(err, "check cache record")
+	}
+	if record == nil {
+		return nil, nil
+	}
+
+	var cachedBlobLayer *Layer
+	if record.NydusBlobDesc != nil {
+		cachedBlobLayer, err = DescToLayer(*record.NydusBlobDesc, record.NydusBlobDesc.Digest)
+		if err != nil {
+			return nil, errors.Wrap(err, "blob desc to layer")
+		}
+	}
+
+	cachedBootstrapLayer, err := DescToLayer(*record.NydusBootstrapDesc, record.NydusBootstrapDiffID)
+	if err != nil {
+		return nil, errors.Wrap(err, "bootstrap desc to layer")
+	}
+
+	return &LayerJob{
+		Source:               &registry.source,
+		Target:               &registry.target,
+		Backend:              registry.Backend,
+		SourceLayerChainID:   sourceLayerChainID,
+		TargetBlobLayer:      cachedBlobLayer,
+		TargetBootstrapLayer: cachedBootstrapLayer,
+		Cached:               true,
+	}, nil
+}
+
+func (registry *Registry) makeTargetImageLayers() error {
+	blobIDs := []string{}
+	for idx, job := range registry.layerJobs {
+		if job.TargetBlobLayer != nil {
+			blobDigest, err := job.TargetBlobLayer.Digest()
+			if err != nil {
+				return err
+			}
+			blobIDs = append(blobIDs, blobDigest.Hex)
+			if registry.Backend == nil {
+				targetImage, err := mutate.Append(*registry.target.Img, mutate.Addendum{
+					Layer: job.TargetBlobLayer,
+					History: v1.History{
+						CreatedBy: fmt.Sprintf("nydusify"),
+					},
+					Annotations: map[string]string{
+						utils.LayerAnnotationNydusBlob: "true",
+					},
+				})
+				if err != nil {
+					return errors.Wrap(err, "append target blob layer")
+				}
+				*registry.target.Img = targetImage
+			}
+		}
+
+		if idx == len(registry.layerJobs)-1 {
+			mediaType := types.OCILayer
+			if registry.DockerV2Format {
+				mediaType = types.DockerLayer
+			}
+			// Write blob digest list to annotation, so that we can track
+			// these blob files were uploaded to foreign storage backend
+			blobIDsBytes, err := json.Marshal(blobIDs)
+			if err != nil {
+				return err
+			}
+			annotations := map[string]string{
+				utils.LayerAnnotationNydusBootstrap: "true",
+				utils.LayerAnnotationNydusBlobIDs:   string(blobIDsBytes),
+			}
+			targetImage, err := mutate.Append(*registry.target.Img, mutate.Addendum{
+				MediaType: mediaType,
+				Layer:     job.TargetBootstrapLayer,
+				History: v1.History{
+					CreatedBy: fmt.Sprintf("nydusify"),
+				},
+				Annotations: annotations,
+			})
+			if err != nil {
+				return errors.Wrap(err, "append target bootstrap layer")
+			}
+			*registry.target.Img = targetImage
+		}
+	}
+
+	return nil
+}
+
+func (registry *Registry) Pull(build func(
+	*LayerJob,
+	func(string) (string, error),
+) error) error {
 	// Write source manifest to json file
 	if err := registry.dumpManifest(&registry.source); err != nil {
 		return errors.Wrap(err, "dump source manifest")
@@ -166,99 +298,131 @@ func (registry *Registry) Pull(callback func(*LayerJob) error) error {
 	}
 
 	layerJobs := []utils.Job{}
-	for _, layer := range layers {
-		// Create layer job for nydus blob upload
-		layerJob := NewLayerJob(&registry.source, &registry.target, registry.Backend)
-		layerJob.SetSourceLayer(layer)
-		if err := layerJob.SetProgress(LayerSource, "BLOB"); err != nil {
-			return errors.Wrap(err, "create blob layer progress")
+	var parentLayerJob *LayerJob
+	for idx, layer := range layers {
+		// Create layer job to push nydus bootstrap and blob layer
+		var sourceLayerChainID *digest.Digest
+		if idx == len(layers)-1 {
+			sourceLayerChainID, err = getLayerChainID(layers)
+		} else {
+			sourceLayerChainID, err = getLayerChainID(layers[:idx+1])
 		}
-		layerJobs = append(layerJobs, layerJob)
+		if err != nil {
+			return err
+		}
+
+		layerJob, err := registry.makeLayerJobByCache(*sourceLayerChainID)
+		if err != nil {
+			return err
+		}
+
+		if layerJob == nil {
+			layerJob = &LayerJob{
+				Source:             &registry.source,
+				Target:             &registry.target,
+				Backend:            registry.Backend,
+				SourceLayerChainID: *sourceLayerChainID,
+				Cached:             false,
+			}
+			layerJob.SetSourceLayer(layer)
+			layerJobs = append(layerJobs, layerJob)
+		} else {
+			logrus.WithField("ChainID", sourceLayerChainID).Infof("[SOUR] Skip")
+		}
+
+		layerJob.Parent = parentLayerJob
+		parentLayerJob = layerJob
+		registry.layerJobs = append(registry.layerJobs, layerJob)
 	}
 	layerJobRets := utils.NewQueueWorkerPool(layerJobs, LayerPullWorkerCount, MethodPull)
 
-	// Pull layer and handle it by callback per layer
+	// Pull source layer and build it one by one
 	for _, jobChan := range layerJobRets {
 		jobRet := <-jobChan
 
 		layerJob := jobRet.Job.(*LayerJob)
-		hash, err := layerJob.SourceLayer.Digest()
+		layerDigest, err := layerJob.SourceLayer.Digest()
 		if err != nil {
 			return err
 		}
+
 		if jobRet.Err != nil {
-			return errors.Wrap(jobRet.Err, fmt.Sprintf("pull layer %s", hash.String()))
+			return errors.Wrap(jobRet.Err, fmt.Sprintf("pull layer %s", layerDigest))
 		}
 
-		if err := callback(layerJob); err != nil {
-			return err
+		// The func pulls bootstrap layer and write the bootstrap file
+		// to targetDir, the build flow uses it as parent bootstrap
+		pullBootstrapFunc := func(targetDir string) (string, error) {
+			bootstrapDesc, err := layerJob.Parent.TargetBootstrapLayer.(*Layer).Desc()
+			if err != nil {
+				return "", err
+			}
+			targetPath := filepath.Join(targetDir, layerJob.Parent.SourceLayerChainID.String())
+			logrus.WithField("Digest", bootstrapDesc.Digest).Infof("[BOOT] Pulling")
+			if err := registry.cache.PullBootstrap(bootstrapDesc, targetPath); err != nil {
+				return "", errors.Wrap(err, "pull bootstrap")
+			}
+			logrus.WithField("Digest", bootstrapDesc.Digest).Infof("[BOOT] Pulled")
+			return targetPath, nil
 		}
+
+		logrus.WithField("Digest", layerDigest).Infof("[SOUR] Building")
+		if err := build(layerJob, pullBootstrapFunc); err != nil {
+			return errors.Wrap(err, "build layer")
+		}
+		logrus.WithField("Digest", layerDigest).Infof("[SOUR] Built")
 	}
 
 	return nil
 }
 
-func (registry *Registry) PushBootstrapLayer(bootstrapPath string, blobIDs []string, privateKeyPath string) error {
-	// Append signature of bootstap file
-	layerAnnotations := map[string]string{
-		LayerAnnotationNydusBootstrap: "true",
-	}
-
-	// Append blob digest to annotation if blob files
-	// were uploaded to foreign storage backend
-	if registry.Backend != nil {
-		annotation, err := json.Marshal(blobIDs)
-		if err != nil {
-			return err
-		}
-		layerAnnotations[LayerAnnotationNydusBlobIDs] = string(annotation)
-	}
-
-	if strings.TrimSpace(privateKeyPath) != "" {
-		signature, err := signature.SignFile(privateKeyPath, bootstrapPath)
-		if err != nil {
-			return errors.Wrap(err, "sign bootstrap file")
-		}
-		layerAnnotations[LayerAnnotationNydusSignature] = string(signature)
-	}
-
-	// Push nydus bootstrap layer
-	layerJob := NewLayerJob(&registry.source, &registry.target, nil)
-	layerJob.SetTargetLayer(bootstrapPath, BootstrapFileNameInLayer, types.OCILayer, layerAnnotations)
-	if err := layerJob.SetProgress(LayerTarget, "BOOT"); err != nil {
-		return errors.Wrap(err, "create bootstrap layer progress")
-	}
-	if err := layerJob.Push(); err != nil {
-		return errors.Wrap(err, "push bootstrap layer")
-	}
-
-	return nil
-}
-
-func (registry *Registry) PushManifest(multiPlatform bool) error {
+func (registry *Registry) PushManifest() error {
 	arch := runtime.GOARCH
 	os := runtime.GOOS
 
-	sourceManifest, err := (*registry.source.Img).Manifest()
+	sourceConfig, err := (*registry.source.Img).ConfigFile()
 	if err != nil {
 		return errors.Wrap(err, "get source manifest")
 	}
-	if sourceManifest.Config.Platform != nil {
-		arch = sourceManifest.Config.Platform.Architecture
-		os = sourceManifest.Config.Platform.OS
+	if sourceConfig != nil {
+		arch = sourceConfig.Architecture
+		os = sourceConfig.OS
 	}
 
-	hash := v1.Hash{}
+	sourceMediaType, err := (*registry.source.Img).MediaType()
+	if err != nil {
+		return errors.Wrap(err, "get source media type")
+	}
+
+	targetMediaType, err := (*registry.target.Img).MediaType()
+	if err != nil {
+		return errors.Wrap(err, "get target media type")
+	}
 
 	platform := v1.Platform{
 		Architecture: arch,
 		OS:           os,
-		OSFeatures:   []string{ManifestOSFeatureNydus},
+		OSFeatures:   []string{utils.ManifestOSFeatureNydus},
+	}
+
+	if err := registry.makeTargetImageLayers(); err != nil {
+		return err
+	}
+
+	// Write target manifest to json file
+	if err := registry.dumpManifest(&registry.target); err != nil {
+		return errors.Wrap(err, "dump target manifest")
+	}
+
+	// Write target config to json file
+	if err := registry.dumpConfig(&registry.target); err != nil {
+		return errors.Wrap(err, "dump target config")
 	}
 
 	imageIndex := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
 		Add: *registry.source.Img,
 		Descriptor: v1.Descriptor{
+			MediaType: sourceMediaType,
 			Platform: &v1.Platform{
 				Architecture: arch,
 				OS:           os,
@@ -267,29 +431,18 @@ func (registry *Registry) PushManifest(multiPlatform bool) error {
 	}, mutate.IndexAddendum{
 		Add: *registry.target.Img,
 		Descriptor: v1.Descriptor{
-			Platform: &platform,
+			MediaType: targetMediaType,
+			Platform:  &platform,
 		},
 	})
 
-	if multiPlatform {
-		hash, err = imageIndex.Digest()
-		if err != nil {
-			return err
-		}
+	if registry.DockerV2Format {
+		imageIndex = mutate.IndexMediaType(imageIndex, types.DockerManifestList)
 	} else {
-		manifest, err := (*registry.target.Img).Manifest()
-		if err != nil {
-			return err
-		}
-		hash = manifest.Config.Digest
+		imageIndex = mutate.IndexMediaType(imageIndex, types.OCIImageIndex)
 	}
 
-	pushProgress, err := NewProgress(hash.String(), "MANI", StatusPushing, 100)
-	if err != nil {
-		return err
-	}
-
-	if multiPlatform {
+	if registry.MultiPlatform {
 		if err := remote.WriteIndex(
 			registry.target.Ref,
 			imageIndex,
@@ -308,18 +461,86 @@ func (registry *Registry) PushManifest(multiPlatform bool) error {
 		}
 	}
 
-	// Write target manifest to json file
-	if err := registry.dumpManifest(&registry.target); err != nil {
-		return errors.Wrap(err, "dump target manifest")
+	return nil
+}
+
+func (registry *Registry) PullCache() error {
+	if registry.cache == nil {
+		return nil
+	}
+	logrus.Infof("Pulling cache image %s", registry.BuildCache)
+	return registry.cache.Import()
+}
+
+func (registry *Registry) PushCache() error {
+	if registry.cache == nil {
+		return nil
 	}
 
-	// Write target config to json file
-	if err := registry.dumpConfig(&registry.target); err != nil {
-		return errors.Wrap(err, "dump target config")
+	logrus.Infof("Pushing cache image %s", registry.BuildCache)
+
+	cacheRecords := []cache.CacheRecordWithChainID{}
+
+	for _, layerJob := range registry.layerJobs {
+		blobLayer := layerJob.TargetBlobLayer
+		bootstrapLayer := layerJob.TargetBootstrapLayer
+
+		var blobDesc *ocispec.Descriptor
+		if blobLayer != nil {
+			_blobDesc, err := blobLayer.(*Layer).Desc()
+			if err != nil {
+				return errors.Wrap(err, "get blob digest")
+			}
+			blobDesc = _blobDesc
+		}
+
+		bootstrapDesc, err := bootstrapLayer.(*Layer).Desc()
+		if err != nil {
+			return errors.Wrap(err, "get bootstrap digest")
+		}
+
+		if !layerJob.Cached {
+			// Push bootstrap layer to cache image, should be fast
+			// because the layer has been pushed to registry in the
+			// previous nydus build workflow
+			reader, err := bootstrapLayer.Compressed()
+			if err != nil {
+				return errors.Wrap(err, "get compressed")
+			}
+			defer reader.Close()
+			if err := registry.cache.PushBootstrap(reader, bootstrapDesc); err != nil {
+				return errors.Wrap(err, "push bootstrap")
+			}
+		}
+
+		bootstrapDiffID, err := bootstrapLayer.DiffID()
+		if err != nil {
+			return errors.Wrap(err, "get bootstrap diff id")
+		}
+
+		cacheRecord := cache.CacheRecordWithChainID{
+			SourceChainID: layerJob.SourceLayerChainID,
+			CacheRecord: cache.CacheRecord{
+				NydusBlobDesc:        blobDesc,
+				NydusBootstrapDesc:   bootstrapDesc,
+				NydusBootstrapDiffID: digest.Digest(bootstrapDiffID.String()),
+			},
+		}
+
+		cacheRecords = append(cacheRecords, cacheRecord)
 	}
 
-	pushProgress.SetStatus(StatusPushed)
-	pushProgress.SetFinish()
+	// Import cache from registry again, to use latest
+	// cache record list, ignore the error
+	if err := registry.cache.Import(); err != nil {
+		logrus.Warnf("Re-pull cache image %s: %s", registry.BuildCache, err)
+	}
+
+	registry.cache.Push(cacheRecords)
+
+	if err := registry.cache.Export(); err != nil {
+		return errors.Wrap(err, "export cache")
+	}
 
 	return nil
 }

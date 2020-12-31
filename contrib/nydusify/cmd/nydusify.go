@@ -53,12 +53,13 @@ func main() {
 				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image conversion", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "prefetch-dir", Value: "/", Usage: "Prefetch directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
-				&cli.StringFlag{Name: "signature-key", Value: "", Usage: "Private key path for image signature", EnvVars: []string{"SIGNATURE_KEY"}},
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Add manifest index (multiple platforms, OCI & Nydus) for target image", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.BoolFlag{Name: "silent", Value: false, Usage: "Disable to show conversion progress", EnvVars: []string{"SILENT"}},
+				&cli.BoolFlag{Name: "docker-v2-format", Value: false, Usage: "Use docker image manifest v2, schema 2 format", EnvVars: []string{"DOCKER_V2_FORMAT"}},
 				&cli.StringFlag{Name: "backend-type", Value: "registry", Usage: "Specify Nydus blob storage backend type", EnvVars: []string{"BACKEND_TYPE"}},
 				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
 				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+				&cli.StringFlag{Name: "build-cache", Value: "", Usage: "An remote image reference for accelerating nydus image build", EnvVars: []string{"BUILD_CACHE"}},
+				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
 			},
 			Action: func(c *cli.Context) error {
 				backendType := c.String("backend-type")
@@ -92,14 +93,15 @@ func main() {
 					SourceInsecure: c.Bool("source-insecure"),
 					TargetInsecure: c.Bool("target-insecure"),
 
-					WorkDir:          c.String("work-dir"),
-					PrefetchDir:      c.String("prefetch-dir"),
-					NydusImagePath:   c.String("nydus-image"),
-					SignatureKeyPath: c.String("signature-key"),
-					MultiPlatform:    c.Bool("multi-platform"),
-					Silent:           c.Bool("silent"),
-					BackendType:      backendType,
-					BackendConfig:    backendConfigJSON,
+					WorkDir:            c.String("work-dir"),
+					PrefetchDir:        c.String("prefetch-dir"),
+					NydusImagePath:     c.String("nydus-image"),
+					MultiPlatform:      c.Bool("multi-platform"),
+					DockerV2Format:     c.Bool("docker-v2-format"),
+					BackendType:        backendType,
+					BackendConfig:      backendConfigJSON,
+					BuildCache:         c.String("build-cache"),
+					BuildCacheInsecure: c.Bool("build-cache-insecure"),
 				})
 				if err != nil {
 					return err
