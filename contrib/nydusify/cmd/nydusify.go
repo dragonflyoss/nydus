@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/containerd/containerd/reference/docker"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -45,7 +46,8 @@ func main() {
 			Usage: "Convert source image to nydus image",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
-				&cli.StringFlag{Name: "target", Required: true, Usage: "Target image reference", EnvVars: []string{"TARGET"}},
+				&cli.StringFlag{Name: "target", Required: false, Usage: "Target image reference", EnvVars: []string{"TARGET"}},
+				&cli.StringFlag{Name: "target-suffix", Required: false, Usage: "Add suffix to source image reference as target image reference", EnvVars: []string{"TARGET_SUFFIX"}},
 
 				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
 				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
@@ -62,6 +64,33 @@ func main() {
 				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
 			},
 			Action: func(c *cli.Context) error {
+				source := c.String("source")
+				target := c.String("target")
+				targetSuffix := c.String("target-suffix")
+				if target != "" && targetSuffix != "" {
+					return fmt.Errorf("--target conflicts with --target-suffix")
+				}
+				if target == "" && targetSuffix == "" {
+					return fmt.Errorf("--target or --target-suffix is required")
+				}
+				// Add suffix to source image reference as the target
+				// image reference, like this:
+				// Source: localhost:5000/nginx:latest
+				// Target: localhost:5000/nginx:latest-suffix
+				if targetSuffix != "" {
+					named, err := docker.ParseDockerRef(source)
+					if err != nil {
+						return fmt.Errorf("Invalid source image reference: %s", err)
+					}
+					if _, ok := named.(docker.Digested); ok {
+						return fmt.Errorf("Unsupported digested image reference: %s", named.String())
+					}
+					named = docker.TagNameOnly(named)
+					target = named.String() + targetSuffix
+				}
+
+				// fmt.Printf("Converting %s to %s\n", source, target)
+
 				backendType := c.String("backend-type")
 				possibleBackendTypes := []string{"registry", "oss"}
 				if !isPossibleValue(possibleBackendTypes, backendType) {
@@ -88,8 +117,8 @@ func main() {
 				}
 
 				converter, err := converter.New(converter.Option{
-					Source:         c.String("source"),
-					Target:         c.String("target"),
+					Source:         source,
+					Target:         target,
 					SourceInsecure: c.Bool("source-insecure"),
 					TargetInsecure: c.Bool("target-insecure"),
 
