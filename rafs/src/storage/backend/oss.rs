@@ -12,7 +12,6 @@ use hmac::{Hmac, Mac, NewMac};
 use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Method, StatusCode};
 use sha1::Sha1;
-use url::Url;
 
 use crate::io_stats::BackendMetrics;
 use crate::storage::backend::request::{HeaderMap, Progress, ReqBody, Request, RequestError};
@@ -50,6 +49,7 @@ pub struct OSS {
     access_key_id: String,
     access_key_secret: String,
     scheme: String,
+    object_prefix: String,
     endpoint: String,
     bucket_name: String,
     force_upload: bool,
@@ -66,6 +66,12 @@ struct OssConfig {
     bucket_name: String,
     #[serde(default = "default_http_scheme")]
     scheme: String,
+    /// Prefix object_prefix to OSS object key, for exmaple the
+    /// simulation of subdirectory:
+    /// object_key: sha256:xxx, object_prefix: nydus/
+    /// object_key with object_prefix: nydus/sha256:xxx
+    #[serde(default)]
+    object_prefix: String,
 }
 
 impl OSS {
@@ -120,34 +126,23 @@ impl OSS {
     }
 
     fn resource(&self, object_key: &str, query_str: &str) -> String {
-        if !self.bucket_name.is_empty() {
-            format!("/{}/{}{}", self.bucket_name, object_key, query_str)
-        } else {
-            format!("/{}{}", object_key, query_str)
-        }
+        format!("/{}/{}{}", self.bucket_name, object_key, query_str)
     }
 
     fn url(&self, object_key: &str, query: &[&str]) -> OssResult<(String, String)> {
-        let url = if !self.bucket_name.is_empty() {
-            format!("{}://{}.{}", self.scheme, self.bucket_name, self.endpoint)
-        } else {
-            format!("{}://{}", self.scheme, self.endpoint)
-        };
-        let mut url = Url::parse(url.as_str()).map_err(|e| OssError::Url(e.to_string()))?;
+        let object_key = &format!("{}{}", self.object_prefix, object_key);
 
-        // TODO: Parsed url can be cached, we can only attach `object_key` part for each
-        // backend request. Then it can save cpu cycles and the returned error can be `ParseError`
-        url.path_segments_mut()
-            .map_err(|_| OssError::Url("Path segments".to_string()))?
-            .push(object_key);
+        let url = format!(
+            "{}://{}.{}/{}",
+            self.scheme, self.bucket_name, self.endpoint, object_key
+        );
 
         if query.is_empty() {
-            Ok((self.resource(object_key, ""), url.to_string()))
+            Ok((self.resource(object_key, ""), url))
         } else {
             let query_str = format!("?{}", query.join("&"));
             let resource = self.resource(object_key, &query_str);
             let url = format!("{}{}", url.as_str(), &query_str);
-
             Ok((resource, url))
         }
     }
@@ -199,6 +194,7 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
 
     Ok(OSS {
         scheme: config.scheme,
+        object_prefix: config.object_prefix,
         endpoint: config.endpoint,
         access_key_id: config.access_key_id,
         access_key_secret: config.access_key_secret,
