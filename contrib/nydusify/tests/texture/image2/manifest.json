@@ -2,70 +2,70 @@
   "schemaVersion": 2,
   "config": {
     "mediaType": "application/vnd.docker.container.image.v1+json",
-    "size": 1612,
-    "digest": "sha256:1d977a7a05af29cb3b8cbc43818b11ded972dccf926096bb079e2b09f6f0b671"
+    "digest": "sha256:256f768a6ccd5a0a0512197babaadb98ada91cc9dde7e0506df25dc9e7a5b4c6",
+    "size": 1612
   },
   "layers": [
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 3691647,
       "digest": "sha256:e326ec63a06e6a322e5351cd78a29d2efe53f23dd2bc649c5d620c882150440b",
+      "size": 3691647,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 425276,
       "digest": "sha256:a98665e859e4dff99d5ac2181b20e8e6be83a8332baccbdd0e1f603a7477a3d7",
+      "size": 425276,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 9670345,
       "digest": "sha256:5ece17685fbfbe4e121aec9ee55feab51c3c897783c529b51ef28fdcccbb128d",
+      "size": 9670345,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 275,
       "digest": "sha256:80ce945afa59e96da2cb34941b743683d1680e5711cd77d15a837ca9bac144c9",
+      "size": 275,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 133,
       "digest": "sha256:9962c19bcc2ee2c2436aeed84fef96628ed0a4cf2e80a48be1714b16d7323379",
+      "size": 133,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 6,
       "digest": "sha256:ab03c34f1ece08211fe2a8039fd6424199b3f5d7b55ff13b1134b364776c45c5",
+      "size": 6,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
-      "size": 6,
       "digest": "sha256:63d6ff853569a0aadec5f247bba51786bb73494d1a06bdc036ebac5034a2920b",
+      "size": 6,
       "annotations": {
         "containerd.io/snapshot/nydus-blob": "true"
       }
     },
     {
       "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "size": 53757,
-      "digest": "sha256:7ab56d4023f4594c053bcf9e2687fc3b6b0355688d05bafbd486d66041234bee",
+      "digest": "sha256:90ccfd421446ab300e39299ab268b27fcf199578f73dc7f292c5d17df9d1096b",
+      "size": 53788,
       "annotations": {
         "containerd.io/snapshot/nydus-blob-ids": "[\"e326ec63a06e6a322e5351cd78a29d2efe53f23dd2bc649c5d620c882150440b\",\"a98665e859e4dff99d5ac2181b20e8e6be83a8332baccbdd0e1f603a7477a3d7\",\"5ece17685fbfbe4e121aec9ee55feab51c3c897783c529b51ef28fdcccbb128d\",\"80ce945afa59e96da2cb34941b743683d1680e5711cd77d15a837ca9bac144c9\",\"9962c19bcc2ee2c2436aeed84fef96628ed0a4cf2e80a48be1714b16d7323379\",\"ab03c34f1ece08211fe2a8039fd6424199b3f5d7b55ff13b1134b364776c45c5\",\"63d6ff853569a0aadec5f247bba51786bb73494d1a06bdc036ebac5034a2920b\"]",
         "containerd.io/snapshot/nydus-bootstrap": "true"

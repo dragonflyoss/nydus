@@ -7,7 +7,7 @@ package utils
 const (
 	ManifestOSFeatureNydus   = "nydus.remoteimage.v1"
 	MediaTypeNydusBlob       = "application/vnd.oci.image.layer.nydus.blob.v1"
-	BootstrapFileNameInLayer = "image.boot"
+	BootstrapFileNameInLayer = "image/image.boot"
 	ManifestNydusCache       = "containerd.io/snapshot/nydus-cache"
 	ManifestNydusCacheV1     = "v1"
 

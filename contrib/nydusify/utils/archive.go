@@ -10,6 +10,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
@@ -19,6 +20,12 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 	fi, err := os.Stat(src)
 	if err != nil {
 		return nil, err
+	}
+
+	dirHdr := &tar.Header{
+		Name:     filepath.Dir(name),
+		Mode:     0770,
+		Typeflag: tar.TypeDir,
 	}
 
 	hdr := &tar.Header{
@@ -48,6 +55,10 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 		defer file.Close()
 
 		// Write targz stream
+		if err := tw.WriteHeader(dirHdr); err != nil {
+			return writer.CloseWithError(err)
+		}
+
 		if err := tw.WriteHeader(hdr); err != nil {
 			return writer.CloseWithError(err)
 		}
