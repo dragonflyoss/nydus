@@ -17,7 +17,7 @@ make
 
 ```
 cd contrib/nydusify
-make build-release
+make static-release
 ```
 
 ## Basic Usage
