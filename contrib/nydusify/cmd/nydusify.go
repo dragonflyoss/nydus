@@ -21,6 +21,9 @@ import (
 	"contrib/nydusify/converter"
 )
 
+var versionGitCommit string
+var versionBuildTime string
+
 func isPossibleValue(excepted []string, value string) bool {
 	for _, v := range excepted {
 		if value == v {
@@ -35,10 +38,15 @@ func main() {
 		FullTimestamp: true,
 	})
 
+	version := fmt.Sprintf("%s.%s", versionGitCommit, versionBuildTime)
+
 	app := &cli.App{
-		Name:  "Nydusify",
-		Usage: "Nydus image converter tool",
+		Name:    "Nydusify",
+		Usage:   "Nydus image converter tool",
+		Version: version,
 	}
+
+	fmt.Printf("Version: %s\n", version)
 
 	app.Commands = []*cli.Command{
 		{
