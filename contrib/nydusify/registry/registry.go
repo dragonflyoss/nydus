@@ -353,7 +353,7 @@ func (registry *Registry) Pull(build func(
 		// The func pulls bootstrap layer and write the bootstrap file
 		// to targetDir, the build flow uses it as parent bootstrap
 		pullBootstrapFunc := func(targetDir string) (string, error) {
-			bootstrapDesc, err := layerJob.Parent.TargetBootstrapLayer.(*Layer).Desc()
+			bootstrapDesc, err := layerJob.Parent.TargetBootstrapLayer.Desc()
 			if err != nil {
 				return "", err
 			}
@@ -481,20 +481,22 @@ func (registry *Registry) PushCache() error {
 
 	cacheRecords := []cache.CacheRecordWithChainID{}
 
-	for _, layerJob := range registry.layerJobs {
+	for idx := range registry.layerJobs {
+		layerJob := registry.layerJobs[idx]
+
 		blobLayer := layerJob.TargetBlobLayer
 		bootstrapLayer := layerJob.TargetBootstrapLayer
 
 		var blobDesc *ocispec.Descriptor
 		if blobLayer != nil {
-			_blobDesc, err := blobLayer.(*Layer).Desc()
+			_blobDesc, err := blobLayer.Desc()
 			if err != nil {
 				return errors.Wrap(err, "get blob digest")
 			}
 			blobDesc = _blobDesc
 		}
 
-		bootstrapDesc, err := bootstrapLayer.(*Layer).Desc()
+		bootstrapDesc, err := bootstrapLayer.Desc()
 		if err != nil {
 			return errors.Wrap(err, "get bootstrap digest")
 		}

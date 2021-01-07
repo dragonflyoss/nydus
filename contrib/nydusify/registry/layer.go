@@ -18,10 +18,9 @@ import (
 )
 
 type Layer struct {
-	name            string
-	sourcePath      string
-	mediaType       types.MediaType
-	progressHandler func(int)
+	name       string
+	sourcePath string
+	mediaType  types.MediaType
 
 	compressedSize     *int64
 	compressedDigest   *v1.Hash
@@ -136,13 +135,7 @@ func (layer *Layer) Compressed() (io.ReadCloser, error) {
 		}
 	}
 
-	pr := utils.NewProgressReader(reader, func(total int) {
-		if layer.progressHandler != nil {
-			layer.progressHandler(total)
-		}
-	})
-
-	return pr, nil
+	return reader, nil
 }
 
 // Uncompressed returns an io.ReadCloser for the uncompressed (.tar) layer contents.
@@ -156,11 +149,6 @@ func (layer *Layer) Uncompressed() (io.ReadCloser, error) {
 // MediaType returns the media type of the Layer.
 func (layer *Layer) MediaType() (types.MediaType, error) {
 	return types.MediaType(layer.mediaType), nil
-}
-
-// SetProgressHandler sets progress handler for layer pull or push
-func (layer *Layer) SetProgressHandler(handler func(int)) {
-	layer.progressHandler = handler
 }
 
 func DescToLayer(desc ocispec.Descriptor, diffID digest.Digest) (*Layer, error) {

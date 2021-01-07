@@ -36,8 +36,8 @@ type LayerJob struct {
 
 	SourceLayerChainID   digest.Digest
 	SourceLayer          v1.Layer
-	TargetBlobLayer      v1.Layer
-	TargetBootstrapLayer v1.Layer
+	TargetBlobLayer      *Layer
+	TargetBootstrapLayer *Layer
 	Cached               bool
 	Parent               *LayerJob
 
