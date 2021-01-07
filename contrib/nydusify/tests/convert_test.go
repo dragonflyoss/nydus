@@ -61,6 +61,11 @@ func assertImage(t *testing.T, ref string, expected string) {
 	err = json.Unmarshal(manifestBytes, &actualManifest)
 	assert.Nil(t, err)
 
+	// data, err := json.MarshalIndent(actualManifest, "", "  ")
+	// assert.Nil(t, err)
+	// err = ioutil.WriteFile(expected, []byte(string(data)+"\n"), 0644)
+	// assert.Nil(t, err)
+
 	expectedManifestBytes, err := ioutil.ReadFile(expected)
 	expectedManifest := ocispec.Manifest{}
 	err = json.Unmarshal(expectedManifestBytes, &expectedManifest)
@@ -90,8 +95,9 @@ func convert(t *testing.T, source, target, cache string, oss bool) {
 		DockerV2Format: false,
 		BackendType:    "registry",
 
-		BuildCache:         cache,
-		BuildCacheInsecure: false,
+		BuildCache:           cache,
+		BuildCacheInsecure:   false,
+		BuildCacheMaxRecords: 200,
 	}
 
 	if oss {

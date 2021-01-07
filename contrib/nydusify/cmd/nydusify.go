@@ -70,6 +70,7 @@ func main() {
 				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
 				&cli.StringFlag{Name: "build-cache", Value: "", Usage: "An remote image reference for accelerating nydus image build", EnvVars: []string{"BUILD_CACHE"}},
 				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
+				&cli.UintFlag{Name: "build-cache-max-records", Value: 200, Usage: "Maximum cache records in cache image", EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"}},
 			},
 			Action: func(c *cli.Context) error {
 				source := c.String("source")
@@ -97,8 +98,6 @@ func main() {
 					target = named.String() + targetSuffix
 				}
 
-				// fmt.Printf("Converting %s to %s\n", source, target)
-
 				backendType := c.String("backend-type")
 				possibleBackendTypes := []string{"registry", "oss"}
 				if !isPossibleValue(possibleBackendTypes, backendType) {
@@ -124,21 +123,27 @@ func main() {
 					return fmt.Errorf("--backend-config or --backend-config-file required")
 				}
 
+				buildCacheMaxRecords := c.Uint("build-cache-max-records")
+				if buildCacheMaxRecords < 1 {
+					return fmt.Errorf("--build-cache-max-records should be greater than 0")
+				}
+
 				converter, err := converter.New(converter.Option{
 					Source:         source,
 					Target:         target,
 					SourceInsecure: c.Bool("source-insecure"),
 					TargetInsecure: c.Bool("target-insecure"),
 
-					WorkDir:            c.String("work-dir"),
-					PrefetchDir:        c.String("prefetch-dir"),
-					NydusImagePath:     c.String("nydus-image"),
-					MultiPlatform:      c.Bool("multi-platform"),
-					DockerV2Format:     c.Bool("docker-v2-format"),
-					BackendType:        backendType,
-					BackendConfig:      backendConfigJSON,
-					BuildCache:         c.String("build-cache"),
-					BuildCacheInsecure: c.Bool("build-cache-insecure"),
+					WorkDir:              c.String("work-dir"),
+					PrefetchDir:          c.String("prefetch-dir"),
+					NydusImagePath:       c.String("nydus-image"),
+					MultiPlatform:        c.Bool("multi-platform"),
+					DockerV2Format:       c.Bool("docker-v2-format"),
+					BackendType:          backendType,
+					BackendConfig:        backendConfigJSON,
+					BuildCache:           c.String("build-cache"),
+					BuildCacheInsecure:   c.Bool("build-cache-insecure"),
+					BuildCacheMaxRecords: c.Uint("build-cache-max-records"),
 				})
 				if err != nil {
 					return err

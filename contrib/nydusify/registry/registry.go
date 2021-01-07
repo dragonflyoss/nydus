@@ -26,7 +26,6 @@ import (
 
 	blobbackend "contrib/nydusify/backend"
 	"contrib/nydusify/cache"
-	buildcache "contrib/nydusify/cache"
 	"contrib/nydusify/utils"
 )
 
@@ -42,24 +41,22 @@ type Image struct {
 }
 
 type RegistryOption struct {
-	WorkDir            string
-	Source             string
-	Target             string
-	SourceInsecure     bool
-	TargetInsecure     bool
-	Backend            blobbackend.Backend
-	BuildCache         string
-	BuildCacheInsecure bool
-	SignatureKeyPath   string
-	MultiPlatform      bool
-	DockerV2Format     bool
+	WorkDir          string
+	Source           string
+	Target           string
+	SourceInsecure   bool
+	TargetInsecure   bool
+	Backend          blobbackend.Backend
+	BuildCache       *cache.Cache
+	SignatureKeyPath string
+	MultiPlatform    bool
+	DockerV2Format   bool
 }
 
 type Registry struct {
 	RegistryOption
 	source    Image
 	target    Image
-	cache     *cache.Cache
 	layerJobs []*LayerJob
 }
 
@@ -131,19 +128,6 @@ func New(option RegistryOption) (*Registry, error) {
 		targetImage = mutate.MediaType(targetImage, types.OCIManifestSchema1)
 	}
 
-	// Init Nydus build cache
-	var cache *buildcache.Cache
-	if option.BuildCache != "" {
-		cache, err = buildcache.New(buildcache.Opt{
-			Ref:            option.BuildCache,
-			Insecure:       option.BuildCacheInsecure,
-			DockerV2Format: option.DockerV2Format,
-		})
-		if err != nil {
-			return nil, errors.Wrap(err, "init build cache")
-		}
-	}
-
 	return &Registry{
 		RegistryOption: option,
 		source: Image{
@@ -156,7 +140,6 @@ func New(option RegistryOption) (*Registry, error) {
 			Ref:     targetRef,
 			Img:     &targetImage,
 		},
-		cache: cache,
 	}, nil
 }
 
@@ -187,11 +170,11 @@ func (registry *Registry) dumpConfig(image *Image) error {
 }
 
 func (registry *Registry) makeLayerJobByCache(sourceLayerChainID digest.Digest) (*LayerJob, error) {
-	if registry.cache == nil {
+	if registry.BuildCache == nil {
 		return nil, nil
 	}
 
-	record, err := registry.cache.Check(sourceLayerChainID)
+	record, err := registry.BuildCache.Check(sourceLayerChainID)
 	if err != nil {
 		return nil, errors.Wrap(err, "check cache record")
 	}
@@ -359,7 +342,7 @@ func (registry *Registry) Pull(build func(
 			}
 			targetPath := filepath.Join(targetDir, layerJob.Parent.SourceLayerChainID.String())
 			logrus.WithField("Digest", bootstrapDesc.Digest).Infof("[BOOT] Pulling")
-			if err := registry.cache.PullBootstrap(bootstrapDesc, targetPath); err != nil {
+			if err := registry.BuildCache.PullBootstrap(bootstrapDesc, targetPath); err != nil {
 				return "", errors.Wrap(err, "pull bootstrap")
 			}
 			logrus.WithField("Digest", bootstrapDesc.Digest).Infof("[BOOT] Pulled")
@@ -465,19 +448,19 @@ func (registry *Registry) PushManifest() error {
 }
 
 func (registry *Registry) PullCache() error {
-	if registry.cache == nil {
+	if registry.BuildCache == nil {
 		return nil
 	}
-	logrus.Infof("Pulling cache image %s", registry.BuildCache)
-	return registry.cache.Import()
+	logrus.Infof("Pulling cache image %s", registry.BuildCache.GetRef())
+	return registry.BuildCache.Import()
 }
 
 func (registry *Registry) PushCache() error {
-	if registry.cache == nil {
+	if registry.BuildCache == nil {
 		return nil
 	}
 
-	logrus.Infof("Pushing cache image %s", registry.BuildCache)
+	logrus.Infof("Pushing cache image %s", registry.BuildCache.GetRef())
 
 	cacheRecords := []cache.CacheRecordWithChainID{}
 
@@ -510,7 +493,7 @@ func (registry *Registry) PushCache() error {
 				return errors.Wrap(err, "get compressed")
 			}
 			defer reader.Close()
-			if err := registry.cache.PushBootstrap(reader, bootstrapDesc); err != nil {
+			if err := registry.BuildCache.PushBootstrap(reader, bootstrapDesc); err != nil {
 				return errors.Wrap(err, "push bootstrap")
 			}
 		}
@@ -534,13 +517,10 @@ func (registry *Registry) PushCache() error {
 
 	// Import cache from registry again, to use latest
 	// cache record list, ignore the error
-	if err := registry.cache.Import(); err != nil {
-		logrus.Warnf("Re-pull cache image %s: %s", registry.BuildCache, err)
-	}
+	registry.BuildCache.Import()
+	registry.BuildCache.Push(cacheRecords)
 
-	registry.cache.Push(cacheRecords)
-
-	if err := registry.cache.Export(); err != nil {
+	if err := registry.BuildCache.Export(); err != nil {
 		return errors.Wrap(err, "export cache")
 	}
 

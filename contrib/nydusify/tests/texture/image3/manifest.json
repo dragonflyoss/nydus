@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "config": {
     "mediaType": "application/vnd.docker.container.image.v1+json",
-    "digest": "sha256:9fc166b308c182ed65a44ee5226108b209098f4b09aa31e7e479dfe02be52cd1",
-    "size": 1612
+    "digest": "sha256:3efd3222cad0a12dd1f2045216426f5410b710894309c0f78cc8290a8d151658",
+    "size": 1878
   },
   "layers": [
     {
@@ -63,11 +63,27 @@
       }
     },
     {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:97bcf21d38d9f7649e2f349d989136654dab40ccc45395c2e4a64047b069b93c",
-      "size": 53790,
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:87790b12003ec58e0a786fc4aaeeb11c6d3bbbfa19f0d05fa2368771a7b83ffb",
+      "size": 6,
       "annotations": {
-        "containerd.io/snapshot/nydus-blob-ids": "[\"e326ec63a06e6a322e5351cd78a29d2efe53f23dd2bc649c5d620c882150440b\",\"a98665e859e4dff99d5ac2181b20e8e6be83a8332baccbdd0e1f603a7477a3d7\",\"5ece17685fbfbe4e121aec9ee55feab51c3c897783c529b51ef28fdcccbb128d\",\"80ce945afa59e96da2cb34941b743683d1680e5711cd77d15a837ca9bac144c9\",\"9962c19bcc2ee2c2436aeed84fef96628ed0a4cf2e80a48be1714b16d7323379\",\"634b027b1b69e1242d40d53e312b3b4ac7710f55be81f289b549446ef6778bee\",\"7d6fd7774f0d87624da6dcf16d0d3d104c3191e771fbe2f39c86aed4b2bf1a0f\"]",
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:ca458467d29de73271059416acfee73a246369b07747930955523013e2665a58",
+      "size": 6,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:ebd0d1630ea9afbec6ac4b12b35ee712d55c1eac07d3a1ad169596aed0df9df8",
+      "size": 54088,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob-ids": "[\"e326ec63a06e6a322e5351cd78a29d2efe53f23dd2bc649c5d620c882150440b\",\"a98665e859e4dff99d5ac2181b20e8e6be83a8332baccbdd0e1f603a7477a3d7\",\"5ece17685fbfbe4e121aec9ee55feab51c3c897783c529b51ef28fdcccbb128d\",\"80ce945afa59e96da2cb34941b743683d1680e5711cd77d15a837ca9bac144c9\",\"9962c19bcc2ee2c2436aeed84fef96628ed0a4cf2e80a48be1714b16d7323379\",\"634b027b1b69e1242d40d53e312b3b4ac7710f55be81f289b549446ef6778bee\",\"7d6fd7774f0d87624da6dcf16d0d3d104c3191e771fbe2f39c86aed4b2bf1a0f\",\"87790b12003ec58e0a786fc4aaeeb11c6d3bbbfa19f0d05fa2368771a7b83ffb\",\"ca458467d29de73271059416acfee73a246369b07747930955523013e2665a58\"]",
         "containerd.io/snapshot/nydus-bootstrap": "true"
       }
     }

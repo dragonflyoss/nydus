@@ -12,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	blobbackend "contrib/nydusify/backend"
+	"contrib/nydusify/cache"
 	"contrib/nydusify/nydus"
 	"contrib/nydusify/registry"
 )
@@ -32,13 +33,13 @@ type Option struct {
 	BackendType   string
 	BackendConfig string
 
-	BuildCache         string
-	BuildCacheInsecure bool
+	BuildCache           string
+	BuildCacheInsecure   bool
+	BuildCacheMaxRecords uint
 }
 
 type Converter struct {
 	Option
-	backend   blobbackend.Backend
 	sourceDir string
 	targetDir string
 }
@@ -59,15 +60,8 @@ func New(option Option) (*Converter, error) {
 		return nil, err
 	}
 
-	// Parse blob storage backend config
-	backend, err := blobbackend.NewBackend(option.BackendType, option.BackendConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "init blob backend")
-	}
-
 	converter := Converter{
 		Option:    option,
-		backend:   backend,
 		sourceDir: sourceDir,
 		targetDir: targetDir,
 	}
@@ -77,23 +71,48 @@ func New(option Option) (*Converter, error) {
 
 // Convert source image to nydus(target) image
 func (converter *Converter) Convert() error {
-	reg, err := registry.New(registry.RegistryOption{
-		WorkDir:            converter.WorkDir,
-		Source:             converter.Source,
-		Target:             converter.Target,
-		SourceInsecure:     converter.SourceInsecure,
-		TargetInsecure:     converter.TargetInsecure,
-		Backend:            converter.backend,
-		BuildCache:         converter.BuildCache,
-		BuildCacheInsecure: converter.BuildCacheInsecure,
-		SignatureKeyPath:   converter.SignatureKeyPath,
-		MultiPlatform:      converter.MultiPlatform,
-		DockerV2Format:     converter.DockerV2Format,
-	})
-	if err != nil {
-		return err
+	// Init Nydus build cache
+	var buildCache *cache.Cache
+	if converter.BuildCache != "" {
+		_cache, err := cache.New(cache.Opt{
+			Ref:            converter.BuildCache,
+			Insecure:       converter.BuildCacheInsecure,
+			MaxRecords:     converter.BuildCacheMaxRecords,
+			DockerV2Format: converter.DockerV2Format,
+		})
+		if err != nil {
+			return errors.Wrap(err, "init build cache")
+		}
+		buildCache = _cache
 	}
 
+	// Init blob storage backend
+	backend, err := blobbackend.NewBackend(
+		converter.BackendType, converter.BackendConfig,
+	)
+	if err != nil {
+		return errors.Wrap(err, "init blob backend")
+	}
+
+	// Init registry for pulling & pushing
+	reg, err := registry.New(registry.RegistryOption{
+		WorkDir:          converter.WorkDir,
+		Source:           converter.Source,
+		Target:           converter.Target,
+		SourceInsecure:   converter.SourceInsecure,
+		TargetInsecure:   converter.TargetInsecure,
+		SignatureKeyPath: converter.SignatureKeyPath,
+		MultiPlatform:    converter.MultiPlatform,
+		DockerV2Format:   converter.DockerV2Format,
+
+		Backend:    backend,
+		BuildCache: buildCache,
+	})
+	if err != nil {
+		return errors.Wrap(err, "init registry")
+	}
+
+	// Init build flow for Nydus building layer by layer
 	buildFlow, err := nydus.NewBuildFlow(nydus.BuildFlowOption{
 		SourceDir:      converter.sourceDir,
 		TargetDir:      converter.targetDir,
@@ -101,7 +120,7 @@ func (converter *Converter) Convert() error {
 		PrefetchDir:    converter.PrefetchDir,
 	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "init build flow")
 	}
 
 	// Pull Nydus cache image from registry

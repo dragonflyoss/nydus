@@ -26,10 +26,10 @@ import (
 	"github.com/pkg/errors"
 )
 
-const maxRecordCountInConfig = 200
 const currentRafsVersion = 0x500
 
 type Opt struct {
+	MaxRecords     uint
 	Ref            string
 	Insecure       bool
 	DockerV2Format bool
@@ -282,14 +282,14 @@ func (cache *Cache) Push(records []CacheRecordWithChainID) {
 	for _, record := range cache.pushedRecords {
 		if !moveFront[record.SourceChainID] {
 			pushedRecords = append(pushedRecords, record)
-			if len(pushedRecords) >= maxRecordCountInConfig {
+			if len(pushedRecords) >= int(cache.opt.MaxRecords) {
 				break
 			}
 		}
 	}
 
-	if len(pushedRecords) > maxRecordCountInConfig {
-		cache.pushedRecords = pushedRecords[:maxRecordCountInConfig]
+	if len(pushedRecords) > int(cache.opt.MaxRecords) {
+		cache.pushedRecords = pushedRecords[:int(cache.opt.MaxRecords)]
 	} else {
 		cache.pushedRecords = pushedRecords
 	}
