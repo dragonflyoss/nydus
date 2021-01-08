@@ -157,6 +157,11 @@ func (converter *Converter) Convert() error {
 		return errors.Wrap(err, "push manifest")
 	}
 
+	// Write output info for debugging
+	if err := reg.Output(); err != nil {
+		return errors.Wrap(err, "output debug info")
+	}
+
 	logrus.Infof("Converted image %s to %s", converter.Source, converter.Target)
 
 	return nil

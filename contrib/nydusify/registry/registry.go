@@ -143,32 +143,6 @@ func New(option RegistryOption) (*Registry, error) {
 	}, nil
 }
 
-func (registry *Registry) dumpManifest(image *Image) error {
-	rawManifest, err := (*image.Img).RawManifest()
-	if err != nil {
-		return errors.Wrap(err, "get image manifest")
-	}
-	manifestFile := filepath.Join(image.WorkDir, "manifest.json")
-	if err := ioutil.WriteFile(manifestFile, rawManifest, 0644); err != nil {
-		return errors.Wrap(err, "write image manifest")
-	}
-
-	return nil
-}
-
-func (registry *Registry) dumpConfig(image *Image) error {
-	rawConfig, err := (*image.Img).RawConfigFile()
-	if err != nil {
-		return errors.Wrap(err, "get image config")
-	}
-	manifestFile := filepath.Join(image.WorkDir, "config.json")
-	if err := ioutil.WriteFile(manifestFile, rawConfig, 0644); err != nil {
-		return errors.Wrap(err, "write image config")
-	}
-
-	return nil
-}
-
 func (registry *Registry) makeLayerJobByCache(sourceLayerChainID digest.Digest) (*LayerJob, error) {
 	if registry.BuildCache == nil {
 		return nil, nil
@@ -269,11 +243,6 @@ func (registry *Registry) Pull(build func(
 	*LayerJob,
 	func(string) (string, error),
 ) error) error {
-	// Write source manifest to json file
-	if err := registry.dumpManifest(&registry.source); err != nil {
-		return errors.Wrap(err, "dump source manifest")
-	}
-
 	// Start worker pool for pulling & decompressing
 	layers, err := (*registry.source.Img).Layers()
 	if err != nil {
@@ -390,16 +359,6 @@ func (registry *Registry) PushManifest() error {
 
 	if err := registry.makeTargetImageLayers(); err != nil {
 		return err
-	}
-
-	// Write target manifest to json file
-	if err := registry.dumpManifest(&registry.target); err != nil {
-		return errors.Wrap(err, "dump target manifest")
-	}
-
-	// Write target config to json file
-	if err := registry.dumpConfig(&registry.target); err != nil {
-		return errors.Wrap(err, "dump target config")
 	}
 
 	imageIndex := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
@@ -522,6 +481,72 @@ func (registry *Registry) PushCache() error {
 
 	if err := registry.BuildCache.Export(); err != nil {
 		return errors.Wrap(err, "export cache")
+	}
+
+	return nil
+}
+
+func (registry *Registry) Output() error {
+	sourceManifest, err := (*registry.source.Img).Manifest()
+	if err != nil {
+		return errors.Wrap(err, "get source image manifest")
+	}
+
+	targetManifest, err := (*registry.target.Img).Manifest()
+	if err != nil {
+		return errors.Wrap(err, "get target image manifest")
+	}
+
+	sourceConfig, err := (*registry.source.Img).ConfigFile()
+	if err != nil {
+		return errors.Wrap(err, "get source image config")
+	}
+
+	targetConfig, err := (*registry.target.Img).ConfigFile()
+	if err != nil {
+		return errors.Wrap(err, "get target image config")
+	}
+
+	layerInfos := []map[string]string{}
+	for idx := range registry.layerJobs {
+		layerInfo := map[string]string{}
+
+		layerJob := registry.layerJobs[idx]
+
+		if layerJob.TargetBlobLayer != nil {
+			desc, err := layerJob.TargetBlobLayer.Desc()
+			if err != nil {
+				return errors.Wrap(err, "get blob desc")
+			}
+			layerInfo["targetBlobDigest"] = desc.Digest.String()
+		}
+
+		desc, err := layerJob.TargetBootstrapLayer.Desc()
+		if err != nil {
+			return errors.Wrap(err, "get bootstrap desc")
+		}
+		layerInfo["targetBootstrapDigest"] = desc.Digest.String()
+		layerInfo["sourceChainID"] = layerJob.SourceLayerChainID.String()
+
+		layerInfos = append(layerInfos, layerInfo)
+	}
+
+	output := map[string]interface{}{
+		"layerInfos":     layerInfos,
+		"sourceManifest": sourceManifest,
+		"targetManifest": targetManifest,
+		"sourceConfig":   sourceConfig,
+		"targetConfig":   targetConfig,
+	}
+
+	outputBytes, err := json.Marshal(output)
+	if err != nil {
+		return err
+	}
+
+	manifestFile := filepath.Join(registry.target.WorkDir, "output.json")
+	if err := ioutil.WriteFile(manifestFile, outputBytes, 0644); err != nil {
+		return errors.Wrap(err, "write output")
 	}
 
 	return nil
