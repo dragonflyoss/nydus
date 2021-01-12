@@ -1,4 +1,4 @@
-FROM rust:1.43
+FROM rust:1.49.0
 
 RUN echo '[source.crates-io] \n\
 registry = "https://github.com/rust-lang/crates.io-index"'\

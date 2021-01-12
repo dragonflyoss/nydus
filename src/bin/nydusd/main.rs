@@ -313,7 +313,7 @@ fn main() -> Result<()> {
     let mut event_manager = EventManager::<Arc<dyn SubscriberWrapper>>::new().unwrap();
 
     let vfs = Arc::new(vfs);
-    if apisock != "" {
+    if !apisock.is_empty() {
         let vfs = Arc::clone(&vfs);
 
         let (to_api, from_http) = channel();

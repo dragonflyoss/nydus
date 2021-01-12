@@ -227,12 +227,13 @@ impl TocEntry {
     }
 
     pub fn new_dir(path: PathBuf) -> Self {
-        let mut entry = TocEntry::default();
-        entry.name = path;
-        entry.toc_type = String::from("dir");
-        entry.mode = 0o755;
-        entry.num_link = 2;
-        entry
+        TocEntry {
+            name: path,
+            toc_type: String::from("dir"),
+            mode: 0o755,
+            num_link: 2,
+            ..Default::default()
+        }
     }
 }
 

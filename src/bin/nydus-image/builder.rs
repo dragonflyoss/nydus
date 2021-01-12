@@ -325,9 +325,12 @@ impl Builder {
     /// Apply new node (upper layer from filesystem directory) to
     /// bootstrap node tree (lower layer from bootstrap file)
     pub fn apply_to_bootstrap(&mut self) -> Result<()> {
-        let mut rs = RafsSuper::default();
-        rs.mode = RafsMode::Direct;
-        rs.digest_validate = true;
+        let mut rs = RafsSuper {
+            mode: RafsMode::Direct,
+            digest_validate: true,
+            ..Default::default()
+        };
+
         rs.load(self.f_parent_bootstrap.as_mut().unwrap())?;
 
         let lower_compressor = rs.meta.get_compressor();
@@ -475,10 +478,12 @@ impl Builder {
         let (blob_hash, blob_size, mut blob_readahead_size) = self.dump_blob()?;
 
         // Set blob hash as blob id if not specified.
-        if self.blob_id == "" {
+        if self.blob_id.is_empty() {
             self.blob_id = format!("{:x}", blob_hash.finalize());
         }
-        if blob_size > 0 || (self.source_type == SourceType::StargzIndex && self.blob_id != "") {
+        if blob_size > 0
+            || (self.source_type == SourceType::StargzIndex && !self.blob_id.is_empty())
+        {
             if self.prefetch_policy != PrefetchPolicy::Blob {
                 blob_readahead_size = 0;
             }

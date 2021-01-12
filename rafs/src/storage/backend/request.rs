@@ -135,7 +135,7 @@ impl Request {
         info!("backend config: {:?}", config);
         let client = Self::build_client("", &config)?;
         let proxy = if !config.proxy.url.is_empty() {
-            let ping_url = if config.proxy.ping_url != "" {
+            let ping_url = if !config.proxy.ping_url.is_empty() {
                 Some(Url::from_str(&config.proxy.ping_url).map_err(|e| einval!(e))?)
             } else {
                 None

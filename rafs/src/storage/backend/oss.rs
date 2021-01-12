@@ -78,7 +78,7 @@ impl OSS {
             }
         }
         let canonicalized_oss_headers = canonicalized_oss_headers.join("\n");
-        if canonicalized_oss_headers != "" {
+        if !canonicalized_oss_headers.is_empty() {
             data.insert(4, canonicalized_oss_headers.as_str());
         }
         let data = data.join("\n");
@@ -99,7 +99,7 @@ impl OSS {
     }
 
     fn resource(&self, object_key: &str, query_str: &str) -> String {
-        if self.bucket_name != "" {
+        if !self.bucket_name.is_empty() {
             format!("/{}/{}{}", self.bucket_name, object_key, query_str)
         } else {
             format!("/{}{}", object_key, query_str)
@@ -107,7 +107,7 @@ impl OSS {
     }
 
     fn url(&self, object_key: &str, query: &[&str]) -> Result<(String, String)> {
-        let url = if self.bucket_name != "" {
+        let url = if !self.bucket_name.is_empty() {
             format!("{}://{}.{}", self.scheme, self.bucket_name, self.endpoint)
         } else {
             format!("{}://{}", self.scheme, self.endpoint)
