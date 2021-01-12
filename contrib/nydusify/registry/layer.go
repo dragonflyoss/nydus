@@ -25,6 +25,8 @@ type Layer struct {
 	compressedSize     *int64
 	compressedDigest   *v1.Hash
 	decompressedDigest *v1.Hash
+
+	compressedReader io.ReadCloser
 }
 
 func (layer *Layer) sourceReader() (io.ReadCloser, error) {
@@ -123,6 +125,10 @@ func (layer *Layer) Size() (int64, error) {
 
 // Compressed returns an io.ReadCloser for the compressed (.tar.gz) layer contents.
 func (layer *Layer) Compressed() (io.ReadCloser, error) {
+	if layer.compressedReader != nil {
+		return layer.compressedReader, nil
+	}
+
 	reader, err := layer.sourceReader()
 	if err != nil {
 		return nil, err
@@ -151,7 +157,7 @@ func (layer *Layer) MediaType() (types.MediaType, error) {
 	return types.MediaType(layer.mediaType), nil
 }
 
-func DescToLayer(desc ocispec.Descriptor, diffID digest.Digest) (*Layer, error) {
+func DescToLayer(desc ocispec.Descriptor, diffID digest.Digest, compressedReader io.ReadCloser) (*Layer, error) {
 	layerDigest, err := v1.NewHash(desc.Digest.String())
 	if err != nil {
 		return nil, err
@@ -165,6 +171,7 @@ func DescToLayer(desc ocispec.Descriptor, diffID digest.Digest) (*Layer, error) 
 		compressedSize:     &desc.Size,
 		compressedDigest:   &layerDigest,
 		decompressedDigest: &layerDiffID,
+		compressedReader:   compressedReader,
 	}, nil
 }
 

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package cache
+package remote
 
 import (
 	"context"
@@ -43,6 +43,9 @@ func newDefaultClient() *http.Client {
 }
 
 func hostWithCredential(host string) (string, string, error) {
+	// The host of docker hub image will be converted to `registry-1.docker.io` in:
+	// github.com/containerd/containerd/remotes/docker/registry.go
+	// But we need use the key `https://index.docker.io/v1/` to find auth from docker config.
 	if host == "registry-1.docker.io" {
 		host = "https://index.docker.io/v1/"
 	}
@@ -122,7 +125,7 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 	return writer, nil
 }
 
-func (remote *Remote) PushByReader(ctx context.Context, desc *ocispec.Descriptor, byDigest bool, reader io.Reader) error {
+func (remote *Remote) PushFromReader(ctx context.Context, desc *ocispec.Descriptor, byDigest bool, reader io.Reader) error {
 	writer, err := remote.Push(ctx, *desc, byDigest)
 	if err != nil {
 		return err

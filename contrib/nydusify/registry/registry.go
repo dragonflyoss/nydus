@@ -148,9 +148,10 @@ func (registry *Registry) makeLayerJobByCache(sourceLayerChainID digest.Digest) 
 		return nil, nil
 	}
 
-	record, err := registry.BuildCache.Check(sourceLayerChainID)
+	record, bootstrapReader, blobReader, err := registry.BuildCache.Check(sourceLayerChainID)
 	if err != nil {
-		return nil, errors.Wrap(err, "check cache record")
+		logrus.Warnf("failed to check cache record: %s", err)
+		return nil, nil
 	}
 	if record == nil {
 		return nil, nil
@@ -158,13 +159,13 @@ func (registry *Registry) makeLayerJobByCache(sourceLayerChainID digest.Digest) 
 
 	var cachedBlobLayer *Layer
 	if record.NydusBlobDesc != nil {
-		cachedBlobLayer, err = DescToLayer(*record.NydusBlobDesc, record.NydusBlobDesc.Digest)
+		cachedBlobLayer, err = DescToLayer(*record.NydusBlobDesc, record.NydusBlobDesc.Digest, blobReader)
 		if err != nil {
 			return nil, errors.Wrap(err, "blob desc to layer")
 		}
 	}
 
-	cachedBootstrapLayer, err := DescToLayer(*record.NydusBootstrapDesc, record.NydusBootstrapDiffID)
+	cachedBootstrapLayer, err := DescToLayer(*record.NydusBootstrapDesc, record.NydusBootstrapDiffID, bootstrapReader)
 	if err != nil {
 		return nil, errors.Wrap(err, "bootstrap desc to layer")
 	}
@@ -180,7 +181,11 @@ func (registry *Registry) makeLayerJobByCache(sourceLayerChainID digest.Digest) 
 	}, nil
 }
 
-func (registry *Registry) makeTargetImageLayers() error {
+func (registry *Registry) MakeTargetImage() error {
+	if len(registry.layerJobs) == 0 {
+		return nil
+	}
+
 	blobIDs := []string{}
 	for idx, job := range registry.layerJobs {
 		if job.TargetBlobLayer != nil {
@@ -357,10 +362,6 @@ func (registry *Registry) PushManifest() error {
 		OSFeatures:   []string{utils.ManifestOSFeatureNydus},
 	}
 
-	if err := registry.makeTargetImageLayers(); err != nil {
-		return err
-	}
-
 	imageIndex := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
 		Add: *registry.source.Img,
 		Descriptor: v1.Descriptor{
@@ -444,16 +445,26 @@ func (registry *Registry) PushCache() error {
 		}
 
 		if !layerJob.Cached {
-			// Push bootstrap layer to cache image, should be fast
-			// because the layer has been pushed to registry in the
-			// previous nydus build workflow
-			reader, err := bootstrapLayer.Compressed()
+			// Push bootstrap and blob layer to cache image, should be fast
+			// because the layer has been pushed to registry in the previous
+			// nydus build workflow
+			bootstrapReader, err := bootstrapLayer.Compressed()
 			if err != nil {
-				return errors.Wrap(err, "get compressed")
+				return errors.Wrap(err, "get compressed bootstrap")
 			}
-			defer reader.Close()
-			if err := registry.BuildCache.PushBootstrap(reader, bootstrapDesc); err != nil {
-				return errors.Wrap(err, "push bootstrap")
+			defer bootstrapReader.Close()
+			if err := registry.BuildCache.PushFromReader(bootstrapReader, bootstrapDesc); err != nil {
+				return errors.Wrap(err, "push cached bootstrap")
+			}
+			if blobDesc != nil {
+				blobReader, err := blobLayer.Compressed()
+				if err != nil {
+					return errors.Wrap(err, "get compressed blob")
+				}
+				defer blobReader.Close()
+				if err := registry.BuildCache.PushFromReader(blobReader, blobDesc); err != nil {
+					return errors.Wrap(err, "push cached blob")
+				}
 			}
 		}
 

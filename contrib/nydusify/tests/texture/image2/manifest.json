@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "config": {
     "mediaType": "application/vnd.docker.container.image.v1+json",
-    "digest": "sha256:256f768a6ccd5a0a0512197babaadb98ada91cc9dde7e0506df25dc9e7a5b4c6",
+    "digest": "sha256:ef8c9379f7737f5cca800e0025d8b3e94e6ab9436e5c93facd8c19dda79110f7",
     "size": 1612
   },
   "layers": [

@@ -15,8 +15,8 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 
-	"contrib/nydusify/cache"
 	"contrib/nydusify/converter"
+	"contrib/nydusify/remote"
 )
 
 func run(t *testing.T, cmd string, ignoreStatus bool) {
@@ -41,7 +41,7 @@ func after(t *testing.T) {
 }
 
 func assertImage(t *testing.T, ref string, expected string) {
-	remote, err := cache.NewRemote(cache.RemoteOpt{
+	remote, err := remote.NewRemote(remote.RemoteOpt{
 		Ref:      "localhost:5000/" + ref,
 		Insecure: true,
 	})

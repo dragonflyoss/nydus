@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 
+	"contrib/nydusify/remote"
 	"contrib/nydusify/utils"
 
 	"github.com/containerd/containerd/content"
@@ -36,7 +37,7 @@ type Opt struct {
 }
 
 type Cache struct {
-	remote        *Remote
+	remote        *remote.Remote
 	opt           Opt
 	pulledRecords map[digest.Digest]int
 	pushedRecords []CacheRecordWithChainID
@@ -57,7 +58,7 @@ type Cache struct {
 //    skip layer build if the cache hit;
 // 3. Export new cache records to registry;
 func New(opt Opt) (*Cache, error) {
-	remote, err := NewRemote(RemoteOpt{
+	remote, err := remote.NewRemote(remote.RemoteOpt{
 		Ref:      opt.Ref,
 		Insecure: opt.Insecure,
 	})
@@ -167,6 +168,33 @@ func (cache *Cache) Export() error {
 
 	layers := cache.exportRecordsToLayers()
 
+	// Prepare empty image config, just for registry API compatibility,
+	// manifest requires a valid config field.
+	configMediaType := ocispec.MediaTypeImageConfig
+	config := ocispec.Image{
+		Config: ocispec.ImageConfig{},
+		RootFS: ocispec.RootFS{},
+	}
+	if cache.opt.DockerV2Format {
+		configMediaType = images.MediaTypeDockerSchema2Config
+	}
+	configDesc, configBytes, err := utils.MarshalToDesc(config, configMediaType)
+	if err != nil {
+		return err
+	}
+	configWriter, err := cache.remote.Push(cache.ctx, *configDesc, false)
+	if err != nil {
+		return errors.Wrap(err, "push cache config")
+	}
+	if configWriter != nil {
+		defer configWriter.Close()
+		if err := content.Copy(
+			cache.ctx, configWriter, bytes.NewReader(configBytes), configDesc.Size, configDesc.Digest,
+		); err != nil {
+			return errors.Wrap(err, "write cache config")
+		}
+	}
+
 	// Push cache manifest to remote registry
 	mediaType := ocispec.MediaTypeImageManifest
 	if cache.opt.DockerV2Format {
@@ -179,13 +207,7 @@ func (cache *Cache) Export() error {
 			Versioned: specs.Versioned{
 				SchemaVersion: 2,
 			},
-			// Just for registry API compatibility, registry requires a
-			// valid config field with existed blob.
-			Config: ocispec.Descriptor{
-				Digest:    layers[0].Digest,
-				Size:      layers[0].Size,
-				MediaType: layers[0].MediaType,
-			},
+			Config: *configDesc,
 			Layers: layers,
 			Annotations: map[string]string{
 				utils.ManifestNydusCache: utils.ManifestNydusCacheV1,
@@ -243,33 +265,32 @@ func (cache *Cache) Import() error {
 	return nil
 }
 
-func (cache *Cache) Check(layerChainID digest.Digest) (*CacheRecordWithChainID, error) {
+func (cache *Cache) Check(layerChainID digest.Digest) (*CacheRecordWithChainID, io.ReadCloser, io.ReadCloser, error) {
 	idx, ok := cache.pulledRecords[layerChainID]
 	if !ok {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	if idx+1 > len(cache.pushedRecords) {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	found := cache.pushedRecords[idx]
 
 	// Check bootstrap layer on remote
-	reader, err := cache.remote.Pull(cache.ctx, *found.NydusBootstrapDesc, true)
+	bootstrapReader, err := cache.remote.Pull(cache.ctx, *found.NydusBootstrapDesc, true)
 	if err != nil {
-		return nil, errors.Wrap(err, "check bootstrap layer")
+		return nil, nil, nil, errors.Wrap(err, "check bootstrap layer")
 	}
-	defer reader.Close()
 
 	// Check blob layer on remote
 	if found.NydusBlobDesc != nil {
-		reader, err := cache.remote.Pull(cache.ctx, *found.NydusBlobDesc, true)
+		blobReader, err := cache.remote.Pull(cache.ctx, *found.NydusBlobDesc, true)
 		if err != nil {
-			return nil, errors.Wrap(err, "check blob layer")
+			return nil, nil, nil, errors.Wrap(err, "check blob layer")
 		}
-		defer reader.Close()
+		return &found, bootstrapReader, blobReader, nil
 	}
 
-	return &found, nil
+	return &found, bootstrapReader, nil, nil
 }
 
 func (cache *Cache) Push(records []CacheRecordWithChainID) {
@@ -306,6 +327,7 @@ func (cache *Cache) PullBootstrap(bootstrapDesc *ocispec.Descriptor, target stri
 	if err != nil {
 		return errors.Wrap(err, "decompress cached bootstrap layer")
 	}
+	defer rdr.Close()
 
 	found := false
 	tr := tar.NewReader(rdr)
@@ -339,8 +361,8 @@ func (cache *Cache) PullBootstrap(bootstrapDesc *ocispec.Descriptor, target stri
 	return nil
 }
 
-func (cache *Cache) PushBootstrap(reader io.Reader, bootstrapDesc *ocispec.Descriptor) error {
-	return cache.remote.PushByReader(cache.ctx, bootstrapDesc, true, reader)
+func (cache *Cache) PushFromReader(reader io.Reader, desc *ocispec.Descriptor) error {
+	return cache.remote.PushFromReader(cache.ctx, desc, true, reader)
 }
 
 func (cache *Cache) GetRef() string {

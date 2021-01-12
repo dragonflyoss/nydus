@@ -147,9 +147,14 @@ func (converter *Converter) Convert() error {
 		return errors.Wrap(err, "build source layer")
 	}
 
-	// Push Nydus cache image
-	if err := reg.PushCache(); err != nil {
-		return errors.Wrap(err, "push cache image")
+	// Append all target layers to target image
+	if err := reg.MakeTargetImage(); err != nil {
+		return errors.Wrap(err, "make target image")
+	}
+
+	// Write output info for debugging
+	if err := reg.Output(); err != nil {
+		return errors.Wrap(err, "output debug info")
 	}
 
 	// Push target manifest or index
@@ -157,9 +162,9 @@ func (converter *Converter) Convert() error {
 		return errors.Wrap(err, "push manifest")
 	}
 
-	// Write output info for debugging
-	if err := reg.Output(); err != nil {
-		return errors.Wrap(err, "output debug info")
+	// Push Nydus cache image
+	if err := reg.PushCache(); err != nil {
+		return errors.Wrap(err, "push cache image")
 	}
 
 	logrus.Infof("Converted image %s to %s", converter.Source, converter.Target)
