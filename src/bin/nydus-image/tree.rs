@@ -90,15 +90,11 @@ impl<'a> MetadataTreeBuilder<'a> {
         };
 
         // Parse xattrs
-        let mut xattrs = XAttrs {
-            pairs: HashMap::new(),
-        };
+        let mut xattrs = XAttrs::new();
         for name in inode.get_xattrs()? {
             let name = bytes_to_os_str(&name);
             let value = inode.get_xattr(name)?;
-            xattrs
-                .pairs
-                .insert(name.to_os_string(), value.unwrap_or_else(Vec::new));
+            xattrs.add(name.to_os_string(), value.unwrap_or_else(Vec::new));
         }
 
         // Get OndiskInode
@@ -272,9 +268,7 @@ impl StargzIndexTreeBuilder {
         };
 
         // Parse xattrs
-        let mut xattrs = XAttrs {
-            pairs: HashMap::new(),
-        };
+        let mut xattrs = XAttrs::new();
         if entry.has_xattr() {
             for (name, value) in entry.xattrs.iter() {
                 flags |= RafsInodeFlags::XATTR;
@@ -284,7 +278,7 @@ impl StargzIndexTreeBuilder {
                         entry_path, name,
                     )
                 })?;
-                xattrs.pairs.insert(name.into(), value);
+                xattrs.add(name.into(), value);
             }
         }
 
@@ -379,7 +373,10 @@ impl FilesystemTreeBuilder {
 
             // Per as to OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
-            if child.whiteout_type(whiteout_spec).is_some() && !self.layered {
+            if child.whiteout_type(whiteout_spec).is_some()
+                && !child.is_overlayfs_opaque(whiteout_spec)
+                && !self.layered
+            {
                 continue;
             }
 
@@ -389,9 +386,9 @@ impl FilesystemTreeBuilder {
                 continue;
             }
 
-            let mut child_tree = Tree::new(child);
-            child_tree.children = self.load_children(&mut child_tree.node, whiteout_spec)?;
-            result.push(child_tree);
+            let mut child = Tree::new(child);
+            child.children = self.load_children(&mut child.node, whiteout_spec)?;
+            result.push(child);
         }
 
         Ok(result)
@@ -475,8 +472,14 @@ impl Tree {
         whiteout_spec: &WhiteoutSpec,
     ) -> Result<bool> {
         // Handle whiteout file
-        if handle_whiteout && target.whiteout_type(whiteout_spec).is_some() {
-            return self.remove(target, whiteout_spec);
+        if handle_whiteout {
+            if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
+                if whiteout_type == WhiteoutType::OverlayFSOpaque {
+                    self.remove(target, whiteout_spec)?;
+                    return self.apply(target, false, whiteout_spec);
+                }
+                return self.remove(target, whiteout_spec);
+            }
         }
 
         let target_paths = target.path_vec();

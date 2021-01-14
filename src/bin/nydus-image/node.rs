@@ -32,6 +32,7 @@ const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
 pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
+pub const OVERLAYFS_WHITEOUT_OPAQUE: &str = "trusted.overlay.opaque";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WhiteoutType {
@@ -188,14 +189,21 @@ impl Node {
         for key in file_xattrs {
             let value = xattr::get(&self.path, &key)
                 .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
-            self.xattrs.pairs.insert(key, value.unwrap_or_default());
+            self.xattrs.add(key, value.unwrap_or_default());
         }
 
-        if !self.xattrs.pairs.is_empty() {
+        if !self.xattrs.is_empty() {
             self.inode.i_flags |= RafsInodeFlags::XATTR;
         }
 
         Ok(())
+    }
+
+    pub fn remove_xattr(&mut self, key: &OsStr) {
+        self.xattrs.remove(key);
+        if self.xattrs.is_empty() {
+            self.inode.i_flags.remove(RafsInodeFlags::XATTR);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -327,7 +335,7 @@ impl Node {
         node_size += inode_size;
 
         // Dump inode xattr
-        if !self.xattrs.pairs.is_empty() {
+        if !self.xattrs.is_empty() {
             let xattr_size = self
                 .xattrs
                 .store(f_bootstrap)
@@ -497,18 +505,14 @@ impl Node {
             && stat::minor(self.rdev) == 0
     }
 
-    fn is_overlayfs_opaque(&self, spec: &WhiteoutSpec) -> bool {
+    pub fn is_overlayfs_opaque(&self, spec: &WhiteoutSpec) -> bool {
         if *spec != WhiteoutSpec::Overlayfs {
             return false;
         }
 
         // A directory is made opaque by setting the xattr
         // "trusted.overlay.opaque" to "y".
-        if let Some(v) = self
-            .xattrs
-            .pairs
-            .get(&OsString::from("trusted.overlay.opaque"))
-        {
+        if let Some(v) = self.xattrs.get(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE)) {
             if let Ok(v) = std::str::from_utf8(v.as_slice()) {
                 return v == "y";
             }

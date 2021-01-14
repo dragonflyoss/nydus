@@ -5,6 +5,7 @@
 //! Bootstrap and blob file builder for RAFS format
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::BufWriter;
 use std::mem::size_of;
@@ -237,6 +238,14 @@ impl Builder {
     /// Traverse node tree, set inode index, ino, child_index and
     /// child_count etc according to RAFS format, then store to nodes collection.
     fn build_rafs(&mut self, tree: &mut Tree, nodes: &mut Vec<Node>) {
+        // FIX: Insert parent inode to inode map to keep correct inodes count in superblock.
+        let inode_map = if tree.node.overlay.lower_layer() {
+            &mut self.lower_inode_map
+        } else {
+            &mut self.upper_inode_map
+        };
+        inode_map.insert((tree.node.real_ino, tree.node.dev), vec![tree.node.index]);
+
         let index = nodes.len() as u64;
         let parent = &mut nodes[tree.node.index as usize - 1];
 
@@ -294,12 +303,31 @@ impl Builder {
             // Store node for bootstrap & blob dump.
             // Put the whiteout file of upper layer in the front of node list for layered build,
             // so that it can be applied to the node tree of lower layer first than other files of upper layer.
-            if self.f_parent_bootstrap.is_some()
-                && child.node.whiteout_type(&self.whiteout_spec).is_some()
-            {
-                nodes.insert(0, child.node.clone());
-            } else {
-                nodes.push(child.node.clone());
+            match (
+                &self.f_parent_bootstrap,
+                child.node.whiteout_type(&self.whiteout_spec),
+            ) {
+                (Some(_), Some(whiteout_type)) => {
+                    // For the overlayfs opaque, we need to remove the lower node that has the same name
+                    // first, then apply upper node to the node tree of lower layer.
+                    nodes.insert(0, child.node.clone());
+                    if whiteout_type == WhiteoutType::OverlayFSOpaque {
+                        let mut node = child.node.clone();
+                        node.remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
+                        nodes.push(node);
+                    }
+                }
+                (None, Some(whiteout_type)) => {
+                    if whiteout_type == WhiteoutType::OverlayFSOpaque {
+                        child
+                            .node
+                            .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
+                    }
+                    nodes.push(child.node.clone());
+                }
+                _ => {
+                    nodes.push(child.node.clone());
+                }
             }
 
             if self.need_prefetch(&child.node) {
@@ -603,7 +631,7 @@ impl Builder {
             inode_offset += node.inode.size() as u32;
             if node.inode.has_xattr() {
                 has_xattr = true;
-                if !node.xattrs.pairs.is_empty() {
+                if !node.xattrs.is_empty() {
                     inode_offset += (size_of::<OndiskXAttrs>() + node.xattrs.aligned_size()) as u32;
                 }
             }
