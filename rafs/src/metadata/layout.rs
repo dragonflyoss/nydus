@@ -936,10 +936,16 @@ pub type XattrValue = Vec<u8>;
 
 #[derive(Clone, Default)]
 pub struct XAttrs {
-    pub pairs: HashMap<OsString, XattrValue>,
+    pairs: HashMap<OsString, XattrValue>,
 }
 
 impl XAttrs {
+    pub fn new() -> Self {
+        Self {
+            pairs: HashMap::new(),
+        }
+    }
+
     pub fn size(&self) -> usize {
         let mut size: usize = 0;
 
@@ -954,6 +960,22 @@ impl XAttrs {
     #[inline]
     pub fn aligned_size(&self) -> usize {
         align_to_rafs(self.size())
+    }
+
+    pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
+        self.pairs.get(name)
+    }
+
+    pub fn add(&mut self, name: OsString, value: XattrValue) {
+        self.pairs.insert(name, value);
+    }
+
+    pub fn remove(&mut self, name: &OsStr) {
+        self.pairs.remove(name);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
     }
 }
 

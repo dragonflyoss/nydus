@@ -576,12 +576,8 @@ mod cached_tests {
         let mut ondisk_inode = OndiskInode::new();
         let file_name = OsString::from("c_inode_1");
         let mut xattr = XAttrs::default();
-        xattr
-            .pairs
-            .insert(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
-        xattr
-            .pairs
-            .insert(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
+        xattr.add(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
+        xattr.add(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
         ondisk_inode.i_name_size = file_name.as_bytes().len() as u16;
         ondisk_inode.i_child_count = 1;
         ondisk_inode.i_ino = 3;
@@ -621,7 +617,7 @@ mod cached_tests {
         for k in c_xattr.iter() {
             let k = OsStr::from_bytes(&k);
             let v = cached_inode.get_xattr(k).unwrap();
-            assert_eq!(xattr.pairs.get(k).cloned().unwrap(), v.unwrap());
+            assert_eq!(xattr.get(k).cloned().unwrap(), v.unwrap());
         }
 
         // close file
