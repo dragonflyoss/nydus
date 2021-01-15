@@ -39,7 +39,7 @@ docker-smoke:
 docker-static:
 	# For static build with musl
 	docker build -t nydus-rs-static misc/musl-static
-	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/root/.cargo nydus-rs-static
+	docker run -it --rm -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/root/.cargo nydus-rs-static
 
 nydusify:
 	make -C contrib/nydusify
