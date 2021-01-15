@@ -312,12 +312,14 @@ impl Builder {
                     // first, then apply upper node to the node tree of lower layer.
                     nodes.insert(0, child.node.clone());
                     if whiteout_type == WhiteoutType::OverlayFSOpaque {
-                        let mut node = child.node.clone();
-                        node.remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
-                        nodes.push(node);
+                        child
+                            .node
+                            .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
+                        nodes.push(child.node.clone());
                     }
                 }
                 (None, Some(whiteout_type)) => {
+                    // Remove overlayfs opaque xattr for single layer build
                     if whiteout_type == WhiteoutType::OverlayFSOpaque {
                         child
                             .node

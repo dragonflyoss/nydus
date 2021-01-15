@@ -10,7 +10,7 @@
 //! 1. Apply FilesystemTree (from upper layer) to MetadataTree (from lower layer) as overlay node tree;
 //! 2. Traverse overlay node tree then dump to bootstrap and blob file according to RAFS format.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
@@ -156,9 +156,7 @@ impl StargzIndexTreeBuilder {
             bail!("the stargz index has no toc entry");
         }
 
-        let root_entry = TocEntry::new_dir(PathBuf::from("/"));
-        let root_node = self.parse_node(&root_entry, explicit_uidgid)?;
-        let mut tree = Tree::new(root_node);
+        let mut tree: Option<Tree> = None;
 
         // Map hardlink path to linked path: HashMap<<hardlink_path>, <linked_path>>
         let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
@@ -230,6 +228,9 @@ impl StargzIndexTreeBuilder {
             }
 
             let node = self.parse_node(entry, explicit_uidgid)?;
+            if entry.path()? == PathBuf::from("/") {
+                tree = Some(Tree::new(node.clone()));
+            }
             nodes.push(node);
         }
 
@@ -241,10 +242,12 @@ impl StargzIndexTreeBuilder {
                 node.inode.i_child_count = node.chunks.len() as u32;
                 node.inode.i_size = *size;
             }
-            tree.apply(node, false, whiteout_spec)?;
+            if let Some(tree) = &mut tree {
+                tree.apply(node, false, whiteout_spec)?;
+            }
         }
 
-        Ok(tree)
+        tree.ok_or_else(|| anyhow!("the stargz index has no root toc entry"))
     }
 
     /// Parse stargz toc entry to Node in builder
