@@ -55,6 +55,7 @@ func (layer *Layer) Digest() (v1.Hash, error) {
 		if err != nil {
 			return v1.Hash{}, err
 		}
+		defer reader.Close()
 	}
 
 	hash, _, err := v1.SHA256(reader)
@@ -81,6 +82,7 @@ func (layer *Layer) DiffID() (v1.Hash, error) {
 	if err != nil {
 		return v1.Hash{}, err
 	}
+	defer tarReader.Close()
 
 	hash, _, err := v1.SHA256(tarReader)
 	if err != nil {
@@ -112,6 +114,7 @@ func (layer *Layer) Size() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	defer gzipReader.Close()
 
 	written, err := io.Copy(ioutil.Discard, gzipReader)
 	if err != nil {

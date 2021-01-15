@@ -5,14 +5,11 @@
 package cache
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
-	"os"
 	"strconv"
 
 	"contrib/nydusify/remote"
@@ -20,7 +17,6 @@ import (
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
-	"github.com/docker/docker/pkg/archive"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -323,39 +319,8 @@ func (cache *Cache) PullBootstrap(bootstrapDesc *ocispec.Descriptor, target stri
 	}
 	defer reader.Close()
 
-	rdr, err := archive.DecompressStream(reader)
-	if err != nil {
-		return errors.Wrap(err, "decompress cached bootstrap layer")
-	}
-	defer rdr.Close()
-
-	found := false
-	tr := tar.NewReader(rdr)
-	for {
-		hdr, err := tr.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			} else {
-				return err
-			}
-		}
-		if hdr.Name == utils.BootstrapFileNameInLayer {
-			file, err := os.Create(target)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			if _, err := io.Copy(file, tr); err != nil {
-				return err
-			}
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("Invalid bootstrap layer in cache")
+	if err := utils.UnpackFile(reader, utils.BootstrapFileNameInLayer, target); err != nil {
+		return errors.Wrap(err, "unpack cached bootstrap layer")
 	}
 
 	return nil

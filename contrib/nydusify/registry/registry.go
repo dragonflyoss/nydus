@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/dustin/go-humanize"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -302,6 +303,10 @@ func (registry *Registry) Pull(build func(
 		if err != nil {
 			return err
 		}
+		layerSize, err := layerJob.SourceLayer.Size()
+		if err != nil {
+			return err
+		}
 
 		if jobRet.Err != nil {
 			return errors.Wrap(jobRet.Err, fmt.Sprintf("pull layer %s", layerDigest))
@@ -315,19 +320,25 @@ func (registry *Registry) Pull(build func(
 				return "", err
 			}
 			targetPath := filepath.Join(targetDir, layerJob.Parent.SourceLayerChainID.String())
-			logrus.WithField("Digest", bootstrapDesc.Digest).Infof("[BOOT] Pulling")
+			bootstrapSize := humanize.Bytes(uint64(bootstrapDesc.Size))
+			logrus.WithField("Digest", bootstrapDesc.Digest).
+				WithField("Size", bootstrapSize).Infof("[BOOT] Pulling")
 			if err := registry.BuildCache.PullBootstrap(bootstrapDesc, targetPath); err != nil {
 				return "", errors.Wrap(err, "pull bootstrap")
 			}
-			logrus.WithField("Digest", bootstrapDesc.Digest).Infof("[BOOT] Pulled")
+			logrus.WithField("Digest", bootstrapDesc.Digest).
+				WithField("Size", bootstrapSize).Infof("[BOOT] Pulled")
 			return targetPath, nil
 		}
 
-		logrus.WithField("Digest", layerDigest).Infof("[SOUR] Building")
+		layerHumanizeSize := humanize.Bytes(uint64(layerSize))
+		logrus.WithField("Digest", layerDigest).
+			WithField("Size", layerHumanizeSize).Infof("[SOUR] Building")
 		if err := build(layerJob, pullBootstrapFunc); err != nil {
 			return errors.Wrap(err, "build layer")
 		}
-		logrus.WithField("Digest", layerDigest).Infof("[SOUR] Built")
+		logrus.WithField("Digest", layerDigest).
+			WithField("Size", layerHumanizeSize).Infof("[SOUR] Built")
 	}
 
 	return nil

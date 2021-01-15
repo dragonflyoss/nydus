@@ -15,6 +15,7 @@ require (
 	github.com/docker/distribution v2.7.1+incompatible
 	github.com/docker/docker v20.10.0-beta1.0.20201110211921-af34b94a78a1+incompatible
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
+	github.com/dustin/go-humanize v1.0.0
 	github.com/google/go-containerregistry v0.1.4
 	github.com/moby/sys/mount v0.1.1 // indirect
 	github.com/moby/sys/mountinfo v0.4.0 // indirect

@@ -12,6 +12,7 @@ import (
 
 	blobbackend "contrib/nydusify/backend"
 
+	"github.com/dustin/go-humanize"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
@@ -79,7 +80,13 @@ func (job *LayerJob) Pull() error {
 	if err != nil {
 		return err
 	}
-	logrus.WithField("Digest", sourceLayerDigest).Infof("[SOUR] Pulling")
+	sourceLayerSize, err := job.SourceLayer.Size()
+	if err != nil {
+		return err
+	}
+	sourceLayerHumanizeSize := humanize.Bytes(uint64(sourceLayerSize))
+	logrus.WithField("Digest", sourceLayerDigest).
+		WithField("Size", sourceLayerHumanizeSize).Infof("[SOUR] Pulling")
 
 	// Pull the layer from source, we need to retry in case of
 	// the layer is compressed or uncompressed
@@ -98,7 +105,8 @@ func (job *LayerJob) Pull() error {
 		return errors.Wrap(err, fmt.Sprintf("decompress source layer %s", sourceLayerDigest.String()))
 	}
 
-	logrus.WithField("Digest", sourceLayerDigest).Infof("[SOUR] Pulled")
+	logrus.WithField("Digest", sourceLayerDigest).
+		WithField("Size", sourceLayerHumanizeSize).Infof("[SOUR] Pulled")
 
 	return nil
 }
@@ -115,6 +123,11 @@ func (job *LayerJob) Push() error {
 	if err != nil {
 		return errors.Wrap(err, "get blob layer digest before upload")
 	}
+	blobSize, err := job.TargetBlobLayer.Size()
+	if err != nil {
+		return errors.Wrap(err, "get blob layer size before upload")
+	}
+	blobHumanizeSize := humanize.Bytes(uint64(blobSize))
 
 	if job.Backend != nil {
 		// Upload blob layer to foreign storage backend
@@ -123,30 +136,37 @@ func (job *LayerJob) Push() error {
 			return errors.Wrap(err, "decompress blob layer before upload")
 		}
 		defer reader.Close()
-		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Uploading")
+		logrus.WithField("Digest", blobDigest).
+			WithField("Size", blobHumanizeSize).Infof("[BLOB] Uploading")
 		if err := job.Backend.Put(blobDigest.Hex, reader); err != nil {
 			return errors.Wrap(err, "upload blob layer")
 		}
-		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Uploaded")
+		logrus.WithField("Digest", blobDigest).
+			WithField("Size", blobHumanizeSize).Infof("[BLOB] Uploaded")
 	} else {
 		// Upload blob layer to remote registry
-		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Pushing")
+		logrus.WithField("Digest", blobDigest).
+			WithField("Size", blobHumanizeSize).Infof("[BLOB] Pushing")
 		if err := remote.WriteLayer(target, job.TargetBlobLayer, authKeychain); err != nil {
 			return errors.Wrap(err, "push target blob layer")
 		}
-		logrus.WithField("Digest", blobDigest).Infof("[BLOB] Pushed")
+		logrus.WithField("Digest", blobDigest).
+			WithField("Size", blobHumanizeSize).Infof("[BLOB] Pushed")
 	}
 
 	// Upload boostrap layer to remote registry
-	bootstrapDigest, err := job.TargetBootstrapLayer.Digest()
+	bootstrapDesc, err := job.TargetBootstrapLayer.Desc()
 	if err != nil {
-		return errors.Wrap(err, "get blob layer digest before upload")
+		return errors.Wrap(err, "get bootstrap layer desc before upload")
 	}
-	logrus.WithField("Digest", bootstrapDigest).Infof("[BOOT] Pushing")
+	bootstrapSize := humanize.Bytes(uint64(bootstrapDesc.Size))
+	logrus.WithField("Digest", bootstrapDesc.Digest).
+		WithField("Size", bootstrapSize).Infof("[BOOT] Pushing")
 	if err := remote.WriteLayer(target, job.TargetBootstrapLayer, authKeychain); err != nil {
 		return errors.Wrap(err, "push target bootstrap layer")
 	}
-	logrus.WithField("Digest", bootstrapDigest).Infof("[BOOT] Pushed")
+	logrus.WithField("Digest", bootstrapDesc.Digest).
+		WithField("Size", bootstrapSize).Infof("[BOOT] Pushed")
 
 	return nil
 }
