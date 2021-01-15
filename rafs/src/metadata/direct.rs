@@ -445,7 +445,7 @@ impl RafsInode for OndiskInodeWrapper {
             || inode.i_name_size as usize > (RAFS_MAX_NAME + 1)
         {
             return Err(ebadf!(format!(
-                "inode validation failure, inode {:#?}",
+                "inode validation failure, inode {:?}",
                 inode
             )));
         }
