@@ -24,6 +24,7 @@ func Start(ctx context.Context, cfg Config) error {
 		return errors.Wrap(err, "failed to initialize verifier")
 	}
 	fs, err := nydus.NewFileSystem(
+		ctx,
 		nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 		nydus.WithMeta(cfg.RootDir),
 		nydus.WithDaemonConfig(cfg.DaemonCfg),
@@ -36,6 +37,7 @@ func Start(ctx context.Context, cfg Config) error {
 	}
 
 	stargzFs, err := stargz.NewFileSystem(
+		ctx,
 		stargz.WithMeta(cfg.RootDir),
 		stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 		stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),

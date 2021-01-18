@@ -28,7 +28,7 @@ $ /path/to/containerd --config /etc/containerd/config.toml
 
 ### Generate Nydus config
 
-You can configure nydus snapshotter with custom configurations. The config file must be formatted with json and can be passed to nydus snapshotter with `--config-path` option. Your configuration file should look like below.
+You can configure nydus snapshotter with custom configurations. The config file must be formatted with json and can be passed to nydus snapshotter with `--config-path` option. Your configuration file should look like below, where value of `auth` is a based64-encoded `username:password` string. You can generate it using `echo -n 'username:password' | base64`.
 
 ```json
 {
@@ -37,6 +37,7 @@ You can configure nydus snapshotter with custom configurations. The config file 
       "type": "registry",
       "config": {
         "scheme": "https",
+        "auth": "<registry auth token>",
         "timeout": 5,
         "connect_timeout": 5,
         "retry_limit": 0
@@ -55,7 +56,8 @@ You can configure nydus snapshotter with custom configurations. The config file 
   "enable_xattr": true,
   "fs_prefetch": {
     "enable": true,
-    "threads_count": 10
+    "threads_count": 10,
+    "merging_size": 131072
   }
 }
 ```
