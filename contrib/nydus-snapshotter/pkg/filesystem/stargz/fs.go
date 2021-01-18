@@ -40,7 +40,7 @@ type filesystem struct {
 	nydusdImageBinaryPath string
 }
 
-func NewFileSystem(opt ...NewFSOpt) (snapshot.FileSystem, error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)
@@ -75,10 +75,7 @@ func (f *filesystem) PrepareLayer(ctx context.Context, s storage.Snapshot, label
 	if ref == "" || layerDigest == "" {
 		return fmt.Errorf("can not find ref and digest from label %+v", labels)
 	}
-	keychain, err := auth.FromLabels(labels)
-	if err != nil {
-		return errors.Wrap(err, "failed to find image pull auth info from labels")
-	}
+	keychain := auth.FromLabels(labels)
 	blob, err := f.resolver.GetBlob(ref, layerDigest, keychain)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get blob from ref %s, digest %s", ref, layerDigest)
@@ -132,10 +129,7 @@ func (f *filesystem) Support(ctx context.Context, labels map[string]string) bool
 		return false
 	}
 	log.G(ctx).Infof("image ref %s digest %s", ref, layerDigest)
-	keychain, err := auth.FromLabels(labels)
-	if err != nil {
-		return false
-	}
+	keychain := auth.FromLabels(labels)
 	blob, err := f.resolver.GetBlob(ref, layerDigest, keychain)
 	if err != nil {
 		return false

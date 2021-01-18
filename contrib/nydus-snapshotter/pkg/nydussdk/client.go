@@ -27,7 +27,7 @@ const (
 	infoEndpoint  = "/api/v1/daemon"
 	mountEndpoint = "/api/v1/mount"
 
-	defaultHttpClientTimeout = 100 * time.Millisecond
+	defaultHttpClientTimeout = 30 * time.Second
 	contentType              = "application/json"
 )
 

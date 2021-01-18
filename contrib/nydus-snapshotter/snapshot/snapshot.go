@@ -199,7 +199,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		if o.fs.Support(ctx, base.Labels) {
 			logCtx.Infof("nydus data layer, skip download and unpack %s", key)
 			err := o.Commit(ctx, target, key, append(opts, snapshots.WithLabels(base.Labels))...)
-			if err == nil {
+			if err == nil || errdefs.IsAlreadyExists(err) {
 				return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "target snapshot %q", target)
 			}
 		}
@@ -213,7 +213,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 				logCtx.Errorf("failed to prepare stargz layer of snapshot ID %s, err: %v", s.ID, err)
 			} else {
 				err := o.Commit(ctx, target, key, append(opts, snapshots.WithLabels(base.Labels))...)
-				if err == nil {
+				if err == nil || errdefs.IsAlreadyExists(err) {
 					return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "target snapshot %q", target)
 				}
 			}
