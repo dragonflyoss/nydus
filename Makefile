@@ -34,7 +34,7 @@ test: build ut
 
 docker-smoke:
 	docker build -t nydus-rs-smoke misc/smoke
-	docker run --rm --privileged -v ${current_dir}:/nydus-rs nydus-rs-smoke make test
+	docker run -it --rm --privileged -v /tmp -e TEST_WORKDIR_PREFIX=/tmp -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/usr/local/cargo -v fuse-targets:/nydus-rs/target-fusedev -v virtiofs-targets:/nydus-rs/target-virtiofs nydus-rs-smoke
 
 docker-static:
 	# For static build with musl
