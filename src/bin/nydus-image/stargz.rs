@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -153,6 +154,22 @@ impl TocEntry {
         !self.xattrs.is_empty()
     }
 
+    pub fn is_blockdev(&self) -> bool {
+        self.toc_type.as_str() == "block"
+    }
+
+    pub fn is_chardev(&self) -> bool {
+        self.toc_type.as_str() == "char"
+    }
+
+    pub fn is_fifo(&self) -> bool {
+        self.toc_type.as_str() == "fifo"
+    }
+
+    pub fn is_special(&self) -> bool {
+        self.is_blockdev() || self.is_chardev() || self.is_fifo()
+    }
+
     pub fn mode(&self) -> u32 {
         let mut mode = self.mode;
 
@@ -162,9 +179,23 @@ impl TocEntry {
             mode |= libc::S_IFREG;
         } else if self.is_symlink() {
             mode |= libc::S_IFLNK;
+        } else if self.is_blockdev() {
+            mode |= libc::S_IFBLK;
+        } else if self.is_chardev() {
+            mode |= libc::S_IFCHR;
+        } else if self.is_fifo() {
+            mode |= libc::S_IFIFO;
         }
 
         mode
+    }
+
+    pub fn rdev(&self) -> u32 {
+        if self.is_special() {
+            makedev(self.dev_major, self.dev_minor) as u32
+        } else {
+            u32::MAX
+        }
     }
 
     // Convert entry name to file name
