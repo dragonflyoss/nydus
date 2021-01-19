@@ -9,7 +9,7 @@ os: linux
 language: rust
 cache: cargo
 rust:
-    - 1.47.0
+    - 1.49.0
 
 before_install:
     - rustup component add clippy rustfmt

@@ -350,7 +350,7 @@ impl Registry {
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
         let cached_auth = self.cached_auth.get();
-        if cached_auth != "" {
+        if !cached_auth.is_empty() {
             last_cached_auth = cached_auth.clone();
             headers.insert(
                 HEADER_AUTHORIZATION,
@@ -480,7 +480,7 @@ impl Registry {
                     let mut location = Url::parse(location).map_err(|e| einval!(e))?;
                     // Note: Some P2P proxy server supports only scheme specified origin blob server,
                     // so we need change scheme to `blob_url_scheme` here
-                    if self.blob_url_scheme != "" {
+                    if !self.blob_url_scheme.is_empty() {
                         location
                             .set_scheme(&self.blob_url_scheme)
                             .map_err(|e| einval!(e))?;

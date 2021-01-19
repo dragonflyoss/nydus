@@ -653,7 +653,7 @@ impl RafsStore for OndiskBlobTable {
         self.entries
             .iter()
             .enumerate()
-            .map(|(idx, entry)| {
+            .try_for_each(|(idx, entry)| -> Result<()> {
                 w.write_all(&u32::to_le_bytes(entry.readahead_offset))?;
                 w.write_all(&u32::to_le_bytes(entry.readahead_size))?;
                 w.write_all(entry.blob_id.as_bytes())?;
@@ -664,8 +664,8 @@ impl RafsStore for OndiskBlobTable {
                     size += size_of::<u32>() * 2 + entry.blob_id.len();
                 }
                 Ok(())
-            })
-            .collect::<Result<()>>()?;
+            })?;
+
         let padding = align_to_rafs(size) - size;
         w.write_padding(padding)?;
 
