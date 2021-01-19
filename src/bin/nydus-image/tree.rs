@@ -119,7 +119,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             index: 0,
             real_ino: ondisk_inode.i_ino,
             dev: u64::MAX,
-            rdev: u64::MAX,
+            rdev: inode.rdev() as u64,
             overlay: Overlay::Lower,
             explicit_uidgid: self.rs.meta.explicit_uidgid(),
             source: PathBuf::from_str("/").unwrap(),
@@ -334,14 +334,15 @@ impl StargzIndexTreeBuilder {
             i_child_count: 0,
             i_name_size: name_size,
             i_symlink_size: symlink_size,
-            i_reserved: [0; 24],
+            i_rdev: entry.rdev(),
+            i_reserved: [0; 20],
         };
 
         Ok(Node {
             index: 0,
             real_ino: ino,
             dev: u64::MAX,
-            rdev: u64::MAX,
+            rdev: inode.i_rdev as u64,
             overlay: Overlay::UpperAddition,
             explicit_uidgid,
             source: PathBuf::from_str("/").unwrap(),
@@ -393,12 +394,6 @@ impl FilesystemTreeBuilder {
                 && !child.is_overlayfs_opaque(whiteout_spec)
                 && !self.layered
             {
-                continue;
-            }
-
-            // Ignore special file, except overlayfs whiteout file
-            // which is a char device with major:minor(0:0).
-            if child.file_type() == "" && !child.is_overlayfs_whiteout(whiteout_spec) {
                 continue;
             }
 

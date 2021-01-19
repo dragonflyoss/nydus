@@ -226,6 +226,9 @@ impl Node {
             self.inode.i_digest =
                 RafsDigest::from_buf(self.symlink.as_ref().unwrap().as_bytes(), digester);
             return Ok(0);
+        } else if self.is_special() {
+            self.inode.i_digest = RafsDigest::hasher(digester).digest_finalize();
+            return Ok(0);
         }
 
         let file_size = self.inode.i_size;
@@ -372,6 +375,7 @@ impl Node {
         self.inode.i_nlink = 1;
         self.inode.i_blocks = meta.st_blocks();
         self.inode.i_blocks = div_round_up(self.inode.i_size, 512);
+        self.inode.i_rdev = meta.st_rdev() as u32;
 
         self.real_ino = meta.st_ino();
         self.dev = meta.st_dev();
@@ -428,6 +432,10 @@ impl Node {
 
     pub fn is_reg(&self) -> bool {
         self.inode.i_mode & libc::S_IFMT == libc::S_IFREG
+    }
+
+    pub fn is_special(&self) -> bool {
+        self.inode.i_mode & (libc::S_IFBLK | libc::S_IFCHR | libc::S_IFIFO) != 0
     }
 
     pub fn is_hardlink(&self) -> bool {
