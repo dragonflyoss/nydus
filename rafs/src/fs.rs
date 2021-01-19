@@ -397,8 +397,7 @@ impl Rafs {
             attr.uid = self.i_uid;
             attr.gid = self.i_gid;
         }
-        // Rafs does not accommodate special files, so `rdev` can always be 0.
-        attr.rdev = 0;
+
         attr.atime = self.i_time;
         attr.ctime = self.i_time;
         attr.mtime = self.i_time;
@@ -414,8 +413,6 @@ impl Rafs {
             entry.attr.st_gid = self.i_gid;
         }
 
-        // Rafs does not accommodate special files, so `rdev` can always be 0.
-        entry.attr.st_rdev = 0u64;
         entry.attr.st_atime = self.i_time as i64;
         entry.attr.st_ctime = self.i_time as i64;
         entry.attr.st_mtime = self.i_time as i64;

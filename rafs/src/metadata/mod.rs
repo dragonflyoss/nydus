@@ -556,7 +556,7 @@ pub trait RafsSuperInodes {
 
         if inode.is_symlink() {
             hasher.digest_update(inode.get_symlink()?.as_os_str().as_bytes());
-        } else {
+        } else if inode.is_reg() || inode.is_dir() {
             for idx in 0..child_count {
                 if inode.is_dir() {
                     let child = inode.get_child_by_index(idx as u64)?;
@@ -627,6 +627,7 @@ pub trait RafsInode {
     fn has_xattr(&self) -> bool;
     fn has_hole(&self) -> bool;
 
+    fn rdev(&self) -> u32;
     fn ino(&self) -> u64;
     fn parent(&self) -> u64;
     fn size(&self) -> u64;

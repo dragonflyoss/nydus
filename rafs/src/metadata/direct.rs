@@ -631,6 +631,7 @@ impl RafsInode for OndiskInodeWrapper {
             uid: inode.i_uid,
             gid: inode.i_gid,
             blksize: RAFS_INODE_BLOCKSIZE,
+            rdev: inode.i_rdev,
             ..Default::default()
         }
     }
@@ -721,6 +722,7 @@ impl RafsInode for OndiskInodeWrapper {
     impl_inode_getter!(ino, i_ino, u64);
     impl_inode_getter!(parent, i_parent, u64);
     impl_inode_getter!(size, i_size, u64);
+    impl_inode_getter!(rdev, i_rdev, u32);
 }
 
 pub struct OndiskChunkInfoWrapper {

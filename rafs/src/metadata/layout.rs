@@ -668,7 +668,6 @@ pub struct OndiskInode {
     pub i_mode: u32, // 64
     pub i_size: u64,
     pub i_blocks: u64,
-    /// HARDLINK | SYMLINK | PREFETCH_HINT
     pub i_flags: RafsInodeFlags,
     pub i_nlink: u32,
     /// for dir, child start index
@@ -680,7 +679,9 @@ pub struct OndiskInode {
     pub i_name_size: u16,
     /// symlink path size, [char; i_symlink_size]
     pub i_symlink_size: u16, // 104
-    pub i_reserved: [u8; 24], // 128
+    //// inode device block number, ignored for non-special files
+    pub i_rdev: u32,          // 108
+    pub i_reserved: [u8; 20], // 128
 }
 
 bitflags! {
