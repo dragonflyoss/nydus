@@ -43,7 +43,12 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 
     /// Build node tree by loading bootstrap file
-    fn load_children(&self, ino: Inode, parent: Option<&PathBuf>) -> Result<Vec<Tree>> {
+    fn load_children(
+        &self,
+        ino: Inode,
+        parent: Option<&PathBuf>,
+        chunk_cache: &mut Option<&mut HashMap<RafsDigest, OndiskChunkInfo>>,
+    ) -> Result<Vec<Tree>> {
         let inode = self.rs.get_inode(ino, true)?;
         let child_index = inode.get_child_index()?;
         let child_count = inode.get_child_count();
@@ -60,8 +65,16 @@ impl<'a> MetadataTreeBuilder<'a> {
                 let child = self.rs.get_inode(idx as Inode, true)?;
                 let child_path = parent_path.join(child.name()?);
                 let child = self.parse_node(child, child_path.clone())?;
+                if let Some(chunk_cache) = chunk_cache {
+                    if child.is_reg() {
+                        for chunk in &child.chunks {
+                            chunk_cache.insert(chunk.block_id, *chunk);
+                        }
+                    }
+                }
                 let mut child = Tree::new(child);
-                child.children = self.load_children(idx as Inode, Some(&parent_path))?;
+                child.children =
+                    self.load_children(idx as Inode, Some(&parent_path), chunk_cache)?;
                 children.push(child);
             }
         }
@@ -431,14 +444,17 @@ impl Tree {
     }
 
     /// Build node tree from a bootstrap file
-    pub fn from_bootstrap(rs: &RafsSuper) -> Result<Self> {
+    pub fn from_bootstrap(
+        rs: &RafsSuper,
+        mut chunk_cache: Option<&mut HashMap<RafsDigest, OndiskChunkInfo>>,
+    ) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(&rs);
 
         let root_inode = rs.get_inode(RAFS_ROOT_INODE, true)?;
         let root_node = tree_builder.parse_node(root_inode, PathBuf::from_str("/").unwrap())?;
         let mut tree = Tree::new(root_node);
 
-        tree.children = tree_builder.load_children(RAFS_ROOT_INODE, None)?;
+        tree.children = tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache)?;
 
         Ok(tree)
     }

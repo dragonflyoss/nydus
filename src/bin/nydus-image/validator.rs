@@ -41,7 +41,7 @@ impl Validator {
         };
         rs.load(&mut self.f_bootstrap).context(err)?;
 
-        let tree = Tree::from_bootstrap(&rs).context(err)?;
+        let tree = Tree::from_bootstrap(&rs, None).context(err)?;
         tree.iterate(&|node| {
             if verbosity {
                 info!("{}", node);

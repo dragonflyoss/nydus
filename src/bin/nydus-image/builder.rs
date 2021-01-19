@@ -337,13 +337,6 @@ impl Builder {
                     .insert(child.node.rootfs(), Some(child.node.index));
             }
 
-            // Store chunk for chunk deduplicate
-            if child.node.is_reg() {
-                for chunk in &child.node.chunks {
-                    self.chunk_cache.insert(chunk.block_id, *chunk);
-                }
-            }
-
             if child.node.is_dir() {
                 dirs.push(child);
             }
@@ -406,8 +399,10 @@ impl Builder {
         // we need to append the blob entry of upper layer to the table
         self.blob_table = rs.inodes.get_blob_table().as_ref().clone();
 
-        // Build node tree of lower layer from a bootstrap file
-        let mut tree = Tree::from_bootstrap(&rs).context("failed to build tree from bootstrap")?;
+        // Build node tree of lower layer from a bootstrap file, drop by to add
+        // chunks of lower node to chunk_cache for chunk deduplication on next.
+        let mut tree = Tree::from_bootstrap(&rs, Some(&mut self.chunk_cache))
+            .context("failed to build tree from bootstrap")?;
 
         // Apply new node (upper layer) to node tree (lower layer)
         for node in &self.nodes {
