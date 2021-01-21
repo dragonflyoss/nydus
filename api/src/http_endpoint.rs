@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Financial. All rights reserved.
+// Copyright 2020 Ant Group. All rights reserved.
 // Copyright © 2019 Intel Corporation
 //
 // SPDX-License-Identifier: Apache-2.0
