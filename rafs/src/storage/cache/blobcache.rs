@@ -456,19 +456,6 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                         blobcache.metrics.prefetch_mr_count.inc();
                     }
 
-                    // FIXME: Remove this as it is limited when merging requests
-                    if let Some(ref limiter) = blobcache.limiter {
-                        let cells = NonZeroU32::new(blob_size).unwrap();
-                        if let Err(e) = limiter
-                            .check_n(cells)
-                            .or_else(|_| block_on(limiter.until_n_ready(cells)))
-                        {
-                            // `InsufficientCapacity` is the only possible error
-                            // Have to give up to avoid dead-loop
-                            error!("{}: give up rate-limiting", e);
-                        }
-                    }
-
                     blobcache
                         .metrics
                         .prefetch_data_amount
