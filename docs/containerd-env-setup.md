@@ -49,7 +49,6 @@ Then start `containerd-nydus-grpc` remote snapshotter:
 ```bash
 /usr/local/bin/containerd-nydus-grpc --nydusd-path /usr/local/bin/nydusd \
     --config-path /etc/nydusd-config.json \
-    --shared-daemon \
     --log-level debug \
     --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
     --address /run/containerd/containerd-nydus-grpc.sock
