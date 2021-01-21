@@ -141,7 +141,7 @@ impl BlobCacheState {
         Ok((fd, size))
     }
 
-    fn get(&self, blk: Arc<dyn RafsChunkInfo>) -> Option<Arc<Mutex<BlobCacheEntry>>> {
+    fn get(&self, blk: &dyn RafsChunkInfo) -> Option<Arc<Mutex<BlobCacheEntry>>> {
         // Do not expect poisoned lock here.
         self.chunk_map.get(&blk.block_id()).cloned()
     }
@@ -160,7 +160,10 @@ impl BlobCacheState {
         } else {
             let (fd, _) = self.get_blob_fd(blob_id, backend, metrics)?;
             let entry = Arc::new(Mutex::new(BlobCacheEntry::new(cki, fd)));
-            self.chunk_map.insert(*block_id, entry.clone());
+            let r = self.chunk_map.insert(*block_id, entry.clone());
+            if r.is_some() {
+                warn!("Entry(block_id={}) is inserted again", block_id);
+            }
             metrics.entries_count.inc();
             Ok(entry)
         }
@@ -313,6 +316,7 @@ impl BlobCache {
                 "using blobcache file fd {} offset {} as data stream",
                 fd, offset,
             );
+            // FIXME: In case of multiple threads duplicating the same fd, they still share the same file offset.
             let fd = dup(fd).map_err(|_| last_error!())?;
             let mut f = unsafe { File::from_raw_fd(fd) };
             f.seek(SeekFrom::Start(offset)).map_err(|_| last_error!())?;
@@ -452,6 +456,7 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                         blobcache.metrics.prefetch_mr_count.inc();
                     }
 
+                    // FIXME: Remove this as it is limited when merging requests
                     if let Some(ref limiter) = blobcache.limiter {
                         let cells = NonZeroU32::new(blob_size).unwrap();
                         if let Err(e) = limiter
@@ -483,19 +488,20 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                             .expect("Expect cache lock not poisoned")
                             .set(blob_id, c.clone(), blobcache.backend(), &blobcache.metrics);
                         if let Ok(entry) = entry {
-                            let entry = entry.lock().unwrap();
+                            let mut entry = entry.lock().unwrap();
                             if entry.is_ready() {
                                 continue;
                             }
                             let fd = entry.fd;
                             let chunk = entry.chunk.clone();
-                            drop(entry);
+                            // Always validate if chunk's hash is equal to `block_id` by which
+                            // blobcache judges if the data is up-to-date.
                             if blobcache
                                 .read_blobcache_chunk(
                                     fd,
                                     chunk.as_ref(),
                                     alloc_buf(d_size).as_mut_slice(),
-                                    blobcache.need_validate(),
+                                    true,
                                 )
                                 .is_err()
                             {
@@ -503,6 +509,8 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                                 // merged request from backend to boost.
                                 issue_batch = true;
                                 break;
+                            } else {
+                                entry.set_ready();
                             }
                         }
                     }
@@ -597,7 +605,7 @@ impl RafsCache for BlobCache {
 
         self.metrics.total.inc();
 
-        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.clone());
+        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.as_ref());
         if entry.is_none() {
             let en = self.cache.write().unwrap().set(
                 blob_id,

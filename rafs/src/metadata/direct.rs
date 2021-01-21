@@ -672,6 +672,7 @@ impl RafsInode for OndiskInodeWrapper {
         self.mapping.state.load().meta.block_size
     }
 
+    // TODO: Do prefetch insides this while walking the entire file system
     fn collect_descendants_inodes(
         &self,
         descendants: &mut Vec<Arc<dyn RafsInode>>,
