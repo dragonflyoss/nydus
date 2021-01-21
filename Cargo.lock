@@ -604,8 +604,8 @@ checksum = "3728d817d99e5ac407411fa471ff9800a778d88a24685968b36824eaf4bee400"
 
 [[package]]
 name = "micro_http"
-version = "0.1.0"
-source = "git+https://github.com/firecracker-microvm/micro-http.git#c9ffb90aebdc77a8fade2e4196f311f9bbfcce82"
+version = "0.2.0"
+source = "git+https://github.com/cloud-hypervisor/micro-http.git?branch=master#af72318b755620f9c1b99b319bc2e4e942b91b2f"
 dependencies = [
  "epoll",
 ]
