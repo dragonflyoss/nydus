@@ -7,13 +7,14 @@ package backend
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 
 	"github.com/pkg/errors"
 )
 
 type Backend interface {
-	Put(blobID string, reader io.Reader) error
+	// TODO: Hopefully, we can pass `Layer` struct in, thus to be able to cook both
+	// file handle and file path.
+	Upload(blobID string, blobPath string) error
 }
 
 func NewBackend(backendType, backendConfig string) (Backend, error) {

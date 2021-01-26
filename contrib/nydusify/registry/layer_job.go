@@ -131,14 +131,9 @@ func (job *LayerJob) Push() error {
 
 	if job.Backend != nil {
 		// Upload blob layer to foreign storage backend
-		reader, err := job.TargetBlobLayer.Uncompressed()
-		if err != nil {
-			return errors.Wrap(err, "decompress blob layer before upload")
-		}
-		defer reader.Close()
 		logrus.WithField("Digest", blobDigest).
 			WithField("Size", blobHumanizeSize).Infof("[BLOB] Uploading")
-		if err := job.Backend.Put(blobDigest.Hex, reader); err != nil {
+		if err := job.Backend.Upload(blobDigest.Hex, job.TargetBlobLayer.sourcePath); err != nil {
 			return errors.Wrap(err, "upload blob layer")
 		}
 		logrus.WithField("Digest", blobDigest).
