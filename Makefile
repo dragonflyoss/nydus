@@ -33,7 +33,7 @@ test: release
 
 docker-smoke:
 	docker build -t nydus-rs-smoke misc/smoke
-	docker run -it --rm --privileged -v ${current_dir}:/nydus-rs nydus-rs-smoke make test
+	docker run --rm --privileged -v ${current_dir}:/nydus-rs nydus-rs-smoke make test
 
 docker-static:
 	# For static build with musl
