@@ -25,7 +25,7 @@ use fuse_rs::transport::{FuseBuf, Reader, Writer};
 use vmm_sys_util::eventfd::EventFd;
 
 /// These follows definition from libfuse
-const FUSE_KERN_BUF_SIZE: usize = 32;
+const FUSE_KERN_BUF_SIZE: usize = 256;
 const FUSE_HEADER_SIZE: usize = 0x1000;
 
 const FUSE_DEVICE: &str = "/dev/fuse";
