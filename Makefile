@@ -1,3 +1,5 @@
+TEST_WORKDIR_PREFIX ?= "/tmp"
+
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
 build: build-virtiofs build-fusedev
@@ -30,11 +32,11 @@ ut:
 	RUST_BACKTRACE=1 cargo test --features=virtiofs --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
 test: build ut
 	# Run smoke test and unit tests
-	RUST_BACKTRACE=1 cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
+	RUST_BACKTRACE=1 TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
 
 docker-smoke:
 	docker build -t nydus-rs-smoke misc/smoke
-	docker run -it --rm --privileged -v /tmp -e TEST_WORKDIR_PREFIX=/tmp -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/usr/local/cargo -v fuse-targets:/nydus-rs/target-fusedev -v virtiofs-targets:/nydus-rs/target-virtiofs nydus-rs-smoke
+	docker run -it --rm --privileged -v $(TEST_WORKDIR_PREFIX) -e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/usr/local/cargo -v fuse-targets:/nydus-rs/target-fusedev -v virtiofs-targets:/nydus-rs/target-virtiofs nydus-rs-smoke
 
 docker-static:
 	# For static build with musl
