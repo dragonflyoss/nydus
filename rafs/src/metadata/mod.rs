@@ -382,7 +382,7 @@ impl RafsSuper {
 
     pub(crate) fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
         if ino == ROOT_ID {
-            return Ok(self.get_inode(ino, false)?.name()?.into());
+            return Ok(self.get_inode(ino, false)?.name().into());
         }
 
         let mut path = PathBuf::new();
@@ -391,7 +391,7 @@ impl RafsSuper {
 
         loop {
             inode = self.get_inode(cur_ino, false)?;
-            let e: PathBuf = inode.name()?.into();
+            let e: PathBuf = inode.name().into();
             path = e.join(path);
 
             if inode.ino() == ROOT_ID {
@@ -585,7 +585,7 @@ pub trait RafsSuperInodes {
                 digest,
                 expected_digest,
                 inode.ino(),
-                inode.name()?
+                inode.name()
             );
         }
 
@@ -600,7 +600,7 @@ pub trait RafsInode {
     /// must validate it before accessing any fields of the object.
     fn validate(&self) -> Result<()>;
 
-    fn name(&self) -> Result<OsString>;
+    fn name(&self) -> OsString;
     fn get_symlink(&self) -> Result<OsString>;
     fn get_digest(&self) -> RafsDigest;
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;

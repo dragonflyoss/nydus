@@ -357,7 +357,7 @@ impl Rafs {
                 ino: child.ino(),
                 offset: cur_offset,
                 type_: 0,
-                name: child.name()?.as_bytes(),
+                name: child.name().as_bytes(),
             }) {
                 Ok(0) => {
                     self.ios

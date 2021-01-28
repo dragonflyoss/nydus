@@ -129,7 +129,7 @@ impl OSS {
         format!("/{}/{}{}", self.bucket_name, object_key, query_str)
     }
 
-    fn url(&self, object_key: &str, query: &[&str]) -> OssResult<(String, String)> {
+    fn url(&self, object_key: &str, query: &[&str]) -> (String, String) {
         let object_key = &format!("{}{}", self.object_prefix, object_key);
 
         let url = format!(
@@ -138,19 +138,19 @@ impl OSS {
         );
 
         if query.is_empty() {
-            Ok((self.resource(object_key, ""), url))
+            (self.resource(object_key, ""), url)
         } else {
             let query_str = format!("?{}", query.join("&"));
             let resource = self.resource(object_key, &query_str);
             let url = format!("{}{}", url.as_str(), &query_str);
-            Ok((resource, url))
+            (resource, url)
         }
     }
 
     #[allow(dead_code)]
     fn create_bucket(&self) -> OssResult<()> {
         let query = &[];
-        let (resource, url) = self.url("", query)?;
+        let (resource, url) = self.url("", query);
         let headers = self
             .sign(Method::PUT, HeaderMap::new(), resource.as_str())
             .map_err(OssError::Auth)?;
@@ -164,7 +164,7 @@ impl OSS {
     }
 
     fn blob_exists(&self, blob_id: &str) -> OssResult<bool> {
-        let (resource, url) = self.url(blob_id, &[])?;
+        let (resource, url) = self.url(blob_id, &[]);
         let headers = HeaderMap::new();
         let headers = self
             .sign(Method::HEAD, headers, resource.as_str())
@@ -237,7 +237,7 @@ impl BlobBackend for OSS {
     }
 
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
-        let (resource, url) = self.url(blob_id, &[])?;
+        let (resource, url) = self.url(blob_id, &[]);
         let headers = HeaderMap::new();
         let headers = self
             .sign(Method::HEAD, headers, resource.as_str())
@@ -263,7 +263,7 @@ impl BlobBackend for OSS {
     /// read ranged data from oss object
     fn try_read(&self, blob_id: &str, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let query = &[];
-        let (resource, url) = self.url(blob_id, query)?;
+        let (resource, url) = self.url(blob_id, query);
 
         let mut headers = HeaderMap::new();
         let end_at = offset + buf.len() as u64 - 1;
@@ -295,7 +295,7 @@ impl BlobBackend for OSS {
     fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize> {
         let position = format!("position={}", offset);
         let query = &["append", position.as_str()];
-        let (resource, url) = self.url(blob_id, query)?;
+        let (resource, url) = self.url(blob_id, query);
         let headers = self
             .sign(Method::POST, HeaderMap::new(), resource.as_str())
             .map_err(OssError::Auth)?;
@@ -321,7 +321,7 @@ impl BlobBackendUploader for OSS {
         }
 
         let query = &[];
-        let (resource, url) = self.url(blob_id, query).map_err(|e| einval!(e))?;
+        let (resource, url) = self.url(blob_id, query);
         let headers = self.sign(Method::PUT, HeaderMap::new(), resource.as_str())?;
 
         let blob_file = OpenOptions::new()
