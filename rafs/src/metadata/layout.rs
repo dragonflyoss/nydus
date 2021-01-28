@@ -626,11 +626,10 @@ impl OndiskBlobTable {
 impl RafsStore for OndiskBlobTable {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
-
         self.entries
             .iter()
             .enumerate()
-            .try_for_each(|(idx, entry)| -> Result<()> {
+            .try_for_each::<_, Result<()>>(|(idx, entry)| {
                 w.write_all(&u32::to_le_bytes(entry.readahead_offset))?;
                 w.write_all(&u32::to_le_bytes(entry.readahead_size))?;
                 w.write_all(entry.blob_id.as_bytes())?;
