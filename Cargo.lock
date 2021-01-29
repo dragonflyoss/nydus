@@ -808,6 +808,9 @@ dependencies = [
  "libc",
  "log",
  "nix",
+ "sendfd",
+ "serde",
+ "serde_json",
  "vmm-sys-util",
 ]
 

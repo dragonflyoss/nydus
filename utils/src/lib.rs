@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use serde::Serialize;
+
 #[macro_use]
 pub mod error;
 pub use error::*;
@@ -33,14 +35,49 @@ pub fn round_down_4k(x: u64) -> u64 {
     x & (!4095u64)
 }
 
-pub struct BuildTimeInfo {}
+pub mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
+pub fn dump_program_info() {
+    info!(
+        "Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
+        built_info::GIT_COMMIT_HASH.unwrap_or_default(),
+        built_info::BUILT_TIME_UTC,
+        built_info::PROFILE,
+        built_info::RUSTC_VERSION,
+    );
+}
+
+#[derive(Serialize, Clone)]
+pub struct BuildTimeInfo {
+    package_ver: String,
+    git_commit: String,
+    build_time: String,
+    profile: String,
+    rustc: String,
+}
 
 impl<'a> BuildTimeInfo {
-    pub fn dump(package_ver: &'a str, commit_hash: &'a str, build_time: &'a str) -> String {
-        format!(
-            "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}",
-            package_ver, commit_hash, build_time
-        )
+    pub fn dump(package_ver: &'a str) -> (String, Self) {
+        let info_string = format!(
+            "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}\nProfile: \t{}\nRustc: \t\t{}\n",
+            package_ver,
+            built_info::GIT_COMMIT_HASH.unwrap_or_default(),
+            built_info::BUILT_TIME_UTC,
+            built_info::PROFILE,
+            built_info::RUSTC_VERSION,
+        );
+
+        let info = Self {
+            package_ver: package_ver.to_string(),
+            git_commit: built_info::GIT_COMMIT_HASH.unwrap_or_default().to_string(),
+            build_time: built_info::BUILT_TIME_UTC.to_string(),
+            profile: built_info::PROFILE.to_string(),
+            rustc: built_info::RUSTC_VERSION.to_string(),
+        };
+
+        (info_string, info)
     }
 }
 
