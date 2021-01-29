@@ -11,12 +11,13 @@ use std::time;
 use nydus_utils::{einval, eother, exec};
 use rafs::metadata::RafsMode;
 
-const NYDUSD: &str = "./target-fusedev/release/nydusd";
+const NYDUSD: &str = "./target-fusedev/debug/nydusd";
 
 pub struct Nydusd {
     work_dir: PathBuf,
     mount_path: PathBuf,
-    bootstrap_file_name: String,
+    bootstrap_file_name: PathBuf,
+    pub api_sock: PathBuf,
 }
 
 pub fn new(
@@ -24,7 +25,8 @@ pub fn new(
     enable_cache: bool,
     cache_compressed: bool,
     rafs_mode: RafsMode,
-    bootstrap_file_name: String,
+    bootstrap_file_name: PathBuf,
+    api_sock: PathBuf,
     digest_validate: bool,
 ) -> Result<Nydusd> {
     let mount_path = work_dir.join("mnt");
@@ -77,24 +79,31 @@ pub fn new(
         work_dir: work_dir.clone(),
         mount_path,
         bootstrap_file_name,
+        api_sock,
     })
 }
 
 impl Nydusd {
-    pub fn start(&self) -> Result<()> {
+    fn _start(&self, upgrade: bool) -> Result<()> {
         let work_dir = self.work_dir.clone();
         let mount_path = self.mount_path.clone();
         let bootstrap_file_name = self.bootstrap_file_name.clone();
+        let api_sock = self.api_sock.clone();
+
+        let upgrade_arg = if upgrade { "--upgrade" } else { "" };
 
         spawn(move || {
             exec(
                 format!(
-                    "{} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level info",
+                    "{} {} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level info --id {:?} --supervisor {:?}",
                     NYDUSD,
+                    upgrade_arg,
                     work_dir.join("config.json"),
-                    work_dir.join("api.sock"),
+                    work_dir.join(api_sock),
                     mount_path,
                     work_dir.join(bootstrap_file_name),
+                    work_dir.file_name().unwrap(),
+                    work_dir.join("supervisor.sock"),
                 )
                 .as_str(),
                 false
@@ -103,11 +112,19 @@ impl Nydusd {
 
         sleep(time::Duration::from_secs(2));
 
-        if !self.is_mounted()? {
+        if !upgrade && !self.is_mounted()? {
             return Err(eother!("nydusd mount failed"));
         }
 
         Ok(())
+    }
+
+    pub fn start(&self) -> Result<()> {
+        self._start(false)
+    }
+
+    pub fn start_with_upgrade(&self) -> Result<()> {
+        self._start(true)
     }
 
     pub fn check(&self, expect_texture: &str) -> Result<()> {

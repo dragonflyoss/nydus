@@ -30,6 +30,7 @@ static-release:
 
 ut:
 	RUST_BACKTRACE=1 cargo test --features=virtiofs --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
+
 test: build ut
 	# Run smoke test and unit tests
 	RUST_BACKTRACE=1 TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
