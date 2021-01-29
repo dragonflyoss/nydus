@@ -3,23 +3,37 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Debug;
 use std::io;
-use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
+use std::sync::mpsc::{RecvError, SendError};
 
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
+use serde::Deserialize;
 use serde_json::Error as SerdeError;
-use vmm_sys_util::eventfd::EventFd;
 
 use crate::http::{extract_query_part, EndpointHandler};
 
-/// API errors are sent back from the VMM API server through the ApiResponse.
+#[derive(Debug)]
+pub enum DaemonErrorKind {
+    NotReady,
+    UpgradeManager,
+    Unsupported,
+    Connect(io::Error),
+    SendFd,
+    RecvFd,
+    Disconnect(io::Error),
+    Channel,
+    Other(String),
+}
+
+/// API errors are sent back from the Nydusd API server through the ApiResponse.
 #[derive(Debug)]
 pub enum ApiError {
     /// Cannot write to EventFd.
     EventFdWrite(io::Error),
 
     /// Cannot mount a resource
-    MountFailure(io::Error),
+    MountFailure(DaemonErrorKind),
 
     /// API request send error
     RequestSend(SendError<ApiRequest>),
@@ -29,372 +43,404 @@ pub enum ApiError {
 
     /// API response receive error
     ResponseRecv(RecvError),
+
+    DaemonAbnormal(DaemonErrorKind),
+
+    Events(String),
+
+    Metrics(String),
 }
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
+#[derive(Serialize)]
 pub enum ApiResponsePayload {
     /// No data is sent on the channel.
     Empty,
-
-    /// Virtual machine information
-    DaemonInfo(DaemonInfo),
-
-    /// Vmm ping response
-    Mount,
-
+    /// Nydus daemon general working information.
+    DaemonInfo(String),
+    Events(String),
+    FsBackendInfo(String),
     /// Nydus filesystem global metrics
     FsGlobalMetrics(String),
-
     /// Nydus filesystem per-file metrics
     FsFilesMetrics(String),
     FsFilesPatterns(String),
+    BackendMetrics(String),
+    BlobcacheMetrics(String),
 }
 
 /// This is the response sent by the API server through the mpsc channel.
 pub type ApiResponse = std::result::Result<ApiResponsePayload, ApiError>;
+pub type HttpResult = std::result::Result<Response, HttpError>;
 
 //#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ApiRequest {
     DaemonInfo,
-    Mount(MountInfo),
+    Events,
+    Mount((String, ApiMountCmd)),
+    Remount((String, ApiMountCmd)),
+    Umount(String),
     ConfigureDaemon(DaemonConf),
     ExportGlobalMetrics(Option<String>),
     ExportFilesMetrics(Option<String>),
     ExportAccessPatterns(Option<String>),
+    ExportBackendMetrics(Option<String>),
+    ExportBlobcacheMetrics(Option<String>),
+    ExportFsBackendInfo(String),
+    SendFuseFd,
+    Takeover,
+    Exit,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-pub struct DaemonInfo {
-    pub id: String,
-    pub version: String,
-    pub state: String,
+#[derive(Clone, Deserialize, Debug)]
+pub struct ApiMountCmd {
+    pub source: String,
+    #[serde(default)]
+    pub fs_type: String,
+    pub config: String,
+    #[serde(default)]
+    pub prefetch_files: Option<Vec<String>>,
 }
 
-#[derive(Clone, Deserialize, Serialize, Debug)]
-pub struct MountInfo {
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub fstype: Option<String>,
+#[derive(Clone, Deserialize, Debug)]
+pub struct ApiUmountCmd {
     pub mountpoint: String,
-    #[serde(default)]
-    pub config: Option<String>,
-    pub ops: String,
 }
 
-#[derive(Clone, Deserialize, Serialize, Debug)]
+fn parse_body<'a, F: Deserialize<'a>>(b: &'a Body) -> Result<F, HttpError> {
+    serde_json::from_slice::<F>(b.raw()).map_err(HttpError::ParseBody)
+}
+
+#[derive(Clone, Deserialize, Debug)]
 pub struct DaemonConf {
     pub log_level: String,
 }
 
-pub fn daemon_info(
-    api_evt: EventFd,
-    to_api: Sender<ApiRequest>,
-    from_api: &Receiver<ApiResponse>,
-) -> ApiResult<DaemonInfo> {
-    // Send the VM request.
-    to_api
-        .send(ApiRequest::DaemonInfo)
-        .map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
-
-    let info = from_api.recv().map_err(ApiError::ResponseRecv)??;
-
-    match info {
-        ApiResponsePayload::DaemonInfo(info) => Ok(info),
-        _ => Err(ApiError::ResponsePayloadType),
-    }
-}
-
-pub fn daemon_configure(
-    api_evt: EventFd,
-    to_api: Sender<ApiRequest>,
-    conf: DaemonConf,
-    from_api: &Receiver<ApiResponse>,
-) -> ApiResult<()> {
-    to_api
-        .send(ApiRequest::ConfigureDaemon(conf))
-        .map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
-
-    let info = from_api.recv().map_err(ApiError::ResponseRecv)??;
-
-    match info {
-        ApiResponsePayload::Empty => Ok(()),
-        _ => Err(ApiError::ResponsePayloadType),
-    }
-}
-
-pub fn mount_info(
-    api_evt: EventFd,
-    to_api: Sender<ApiRequest>,
-    info: MountInfo,
-    from_api: &Receiver<ApiResponse>,
-) -> ApiResult<()> {
-    // Send the VM request.
-    to_api
-        .send(ApiRequest::Mount(info))
-        .map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
-
-    let info = from_api.recv().map_err(ApiError::ResponseRecv)??;
-
-    match info {
-        ApiResponsePayload::Mount => Ok(()),
-        _ => Err(ApiError::ResponsePayloadType),
-    }
-}
-
-pub fn export_global_stats(
-    api_evt: EventFd,
-    to_api: Sender<ApiRequest>,
-    id: Option<String>,
-    from_api: &Receiver<ApiResponse>,
-) -> ApiResult<String> {
-    to_api
-        .send(ApiRequest::ExportGlobalMetrics(id))
-        .map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
-
-    let info = from_api.recv().map_err(ApiError::ResponseRecv)??;
-
-    match info {
-        ApiResponsePayload::FsGlobalMetrics(info) => Ok(info),
-        _ => Err(ApiError::ResponsePayloadType),
-    }
-}
-
-pub fn export_files_stats(
-    api_evt: EventFd,
-    to_api: Sender<ApiRequest>,
-    id: Option<String>,
-    from_api: &Receiver<ApiResponse>,
-) -> ApiResult<String> {
-    to_api
-        .send(ApiRequest::ExportFilesMetrics(id))
-        .map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
-
-    let info = from_api.recv().map_err(ApiError::ResponseRecv)??;
-
-    match info {
-        ApiResponsePayload::FsFilesMetrics(info) => Ok(info),
-        _ => Err(ApiError::ResponsePayloadType),
-    }
-}
-
-pub fn export_files_patterns(
-    api_evt: EventFd,
-    to_api: Sender<ApiRequest>,
-    id: Option<String>,
-    from_api: &Receiver<ApiResponse>,
-) -> ApiResult<String> {
-    to_api
-        .send(ApiRequest::ExportAccessPatterns(id))
-        .map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
-
-    let info = from_api.recv().map_err(ApiError::ResponseRecv)??;
-
-    match info {
-        ApiResponsePayload::FsFilesPatterns(info) => Ok(info),
-        _ => Err(ApiError::ResponsePayloadType),
-    }
-}
-
-/// Errors associated with VMM management
+/// Errors associated with Nydus management
 #[derive(Debug)]
 pub enum HttpError {
+    NoRoute,
+    BadRequest,
+    QueryString(String),
     /// API request receive error
     SerdeJsonDeserialize(SerdeError),
-
+    SerdeJsonSerialize(SerdeError),
+    ParseBody(SerdeError),
     /// Could not query daemon info
     Info(ApiError),
-
+    Events(ApiError),
     /// Could not mount resource
     Mount(ApiError),
+    GlobalMetrics(ApiError),
+    FsFilesMetrics(ApiError),
+    Pattern(ApiError),
     Configure(ApiError),
+    Upgrade(ApiError),
+    BlobcacheMetrics(ApiError),
+    BackendMetrics(ApiError),
+    FsBackendInfo(ApiError),
 }
 
-fn error_response(error: HttpError, status: StatusCode) -> Response {
+fn success_response(body: Option<String>) -> Response {
+    let status_code = if body.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::NoContent
+    };
+    let mut r = Response::new(Version::Http11, status_code);
+    if let Some(b) = body {
+        r.set_body(Body::new(b));
+    }
+    r
+}
+
+#[derive(Serialize, Debug)]
+struct ErrorMessage {
+    code: String,
+    message: String,
+}
+
+pub fn error_response(error: HttpError, status: StatusCode) -> Response {
     let mut response = Response::new(Version::Http11, status);
-    response.set_body(Body::new(format!("{:?}", error)));
+
+    let err_msg = ErrorMessage {
+        code: "UNDEFINED".to_string(),
+        message: format!("{:?}", error),
+    };
+    response.set_body(Body::new(serde_json::to_string(&err_msg).unwrap()));
 
     response
 }
 
-// /api/v1/info handler
-pub struct InfoHandler {}
+fn translate_status_code(e: &ApiError) -> StatusCode {
+    match e {
+        ApiError::DaemonAbnormal(kind) | ApiError::MountFailure(kind) => match kind {
+            DaemonErrorKind::NotReady => StatusCode::ServiceUnavailable,
+            DaemonErrorKind::Unsupported => StatusCode::NotImplemented,
+            _ => StatusCode::InternalServerError,
+        },
+        _ => StatusCode::InternalServerError,
+    }
+}
 
-impl EndpointHandler for InfoHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        api_notifier: EventFd,
-        to_api: Sender<ApiRequest>,
-        from_api: &Receiver<ApiResponse>,
-    ) -> Response {
-        match req.method() {
-            Method::Get => {
-                match daemon_info(api_notifier, to_api, from_api).map_err(HttpError::Info) {
-                    Ok(info) => {
-                        let mut response = Response::new(Version::Http11, StatusCode::OK);
-                        let info_serialized = serde_json::to_string(&info).unwrap();
+fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(
+    api_resp: ApiResponse,
+    op: O,
+) -> Result<Response, HttpError> {
+    match api_resp {
+        Ok(r) => {
+            use ApiResponsePayload::*;
+            let resp = match r {
+                Empty => success_response(None),
+                DaemonInfo(d) => success_response(Some(d)),
+                Events(d) => success_response(Some(d)),
+                FsFilesMetrics(d) => success_response(Some(d)),
+                FsGlobalMetrics(d) => success_response(Some(d)),
+                FsFilesPatterns(d) => success_response(Some(d)),
+                BackendMetrics(d) => success_response(Some(d)),
+                BlobcacheMetrics(d) => success_response(Some(d)),
+                FsBackendInfo(d) => success_response(Some(d)),
+            };
 
-                        response.set_body(Body::new(info_serialized));
-                        response
-                    }
-                    Err(e) => error_response(e, StatusCode::InternalServerError),
-                }
-            }
-            Method::Put => match &req.body {
-                Some(body) => {
-                    let kv: DaemonConf = match serde_json::from_slice(body.raw())
-                        .map_err(HttpError::SerdeJsonDeserialize)
-                    {
-                        Ok(config) => config,
-                        Err(e) => return error_response(e, StatusCode::BadRequest),
-                    };
-
-                    match daemon_configure(api_notifier, to_api, kv, from_api)
-                        .map_err(HttpError::Configure)
-                    {
-                        Ok(()) => Response::new(Version::Http11, StatusCode::NoContent),
-                        Err(e) => error_response(e, StatusCode::InternalServerError),
-                    }
-                }
-                None => Response::new(Version::Http11, StatusCode::BadRequest),
-            },
-            _ => Response::new(Version::Http11, StatusCode::BadRequest),
+            Ok(resp)
+        }
+        Err(e) => {
+            let sc = translate_status_code(&e);
+            Ok(error_response(op(e), sc))
         }
     }
 }
 
-// /api/v1/mount handler
-pub struct MountHandler {}
+pub struct InfoHandler {}
+impl EndpointHandler for InfoHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let r = kicker(ApiRequest::DaemonInfo);
+                convert_to_response(r, HttpError::Info)
+            }
+            (Method::Put, Some(body)) => {
+                let conf = parse_body(body)?;
+                let r = kicker(ApiRequest::ConfigureDaemon(conf));
+                convert_to_response(r, HttpError::Configure)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
 
+pub struct EventsHandler {}
+impl EndpointHandler for EventsHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let r = kicker(ApiRequest::Events);
+                convert_to_response(r, HttpError::Events)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct MountHandler {}
 impl EndpointHandler for MountHandler {
     fn handle_request(
         &self,
         req: &Request,
-        api_notifier: EventFd,
-        to_api: Sender<ApiRequest>,
-        from_api: &Receiver<ApiResponse>,
-    ) -> Response {
-        match req.method() {
-            Method::Put => {
-                match &req.body {
-                    Some(body) => {
-                        // Deserialize into a MountInfo
-                        let info: MountInfo = match serde_json::from_slice(body.raw())
-                            .map_err(HttpError::SerdeJsonDeserialize)
-                        {
-                            Ok(config) => config,
-                            Err(e) => return error_response(e, StatusCode::BadRequest),
-                        };
-
-                        // Call mount_info()
-                        match mount_info(api_notifier, to_api, info, from_api)
-                            .map_err(HttpError::Mount)
-                        {
-                            Ok(_) => Response::new(Version::Http11, StatusCode::NoContent),
-                            Err(e) => error_response(e, StatusCode::InternalServerError),
-                        }
-                    }
-
-                    None => Response::new(Version::Http11, StatusCode::BadRequest),
-                }
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        let mountpoint = extract_query_part(req, "mountpoint").ok_or_else(|| {
+            HttpError::QueryString("'mountpoint' should be specified in query string".to_string())
+        })?;
+        match (req.method(), req.body.as_ref()) {
+            (Method::Post, Some(body)) => {
+                let cmd = parse_body(body)?;
+                let r = kicker(ApiRequest::Mount((mountpoint, cmd)));
+                convert_to_response(r, HttpError::Mount)
             }
-
-            _ => Response::new(Version::Http11, StatusCode::BadRequest),
+            (Method::Put, Some(body)) => {
+                let cmd = parse_body(body)?;
+                let r = kicker(ApiRequest::Remount((mountpoint, cmd)));
+                convert_to_response(r, HttpError::Mount)
+            }
+            (Method::Delete, None) => {
+                let r = kicker(ApiRequest::Umount(mountpoint));
+                convert_to_response(r, HttpError::Mount)
+            }
+            _ => Err(HttpError::BadRequest),
         }
     }
 }
 
 pub struct MetricsHandler {}
-
 impl EndpointHandler for MetricsHandler {
     fn handle_request(
         &self,
         req: &Request,
-        api_notifier: EventFd,
-        to_api: Sender<ApiRequest>,
-        from_api: &Receiver<ApiResponse>,
-    ) -> Response {
-        match req.method() {
-            Method::Get => {
-                let id = extract_query_part(req, &"id");
-                match export_global_stats(api_notifier, to_api, id, from_api)
-                    .map_err(HttpError::Info)
-                {
-                    Ok(info) => {
-                        let mut response = Response::new(Version::Http11, StatusCode::OK);
-                        response.set_body(Body::new(info));
-                        response
-                    }
-                    Err(e) => error_response(e, StatusCode::InternalServerError),
-                }
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportGlobalMetrics(id));
+                convert_to_response(r, HttpError::GlobalMetrics)
             }
-            _ => Response::new(Version::Http11, StatusCode::BadRequest),
+            _ => Err(HttpError::BadRequest),
         }
     }
 }
 
 pub struct MetricsFilesHandler {}
-
 impl EndpointHandler for MetricsFilesHandler {
     fn handle_request(
         &self,
         req: &Request,
-        api_notifier: EventFd,
-        to_api: Sender<ApiRequest>,
-        from_api: &Receiver<ApiResponse>,
-    ) -> Response {
-        match req.method() {
-            Method::Get => {
-                let id = extract_query_part(req, &"id");
-                match export_files_stats(api_notifier, to_api, id, from_api)
-                    .map_err(HttpError::Info)
-                {
-                    Ok(info) => {
-                        let mut response = Response::new(Version::Http11, StatusCode::OK);
-                        response.set_body(Body::new(info));
-                        response
-                    }
-                    Err(e) => error_response(e, StatusCode::InternalServerError),
-                }
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportFilesMetrics(id));
+                convert_to_response(r, HttpError::FsFilesMetrics)
             }
-            _ => Response::new(Version::Http11, StatusCode::BadRequest),
+            _ => Err(HttpError::BadRequest),
         }
     }
 }
 
 pub struct MetricsPatternHandler {}
-
 impl EndpointHandler for MetricsPatternHandler {
     fn handle_request(
         &self,
         req: &Request,
-        api_notifier: EventFd,
-        to_api: Sender<ApiRequest>,
-        from_api: &Receiver<ApiResponse>,
-    ) -> Response {
-        match req.method() {
-            Method::Get => {
-                let id = extract_query_part(req, &"id");
-                match export_files_patterns(api_notifier, to_api, id, from_api)
-                    .map_err(HttpError::Info)
-                {
-                    Ok(info) => {
-                        let mut response = Response::new(Version::Http11, StatusCode::OK);
-                        response.set_body(Body::new(info));
-                        response
-                    }
-                    Err(e) => error_response(e, StatusCode::InternalServerError),
-                }
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportAccessPatterns(id));
+                convert_to_response(r, HttpError::Pattern)
             }
-            _ => Response::new(Version::Http11, StatusCode::BadRequest),
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct MetricsBackendHandler {}
+impl EndpointHandler for MetricsBackendHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportBackendMetrics(id));
+                convert_to_response(r, HttpError::BackendMetrics)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct MetricsBlobcacheHandler {}
+impl EndpointHandler for MetricsBlobcacheHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportBlobcacheMetrics(id));
+                convert_to_response(r, HttpError::BlobcacheMetrics)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct SendFuseFdHandler {}
+impl EndpointHandler for SendFuseFdHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::SendFuseFd);
+                convert_to_response(r, HttpError::Upgrade)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct TakeoverHandler {}
+impl EndpointHandler for TakeoverHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::Takeover);
+                convert_to_response(r, HttpError::Upgrade)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct ExitHandler {}
+impl EndpointHandler for ExitHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::Exit);
+                convert_to_response(r, HttpError::Upgrade)
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct FsBackendInfo {}
+
+impl EndpointHandler for FsBackendInfo {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let mountpoint = extract_query_part(req, "mountpoint").ok_or_else(|| {
+                    HttpError::QueryString(
+                        "'mountpoint' should be specified in query string".to_string(),
+                    )
+                })?;
+                let r = kicker(ApiRequest::ExportFsBackendInfo(mountpoint));
+                convert_to_response(r, HttpError::FsBackendInfo)
+            }
+            _ => Err(HttpError::BadRequest),
         }
     }
 }
