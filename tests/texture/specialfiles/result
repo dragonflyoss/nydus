@@ -1,0 +1,12 @@
+[
+  {"type":"directory","name":"","contents":[
+    {"type":"block","name":"block-file"},
+    {"type":"char","name":"char-file"},
+    {"type":"directory","name":"dir","contents":[
+    ]},
+    {"type":"fifo","name":"fifo-file"},
+    {"type":"file","name":"normal-file"}
+  ]},
+  {"type":"report","directories":1,"files":4}
+]
+d41d8cd98f00b204e9800998ecf8427e  /normal-file

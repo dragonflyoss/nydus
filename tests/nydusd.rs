@@ -15,8 +15,6 @@ const NYDUSD: &str = "./target-fusedev/debug/nydusd";
 
 pub struct Nydusd {
     work_dir: PathBuf,
-    mount_path: PathBuf,
-    bootstrap_file_name: PathBuf,
     pub api_sock: PathBuf,
 }
 
@@ -25,13 +23,9 @@ pub fn new(
     enable_cache: bool,
     cache_compressed: bool,
     rafs_mode: RafsMode,
-    bootstrap_file_name: PathBuf,
     api_sock: PathBuf,
     digest_validate: bool,
 ) -> Result<Nydusd> {
-    let mount_path = work_dir.join("mnt");
-    fs::create_dir_all(mount_path.clone())?;
-
     let cache_path = work_dir.join("cache");
     fs::create_dir_all(cache_path.clone())?;
 
@@ -77,31 +71,35 @@ pub fn new(
 
     Ok(Nydusd {
         work_dir: work_dir.clone(),
-        mount_path,
-        bootstrap_file_name,
         api_sock,
     })
 }
 
 impl Nydusd {
-    fn _start(&self, upgrade: bool) -> Result<()> {
+    fn _start(&self, upgrade: bool, bootstrap_name: Option<&str>, mount_path: &str) -> Result<()> {
         let work_dir = self.work_dir.clone();
-        let mount_path = self.mount_path.clone();
-        let bootstrap_file_name = self.bootstrap_file_name.clone();
         let api_sock = self.api_sock.clone();
 
-        let upgrade_arg = if upgrade { "--upgrade" } else { "" };
+        fs::create_dir_all(work_dir.join(mount_path))?;
 
+        let upgrade_arg = if upgrade { "--upgrade" } else { "" };
+        let bootstrap_name = if let Some(bootstrap_name) = bootstrap_name {
+            format!("--bootstrap {:?}", work_dir.join(bootstrap_name))
+        } else {
+            String::new()
+        };
+
+        let _mount_path = mount_path.to_string();
         spawn(move || {
             exec(
                 format!(
-                    "{} {} --config {:?} --apisock {:?} --mountpoint {:?} --bootstrap {:?} --log-level info --id {:?} --supervisor {:?}",
+                    "{} {} --config {:?} --apisock {:?} --mountpoint {:?} {} --log-level info --id {:?} --supervisor {:?}",
                     NYDUSD,
                     upgrade_arg,
                     work_dir.join("config.json"),
                     work_dir.join(api_sock),
-                    mount_path,
-                    work_dir.join(bootstrap_file_name),
+                    work_dir.join(_mount_path),
+                    bootstrap_name,
                     work_dir.file_name().unwrap(),
                     work_dir.join("supervisor.sock"),
                 )
@@ -112,23 +110,19 @@ impl Nydusd {
 
         sleep(time::Duration::from_secs(2));
 
-        if !upgrade && !self.is_mounted()? {
+        if !upgrade && !self.is_mounted(mount_path)? {
             return Err(eother!("nydusd mount failed"));
         }
 
         Ok(())
     }
 
-    pub fn start(&self) -> Result<()> {
-        self._start(false)
+    pub fn start(&self, bootstrap_name: Option<&str>, mount_path: &str) -> Result<()> {
+        self._start(false, bootstrap_name, mount_path)
     }
 
-    pub fn start_with_upgrade(&self) -> Result<()> {
-        self._start(true)
-    }
-
-    pub fn check(&self, expect_texture: &str) -> Result<()> {
-        let mount_path = self.work_dir.join("mnt");
+    pub fn check(&self, expect_texture: &str, mount_path: &str) -> Result<()> {
+        let mount_path = self.work_dir.join(mount_path);
 
         let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true)?;
         let md5_ret = exec(
@@ -153,17 +147,21 @@ impl Nydusd {
         Ok(())
     }
 
-    pub fn is_mounted(&self) -> Result<bool> {
+    pub fn is_mounted(&self, mount_path: &str) -> Result<bool> {
         let ret = exec(format!("cat /proc/mounts").as_str(), true)?;
         for line in ret.split("\n") {
-            if line.contains(self.mount_path.to_str().unwrap()) {
+            if line.contains(self.work_dir.join(mount_path).to_str().unwrap()) {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    pub fn stop(&self) {
-        exec(format!("umount {:?}", self.mount_path).as_str(), false).unwrap();
+    pub fn umount(&self, mount_path: &str) {
+        exec(
+            format!("umount {:?}", self.work_dir.join(mount_path)).as_str(),
+            false,
+        )
+        .unwrap();
     }
 }
