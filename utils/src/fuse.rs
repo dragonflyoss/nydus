@@ -159,11 +159,7 @@ impl FuseChannel {
         })
     }
 
-    pub fn get_reader<'b>(
-        &self,
-        buf: &'b mut Vec<u8>,
-        exit: &mut bool,
-    ) -> io::Result<Option<Reader<'b>>> {
+    pub fn get_reader<'b>(&self, buf: &'b mut Vec<u8>) -> io::Result<Option<Reader<'b>>> {
         loop {
             let num_events = epoll::wait(self.epoll_fd, -1, &mut self.events.borrow_mut())?;
 
@@ -185,7 +181,6 @@ impl FuseChannel {
                             // One more trick is we don't read the event fd so as to make all fuse threads exit.
                             // That is because we configure this event fd as LEVEL triggered.
                             info!("Will exit from fuse service");
-                            *exit = true;
                             return Ok(None);
                         }
 
