@@ -4,36 +4,49 @@ version = "0.1.0"
 authors = ["The Nydus Developers"]
 edition = "2018"
 
+[profile.release]
+panic = "abort"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 rlimit = "0.3.0"
-log = "0.4"
+log = "0.4.8"
 epoll = ">=4.0.1"
 libc = "0.2"
 vmm-sys-util = ">=0.3.1"
 clap = "2.33"
 stderrlog = "0.4"
-serde = {version = ">=1.0.27", features = ["rc"] }
+serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
+serde_with = { version="1.6.0", features = [ "macros" ] }
 sha2 = "0.9.1"
 lazy_static = "1.4.0"
 xattr = "0.2.2"
 nix = "0.17"
+anyhow = "1.0.35"
 base64 = { version = ">=0.12.0" }
+rust-fsm = "0.4.0"
 uuid = { version = "0.8", features = ["serde", "v4"] }
 rafs = { path = "rafs", features = ["backend-localfs", "backend-oss", "backend-registry"] }
 nydus-utils = { path = "utils" }
 nydus-api = { path = "api" }
 vm-memory = { version = ">=0.2.0", optional = true }
+chrono = "0.4.19"
+
+event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "v0.2.0"}
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true }
 vhost-rs = { git = "https://github.com/cloud-hypervisor/vhost.git", branch = "dragonball", package = "vhost", optional = true }
-vhost_user_backend = { git = "https://github.com/cloud-hypervisor/vhost-user-backend.git", optional = true }
-event-manager = { git = "https://github.com/rust-vmm/event-manager.git", branch= "master" }
+vhost-user-backend = { git = "https://github.com/cloud-hypervisor/vhost-user-backend.git", package="vhost_user_backend", optional = true }
+
+[dev-dependencies]
+sendfd = "0.3.3"
+vmm-sys-util = ">=0.3.1"
+env_logger = "0.8.2"
 
 [features]
 fusedev = ["nydus-utils/fusedev", "fuse-rs/fusedev"]
-virtiofsd = ["fuse-rs/vhost-user-fs", "vm-memory/backend-mmap", "vhost-rs/vhost-user-slave", "vhost_user_backend"]
+virtiofs = ["fuse-rs/vhost-user-fs", "vm-memory/backend-mmap", "vhost-rs/vhost-user-slave", "vhost-user-backend"]
 
 [workspace]
 members = [

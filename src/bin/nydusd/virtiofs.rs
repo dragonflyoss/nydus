@@ -4,8 +4,13 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+use std::any::Any;
 use std::io::Result;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{
+    mpsc::{channel, Receiver},
+    Arc, Mutex, MutexGuard, RwLock,
+};
+use std::thread;
 
 use libc::EFD_NONBLOCK;
 
@@ -17,10 +22,13 @@ use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring};
 use vm_memory::GuestMemoryMmap;
 use vmm_sys_util::eventfd::EventFd;
 
-use crate::daemon;
-use daemon::{Error, NydusDaemon};
+use crate::upgrade::UpgradeManager;
+use nydus_utils::{eother, BuildTimeInfo};
 
-use nydus_utils::einval;
+use crate::daemon::{
+    DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
+    DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
+};
 
 const VIRTIO_F_VERSION_1: u32 = 32;
 const QUEUE_SIZE: usize = 1024;
@@ -33,7 +41,6 @@ const REQ_QUEUE_EVENT: u16 = 1;
 // The device has been dropped.
 const KILL_EVENT: u16 = 2;
 
-/// TODO: group virtiofsd code into a different file
 type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
 
 #[allow(dead_code)]
@@ -54,7 +61,7 @@ impl VhostUserFsBackendHandler {
     fn new(vfs: Arc<Vfs>) -> Result<Self> {
         let backend = VhostUserFsBackend {
             mem: None,
-            kill_evt: EventFd::new(EFD_NONBLOCK).map_err(Error::Epoll)?,
+            kill_evt: EventFd::new(EFD_NONBLOCK).map_err(DaemonError::Epoll)?,
             server: Arc::new(Server::new(vfs)),
             vu_req: None,
             used_descs: Vec::with_capacity(QUEUE_SIZE),
@@ -69,13 +76,14 @@ impl VhostUserFsBackend {
     // There's no way to recover if error happens during processing a virtq, let the caller
     // to handle it.
     fn process_queue(&mut self, vring: &mut Vring) -> Result<()> {
-        let mem = self.mem.as_ref().ok_or(Error::NoMemoryConfigured)?;
+        let mem = self.mem.as_ref().ok_or(DaemonError::NoMemoryConfigured)?;
 
         while let Some(avail_desc) = vring.mut_queue().iter(mem).next() {
             let head_index = avail_desc.index();
-            let reader =
-                Reader::new(mem, avail_desc.clone()).map_err(Error::InvalidDescriptorChain)?;
-            let writer = Writer::new(mem, avail_desc).map_err(Error::InvalidDescriptorChain)?;
+            let reader = Reader::new(mem, avail_desc.clone())
+                .map_err(DaemonError::InvalidDescriptorChain)?;
+            let writer =
+                Writer::new(mem, avail_desc).map_err(DaemonError::InvalidDescriptorChain)?;
 
             let total = self
                 .server
@@ -86,7 +94,7 @@ impl VhostUserFsBackend {
                         .as_mut()
                         .map(|x| x as &mut dyn FsCacheReqHandler),
                 )
-                .map_err(Error::ProcessQueue)?;
+                .map_err(DaemonError::ProcessQueue)?;
 
             self.used_descs.push((head_index, total as u32));
         }
@@ -141,7 +149,7 @@ impl VhostUserBackend for VhostUserFsBackendHandler {
         _thread_id: usize,
     ) -> VhostUserBackendResult<bool> {
         if evset != epoll::Events::EPOLLIN {
-            return Err(Error::HandleEventNotEpollIn.into());
+            return Err(DaemonError::HandleEventNotEpollIn.into());
         }
 
         match index {
@@ -155,7 +163,7 @@ impl VhostUserBackend for VhostUserFsBackendHandler {
                 let mut vring = vrings[x as usize].write().unwrap();
                 self.backend.lock().unwrap().process_queue(&mut vring)?;
             }
-            _ => return Err(Error::HandleEventUnknownEvent.into()),
+            _ => return Err(DaemonError::HandleEventUnknownEvent.into()),
         }
 
         Ok(false)
@@ -174,42 +182,152 @@ impl VhostUserBackend for VhostUserFsBackendHandler {
 }
 
 struct VirtiofsDaemon<S: VhostUserBackend> {
+    vfs: Arc<Vfs>,
+    daemon: Arc<Mutex<VhostUserDaemon<S>>>,
     sock: String,
-    daemon: VhostUserDaemon<S>,
+    id: Option<String>,
+    supervisor: Option<String>,
+    upgrade_mgr: Option<Mutex<UpgradeManager>>,
+    trigger: Arc<Mutex<Trigger>>,
+    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    backend_collection: Mutex<FsBackendCollection>,
+    bti: BuildTimeInfo,
 }
 
 impl<S: VhostUserBackend> NydusDaemon for VirtiofsDaemon<S> {
-    fn start(&mut self, _: u32) -> Result<()> {
-        let listener = Listener::new(&self.sock, true).unwrap();
-        self.daemon.start(listener).map_err(|e| einval!(e))
-    }
+    fn start(&self) -> DaemonResult<()> {
+        let listener = Listener::new(&self.sock, true)
+            .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
 
-    fn wait(&mut self) -> Result<()> {
-        self.daemon.wait().map_err(|e| einval!(e))
-    }
+        let vu_daemon = self.daemon.clone();
+        let _ = thread::Builder::new()
+            .name("vhost_user_listener".to_string())
+            .spawn(move || {
+                vu_daemon
+                    .lock()
+                    .unwrap()
+                    .start(listener)
+                    .unwrap_or_else(|e| error!("{:?}", e));
+            })
+            .map_err(DaemonError::ThreadSpawn)?;
 
-    fn stop(&mut self) -> Result<()> {
-        /* TODO: find a way to kill backend
-        let kill_evt = &backend.read().unwrap().kill_evt;
-        if let Err(e) = kill_evt.write(1) {}
-        */
         Ok(())
+    }
+
+    fn wait(&self) -> DaemonResult<()> {
+        self.daemon
+            .lock()
+            .unwrap()
+            .wait()
+            .map_err(|e| DaemonError::WaitDaemon(eother!(e)))
+    }
+
+    fn disconnect(&self) -> DaemonResult<()> {
+        Ok(())
+    }
+
+    fn id(&self) -> Option<String> {
+        self.id.clone()
+    }
+
+    fn supervisor(&self) -> Option<String> {
+        self.supervisor.clone()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get_state(&self) -> DaemonState {
+        unimplemented!();
+    }
+
+    fn set_state(&self, _state: DaemonState) {}
+
+    fn save(&self) -> DaemonResult<()> {
+        unimplemented!();
+    }
+
+    fn restore(&self) -> DaemonResult<()> {
+        unimplemented!();
+    }
+
+    fn get_vfs(&self) -> &Vfs {
+        &self.vfs
+    }
+
+    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+        self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
+    }
+
+    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
+        self.backend_collection.lock().unwrap()
+    }
+
+    fn version(&self) -> BuildTimeInfo {
+        self.bti.clone()
+    }
+}
+
+impl<S: VhostUserBackend> DaemonStateMachineSubscriber for VirtiofsDaemon<S> {
+    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
+        self.trigger
+            .lock()
+            .unwrap()
+            .send(event)
+            .map_err(|e| DaemonError::Channel(format!("send {:?}", e)))?;
+
+        self.result_receiver
+            .lock()
+            .expect("Not expect poisoned lock!")
+            .recv()
+            .map_err(|e| DaemonError::Channel(format!("recv {:?}", e)))?
     }
 }
 
 pub fn create_nydus_daemon(
+    id: Option<String>,
+    supervisor: Option<String>,
     sock: &str,
-    fs: Arc<Vfs>,
-    _evtfd: EventFd,
-    _readonly: bool,
-) -> Result<Box<dyn NydusDaemon>> {
-    let daemon = VhostUserDaemon::new(
+    vfs: Arc<Vfs>,
+    mount_cmd: Option<FsBackendMountCmd>,
+    bti: BuildTimeInfo,
+) -> Result<Arc<dyn NydusDaemon + Send>> {
+    let vu_daemon = VhostUserDaemon::new(
         String::from("vhost-user-fs-backend"),
-        Arc::new(RwLock::new(VhostUserFsBackendHandler::new(fs)?)),
+        Arc::new(RwLock::new(VhostUserFsBackendHandler::new(vfs.clone())?)),
     )
-    .map_err(|e| Error::DaemonFailure(format!("{:?}", e)))?;
-    Ok(Box::new(VirtiofsDaemon {
-        sock: sock.to_owned(),
-        daemon,
-    }))
+    .map_err(|e| DaemonError::DaemonFailure(format!("{:?}", e)))?;
+
+    let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
+    let (result_sender, result_receiver) = channel::<DaemonResult<()>>();
+
+    let daemon = Arc::new(VirtiofsDaemon {
+        vfs,
+        daemon: Arc::new(Mutex::new(vu_daemon)),
+        sock: sock.to_string(),
+        id,
+        supervisor,
+        upgrade_mgr: None,
+        trigger: Arc::new(Mutex::new(trigger)),
+        result_receiver: Mutex::new(result_receiver),
+        bti,
+        backend_collection: Default::default(),
+    });
+
+    let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
+    machine.kick_state_machine()?;
+
+    if let Some(cmd) = mount_cmd {
+        daemon.mount(cmd)?;
+    }
+
+    // TODO: In fact, for virtiofs, below event triggers virtio-queue setup and some other
+    // preparation/connection work. So this event name `Mount` might not be suggestive.
+    // I'd like to rename it someday.
+    daemon
+        .on_event(DaemonStateMachineInput::Mount)
+        .map_err(|e| eother!(e))?;
+
+    Ok(daemon)
 }
