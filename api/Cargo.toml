@@ -15,6 +15,5 @@ serde = { version = ">=1.0.27", features = ["rc"] }
 serde_derive = ">=1.0.27"
 serde_json = ">=1.0.9"
 vmm-sys-util = ">=0.3.1"
-rafs = { path = "../rafs" }
 url = "2.1.1"
 http = "0.2.1"

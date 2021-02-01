@@ -1054,7 +1054,6 @@ dependencies = [
  "lazy_static 1.4.0",
  "log",
  "micro_http",
- "rafs",
  "serde",
  "serde_derive",
  "serde_json",
