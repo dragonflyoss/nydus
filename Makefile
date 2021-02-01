@@ -37,12 +37,12 @@ test: build ut
 
 docker-smoke:
 	docker build -t nydus-rs-smoke misc/smoke
-	docker run -it --rm --privileged -v $(TEST_WORKDIR_PREFIX) -e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/usr/local/cargo -v fuse-targets:/nydus-rs/target-fusedev -v virtiofs-targets:/nydus-rs/target-virtiofs nydus-rs-smoke
+	docker run --rm --privileged -v $(TEST_WORKDIR_PREFIX) -e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) -v ${current_dir}:/nydus-rs nydus-rs-smoke make test
 
 docker-static:
 	# For static build with musl
 	docker build -t nydus-rs-static misc/musl-static
-	docker run -it --rm -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/root/.cargo nydus-rs-static
+	docker run --rm -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/root/.cargo nydus-rs-static
 
 nydusify:
 	make -C contrib/nydusify
