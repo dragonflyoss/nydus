@@ -7,30 +7,32 @@
 //! RAFS: a readonly FUSE file system designed for Cloud Native.
 
 use std::any::Any;
-use std::ffi::CStr;
-use std::ffi::OsStr;
+use std::convert::TryFrom;
+use std::ffi::{CStr, OsStr};
 use std::fmt;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::os::unix::io::FromRawFd;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fuse_rs::abi::linux_abi::Attr;
-use fuse_rs::api::filesystem::*;
-use fuse_rs::api::BackendFileSystem;
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 use std::time::SystemTime;
 
-use crate::io_stats;
-use crate::io_stats::StatsFop;
-use crate::metadata::{Inode, RafsInode, RafsSuper};
-use crate::storage::device;
+use fuse_rs::abi::linux_abi::Attr;
+use fuse_rs::api::filesystem::*;
+use fuse_rs::api::BackendFileSystem;
+
+use crate::io_stats::{self, FopRecorder, StatsFop::*};
+use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::storage::*;
+use crate::storage::{cache::PrefetchWorker, device};
 use crate::*;
 
-use nydus_utils::{eacces, ealready, enoent, eother};
+use nydus_utils::eacces;
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -58,7 +60,16 @@ pub struct FsPrefetchControl {
     #[serde(default = "default_threads_count")]
     threads_count: usize,
     #[serde(default = "default_merging_size")]
+    // In unit of Bytes
     merging_size: usize,
+    #[serde(default)]
+    // In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
+    // reduce congestion with normal user IO.
+    // bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
+    // bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
+    //                        Please note that if the value is less than Rafs chunk size,
+    //                        it will be raised to the chunk size.
+    bandwidth_rate: u32,
 }
 
 /// Rafs storage backend configuration information.
@@ -78,11 +89,24 @@ pub struct RafsConfig {
     pub access_pattern: bool,
 }
 
+impl FromStr for RafsConfig {
+    type Err = RafsError;
+
+    fn from_str(s: &str) -> RafsResult<RafsConfig> {
+        serde_json::from_str(s).map_err(RafsError::ParseConfig)
+    }
+}
+
 impl RafsConfig {
     pub fn new() -> RafsConfig {
         RafsConfig {
             ..Default::default()
         }
+    }
+
+    pub fn from_file(path: &str) -> RafsResult<RafsConfig> {
+        let file = File::open(path).map_err(RafsError::LoadConfig)?;
+        serde_json::from_reader::<File, RafsConfig>(file).map_err(RafsError::ParseConfig)
     }
 }
 
@@ -98,8 +122,9 @@ impl fmt::Display for RafsConfig {
 
 /// Main entrance of the RAFS readonly FUSE file system.
 pub struct Rafs {
+    id: String,
     device: device::RafsDevice,
-    sb: RafsSuper,
+    pub sb: Arc<RafsSuper>,
     digest_validate: bool,
     fs_prefetch: bool,
     initialized: bool,
@@ -111,23 +136,44 @@ pub struct Rafs {
     i_time: u64,
 }
 
-impl Rafs {
-    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> Result<Self> {
-        let mut device_conf = conf.device.clone();
-        device_conf.cache.cache_validate = conf.digest_validate;
-        device_conf.cache.prefetch_worker.threads_count = conf.fs_prefetch.threads_count;
-        device_conf.cache.prefetch_worker.merging_size = conf.fs_prefetch.merging_size;
+impl TryFrom<&RafsConfig> for PrefetchWorker {
+    type Error = RafsError;
+    fn try_from(c: &RafsConfig) -> RafsResult<Self> {
+        if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_BLOCK_SIZE {
+            return Err(RafsError::Configure(
+                "Merging size can't exceed chunk size".to_string(),
+            ));
+        }
 
-        let mut sb = RafsSuper::new(&conf)?;
-        sb.load(r)?;
+        Ok(PrefetchWorker {
+            enable: c.fs_prefetch.enable,
+            threads_count: c.fs_prefetch.threads_count,
+            merging_size: c.fs_prefetch.merging_size,
+            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
+        })
+    }
+}
+
+impl Rafs {
+    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
+        let mut device_conf = conf.device.clone();
+
+        device_conf.cache.cache_validate = conf.digest_validate;
+        device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
+
+        let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
+        sb.load(r).map_err(RafsError::FillSuperblock)?;
 
         let rafs = Rafs {
+            id: id.to_string(),
             device: device::RafsDevice::new(
                 device_conf,
                 sb.meta.get_compressor(),
                 sb.meta.get_digester(),
-            )?,
-            sb,
+                id,
+            )
+            .map_err(RafsError::CreateDevice)?,
+            sb: Arc::new(sb),
             initialized: false,
             ios: io_stats::new(id),
             digest_validate: conf.digest_validate,
@@ -148,11 +194,11 @@ impl Rafs {
     }
 
     /// update backend meta and blob file.
-    pub fn update(&self, r: &mut RafsIoReader, conf: RafsConfig) -> Result<()> {
+    pub fn update(&self, r: &mut RafsIoReader, conf: RafsConfig) -> RafsResult<()> {
         info!("update");
         if !self.initialized {
             warn!("Rafs is not yet initialized");
-            return Err(enoent!("Rafs is not yet initialized"));
+            return Err(RafsError::Uninitialized);
         }
 
         // step 1: update sb.
@@ -165,11 +211,14 @@ impl Rafs {
         info!("update sb is successful");
 
         // step 2: update device (only localfs is supported)
-        self.device.update(
-            conf.device,
-            self.sb.meta.get_compressor(),
-            self.sb.meta.get_digester(),
-        )?;
+        self.device
+            .update(
+                conf.device,
+                self.sb.meta.get_compressor(),
+                self.sb.meta.get_digester(),
+                self.id.as_str(),
+            )
+            .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
         Ok(())
@@ -179,37 +228,60 @@ impl Rafs {
     pub fn import(
         &mut self,
         r: &mut RafsIoReader,
-        prefetch_files: Option<Vec<&Path>>,
-    ) -> Result<()> {
+        prefetch_files: Option<Vec<PathBuf>>,
+    ) -> RafsResult<()> {
         if self.initialized {
-            return Err(ealready!("rafs already mounted"));
+            return Err(RafsError::AlreadyMounted);
         }
 
         self.device
-            .init(&self.sb.meta, &self.sb.inodes.get_blobs())?;
+            .init(&self.sb.meta, &self.sb.inodes.get_blobs())
+            .map_err(RafsError::CreateDevice)?;
 
         // Device should be ready before any prefetch.
         if self.fs_prefetch {
-            let inodes = match prefetch_files {
-                Some(files) => {
-                    let mut inodes = Vec::<Inode>::new();
-                    for f in files {
-                        if let Ok(inode) = self.ino_from_path(f) {
-                            inodes.push(inode);
-                        } else {
-                            continue;
-                        }
-                    }
-                    Some(inodes)
-                }
-                None => None,
-            };
+            // We have to this unsafe conversion because RafsIoReader as a Box pointer can't
+            // be shared between threads safely, even after cloning.
+            let _f: File = unsafe { FromRawFd::from_raw_fd(r.as_raw_fd()) };
+            let underlying_file = _f.try_clone().unwrap();
+            let sb = self.sb.clone();
+            let device = self.device.clone();
 
-            if let Ok(ref mut desc) = self.sb.prefetch_hint_files(r, inodes) {
-                if self.device.prefetch(desc).is_err() {
-                    eother!("Prefetch error");
-                }
-            }
+            let _ = std::thread::spawn(move || {
+                let mut reader = Box::new(underlying_file) as RafsIoReader;
+                let inodes = match prefetch_files {
+                    Some(files) => {
+                        let mut inodes = Vec::<Inode>::new();
+                        for f in files {
+                            if let Ok(inode) = sb.ino_from_path(f.as_path()) {
+                                inodes.push(inode);
+                            } else {
+                                continue;
+                            }
+                        }
+                        Some(inodes)
+                    }
+                    None => None,
+                };
+
+                // Prefetch procedure does not affect rafs mounting
+                sb.prefetch_hint_files(&mut reader, inodes, &|mut desc| {
+                    device.prefetch(&mut desc).unwrap_or_else(|e| {
+                        warn!("Prefetch error, {:?}", e);
+                        0
+                    });
+                })
+                .unwrap_or_else(|e| {
+                    info!("No file to be prefetched {:?}", e);
+                });
+
+                // For now, we only have hinted prefetch. So stopping prefetch workers once
+                // it's done is Okay. But if we involve more policies someday, we have to be
+                // careful when to stop prefetch progresses.
+                device
+                    .stop_prefetch()
+                    .unwrap_or_else(|_| error!("Failed in stopping prefetch workers"));
+            });
         }
 
         self.initialized = true;
@@ -223,7 +295,9 @@ impl Rafs {
         info! {"Destroy rafs"}
 
         if self.initialized {
-            self.sb.destroy();
+            Arc::get_mut(&mut self.sb)
+                .expect("Superblock is no longer used")
+                .destroy();
             self.device.close()?;
             self.initialized = false;
         }
@@ -287,13 +361,13 @@ impl Rafs {
             }) {
                 Ok(0) => {
                     self.ios
-                        .new_file_counter(child.ino(), |i| self.path_from_ino(i).unwrap());
+                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap());
                     break;
                 }
                 Ok(_) => {
                     idx += 1;
                     self.ios
-                        .new_file_counter(child.ino(), |i| self.path_from_ino(i).unwrap())
+                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap())
                 } // TODO: should we check `size` here?
                 Err(r) => return Err(r),
             }
@@ -315,35 +389,6 @@ impl Rafs {
         }
     }
 
-    fn lookup_wrapped(&self, ino: u64, name: &CStr) -> Result<Entry> {
-        let target = OsStr::from_bytes(name.to_bytes());
-        let parent = self.sb.get_inode(ino, self.digest_validate)?;
-        if !parent.is_dir() {
-            return Err(err_not_directory!());
-        }
-
-        if target == DOT || (ino == ROOT_ID && target == DOTDOT) {
-            let mut entry = self.get_inode_entry(parent);
-            entry.inode = ino;
-            Ok(entry)
-        } else if target == DOTDOT {
-            Ok(self
-                .sb
-                .get_inode(parent.parent(), self.digest_validate)
-                .map(|i| self.get_inode_entry(i))
-                .unwrap_or_else(|_| self.negative_entry()))
-        } else {
-            Ok(parent
-                .get_child_by_name(target)
-                .map(|i| {
-                    self.ios
-                        .new_file_counter(i.ino(), |i| self.path_from_ino(i).unwrap());
-                    self.get_inode_entry(i)
-                })
-                .unwrap_or_else(|_| self.negative_entry()))
-        }
-    }
-
     fn get_inode_attr(&self, ino: u64) -> Result<Attr> {
         let inode = self.sb.get_inode(ino, false)?;
         let mut attr = inode.get_attr();
@@ -352,8 +397,7 @@ impl Rafs {
             attr.uid = self.i_uid;
             attr.gid = self.i_gid;
         }
-        // Rafs does not accommodate special files, so `rdev` can always be 0.
-        attr.rdev = 0;
+
         attr.atime = self.i_time;
         attr.ctime = self.i_time;
         attr.mtime = self.i_time;
@@ -369,83 +413,11 @@ impl Rafs {
             entry.attr.st_gid = self.i_gid;
         }
 
-        // Rafs does not accommodate special files, so `rdev` can always be 0.
-        entry.attr.st_rdev = 0u64;
         entry.attr.st_atime = self.i_time as i64;
         entry.attr.st_ctime = self.i_time as i64;
         entry.attr.st_mtime = self.i_time as i64;
 
         entry
-    }
-
-    fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
-        if ino == ROOT_ID {
-            return Ok(self.sb.get_inode(ino, false)?.name()?.into());
-        }
-
-        let mut path = PathBuf::new();
-        let mut cur_ino = ino;
-        let mut inode;
-
-        loop {
-            inode = self.sb.get_inode(cur_ino, false)?;
-            let e: PathBuf = inode.name()?.into();
-            path = e.join(path);
-
-            if inode.ino() == ROOT_ID {
-                break;
-            } else {
-                cur_ino = inode.parent();
-            }
-        }
-
-        Ok(path)
-    }
-
-    fn ino_from_path(&self, f: &Path) -> Result<u64> {
-        if f == Path::new("/") {
-            return Ok(ROOT_ID);
-        }
-
-        if !f.starts_with("/") {
-            return Err(einval!());
-        }
-
-        let mut parent = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
-
-        let entries = f
-            .components()
-            .filter(|comp| *comp != Component::RootDir)
-            .map(|comp| match comp {
-                Component::Normal(name) => Some(name),
-                Component::ParentDir => Some(OsStr::from_bytes(DOTDOT.as_bytes())),
-                Component::CurDir => Some(OsStr::from_bytes(DOT.as_bytes())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        if entries.is_empty() {
-            warn!("Path can't be parsed {:?}", f);
-            return Err(enoent!());
-        }
-
-        for p in entries {
-            if p.is_none() {
-                error!("Illegal specified path {:?}", f);
-                return Err(einval!());
-            }
-
-            // Safe because it already checks if p is None above.
-            match parent.get_child_by_name(p.unwrap()) {
-                Ok(p) => parent = p,
-                Err(_) => {
-                    warn!("File {:?} not in rafs", p.unwrap());
-                    return Err(enoent!());
-                }
-            }
-        }
-
-        Ok(parent.ino())
     }
 }
 
@@ -453,7 +425,7 @@ impl BackendFileSystem for Rafs {
     fn mount(&self) -> Result<(Entry, u64)> {
         let root_inode = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
         self.ios
-            .new_file_counter(root_inode.ino(), |i| self.path_from_ino(i).unwrap());
+            .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
         let entry = self.get_inode_entry(root_inode);
         Ok((entry, self.sb.get_max_ino()))
     }
@@ -487,11 +459,34 @@ impl FileSystem for Rafs {
     fn destroy(&self) {}
 
     fn lookup(&self, _ctx: Context, ino: u64, name: &CStr) -> Result<Entry> {
-        let start = self.ios.latency_start();
-        let r = self.lookup_wrapped(ino, name);
-        self.ios.file_stats_update(ino, StatsFop::Lookup, 0, &r);
-        self.ios.latency_end(&start, StatsFop::Lookup);
-        r
+        let mut rec = FopRecorder::settle(Lookup, ino, &self.ios);
+        let target = OsStr::from_bytes(name.to_bytes());
+        let parent = self.sb.get_inode(ino, self.digest_validate)?;
+        if !parent.is_dir() {
+            return Err(err_not_directory!());
+        }
+
+        rec.mark_success(0);
+        if target == DOT || (ino == ROOT_ID && target == DOTDOT) {
+            let mut entry = self.get_inode_entry(parent);
+            entry.inode = ino;
+            Ok(entry)
+        } else if target == DOTDOT {
+            Ok(self
+                .sb
+                .get_inode(parent.parent(), self.digest_validate)
+                .map(|i| self.get_inode_entry(i))
+                .unwrap_or_else(|_| self.negative_entry()))
+        } else {
+            Ok(parent
+                .get_child_by_name(target)
+                .map(|i| {
+                    self.ios
+                        .new_file_counter(i.ino(), |i| self.sb.path_from_ino(i).unwrap());
+                    self.get_inode_entry(i)
+                })
+                .unwrap_or_else(|_| self.negative_entry()))
+        }
     }
 
     fn forget(&self, _ctx: Context, _inode: u64, _count: u64) {}
@@ -508,16 +503,25 @@ impl FileSystem for Rafs {
         ino: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
-        let attr = self.get_inode_attr(ino)?;
-        let r = Ok((attr.into(), self.sb.meta.attr_timeout));
-        self.ios.file_stats_update(ino, StatsFop::Stat, 0, &r);
-        r
+        let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
+        let attr = self.get_inode_attr(ino).map(|r| {
+            recorder.mark_success(0);
+            r
+        })?;
+        Ok((attr.into(), self.sb.meta.attr_timeout))
     }
 
     fn readlink(&self, _ctx: Context, ino: u64) -> Result<Vec<u8>> {
+        let mut rec = FopRecorder::settle(Readlink, ino, &self.ios);
         let inode = self.sb.get_inode(ino, self.digest_validate)?;
-
-        Ok(inode.get_symlink()?.as_bytes().to_vec())
+        Ok(inode
+            .get_symlink()
+            .map(|r| {
+                rec.mark_success(0);
+                r
+            })?
+            .as_bytes()
+            .to_vec())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -532,16 +536,18 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
+        let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
         if offset >= inode.size() {
             return Ok(0);
         }
         let desc = inode.alloc_bio_desc(offset, size as usize)?;
         let start = self.ios.latency_start();
-        let r = self.device.read_to(w, desc);
-        self.ios
-            .file_stats_update(ino, StatsFop::Read, size as usize, &r);
-        self.ios.latency_end(&start, io_stats::StatsFop::Read);
+        let r = self.device.read_to(w, desc).map(|r| {
+            recorder.mark_success(r);
+            r
+        });
+        self.ios.latency_end(&start, Read);
         r
     }
 
@@ -573,6 +579,8 @@ impl FileSystem for Rafs {
     }
 
     fn getxattr(&self, _ctx: Context, inode: u64, name: &CStr, size: u32) -> Result<GetxattrReply> {
+        let mut recorder = FopRecorder::settle(Getxattr, inode, &self.ios);
+
         if !self.xattr_supported() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -581,17 +589,23 @@ impl FileSystem for Rafs {
         let inode = self.sb.get_inode(inode, false)?;
 
         let value = inode.get_xattr(name)?;
-        match value {
+        let r = match value {
             Some(value) => match size {
                 0 => Ok(GetxattrReply::Count((value.len() + 1) as u32)),
                 x if x < value.len() as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
                 _ => Ok(GetxattrReply::Value(value)),
             },
             None => Err(std::io::Error::from_raw_os_error(libc::ENODATA)),
-        }
+        };
+
+        r.map(|v| {
+            recorder.mark_success(0);
+            v
+        })
     }
 
     fn listxattr(&self, _ctx: Context, inode: u64, size: u32) -> Result<ListxattrReply> {
+        let mut rec = FopRecorder::settle(Listxattr, inode, &self.ios);
         if !self.xattr_supported() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -609,6 +623,8 @@ impl FileSystem for Rafs {
             }
         }
 
+        rec.mark_success(0);
+
         match size {
             0 => Ok(ListxattrReply::Count(count as u32)),
             x if x < count as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
@@ -625,7 +641,11 @@ impl FileSystem for Rafs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
     ) -> Result<()> {
-        self.do_readdir(inode, size, offset, add_entry)
+        let mut rec = FopRecorder::settle(Readdir, inode, &self.ios);
+        self.do_readdir(inode, size, offset, add_entry).map(|r| {
+            rec.mark_success(0);
+            r
+        })
     }
 
     fn readdirplus(
@@ -637,9 +657,14 @@ impl FileSystem for Rafs {
         offset: u64,
         add_entry: &mut dyn FnMut(DirEntry, Entry) -> Result<usize>,
     ) -> Result<()> {
+        let mut rec = FopRecorder::settle(Readdirplus, ino, &self.ios);
         self.do_readdir(ino, size, offset, |dir_entry| {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
+        })
+        .map(|r| {
+            rec.mark_success(0);
+            r
         })
     }
 
@@ -648,10 +673,12 @@ impl FileSystem for Rafs {
     }
 
     fn access(&self, ctx: Context, ino: u64, mask: u32) -> Result<()> {
+        let mut rec = FopRecorder::settle(Access, ino, &self.ios);
         let st = self.get_inode_attr(ino)?;
         let mode = mask as i32 & (libc::R_OK | libc::W_OK | libc::X_OK);
 
         if mode == libc::F_OK {
+            rec.mark_success(0);
             return Ok(());
         }
 
@@ -684,6 +711,7 @@ impl FileSystem for Rafs {
             return Err(eacces!("permission denied"));
         }
 
+        rec.mark_success(0);
         Ok(())
     }
 }

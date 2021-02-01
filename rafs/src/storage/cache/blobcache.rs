@@ -5,18 +5,27 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
+use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, RwLock,
+};
 use std::thread;
 
 use nix::sys::uio;
 use nix::unistd::dup;
 extern crate spmc;
+use futures::executor::block_on;
+use governor::{
+    clock::QuantaClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
+};
 use vm_memory::VolatileSlice;
 
+use crate::io_stats::{BlobcacheMetrics, Metric};
 use crate::metadata::digest::{self, RafsDigest};
 use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
+use crate::metadata::{RafsChunkInfo, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::storage::backend::BlobBackend;
 use crate::storage::cache::RafsCache;
 use crate::storage::cache::*;
@@ -102,6 +111,7 @@ impl BlobCacheState {
         &mut self,
         blob_id: &str,
         backend: &(dyn BlobBackend + Sync + Send),
+        metrics: &Arc<BlobcacheMetrics>,
     ) -> Result<(RawFd, u64)> {
         if let Some((file, size)) = self.file_map.get(blob_id) {
             return Ok((file.as_raw_fd(), *size));
@@ -116,17 +126,22 @@ impl BlobCacheState {
         let fd = file.as_raw_fd();
 
         let size = if self.backend_size_valid {
-            backend.blob_size(blob_id)?
+            backend.blob_size(blob_id).map_err(|e| einval!(e))?
         } else {
             0
         };
 
         self.file_map.insert(blob_id.to_string(), (file, size));
+        metrics
+            .underlying_files
+            .lock()
+            .unwrap()
+            .insert(blob_id.to_string());
 
         Ok((fd, size))
     }
 
-    fn get(&self, blk: Arc<dyn RafsChunkInfo>) -> Option<Arc<Mutex<BlobCacheEntry>>> {
+    fn get(&self, blk: &dyn RafsChunkInfo) -> Option<Arc<Mutex<BlobCacheEntry>>> {
         // Do not expect poisoned lock here.
         self.chunk_map.get(&blk.block_id()).cloned()
     }
@@ -136,21 +151,25 @@ impl BlobCacheState {
         blob_id: &str,
         cki: Arc<dyn RafsChunkInfo>,
         backend: &(dyn BlobBackend + Sync + Send),
+        metrics: &Arc<BlobcacheMetrics>,
     ) -> Result<Arc<Mutex<BlobCacheEntry>>> {
         let block_id = cki.block_id();
         // Double check if someone else has inserted the blob chunk concurrently.
         if let Some(entry) = self.chunk_map.get(&block_id) {
             Ok(entry.clone())
         } else {
-            let (fd, _) = self.get_blob_fd(blob_id, backend)?;
+            let (fd, _) = self.get_blob_fd(blob_id, backend, metrics)?;
             let entry = Arc::new(Mutex::new(BlobCacheEntry::new(cki, fd)));
-            self.chunk_map.insert(*block_id, entry.clone());
+            let r = self.chunk_map.insert(*block_id, entry.clone());
+            if r.is_some() {
+                warn!("Entry(block_id={}) is inserted again", block_id);
+            }
+            metrics.entries_count.inc();
             Ok(entry)
         }
     }
 }
 
-#[derive(Clone)]
 pub struct BlobCache {
     cache: Arc<RwLock<BlobCacheState>>,
     validate: bool,
@@ -159,6 +178,14 @@ pub struct BlobCache {
     is_compressed: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    // TODO: Directly using Governor RateLimiter makes code a little hard to read as
+    // some concepts come from GCRA like "cells". GCRA is a sort of improved "Leaky Bucket"
+    // firstly invented from ATM network technology. Wrap the limiter into Throttle!
+    limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
+    mr_sender: Arc<Mutex<Option<spmc::Sender<MergedBackendRequest>>>>,
+    mr_receiver: Option<spmc::Receiver<MergedBackendRequest>>,
+    prefetch_seq: AtomicU64,
+    metrics: Arc<BlobcacheMetrics>,
 }
 
 impl BlobCache {
@@ -183,6 +210,7 @@ impl BlobCache {
                 chunk.block_id().to_string(),
                 chunk.compress_size()
             );
+            self.metrics.partial_hits.inc();
             return cache_entry.read_partial_chunk(bufs, offset + chunk.decompress_offset(), size);
         }
 
@@ -213,8 +241,9 @@ impl BlobCache {
                 )
                 .is_ok()
         {
+            self.metrics.whole_hits.inc();
             trace!(
-                "recover blob cache {} {} resue {} offset {} size {}",
+                "recover blob cache {} {} reuse {} offset {} size {}",
                 chunk.block_id(),
                 d_size,
                 reuse,
@@ -259,7 +288,6 @@ impl BlobCache {
         let mut d;
         let raw_chunk = if self.is_compressed && self.compressor() != compress::Algorithm::GZip {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
-            // TODO: Use a buffer pool for lower latency?
             //
             // gzip is special that it doesn't carry compress_size, instead, we make an IO stream out
             // of the blobcache file. So no need for an internal buffer here.
@@ -288,6 +316,7 @@ impl BlobCache {
                 "using blobcache file fd {} offset {} as data stream",
                 fd, offset,
             );
+            // FIXME: In case of multiple threads duplicating the same fd, they still share the same file offset.
             let fd = dup(fd).map_err(|_| last_error!())?;
             let mut f = unsafe { File::from_raw_fd(fd) };
             f.seek(SeekFrom::Start(offset)).map_err(|_| last_error!())?;
@@ -305,6 +334,215 @@ impl BlobCache {
         )?;
 
         Ok(())
+    }
+
+    fn is_chunk_continuous(prior: &RafsBio, cur: &RafsBio) -> bool {
+        let prior_cki = &prior.chunkinfo;
+        let cur_cki = &cur.chunkinfo;
+        let prior_end = prior_cki.compress_offset() + prior_cki.compress_size() as u64;
+        let cur_offset = cur_cki.compress_offset();
+        if prior_end == cur_offset && prior.blob_id == cur.blob_id {
+            return true;
+        }
+        false
+    }
+    fn generate_merged_requests(
+        &self,
+        bios: &mut [RafsBio],
+        tx: &mut spmc::Sender<MergedBackendRequest>,
+        merging_size: usize,
+        seq: u64,
+    ) {
+        let limiter = |merged_size: u32| {
+            if let Some(ref limiter) = self.limiter {
+                let cells = NonZeroU32::new(merged_size).unwrap();
+                if let Err(e) = limiter
+                    .check_n(cells)
+                    .or_else(|_| block_on(limiter.until_n_ready(cells)))
+                {
+                    // `InsufficientCapacity` is the only possible error
+                    // Have to give up to avoid dead-loop
+                    error!("{}: give up rate-limiting", e);
+                }
+            }
+        };
+
+        bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
+        let mut index: usize = 1;
+        if bios.is_empty() {
+            return;
+        }
+        let first_cki = &bios[0].chunkinfo;
+        let mut mr = MergedBackendRequest::new(seq);
+        mr.merge_begin(Arc::clone(first_cki), &bios[0].blob_id);
+
+        if bios.len() == 1 {
+            limiter(mr.blob_size);
+            tx.send(mr).unwrap();
+            return;
+        }
+
+        loop {
+            let cki = &bios[index].chunkinfo;
+            let prior_bio = &bios[index - 1];
+            let cur_bio = &bios[index];
+            // Even more chunks are continuous, still split them per as certain size.
+            // So that to achieve an appropriate request size to backend.
+            if Self::is_chunk_continuous(prior_bio, cur_bio) && mr.blob_size <= merging_size as u32
+            {
+                mr.merge_one_chunk(Arc::clone(&cki));
+            } else {
+                // New a MR if a non-continuous chunk is met.
+                limiter(mr.blob_size);
+                tx.send(mr.clone()).unwrap();
+                mr.reset();
+                mr.merge_begin(Arc::clone(&cki), &cur_bio.blob_id);
+            }
+            index += 1;
+            if index >= bios.len() {
+                limiter(mr.blob_size);
+                tx.send(mr).unwrap();
+                break;
+            }
+        }
+    }
+}
+
+// TODO: This function is too long... :-(
+fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
+    for num in 0..cache.prefetch_worker.threads_count {
+        // Clone cache fulfils our requirement that invoke `read_chunks` and it's
+        // hard to move `self` into closure.
+        let blobcache = cache.clone();
+        let rx = blobcache.mr_receiver.clone();
+        // TODO: We now don't define prefetch policy. Prefetch works according to hints coming
+        // from on-disk prefetch table or input arguments while nydusd starts. So better
+        // we can have method to kill prefetch threads. But hopefully, we can add
+        // another new prefetch policy triggering prefetch files belonging to the same
+        // directory while one of them is read. We can easily get a continuous region on blob
+        // that way.
+        let _thread = thread::Builder::new()
+            .name(format!("prefetch_thread_{}", num))
+            .spawn(move || {
+                blobcache
+                    .metrics
+                    .prefetch_workers
+                    .fetch_add(1, Ordering::Relaxed);
+                // Safe because channel must be established before prefetch workers
+                'wait_mr: while let Ok(mr) = rx.as_ref().unwrap().recv() {
+                    let blob_offset = mr.blob_offset;
+                    let blob_size = mr.blob_size;
+                    let continuous_chunks = &mr.chunks;
+                    let blob_id = &mr.blob_id;
+                    let mut issue_batch: bool;
+
+                    trace!(
+                        "Merged req id {} seq {} req offset {} size {}",
+                        blob_id,
+                        &mr.seq,
+                        blob_offset,
+                        blob_size
+                    );
+
+                    if blob_size == 0 {
+                        continue;
+                    }
+
+                    if continuous_chunks.len() > 2 {
+                        blobcache
+                            .metrics
+                            .prefetch_total_size
+                            .add(blob_size as usize);
+                        blobcache.metrics.prefetch_mr_count.inc();
+                    }
+
+                    blobcache
+                        .metrics
+                        .prefetch_data_amount
+                        .add(blob_size as usize);
+
+                    issue_batch = false;
+                    // An immature trick here to detect if chunk already resides in
+                    // blob cache file. Hopefully, we can have a more clever and agile
+                    // way in the future. Principe is that if all chunks are Ready,
+                    // abort this Merged Request. It might involve extra stress
+                    // to local file system.
+                    for c in continuous_chunks {
+                        let d_size = c.decompress_size() as usize;
+                        let entry = blobcache
+                            .cache
+                            .write()
+                            .expect("Expect cache lock not poisoned")
+                            .set(blob_id, c.clone(), blobcache.backend(), &blobcache.metrics);
+                        if let Ok(entry) = entry {
+                            let mut entry = entry.lock().unwrap();
+                            if entry.is_ready() {
+                                continue;
+                            }
+                            let fd = entry.fd;
+                            let chunk = entry.chunk.clone();
+                            // Always validate if chunk's hash is equal to `block_id` by which
+                            // blobcache judges if the data is up-to-date.
+                            if blobcache
+                                .read_blobcache_chunk(
+                                    fd,
+                                    chunk.as_ref(),
+                                    alloc_buf(d_size).as_mut_slice(),
+                                    true,
+                                )
+                                .is_err()
+                            {
+                                // Aha, we have a not integrated chunk here. Issue the entire
+                                // merged request from backend to boost.
+                                issue_batch = true;
+                                break;
+                            } else {
+                                entry.set_ready();
+                            }
+                        }
+                    }
+
+                    if !issue_batch {
+                        continue 'wait_mr;
+                    }
+
+                    if let Ok(chunks) = blobcache.read_chunks(
+                        blob_id,
+                        blob_offset,
+                        blob_size as usize,
+                        &continuous_chunks,
+                    ) {
+                        for (i, c) in continuous_chunks.iter().enumerate() {
+                            let mut cache_guard = blobcache
+                                .cache
+                                .write()
+                                .expect("Expect cache lock not poisoned");
+
+                            if let Ok(entry) = cache_guard
+                                .set(blob_id, c.clone(), blobcache.backend(), &blobcache.metrics)
+                                .map_err(|_| error!("Set cache index error!"))
+                            {
+                                let mut entry = entry.lock().unwrap();
+                                if !entry.is_ready() {
+                                    let offset = if blobcache.is_compressed {
+                                        entry.chunk.compress_offset()
+                                    } else {
+                                        entry.chunk.decompress_offset()
+                                    };
+                                    if let Err(err) = entry.cache(chunks[i].as_slice(), offset) {
+                                        error!("Failed to cache chunk: {}", err);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                blobcache
+                    .metrics
+                    .prefetch_workers
+                    .fetch_sub(1, Ordering::Relaxed);
+                info!("Prefetch thread exits.")
+            });
     }
 }
 
@@ -335,7 +573,7 @@ impl RafsCache for BlobCache {
     }
 
     fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
-        // Doesn't expected poisoned lock here.
+        // Doesn't expect poisoned lock here.
         self.cache
             .write()
             .unwrap()
@@ -352,13 +590,16 @@ impl RafsCache for BlobCache {
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
         let blob_id = &bio.blob_id;
 
-        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.clone());
+        self.metrics.total.inc();
+
+        let mut entry = self.cache.read().unwrap().get(bio.chunkinfo.as_ref());
         if entry.is_none() {
-            let en =
-                self.cache
-                    .write()
-                    .unwrap()
-                    .set(blob_id, bio.chunkinfo.clone(), self.backend())?;
+            let en = self.cache.write().unwrap().set(
+                blob_id,
+                bio.chunkinfo.clone(),
+                self.backend(),
+                &self.metrics,
+            )?;
             entry = Some(en);
         };
 
@@ -370,132 +611,36 @@ impl RafsCache for BlobCache {
     }
 
     fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        let (_, size) = self
-            .cache
-            .write()
-            .unwrap()
-            .get_blob_fd(blob_id, self.backend())?;
+        let (_, size) =
+            self.cache
+                .write()
+                .unwrap()
+                .get_blob_fd(blob_id, self.backend(), &self.metrics)?;
         Ok(size)
     }
 
-    fn release(&self) {}
-    /// Bypass memory blob cache index, fetch blocks from backend and directly
-    /// mirror them into blob cache file.
-    /// Continuous chunks may be compressed or not.
-    fn prefetch(&self, bios: &mut [RafsBio]) -> Result<usize> {
-        let (mut tx, rx) = spmc::channel::<MergedBackendRequest>();
+    fn release(&self) {
+        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
 
-        for num in 0..self.prefetch_worker.threads_count {
-            let cache = Arc::clone(&self.cache);
-            // Clone cache fulfils our requirement that invoke `read_chunks` and it's
-            // hard to move `self` into closure.
-            let cache_cloned = Arc::new(self.clone());
-            let rx = rx.clone();
-            let _thread = thread::Builder::new()
-                .name(format!("prefetch_thread_{}", num))
-                .spawn(move || {
-                    'wait_mr: while let Ok(mr) = rx.recv() {
-                        let blob_offset = mr.blob_offset;
-                        let blob_size = mr.blob_size;
-                        let continuous_chunks = &mr.chunks;
-                        let blob_id = &mr.blob_id;
-                        let mut issue_batch: bool;
+        // TODO: Cache is responsible to release backend's resources
+        self.backend().release()
+    }
+    fn prefetch(&self, bios: &mut [RafsBio]) -> RafsResult<usize> {
+        let merging_size = self.prefetch_worker.merging_size;
+        let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
 
-                        trace!(
-                            "Merged req id {} req offset {} size {}",
-                            blob_id,
-                            blob_offset,
-                            blob_size
-                        );
+        self.metrics.prefetch_unmerged_chunks.add(bios.len());
 
-                        issue_batch = false;
-                        // An immature trick here to detect if chunk already resides in
-                        // blob cache file. Hopefully, we can have a more clever and agile
-                        // way in the future. Principe is that if all chunks are Ready,
-                        // abort this Merged Request. It might involve extra stress
-                        // to local file system.
-                        for c in continuous_chunks {
-                            let d_size = c.decompress_size() as usize;
-                            let entry = cache.write().expect("Expect cache lock not poisoned").set(
-                                blob_id,
-                                c.clone(),
-                                cache_cloned.backend(),
-                            );
-                            if let Ok(entry) = entry {
-                                let entry = entry.lock().unwrap();
-                                if entry.is_ready() {
-                                    continue;
-                                }
-                                let fd = entry.fd;
-                                let chunk = entry.chunk.clone();
-                                drop(entry);
-                                if cache_cloned
-                                    .read_blobcache_chunk(
-                                        fd,
-                                        chunk.as_ref(),
-                                        alloc_buf(d_size).as_mut_slice(),
-                                        cache_cloned.need_validate(),
-                                    )
-                                    .is_err()
-                                {
-                                    // Aha, we have a not integrated chunk here. Issue the entire
-                                    // merged request from backend to boost.
-                                    issue_batch = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if !issue_batch {
-                            continue 'wait_mr;
-                        }
-
-                        if let Ok(chunks) = cache_cloned.read_chunks(
-                            blob_id,
-                            blob_offset,
-                            blob_size as usize,
-                            &continuous_chunks,
-                        ) {
-                            for (i, c) in continuous_chunks.iter().enumerate() {
-                                let mut cache_guard =
-                                    cache.write().expect("Expect cache lock not poisoned");
-
-                                if let Ok(entry) = cache_guard
-                                    .set(blob_id, c.clone(), cache_cloned.backend())
-                                    .map_err(|_| error!("Set cache index error!"))
-                                {
-                                    let mut entry = entry.lock().unwrap();
-                                    if !entry.is_ready() {
-                                        let offset = if cache_cloned.is_compressed {
-                                            entry.chunk.compress_offset()
-                                        } else {
-                                            entry.chunk.decompress_offset()
-                                        };
-                                        if let Err(err) = entry.cache(chunks[i].as_slice(), offset)
-                                        {
-                                            error!("Failed to cache chunk: {}", err);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    info!("Prefetch thread exits.")
-                });
+        if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
+            self.generate_merged_requests(bios, mr_sender, merging_size, seq);
         }
 
-        // Ideally, prefetch task can run within a separated thread from loading prefetch table.
-        // However, due to current implementation, doing so needs modifying key data structure like
-        // `Superblock` on `Rafs`. So let's suspend this action.
-        let mut bios = bios.to_vec();
-        let merging_size = self.prefetch_worker.merging_size;
-        let _thread = thread::Builder::new().spawn({
-            move || {
-                generate_merged_requests(bios.as_mut_slice(), &mut tx, merging_size);
-            }
-        });
-
         Ok(0)
+    }
+
+    fn stop_prefetch(&self) -> RafsResult<()> {
+        drop(self.mr_sender.lock().unwrap().take().unwrap());
+        Ok(())
     }
 
     #[inline]
@@ -529,7 +674,8 @@ pub fn new(
     backend: Arc<dyn BlobBackend + Sync + Send>,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
-) -> Result<BlobCache> {
+    id: &str,
+) -> Result<Arc<BlobCache>> {
     let blob_config: BlobCacheConfig =
         serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
     let work_dir = {
@@ -554,7 +700,34 @@ pub fn new(
         }
     }?;
 
-    Ok(BlobCache {
+    // If the given value is less than blob chunk size, it exceeds burst size of the limiter ending
+    // up with throttling all throughput.
+    // TODO: We get the chunk size by a constant which is the default value and it's not
+    // easy to get real value now. Perhaps we should have a configuration center?
+    let tweaked_bw_limit = if config.prefetch_worker.bandwidth_rate != 0 {
+        std::cmp::max(
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+            config.prefetch_worker.bandwidth_rate,
+        )
+    } else {
+        0
+    };
+
+    let limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
+        info!("Prefetch bandwidth will be limited at {}Bytes/S", v);
+        Arc::new(RateLimiter::direct(Quota::per_second(v)))
+    });
+
+    let mut enabled = false;
+    let (tx, rx) = if config.prefetch_worker.enable {
+        let (send, recv) = spmc::channel::<MergedBackendRequest>();
+        enabled = true;
+        (Some(send), Some(recv))
+    } else {
+        (None, None)
+    };
+
+    let cache = Arc::new(BlobCache {
         cache: Arc::new(RwLock::new(BlobCacheState {
             chunk_map: HashMap::new(),
             file_map: HashMap::new(),
@@ -567,23 +740,41 @@ pub fn new(
         prefetch_worker: config.prefetch_worker,
         compressor,
         digester,
-    })
+        limiter,
+        mr_sender: Arc::new(Mutex::new(tx)),
+        mr_receiver: rx,
+        prefetch_seq: AtomicU64::new(0),
+        metrics: BlobcacheMetrics::new(id, work_dir),
+    });
+
+    cache
+        .metrics
+        .prefetch_policy
+        .lock()
+        .unwrap()
+        .insert("hinted".to_string());
+
+    if enabled {
+        kick_prefetch_workers(&cache);
+    }
+
+    Ok(cache)
 }
 
 #[cfg(test)]
 mod blob_cache_tests {
     use std::alloc::{alloc, dealloc, Layout};
-    use std::io::Result;
     use std::slice::from_raw_parts;
     use std::sync::Arc;
 
     use vm_memory::{VolatileMemory, VolatileSlice};
     use vmm_sys_util::tempdir::TempDir;
 
+    use crate::io_stats::BackendMetrics;
     use crate::metadata::digest::{self, RafsDigest};
     use crate::metadata::layout::OndiskChunkInfo;
     use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
-    use crate::storage::backend::BlobBackend;
+    use crate::storage::backend::{BackendResult, BlobBackend};
     use crate::storage::cache::blobcache;
     use crate::storage::cache::PrefetchWorker;
     use crate::storage::cache::RafsCache;
@@ -591,10 +782,12 @@ mod blob_cache_tests {
     use crate::storage::device::RafsBio;
     use crate::storage::factory::CacheConfig;
 
-    struct MockBackend {}
+    struct MockBackend {
+        metrics: Arc<BackendMetrics>,
+    }
 
     impl BlobBackend for MockBackend {
-        fn try_read(&self, _blob_id: &str, buf: &mut [u8], _offset: u64) -> Result<usize> {
+        fn try_read(&self, _blob_id: &str, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
             let mut i = 0;
             while i < buf.len() {
                 buf[i] = i as u8;
@@ -603,12 +796,29 @@ mod blob_cache_tests {
             Ok(i)
         }
 
-        fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> Result<usize> {
+        fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
             Ok(0)
         }
 
-        fn blob_size(&self, _blob_id: &str) -> Result<u64> {
+        fn blob_size(&self, _blob_id: &str) -> BackendResult<u64> {
             Ok(0)
+        }
+
+        fn release(&self) {}
+
+        fn prefetch_blob(
+            &self,
+            _blob_id: &str,
+            _blob_readahead_offset: u32,
+            _blob_readahead_size: u32,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> &BackendMetrics {
+            // Safe because nydusd must have backend attached with id, only image builder can no id
+            // but use backend instance to upload blob.
+            &self.metrics
         }
     }
 
@@ -634,9 +844,12 @@ mod blob_cache_tests {
         };
         let blob_cache = blobcache::new(
             cache_config,
-            Arc::new(MockBackend {}) as Arc<dyn BlobBackend + Send + Sync>,
+            Arc::new(MockBackend {
+                metrics: BackendMetrics::new("id", "mock"),
+            }) as Arc<dyn BlobBackend + Send + Sync>,
             compress::Algorithm::LZ4Block,
             digest::Algorithm::Blake3,
+            "id",
         )
         .unwrap();
 

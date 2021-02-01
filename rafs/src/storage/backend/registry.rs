@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Read, Result};
+use std::io::{Error, Read, Result};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -12,10 +12,13 @@ use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
-use url::Url;
+use url::{ParseError, Url};
 
-use crate::storage::backend::default_http_scheme;
-use crate::storage::backend::request::{is_success_status, respond, Progress, ReqBody, Request};
+use crate::io_stats::BackendMetrics;
+use crate::storage::backend::request::{
+    is_success_status, respond, Progress, ReqBody, Request, RequestError,
+};
+use crate::storage::backend::{default_http_scheme, BackendError, BackendResult};
 use crate::storage::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 
 use nydus_utils::{einval, epipe};
@@ -31,9 +34,29 @@ struct Cache(RwLock<String>);
 #[derive(Default)]
 struct HashCache(RwLock<HashMap<String, String>>);
 
+#[derive(Debug)]
+pub enum RegistryError {
+    Common(String),
+    Url(ParseError),
+    Request(RequestError),
+    Scheme(String),
+    Auth(String),
+    ResponseHead(String),
+    Response(Error),
+    Transport(reqwest::Error),
+}
+
+impl From<RegistryError> for BackendError {
+    fn from(error: RegistryError) -> Self {
+        BackendError::Registry(error)
+    }
+}
+
+type RegistryResult<T> = std::result::Result<T, RegistryError>;
+
 impl Cache {
-    fn new() -> Self {
-        Cache(RwLock::new(String::new()))
+    fn new(val: String) -> Self {
+        Cache(RwLock::new(val))
     }
     fn get(&self) -> String {
         let cached_guard = self.0.read().unwrap();
@@ -76,7 +99,7 @@ pub struct Registry {
     // Image repo name like: library/ubuntu
     repo: String,
     // Base64 encoded registry auth
-    auth: String,
+    auth: Option<String>,
     username: String,
     password: String,
     // Still upload even if blob exists on blob server
@@ -94,6 +117,7 @@ pub struct Registry {
     // Cache 30X redirect url
     // Example: RwLock<HashMap<"<blob_id>", "<redirected_url>">>
     cached_redirect: HashCache,
+    metrics: Option<Arc<BackendMetrics>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -102,8 +126,14 @@ struct RegistryConfig {
     scheme: String,
     host: String,
     repo: String,
+    // Base64_encoded(username:password), the field should be
+    // sent to registry auth server to get a bearer token.
     #[serde(default)]
-    auth: String,
+    auth: Option<String>,
+    // The field is a bearer token to be sent to registry
+    // to authorize registry requests.
+    #[serde(default)]
+    registry_token: Option<String>,
     #[serde(default)]
     blob_url_scheme: String,
 }
@@ -131,8 +161,23 @@ enum Auth {
     Bearer(BearerAuth),
 }
 
+fn trim(val: Option<String>) -> Option<String> {
+    if let Some(ref _val) = val {
+        let trimmed_val = _val.trim();
+        if trimmed_val.is_empty() {
+            None
+        } else if trimmed_val.len() == _val.len() {
+            val
+        } else {
+            Some(trimmed_val.to_string())
+        }
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::useless_let_if_seq)]
-pub fn new(config: serde_json::value::Value) -> Result<Registry> {
+pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
     let force_upload = common_config.force_upload;
@@ -141,14 +186,11 @@ pub fn new(config: serde_json::value::Value) -> Result<Registry> {
 
     let config: RegistryConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
 
-    let username;
-    let password;
+    let auth = trim(config.auth);
+    let registry_token = trim(config.registry_token);
 
-    if config.auth.trim().is_empty() {
-        username = String::new();
-        password = String::new();
-    } else {
-        let auth = base64::decode(config.auth.as_bytes()).map_err(|e| {
+    let (username, password) = if let Some(auth) = &auth {
+        let auth = base64::decode(auth.as_bytes()).map_err(|e| {
             einval!(format!(
                 "Invalid base64 encoded registry auth config: {:?}",
                 e
@@ -164,42 +206,54 @@ pub fn new(config: serde_json::value::Value) -> Result<Registry> {
         if auth.len() < 2 {
             return Err(einval!("Invalid registry auth config"));
         }
-        username = auth[0].to_string();
-        password = auth[1].to_string();
-    }
+        (auth[0].to_string(), auth[1].to_string())
+    } else {
+        (String::new(), String::new())
+    };
+
+    let cached_auth = if let Some(registry_token) = registry_token {
+        // Store the registry bearer token to cached_auth, prefer to
+        // use the token stored in cached_auth to request registry.
+        Cache::new(format!("Bearer {}", registry_token))
+    } else {
+        Cache::new(String::new())
+    };
 
     Ok(Registry {
         request,
         scheme: config.scheme,
         host: config.host,
         repo: config.repo,
-        auth: config.auth,
+        auth,
+        cached_auth,
         username,
         password,
         force_upload,
         retry_limit,
         blob_url_scheme: config.blob_url_scheme,
-        cached_auth: Cache::new(),
         cached_redirect: HashCache::new(),
+        metrics: id.map(|i| BackendMetrics::new(i, "registry")),
     })
 }
 
 impl Registry {
-    fn url(&self, path: &str, query: &[&str]) -> Result<String> {
+    fn url(&self, path: &str, query: &[&str]) -> std::result::Result<String, ParseError> {
         let path = if !query.is_empty() {
             format!("/v2/{}{}?{}", self.repo, path, query.join("&"))
         } else {
             format!("/v2/{}{}", self.repo, path)
         };
         let url = format!("{}://{}", self.scheme, self.host.as_str());
-        let url = Url::parse(url.as_str()).map_err(|e| einval!(e))?;
-        let url = url.join(path.as_str()).map_err(|e| einval!(e))?;
+        let url = Url::parse(url.as_str())?;
+        let url = url.join(path.as_str())?;
 
         Ok(url.to_string())
     }
 
-    fn blob_exists(&self, blob_id: &str) -> Result<bool> {
-        let url = self.url(&format!("/blobs/sha256:{}", blob_id), &[])?;
+    fn blob_exists(&self, blob_id: &str) -> RegistryResult<bool> {
+        let url = self
+            .url(&format!("/blobs/sha256:{}", blob_id), &[])
+            .map_err(RegistryError::Url)?;
 
         let resp =
             self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), false)?;
@@ -211,15 +265,22 @@ impl Registry {
         Ok(false)
     }
 
-    fn create_upload(&self) -> Result<String> {
-        let url = self.url("/blobs/uploads/", &[])?;
+    fn create_upload(&self) -> RegistryResult<String> {
+        let url = self
+            .url("/blobs/uploads/", &[])
+            .map_err(RegistryError::Url)?;
 
         let resp =
             self.request::<&[u8]>(Method::POST, url.as_str(), None, HeaderMap::new(), true)?;
 
         match resp.headers().get(HEADER_LOCATION) {
-            Some(location) => Ok(location.to_str().map_err(|e| einval!(e))?.to_owned()),
-            None => Err(einval!("location not found in header")),
+            Some(location) => Ok(location
+                .to_str()
+                .map_err(|e| RegistryError::ResponseHead(e.to_string()))?
+                .to_owned()),
+            None => Err(RegistryError::ResponseHead(
+                "location not found in header".to_string(),
+            )),
         }
     }
 
@@ -255,7 +316,11 @@ impl Registry {
 
     fn get_auth_header(&self, auth: Auth) -> Result<String> {
         match auth {
-            Auth::Basic(_) => Ok(format!("Basic {}", self.auth)),
+            Auth::Basic(_) => self
+                .auth
+                .as_ref()
+                .map(|auth| format!("Basic {}", auth))
+                .ok_or_else(|| einval!("invalid auth config")),
             Auth::Bearer(auth) => {
                 let token = self.get_token(auth)?;
                 Ok(format!("Bearer {}", token))
@@ -346,7 +411,7 @@ impl Registry {
         data: Option<ReqBody<R>>,
         mut headers: HeaderMap,
         catch_status: bool,
-    ) -> Result<Response> {
+    ) -> RegistryResult<Response> {
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
         let cached_auth = self.cached_auth.get();
@@ -364,47 +429,45 @@ impl Registry {
             return self
                 .request
                 .call(method, url, Some(data), headers, catch_status)
-                .map_err(|e| epipe!(format!("registry request failed {:?}", e)));
+                .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
         let resp = self
             .request
             .call::<&[u8]>(method.clone(), url, None, headers.clone(), false)
-            .map_err(|e| epipe!(format!("registry try request failed {:?}", e)))?;
+            .map_err(RegistryError::Request)?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
                 // Get token from registry authorization server
-                if let Some(auth) = self.parse_auth(resp_auth_header)? {
-                    let auth_header = self.get_auth_header(auth)?;
+                if let Some(auth) = self
+                    .parse_auth(resp_auth_header)
+                    .map_err(|e| RegistryError::Common(e.to_string()))?
+                {
+                    let auth_header = self
+                        .get_auth_header(auth)
+                        .map_err(|e| RegistryError::Common(e.to_string()))?;
                     headers.insert(
                         HEADER_AUTHORIZATION,
                         HeaderValue::from_str(auth_header.as_str()).unwrap(),
                     );
 
                     // Try to request registry server with `authorization` header again
-                    let resp_ret = self
+                    let resp = self
                         .request
                         .call(method, url, data, headers, catch_status)
-                        .map_err(|e| epipe!(format!("registry twice request failed {:?}", e)));
+                        .map_err(RegistryError::Request)?;
 
-                    match resp_ret {
-                        Ok(resp) => {
-                            let status = resp.status();
-                            if is_success_status(status) {
-                                // Cache authorization header for next request
-                                self.cached_auth.set(last_cached_auth, auth_header)
-                            }
-                            if !catch_status {
-                                return Ok(resp);
-                            }
-                            return respond(resp);
-                        }
-                        Err(err) => {
-                            return Err(err);
-                        }
+                    let status = resp.status();
+                    if is_success_status(status) {
+                        // Cache authorization header for next request
+                        self.cached_auth.set(last_cached_auth, auth_header)
                     }
+                    if !catch_status {
+                        return Ok(resp);
+                    }
+                    return respond(resp).map_err(RegistryError::Request);
                 }
             }
         }
@@ -412,7 +475,8 @@ impl Registry {
         if !catch_status {
             return Ok(resp);
         }
-        respond(resp)
+
+        respond(resp).map_err(RegistryError::Request)
     }
 
     /// Read data from registry server
@@ -432,9 +496,9 @@ impl Registry {
         mut buf: &mut [u8],
         offset: u64,
         allow_retry: bool,
-    ) -> Result<usize> {
+    ) -> RegistryResult<usize> {
         let url = format!("/blobs/sha256:{}", blob_id);
-        let url = self.url(url.as_str(), &[])?;
+        let url = self.url(url.as_str(), &[]).map_err(RegistryError::Url)?;
 
         let mut headers = HeaderMap::new();
         let end_at = offset + buf.len() as u64 - 1;
@@ -445,13 +509,11 @@ impl Registry {
         let cached_redirect = self.cached_redirect.get(blob_id);
 
         if let Some(cached_redirect) = cached_redirect {
-            resp = self.request.call::<&[u8]>(
-                Method::GET,
-                cached_redirect.as_str(),
-                None,
-                headers,
-                false,
-            )?;
+            resp = self
+                .request
+                .call::<&[u8]>(Method::GET, cached_redirect.as_str(), None, headers, false)
+                .map_err(RegistryError::Request)?;
+
             // The request has expired or has been denied, need to re-request
             if allow_retry
                 && vec![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&resp.status())
@@ -477,21 +539,18 @@ impl Registry {
             {
                 if let Some(location) = resp.headers().get("location") {
                     let location = location.to_str().unwrap();
-                    let mut location = Url::parse(location).map_err(|e| einval!(e))?;
+                    let mut location = Url::parse(location).map_err(RegistryError::Url)?;
                     // Note: Some P2P proxy server supports only scheme specified origin blob server,
                     // so we need change scheme to `blob_url_scheme` here
                     if !self.blob_url_scheme.is_empty() {
                         location
                             .set_scheme(&self.blob_url_scheme)
-                            .map_err(|e| einval!(e))?;
+                            .map_err(|_| RegistryError::Scheme(self.blob_url_scheme.clone()))?;
                     }
-                    let resp_ret = self.request.call::<&[u8]>(
-                        Method::GET,
-                        location.as_str(),
-                        None,
-                        headers,
-                        true,
-                    );
+                    let resp_ret = self
+                        .request
+                        .call::<&[u8]>(Method::GET, location.as_str(), None, headers, true)
+                        .map_err(RegistryError::Request);
                     match resp_ret {
                         Ok(_resp) => {
                             resp = _resp;
@@ -504,12 +563,12 @@ impl Registry {
                     }
                 };
             } else {
-                resp = respond(resp)?;
+                resp = respond(resp).map_err(RegistryError::Request)?;
             }
         }
 
         resp.copy_to(&mut buf)
-            .map_err(|err| epipe!(format!("registry read failed {:?}", err)))
+            .map_err(RegistryError::Transport)
             .map(|size| size as usize)
     }
 }
@@ -520,8 +579,33 @@ impl BlobBackend for Registry {
         self.retry_limit
     }
 
-    fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        let url = self.url(&format!("/blobs/sha256:{}", blob_id), &[])?;
+    fn metrics(&self) -> &BackendMetrics {
+        // Safe because nydusd must have backend attached with id, only image builder can no id
+        // but use backend instance to upload blob.
+        self.metrics.as_ref().unwrap()
+    }
+
+    fn release(&self) {
+        self.metrics()
+            .release()
+            .unwrap_or_else(|e| error!("{:?}", e))
+    }
+
+    fn prefetch_blob(
+        &self,
+        _blob_id: &str,
+        _blob_readahead_offset: u32,
+        _blob_readahead_size: u32,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "Registry backend does not support prefetch per as to on-disk blob entries".to_string(),
+        ))
+    }
+
+    fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
+        let url = self
+            .url(&format!("/blobs/sha256:{}", blob_id), &[])
+            .map_err(RegistryError::Url)?;
 
         let resp =
             self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?;
@@ -529,20 +613,21 @@ impl BlobBackend for Registry {
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)
-            .ok_or_else(|| einval!("invalid content length"))?;
+            .ok_or_else(|| RegistryError::Common("invalid content length".to_string()))?;
 
-        content_length
+        Ok(content_length
             .to_str()
-            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))?
+            .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?
             .parse::<u64>()
-            .map_err(|err| einval!(format!("invalid content length: {:?}", err)))
+            .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?)
     }
 
-    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
+    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         self._try_read(blob_id, buf, offset, true)
+            .map_err(BackendError::Registry)
     }
 
-    fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> Result<usize> {
+    fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
         Ok(_buf.len())
     }
 }
@@ -554,11 +639,11 @@ impl BlobBackendUploader for Registry {
         blob_path: &Path,
         callback: fn((usize, usize)),
     ) -> Result<usize> {
-        if !self.force_upload && self.blob_exists(blob_id)? {
+        if !self.force_upload && self.blob_exists(blob_id).map_err(|e| einval!(e))? {
             return Ok(0);
         }
 
-        let location = self.create_upload()?;
+        let location = self.create_upload().map_err(|e| einval!(e))?;
 
         let blob_id_storage;
         let blob_id_val = if !blob_id.starts_with("sha256:") {
@@ -596,7 +681,8 @@ impl BlobBackendUploader for Registry {
             Some(ReqBody::Read(body, size)),
             HeaderMap::new(),
             true,
-        )?;
+        )
+        .map_err(|e| epipe!(e))?;
 
         Ok(size as usize)
     }

@@ -145,8 +145,8 @@ impl RafsSuperInodes for CachedInodes {
         self.s_blob.clone()
     }
 
-    fn update(&self, _r: &mut RafsIoReader) -> Result<()> {
-        unimplemented!()
+    fn update(&self, _r: &mut RafsIoReader) -> RafsResult<()> {
+        Err(RafsError::Unsupported)
     }
 }
 
@@ -168,6 +168,7 @@ pub struct CachedInode {
     i_child_cnt: u32,
     // extra info need cache
     i_blksize: u32,
+    i_rdev: u32,
     i_target: OsString, // for symbol link
     i_xattr: HashMap<OsString, Vec<u8>>,
     i_data: Vec<Arc<CachedChunkInfo>>,
@@ -262,6 +263,7 @@ impl CachedInode {
         self.i_blocks = inode.i_blocks;
         self.i_child_idx = inode.i_child_index;
         self.i_child_cnt = inode.i_child_count;
+        self.i_rdev = inode.i_rdev;
     }
 
     fn add_child(&mut self, child: Arc<CachedInode>) {
@@ -352,6 +354,7 @@ impl RafsInode for CachedInode {
             mode: self.i_mode,
             nlink: self.i_nlink as u32,
             blksize: RAFS_INODE_BLOCKSIZE,
+            rdev: self.i_rdev,
             ..Default::default()
         }
     }
@@ -405,16 +408,22 @@ impl RafsInode for CachedInode {
             return Err(enotdir!(""));
         }
 
+        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
+
         for child_inode in &self.i_child {
             if child_inode.is_dir() {
                 trace!("Got dir {:?}", child_inode.name().unwrap());
-                child_inode.collect_descendants_inodes(descendants)?;
+                child_dirs.push(child_inode.clone());
             } else {
                 if child_inode.is_empty_size() {
                     continue;
                 }
                 descendants.push(child_inode.clone());
             }
+        }
+
+        for d in child_dirs {
+            d.collect_descendants_inodes(descendants)?;
         }
 
         Ok(0)
@@ -437,13 +446,15 @@ impl RafsInode for CachedInode {
             i_child_count: self.i_child_cnt,
             i_name_size: self.i_name.len() as u16,
             i_symlink_size: self.get_symlink()?.len() as u16,
-            i_reserved: [0; 24],
+            i_rdev: self.i_rdev,
+            i_reserved: [0; 20],
         })
     }
 
     impl_getter!(ino, i_ino, u64);
     impl_getter!(parent, i_parent, u64);
     impl_getter!(size, i_size, u64);
+    impl_getter!(rdev, i_rdev, u32);
 }
 
 /// Cached information about an Rafs Data Chunk.
@@ -570,12 +581,8 @@ mod cached_tests {
         let mut ondisk_inode = OndiskInode::new();
         let file_name = OsString::from("c_inode_1");
         let mut xattr = XAttrs::default();
-        xattr
-            .pairs
-            .insert(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
-        xattr
-            .pairs
-            .insert(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
+        xattr.add(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
+        xattr.add(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
         ondisk_inode.i_name_size = file_name.as_bytes().len() as u16;
         ondisk_inode.i_child_count = 1;
         ondisk_inode.i_ino = 3;
@@ -615,7 +622,7 @@ mod cached_tests {
         for k in c_xattr.iter() {
             let k = OsStr::from_bytes(&k);
             let v = cached_inode.get_xattr(k).unwrap();
-            assert_eq!(xattr.pairs.get(k).cloned().unwrap(), v.unwrap());
+            assert_eq!(xattr.get(k).cloned().unwrap(), v.unwrap());
         }
 
         // close file

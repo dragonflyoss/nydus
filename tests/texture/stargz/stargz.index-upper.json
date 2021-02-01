@@ -11,40 +11,6 @@
 			"NumLink": 0
 		},
 		{
-			"name": "root-large",
-			"type": "reg",
-			"size": 13631488,
-			"modtime": "2020-09-10T06:43:07Z",
-			"mode": 420,
-			"offset": 234,
-			"NumLink": 0,
-			"digest": "sha256:7252d1b37ba331cfb78ed939d9edda7ebeebf0ba3523877c86a77e1f54688cc7",
-			"chunkSize": 4194304
-		},
-		{
-			"name": "root-large",
-			"type": "chunk",
-			"offset": 4343,
-			"NumLink": 0,
-			"chunkOffset": 4194304,
-			"chunkSize": 4194304
-		},
-		{
-			"name": "root-large",
-			"type": "chunk",
-			"offset": 8452,
-			"NumLink": 0,
-			"chunkOffset": 8388608,
-			"chunkSize": 4194304
-		},
-		{
-			"name": "root-large",
-			"type": "chunk",
-			"offset": 12561,
-			"NumLink": 0,
-			"chunkOffset": 12582912
-		},
-		{
 			"name": "sub/",
 			"type": "dir",
 			"modtime": "2020-09-10T06:43:07Z",
@@ -94,30 +60,6 @@
 			"digest": "sha256:038bbd78fbb51d110dffcd0e5d4e70f5d7e6cfb0a95080a2f000b288409cabee"
 		},
 		{
-			"name": "sub/some/",
-			"type": "dir",
-			"modtime": "2020-09-10T06:43:07Z",
-			"mode": 493,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/some/some-sub/",
-			"type": "dir",
-			"modtime": "2020-09-10T06:43:07Z",
-			"mode": 493,
-			"NumLink": 0
-		},
-		{
-			"name": "sub/some/some-sub/some-sub-1",
-			"type": "reg",
-			"size": 16,
-			"modtime": "2020-09-10T06:43:07Z",
-			"mode": 420,
-			"offset": 14430,
-			"NumLink": 0,
-			"digest": "sha256:f03554d7d94d6eb5846fc5e9e6af163755caaa3bac590d181dec39457f662ecf"
-		},
-		{
 			"name": "sub/.wh.sub-2",
 			"type": "reg",
 			"modtime": "2020-09-10T06:43:07Z",
@@ -150,16 +92,6 @@
 			"mode": 420,
 			"NumLink": 0,
 			"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-		},
-		{
-			"name": "root-2",
-			"type": "reg",
-			"size": 12,
-			"modtime": "2020-09-10T06:43:07Z",
-			"mode": 420,
-			"offset": 14962,
-			"NumLink": 0,
-			"digest": "sha256:27f67a8989840f93b29228d965579cacd27dca64d286f7268446812bb6a2858e"
 		},
 		{
 			"name": ".wh.root-large",

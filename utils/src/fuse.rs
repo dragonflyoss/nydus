@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use libc::{c_int, sysconf, _SC_PAGESIZE};
@@ -43,35 +43,38 @@ pub struct FuseSession {
 const EXIT_FUSE_SERVICE: u64 = 1;
 
 impl FuseSession {
-    /// create a new fuse session
-    pub fn new(
-        mountpoint: &Path,
-        fsname: &str,
-        subtype: &str,
-        readonly: bool,
-    ) -> io::Result<FuseSession> {
+    pub fn new(mountpoint: &Path, fsname: &str, subtype: &str) -> io::Result<FuseSession> {
         let dest = mountpoint.canonicalize()?;
         if !dest.is_dir() {
-            return Err(einval!(format!(
-                "{} is not a directory",
-                dest.to_str().unwrap()
-            )));
+            return Err(enotdir!(format!("{:?} is not a directory", dest)));
         }
-        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME;
-        if readonly {
-            flags |= MsFlags::MS_RDONLY;
-        }
-        let file = fuse_kern_mount(&dest, fsname, subtype, flags)?;
-
-        fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| einval!(e))?;
 
         Ok(FuseSession {
             mountpoint: dest,
             fsname: fsname.to_owned(),
             subtype: subtype.to_owned(),
-            file: Some(file),
+            file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
         })
+    }
+
+    pub fn mount(&mut self) -> io::Result<()> {
+        let flags =
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME | MsFlags::MS_RDONLY;
+
+        let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, flags)?;
+        fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| einval!(e))?;
+        self.file = Some(file);
+
+        Ok(())
+    }
+
+    pub fn get_fuse_fd(&mut self) -> Option<RawFd> {
+        self.file.as_ref().map(|file| file.as_raw_fd())
+    }
+
+    pub fn set_fuse_fd(&mut self, fd: RawFd) {
+        self.file = Some(unsafe { File::from_raw_fd(fd) });
     }
 
     /// destroy a fuse session
@@ -122,7 +125,6 @@ impl Drop for FuseSession {
 pub struct FuseChannel {
     fd: c_int,
     epoll_fd: RawFd,
-    exit_evtfd: EventFd,
     bufsize: usize,
     events: RefCell<Vec<Event>>,
     // XXX: Ideally we should have write buffer as well
@@ -152,7 +154,6 @@ impl FuseChannel {
         Ok(FuseChannel {
             fd: dup(fd).map_err(|e| last_error!(e))?,
             epoll_fd,
-            exit_evtfd,
             bufsize,
             events: RefCell::new(vec![Event::new(Events::empty(), 0); EPOLL_EVENTS_LEN]),
         })
@@ -175,11 +176,12 @@ impl FuseChannel {
                 match evset {
                     Events::EPOLLIN => {
                         if event.data == EXIT_FUSE_SERVICE {
-                            self.exit_evtfd.read().map_err(|e| {
-                                error!("Read event fd failed. {:?}", e);
-                                e
-                            })?;
-                            return Err(ebadf!());
+                            // Directly return from here is reliable as we handle only one epoll event
+                            // which is `Read` or `Exit` once this function is called.
+                            // One more trick is we don't read the event fd so as to make all fuse threads exit.
+                            // That is because we configure this event fd as LEVEL triggered.
+                            info!("Will exit from fuse service");
+                            return Ok(None);
                         }
 
                         match read(self.fd, buf.as_mut_slice()) {

@@ -46,7 +46,7 @@ type filesystem struct {
 }
 
 // NewFileSystem initialize Filesystem instance
-func NewFileSystem(opt ...NewFSOpt) (snapshot.FileSystem, error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)
@@ -65,6 +65,9 @@ func NewFileSystem(opt ...NewFSOpt) (snapshot.FileSystem, error) {
 		if err := fs.manager.StartDaemon(d); err != nil {
 			return nil, errors.Wrap(err, "failed to start shared daemon")
 		}
+		if err := fs.WaitUntilReady(ctx, SharedNydusDaemonID); err != nil {
+			return nil, errors.Wrap(err, "failed to wait shared daemon")
+		}
 	}
 	return &fs, nil
 }
@@ -72,6 +75,7 @@ func NewFileSystem(opt ...NewFSOpt) (snapshot.FileSystem, error) {
 func (fs *filesystem) newSharedDaemon() (*daemon.Daemon, error) {
 	d, err := daemon.NewDaemon(
 		daemon.WithID(SharedNydusDaemonID),
+		daemon.WithSnapshotID(SharedNydusDaemonID),
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
 		daemon.WithLogDir(fs.LogRoot()),
@@ -133,22 +137,8 @@ func (fs *filesystem) Mount(ctx context.Context, snapshotID string, labels map[s
 	return nil
 }
 
-func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
-	err := fs.generateDaemonConfig(d, labels)
-	if err != nil {
-		return err
-	}
-	if fs.mode == SingleInstance {
-		err := d.SharedMount()
-		if err != nil {
-			return errors.Wrapf(err, "failed to shared mount")
-		}
-		return nil
-	}
-	return fs.manager.StartDaemon(d)
-}
-
-// WaitUntilReady wait until daemon ready by snapshotID
+// WaitUntilReady wait until daemon ready by snapshotID, it will wait until nydus domain socket established
+// and the status of nydusd daemon must be ready
 func (fs *filesystem) WaitUntilReady(ctx context.Context, snapshotID string) error {
 	s, err := fs.manager.GetBySnapshotID(snapshotID)
 	if err != nil {
@@ -196,24 +186,19 @@ func (fs *filesystem) MountPoint(snapshotID string) (string, error) {
 	return "", fmt.Errorf("failed to find nydus mountpoint of snapshot %s", snapshotID)
 }
 
-// createNewDaemon create new nydus daemon by snapshotID and imageID
-func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
-	d, err := daemon.NewDaemon(
-		daemon.WithSnapshotID(snapshotID),
-		daemon.WithSocketDir(fs.SocketRoot()),
-		daemon.WithConfigDir(fs.ConfigRoot()),
-		daemon.WithSnapshotDir(fs.SnapshotRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
-		daemon.WithCacheDir(fs.CacheRoot()),
-		daemon.WithImageID(imageID),
-	)
+func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
+	err := fs.generateDaemonConfig(d, labels)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := fs.manager.NewDaemon(d); err != nil {
-		return nil, err
+	if fs.mode == SingleInstance {
+		err = d.SharedMount()
+		if err != nil {
+			return errors.Wrapf(err, "failed to shared mount")
+		}
+		return nil
 	}
-	return d, nil
+	return fs.manager.StartDaemon(d)
 }
 
 func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
@@ -223,12 +208,42 @@ func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daem
 	return fs.createNewDaemon(snapshotID, imageID)
 }
 
-func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
-	sharedDaemon, err := fs.manager.GetByID(SharedNydusDaemonID)
-	if err != nil {
+// createNewDaemon create new nydus daemon by snapshotID and imageID
+func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
+	var (
+		d   *daemon.Daemon
+		err error
+	)
+	if d, err = daemon.NewDaemon(
+		daemon.WithSnapshotID(snapshotID),
+		daemon.WithSocketDir(fs.SocketRoot()),
+		daemon.WithConfigDir(fs.ConfigRoot()),
+		daemon.WithSnapshotDir(fs.SnapshotRoot()),
+		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithCacheDir(fs.CacheRoot()),
+		daemon.WithImageID(imageID),
+	); err != nil {
 		return nil, err
 	}
-	d, err := daemon.NewDaemon(
+	if err = fs.manager.NewDaemon(d); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// createSharedDaemon create an virtual daemon from global shared daemon instance
+// the global shared daemon with an special ID "shared_daemon", all virtual daemons are
+// created from this daemon with api invocation
+func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
+	var (
+		sharedDaemon *daemon.Daemon
+		d            *daemon.Daemon
+		err          error
+	)
+	if sharedDaemon, err = fs.manager.GetByID(SharedNydusDaemonID); err != nil {
+		return nil, err
+	}
+	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithRootMountPoint(*sharedDaemon.RootMountPoint),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
@@ -237,11 +252,10 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		daemon.WithLogDir(fs.LogRoot()),
 		daemon.WithCacheDir(fs.CacheRoot()),
 		daemon.WithImageID(imageID),
-	)
-	if err != nil {
+	); err != nil {
 		return nil, err
 	}
-	if err := fs.manager.NewDaemon(d); err != nil {
+	if err = fs.manager.NewDaemon(d); err != nil {
 		return nil, err
 	}
 	return d, nil

@@ -69,6 +69,9 @@ pub fn copyv(src: &[u8], dst: &[VolatileSlice], offset: u64, mut max_size: usize
         if offset + len > src.len() {
             len = src.len() - offset;
         }
+        if len > s.len() {
+            len = s.len();
+        }
 
         s.write_slice(&src[offset..offset + len], 0)
             .map_err(|e| einval!(e))?;

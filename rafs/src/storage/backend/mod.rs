@@ -2,13 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Result;
+use std::io::{Error, Result};
 use std::path::Path;
 
 use vm_memory::VolatileSlice;
 
+use crate::io_stats::{BackendMetrics, ERROR_HOLDER};
+use crate::storage::backend::{localfs::LocalFsError, oss::OssError, registry::RegistryError};
 use crate::storage::utils::copyv;
-use nydus_utils::eio;
 
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
@@ -27,6 +28,17 @@ pub struct ProxyConfig {
     fallback: bool,
     check_interval: u64,
 }
+
+#[derive(Debug)]
+pub enum BackendError {
+    Unsupported(String),
+    CopyData(Error),
+    Registry(RegistryError),
+    LocalFs(LocalFsError),
+    Oss(OssError),
+}
+
+pub type BackendResult<T> = std::result::Result<T, BackendError>;
 
 impl Default for ProxyConfig {
     fn default() -> Self {
@@ -64,43 +76,51 @@ impl Default for CommonConfig {
 /// Rafs blob backend API
 pub trait BlobBackend {
     /// prefetch blob if supported
-    /// TODO: Now `blob_readahead_offset` is type of `u32`. Better that we can change
-    /// it to u64 someday.
     fn prefetch_blob(
         &self,
-        _blob_id: &str,
-        _blob_readahead_offset: u32,
-        _blob_readahead_size: u32,
-    ) -> Result<()> {
-        Ok(())
-    }
+        blob_id: &str,
+        blob_readahead_offset: u32,
+        blob_readahead_size: u32,
+    ) -> BackendResult<()>;
+
+    fn release(&self);
 
     #[inline]
     fn retry_limit(&self) -> u8 {
         0
     }
 
+    fn metrics(&self) -> &BackendMetrics;
+
     /// Get whole blob size
-    fn blob_size(&self, blob_id: &str) -> Result<u64>;
+    fn blob_size(&self, blob_id: &str) -> BackendResult<u64>;
 
     /// Read a range of data from blob into the provided slice
-    fn read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize> {
+    fn read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let mut retry_count = self.retry_limit();
+        let begin_time = self.metrics().begin();
         loop {
             let ret = self.try_read(blob_id, buf, offset);
             match ret {
                 Ok(size) => {
+                    self.metrics().end(&begin_time, buf.len(), false);
                     return Ok(size);
                 }
                 Err(err) => {
                     if retry_count > 0 {
                         warn!(
-                            "Read from backend failed: {}, retry count {}",
+                            "Read from backend failed: {:?}, retry count {}",
                             err, retry_count
                         );
                         retry_count -= 1;
                     } else {
-                        break Err(eio!(format!("Read from backend failed: {}", err)));
+                        self.metrics().end(&begin_time, buf.len(), true);
+                        ERROR_HOLDER
+                            .lock()
+                            .unwrap()
+                            .push(&format!("{:?}", err))
+                            .unwrap_or_else(|_| error!("Failed when try to hold error"));
+                        break Err(err);
                     }
                 }
             }
@@ -108,7 +128,7 @@ pub trait BlobBackend {
     }
 
     /// Read a range of data from blob into the provided slice
-    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> Result<usize>;
+    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize>;
 
     /// Read multiple range of data from blob into the provided slices
     fn readv(
@@ -117,7 +137,7 @@ pub trait BlobBackend {
         bufs: &[VolatileSlice],
         offset: u64,
         max_size: usize,
-    ) -> Result<usize> {
+    ) -> BackendResult<usize> {
         if bufs.len() == 1 && max_size >= bufs[0].len() {
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), bufs[0].len()) };
             self.read(blob_id, buf, offset)
@@ -129,7 +149,7 @@ pub trait BlobBackend {
             let data = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
 
             self.read(blob_id, data, offset)?;
-            let result = copyv(&data, bufs, offset, max_size);
+            let result = copyv(&data, bufs, offset, max_size).map_err(BackendError::CopyData);
 
             unsafe { std::alloc::dealloc(ptr, layout) };
 
@@ -138,7 +158,7 @@ pub trait BlobBackend {
     }
 
     /// Write a range of data to blob from the provided slice
-    fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> Result<usize>;
+    fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize>;
 }
 
 // Rafs blob backend upload API

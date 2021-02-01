@@ -38,6 +38,8 @@ use std::io::{Error, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 
+use serde::Serialize;
+
 use nydus_utils::{einval, enoent};
 
 use super::*;
@@ -151,6 +153,7 @@ pub struct OndiskSuperBlock {
 }
 
 bitflags! {
+    #[derive(Serialize)]
     pub struct RafsSuperFlags: u64 {
         /// Data chunks are not compressed.
         const COMPRESS_NONE = 0x0000_0001;
@@ -181,27 +184,7 @@ impl Default for RafsSuperFlags {
 
 impl fmt::Display for RafsSuperFlags {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.contains(RafsSuperFlags::COMPRESS_NONE) {
-            write!(f, "COMPRESS_NONE ")?;
-        }
-        if self.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) {
-            write!(f, "COMPRESS_LZ4_BLOCK ")?;
-        }
-        if self.contains(RafsSuperFlags::COMPRESS_GZIP) {
-            write!(f, "COMPRESS_GZIP ")?;
-        }
-        if self.contains(RafsSuperFlags::DIGESTER_BLAKE3) {
-            write!(f, "DIGESTER_BLAKE3 ")?;
-        }
-        if self.contains(RafsSuperFlags::DIGESTER_SHA256) {
-            write!(f, "DIGESTER_SHA256 ")?;
-        }
-        if self.contains(RafsSuperFlags::EXPLICIT_UID_GID) {
-            write!(f, "EXPLICIT_UID_GID ")?;
-        }
-        if self.contains(RafsSuperFlags::HAS_XATTR) {
-            write!(f, "HAS_XATTR ")?;
-        }
+        write!(f, "{}", format!("{:?}", self))?;
         Ok(())
     }
 }
@@ -371,10 +354,6 @@ impl OndiskSuperBlock {
 
 impl RafsStore for OndiskSuperBlock {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        info!(
-            "rafs superblock features: {}",
-            RafsSuperFlags::from_bits(self.s_flags).unwrap_or_default()
-        );
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
     }
@@ -512,22 +491,19 @@ impl PrefetchTable {
         Ok(data.len() + padding_bytes)
     }
 
-    /// Note: This method changes file offset.
-    /// `len` as u32 hint entries reside in this prefetch table.
-    pub fn load_from(
+    /// Note: Generally, prefetch happens after loading bootstrap, so with methods operating
+    /// files with changing their offset won't bring errors. But we still use `pread` now so as
+    /// to make this method more stable and robust. Even dup(2) can't give us a separated file struct.
+    pub fn load_prefetch_table_from(
         &mut self,
         r: &mut RafsIoReader,
         offset: u64,
         table_size: usize,
-    ) -> Result<()> {
-        // Map prefetch table in.
-        // TODO: Need to consider about backend switch?
-        r.seek(SeekFrom::Start(offset))?;
-
+    ) -> RafsResult<()> {
         self.inode_indexes = vec![0u32; table_size];
-
         let (_, data, _) = unsafe { self.inode_indexes.align_to_mut::<u8>() };
-        r.read_exact(data)?;
+        nix::sys::uio::pread(r.as_raw_fd(), data, offset as i64)
+            .map_err(|e| RafsError::Prefetch(e.to_string()))?;
 
         Ok(())
     }
@@ -535,6 +511,7 @@ impl PrefetchTable {
 
 #[derive(Clone, Debug, Default)]
 pub struct OndiskBlobTableEntry {
+    // Blob's own meta should be put onto its head, so `u32` should be sufficient.
     pub readahead_offset: u32,
     pub readahead_size: u32,
     pub blob_id: String,
@@ -649,11 +626,10 @@ impl OndiskBlobTable {
 impl RafsStore for OndiskBlobTable {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
-
         self.entries
             .iter()
             .enumerate()
-            .try_for_each(|(idx, entry)| -> Result<()> {
+            .try_for_each::<_, Result<()>>(|(idx, entry)| {
                 w.write_all(&u32::to_le_bytes(entry.readahead_offset))?;
                 w.write_all(&u32::to_le_bytes(entry.readahead_size))?;
                 w.write_all(entry.blob_id.as_bytes())?;
@@ -691,7 +667,6 @@ pub struct OndiskInode {
     pub i_mode: u32, // 64
     pub i_size: u64,
     pub i_blocks: u64,
-    /// HARDLINK | SYMLINK | PREFETCH_HINT
     pub i_flags: RafsInodeFlags,
     pub i_nlink: u32,
     /// for dir, child start index
@@ -703,7 +678,9 @@ pub struct OndiskInode {
     pub i_name_size: u16,
     /// symlink path size, [char; i_symlink_size]
     pub i_symlink_size: u16, // 104
-    pub i_reserved: [u8; 24], // 128
+    //// inode device block number, ignored for non-special files
+    pub i_rdev: u32,          // 108
+    pub i_reserved: [u8; 20], // 128
 }
 
 bitflags! {
@@ -959,10 +936,16 @@ pub type XattrValue = Vec<u8>;
 
 #[derive(Clone, Default)]
 pub struct XAttrs {
-    pub pairs: HashMap<OsString, XattrValue>,
+    pairs: HashMap<OsString, XattrValue>,
 }
 
 impl XAttrs {
+    pub fn new() -> Self {
+        Self {
+            pairs: HashMap::new(),
+        }
+    }
+
     pub fn size(&self) -> usize {
         let mut size: usize = 0;
 
@@ -977,6 +960,22 @@ impl XAttrs {
     #[inline]
     pub fn aligned_size(&self) -> usize {
         align_to_rafs(self.size())
+    }
+
+    pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
+        self.pairs.get(name)
+    }
+
+    pub fn add(&mut self, name: OsString, value: XattrValue) {
+        self.pairs.insert(name, value);
+    }
+
+    pub fn remove(&mut self, name: &OsStr) {
+        self.pairs.remove(name);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
     }
 }
 

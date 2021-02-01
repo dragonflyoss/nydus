@@ -27,8 +27,8 @@ const (
 	infoEndpoint  = "/api/v1/daemon"
 	mountEndpoint = "/api/v1/mount"
 
-	defaultHttpClientTimeout = 100 * time.Millisecond
-	contentType = "application/json"
+	defaultHttpClientTimeout = 30 * time.Second
+	contentType              = "application/json"
 )
 
 type Interface interface {

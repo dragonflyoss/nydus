@@ -53,7 +53,7 @@ paths:
             schema:
               $ref: "#/components/schemas/DaemonConf"
   /mount:
-    put:
+    post:
       operationId: createMount
       requestBody:
         content:
@@ -62,15 +62,15 @@ paths:
               $ref: "#/components/schemas/MountInfo"
         required: true
       responses:
-        "204":
+        "200":
           content: {}
-          description: The mount was successful
+          description: The mount creation was successful
         "400":
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-          description: The mount action cannot be executed due to bad input
+          description: The mount creation action cannot be executed due to bad input
         default:
           content:
             application/json:
@@ -78,6 +78,54 @@ paths:
                 $ref: "#/components/schemas/Error"
           description: Internal Server Error
       summary: Creates a mount.
+      x-codegen-request-body-name: info
+    put:
+      operationId: Remount
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MountInfo"
+        required: true
+      responses:
+        "200":
+          content: {}
+          description: The mount update was successful
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: The mount update action cannot be executed due to bad input
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Updates a mount.
+      x-codegen-request-body-name: info
+    delete:
+      operationId: removeMount
+      requestBody:
+        required: false
+      responses:
+        "200":
+          content: {}
+          description: The mount deletion was successful
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: The mount deletion action cannot be executed due to bad input
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      summary: Deletes a mount.
       x-codegen-request-body-name: info
   /metrics:
     get:
@@ -192,8 +240,6 @@ components:
     MountInfo:
       example:
         source: /foo/bar/bootstrap
-        fstype: rafs
-        mountpoint: /foo/bar
         config: /foo/bar/config
       properties:
         fstype:

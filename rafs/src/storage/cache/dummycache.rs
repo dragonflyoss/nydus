@@ -4,7 +4,6 @@
 
 use std::io::Result;
 use std::sync::Arc;
-use std::thread;
 
 use vm_memory::VolatileSlice;
 
@@ -17,11 +16,13 @@ use crate::storage::compress;
 use crate::storage::device::RafsBio;
 use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv};
+use crate::{RafsError, RafsResult};
+
+use nydus_utils::eother;
 
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,
     validate: bool,
-    prefetch_worker: PrefetchWorker,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
 }
@@ -81,7 +82,7 @@ impl RafsCache for DummyCache {
     }
 
     fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        self.backend().blob_size(blob_id)
+        self.backend().blob_size(blob_id).map_err(|e| eother!(e))
     }
 
     fn digester(&self) -> digest::Algorithm {
@@ -97,50 +98,12 @@ impl RafsCache for DummyCache {
     }
 
     /// Prefetch works when blobcache is enabled
-    fn prefetch(&self, bios: &mut [RafsBio]) -> Result<usize> {
-        let (mut tx, rx) = spmc::channel::<MergedBackendRequest>();
-        for num in 0..self.prefetch_worker.threads_count {
-            let backend = Arc::clone(&self.backend);
-            let rx = rx.clone();
-            let _thread = thread::Builder::new()
-                .name(format!("prefetch_thread_{}", num))
-                .spawn(move || {
-                    while let Ok(mr) = rx.recv() {
-                        let blob_offset = mr.blob_offset;
-                        let blob_size = mr.blob_size;
-                        let blob_id = &mr.blob_id;
-                        trace!(
-                            "Merged req id {} req offset {} size {}",
-                            blob_id,
-                            blob_offset,
-                            blob_size
-                        );
-                        // Blob id must be unique.
-                        // TODO: Currently, request length to backend may span a whole chunk,
-                        // Do we need to split it into smaller pieces?
-                        if backend
-                            .prefetch_blob(blob_id, blob_offset as u32, blob_size)
-                            .is_err()
-                        {
-                            error!(
-                                "Readahead from {} for {} bytes failed",
-                                blob_offset, blob_size
-                            )
-                        }
-                    }
-                    info!("Prefetch thread exits.")
-                });
-        }
+    fn prefetch(&self, _bios: &mut [RafsBio]) -> RafsResult<usize> {
+        Err(RafsError::Unsupported)
+    }
 
-        let mut bios = bios.to_vec();
-        let merging_size = self.prefetch_worker.merging_size;
-        let _thread = thread::Builder::new().spawn({
-            move || {
-                generate_merged_requests(bios.as_mut_slice(), &mut tx, merging_size);
-            }
-        });
-
-        Ok(0)
+    fn stop_prefetch(&self) -> RafsResult<()> {
+        Err(RafsError::Unsupported)
     }
 
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize> {
@@ -152,10 +115,14 @@ impl RafsCache for DummyCache {
             unsafe { slice::from_raw_parts(buf.as_ptr(), buf.len()) }
         };
 
-        self.backend.write(blob_id, wbuf, blk.compress_offset())
+        self.backend
+            .write(blob_id, wbuf, blk.compress_offset())
+            .map_err(|e| eother!(e))
     }
 
-    fn release(&self) {}
+    fn release(&self) {
+        self.backend().release()
+    }
 }
 
 pub fn new(
@@ -167,7 +134,6 @@ pub fn new(
     Ok(DummyCache {
         backend,
         validate: config.cache_validate,
-        prefetch_worker: config.prefetch_worker,
         compressor,
         digester,
     })

@@ -34,7 +34,7 @@ sudo target-fusedev/debug/nydusd \
 Virtio-fs is supported by both [QEMU](https://www.qemu.org/) and [Cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor). To run `nydusd` with virtio-fs support, first start it with `--sock` option to expose a virtio-fs socket endpoint.
 
 ``` shell
-sudo target-virtiofsd/debug/nydusd \
+sudo target-virtiofs/debug/nydusd \
   --config /path/to/config-localfs.json \
   --sock /path/to/vhost-user-fs.sock \
   --bootstrap /path/to/bootstrap \
@@ -185,8 +185,11 @@ We are working on enabling cloud-hypervisor support for nydus.
         "scheme": "http",
         "host": "my-registry:5000",
         "repo": "test/repo",
-        // Base64(username:password)
-        "auth": "<base64_encoded_auth>"
+        // Username and password for auth
+        // base64(username:password), optional
+        "auth": "<base64_encoded_auth>",
+        // Bearer token for auth, optional
+        "registry_token": "<bearer_token>"
       }
     },
     ...

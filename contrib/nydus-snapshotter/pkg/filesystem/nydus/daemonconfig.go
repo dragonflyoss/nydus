@@ -38,6 +38,7 @@ type DeviceConfig struct {
 			Host          string `json:"host,omitempty"`
 			Repo          string `json:"repo,omitempty"`
 			Auth          string `json:"auth,omitempty"`
+			RegistryToken string `json:"registry_token,omitempty"`
 			BlobUrlScheme string `json:"blob_url_scheme,omitempty"`
 			Proxy         struct {
 				URL           string `json:"url,omitempty"`
@@ -51,10 +52,10 @@ type DeviceConfig struct {
 		} `json:"config"`
 	} `json:"backend"`
 	Cache struct {
-		CacheType string `json:"type"`
+		CacheType  string `json:"type"`
 		Compressed bool   `json:"compressed,omitempty"`
-		Config    struct {
-			WorkDir    string `json:"work_dir"`
+		Config     struct {
+			WorkDir string `json:"work_dir"`
 		} `json:"config"`
 	} `json:"cache"`
 }
@@ -87,12 +88,13 @@ func NewDaemonConfig(cfg DaemonConfig, d *daemon.Daemon, vpcRegistry bool, label
 	if vpcRegistry {
 		registryHost = registry.ConvertToVPCHost(registryHost)
 	}
-	keyChain, err := auth.FromLabels(labels)
-	if err != nil {
-		return DaemonConfig{}, errors.Wrap(err, "failed to find image pull secret from label")
+	keyChain := auth.FromLabels(labels)
+	if keyChain.TokenBase() {
+		cfg.Device.Backend.Config.RegistryToken = keyChain.Password
+	} else {
+		cfg.Device.Backend.Config.Auth = keyChain.ToBase64()
 	}
 	cfg.Device.Backend.Config.Host = registryHost
 	cfg.Device.Backend.Config.Repo = image.Repo
-	cfg.Device.Backend.Config.Auth = keyChain.ToBase64()
 	return cfg, nil
 }

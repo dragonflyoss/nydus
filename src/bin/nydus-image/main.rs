@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#[macro_use(crate_version, crate_authors)]
+#[macro_use(crate_authors, crate_version)]
 extern crate clap;
 extern crate stderrlog;
 
@@ -10,6 +10,7 @@ mod builder;
 mod node;
 mod stargz;
 mod tree;
+mod uploader;
 mod validator;
 
 #[macro_use]
@@ -18,49 +19,21 @@ extern crate serde;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{App, Arg, SubCommand};
-use vmm_sys_util::tempfile::TempFile;
 
 use std::collections::BTreeMap;
 use std::fs::metadata;
-use std::fs::rename;
-use std::io::{self, Result, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use builder::SourceType;
-use nydus_utils::einval;
-use nydus_utils::log_level_to_verbosity;
+use node::WhiteoutSpec;
+use nydus_utils::{log_level_to_verbosity, BuildTimeInfo};
 use rafs::metadata::digest;
-use rafs::storage::{backend, compress, factory};
+use rafs::storage::compress;
+use uploader::Uploader;
 use validator::Validator;
-
-fn upload_blob(
-    backend: Arc<dyn backend::BlobBackendUploader>,
-    blob_id: &str,
-    blob_path: &Path,
-) -> Result<()> {
-    backend
-        .upload(blob_id, blob_path, |(current, total)| {
-            io::stdout().flush().unwrap();
-            print!("\r");
-            print!(
-                "Backend blob uploading: {}/{} bytes ({}%)",
-                current,
-                total,
-                current * 100 / total,
-            );
-        })
-        .map_err(|e| {
-            error!("upload_blob backend.upload {:?}", e);
-            e
-        })?;
-
-    print!("\r");
-    io::stdout().flush().unwrap();
-
-    Ok(())
-}
 
 /// Get readahead file paths line by line from stdin
 fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> {
@@ -68,7 +41,7 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
     let mut files = BTreeMap::new();
 
     // Can't fail since source must be a legal input option.
-    let source_path = source.canonicalize().unwrap();
+    let source_path = source.canonicalize()?;
 
     loop {
         let mut file = String::new();
@@ -77,62 +50,58 @@ fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> 
         // Absolute path must point to a file in source rootfs.
         // Relative path must point to a file in source rootfs.
         // All paths must conform to format `/rootfs/dir/file` when added to BTree.
-        let ret = stdin.read_line(&mut file);
-        match ret {
-            Ok(size) => {
-                if size == 0 {
-                    break;
-                }
-                let file_name = file.trim();
-                if file_name.is_empty() {
-                    continue;
-                }
-                let path = Path::new(file_name);
-                // Will follow symlink.
-                if !path.exists() {
-                    warn!("{} does not exist, ignore it!", path.to_str().unwrap());
-                    continue;
-                }
-
-                let canonicalized_name;
-                match path.canonicalize() {
-                    Ok(p) => {
-                        if !p.starts_with(&source_path) {
-                            continue;
-                        }
-                        canonicalized_name = p;
-                    }
-                    Err(_) => continue,
-                }
-
-                let file_name_trimmed = Path::new("/").join(
-                    canonicalized_name
-                        .strip_prefix(&source_path)
-                        .unwrap()
-                        .to_path_buf(),
-                );
-
-                // FIXME: Temporarily raise log level up, for devel/debug sake.
-                debug!(
-                    "readahead file: {}, trimmed file name {}",
-                    file_name,
-                    file_name_trimmed.to_str().unwrap()
-                );
-                // The inode index is not decided yet, but will do during fs-walk.
-                files.insert(file_name_trimmed, None);
-            }
-            Err(err) => {
-                error!("Failed to parse readahead files: {}", err);
-            }
+        let size = stdin
+            .read_line(&mut file)
+            .context(format!("failed to parse readahead files from {:?}", source))?;
+        if size == 0 {
+            break;
         }
+        let file_name = file.trim();
+        if file_name.is_empty() {
+            continue;
+        }
+        let path = Path::new(file_name);
+        // Will follow symlink.
+        if !path.exists() {
+            warn!("{} does not exist, ignore it!", path.to_str().unwrap());
+            continue;
+        }
+
+        let canonicalized_name;
+        match path.canonicalize() {
+            Ok(p) => {
+                if !p.starts_with(&source_path) {
+                    continue;
+                }
+                canonicalized_name = p;
+            }
+            Err(_) => continue,
+        }
+
+        let file_name_trimmed = Path::new("/").join(
+            canonicalized_name
+                .strip_prefix(&source_path)
+                .unwrap()
+                .to_path_buf(),
+        );
+
+        debug!(
+            "readahead file: {}, trimmed file name {}",
+            file_name,
+            file_name_trimmed.to_str().unwrap()
+        );
+        // The inode index is not decided yet, but will do during fs-walk.
+        files.insert(file_name_trimmed, None);
     }
 
     Ok(files)
 }
 
 fn main() -> Result<()> {
+    let (bti_string, _) = BuildTimeInfo::dump(crate_version!());
+
     let cmd = App::new("nydus image builder")
-        .version(crate_version!())
+        .version(bti_string.as_str())
         .author(crate_authors!())
         .about("Build image using nydus format.")
         .subcommand(
@@ -140,7 +109,7 @@ fn main() -> Result<()> {
                 .about("dump image bootstrap and upload blob to storage backend")
                 .arg(
                     Arg::with_name("SOURCE")
-                        .help("source directory")
+                        .help("source path")
                         .required(true)
                         .index(1),
                 )
@@ -156,11 +125,13 @@ fn main() -> Result<()> {
                     Arg::with_name("blob")
                         .long("blob")
                         .help("blob file path")
-                        .takes_value(true),
+                        .takes_value(true)
+                        .conflicts_with("backend-type"),
                 )
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
+                        .required(true)
                         .help("bootstrap file path (required)")
                         .takes_value(true),
                 )
@@ -196,13 +167,20 @@ fn main() -> Result<()> {
                 .arg(
                     Arg::with_name("backend-type")
                         .long("backend-type")
-                        .help("blob storage backend type (enable backend upload if specified)")
+                        .help("blob storage backend type (enable blob upload if specified)")
                         .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("backend-config")
                         .long("backend-config")
-                        .help("blob storage backend config (json)")
+                        .help("blob storage backend config (JSON string)")
+                        .takes_value(true)
+                        .conflicts_with("backend-config-file"),
+                )
+                .arg(
+                    Arg::with_name("backend-config-file")
+                        .long("backend-config-file")
+                        .help("blob storage backend config (JSON file)")
                         .takes_value(true),
                 )
                 .arg(
@@ -227,6 +205,21 @@ fn main() -> Result<()> {
                     .takes_value(false)
                     .required(false)
                 )
+                .arg(
+                    Arg::with_name("whiteout-spec")
+                    .long("whiteout-spec")
+                    .help("decide which whiteout spec to follow: \"oci\" or \"overlayfs\"")
+                    .takes_value(true)
+                    .required(true)
+                    .possible_values(&["oci", "overlayfs"])
+                    .default_value("oci")
+                )
+                .arg(
+                    Arg::with_name("output-json")
+                        .long("output-json")
+                        .help("JSON output path for build result")
+                        .takes_value(true)
+                )
         )
         .subcommand(
             SubCommand::with_name("check")
@@ -235,6 +228,7 @@ fn main() -> Result<()> {
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .help("bootstrap file path (required)")
+                        .required(true)
                         .takes_value(true),
                 )
         )
@@ -260,26 +254,20 @@ fn main() -> Result<()> {
         .verbosity(log_level_to_verbosity(v))
         .timestamp(stderrlog::Timestamp::Second)
         .init()
-        .unwrap();
+        .context("failed to init logger")?;
 
     if let Some(matches) = cmd.subcommand_matches("create") {
-        let source_path = Path::new(matches.value_of("SOURCE").expect("SOURCE is required"));
-        let source_type: SourceType = matches
-            .value_of("source-type")
-            .expect("source-type is required")
-            .parse()?;
+        let source_path = Path::new(matches.value_of("SOURCE").unwrap());
+        let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
 
         let source_file = metadata(source_path)
-            .map_err(|e| einval!(format!("failed to get source path {:?}", e)))?;
+            .context(format!("failed to get source path {:?}", source_path))?;
 
         let mut blob_id = String::new();
         if let Some(p_blob_id) = matches.value_of("blob-id") {
             blob_id = String::from(p_blob_id);
             if blob_id.len() > BLOB_ID_MAXIMUM_LENGTH {
-                return Err(einval!(format!(
-                    "blob id is limited to length {}",
-                    BLOB_ID_MAXIMUM_LENGTH
-                )));
+                bail!("blob id is limited to length {}", BLOB_ID_MAXIMUM_LENGTH);
             }
         }
 
@@ -290,15 +278,15 @@ fn main() -> Result<()> {
         match source_type {
             SourceType::Directory => {
                 if !source_file.is_dir() {
-                    return Err(einval!("source must be a directory"));
+                    bail!("source {:?} must be a directory", source_path);
                 }
             }
             SourceType::StargzIndex => {
                 if !source_file.is_file() {
-                    return Err(einval!("source must be a JSON file"));
+                    bail!("source {:?} must be a JSON file", source_path);
                 }
                 if blob_id.trim() == "" {
-                    return Err(einval!("blob-id can't be empty"));
+                    bail!("blob-id can't be empty");
                 }
                 if compressor != compress::Algorithm::GZip {
                     trace!("compressor set to {}", compress::Algorithm::GZip);
@@ -311,18 +299,36 @@ fn main() -> Result<()> {
             }
         }
 
-        let bootstrap_path = Path::new(
-            matches
-                .value_of("bootstrap")
-                .expect("bootstrap is required"),
-        );
+        let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
 
-        let temp_file = TempFile::new_with_prefix("").unwrap();
+        let mut uploader = None;
+        let mut blob_path = match matches.value_of("blob") {
+            Some(p) => Some(PathBuf::from(p)),
+            None => {
+                if source_type == SourceType::Directory {
+                    let backend_type = matches
+                        .value_of("backend-type")
+                        .ok_or_else(|| anyhow!("blob or backend-type must be specified"))?;
 
-        let mut blob_path = matches
-            .value_of("blob")
-            .map(|p| Path::new(p))
-            .unwrap_or_else(|| temp_file.as_path());
+                    let real_uploader =
+                        if let Some(backend_config) = matches.value_of("backend-config") {
+                            Uploader::from_config_str(backend_type, backend_config)?
+                        } else if let Some(backend_config_file) =
+                            matches.value_of("backend-config-file")
+                        {
+                            Uploader::from_config_file(backend_type, backend_config_file)?
+                        } else {
+                            bail!("backend-config or backend-config-file must be specified")
+                        };
+
+                    let blob_path = Some(real_uploader.blob_path.clone());
+                    uploader = Some(real_uploader);
+                    blob_path
+                } else {
+                    None
+                }
+            }
+        };
 
         let mut parent_bootstrap = Path::new("");
         if let Some(_parent_bootstrap) = matches.value_of("parent-bootstrap") {
@@ -335,15 +341,24 @@ fn main() -> Result<()> {
             .parse()?;
 
         let hint_readahead_files = if prefetch_policy != builder::PrefetchPolicy::None {
-            get_readahead_files(source_path)?
+            get_readahead_files(source_path).context("failed to get readahead files")?
         } else {
             BTreeMap::new()
         };
 
+        let whiteout_spec: WhiteoutSpec = matches
+            .value_of("whiteout-spec")
+            .unwrap_or_default()
+            .parse()?;
+
+        let output_json = matches
+            .value_of("output-json")
+            .map(|o| o.to_string().into());
+
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
-            blob_path,
+            blob_path.as_deref(),
             bootstrap_path,
             parent_bootstrap,
             blob_id,
@@ -352,78 +367,51 @@ fn main() -> Result<()> {
             hint_readahead_files,
             prefetch_policy,
             !repeatable,
+            whiteout_spec,
+            output_json,
         )?;
-        let (blob_ids, blob_size) = ib.build()?;
+        let (blob_ids, blob_size) = ib.build().context("build failed")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(&bootstrap_path)?;
-            match validator.check(false) {
-                Ok(valid) => {
-                    if !valid {
-                        return Err(einval!("Failed to build bootstrap from source"));
-                    }
-                }
-                Err(err) => {
-                    return Err(err);
-                }
-            }
-        }
-
-        // Upload blob file
-        if blob_size > 0 {
-            let blob_id = blob_ids.last().unwrap();
-            let mut uploaded = false;
-            if let Some(backend_type) = matches.value_of("backend-type") {
-                if let Some(backend_config) = matches.value_of("backend-config") {
-                    let config = factory::BackendConfig {
-                        backend_type: backend_type.to_owned(),
-                        backend_config: serde_json::from_str(backend_config).map_err(|e| {
-                            error!("failed to parse backend_config json: {}", e);
-                            e
-                        })?,
-                    };
-                    let blob_backend = factory::new_uploader(config).unwrap();
-                    upload_blob(blob_backend, blob_id.as_str(), blob_path)?;
-                    uploaded = true;
-                }
-            }
-            // blob not uploaded to backend, let's save it to local file system
-            if !uploaded && blob_path == temp_file.as_path() {
-                trace!("rename {:?} to {}", blob_path, blob_id);
-                rename(blob_path, blob_id)?;
-                blob_path = Path::new(blob_id);
+            let valid = validator
+                .check(false)
+                .context("failed to validate bootstrap")?;
+            if !valid {
+                bail!("failed to build bootstrap");
             }
         }
 
         if blob_size > 0 {
-            info!(
-                "build finished, blob id: {:?}, blob file: {:?}",
-                blob_ids, blob_path
-            );
+            // Upload blob file
+            if let Some(uploader) = uploader {
+                let blob_id = blob_ids.last().unwrap();
+                blob_path = uploader.upload(blob_id)?;
+            }
+            if let Some(blob_path) = blob_path.as_ref() {
+                info!(
+                    "build finished, blob id: {:?}, blob file: {:?}",
+                    blob_ids, blob_path,
+                );
+            } else {
+                info!("build finished, blob id: {:?}", blob_ids);
+            }
         } else {
-            info!("build finished, blob id: {:?}", blob_ids);
+            info!("build finished, no blob output");
         }
     }
 
     if let Some(matches) = cmd.subcommand_matches("check") {
-        let bootstrap_path = Path::new(
-            matches
-                .value_of("bootstrap")
-                .expect("bootstrap is required"),
-        );
+        let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
         let mut validator = Validator::new(bootstrap_path)?;
-        match validator.check(true) {
-            Ok(valid) => {
-                if valid {
-                    info!("Bootstrap is valid");
-                } else {
-                    return Err(einval!("Bootstrap is invalid"));
-                }
-            }
-            Err(err) => {
-                return Err(err);
-            }
+        let valid = validator
+            .check(true)
+            .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
+        if valid {
+            info!("bootstrap is valid");
+        } else {
+            bail!("bootstrap is invalid");
         }
     }
 

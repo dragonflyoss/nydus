@@ -4,23 +4,24 @@
 
 //! File node for RAFS format
 
+use nix::sys::stat;
 use rafs::RafsIoWriter;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::io::Result;
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str;
+use std::str::FromStr;
 
+use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
 use nydus_utils::div_round_up;
-use nydus_utils::{einval, last_error};
 
 use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
@@ -31,11 +32,40 @@ const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
 pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
+pub const OVERLAYFS_WHITEOUT_OPAQUE: &str = "trusted.overlay.opaque";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WhiteoutType {
-    Opaque,
-    Removal,
+    OCIOpaque,
+    OCIRemoval,
+    OverlayFSOpaque,
+    OverlayFSRemoval,
+}
+
+impl WhiteoutType {
+    pub fn is_removal(&self) -> bool {
+        *self == WhiteoutType::OCIRemoval || *self == WhiteoutType::OverlayFSRemoval
+    }
+}
+
+#[derive(PartialEq)]
+pub enum WhiteoutSpec {
+    /// https://github.com/opencontainers/image-spec/blob/master/layer.md#whiteouts
+    Oci,
+    /// "whiteouts and opaque directories" in https://www.kernel.org/doc/Documentation/filesystems/overlayfs.txt
+    Overlayfs,
+}
+
+impl FromStr for WhiteoutSpec {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "oci" => Ok(Self::Oci),
+            "overlayfs" => Ok(Self::Overlayfs),
+            _ => Err(anyhow!("invalid whiteout spec")),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -97,6 +127,8 @@ pub struct Node {
     /// dev number is required because a source root directory can have multiple
     /// partitions mounted. Files from different partition can have unique inode number.
     pub dev: u64,
+    /// device ID (if special file), describes the device that this file (inode) represents.
+    pub rdev: u64,
     /// Overlay type for layered build
     pub overlay: Overlay,
     /// Absolute path to root directory where start to build image.
@@ -127,7 +159,8 @@ impl Node {
         let mut node = Node {
             index: 0,
             real_ino: 0,
-            dev: std::u64::MAX,
+            dev: u64::MAX,
+            rdev: u64::MAX,
             source,
             path,
             overlay,
@@ -137,29 +170,46 @@ impl Node {
             xattrs: XAttrs::default(),
             explicit_uidgid,
         };
-        node.build_inode()?;
+        node.build_inode().context("failed to build inode")?;
         Ok(node)
     }
 
     fn build_inode_xattr(&mut self) -> Result<()> {
-        let file_xattrs = xattr::list(&self.path)?;
+        let file_xattrs = match xattr::list(&self.path) {
+            Ok(x) => x,
+            Err(e) => {
+                if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                    return Ok(());
+                } else {
+                    return Err(anyhow!("failed to list xattr of {:?}", self.path));
+                }
+            }
+        };
 
         for key in file_xattrs {
-            let value = xattr::get(&self.path, &key)?;
-            self.xattrs.pairs.insert(key, value.unwrap_or_default());
+            let value = xattr::get(&self.path, &key)
+                .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
+            self.xattrs.add(key, value.unwrap_or_default());
         }
 
-        if !self.xattrs.pairs.is_empty() {
+        if !self.xattrs.is_empty() {
             self.inode.i_flags |= RafsInodeFlags::XATTR;
         }
 
         Ok(())
     }
 
+    pub fn remove_xattr(&mut self, key: &OsStr) {
+        self.xattrs.remove(key);
+        if self.xattrs.is_empty() {
+            self.inode.i_flags.remove(RafsInodeFlags::XATTR);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn dump_blob(
         &mut self,
-        f_blob: &mut RafsIoWriter,
+        mut f_blob: Option<&mut RafsIoWriter>,
         blob_hash: &mut Sha256,
         compress_offset: &mut u64,
         decompress_offset: &mut u64,
@@ -176,16 +226,22 @@ impl Node {
             self.inode.i_digest =
                 RafsDigest::from_buf(self.symlink.as_ref().unwrap().as_bytes(), digester);
             return Ok(0);
+        } else if self.is_special() {
+            self.inode.i_digest = RafsDigest::hasher(digester).digest_finalize();
+            return Ok(0);
         }
 
         let file_size = self.inode.i_size;
         let mut blob_size = 0usize;
         let mut inode_hasher = RafsDigest::hasher(digester);
-        let mut file = File::open(&self.path).map_err(|e| last_error!(e))?;
+        let mut file = File::open(&self.path)
+            .with_context(|| format!("failed to open node file {:?}", self.path))?;
 
         for i in 0..self.inode.i_child_count {
             // Init chunk info
             let mut chunk = OndiskChunkInfo::new();
+            // FIXME: Should not assume that block size must be the default one.
+            // Use the configured value instead!
             let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
             let chunk_size = if i == self.inode.i_child_count - 1 {
                 file_size as usize - (RAFS_DEFAULT_BLOCK_SIZE as usize * i as usize)
@@ -195,7 +251,8 @@ impl Node {
 
             // Read chunk data
             let mut chunk_data = vec![0; chunk_size];
-            file.read_exact(&mut chunk_data)?;
+            file.read_exact(&mut chunk_data)
+                .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
             // Calculate chunk digest
             // TODO: check for hole chunks. One possible way is to always save
@@ -223,7 +280,8 @@ impl Node {
             }
 
             // Compress chunk data
-            let (compressed, is_compressed) = compress::compress(&chunk_data, compressor)?;
+            let (compressed, is_compressed) = compress::compress(&chunk_data, compressor)
+                .with_context(|| format!("failed to compress node file {:?}", self.path))?;
             let compressed_size = compressed.len();
             if is_compressed {
                 chunk.flags |= RafsChunkFlags::COMPRESSED;
@@ -245,7 +303,11 @@ impl Node {
             blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
-            f_blob.write_all(&compressed)?;
+            if let Some(f_blob) = f_blob.as_mut() {
+                f_blob
+                    .write_all(&compressed)
+                    .context("failed to write blob")?;
+            }
 
             // Cache chunk digest info
             chunk_cache.insert(chunk.block_id, chunk);
@@ -270,26 +332,29 @@ impl Node {
             symlink: self.symlink.as_deref(),
             inode: &self.inode,
         };
-        let inode_size = inode.store(f_bootstrap)?;
+        let inode_size = inode
+            .store(f_bootstrap)
+            .context("failed to dump inode to bootstrap")?;
         node_size += inode_size;
 
         // Dump inode xattr
-        if !self.xattrs.pairs.is_empty() {
-            let xattr_size = self.xattrs.store(f_bootstrap)?;
+        if !self.xattrs.is_empty() {
+            let xattr_size = self
+                .xattrs
+                .store(f_bootstrap)
+                .context("failed to dump xattr to bootstrap")?;
             node_size += xattr_size;
         }
 
         // Dump chunk info
         if self.is_reg() && self.inode.i_child_count as usize != self.chunks.len() {
-            return Err(einval!(format!(
-                "invalid chunks count {}: {}",
-                self.chunks.len(),
-                self
-            )));
+            bail!("invalid chunks count {}: {}", self.chunks.len(), self);
         }
 
         for chunk in &mut self.chunks {
-            let chunk_size = chunk.store(f_bootstrap)?;
+            let chunk_size = chunk
+                .store(f_bootstrap)
+                .context("failed to dump chunk info to bootstrap")?;
             node_size += chunk_size;
         }
 
@@ -310,16 +375,19 @@ impl Node {
         self.inode.i_nlink = 1;
         self.inode.i_blocks = meta.st_blocks();
         self.inode.i_blocks = div_round_up(self.inode.i_size, 512);
+        self.inode.i_rdev = meta.st_rdev() as u32;
 
         self.real_ino = meta.st_ino();
         self.dev = meta.st_dev();
+        self.rdev = meta.st_rdev();
 
         Ok(())
     }
 
     fn build_inode(&mut self) -> Result<()> {
         self.inode.set_name_size(self.name().as_bytes().len());
-        self.build_inode_stat()?;
+        self.build_inode_stat()
+            .with_context(|| format!("failed to build inode {:?}", self.path))?;
 
         if self.is_reg() {
             self.inode.i_child_count = self.chunk_count() as u32;
@@ -337,7 +405,9 @@ impl Node {
     }
 
     pub fn meta(&self) -> Result<impl MetadataExt> {
-        self.path.symlink_metadata().map_err(|e| einval!(e))
+        self.path
+            .symlink_metadata()
+            .with_context(|| format!("failed to get metadata from {:?}", self.path))
     }
 
     /// Generate the path relative to original rootfs.
@@ -362,6 +432,10 @@ impl Node {
 
     pub fn is_reg(&self) -> bool {
         self.inode.i_mode & libc::S_IFMT == libc::S_IFREG
+    }
+
+    pub fn is_special(&self) -> bool {
+        self.inode.i_mode & (libc::S_IFBLK | libc::S_IFCHR | libc::S_IFIFO) != 0
     }
 
     pub fn is_hardlink(&self) -> bool {
@@ -402,6 +476,22 @@ impl Node {
         }
     }
 
+    pub fn origin_name(&self, t: &WhiteoutType) -> Option<&OsStr> {
+        if let Some(name) = self.name().to_str() {
+            if *t == WhiteoutType::OCIRemoval {
+                // the whiteout filename prefixes the basename of the path to be deleted with ".wh.".
+                return Some(OsStr::from_bytes(
+                    name[OCISPEC_WHITEOUT_PREFIX.len()..].as_bytes(),
+                ));
+            } else if *t == WhiteoutType::OverlayFSRemoval {
+                // the whiteout file has the same name as the file to be deleted.
+                return Some(name.as_ref());
+            }
+        }
+
+        None
+    }
+
     pub fn path_vec(&self) -> Vec<OsString> {
         self.rootfs()
             .components()
@@ -413,19 +503,56 @@ impl Node {
             .collect::<Vec<_>>()
     }
 
-    pub fn whiteout_type(&self) -> Option<WhiteoutType> {
+    pub fn is_overlayfs_whiteout(&self, spec: &WhiteoutSpec) -> bool {
+        if *spec != WhiteoutSpec::Overlayfs {
+            return false;
+        }
+
+        (self.inode.i_mode & libc::S_IFMT == libc::S_IFCHR)
+            && stat::major(self.rdev) == 0
+            && stat::minor(self.rdev) == 0
+    }
+
+    pub fn is_overlayfs_opaque(&self, spec: &WhiteoutSpec) -> bool {
+        if *spec != WhiteoutSpec::Overlayfs {
+            return false;
+        }
+
+        // A directory is made opaque by setting the xattr
+        // "trusted.overlay.opaque" to "y".
+        if let Some(v) = self.xattrs.get(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE)) {
+            if let Ok(v) = std::str::from_utf8(v.as_slice()) {
+                return v == "y";
+            }
+        }
+
+        false
+    }
+
+    pub fn whiteout_type(&self, spec: &WhiteoutSpec) -> Option<WhiteoutType> {
         if self.overlay == Overlay::Lower {
             return None;
         }
-        let name = self.name();
-        if name == OCISPEC_WHITEOUT_OPAQUE {
-            return Some(WhiteoutType::Opaque);
-        }
-        if let Some(n) = name.to_str() {
-            if n.starts_with(OCISPEC_WHITEOUT_PREFIX) {
-                return Some(WhiteoutType::Removal);
+
+        match spec {
+            WhiteoutSpec::Oci => {
+                if let Some(name) = self.name().to_str() {
+                    if name == OCISPEC_WHITEOUT_OPAQUE {
+                        return Some(WhiteoutType::OCIOpaque);
+                    } else if name.starts_with(OCISPEC_WHITEOUT_PREFIX) {
+                        return Some(WhiteoutType::OCIRemoval);
+                    }
+                }
+            }
+            WhiteoutSpec::Overlayfs => {
+                if self.is_overlayfs_whiteout(spec) {
+                    return Some(WhiteoutType::OverlayFSRemoval);
+                } else if self.is_overlayfs_opaque(spec) {
+                    return Some(WhiteoutType::OverlayFSOpaque);
+                }
             }
         }
+
         None
     }
 }

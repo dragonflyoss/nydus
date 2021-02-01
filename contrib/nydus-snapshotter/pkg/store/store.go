@@ -95,4 +95,3 @@ func (s *DaemonStore) filterOutDeletedDaemon(d *daemon.Daemon) []*daemon.Daemon 
 	}
 	return res
 }
-

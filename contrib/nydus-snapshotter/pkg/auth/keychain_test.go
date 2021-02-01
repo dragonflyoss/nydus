@@ -19,19 +19,24 @@ func TestFromLabels(t *testing.T) {
 		label.ImagePullUsername: "mock",
 		label.ImagePullSecret: "mock",
 	}
-	kc, err := FromLabels(labels)
-	assert.Nil(t, err)
+	kc := FromLabels(labels)
 	assert.Equal(t, kc.Username, "mock")
 	assert.Equal(t, kc.Password, "mock")
 	assert.Equal(t, "bW9jazptb2Nr", kc.ToBase64())
 
-	kc, err = FromBase64("bW9jazptb2Nr")
+	kc, err := FromBase64("bW9jazptb2Nr")
 	assert.Nil(t, err)
 	assert.Equal(t, kc.Username, "mock")
 	assert.Equal(t, kc.Password, "mock")
 
 	labels = map[string]string {}
-	kc, err = FromLabels(labels)
-	assert.Nil(t, err)
+	kc = FromLabels(labels)
 	assert.Equal(t, "", kc.ToBase64())
+
+	labels = map[string]string {
+		label.ImagePullSecret: "mock",
+	}
+	kc = FromLabels(labels)
+	assert.True(t, kc.TokenBase())
+	assert.Equal(t, "mock", kc.Password)
 }

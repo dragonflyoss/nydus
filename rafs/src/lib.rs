@@ -13,24 +13,39 @@ extern crate bitflags;
 
 use std::any::Any;
 use std::fs::File;
-use std::io::Result;
-use std::io::{Read, Seek, Write};
+use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
-use nydus_utils::einval;
+use nydus_utils::{einval, last_error};
 
 #[macro_use]
 mod error;
 pub mod fs;
 pub mod metadata;
 pub mod storage;
-use std::io::SeekFrom;
 
 #[macro_use]
 extern crate lazy_static;
 #[allow(dead_code)]
 pub mod io_stats;
+
+#[derive(Debug)]
+pub enum RafsError {
+    Unsupported,
+    Uninitialized,
+    AlreadyMounted,
+    ReadMetadata(Error),
+    LoadConfig(Error),
+    ParseConfig(serde_json::Error),
+    SwapBackend(Error),
+    FillSuperblock(Error),
+    CreateDevice(Error),
+    Prefetch(String),
+    Configure(String),
+}
+
+pub type RafsResult<T> = std::result::Result<T, RafsError>;
 
 /// A helper trait for RafsIoReader.
 pub trait RafsIoRead: Read + AsRawFd + Seek {}
@@ -42,6 +57,15 @@ pub trait RafsIoWrite: Write + Seek {
 
 impl RafsIoRead for File {}
 impl RafsIoWrite for File {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// Rust file I/O is unbuffered by default. If we have many small write calls
+// to a file, should use BufWriter. BufWriter maintains an in-memory buffer
+// for writing, minimizing the number of system calls required.
+impl RafsIoWrite for BufWriter<File> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -65,6 +89,13 @@ impl dyn RafsIoRead {
             (align_to_rafs(last_read_len) - last_read_len) as i64,
         ))
         .unwrap();
+    }
+
+    pub fn from_file(path: &str) -> RafsResult<Box<dyn RafsIoRead>> {
+        Ok(Box::new(File::open(path).map_err(|err| {
+            last_error!(format!("Failed to open file {:?}: {:?}", path, err));
+            RafsError::ReadMetadata(err)
+        })?))
     }
 }
 

@@ -53,18 +53,35 @@ func (kc PassKeyChain) ToBase64() string {
 	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", kc.Username, kc.Password)))
 }
 
+// TokenBase check if PassKeyChain is token based, when username is empty and password is not empty
+// then password is registry token
+func (kc PassKeyChain) TokenBase() bool {
+	return kc.Username == "" && kc.Password != ""
+}
+
 // FromLabels find image pull username and secret from snapshot labels
 // if username and secret is empty, we treat it as empty string
-func FromLabels(labels map[string]string) (PassKeyChain, error) {
+func FromLabels(labels map[string]string) PassKeyChain {
 	return PassKeyChain{
 		Username: labels[label.ImagePullUsername],
 		Password: labels[label.ImagePullSecret],
-	}, nil
+	}
 }
 
 func (kc PassKeyChain) Resolve(target authn.Resource) (authn.Authenticator, error) {
-	return authn.FromConfig(authn.AuthConfig{
-		Username: kc.Username,
-		Password: kc.Password,
-	}), nil
+	return authn.FromConfig(kc.toAuthConfig()), nil
+}
+
+// toAuthConfig convert PassKeyChain to authn.AuthConfig when kc is token based,
+// RegistryToken is preferred to
+func (kc PassKeyChain) toAuthConfig() authn.AuthConfig {
+	if kc.TokenBase() {
+		return authn.AuthConfig{
+			RegistryToken: kc.Password,
+		}
+	}
+	return authn.AuthConfig{
+		Username:      kc.Username,
+		Password:      kc.Password,
+	}
 }

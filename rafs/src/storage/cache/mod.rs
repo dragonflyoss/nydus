@@ -17,6 +17,7 @@ use crate::storage::backend::BlobBackend;
 use crate::storage::compress;
 use crate::storage::device::RafsBio;
 use crate::storage::utils::{alloc_buf, digest_check};
+use crate::RafsResult;
 
 use nydus_utils::eio;
 
@@ -25,6 +26,7 @@ pub mod dummycache;
 
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
+    seq: u64,
     // Chunks that are continuous to each other.
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
     pub blob_offset: u64,
@@ -32,7 +34,14 @@ struct MergedBackendRequest {
     pub blob_id: String,
 }
 
-impl<'a> MergedBackendRequest {
+impl MergedBackendRequest {
+    fn new(seq: u64) -> Self {
+        MergedBackendRequest {
+            seq,
+            ..Default::default()
+        }
+    }
+
     fn reset(&mut self) {
         self.blob_offset = 0;
         self.blob_size = 0;
@@ -53,68 +62,13 @@ impl<'a> MergedBackendRequest {
     }
 }
 
-fn is_chunk_continuous(prior: &RafsBio, cur: &RafsBio) -> bool {
-    let prior_cki = &prior.chunkinfo;
-    let cur_cki = &cur.chunkinfo;
-
-    let prior_end = prior_cki.compress_offset() + prior_cki.compress_size() as u64;
-    let cur_offset = cur_cki.compress_offset();
-
-    if prior_end == cur_offset && prior.blob_id == cur.blob_id {
-        return true;
-    }
-
-    false
-}
-
-fn generate_merged_requests(
-    bios: &mut [RafsBio],
-    tx: &mut spmc::Sender<MergedBackendRequest>,
-    merging_size: usize,
-) {
-    bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
-    let mut index: usize = 1;
-    if bios.is_empty() {
-        return;
-    }
-    let first_cki = &bios[0].chunkinfo;
-    let mut mr = MergedBackendRequest::default();
-    mr.merge_begin(Arc::clone(first_cki), &bios[0].blob_id);
-
-    if bios.len() == 1 {
-        tx.send(mr).unwrap();
-        return;
-    }
-
-    loop {
-        let cki = &bios[index].chunkinfo;
-        let prior_bio = &bios[index - 1];
-        let cur_bio = &bios[index];
-
-        // Even more chunks are continuous, still split them per as certain size.
-        // So that to achieve an appropriate request size to backend.
-        if is_chunk_continuous(prior_bio, cur_bio) && mr.blob_size <= merging_size as u32 {
-            mr.merge_one_chunk(Arc::clone(&cki));
-        } else {
-            // New a MR if a non-continuous chunk is met.
-            tx.send(mr.clone()).unwrap();
-            mr.reset();
-            mr.merge_begin(Arc::clone(&cki), &cur_bio.blob_id);
-        }
-
-        index += 1;
-
-        if index >= bios.len() {
-            tx.send(mr).unwrap();
-            break;
-        }
-    }
-}
-
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default)]
 pub struct PrefetchWorker {
+    pub enable: bool,
     pub threads_count: usize,
     pub merging_size: usize,
+    // In unit of Bytes and Zero means no rate limit is set.
+    pub bandwidth_rate: u32,
 }
 
 pub trait RafsCache {
@@ -140,7 +94,8 @@ pub trait RafsCache {
     /// Get the size of a blob
     fn blob_size(&self, blob_id: &str) -> Result<u64>;
 
-    fn prefetch(&self, bio: &mut [RafsBio]) -> Result<usize>;
+    fn prefetch(&self, bio: &mut [RafsBio]) -> RafsResult<usize>;
+    fn stop_prefetch(&self) -> RafsResult<()>;
 
     /// Release cache
     fn release(&self);
@@ -172,7 +127,6 @@ pub trait RafsCache {
 
         let raw_chunk = if cki.is_compressed() {
             // Need to put compressed data into a temporary buffer so as to perform decompression.
-            // TODO: Use a buffer pool for lower latency?
             //
             // gzip is special that it doesn't carry compress_size, instead, we can read as much
             // as chunk_decompress_size compressed data per chunk, decompress as much as necessary to fill in chunk
@@ -232,7 +186,9 @@ pub trait RafsCache {
             unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
         };
 
-        self.backend().read(blob_id, raw_chunk, offset)?;
+        self.backend()
+            .read(blob_id, raw_chunk, offset)
+            .map_err(|e| eio!(e))?;
         // Try to validate data just fetched from backend inside.
         self.process_raw_chunk(
             cki,
@@ -299,7 +255,8 @@ pub trait RafsCache {
         // Do we need to split it into smaller pieces like 128K or 256K?
         let nr_read = self
             .backend()
-            .read(blob_id, c_buf.as_mut_slice(), blob_offset)?;
+            .read(blob_id, c_buf.as_mut_slice(), blob_offset)
+            .map_err(|e| eio!(e))?;
 
         if nr_read != blob_size {
             return Err(eio!(format!(

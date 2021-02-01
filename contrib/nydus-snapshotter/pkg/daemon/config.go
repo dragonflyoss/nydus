@@ -135,4 +135,3 @@ func prepareDaemonLogs(logDir string) ([]*os.File, error) {
 	}
 	return logFiles, nil
 }
-

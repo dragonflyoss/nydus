@@ -17,12 +17,14 @@ use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::cache::RafsCache;
 use crate::storage::{compress, factory};
+use crate::RafsResult;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
 // A rafs storage device
+#[derive(Clone)]
 pub struct RafsDevice {
-    rw_layer: ArcSwap<Box<dyn RafsCache + Send + Sync>>,
+    rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
 }
 
 impl RafsDevice {
@@ -30,10 +32,11 @@ impl RafsDevice {
         config: factory::Config,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
+        id: &str,
     ) -> io::Result<RafsDevice> {
         Ok(RafsDevice {
             rw_layer: ArcSwap::new(Arc::new(factory::new_rw_layer(
-                config, compressor, digester,
+                config, compressor, digester, id,
             )?)),
         })
     }
@@ -43,9 +46,10 @@ impl RafsDevice {
         config: factory::Config,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
+        id: &str,
     ) -> io::Result<()> {
         self.rw_layer.store(Arc::new(factory::new_rw_layer(
-            config, compressor, digester,
+            config, compressor, digester, id,
         )?));
         Ok(())
     }
@@ -80,10 +84,14 @@ impl RafsDevice {
         Ok(count)
     }
 
-    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> io::Result<usize> {
+    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> RafsResult<usize> {
         self.rw_layer.load().prefetch(desc.bi_vec.as_mut_slice())?;
 
         Ok(desc.bi_size)
+    }
+
+    pub fn stop_prefetch(&self) -> RafsResult<()> {
+        self.rw_layer.load().stop_prefetch()
     }
 }
 

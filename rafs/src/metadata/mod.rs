@@ -11,12 +11,17 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Error, Result, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
+use serde_with::{serde_as, DisplayFromStr};
+
 use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::Entry;
+use fuse_rs::api::filesystem::ROOT_ID;
 
 use self::digest::RafsDigest;
 use self::direct::DirectMapping;
@@ -40,8 +45,11 @@ pub const RAFS_DIGEST_LENGTH: usize = 32;
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
+// FIXME: u64 for this constant is extremely large, which is unnecessary as `u32` can represent block size 4GB.
 pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
+const DOT: &str = ".";
+const DOTDOT: &str = "..";
 
 /// Type of RAFS inode.
 pub type Inode = u64;
@@ -69,7 +77,8 @@ macro_rules! impl_getter {
 }
 
 /// Cached Rafs super block bootstrap.
-#[derive(Clone, Copy, Default, Debug)]
+#[serde_as]
+#[derive(Clone, Copy, Default, Debug, Serialize)]
 pub struct RafsSuperMeta {
     pub magic: u32,
     pub version: u32,
@@ -78,6 +87,7 @@ pub struct RafsSuperMeta {
     pub block_size: u32,
     pub inodes_count: u64,
     // Use u64 as [u8; 8] => [.., digest::Algorithm, compress::Algorithm]
+    #[serde_as(as = "DisplayFromStr")]
     pub flags: RafsSuperFlags,
     pub inode_table_entries: u32,
     pub inode_table_offset: u64,
@@ -106,6 +116,7 @@ impl RafsSuperMeta {
     }
 }
 
+#[derive(Clone)]
 pub enum RafsMode {
     Direct,
     Cached,
@@ -137,7 +148,7 @@ pub struct RafsSuper {
     pub mode: RafsMode,
     pub digest_validate: bool,
     pub meta: RafsSuperMeta,
-    pub inodes: Box<dyn RafsSuperInodes + Sync + Send>,
+    pub inodes: Arc<dyn RafsSuperInodes + Sync + Send>,
 }
 
 impl Default for RafsSuper {
@@ -164,7 +175,7 @@ impl Default for RafsSuper {
                 attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
                 entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
             },
-            inodes: Box::new(NoopInodes::new()),
+            inodes: Arc::new(NoopInodes::new()),
         }
     }
 }
@@ -193,13 +204,15 @@ impl RafsSuper {
     }
 
     pub fn destroy(&mut self) {
-        self.inodes.destroy();
+        Arc::get_mut(&mut self.inodes)
+            .expect("Inodes are no longer used.")
+            .destroy();
     }
 
-    pub fn update(&self, r: &mut RafsIoReader) -> Result<()> {
+    pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
         let mut sb = OndiskSuperBlock::new();
 
-        r.read_exact(sb.as_mut())?;
+        r.read_exact(sb.as_mut()).map_err(RafsError::ReadMetadata)?;
         self.inodes.update(r)
     }
 
@@ -242,22 +255,18 @@ impl RafsSuper {
             }
             RAFS_SUPER_VERSION_V5 => match self.mode {
                 RafsMode::Direct => {
-                    let mut inodes = Box::new(DirectMapping::new(&self.meta, self.digest_validate));
+                    let mut inodes = DirectMapping::new(&self.meta, self.digest_validate);
                     inodes.load(r)?;
-                    self.inodes = inodes;
+                    self.inodes = Arc::new(inodes);
                 }
                 RafsMode::Cached => {
                     r.seek(SeekFrom::Start(sb.blob_table_offset()))?;
                     let mut blob_table = OndiskBlobTable::new();
                     blob_table.load(r, sb.blob_table_size() as usize)?;
 
-                    let mut inodes = Box::new(CachedInodes::new(
-                        self.meta,
-                        blob_table,
-                        self.digest_validate,
-                    ));
+                    let mut inodes = CachedInodes::new(self.meta, blob_table, self.digest_validate);
                     inodes.load(r)?;
-                    self.inodes = inodes;
+                    self.inodes = Arc::new(inodes);
                 }
             },
             _ => return Err(einval!("invalid superblock version number")),
@@ -307,11 +316,27 @@ impl RafsSuper {
         ino: u64,
         head_desc: &mut RafsBioDesc,
         hardlinks: &mut HashSet<u64>,
+        fetcher: &dyn Fn(&mut RafsBioDesc),
     ) -> Result<()> {
+        let try_prefetch = |desc: &mut RafsBioDesc| {
+            // Issue a prefetch request since target is large enough.
+            // As files belonging to the same directory are arranged in adjacent,
+            // it should fetch a range of blob in batch.
+            if desc.bi_size >= (4 * RAFS_DEFAULT_BLOCK_SIZE) as usize {
+                trace!("fetching head bio size {}", desc.bi_size);
+                fetcher(desc);
+                desc.bi_size = 0;
+                desc.bi_vec.truncate(0);
+            }
+        };
+
         match self.inodes.get_inode(ino, self.digest_validate) {
             Ok(inode) => {
                 if inode.is_dir() {
                     let mut descendants = Vec::new();
+                    // FIXME: Collecting descendants in DFS(Deep-First-Search) way impacts merging
+                    // possibility, which means a single Merging Request spans multiple directories.
+                    // But only files in the same directory are located closely in blob.
                     let _ = inode.collect_descendants_inodes(&mut descendants)?;
                     for i in descendants {
                         if i.is_hardlink() {
@@ -324,6 +349,8 @@ impl RafsSuper {
                         let mut desc = i.alloc_bio_desc(0, i.size() as usize)?;
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
+
+                        try_prefetch(head_desc);
                     }
                 } else {
                     if inode.is_empty_size() {
@@ -339,6 +366,8 @@ impl RafsSuper {
                     let mut desc = inode.alloc_bio_desc(0, inode.size() as usize)?;
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
+
+                    try_prefetch(head_desc);
                 }
             }
             Err(_) => {
@@ -346,7 +375,79 @@ impl RafsSuper {
             }
         }
 
+        fetcher(head_desc);
+
         Ok(())
+    }
+
+    pub(crate) fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
+        if ino == ROOT_ID {
+            return Ok(self.get_inode(ino, false)?.name()?.into());
+        }
+
+        let mut path = PathBuf::new();
+        let mut cur_ino = ino;
+        let mut inode;
+
+        loop {
+            inode = self.get_inode(cur_ino, false)?;
+            let e: PathBuf = inode.name()?.into();
+            path = e.join(path);
+
+            if inode.ino() == ROOT_ID {
+                break;
+            } else {
+                cur_ino = inode.parent();
+            }
+        }
+
+        Ok(path)
+    }
+
+    pub(crate) fn ino_from_path(&self, f: &Path) -> Result<u64> {
+        if f == Path::new("/") {
+            return Ok(ROOT_ID);
+        }
+
+        if !f.starts_with("/") {
+            return Err(einval!());
+        }
+
+        let mut parent = self.get_inode(ROOT_ID, self.digest_validate)?;
+
+        let entries = f
+            .components()
+            .filter(|comp| *comp != Component::RootDir)
+            .map(|comp| match comp {
+                Component::Normal(name) => Some(name),
+                Component::ParentDir => Some(OsStr::from_bytes(DOTDOT.as_bytes())),
+                Component::CurDir => Some(OsStr::from_bytes(DOT.as_bytes())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            warn!("Path can't be parsed {:?}", f);
+            return Err(enoent!());
+        }
+
+        for p in entries {
+            if p.is_none() {
+                error!("Illegal specified path {:?}", f);
+                return Err(einval!());
+            }
+
+            // Safe because it already checks if p is None above.
+            match parent.get_child_by_name(p.unwrap()) {
+                Ok(p) => parent = p,
+                Err(_) => {
+                    warn!("File {:?} not in rafs", p.unwrap());
+                    return Err(enoent!());
+                }
+            }
+        }
+
+        Ok(parent.ino())
     }
 
     /// This is fs layer prefetch entry point where 2 kinds of prefetch can be started:
@@ -357,54 +458,68 @@ impl RafsSuper {
     ///     involved.
     /// Each inode passed into should correspond to directory. And it already does the file type
     /// check inside.
+    ///
     pub fn prefetch_hint_files(
         &self,
         r: &mut RafsIoReader,
         files: Option<Vec<Inode>>,
-    ) -> Result<RafsBioDesc> {
+        fetcher: &dyn Fn(&mut RafsBioDesc),
+    ) -> RafsResult<()> {
         let hint_entries = self.meta.prefetch_table_entries as usize;
 
         if hint_entries == 0 && files.is_none() {
-            return Err(enoent!("Prefetch table is empty!"));
-        }
-
-        let mut prefetch_table = PrefetchTable::new();
-        if prefetch_table
-            .load_from(r, self.meta.prefetch_table_offset, hint_entries)
-            .is_err()
-        {
-            einval!(format!(
-                "Failed in load hint prefetch table at {}",
-                self.meta.prefetch_table_offset
+            return Err(RafsError::Prefetch(
+                "Prefetch table is empty and no file was ever specified".to_string(),
             ));
         }
 
+        // No need to prefetch blob data for each alias as they share the same range,
+        // we do it once.
+        let mut hardlinks: HashSet<u64> = HashSet::new();
+        let mut prefetch_table = PrefetchTable::new();
         let mut head_desc = RafsBioDesc {
             bi_size: 0,
             bi_flags: 0,
             bi_vec: Vec::new(),
         };
 
-        // No need to prefetch blob data for each alias as they share the same range,
-        // we do it once.
-        let mut hardlinks: HashSet<u64> = HashSet::new();
+        // First, try to prefetch according to on-disk prefetch table. If an error happens,
+        // abort prefetch even if a prefetch files list is specified when nydusd starts since
+        // something ugly may stand on the disk.
+        if hint_entries != 0 {
+            prefetch_table
+                .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .map_err(|e| {
+                    RafsError::Prefetch(format!(
+                        "Failed in loading hint prefetch table at offset {}. {:?}",
+                        self.meta.prefetch_table_offset, e
+                    ))
+                })?;
 
-        for inode_idx in prefetch_table.inode_indexes.iter() {
-            // index 0 is invalid, it was added because prefetch table has to be aligned.
-            if *inode_idx == 0 {
-                break;
+            for inode_idx in prefetch_table.inode_indexes.iter() {
+                // index 0 is invalid, it was added because prefetch table has to be aligned.
+                if *inode_idx == 0 {
+                    break;
+                }
+                debug!("hint prefetch inode {}", inode_idx);
+                self.build_prefetch_desc(
+                    *inode_idx as u64,
+                    &mut head_desc,
+                    &mut hardlinks,
+                    fetcher,
+                )
+                .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
-            debug!("hint prefetch inode {}", inode_idx);
-            self.build_prefetch_desc(*inode_idx as u64, &mut head_desc, &mut hardlinks)?;
         }
 
         if let Some(files) = files {
             for f_ino in files {
-                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks)?;
+                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks, fetcher)
+                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
         }
 
-        Ok(head_desc)
+        Ok(())
     }
 }
 
@@ -424,7 +539,7 @@ pub trait RafsSuperInodes {
 
     fn get_blob_table(&self) -> Arc<OndiskBlobTable>;
 
-    fn update(&self, r: &mut RafsIoReader) -> Result<()>;
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
 
     /// Validate child, chunk and symlink digest on inode tree.
     /// The chunk data digest for regular file will only validate on fs read.
@@ -441,7 +556,7 @@ pub trait RafsSuperInodes {
 
         if inode.is_symlink() {
             hasher.digest_update(inode.get_symlink()?.as_os_str().as_bytes());
-        } else {
+        } else if inode.is_reg() || inode.is_dir() {
             for idx in 0..child_count {
                 if inode.is_dir() {
                     let child = inode.get_child_by_index(idx as u64)?;
@@ -512,6 +627,7 @@ pub trait RafsInode {
     fn has_xattr(&self) -> bool;
     fn has_hole(&self) -> bool;
 
+    fn rdev(&self) -> u32;
     fn ino(&self) -> u64;
     fn parent(&self) -> u64;
     fn size(&self) -> u64;

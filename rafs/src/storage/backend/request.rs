@@ -11,16 +11,28 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use reqwest::blocking::{Body, Client, Response};
-use reqwest::redirect::Policy;
-use reqwest::{self, Method, StatusCode, Url};
+use reqwest::{
+    self,
+    blocking::{Body, Client, Response},
+    redirect::Policy,
+    Method, StatusCode, Url,
+};
 
 use crate::storage::backend::CommonConfig;
-use nydus_utils::{einval, eio, epipe};
+use nydus_utils::einval;
 
 pub use reqwest::header::HeaderMap;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
+
+#[derive(Debug)]
+pub enum RequestError {
+    ErrorWithMsg(String),
+    Common(reqwest::Error),
+    Format(reqwest::Error),
+}
+
+pub type RequestResult<T> = std::result::Result<T, RequestError>;
 
 #[derive(Clone)]
 pub struct Progress<R> {
@@ -98,12 +110,12 @@ pub fn is_success_status(status: StatusCode) -> bool {
     status >= StatusCode::OK && status < StatusCode::BAD_REQUEST
 }
 
-pub fn respond(resp: Response) -> Result<Response> {
+pub fn respond(resp: Response) -> RequestResult<Response> {
     if is_success_status(resp.status()) {
         return Ok(resp);
     }
-    let message = resp.text().map_err(|e| epipe!(e))?;
-    Err(eio!(message))
+    let msg = resp.text().map_err(RequestError::Format)?;
+    Err(RequestError::ErrorWithMsg(msg))
 }
 
 impl Request {
@@ -189,19 +201,19 @@ impl Request {
         headers: HeaderMap,
         catch_status: bool,
         proxy: bool,
-    ) -> Result<Response> {
-        if log::max_level() >= log::LevelFilter::Debug {
-            let mut display_headers = headers.clone();
-            display_headers.remove(HEADER_AUTHORIZATION);
-            debug!(
-                "Request: {} {} headers: {:?}, proxy: {}, data: {}",
-                method,
-                url,
-                display_headers,
-                proxy,
-                data.is_some(),
-            );
-        }
+    ) -> RequestResult<Response> {
+        debug!(
+            "Request: {} {} headers: {:?}, proxy: {}, data: {}",
+            method,
+            url,
+            {
+                let mut display_headers = headers.clone();
+                display_headers.remove(HEADER_AUTHORIZATION);
+                display_headers
+            },
+            proxy,
+            data.is_some(),
+        );
 
         let rb = client.request(method, url).headers(headers);
 
@@ -230,7 +242,7 @@ impl Request {
                 }
                 respond(resp)
             }
-            Err(err) => Err(epipe!(err)),
+            Err(err) => Err(RequestError::Common(err)),
         }
     }
 
@@ -241,7 +253,7 @@ impl Request {
         data: Option<ReqBody<R>>,
         headers: HeaderMap,
         catch_status: bool,
-    ) -> Result<Response> {
+    ) -> RequestResult<Response> {
         if let Some(proxy) = &self.proxy {
             if proxy.health.ok() {
                 let data_cloned: Option<ReqBody<R>> = match data.as_ref() {

@@ -320,7 +320,6 @@ impl RafsSuperInodes for DirectMapping {
 
     fn destroy(&mut self) {
         let state = DirectMappingState::new(&RafsSuperMeta::default(), false);
-
         self.state.store(Arc::new(state));
     }
 
@@ -351,8 +350,8 @@ impl RafsSuperInodes for DirectMapping {
         Arc::new(state.blob_table.clone())
     }
 
-    fn update(&self, r: &mut RafsIoReader) -> Result<()> {
-        self.update_state(r)
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
+        self.update_state(r).map_err(RafsError::SwapBackend)
     }
 }
 
@@ -446,7 +445,7 @@ impl RafsInode for OndiskInodeWrapper {
             || inode.i_name_size as usize > (RAFS_MAX_NAME + 1)
         {
             return Err(ebadf!(format!(
-                "inode validation failure, inode {:#?}",
+                "inode validation failure, inode {:?}",
                 inode
             )));
         }
@@ -632,6 +631,7 @@ impl RafsInode for OndiskInodeWrapper {
             uid: inode.i_uid,
             gid: inode.i_gid,
             blksize: RAFS_INODE_BLOCKSIZE,
+            rdev: inode.i_rdev,
             ..Default::default()
         }
     }
@@ -673,6 +673,7 @@ impl RafsInode for OndiskInodeWrapper {
         self.mapping.state.load().meta.block_size
     }
 
+    // TODO: Do prefetch insides this while walking the entire file system
     fn collect_descendants_inodes(
         &self,
         descendants: &mut Vec<Arc<dyn RafsInode>>,
@@ -685,18 +686,23 @@ impl RafsInode for OndiskInodeWrapper {
         let inode = self.inode(state.deref());
         let child_count = inode.i_child_count as u64;
         let child_index = inode.i_child_index as u64;
+        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
 
         for idx in child_index..(child_index + child_count) {
             let child_inode = self.mapping.get_inode(idx, false).unwrap();
             if child_inode.is_dir() {
                 trace!("Got dir {:?}", child_inode.name().unwrap());
-                child_inode.collect_descendants_inodes(descendants)?;
+                child_dirs.push(child_inode);
             } else {
                 if child_inode.is_empty_size() {
                     continue;
                 }
                 descendants.push(child_inode);
             }
+        }
+
+        for d in child_dirs {
+            d.collect_descendants_inodes(descendants)?;
         }
 
         Ok(0)
@@ -716,6 +722,7 @@ impl RafsInode for OndiskInodeWrapper {
     impl_inode_getter!(ino, i_ino, u64);
     impl_inode_getter!(parent, i_parent, u64);
     impl_inode_getter!(size, i_size, u64);
+    impl_inode_getter!(rdev, i_rdev, u32);
 }
 
 pub struct OndiskChunkInfoWrapper {

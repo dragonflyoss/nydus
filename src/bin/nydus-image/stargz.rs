@@ -4,15 +4,16 @@
 //
 // Stargz support.
 
+use anyhow::{anyhow, bail, Context, Result};
+
+use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Result;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use nydus_utils::einval;
 use rafs::metadata::digest::{Algorithm, RafsDigest};
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
@@ -153,6 +154,22 @@ impl TocEntry {
         !self.xattrs.is_empty()
     }
 
+    pub fn is_blockdev(&self) -> bool {
+        self.toc_type.as_str() == "block"
+    }
+
+    pub fn is_chardev(&self) -> bool {
+        self.toc_type.as_str() == "char"
+    }
+
+    pub fn is_fifo(&self) -> bool {
+        self.toc_type.as_str() == "fifo"
+    }
+
+    pub fn is_special(&self) -> bool {
+        self.is_blockdev() || self.is_chardev() || self.is_fifo()
+    }
+
     pub fn mode(&self) -> u32 {
         let mut mode = self.mode;
 
@@ -162,9 +179,23 @@ impl TocEntry {
             mode |= libc::S_IFREG;
         } else if self.is_symlink() {
             mode |= libc::S_IFLNK;
+        } else if self.is_blockdev() {
+            mode |= libc::S_IFBLK;
+        } else if self.is_chardev() {
+            mode |= libc::S_IFCHR;
+        } else if self.is_fifo() {
+            mode |= libc::S_IFIFO;
         }
 
         mode
+    }
+
+    pub fn rdev(&self) -> u32 {
+        if self.is_special() {
+            makedev(self.dev_major, self.dev_minor) as u32
+        } else {
+            u32::MAX
+        }
     }
 
     // Convert entry name to file name
@@ -177,7 +208,7 @@ impl TocEntry {
         }
         let name = path
             .file_name()
-            .ok_or_else(|| einval!("invalid entry name"))?;
+            .ok_or_else(|| anyhow!("invalid entry name"))?;
         Ok(PathBuf::from(name))
     }
 
@@ -192,10 +223,10 @@ impl TocEntry {
         let path = PathBuf::from("/").join(&self.name);
         Ok(path
             .parent()
-            .ok_or_else(|| einval!("invalid entry path"))?
+            .ok_or_else(|| anyhow!("invalid entry path"))?
             .join(
                 path.file_name()
-                    .ok_or_else(|| einval!("invalid entry name"))?,
+                    .ok_or_else(|| anyhow!("invalid entry name"))?,
             ))
     }
 
@@ -216,10 +247,9 @@ impl TocEntry {
     // TODO: think about chunk deduplicate
     pub fn block_id(&self, blob_id: &str) -> Result<RafsDigest> {
         if !self.is_reg() && !self.is_chunk() {
-            return Err(einval!("only support chunk or reg entry"));
+            bail!("only support chunk or reg entry");
         }
-        let data = serde_json::to_string(self)
-            .map_err(|e| einval!(format!("block id calculation failed: {:?}", e)))?;
+        let data = serde_json::to_string(self).context("block id calculation failed")?;
         Ok(RafsDigest::from_buf(
             (data + blob_id).as_bytes(),
             Algorithm::Sha256,
@@ -244,14 +274,12 @@ pub struct TocIndex {
 }
 
 pub fn parse_index(path: &PathBuf) -> Result<TocIndex> {
-    let index_file = File::open(path)?;
+    let index_file =
+        File::open(path).with_context(|| format!("failed to open stargz index file {:?}", path))?;
     let toc_index: TocIndex = serde_json::from_reader(index_file)
-        .map_err(|e| einval!(format!("invalid stargz index json file {:?}", e)))?;
+        .with_context(|| format!("invalid stargz index file {:?}", path))?;
     if toc_index.version != 1 {
-        return Err(einval!(format!(
-            "unsupported index version {}",
-            toc_index.version
-        )));
+        bail!("unsupported index version {}", toc_index.version);
     }
     Ok(toc_index)
 }
