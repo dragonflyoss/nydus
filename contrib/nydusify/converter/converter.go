@@ -8,10 +8,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/gosuri/uiprogress"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	blobbackend "contrib/nydusify/backend"
+	"contrib/nydusify/cache"
 	"contrib/nydusify/nydus"
 	"contrib/nydusify/registry"
 )
@@ -27,7 +28,14 @@ type Option struct {
 	SignatureKeyPath string
 	NydusImagePath   string
 	MultiPlatform    bool
-	Silent           bool
+	DockerV2Format   bool
+
+	BackendType   string
+	BackendConfig string
+
+	BuildCache           string
+	BuildCacheInsecure   bool
+	BuildCacheMaxRecords uint
 }
 
 type Converter struct {
@@ -42,8 +50,8 @@ func New(option Option) (*Converter, error) {
 	if err := os.RemoveAll(sourceDir); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(sourceDir, 0666); err != nil {
-		return nil, err
+	if err := os.MkdirAll(sourceDir, 0770); err != nil {
+		return nil, errors.Wrap(err, "create source directory")
 	}
 
 	// Make directory for target image
@@ -63,21 +71,48 @@ func New(option Option) (*Converter, error) {
 
 // Convert source image to nydus(target) image
 func (converter *Converter) Convert() error {
-	if !converter.Silent {
-		uiprogress.Start()
+	// Init Nydus build cache
+	var buildCache *cache.Cache
+	if converter.BuildCache != "" {
+		_cache, err := cache.New(cache.Opt{
+			Ref:            converter.BuildCache,
+			Insecure:       converter.BuildCacheInsecure,
+			MaxRecords:     converter.BuildCacheMaxRecords,
+			DockerV2Format: converter.DockerV2Format,
+		})
+		if err != nil {
+			return errors.Wrap(err, "init build cache")
+		}
+		buildCache = _cache
 	}
 
+	// Init blob storage backend
+	backend, err := blobbackend.NewBackend(
+		converter.BackendType, converter.BackendConfig,
+	)
+	if err != nil {
+		return errors.Wrap(err, "init blob backend")
+	}
+
+	// Init registry for pulling & pushing
 	reg, err := registry.New(registry.RegistryOption{
-		WorkDir:        converter.WorkDir,
-		Source:         converter.Source,
-		Target:         converter.Target,
-		SourceInsecure: converter.SourceInsecure,
-		TargetInsecure: converter.TargetInsecure,
+		WorkDir:          converter.WorkDir,
+		Source:           converter.Source,
+		Target:           converter.Target,
+		SourceInsecure:   converter.SourceInsecure,
+		TargetInsecure:   converter.TargetInsecure,
+		SignatureKeyPath: converter.SignatureKeyPath,
+		MultiPlatform:    converter.MultiPlatform,
+		DockerV2Format:   converter.DockerV2Format,
+
+		Backend:    backend,
+		BuildCache: buildCache,
 	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "init registry")
 	}
 
+	// Init build flow for Nydus building layer by layer
 	buildFlow, err := nydus.NewBuildFlow(nydus.BuildFlowOption{
 		SourceDir:      converter.sourceDir,
 		TargetDir:      converter.targetDir,
@@ -85,15 +120,26 @@ func (converter *Converter) Convert() error {
 		PrefetchDir:    converter.PrefetchDir,
 	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "init build flow")
+	}
+
+	// Pull Nydus cache image from registry
+	if err := reg.PullCache(); err != nil {
+		logrus.Warnf("Pull cache image %s: %s", converter.BuildCache, err)
 	}
 
 	// Pull source layers
-	if err = reg.Pull(func(layerJob *registry.LayerJob) error {
+	if err = reg.Pull(func(
+		layerJob *registry.LayerJob,
+		parentBootstrapFunc func(string) (string, error),
+	) error {
 		// Start building once the layer has been pulled
-		return buildFlow.Build(layerJob)
+		if err := buildFlow.Build(layerJob, parentBootstrapFunc); err != nil {
+			return errors.Wrap(err, "build source layer")
+		}
+		return nil
 	}); err != nil {
-		return err
+		return errors.Wrap(err, "pull source layer")
 	}
 
 	// Wait all layers to be built and pushed
@@ -101,28 +147,27 @@ func (converter *Converter) Convert() error {
 		return errors.Wrap(err, "build source layer")
 	}
 
-	// Push bootstrap layer
-	if err := reg.PushBootstrapLayer(
-		buildFlow.GetBootstrap(),
-		converter.SignatureKeyPath,
-	); err != nil {
-		return err
+	// Append all target layers to target image
+	if err := reg.MakeTargetImage(); err != nil {
+		return errors.Wrap(err, "make target image")
+	}
+
+	// Write output info for debugging
+	if err := reg.Output(); err != nil {
+		return errors.Wrap(err, "output debug info")
 	}
 
 	// Push target manifest or index
-	if err := reg.PushManifest(converter.MultiPlatform); err != nil {
-		return err
+	if err := reg.PushManifest(); err != nil {
+		return errors.Wrap(err, "push manifest")
 	}
 
-	if !converter.Silent {
-		uiprogress.Stop()
+	// Push Nydus cache image
+	if err := reg.PushCache(); err != nil {
+		return errors.Wrap(err, "push cache image")
 	}
 
-	logrus.Infof(
-		"Success convert image %s to %s",
-		converter.Source,
-		converter.Target,
-	)
+	logrus.Infof("Converted image %s to %s", converter.Source, converter.Target)
 
 	return nil
 }

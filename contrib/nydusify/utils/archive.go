@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2020 Ant Financial. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,8 +8,10 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
@@ -21,6 +23,12 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 		return nil, err
 	}
 
+	dirHdr := &tar.Header{
+		Name:     filepath.Dir(name),
+		Mode:     0770,
+		Typeflag: tar.TypeDir,
+	}
+
 	hdr := &tar.Header{
 		Name: name,
 		Mode: 0666,
@@ -29,10 +37,12 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 
 	reader, writer := io.Pipe()
 
-	go func() error {
+	go func() {
 		// Prepare targz writer
 		var tw *tar.Writer
 		var gw *gzip.Writer
+		var err error
+		var file *os.File
 
 		if compress {
 			gw = gzip.NewWriter(writer)
@@ -41,32 +51,45 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 			tw = tar.NewWriter(writer)
 		}
 
-		file, err := os.Open(src)
+		defer func() {
+			err1 := tw.Close()
+			var err2 error
+			if gw != nil {
+				err2 = gw.Close()
+			}
+
+			var finalErr error
+
+			// Return the first error encountered to the other end and ignore others.
+			if err != nil {
+				finalErr = err
+			} else if err1 != nil {
+				finalErr = err1
+			} else if err2 != nil {
+				finalErr = err2
+			}
+
+			writer.CloseWithError(finalErr)
+		}()
+
+		file, err = os.Open(src)
 		if err != nil {
-			return writer.CloseWithError(err)
+			return
 		}
 		defer file.Close()
 
 		// Write targz stream
-		if err := tw.WriteHeader(hdr); err != nil {
-			return writer.CloseWithError(err)
+		if err = tw.WriteHeader(dirHdr); err != nil {
+			return
 		}
 
-		if _, err := io.Copy(tw, file); err != nil {
-			return writer.CloseWithError(err)
+		if err = tw.WriteHeader(hdr); err != nil {
+			return
 		}
 
-		// Close all resources
-		if err := tw.Close(); err != nil {
-			return writer.CloseWithError(err)
+		if _, err = io.Copy(tw, file); err != nil {
+			return
 		}
-		if gw != nil {
-			if err := gw.Close(); err != nil {
-				return writer.CloseWithError(err)
-			}
-		}
-
-		return writer.CloseWithError(nil)
 	}()
 
 	return reader, nil
@@ -92,6 +115,45 @@ func DecompressTargz(dst string, r io.Reader) error {
 		}),
 	); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func UnpackFile(reader io.Reader, source, target string) error {
+	rdr, err := compression.DecompressStream(reader)
+	if err != nil {
+		return err
+	}
+	defer rdr.Close()
+
+	found := false
+	tr := tar.NewReader(rdr)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			} else {
+				return err
+			}
+		}
+		if hdr.Name == source {
+			file, err := os.Create(target)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			if _, err := io.Copy(file, tr); err != nil {
+				return err
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("Not found file %s in targz", source)
 	}
 
 	return nil
