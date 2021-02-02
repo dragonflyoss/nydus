@@ -318,6 +318,7 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
         let r = self.get_vfs().get_rootfs(mp)?;
         Ok(r)
     }
+    fn export_inflight_ops(&self) -> DaemonResult<Option<String>>;
 
     // NOTE: This method is not thread-safe, however, it is acceptable as
     // mount/umount/remount/restore_mount is invoked from single thread in FSM

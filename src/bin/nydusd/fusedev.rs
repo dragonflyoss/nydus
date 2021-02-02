@@ -18,10 +18,17 @@ use std::sync::{
     Arc, Mutex, MutexGuard,
 };
 use std::thread::{self, JoinHandle};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nix::sys::stat::{major, minor};
+use serde::Serialize;
 
-use fuse_rs::api::{server::Server, Vfs};
+use fuse_rs::api::{
+    server::{MetricsHook, Server},
+    Vfs,
+};
+
+use fuse_rs::abi::linux_abi::{InHeader, OutHeader};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
@@ -32,7 +39,35 @@ use daemon::{
 };
 use nydus_utils::{eio, eother, BuildTimeInfo, FuseChannel, FuseSession};
 
-struct FuseServer {
+#[derive(Serialize)]
+struct FuseOp {
+    inode: u64,
+    opcode: u32,
+    unique: u64,
+    timestamp_secs: u64,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct FuseOpWrapper {
+    op: Arc<Mutex<Option<FuseOp>>>,
+}
+
+impl Default for FuseOp {
+    fn default() -> Self {
+        Self {
+            inode: u64::default(),
+            opcode: u32::default(),
+            unique: u64::default(),
+            // unwrap because time can't be earlier than EPOCH.
+            timestamp_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+}
+
+pub(crate) struct FuseServer {
     server: Arc<Server<Arc<Vfs>>>,
     ch: FuseChannel,
     // read buffer for fuse requests
@@ -48,7 +83,7 @@ impl FuseServer {
         })
     }
 
-    fn svc_loop(&mut self) -> Result<()> {
+    fn svc_loop(&mut self, metrics_hook: &dyn MetricsHook) -> Result<()> {
         // Safe because we have already reserved the capacity
         unsafe {
             self.buf.set_len(self.buf.capacity());
@@ -59,7 +94,10 @@ impl FuseServer {
         loop {
             if let Some(reader) = self.ch.get_reader(&mut self.buf)? {
                 let writer = self.ch.get_writer()?;
-                if let Err(e) = self.server.handle_message(reader, writer, None) {
+                if let Err(e) = self
+                    .server
+                    .handle_message(reader, writer, None, Some(metrics_hook))
+                {
                     match e {
                         fuse_rs::Error::EncodeMessage(_ebadf) => {
                             return Err(eio!("fuse session has been shut down"));
@@ -101,6 +139,29 @@ pub struct FusedevDaemon {
     upgrade_mgr: Option<Mutex<UpgradeManager>>,
     backend_collection: Mutex<FsBackendCollection>,
     bti: BuildTimeInfo,
+    inflight_ops: Mutex<Vec<FuseOpWrapper>>,
+}
+
+impl MetricsHook for FuseOpWrapper {
+    fn collect(&self, ih: &InHeader) {
+        let (n, u, o) = (ih.nodeid, ih.unique, ih.opcode);
+        // Mutex should be acceptable since `inflight_op` is always updated
+        // within the same thread, which means locking is always directly acquired.
+        *self.op.lock().expect("Not expect poisoned lock") = Some(FuseOp {
+            inode: n,
+            unique: u,
+            opcode: o,
+            // Unwrap is safe because time can't be earlier than EPOCH
+            timestamp_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        })
+    }
+
+    fn release(&self, _oh: Option<&OutHeader>) {
+        *self.op.lock().expect("Not expect poisoned lock") = None
+    }
 }
 
 impl FusedevDaemon {
@@ -112,15 +173,19 @@ impl FusedevDaemon {
             self.event_fd.try_clone().unwrap(),
         )?;
 
+        let inflight_op = FuseOpWrapper::default();
+        // "Not expected poisoned lock"
+        self.inflight_ops.lock().unwrap().push(inflight_op.clone());
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
             .spawn(move || {
-                let _ = s.svc_loop();
+                let _ = s.svc_loop(&inflight_op);
                 exit_event_manager();
                 // Ignore fuse service error when joining them.
                 Ok(())
             })
             .map_err(DaemonError::ThreadSpawn)?;
+
         // Safe to unwrap because it should be initialized as Some when daemon being created.
         self.thread_tx
             .lock()
@@ -250,6 +315,23 @@ impl NydusDaemon for FusedevDaemon {
     fn version(&self) -> BuildTimeInfo {
         self.bti.clone()
     }
+
+    fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
+        let ops = self.inflight_ops.lock().unwrap();
+
+        let r = ops
+            .iter()
+            .filter(|w| w.op.lock().unwrap().is_some())
+            .map(|w| &w.op)
+            .collect::<Vec<&Arc<Mutex<Option<FuseOp>>>>>();
+
+        if r.is_empty() {
+            Ok(None)
+        } else {
+            let resp = serde_json::to_string(&r).map_err(DaemonError::Serde)?;
+            Ok(Some(resp))
+        }
+    }
 }
 
 // TODO: Perhaps, we can't rely on `/proc/self/mounts` to tell if it is mounted.
@@ -358,6 +440,7 @@ pub fn create_nydus_daemon(
         upgrade_mgr,
         backend_collection: Default::default(),
         bti,
+        inflight_ops: Mutex::new(Vec::new()),
     });
 
     let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
