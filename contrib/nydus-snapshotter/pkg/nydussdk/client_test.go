@@ -20,6 +20,14 @@ import (
 	"contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
+var BTI = model.BuildTimeInfo{
+	PackageVer: "1.1.0",
+	GitCommit:  "67f4ecc7acee6dd37234e6a697e72ac09d6cc8ba",
+	BuildTime:  "Thu, 28 Jan 2021 14:02:39 +0000",
+	Profile:    "debug",
+	Rustc:      "rustc 1.46.0 (04488afe3 2020-08-24)",
+}
+
 func prepareNydusServer(t *testing.T) (string, func()) {
 	mockSocket := "testdata/nydus.sock"
 	_, err := os.Stat(mockSocket)
@@ -30,7 +38,7 @@ func prepareNydusServer(t *testing.T) (string, func()) {
 		w.WriteHeader(200)
 		info := model.DaemonInfo{
 			ID:      "testid",
-			Version: "1.0",
+			Version: BTI,
 			State:   "Running",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -55,4 +63,5 @@ func TestNydusClient_CheckStatus(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, "Running", info.State)
 	assert.Equal(t, "testid", info.ID)
+	assert.Equal(t, BTI, info.Version)
 }
