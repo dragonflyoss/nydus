@@ -32,7 +32,7 @@ hmac = { version = "0.8.1", optional = true }
 url = { version = "2.1.1", optional = true }
 
 
-fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git" }
+fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "cfd2cca" }
 vm-memory = ">=0.2.0"
 
 nydus-utils = { path = "../utils" }
