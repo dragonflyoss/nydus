@@ -25,7 +25,6 @@ use crate::daemon::{
 };
 #[cfg(fusedev)]
 use crate::fusedev::FusedevDaemon;
-use crate::SubscriberWrapper;
 
 pub struct ApiServer {
     to_http: Sender<ApiResponse>,
@@ -233,12 +232,6 @@ impl ApiServer {
     }
 }
 
-impl SubscriberWrapper for ApiSeverSubscriber {
-    fn get_event_fd(&self) -> std::io::Result<EventFd> {
-        self.event_fd.try_clone()
-    }
-}
-
 pub struct ApiSeverSubscriber {
     event_fd: EventFd,
     server: ApiServer,
@@ -258,6 +251,10 @@ impl ApiSeverSubscriber {
                 Err(e)
             }
         }
+    }
+
+    pub fn get_event_fd(&self) -> std::io::Result<EventFd> {
+        self.event_fd.try_clone()
     }
 }
 
