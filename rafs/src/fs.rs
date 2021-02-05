@@ -539,6 +539,7 @@ impl FileSystem for Rafs {
         let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
         if offset >= inode.size() {
+            recorder.mark_success(0);
             return Ok(0);
         }
         let desc = inode.alloc_bio_desc(offset, size as usize)?;
