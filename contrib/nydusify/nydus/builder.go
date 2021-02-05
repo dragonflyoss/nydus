@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 )
 
 type BuilderOption struct {
@@ -65,7 +64,6 @@ func (builder *Builder) Run(option BuilderOption) error {
 	}
 
 	if option.PrefetchDir != "" {
-		option.PrefetchDir = filepath.Join(option.RootfsPath, option.PrefetchDir)
 		args = append(args, "--prefetch-policy", "fs")
 	}
 
