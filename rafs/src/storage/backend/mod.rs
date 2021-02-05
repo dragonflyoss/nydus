@@ -8,7 +8,12 @@ use std::path::Path;
 use vm_memory::VolatileSlice;
 
 use crate::io_stats::{BackendMetrics, ERROR_HOLDER};
-use crate::storage::backend::{localfs::LocalFsError, oss::OssError, registry::RegistryError};
+#[cfg(feature = "backend-localfs")]
+use crate::storage::backend::localfs::LocalFsError;
+#[cfg(feature = "backend-oss")]
+use crate::storage::backend::oss::OssError;
+#[cfg(feature = "backend-registry")]
+use crate::storage::backend::registry::RegistryError;
 use crate::storage::utils::copyv;
 
 #[cfg(feature = "backend-localfs")]
@@ -33,8 +38,11 @@ pub struct ProxyConfig {
 pub enum BackendError {
     Unsupported(String),
     CopyData(Error),
+    #[cfg(feature = "backend-registry")]
     Registry(RegistryError),
+    #[cfg(feature = "backend-localfs")]
     LocalFs(LocalFsError),
+    #[cfg(feature = "backend-oss")]
     Oss(OssError),
 }
 
@@ -171,6 +179,7 @@ pub trait BlobBackendUploader {
     ) -> Result<usize>;
 }
 
+#[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
 fn default_http_scheme() -> String {
     "https".to_string()
 }

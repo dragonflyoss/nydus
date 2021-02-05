@@ -88,12 +88,14 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs
         return Err(einval!("blob file or dir is required"));
     }
 
+    let metrics = id.map(|i| BackendMetrics::new(i, "localfs"));
     if !config.blob_file.is_empty() {
         return Ok(LocalFs {
             blob_file: config.blob_file,
             readahead: config.readahead,
             readahead_sec: config.readahead_sec,
             file_table: RwLock::new(HashMap::new()),
+            metrics,
             ..Default::default()
         });
     }
@@ -103,7 +105,7 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs
         readahead: config.readahead,
         readahead_sec: config.readahead_sec,
         file_table: RwLock::new(HashMap::new()),
-        metrics: id.map(|i| BackendMetrics::new(i, "localfs")),
+        metrics,
         ..Default::default()
     })
 }
