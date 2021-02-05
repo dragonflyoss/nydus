@@ -12,9 +12,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/auth"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/utils/registry"
+	"contrib/nydus-snapshotter/pkg/auth"
+	"contrib/nydus-snapshotter/pkg/daemon"
+	"contrib/nydus-snapshotter/pkg/utils/registry"
 )
 
 type DaemonConfig struct {

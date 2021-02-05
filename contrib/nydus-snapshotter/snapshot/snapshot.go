@@ -23,10 +23,10 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/label"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/process"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/snapshot"
+	"contrib/nydus-snapshotter/pkg/daemon"
+	"contrib/nydus-snapshotter/pkg/label"
+	"contrib/nydus-snapshotter/pkg/process"
+	"contrib/nydus-snapshotter/pkg/snapshot"
 )
 
 var _ snapshots.Snapshotter = &snapshotter{}

@@ -13,10 +13,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/cmd/containerd-nydus-grpc/app/snapshotter"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/logging"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/errdefs"
+	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/app/snapshotter"
+	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
+	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/logging"
+	"contrib/nydus-snapshotter/pkg/errdefs"
 )
 
 func main() {

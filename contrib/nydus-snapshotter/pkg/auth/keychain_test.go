@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/label"
+	"contrib/nydus-snapshotter/pkg/label"
 )
 
 func TestFromLabels(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/label"
+	"contrib/nydus-snapshotter/pkg/label"
 )
 
 const (

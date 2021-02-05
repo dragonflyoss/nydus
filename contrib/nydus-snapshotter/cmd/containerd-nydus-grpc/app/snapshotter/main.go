@@ -11,11 +11,11 @@ import (
 
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/stargz"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/signature"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/utils/signals"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/snapshot"
+	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/pkg/filesystem/stargz"
+	"contrib/nydus-snapshotter/pkg/signature"
+	"contrib/nydus-snapshotter/pkg/utils/signals"
+	"contrib/nydus-snapshotter/snapshot"
 )
 
 func Start(ctx context.Context, cfg Config) error {

@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
+	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
 )
 
 func TestValidate(t *testing.T) {

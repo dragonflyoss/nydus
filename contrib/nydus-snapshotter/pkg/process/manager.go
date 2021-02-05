@@ -17,10 +17,10 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/errdefs"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/store"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/utils/mount"
+	"contrib/nydus-snapshotter/pkg/daemon"
+	"contrib/nydus-snapshotter/pkg/errdefs"
+	"contrib/nydus-snapshotter/pkg/store"
+	"contrib/nydus-snapshotter/pkg/utils/mount"
 )
 
 type configGenerator = func(*daemon.Daemon) error

@@ -19,15 +19,15 @@ import (
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/auth"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/errdefs"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/meta"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/label"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/process"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/utils/retry"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/snapshot"
+	"contrib/nydus-snapshotter/pkg/auth"
+	"contrib/nydus-snapshotter/pkg/daemon"
+	"contrib/nydus-snapshotter/pkg/errdefs"
+	"contrib/nydus-snapshotter/pkg/filesystem/meta"
+	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/pkg/label"
+	"contrib/nydus-snapshotter/pkg/process"
+	"contrib/nydus-snapshotter/pkg/utils/retry"
+	"contrib/nydus-snapshotter/snapshot"
 )
 
 type filesystem struct {

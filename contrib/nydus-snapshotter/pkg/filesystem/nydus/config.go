@@ -9,8 +9,8 @@ package nydus
 import (
 	"errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/meta"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/signature"
+	"contrib/nydus-snapshotter/pkg/filesystem/meta"
+	"contrib/nydus-snapshotter/pkg/signature"
 )
 
 type NewFSOpt func(d *filesystem) error
