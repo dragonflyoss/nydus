@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/nydussdk/model"
+	"contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
 func prepareNydusServer(t *testing.T) (string, func()) {

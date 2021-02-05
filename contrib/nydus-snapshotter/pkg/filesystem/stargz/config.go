@@ -9,8 +9,8 @@ package stargz
 import (
 	"errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/meta"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/pkg/filesystem/meta"
+	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
 )
 
 func WithMeta(root string) NewFSOpt {

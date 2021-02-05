@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/auth"
+	"contrib/nydus-snapshotter/pkg/auth"
 )
 
 func TestResolver_resolve(t *testing.T) {

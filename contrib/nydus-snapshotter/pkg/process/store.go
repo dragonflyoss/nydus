@@ -7,8 +7,8 @@
 package process
 
 import (
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/store"
+	"contrib/nydus-snapshotter/pkg/daemon"
+	"contrib/nydus-snapshotter/pkg/store"
 )
 
 type Store interface {

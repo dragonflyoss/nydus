@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
+	"contrib/nydus-snapshotter/pkg/daemon"
 )
 
 

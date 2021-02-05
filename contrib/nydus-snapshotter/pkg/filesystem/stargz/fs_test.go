@@ -17,10 +17,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/meta"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/label"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/process"
+	"contrib/nydus-snapshotter/pkg/filesystem/meta"
+	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/pkg/label"
+	"contrib/nydus-snapshotter/pkg/process"
 )
 
 func ensureExists(path string) error {

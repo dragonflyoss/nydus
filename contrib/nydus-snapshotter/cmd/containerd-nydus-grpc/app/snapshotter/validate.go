@@ -11,8 +11,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
+	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
 )
 
 type Config struct {

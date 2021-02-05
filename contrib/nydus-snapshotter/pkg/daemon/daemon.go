@@ -14,8 +14,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/nydussdk"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/nydussdk/model"
+	"contrib/nydus-snapshotter/pkg/nydussdk"
+	"contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
 type NewDaemonOpt func(d *Daemon) error

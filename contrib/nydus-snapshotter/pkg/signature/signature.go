@@ -14,8 +14,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/label"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/utils/signer"
+	"contrib/nydus-snapshotter/pkg/label"
+	"contrib/nydus-snapshotter/pkg/utils/signer"
 )
 
 type Verifier struct {

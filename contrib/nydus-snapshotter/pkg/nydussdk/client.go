@@ -19,8 +19,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/nydussdk/model"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/utils/retry"
+	"contrib/nydus-snapshotter/pkg/nydussdk/model"
+	"contrib/nydus-snapshotter/pkg/utils/retry"
 )
 
 const (
