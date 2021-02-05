@@ -2,16 +2,11 @@
 
 # I. High Level Design
 ##    0. Overview
-Dragonfly image service is named as "nydus", [github repo](https://github.com/dragonflyoss/image-service) 
+Dragonfly image service is named as `nydus`, [github repo](https://github.com/dragonflyoss/image-service)
 
 Nydus consists of two parts,
-* a userspace filesystem called "rafs" on top of a container image format 
+* a userspace filesystem called `rafs` on top of a container image format
 * an image manifest that is compatible with oci spec of image and distribution
-
-Nydus splits container image into two parts, metadata and data, where metadata contains everything a container needs to start with, while data is stored in chunk with chunk size being 1MB.
-
-Nydus is a fuse-based solution.
-
 
 Its key features include:
 
@@ -25,11 +20,16 @@ Its key features include:
 * Integrated with existing CNCF project Dragonfly to support image distribution in large clusters
 * Different container image storage backends are supported
 
+##     1. Architecture
+Nydus takes in either [FUSE](https://www.kernel.org/doc/html/latest/filesystems/fuse.html) or [virtiofs](https://virtio-fs.gitlab.io/) protocol to service POD created by conventional runc containers or vm-based [Kata Containers](https://katacontainers.io/). It supports pulling container image data from container image registry, [OSS](https://www.alibabacloud.com/product/oss), NAS, as well as Dragonfly supernode and node peers. It can also optionally use a local directory to cache all container image data to speed up future container creation.
 
-##    1. Rafs
-Rafs presents to users a userspace filesystem with seperating filesystem's metadata with data.  In a typical rafs filesystem, the metadata is stored in `bootstrap` while the data is stored in `blobfile`.
+![architecture](images/nydusd-arch.png)
 
-![undefined](./nydus-arch.png)
+##    2. Rafs
+Rafs presents to users a userspace filesystem with seperating filesystem's metadata with data.  In a typical rafs filesystem, the metadata is stored in `bootstrap` while the data is stored in `blobfile`. Nydus splits container image into two parts, metadata and data, where metadata contains everything a container needs to start with, while data is stored in chunk with chunk size being 1MB.
+
+![rafs](./images/rafs-format.png)
+
    * bootstrap
       * The metadata is a merkle tree whose nodes represents a regular filesystem's directory/file
       * a leaf nodes refers to a file and contains hash value of its file data
@@ -69,8 +69,8 @@ Rafs presents to users a userspace filesystem with seperating filesystem's metad
 +------------+-----------+-------------------------------------------------+
 ```
    
-##    2. Integrity Validation
-### 2.1 Metadata Integrity Validation
+##    3. Integrity Validation
+### 3.1 Metadata Integrity Validation
 Firstly, Nydus does basic verification of metadata values, looking for values that are in range (and hence not detected by automated verification checks) but are not correct.
 
 Secondly, as a primary concern, metadata needs some form of overall integrity checking. We cannot trust the metadata if we cannot verify that it has not been changed as a result of external influences. Hence we need some form of integrity check, and this is done by adding one of the two digest validations (Sha256 and blake3) to the metadata.
@@ -78,21 +78,21 @@ Secondly, as a primary concern, metadata needs some form of overall integrity ch
 Validation of the metadata takes place at runtime when metadata is accessed.  By the nature of container image, only read verification is required.
 
 The read verification is doing sanity checking on metadata's fields and determining whether digest validating is necessary.  If it is, the digest is calculated with the chosen hash algorithm and compared against the value stored in the object itself.  If any of these checks fail, then the buffer is considered corrupt and the EINVAL error is set appropriately.
-### 2.2  Data Integrity Validation
+### 3.2  Data Integrity Validation
 Data is split into chunks and each chunk has a saved digest in chunk info, the way of metadata digest validation applies to chunk as well.
 
-##    3. Prefetch
+##    4. Prefetch
 As a lazily fetch solution, prefetch plays an important role to mitigate the impact of failing to fetch data after containers run.   In order to do it, we need to record hints in container image about which files and directories need prefetching, according to the information, at runtime nydus daemon will fetch these files and directories in the background into local storage.
 
 The image build tool `nydusify` accepts prefetch hints from `stdin`.
-##    4. Blob and Blob Cache
+##    5. Blob and Blob Cache
 * blob
 Blob is the data part of a container image, it consists of files' data.  Nydus has splitted a file's data into one or more fixed-length (1MB) chunks.
 
 * blob cache
 Nydus can be configured to set up a cache for blob, called `blobcache`.  With `blobcache`, fetched blob data is saved to a `work dir` and won't be repeatedly fetched.  Given the assumption that only a small portion of image is fetched, there is no cache eviction for `blobcache`.
 
-##    5. Compression
+##    6. Compression
 Nydus can be configured to save either compressed chunk or noncompressed chunk, with compressed chunk is the default configuration.
 
 The compression algorithm is lz4 and gzip, `None` stands for noncompression.
