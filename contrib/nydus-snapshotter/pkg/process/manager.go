@@ -116,7 +116,7 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	d.Process = cmd.Process
+	d.Pid = cmd.Process.Pid
 	// make sure to wait after start
 	go func() {
 		scanner := bufio.NewScanner(stderr)
@@ -172,12 +172,17 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	m.CleanUpDaemonResource(d)
 	log.L.Infof("umount remote snapshot, mountpoint %s", d.MountPoint())
 	// The process only needs to be wait if it's a non shared daemon.
-	if d.Process != nil && !d.SharedDaemon {
-		err := d.Process.Kill()
+	if d.Pid != -1 && !d.SharedDaemon {
+		p, err := os.FindProcess(d.Pid)
 		if err != nil {
 			return err
 		}
-		_, err = d.Process.Wait()
+
+		err = p.Kill()
+		if err != nil {
+			return err
+		}
+		_, err = p.Wait()
 		if err != nil {
 			return err
 		}

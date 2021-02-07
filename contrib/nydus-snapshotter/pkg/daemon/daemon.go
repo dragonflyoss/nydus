@@ -30,7 +30,7 @@ type Daemon struct {
 	Stderr         io.WriteCloser
 	CacheDir       string
 	SnapshotDir    string
-	Process        *os.Process
+	Pid            int
 	client         nydussdk.Interface
 	ImageID        string
 	SharedDaemon   bool
@@ -104,7 +104,7 @@ func (d *Daemon) SharedMount() error {
 }
 
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
-	d := &Daemon{}
+	d := &Daemon{Pid: -1}
 	d.ID = newID()
 	for _, o := range opt {
 		err := o(d)
