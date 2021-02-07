@@ -8,6 +8,7 @@ import (
 	"contrib/nydus-snapshotter/config"
 	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"contrib/nydus-snapshotter/pkg/filesystem/stargz"
+	"contrib/nydus-snapshotter/pkg/signature"
 	"contrib/nydus-snapshotter/snapshot"
 )
 
@@ -31,12 +32,18 @@ func init() {
 				return nil, errors.New("failed to fillup nydus configuration with defaults")
 			}
 
+			verifier, err := signature.NewVerifier(cfg.PublicKeyFile, cfg.ValidateSignature)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to initialize verifier")
+			}
+
 			fs, err := nydus.NewFileSystem(
 				ic.Context,
 				nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 				nydus.WithMeta(cfg.RootDir),
 				nydus.WithDaemonConfig(cfg.DaemonCfg),
 				nydus.WithSharedDaemon(cfg.SharedDaemon),
+				nydus.WithVerifier(verifier),
 			)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
