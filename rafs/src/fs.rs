@@ -285,8 +285,6 @@ impl Rafs {
         }
 
         self.initialized = true;
-        info!("rafs imported");
-
         Ok(())
     }
 
