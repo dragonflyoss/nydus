@@ -67,7 +67,7 @@ impl RafsDevice {
     pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: RafsBioDesc) -> io::Result<usize> {
         let mut count: usize = 0;
         for bio in desc.bi_vec.iter() {
-            let mut f = RafsBioDevice::new(bio, &self)?;
+            let mut f = RafsBioDevice::new(bio, &self);
             count += w.write_from(&mut f, bio.size, bio.offset as u64)?;
         }
         Ok(count)
@@ -77,7 +77,7 @@ impl RafsDevice {
     pub fn write_from(&self, r: &mut dyn ZeroCopyReader, desc: RafsBioDesc) -> io::Result<usize> {
         let mut count: usize = 0;
         for bio in desc.bi_vec.iter() {
-            let mut f = RafsBioDevice::new(bio, &self)?;
+            let mut f = RafsBioDevice::new(bio, &self);
             let offset = bio.chunkinfo.compress_offset() + bio.offset as u64;
             count += r.read_to(&mut f, bio.size, offset)?;
         }
@@ -101,9 +101,9 @@ struct RafsBioDevice<'a> {
 }
 
 impl<'a> RafsBioDevice<'a> {
-    fn new(bio: &'a RafsBio, b: &'a RafsDevice) -> io::Result<Self> {
+    fn new(bio: &'a RafsBio, b: &'a RafsDevice) -> Self {
         // FIXME: make sure bio is valid
-        Ok(RafsBioDevice { bio, dev: b })
+        RafsBioDevice { bio, dev: b }
     }
 }
 

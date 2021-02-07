@@ -184,14 +184,12 @@ fn translate_status_code(e: &ApiError) -> StatusCode {
     }
 }
 
-fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(
-    api_resp: ApiResponse,
-    op: O,
-) -> Result<Response, HttpError> {
+// API server has successfully processed the request, but can't fulfill that.
+fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, op: O) -> Response {
     match api_resp {
         Ok(r) => {
             use ApiResponsePayload::*;
-            let resp = match r {
+            match r {
                 Empty => success_response(None),
                 DaemonInfo(d) => success_response(Some(d)),
                 Events(d) => success_response(Some(d)),
@@ -201,13 +199,11 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(
                 BackendMetrics(d) => success_response(Some(d)),
                 BlobcacheMetrics(d) => success_response(Some(d)),
                 FsBackendInfo(d) => success_response(Some(d)),
-            };
-
-            Ok(resp)
+            }
         }
         Err(e) => {
             let sc = translate_status_code(&e);
-            Ok(error_response(op(e), sc))
+            error_response(op(e), sc)
         }
     }
 }
@@ -222,12 +218,12 @@ impl EndpointHandler for InfoHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
                 let r = kicker(ApiRequest::DaemonInfo);
-                convert_to_response(r, HttpError::Info)
+                Ok(convert_to_response(r, HttpError::Info))
             }
             (Method::Put, Some(body)) => {
                 let conf = parse_body(body)?;
                 let r = kicker(ApiRequest::ConfigureDaemon(conf));
-                convert_to_response(r, HttpError::Configure)
+                Ok(convert_to_response(r, HttpError::Configure))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -244,7 +240,7 @@ impl EndpointHandler for EventsHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
                 let r = kicker(ApiRequest::Events);
-                convert_to_response(r, HttpError::Events)
+                Ok(convert_to_response(r, HttpError::Events))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -265,16 +261,16 @@ impl EndpointHandler for MountHandler {
             (Method::Post, Some(body)) => {
                 let cmd = parse_body(body)?;
                 let r = kicker(ApiRequest::Mount((mountpoint, cmd)));
-                convert_to_response(r, HttpError::Mount)
+                Ok(convert_to_response(r, HttpError::Mount))
             }
             (Method::Put, Some(body)) => {
                 let cmd = parse_body(body)?;
                 let r = kicker(ApiRequest::Remount((mountpoint, cmd)));
-                convert_to_response(r, HttpError::Mount)
+                Ok(convert_to_response(r, HttpError::Mount))
             }
             (Method::Delete, None) => {
                 let r = kicker(ApiRequest::Umount(mountpoint));
-                convert_to_response(r, HttpError::Mount)
+                Ok(convert_to_response(r, HttpError::Mount))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -292,7 +288,7 @@ impl EndpointHandler for MetricsHandler {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportGlobalMetrics(id));
-                convert_to_response(r, HttpError::GlobalMetrics)
+                Ok(convert_to_response(r, HttpError::GlobalMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -310,7 +306,7 @@ impl EndpointHandler for MetricsFilesHandler {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportFilesMetrics(id));
-                convert_to_response(r, HttpError::FsFilesMetrics)
+                Ok(convert_to_response(r, HttpError::FsFilesMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -328,7 +324,7 @@ impl EndpointHandler for MetricsPatternHandler {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportAccessPatterns(id));
-                convert_to_response(r, HttpError::Pattern)
+                Ok(convert_to_response(r, HttpError::Pattern))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -346,7 +342,7 @@ impl EndpointHandler for MetricsBackendHandler {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportBackendMetrics(id));
-                convert_to_response(r, HttpError::BackendMetrics)
+                Ok(convert_to_response(r, HttpError::BackendMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -364,7 +360,7 @@ impl EndpointHandler for MetricsBlobcacheHandler {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportBlobcacheMetrics(id));
-                convert_to_response(r, HttpError::BlobcacheMetrics)
+                Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -381,7 +377,7 @@ impl EndpointHandler for SendFuseFdHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Put, None) => {
                 let r = kicker(ApiRequest::SendFuseFd);
-                convert_to_response(r, HttpError::Upgrade)
+                Ok(convert_to_response(r, HttpError::Upgrade))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -398,7 +394,7 @@ impl EndpointHandler for TakeoverHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Put, None) => {
                 let r = kicker(ApiRequest::Takeover);
-                convert_to_response(r, HttpError::Upgrade)
+                Ok(convert_to_response(r, HttpError::Upgrade))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -415,7 +411,7 @@ impl EndpointHandler for ExitHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Put, None) => {
                 let r = kicker(ApiRequest::Exit);
-                convert_to_response(r, HttpError::Upgrade)
+                Ok(convert_to_response(r, HttpError::Upgrade))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -438,7 +434,7 @@ impl EndpointHandler for FsBackendInfo {
                     )
                 })?;
                 let r = kicker(ApiRequest::ExportFsBackendInfo(mountpoint));
-                convert_to_response(r, HttpError::FsBackendInfo)
+                Ok(convert_to_response(r, HttpError::FsBackendInfo))
             }
             _ => Err(HttpError::BadRequest),
         }

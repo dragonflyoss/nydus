@@ -70,11 +70,11 @@ impl CachedInodes {
                 dir_ino_set.push(child_inode.i_ino);
                 continue;
             }
-            self.add_into_parent(child_inode)?;
+            self.add_into_parent(child_inode);
         }
         while !dir_ino_set.is_empty() {
             let ino = dir_ino_set.pop().unwrap();
-            self.add_into_parent(self.get_node(ino)?)?;
+            self.add_into_parent(self.get_node(ino)?);
         }
         debug!("all {} inodes loaded", self.s_inodes.len());
 
@@ -102,13 +102,12 @@ impl CachedInodes {
         self.get_node(ino)
     }
 
-    fn add_into_parent(&mut self, child_inode: Arc<CachedInode>) -> Result<()> {
+    fn add_into_parent(&mut self, child_inode: Arc<CachedInode>) {
         if let Ok(parent_inode) = self.get_node_mut(child_inode.parent()) {
             Arc::get_mut(parent_inode)
                 .unwrap()
                 .add_child(child_inode.clone());
         }
-        Ok(())
     }
 }
 
@@ -284,8 +283,8 @@ impl RafsInode for CachedInode {
         Ok(())
     }
 
-    fn name(&self) -> Result<OsString> {
-        Ok(self.i_name.clone())
+    fn name(&self) -> OsString {
+        self.i_name.clone()
     }
 
     fn get_symlink(&self) -> Result<OsString> {
@@ -412,7 +411,7 @@ impl RafsInode for CachedInode {
 
         for child_inode in &self.i_child {
             if child_inode.is_dir() {
-                trace!("Got dir {:?}", child_inode.name().unwrap());
+                trace!("Got dir {:?}", child_inode.name());
                 child_dirs.push(child_inode.clone());
             } else {
                 if child_inode.is_empty_size() {

@@ -54,7 +54,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         let child_count = inode.get_child_count();
 
         let parent_path = if let Some(parent) = parent {
-            parent.join(inode.name()?)
+            parent.join(inode.name())
         } else {
             PathBuf::from_str("/").unwrap()
         };
@@ -63,7 +63,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         if inode.is_dir() {
             for idx in child_index..(child_index + child_count) {
                 let child = self.rs.get_inode(idx as Inode, true)?;
-                let child_path = parent_path.join(child.name()?);
+                let child_path = parent_path.join(child.name());
                 let child = self.parse_node(child, child_path.clone())?;
                 if let Some(chunk_cache) = chunk_cache {
                     if child.is_reg() {

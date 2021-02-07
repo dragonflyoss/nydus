@@ -330,11 +330,11 @@ impl Registry {
 
     /// Parse `www-authenticate` response header respond from registry server
     /// The header format like: `Bearer realm="https://auth.my-registry.com/token",service="my-registry.com",scope="repository:test/repo:pull,push"`
-    fn parse_auth(&self, source: &HeaderValue) -> Result<Option<Auth>> {
+    fn parse_auth(&self, source: &HeaderValue) -> Option<Auth> {
         let source = source.to_str().unwrap();
         let source: Vec<&str> = source.splitn(2, ' ').collect();
         if source.len() < 2 {
-            return Ok(None);
+            return None;
         }
         let scheme = source[0].trim();
         let pairs = source[1].trim();
@@ -343,7 +343,7 @@ impl Registry {
         for pair in pairs {
             let pair: Vec<&str> = pair.trim().split('=').collect();
             if pair.len() < 2 {
-                return Ok(None);
+                return None;
             }
             let key = pair[0].trim();
             let value = pair[1].trim().trim_matches('"');
@@ -364,7 +364,7 @@ impl Registry {
                     || paras.get("service").is_none()
                     || paras.get("scope").is_none()
                 {
-                    return Ok(None);
+                    return None;
                 }
                 Some(Auth::Bearer(BearerAuth {
                     realm: (*paras.get("realm").unwrap()).to_string(),
@@ -375,7 +375,7 @@ impl Registry {
             _ => None,
         };
 
-        Ok(auth)
+        auth
     }
 
     /// Request registry server with `authorization` header
@@ -441,10 +441,7 @@ impl Registry {
         if resp.status() == StatusCode::UNAUTHORIZED {
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
                 // Get token from registry authorization server
-                if let Some(auth) = self
-                    .parse_auth(resp_auth_header)
-                    .map_err(|e| RegistryError::Common(e.to_string()))?
-                {
+                if let Some(auth) = self.parse_auth(resp_auth_header) {
                     let auth_header = self
                         .get_auth_header(auth)
                         .map_err(|e| RegistryError::Common(e.to_string()))?;

@@ -375,14 +375,14 @@ impl OndiskInodeWrapper {
         }
     }
 
-    fn name_ref<'a>(&self, state: &'a DirectMappingState) -> Result<&OsStr> {
+    fn name_ref<'a>(&self, state: &'a DirectMappingState) -> &OsStr {
         let offset = self.offset + size_of::<OndiskInode>();
         let name = unsafe {
             let start = state.base.add(offset);
             slice::from_raw_parts(start, self.inode(state).i_name_size as usize)
         };
 
-        Ok(bytes_to_os_str(name))
+        bytes_to_os_str(name)
     }
 
     #[allow(clippy::cast_ptr_alignment)]
@@ -483,10 +483,9 @@ impl RafsInode for OndiskInodeWrapper {
     ///
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
-    fn name(&self) -> Result<OsString> {
+    fn name(&self) -> OsString {
         let state = self.state();
-
-        self.name_ref(state.deref()).map(|v| v.to_owned())
+        self.name_ref(state.deref()).to_owned()
     }
 
     /// Get symlink target of the inode.
@@ -535,7 +534,7 @@ impl RafsInode for OndiskInodeWrapper {
             let wrapper = self
                 .mapping
                 .get_inode_wrapper((inode.i_child_index as i32 + pivot) as u64, state.deref())?;
-            let target = wrapper.name_ref(state.deref())?;
+            let target = wrapper.name_ref(state.deref());
 
             if target == name {
                 return Ok(Arc::new(wrapper) as Arc<dyn RafsInode>);
@@ -691,7 +690,7 @@ impl RafsInode for OndiskInodeWrapper {
         for idx in child_index..(child_index + child_count) {
             let child_inode = self.mapping.get_inode(idx, false).unwrap();
             if child_inode.is_dir() {
-                trace!("Got dir {:?}", child_inode.name().unwrap());
+                trace!("Got dir {:?}", child_inode.name());
                 child_dirs.push(child_inode);
             } else {
                 if child_inode.is_empty_size() {
