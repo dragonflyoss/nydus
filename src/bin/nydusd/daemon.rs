@@ -44,7 +44,7 @@ use rafs::{
 };
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
-use crate::{SubscriberWrapper, EVENT_MANAGER_RUN};
+use crate::EVENT_MANAGER_RUN;
 
 #[allow(dead_code)]
 #[derive(Debug, Hash, PartialEq, Eq, Serialize)]
@@ -461,10 +461,8 @@ impl NydusDaemonSubscriber {
             }
         }
     }
-}
 
-impl SubscriberWrapper for NydusDaemonSubscriber {
-    fn get_event_fd(&self) -> Result<EventFd> {
+    pub fn get_event_fd(&self) -> Result<EventFd> {
         self.event_fd.try_clone()
     }
 }

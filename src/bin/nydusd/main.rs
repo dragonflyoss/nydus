@@ -59,10 +59,6 @@ lazy_static! {
     static ref EXIT_EVTFD: Mutex::<Option<EventFd>> = Mutex::<Option<EventFd>>::default();
 }
 
-pub trait SubscriberWrapper: EventSubscriber {
-    fn get_event_fd(&self) -> Result<EventFd>;
-}
-
 fn get_default_rlimit_nofile() -> Result<rlim> {
     // Our default RLIMIT_NOFILE target.
     let mut max_fds: rlim = 1_000_000;
@@ -332,17 +328,13 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut event_manager = EventManager::<Arc<dyn SubscriberWrapper>>::new().unwrap();
+    let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
 
     let vfs = Arc::new(vfs);
     let daemon_subscriber = Arc::new(NydusDaemonSubscriber::new()?);
-    let daemon_subscriber_id = event_manager.add_subscriber(daemon_subscriber);
-
     // Send an event to exit from Event Manager so as to exit from nydusd
-    let exit_evtfd = event_manager
-        .subscriber_mut(daemon_subscriber_id)
-        .unwrap()
-        .get_event_fd()?;
+    let exit_evtfd = daemon_subscriber.get_event_fd()?;
+    event_manager.add_subscriber(daemon_subscriber);
 
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = cmd_arguments_parsed.value_of("id").map(|id| id.to_string());
@@ -407,11 +399,8 @@ fn main() -> Result<()> {
         let api_server = ApiServer::new(to_http, daemon.clone())?;
 
         let api_server_subscriber = Arc::new(ApiSeverSubscriber::new(api_server, from_http)?);
-        let api_server_id = event_manager.add_subscriber(api_server_subscriber);
-        let evtfd = event_manager
-            .subscriber_mut(api_server_id)
-            .unwrap()
-            .get_event_fd()?;
+        let evtfd = api_server_subscriber.get_event_fd()?;
+        event_manager.add_subscriber(api_server_subscriber);
         let ret = start_http_thread(
             apisock,
             evtfd,
