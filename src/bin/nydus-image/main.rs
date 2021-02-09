@@ -9,6 +9,7 @@ extern crate stderrlog;
 mod builder;
 mod node;
 mod stargz;
+mod trace;
 mod tree;
 mod uploader;
 mod validator;
@@ -16,6 +17,8 @@ mod validator;
 #[macro_use]
 extern crate log;
 extern crate serde;
+#[macro_use]
+extern crate lazy_static;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
@@ -26,12 +29,14 @@ use std::collections::BTreeMap;
 use std::fs::metadata;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
 use nydus_utils::{log_level_to_verbosity, BuildTimeInfo};
 use rafs::metadata::digest;
 use rafs::storage::compress;
+use trace::*;
 use uploader::Uploader;
 use validator::Validator;
 
@@ -253,6 +258,8 @@ fn main() -> Result<()> {
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
         let repeatable = matches.is_present("repeatable");
 
+        register_tracer!(TraceClass::Timing, TimingTracerClass);
+
         match source_type {
             SourceType::Directory => {
                 if !source_file.is_dir() {
@@ -348,14 +355,22 @@ fn main() -> Result<()> {
             whiteout_spec,
             output_json,
         )?;
-        let (blob_ids, blob_size) = ib.build().context("build failed")?;
+
+        let (blob_ids, blob_size) =
+            timing_tracer!({ ib.build().context("build failed") }, "total")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(&bootstrap_path)?;
-            let valid = validator
-                .check(false)
-                .context("failed to validate bootstrap")?;
+            let valid = timing_tracer!(
+                {
+                    validator
+                        .check(false)
+                        .context("failed to validate bootstrap")
+                },
+                "validate bootstrap out of band"
+            )?;
+
             if !valid {
                 bail!("failed to build bootstrap");
             }
@@ -392,6 +407,10 @@ fn main() -> Result<()> {
             bail!("bootstrap is invalid");
         }
     }
+
+    root_tracer!()
+        .dump_summary(&mut std::io::stdout())
+        .unwrap_or_default();
 
     Ok(())
 }

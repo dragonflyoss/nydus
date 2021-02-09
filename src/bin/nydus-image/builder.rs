@@ -25,6 +25,8 @@ use rafs::storage::compress;
 use rafs::{RafsIoRead, RafsIoWrite};
 
 use crate::stargz;
+use crate::trace::*;
+use crate::{root_tracer, timing_tracer};
 
 use crate::node::*;
 use crate::tree::Tree;
@@ -406,15 +408,23 @@ impl Builder {
             .context("failed to build tree from bootstrap")?;
 
         // Apply new node (upper layer) to node tree (lower layer)
-        for node in &self.nodes {
-            tree.apply(&node, true, &self.whiteout_spec)
-                .context("failed to apply tree")?;
-        }
+        timing_tracer!(
+            {
+                for node in &self.nodes {
+                    tree.apply(&node, true, &self.whiteout_spec)
+                        .context("failed to apply tree")?;
+                }
+                Ok(true)
+            },
+            "apply layers",
+            Result<bool>
+        )?;
 
         self.lower_inode_map.clear();
         self.upper_inode_map.clear();
         self.readahead_files.clear();
-        self.build_rafs_wrap(&mut tree);
+
+        timing_tracer!({ self.build_rafs_wrap(&mut tree) }, "build rafs");
 
         Ok(())
     }
@@ -720,7 +730,8 @@ impl Builder {
             self.apply_to_bootstrap()?;
         }
         // Dump blob and bootstrap file
-        let (blob_ids, blob_size) = self.dump_to_file()?;
+        let (blob_ids, blob_size) =
+            timing_tracer!({ self.dump_to_file() }, "dump bootstrap and blob")?;
 
         if let Some(ref f) = self.output_json {
             let w = OpenOptions::new()
