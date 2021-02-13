@@ -72,6 +72,18 @@ pub struct FsPrefetchControl {
     bandwidth_rate: u32,
 }
 
+/// Not everything can be safely exported from configuration.
+/// We trim the unneeded info from here.
+#[macro_export]
+macro_rules! trim_backend_config {
+    ($config:expr, $($i:expr),*) => {
+        let mut _n :&mut serde_json::Value = &mut $config["device"]["backend"]["config"];
+        if let serde_json::Value::Object(ref mut m) = _n {
+            $(if m.contains_key($i) { m[$i].take();} else {()};)*
+        }
+    };
+}
+
 /// Rafs storage backend configuration information.
 #[derive(Clone, Default, Deserialize)]
 pub struct RafsConfig {

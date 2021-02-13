@@ -374,7 +374,7 @@ impl GlobalIOStats {
     pub fn latency_end(&self, start: &Option<SystemTime>, fop: StatsFop) {
         if let Some(start) = start {
             if let Ok(d) = SystemTime::elapsed(start) {
-                // FIXME: converting u128 to isize is fragile.
+                // Converting u128 to u64 here is safe since it's delta.
                 let elapsed = d.as_micros() as usize;
                 self.read_latency_dist[latency_range_index(elapsed)]
                     .fetch_add(1, Ordering::Relaxed);
