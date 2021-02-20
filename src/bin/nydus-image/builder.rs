@@ -561,7 +561,10 @@ impl Builder {
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
     fn dump_to_file(&mut self) -> Result<(Vec<String>, usize)> {
-        let (blob_hash, blob_size, mut blob_readahead_size) = self.dump_blob()?;
+        let (blob_hash, blob_size, mut blob_readahead_size) = timing_tracer!(
+            { self.dump_blob() },
+            "write all nodes to blob including hashing"
+        )?;
 
         // Set blob hash as blob id if not specified.
         if self.blob_id.is_empty() {
@@ -667,18 +670,26 @@ impl Builder {
             .store(&mut self.f_bootstrap)
             .context("failed to store blob table")?;
 
-        for node in &mut self.nodes {
-            if self.source_type == SourceType::StargzIndex {
-                debug!("[{}]\t{}", node.overlay, node);
-                if log::max_level() >= log::LevelFilter::Debug {
-                    for chunk in node.chunks.iter_mut() {
-                        trace!("\t\tbuilding chunk: {}", chunk);
+        timing_tracer!(
+            {
+                for node in &mut self.nodes {
+                    if self.source_type == SourceType::StargzIndex {
+                        debug!("[{}]\t{}", node.overlay, node);
+                        if log::max_level() >= log::LevelFilter::Debug {
+                            for chunk in node.chunks.iter_mut() {
+                                trace!("\t\tbuilding chunk: {}", chunk);
+                            }
+                        }
                     }
+                    node.dump_bootstrap(&mut self.f_bootstrap)
+                        .context("failed to dump bootstrap")?;
                 }
-            }
-            node.dump_bootstrap(&mut self.f_bootstrap)
-                .context("failed to dump bootstrap")?;
-        }
+
+                Ok(())
+            },
+            "write all nodes to bootstrap",
+            Result<()>
+        )?;
 
         let blob_ids: Vec<String> = self
             .blob_table
