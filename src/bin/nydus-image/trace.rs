@@ -9,7 +9,7 @@ use std::cmp::{Eq, PartialEq};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{atomic::AtomicU64, Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use serde::Serialize;
@@ -19,6 +19,7 @@ impl Display for TraceClass {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
             TraceClass::Timing => write!(f, "consumed_time"),
+            TraceClass::Event => write!(f, "registered_events"),
         }
     }
 }
@@ -47,6 +48,7 @@ enum_str! {
 derive(Hash, Eq, PartialEq)
 pub enum TraceClass {
     Timing = 1,
+    Event = 2,
 }
 }
 pub enum TraceError {
@@ -58,6 +60,9 @@ type Result<T> = std::result::Result<T, TraceError>;
 /// Used to measure time consuming and gather all tracing points when building image.
 #[derive(Serialize, Default)]
 pub struct TimingTracerClass {
+    // Generally speaking, we won't have many timing tracers act from multiple points.
+    // So `Mutex` should fill our requirements.
+    #[serde(flatten)]
     records: Mutex<HashMap<String, f32>>,
 }
 
@@ -125,6 +130,29 @@ impl BuildRootTracer {
     }
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum TraceEvent {
+    Counter(AtomicU64),
+    Fixed(u64),
+}
+
+#[derive(Serialize, Default)]
+pub struct EventTracerClass {
+    #[serde(flatten)]
+    pub events: RwLock<HashMap<String, TraceEvent>>,
+}
+
+impl TracerClass for EventTracerClass {
+    fn release(&self) -> Result<Value> {
+        serde_json::to_value(self).map_err(TraceError::Serde)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 lazy_static! {
     pub static ref BUILDING_RECORDER: BuildRootTracer = BuildRootTracer {
         tracers: RwLock::new(HashMap::default())
@@ -159,5 +187,46 @@ macro_rules! timing_tracer {
 macro_rules! register_tracer {
     ($class:expr, $r:ty) => {
         root_tracer!().register($class, Arc::new(<$r>::default()));
+    };
+}
+
+#[macro_export]
+macro_rules! event_tracer {
+    () => {
+        root_tracer!()
+            .tracer(TraceClass::Event)
+            .as_any()
+            .downcast_ref::<EventTracerClass>()
+            .unwrap()
+    };
+    ($event:expr, $desc:expr) => {
+        event_tracer!()
+            .events
+            .write()
+            .unwrap()
+            .insert($event.to_string(), TraceEvent::Fixed($desc as u64))
+    };
+    ($event:expr, +$value:expr) => {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let mut new: bool = true;
+        {
+            if let Some(TraceEvent::Counter(ref e)) =
+                event_tracer!().events.read().unwrap().get($event)
+            {
+                e.fetch_add($value as u64, Ordering::Relaxed);
+                new = false;
+            }
+        }
+
+        if new {
+            // Double check to close the race that another thread has already inserted.
+            if let Ok(ref mut guard) = event_tracer!().events.write() {
+                if let Some(TraceEvent::Counter(ref e)) = guard.get($event) {
+                    e.fetch_add($value as u64, Ordering::Relaxed);
+                } else {
+                    guard.insert($event.to_string(), TraceEvent::Counter(AtomicU64::new(0)));
+                }
+            }
+        }
     };
 }

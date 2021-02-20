@@ -30,7 +30,7 @@ use crate::{
 };
 
 use crate::trace::*;
-use crate::{root_tracer, timing_tracer};
+use crate::{event_tracer, root_tracer, timing_tracer};
 
 #[derive(Clone)]
 pub struct Tree {
@@ -63,6 +63,8 @@ impl<'a> MetadataTreeBuilder<'a> {
         } else {
             PathBuf::from_str("/").unwrap()
         };
+
+        event_tracer!("loading files from parent", +child_count);
 
         let mut children = Vec::new();
         if inode.is_dir() {
@@ -381,6 +383,8 @@ impl FilesystemTreeBuilder {
         let children = fs::read_dir(&parent.path)
             .with_context(|| format!("failed to read dir {:?}", parent.path))?;
         let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
+
+        event_tracer!("loading files from directory", +children.len());
 
         for child in children {
             let path = child.path();

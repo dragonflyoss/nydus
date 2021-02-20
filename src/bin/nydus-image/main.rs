@@ -259,6 +259,7 @@ fn main() -> Result<()> {
         let repeatable = matches.is_present("repeatable");
 
         register_tracer!(TraceClass::Timing, TimingTracerClass);
+        register_tracer!(TraceClass::Event, EventTracerClass);
 
         match source_type {
             SourceType::Directory => {
