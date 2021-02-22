@@ -63,9 +63,10 @@ pub struct Builder {
     /// Store all blob id entry during build.
     blob_table: OndiskBlobTable,
     /// Readahead file list, use BTreeMap to keep stable iteration order, HashMap<path, Option<index>>.
+    /// Files from this collection are all regular files and will be persisted to blob following a certain scheme.
     readahead_files: BTreeMap<PathBuf, Option<u64>>,
     /// Specify files or directories which need to prefetch. Their inode indexes will
-    /// be persist to prefetch table.
+    /// be persist to prefetch table. They could be directory's or regular file's index
     hint_readahead_files: BTreeMap<PathBuf, Option<u64>>,
     prefetch_policy: PrefetchPolicy,
     /// Store all nodes during build, node index of root starting from 1,

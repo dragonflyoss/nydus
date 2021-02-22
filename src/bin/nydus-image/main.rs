@@ -35,63 +35,41 @@ use rafs::storage::compress;
 use uploader::Uploader;
 use validator::Validator;
 
-/// Get readahead file paths line by line from stdin
-fn get_readahead_files(source: &Path) -> Result<BTreeMap<PathBuf, Option<u64>>> {
+/// Gather readahead file paths line by line from stdin
+/// Input format:
+///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/1"
+/// This routine does not guarantee that specified file must exist in local filesystem,
+/// this is because we can't guarantee that source rootfs directory of parent bootstrap
+/// is located in local file system.
+fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     let stdin = io::stdin();
     let mut files = BTreeMap::new();
 
-    // Can't fail since source must be a legal input option.
-    let source_path = source.canonicalize()?;
-
     loop {
         let mut file = String::new();
-        // Files' names as input must exist within source rootfs no matter its relative path or absolute path.
-        // Hint path that does not correspond to an existed file will be discarded and throw warn logs.
-        // Absolute path must point to a file in source rootfs.
-        // Relative path must point to a file in source rootfs.
-        // All paths must conform to format `/rootfs/dir/file` when added to BTree.
+
         let size = stdin
             .read_line(&mut file)
-            .context(format!("failed to parse readahead files from {:?}", source))?;
+            .context("failed to parse readahead files")?;
         if size == 0 {
             break;
         }
-        let file_name = file.trim();
-        if file_name.is_empty() {
+        let file_trimmed: PathBuf = file.trim().into();
+        // Sanity check for the list format.
+        if !file_trimmed.starts_with(Path::new("/")) {
+            warn!(
+                "Illegal file path specified. It {:?} must start with '/'",
+                file
+            );
             continue;
         }
-        let path = Path::new(file_name);
-        // Will follow symlink.
-        if !path.exists() {
-            warn!("{} does not exist, ignore it!", path.to_str().unwrap());
-            continue;
-        }
-
-        let canonicalized_name;
-        match path.canonicalize() {
-            Ok(p) => {
-                if !p.starts_with(&source_path) {
-                    continue;
-                }
-                canonicalized_name = p;
-            }
-            Err(_) => continue,
-        }
-
-        let file_name_trimmed = Path::new("/").join(
-            canonicalized_name
-                .strip_prefix(&source_path)
-                .unwrap()
-                .to_path_buf(),
-        );
 
         debug!(
-            "readahead file: {}, trimmed file name {}",
-            file_name,
-            file_name_trimmed.to_str().unwrap()
+            "readahead file: {}, trimmed file name {:?}",
+            file, file_trimmed
         );
         // The inode index is not decided yet, but will do during fs-walk.
-        files.insert(file_name_trimmed, None);
+        files.insert(file_trimmed, None);
     }
 
     Ok(files)
@@ -341,7 +319,7 @@ fn main() -> Result<()> {
             .parse()?;
 
         let hint_readahead_files = if prefetch_policy != builder::PrefetchPolicy::None {
-            get_readahead_files(source_path).context("failed to get readahead files")?
+            gather_readahead_files().context("failed to get readahead files")?
         } else {
             BTreeMap::new()
         };
