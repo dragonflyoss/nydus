@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use serde::Serialize;
 use sha2::digest::Digest;
 use sha2::Sha256;
 
@@ -74,12 +73,6 @@ pub struct Builder {
     /// Store all nodes during build, node index of root starting from 1,
     /// so the collection index equal to (node.index - 1).
     nodes: Vec<Node>,
-    output_json: Option<PathBuf>,
-}
-
-#[derive(Serialize)]
-pub struct ResultOutput {
-    blobs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,7 +132,6 @@ impl Builder {
         prefetch_policy: PrefetchPolicy,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
-        output_json: Option<PathBuf>,
     ) -> Result<Builder> {
         let f_blob = if let Some(blob_path) = blob_path {
             Some(Box::new(BufWriter::with_capacity(
@@ -202,7 +194,6 @@ impl Builder {
             hint_readahead_files,
             prefetch_policy,
             nodes: Vec::new(),
-            output_json,
         })
     }
 
@@ -743,21 +734,6 @@ impl Builder {
         // Dump blob and bootstrap file
         let (blob_ids, blob_size) =
             timing_tracer!({ self.dump_to_file() }, "dump bootstrap and blob")?;
-
-        if let Some(ref f) = self.output_json {
-            let w = OpenOptions::new()
-                .truncate(true)
-                .create(true)
-                .write(true)
-                .open(f)
-                .with_context(|| format!("{:?} can't be opened", f))?;
-
-            let output = ResultOutput {
-                blobs: blob_ids.clone(),
-            };
-
-            serde_json::to_writer(w, &output).context("Write output file failed")?;
-        }
 
         Ok((blob_ids, blob_size))
     }

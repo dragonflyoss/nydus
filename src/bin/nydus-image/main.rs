@@ -27,9 +27,12 @@ use clap::{App, Arg, SubCommand};
 
 use std::collections::BTreeMap;
 use std::fs::metadata;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use serde::Serialize;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
@@ -78,6 +81,12 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     }
 
     Ok(files)
+}
+
+#[derive(Serialize, Default)]
+pub struct ResultOutput {
+    blobs: Vec<String>,
+    trace: serde_json::Map<String, serde_json::Value>,
 }
 
 fn main() -> Result<()> {
@@ -337,10 +346,6 @@ fn main() -> Result<()> {
             .unwrap_or_default()
             .parse()?;
 
-        let output_json = matches
-            .value_of("output-json")
-            .map(|o| o.to_string().into());
-
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
@@ -354,11 +359,10 @@ fn main() -> Result<()> {
             prefetch_policy,
             !repeatable,
             whiteout_spec,
-            output_json,
         )?;
 
         let (blob_ids, blob_size) =
-            timing_tracer!({ ib.build().context("build failed") }, "total")?;
+            timing_tracer!({ ib.build().context("build failed") }, "total build time")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
@@ -375,6 +379,28 @@ fn main() -> Result<()> {
             if !valid {
                 bail!("failed to build bootstrap");
             }
+        }
+
+        let output_json: Option<PathBuf> = matches
+            .value_of("output-json")
+            .map(|o| o.to_string().into());
+
+        if let Some(ref f) = output_json {
+            let w = OpenOptions::new()
+                .truncate(true)
+                .create(true)
+                .write(true)
+                .open(f)
+                .with_context(|| format!("{:?} can't be opened", f))?;
+
+            let map = root_tracer!().dump_summary_map().unwrap_or_default();
+
+            let summary_output = ResultOutput {
+                trace: map,
+                blobs: blob_ids.clone(),
+            };
+
+            serde_json::to_writer(w, &summary_output).context("Write output file failed")?;
         }
 
         if blob_size > 0 {
@@ -408,10 +434,6 @@ fn main() -> Result<()> {
             bail!("bootstrap is invalid");
         }
     }
-
-    root_tracer!()
-        .dump_summary(&mut std::io::stdout())
-        .unwrap_or_default();
 
     Ok(())
 }

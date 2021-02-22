@@ -8,7 +8,6 @@ use std::any::Any;
 use std::cmp::{Eq, PartialEq};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::io::{self, Write};
 use std::sync::{atomic::AtomicU64, Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -115,18 +114,12 @@ impl BuildRootTracer {
         (&g).get(&class).unwrap().clone()
     }
 
-    pub fn dump_summary(&self, w: &mut dyn io::Write) -> Result<()> {
+    pub fn dump_summary_map(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
         let mut map = serde_json::Map::new();
         for c in self.tracers.write().unwrap().iter() {
             map.insert(c.0.name(), c.1.release()?);
         }
-
-        serde_json::to_writer(w, &map).map_err(TraceError::Serde)?;
-
-        #[allow(clippy::write_with_newline)]
-        write!(io::stdout(), "\n").unwrap_or_default();
-
-        Ok(())
+        Ok(map)
     }
 }
 
