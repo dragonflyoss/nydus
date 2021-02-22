@@ -104,7 +104,7 @@ func NewRemote(opt RemoteOpt) (*Remote, error) {
 	}, nil
 }
 
-func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (content.Writer, error) {
+func (remote *Remote) Push(ctx context.Context, desc *ocispec.Descriptor, byDigest bool, reader io.Reader) error {
 	var ref string
 	if byDigest {
 		ref = remote.parsed.Name()
@@ -114,24 +114,15 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 
 	pusher, err := remote.resolver.Pusher(ctx, ref)
 	if err != nil {
-		return nil, err
-	}
-
-	writer, err := pusher.Push(ctx, desc)
-	if err != nil && !errdefs.IsAlreadyExists(err) {
-		return nil, err
-	}
-
-	return writer, nil
-}
-
-func (remote *Remote) PushFromReader(ctx context.Context, desc *ocispec.Descriptor, byDigest bool, reader io.Reader) error {
-	writer, err := remote.Push(ctx, *desc, byDigest)
-	if err != nil {
 		return err
 	}
-	if writer == nil {
-		return nil
+
+	writer, err := pusher.Push(ctx, *desc)
+	if err != nil {
+		if errdefs.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
 	}
 	defer writer.Close()
 

@@ -199,7 +199,7 @@ func (registry *Registry) MakeTargetImage() error {
 				targetImage, err := mutate.Append(*registry.target.Img, mutate.Addendum{
 					Layer: job.TargetBlobLayer,
 					History: v1.History{
-						CreatedBy: fmt.Sprintf("nydusify"),
+						CreatedBy: fmt.Sprintf("Nydusify"),
 					},
 					Annotations: map[string]string{
 						utils.LayerAnnotationNydusBlob: "true",
@@ -231,7 +231,7 @@ func (registry *Registry) MakeTargetImage() error {
 				MediaType: mediaType,
 				Layer:     job.TargetBootstrapLayer,
 				History: v1.History{
-					CreatedBy: fmt.Sprintf("nydusify"),
+					CreatedBy: fmt.Sprintf("Nydusify"),
 				},
 				Annotations: annotations,
 			})
@@ -464,7 +464,7 @@ func (registry *Registry) PushCache() error {
 				return errors.Wrap(err, "get compressed bootstrap")
 			}
 			defer bootstrapReader.Close()
-			if err := registry.BuildCache.PushFromReader(bootstrapReader, bootstrapDesc); err != nil {
+			if err := registry.BuildCache.Push(bootstrapDesc, bootstrapReader); err != nil {
 				return errors.Wrap(err, "push cached bootstrap")
 			}
 			if blobDesc != nil {
@@ -473,7 +473,7 @@ func (registry *Registry) PushCache() error {
 					return errors.Wrap(err, "get compressed blob")
 				}
 				defer blobReader.Close()
-				if err := registry.BuildCache.PushFromReader(blobReader, blobDesc); err != nil {
+				if err := registry.BuildCache.Push(blobDesc, blobReader); err != nil {
 					return errors.Wrap(err, "push cached blob")
 				}
 			}
@@ -499,7 +499,7 @@ func (registry *Registry) PushCache() error {
 	// Import cache from registry again, to use latest
 	// cache record list, ignore the error
 	registry.BuildCache.Import()
-	registry.BuildCache.Push(cacheRecords)
+	registry.BuildCache.Record(cacheRecords)
 
 	if err := registry.BuildCache.Export(); err != nil {
 		return errors.Wrap(err, "export cache")

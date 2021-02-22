@@ -50,7 +50,7 @@ func New(option Option) (*Converter, error) {
 	if err := os.RemoveAll(sourceDir); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(sourceDir, 0770); err != nil {
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
 		return nil, errors.Wrap(err, "create source directory")
 	}
 

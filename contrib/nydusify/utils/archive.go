@@ -102,7 +102,7 @@ func DecompressTargz(dst string, r io.Reader) error {
 	}
 	defer ds.Close()
 
-	if err := os.MkdirAll(dst, 0770); err != nil {
+	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err
 	}
 

@@ -15,7 +15,6 @@ import (
 	"contrib/nydusify/remote"
 	"contrib/nydusify/utils"
 
-	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
@@ -178,17 +177,8 @@ func (cache *Cache) Export() error {
 	if err != nil {
 		return err
 	}
-	configWriter, err := cache.remote.Push(cache.ctx, *configDesc, false)
-	if err != nil {
+	if err := cache.remote.Push(cache.ctx, configDesc, false, bytes.NewReader(configBytes)); err != nil {
 		return errors.Wrap(err, "push cache config")
-	}
-	if configWriter != nil {
-		defer configWriter.Close()
-		if err := content.Copy(
-			cache.ctx, configWriter, bytes.NewReader(configBytes), configDesc.Size, configDesc.Digest,
-		); err != nil {
-			return errors.Wrap(err, "write cache config")
-		}
 	}
 
 	// Push cache manifest to remote registry
@@ -216,17 +206,8 @@ func (cache *Cache) Export() error {
 		return err
 	}
 
-	manifestWriter, err := cache.remote.Push(cache.ctx, *manifestDesc, false)
-	if err != nil {
+	if err := cache.remote.Push(cache.ctx, manifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
 		return errors.Wrap(err, "push cache manifest")
-	}
-	if manifestWriter != nil {
-		defer manifestWriter.Close()
-		if err := content.Copy(
-			cache.ctx, manifestWriter, bytes.NewReader(manifestBytes), manifestDesc.Size, manifestDesc.Digest,
-		); err != nil {
-			return errors.Wrap(err, "write cache manifest")
-		}
 	}
 
 	return nil
@@ -289,7 +270,7 @@ func (cache *Cache) Check(layerChainID digest.Digest) (*CacheRecordWithChainID, 
 	return &found, bootstrapReader, nil, nil
 }
 
-func (cache *Cache) Push(records []CacheRecordWithChainID) {
+func (cache *Cache) Record(records []CacheRecordWithChainID) {
 	moveFront := map[digest.Digest]bool{}
 	for _, record := range records {
 		moveFront[record.SourceChainID] = true
@@ -326,8 +307,8 @@ func (cache *Cache) PullBootstrap(bootstrapDesc *ocispec.Descriptor, target stri
 	return nil
 }
 
-func (cache *Cache) PushFromReader(reader io.Reader, desc *ocispec.Descriptor) error {
-	return cache.remote.PushFromReader(cache.ctx, desc, true, reader)
+func (cache *Cache) Push(desc *ocispec.Descriptor, reader io.Reader) error {
+	return cache.remote.Push(cache.ctx, desc, true, reader)
 }
 
 func (cache *Cache) GetRef() string {

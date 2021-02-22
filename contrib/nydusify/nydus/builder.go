@@ -57,7 +57,7 @@ func (builder *Builder) Run(option BuilderOption) error {
 		option.BackendConfig,
 		option.RootfsPath,
 		"--log-level",
-		"warn")
+		"error")
 
 	if option.BlobPath != "" {
 		args = append(args, "--blob", option.BlobPath)

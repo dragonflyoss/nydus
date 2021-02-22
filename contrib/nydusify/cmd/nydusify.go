@@ -18,6 +18,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
+	"contrib/nydusify/checker"
 	"contrib/nydusify/converter"
 )
 
@@ -31,6 +32,22 @@ func isPossibleValue(excepted []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, error) {
+	if backendConfigJSON != "" && backendConfigFile != "" {
+		return "", fmt.Errorf("--backend-config conflicts with --backend-config-file")
+	}
+
+	if backendConfigFile != "" {
+		_backendConfigJSON, err := ioutil.ReadFile(backendConfigFile)
+		if err != nil {
+			return "", errors.Wrap(err, "parse backend config file")
+		}
+		backendConfigJSON = string(_backendConfigJSON)
+	}
+
+	return backendConfigJSON, nil
 }
 
 func main() {
@@ -54,7 +71,7 @@ func main() {
 			Usage: "Convert source image to nydus image",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
-				&cli.StringFlag{Name: "target", Required: false, Usage: "Target image reference", EnvVars: []string{"TARGET"}},
+				&cli.StringFlag{Name: "target", Required: false, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
 				&cli.StringFlag{Name: "target-suffix", Required: false, Usage: "Add suffix to source image reference as target image reference", EnvVars: []string{"TARGET_SUFFIX"}},
 
 				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
@@ -103,23 +120,11 @@ func main() {
 				if !isPossibleValue(possibleBackendTypes, backendType) {
 					return fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
 				}
-
-				backendConfigJSON := c.String("backend-config")
-				backendConfigFile := c.String("backend-config-file")
-
-				if backendConfigJSON != "" && backendConfigFile != "" {
-					return fmt.Errorf("--backend-config conflicts with --backend-config-file")
+				backendConfig, err := parseBackendConfig(c.String("backend-config"), c.String("backend-config-file"))
+				if err != nil {
+					return err
 				}
-
-				if backendConfigFile != "" {
-					_backendConfigJSON, err := ioutil.ReadFile(backendConfigFile)
-					if err != nil {
-						return errors.Wrap(err, "parse backend config file")
-					}
-					backendConfigJSON = string(_backendConfigJSON)
-				}
-
-				if backendType != "registry" && strings.TrimSpace(backendConfigJSON) == "" {
+				if backendType != "registry" && strings.TrimSpace(backendConfig) == "" {
 					return fmt.Errorf("--backend-config or --backend-config-file required")
 				}
 
@@ -140,7 +145,7 @@ func main() {
 					MultiPlatform:        c.Bool("multi-platform"),
 					DockerV2Format:       c.Bool("docker-v2-format"),
 					BackendType:          backendType,
-					BackendConfig:        backendConfigJSON,
+					BackendConfig:        backendConfig,
 					BuildCache:           c.String("build-cache"),
 					BuildCacheInsecure:   c.Bool("build-cache-insecure"),
 					BuildCacheMaxRecords: c.Uint("build-cache-max-records"),
@@ -150,6 +155,54 @@ func main() {
 				}
 
 				return converter.Convert()
+			},
+		},
+		{
+			Name:  "check",
+			Usage: "Check nydus image",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "source", Required: false, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
+				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
+
+				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
+				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+
+				&cli.StringFlag{Name: "work-dir", Value: "./output", Usage: "Work directory path for image check, will be cleaned before checking", EnvVars: []string{"WORK_DIR"}},
+				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
+				&cli.StringFlag{Name: "nydusd", Value: "./nydusd", Usage: "The nydusd binary path", EnvVars: []string{"NYDUSD"}},
+				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will check file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
+				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
+				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+			},
+			Action: func(c *cli.Context) error {
+				backendType := c.String("backend-type")
+				backendConfig := ""
+				if backendType != "" {
+					_backendConfig, err := parseBackendConfig(
+						c.String("backend-config"), c.String("backend-config-file"),
+					)
+					if err != nil {
+						return err
+					}
+					backendConfig = _backendConfig
+				}
+
+				checker, err := checker.New(checker.Opt{
+					WorkDir:        c.String("work-dir"),
+					Source:         c.String("source"),
+					Target:         c.String("target"),
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
+					NydusImagePath: c.String("nydus-image"),
+					NydusdPath:     c.String("nydusd"),
+					BackendType:    backendType,
+					BackendConfig:  backendConfig,
+				})
+				if err != nil {
+					return err
+				}
+
+				return checker.Check()
 			},
 		},
 	}

@@ -63,12 +63,12 @@ func (build *BuildFlow) getLatestBlobPath() (string, error) {
 func NewBuildFlow(option BuildFlowOption) (*BuildFlow, error) {
 	// Prepare bootstrap and blobs path for build
 	blobsDir := filepath.Join(option.TargetDir, "blobs")
-	if err := os.MkdirAll(blobsDir, 0770); err != nil {
+	if err := os.MkdirAll(blobsDir, 0755); err != nil {
 		return nil, errors.Wrap(err, "create blob directory")
 	}
 
 	bootstrapsDir := filepath.Join(option.TargetDir, "bootstraps")
-	if err := os.MkdirAll(bootstrapsDir, 0770); err != nil {
+	if err := os.MkdirAll(bootstrapsDir, 0755); err != nil {
 		return nil, errors.Wrap(err, "create bootstrap directory")
 	}
 	bootstrapPath := filepath.Join(bootstrapsDir, "bootstrap")
