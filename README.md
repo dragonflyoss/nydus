@@ -1,5 +1,7 @@
 # Nydus: Dragonfly Container Image Service
 
+<p><img src="misc/logo.svg" width="170"></p>
+
 The nydus project implements a user space filesystem on top of
 a container image format that improves over the current OCI image
 specification. Its key features include:
