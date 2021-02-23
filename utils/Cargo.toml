@@ -11,6 +11,7 @@ built = { version = "=0.4.3", features = ["git2", "chrono"] }
 
 [dependencies]
 log = "0.4.8"
+flexi_logger = { version = "0.17"}
 libc = "0.2"
 nix = "0.17"
 epoll = ">=4.0.1"

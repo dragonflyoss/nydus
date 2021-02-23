@@ -7,6 +7,8 @@ use std::ops::{Add, BitAnd, Not, Sub};
 
 use num_traits::CheckedAdd;
 use serde::Serialize;
+use std::io::{Error, ErrorKind, Result};
+use std::path::Path;
 
 #[macro_use]
 pub mod error;
@@ -17,6 +19,7 @@ pub use exec::*;
 
 #[macro_use]
 extern crate log;
+use flexi_logger::{self, colored_opt_format, opt_format, Logger};
 #[cfg(feature = "fusedev")]
 pub mod fuse;
 #[cfg(feature = "fusedev")]
@@ -105,6 +108,74 @@ impl<'a> BuildTimeInfo {
 
         (info_string, info)
     }
+}
+
+// Setup logging
+pub fn setup_logging(path: Option<&str>, level: Option<&str>) -> Result<()> {
+    if let Some(path) = path {
+        let path = Path::new(path);
+
+        // get the log directory
+        let mut dir = path
+            .parent()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "failed to get log file's directory",
+                )
+            })?
+            .to_str()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "to_str() failed"))?;
+        // parent() returns empty string in case only log filename is given, e.g. test.log
+        let cwd = std::env::current_dir()?;
+        if dir.is_empty() {
+            dir = cwd.to_str().ok_or_else(|| {
+                Error::new(ErrorKind::InvalidInput, "failed to get CWD directory")
+            })?;
+        }
+
+        // get the log file basename and suffix
+        let basename = path
+            .file_stem()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "failed to get log file basename"))?
+            .to_str()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "to_str() failed"))?;
+
+        // log filename must have suffix due to this issue: https://github.com/emabee/flexi_logger/issues/74
+        let suffix = path
+            .extension()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "failed to get log file extension"))?
+            .to_str()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "to_str() failed"))?;
+
+        Logger::with_env_or_str("trace")
+            .log_to_file()
+            .directory(dir)
+            .basename(basename)
+            .suffix(suffix)
+            .suppress_timestamp()
+            .append()
+            .format(opt_format)
+            .start()
+            .map_err(|e| Error::new(ErrorKind::Other, e))?;
+    } else {
+        Logger::with_env_or_str("trace")
+            .format(colored_opt_format)
+            .start()
+            .map_err(|e| Error::new(ErrorKind::Other, e))?;
+    }
+
+    // Safe because log level has a default value
+    let v = level
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "log level is required"))?
+        .parse()
+        .unwrap_or(log::LevelFilter::Info);
+    // We rely on `log` macro to limit current log level rather than `flexi_logger`
+    // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
+    // can't change log level to a higher level than what is passed to `flexi_logger`.
+    log::set_max_level(v);
+
+    Ok(())
 }
 
 #[cfg(test)]

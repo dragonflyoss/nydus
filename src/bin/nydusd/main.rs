@@ -9,7 +9,6 @@ extern crate clap;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
-extern crate flexi_logger;
 extern crate rafs;
 extern crate serde_json;
 
@@ -36,7 +35,7 @@ use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use vmm_sys_util::eventfd::EventFd;
 
 use nydus_api::http::start_http_thread;
-use nydus_utils::{dump_program_info, BuildTimeInfo};
+use nydus_utils::{dump_program_info, setup_logging, BuildTimeInfo};
 
 mod daemon;
 use daemon::{DaemonError, FsBackendMountCmd, FsBackendType, NydusDaemonSubscriber};
@@ -158,6 +157,14 @@ fn main() -> Result<()> {
                 .global(true),
         )
         .arg(
+            Arg::with_name("log-file")
+                .long("log-file")
+                .help("Specify the path to log file")
+                .takes_value(true)
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::with_name("rlimit-nofile")
                 .long("rlimit-nofile")
                 .default_value("1,000,000")
@@ -252,19 +259,11 @@ fn main() -> Result<()> {
 
     let cmd_arguments_parsed = cmd_arguments.get_matches();
 
-    let v = cmd_arguments_parsed
-        .value_of("log-level")
-        .unwrap()
-        .parse()
-        .unwrap_or(log::LevelFilter::Info);
+    setup_logging(
+        cmd_arguments_parsed.value_of("log-file"),
+        cmd_arguments_parsed.value_of("log-level"),
+    )?;
 
-    flexi_logger::Logger::with_env_or_str("trace")
-        .start()
-        .unwrap();
-    // We rely on `log` macro to limit current log level rather than `flexi_logger`
-    // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
-    // can't change log level to a higher level than what is passed to `flexi_logger`.
-    log::set_max_level(v);
     dump_program_info();
 
     // Retrieve arguments
