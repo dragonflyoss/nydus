@@ -9,9 +9,9 @@ extern crate clap;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
+extern crate flexi_logger;
 extern crate rafs;
 extern crate serde_json;
-extern crate stderrlog;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
@@ -36,7 +36,7 @@ use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use vmm_sys_util::eventfd::EventFd;
 
 use nydus_api::http::start_http_thread;
-use nydus_utils::{dump_program_info, log_level_to_verbosity, BuildTimeInfo};
+use nydus_utils::{dump_program_info, BuildTimeInfo};
 
 mod daemon;
 use daemon::{DaemonError, FsBackendMountCmd, FsBackendType, NydusDaemonSubscriber};
@@ -258,15 +258,12 @@ fn main() -> Result<()> {
         .parse()
         .unwrap_or(log::LevelFilter::Info);
 
-    stderrlog::new()
-        .quiet(false)
-        .verbosity(log_level_to_verbosity(log::LevelFilter::Trace))
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .init()
+    flexi_logger::Logger::with_env_or_str("trace")
+        .start()
         .unwrap();
-    // We rely on `log` macro to limit current log level rather than `stderrlog`
-    // So we set stderrlog verbosity to TRACE which is High enough. Otherwise, we
-    // can't change log level to a higher level than what is passed to `stderrlog`.
+    // We rely on `log` macro to limit current log level rather than `flexi_logger`
+    // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
+    // can't change log level to a higher level than what is passed to `flexi_logger`.
     log::set_max_level(v);
     dump_program_info();
 

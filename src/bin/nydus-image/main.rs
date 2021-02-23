@@ -4,7 +4,7 @@
 
 #[macro_use(crate_authors, crate_version)]
 extern crate clap;
-extern crate stderrlog;
+extern crate flexi_logger;
 
 mod builder;
 mod node;
@@ -37,7 +37,7 @@ use serde::Serialize;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
-use nydus_utils::{log_level_to_verbosity, BuildTimeInfo};
+use nydus_utils::BuildTimeInfo;
 use rafs::metadata::digest;
 use rafs::storage::compress;
 use trace::*;
@@ -276,18 +276,9 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let v = cmd
-        .value_of("log-level")
-        .unwrap()
-        .parse()
-        .unwrap_or(log::LevelFilter::Warn);
-
-    stderrlog::new()
-        .quiet(false)
-        .verbosity(log_level_to_verbosity(v))
-        .timestamp(stderrlog::Timestamp::Second)
-        .init()
-        .context("failed to init logger")?;
+    // safe because it has default value
+    let v = cmd.value_of("log-level").unwrap();
+    flexi_logger::Logger::with_env_or_str(v).start()?;
 
     // FIXME: only register tracer in `create` subcommand.
     register_tracer!(TraceClass::Timing, TimingTracerClass);
