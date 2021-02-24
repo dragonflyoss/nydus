@@ -503,6 +503,7 @@ impl Tree {
         // Handle whiteout file
         if handle_whiteout {
             if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
+                event_tracer!("whiteout files", +1);
                 if whiteout_type == WhiteoutType::OverlayFSOpaque {
                     self.remove(target, whiteout_spec)?;
                     return self.apply(target, false, whiteout_spec);

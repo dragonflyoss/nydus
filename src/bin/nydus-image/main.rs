@@ -362,8 +362,8 @@ fn main() -> Result<()> {
             whiteout_spec,
         )?;
 
-        // Some operations like read xattr pairs of certain types need the process
-        // to be privileged. Therefore, trace what euid and egid is
+        // Some operations like listing xattr pairs of certain namespace need the process
+        // to be privileged. Therefore, trace what euid and egid are
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
 
