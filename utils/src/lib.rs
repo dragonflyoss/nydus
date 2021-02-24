@@ -29,6 +29,9 @@ pub fn div_round_up(n: u64, d: u64) -> u64 {
 }
 
 pub fn round_up_4k(x: u64) -> Option<u64> {
+    if x == 0 {
+        return Some(0);
+    }
     ((x - 1) | 4095u64).checked_add(1)
 }
 
@@ -88,6 +91,7 @@ mod tests {
 
     #[test]
     fn test_rounders() {
+        assert_eq!(round_down_4k(0), 0);
         assert_eq!(round_down_4k(100), 0);
         assert_eq!(round_down_4k(4300), 4096);
         assert_eq!(round_down_4k(4096), 4096);
@@ -95,7 +99,8 @@ mod tests {
         assert_eq!(round_down_4k(4097), 4096);
         assert_eq!(round_down_4k(u64::MAX - 1), u64::MAX - 4095);
         assert_eq!(round_down_4k(u64::MAX - 4095), u64::MAX - 4095);
-        assert_eq!(round_down_4k(0), 0);
+        assert_eq!(round_up_4k(0), Some(0));
+        assert_eq!(round_up_4k(1), Some(4096));
         assert_eq!(round_up_4k(100), Some(4096));
         assert_eq!(round_up_4k(4100), Some(8192));
         assert_eq!(round_up_4k(4096), Some(4096));
