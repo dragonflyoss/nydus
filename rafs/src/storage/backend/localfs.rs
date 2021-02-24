@@ -19,7 +19,7 @@ use crate::storage::backend::{BackendError, BackendResult, BlobBackend, BlobBack
 use crate::storage::utils::{readahead, readv};
 
 use nydus_utils::{ebadf, einval, eio, last_error};
-use nydus_utils::{round_down_4k, round_up_4k};
+use nydus_utils::{round_down_4k, try_round_up_4k};
 
 const BLOB_ACCESSED_SUFFIX: &str = ".access";
 const BLOB_ACCESS_RECORD_SECOND: u32 = 10;
@@ -210,12 +210,13 @@ impl LocalFsAccessLog {
 
     fn do_readahead(&self) -> Result<()> {
         info!("starting localfs blob readahead");
-        let blob_end = round_up_4k(self.blob_size as u64).unwrap();
+        // Convert from `usize` to `u64` is safe to unwrap and it's hard to overflow here.
+        let blob_end: u64 = try_round_up_4k(self.blob_size).unwrap();
         for &(offset, len, zero) in self.records.lock().unwrap().iter() {
             let end: u64 = offset
                 .checked_add(len as u64)
                 .ok_or_else(|| einval!("invalid length"))?;
-            if offset > blob_end as u64 || end > blob_end as u64 || zero != 0 {
+            if offset > blob_end || end > blob_end || zero != 0 {
                 return Err(einval!(format!(
                     "invalid readahead entry ({}, {}), blob size {}",
                     offset, len, blob_end
@@ -232,17 +233,16 @@ impl LocalFsAccessLog {
             return false;
         }
 
-        let mut r = self.records.lock().unwrap();
-        if r.len() < MAX_ACCESS_RECORD {
-            r.push((
-                round_down_4k(offset),
-                // Safe to unwrap because len is u32
-                round_up_4k(len as u64).unwrap() as u32,
-                0,
-            ));
-            return true;
+        if let Some(rounded_len) = try_round_up_4k(len) {
+            let mut r = self.records.lock().unwrap();
+            if r.len() < MAX_ACCESS_RECORD {
+                r.push((round_down_4k(offset), rounded_len, 0));
+                return true;
+            }
+            false
+        } else {
+            false
         }
-        false
     }
 
     fn flush(&self) {
