@@ -32,6 +32,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
 use builder::SourceType;
@@ -360,6 +361,11 @@ fn main() -> Result<()> {
             !repeatable,
             whiteout_spec,
         )?;
+
+        // Some operations like read xattr pairs of certain types need the process
+        // to be privileged. Therefore, trace what euid and egid is
+        event_tracer!("euid", "{}", geteuid());
+        event_tracer!("egid", "{}", getegid());
 
         let (blob_ids, blob_size) =
             timing_tracer!({ ib.build().context("build failed") }, "total build time")?;

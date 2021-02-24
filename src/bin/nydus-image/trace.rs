@@ -129,6 +129,7 @@ impl BuildRootTracer {
 pub enum TraceEvent {
     Counter(AtomicU64),
     Fixed(u64),
+    Desc(String),
 }
 
 #[derive(Serialize, Default)]
@@ -220,6 +221,14 @@ macro_rules! event_tracer {
                     guard.insert($event.to_string(), TraceEvent::Counter(AtomicU64::new(0)));
                 }
             }
+        }
+    };
+    ($event:expr, $format:expr, $value:expr) => {
+        if let Ok(ref mut guard) = event_tracer!().events.write() {
+            guard.insert(
+                $event.to_string(),
+                TraceEvent::Desc(format!($format, $value)),
+            );
         }
     };
 }
