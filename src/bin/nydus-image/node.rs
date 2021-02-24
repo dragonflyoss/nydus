@@ -377,8 +377,17 @@ impl Node {
         self.inode.i_size = meta.st_size();
         // Ignore actual nlink value and calculate from rootfs directory instead
         self.inode.i_nlink = 1;
-        self.inode.i_blocks = meta.st_blocks();
-        self.inode.i_blocks = div_round_up(self.inode.i_size, 512);
+
+        // Xattr paris are located into bootstrap rather than blob, however, we should
+        // also reflect the size they consume like other file system. We don't
+        // directly use local file's metadata for `i_block` since we are purchasing
+        // "reproducible build" which means nydus image can be built from anywhere with
+        // the unique image built.
+        // TODO: The real size occupied within blob is compressed. Therefore, the
+        // sum of all chunks' size should be more accurate. But we don't know the size
+        // right now since compression is not acted yet. Try to make this accurate later.
+        self.inode.i_blocks =
+            div_round_up(self.inode.i_size + self.xattrs.aligned_size() as u64, 512);
         self.inode.i_rdev = meta.st_rdev() as u32;
 
         self.real_ino = meta.st_ino();
@@ -390,6 +399,10 @@ impl Node {
 
     fn build_inode(&mut self) -> Result<()> {
         self.inode.set_name_size(self.name().as_bytes().len());
+
+        // NOTE: Always retrieve xattr before attr so that we can know
+        // the size of xattr pairs.
+        self.build_inode_xattr()?;
         self.build_inode_stat()
             .with_context(|| format!("failed to build inode {:?}", self.path))?;
 
@@ -402,8 +415,6 @@ impl Node {
             self.inode
                 .set_symlink_size(self.symlink.as_ref().unwrap().as_bytes().len());
         }
-
-        self.build_inode_xattr()?;
 
         Ok(())
     }
