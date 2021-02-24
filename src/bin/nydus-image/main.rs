@@ -44,6 +44,46 @@ use trace::*;
 use uploader::Uploader;
 use validator::Validator;
 
+#[derive(Serialize, Default)]
+pub struct ResultOutput {
+    blobs: Vec<String>,
+    trace: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ResultOutput {
+    fn dump<W>(&self, writer: W) -> Result<()>
+    where
+        W: io::Write,
+    {
+        serde_json::to_writer(writer, &self).context("Write output file failed")
+    }
+}
+
+fn dump_result_output(matches: &clap::ArgMatches, blob_ids: Vec<String>) -> Result<()> {
+    let output_json: Option<PathBuf> = matches
+        .value_of("output-json")
+        .map(|o| o.to_string().into());
+
+    if let Some(ref f) = output_json {
+        let w = OpenOptions::new()
+            .truncate(true)
+            .create(true)
+            .write(true)
+            .open(f)
+            .with_context(|| format!("{:?} can't be opened", f))?;
+
+        let trace = root_tracer!().dump_summary_map().unwrap_or_default();
+
+        ResultOutput {
+            trace,
+            blobs: blob_ids,
+        }
+        .dump(w)?;
+    }
+
+    Ok(())
+}
+
 /// Gather readahead file paths line by line from stdin
 /// Input format:
 ///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/1"
@@ -82,12 +122,6 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     }
 
     Ok(files)
-}
-
-#[derive(Serialize, Default)]
-pub struct ResultOutput {
-    blobs: Vec<String>,
-    trace: serde_json::Map<String, serde_json::Value>,
 }
 
 fn main() -> Result<()> {
@@ -224,6 +258,12 @@ fn main() -> Result<()> {
                         .required(true)
                         .takes_value(true),
                 )
+                .arg(
+                    Arg::with_name("output-json")
+                        .long("output-json")
+                        .help("JSON output path for check result")
+                        .takes_value(true)
+                )
         )
         .arg(
             Arg::with_name("log-level")
@@ -249,6 +289,10 @@ fn main() -> Result<()> {
         .init()
         .context("failed to init logger")?;
 
+    // FIXME: only register tracer in `create` subcommand.
+    register_tracer!(TraceClass::Timing, TimingTracerClass);
+    register_tracer!(TraceClass::Event, EventTracerClass);
+
     if let Some(matches) = cmd.subcommand_matches("create") {
         let source_path = Path::new(matches.value_of("SOURCE").unwrap());
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
@@ -267,9 +311,6 @@ fn main() -> Result<()> {
         let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
         let repeatable = matches.is_present("repeatable");
-
-        register_tracer!(TraceClass::Timing, TimingTracerClass);
-        register_tracer!(TraceClass::Event, EventTracerClass);
 
         match source_type {
             SourceType::Directory => {
@@ -373,7 +414,7 @@ fn main() -> Result<()> {
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(&bootstrap_path)?;
-            let valid = timing_tracer!(
+            timing_tracer!(
                 {
                     validator
                         .check(false)
@@ -381,33 +422,9 @@ fn main() -> Result<()> {
                 },
                 "validate bootstrap out of band"
             )?;
-
-            if !valid {
-                bail!("failed to build bootstrap");
-            }
         }
 
-        let output_json: Option<PathBuf> = matches
-            .value_of("output-json")
-            .map(|o| o.to_string().into());
-
-        if let Some(ref f) = output_json {
-            let w = OpenOptions::new()
-                .truncate(true)
-                .create(true)
-                .write(true)
-                .open(f)
-                .with_context(|| format!("{:?} can't be opened", f))?;
-
-            let map = root_tracer!().dump_summary_map().unwrap_or_default();
-
-            let summary_output = ResultOutput {
-                trace: map,
-                blobs: blob_ids.clone(),
-            };
-
-            serde_json::to_writer(w, &summary_output).context("Write output file failed")?;
-        }
+        dump_result_output(matches, blob_ids.clone())?;
 
         if blob_size > 0 {
             // Upload blob file
@@ -431,14 +448,13 @@ fn main() -> Result<()> {
     if let Some(matches) = cmd.subcommand_matches("check") {
         let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
         let mut validator = Validator::new(bootstrap_path)?;
-        let valid = validator
+        let blob_ids = validator
             .check(true)
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
-        if valid {
-            info!("bootstrap is valid");
-        } else {
-            bail!("bootstrap is invalid");
-        }
+
+        info!("bootstrap is valid, blobs: {:?}", blob_ids);
+
+        dump_result_output(matches, blob_ids)?;
     }
 
     Ok(())

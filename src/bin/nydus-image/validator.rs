@@ -33,7 +33,7 @@ impl Validator {
         Ok(Self { f_bootstrap })
     }
 
-    pub fn check(&mut self, verbosity: bool) -> Result<bool> {
+    pub fn check(&mut self, verbosity: bool) -> Result<Vec<String>> {
         let err = "failed to load bootstrap for validator";
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
@@ -53,6 +53,14 @@ impl Validator {
             true
         })?;
 
-        Ok(true)
+        let blob_ids = rs
+            .inodes
+            .get_blob_table()
+            .entries
+            .iter()
+            .map(|entry| entry.blob_id.to_string())
+            .collect::<Vec<String>>();
+
+        Ok(blob_ids)
     }
 }
