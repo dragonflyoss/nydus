@@ -62,6 +62,10 @@ lazy_static! {
 
         r.routes.insert(endpoint!("/daemon"), Box::new(InfoHandler{}));
         r.routes.insert(endpoint!("/daemon/events"), Box::new(EventsHandler{}));
+        r.routes.insert(endpoint!("/daemon/backend"), Box::new(FsBackendInfo{}));
+        r.routes.insert(endpoint!("/daemon/exit"), Box::new(ExitHandler{}));
+        r.routes.insert(endpoint!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
+        r.routes.insert(endpoint!("/daemon/fuse/takeover"), Box::new(TakeoverHandler{}));
         r.routes.insert(endpoint!("/mount"), Box::new(MountHandler{}));
         r.routes.insert(endpoint!("/metrics"), Box::new(MetricsHandler{}));
         r.routes.insert(endpoint!("/metrics/files"), Box::new(MetricsFilesHandler{}));
@@ -69,10 +73,6 @@ lazy_static! {
         r.routes.insert(endpoint!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
         r.routes.insert(endpoint!("/metrics/inflight"), Box::new(MetricsInflightHandler{}));
-        r.routes.insert(endpoint!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
-        r.routes.insert(endpoint!("/daemon/fuse/takeover"), Box::new(TakeoverHandler{}));
-        r.routes.insert(endpoint!("/daemon/backend"), Box::new(FsBackendInfo{}));
-        r.routes.insert(endpoint!("/daemon/exit"), Box::new(ExitHandler{}));
         r
     };
 }

@@ -644,7 +644,8 @@ impl BackendMetrics {
 
     pub fn end(&self, begin: &SystemTime, size: usize, error: bool) {
         if let Ok(d) = SystemTime::elapsed(begin) {
-            // FIXME: converting u128 to usize is fragile.
+            // Below conversion from u128 to usize is acceptable since elapsed
+            // is a short duration.
             let elapsed = d.as_micros() as usize;
             self.read_count.inc();
             self.read_cumulative_latency_total.add(elapsed);

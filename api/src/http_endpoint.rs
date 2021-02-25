@@ -185,7 +185,10 @@ fn translate_status_code(e: &ApiError) -> StatusCode {
     }
 }
 
-// API server has successfully processed the request, but can't fulfill that.
+// API server has successfully processed the request, but can't fulfill that. Therefore,
+// a `error_response` is generated whose status code is 4XX or 5XX. With error response,
+// it still returns Ok(error_response) to http request handling framework, which means
+// nydusd api server receives the request and try handle it, even the request can't be fulfilled.
 fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, op: O) -> Response {
     match api_resp {
         Ok(r) => {
