@@ -2,22 +2,26 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nydus
+package build
 
 import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 type BuilderOption struct {
 	ParentBootstrapPath string
 	BootstrapPath       string
-	BlobPath            string
 	RootfsPath          string
 	BackendType         string
 	BackendConfig       string
 	PrefetchDir         string
+	WhiteoutSpec        string
+	OutputJSONPath      string
 }
 
 type Builder struct {
@@ -34,6 +38,7 @@ func NewBuilder(binaryPath string) *Builder {
 	}
 }
 
+// Run exec nydus-image CLI to build layer
 func (builder *Builder) Run(option BuilderOption) error {
 	var args []string
 	if option.ParentBootstrapPath == "" {
@@ -57,15 +62,18 @@ func (builder *Builder) Run(option BuilderOption) error {
 		option.BackendConfig,
 		option.RootfsPath,
 		"--log-level",
-		"error")
-
-	if option.BlobPath != "" {
-		args = append(args, "--blob", option.BlobPath)
-	}
+		"warn",
+		"--whiteout-spec",
+		option.WhiteoutSpec,
+		"--output-json",
+		option.OutputJSONPath,
+	)
 
 	if option.PrefetchDir != "" {
 		args = append(args, "--prefetch-policy", "fs")
 	}
+
+	logrus.Debugf("\tCommand: %s %s", builder.binaryPath, strings.Join(args[:], " "))
 
 	cmd := exec.Command(builder.binaryPath, args...)
 	cmd.Stdout = builder.stdout
