@@ -270,12 +270,15 @@ fn main() -> Result<()> {
                 .default_value("info")
                 .help("Specify log level: trace, debug, info, warn, error")
                 .takes_value(true)
+                .possible_values(&["trace", "debug", "info", "warn", "error"])
                 .required(false)
                 .global(true),
         )
         .get_matches();
 
-    setup_logging(None, cmd.value_of("log-level"))?;
+    // Safe to unwrap because it has default value and possible values are defined.
+    let level = cmd.value_of("log-level").unwrap().parse().unwrap();
+    setup_logging(None, level)?;
 
     // FIXME: only register tracer in `create` subcommand.
     register_tracer!(TraceClass::Timing, TimingTracerClass);

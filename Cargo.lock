@@ -389,7 +389,9 @@ dependencies = [
  "atty",
  "chrono",
  "glob",
+ "lazy_static",
  "log",
+ "regex",
  "thiserror",
  "yansi",
 ]
@@ -1118,6 +1120,7 @@ dependencies = [
  "built",
  "chrono",
  "epoll",
+ "flexi_logger",
  "fuse-rs",
  "libc",
  "log",
