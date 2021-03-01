@@ -377,10 +377,6 @@ components:
           type: array
           items:
             type: integer
-        fop_cumulative_latency_avg:
-          type: array
-          items:
-            type: integer
         fop_cumulative_latency_total:
           type: array
           items:
@@ -428,7 +424,7 @@ components:
           description: How many times a file is read regardless of io block size and request offset
         first_access_time:
           type: integer
-          description: Last time point at which this file is read. It's wall-time in unit of seconds
+          description: First time point at which this file is read. It's wall-time in unit of seconds
     RafsBackend:
       type: object
       properties:

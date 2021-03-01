@@ -313,6 +313,8 @@ impl GlobalIOStats {
                 Some(r) => {
                     r.nr_read.fetch_add(1, Ordering::Relaxed);
                     if r.first_access_time.load(Ordering::Relaxed) == 0 {
+                        // FIXME: Conversion from `u64` to `usize` on 32-bit platform
+                        // is not reliable. Fix this by using AtomicU64 instead.
                         r.first_access_time.store(
                             SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)
