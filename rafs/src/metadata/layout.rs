@@ -859,8 +859,8 @@ impl RafsChunkInfo for OndiskChunkInfo {
     }
 
     #[inline]
-    fn block_id(&self) -> Arc<RafsDigest> {
-        Arc::new(self.block_id)
+    fn block_id(&self) -> &RafsDigest {
+        &self.block_id
     }
 
     #[inline]

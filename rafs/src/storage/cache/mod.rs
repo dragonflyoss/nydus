@@ -231,7 +231,7 @@ pub trait RafsCache {
         if chunk.len() != d_size {
             return Err(eio!());
         }
-        if need_validate && !digest_check(chunk, &cki.block_id(), self.digester()) {
+        if need_validate && !digest_check(chunk, cki.block_id(), self.digester()) {
             return Err(eio!());
         }
 

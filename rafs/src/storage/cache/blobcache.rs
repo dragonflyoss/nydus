@@ -153,14 +153,14 @@ impl BlobCacheState {
         backend: &(dyn BlobBackend + Sync + Send),
         metrics: &Arc<BlobcacheMetrics>,
     ) -> Result<Arc<Mutex<BlobCacheEntry>>> {
-        let block_id = cki.block_id();
+        let block_id = *cki.block_id();
         // Double check if someone else has inserted the blob chunk concurrently.
         if let Some(entry) = self.chunk_map.get(&block_id) {
             Ok(entry.clone())
         } else {
             let (fd, _) = self.get_blob_fd(blob_id, backend, metrics)?;
             let entry = Arc::new(Mutex::new(BlobCacheEntry::new(cki, fd)));
-            let r = self.chunk_map.insert(*block_id, entry.clone());
+            let r = self.chunk_map.insert(block_id, entry.clone());
             if r.is_some() {
                 warn!("Entry(block_id={}) is inserted again", block_id);
             }
@@ -257,7 +257,8 @@ impl BlobCache {
                 } else {
                     (c2, cache_entry.chunk.decompress_offset())
                 };
-
+                // TODO: Try to make this as a following asynchronous step writing cache
+                // This should be help to reduce read latency.
                 cache_entry.cache(chunk, c_offset)
             })?;
         }
@@ -411,8 +412,6 @@ impl BlobCache {
 // TODO: This function is too long... :-(
 fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
     for num in 0..cache.prefetch_worker.threads_count {
-        // Clone cache fulfils our requirement that invoke `read_chunks` and it's
-        // hard to move `self` into closure.
         let blobcache = cache.clone();
         let rx = blobcache.mr_receiver.clone();
         // TODO: We now don't define prefetch policy. Prefetch works according to hints coming
@@ -557,7 +556,7 @@ impl RafsCache for BlobCache {
             .read()
             .unwrap()
             .chunk_map
-            .contains_key(&blk.block_id())
+            .contains_key(blk.block_id())
     }
 
     fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
