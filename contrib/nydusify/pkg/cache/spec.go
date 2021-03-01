@@ -1,3 +1,7 @@
+// Copyright 2020 Ant Group. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package cache
 
 import (
@@ -11,12 +15,8 @@ type CacheManifest struct {
 }
 
 type CacheRecord struct {
+	SourceChainID        digest.Digest
 	NydusBlobDesc        *ocispec.Descriptor
 	NydusBootstrapDesc   *ocispec.Descriptor
 	NydusBootstrapDiffID digest.Digest
-}
-
-type CacheRecordWithChainID struct {
-	SourceChainID digest.Digest
-	CacheRecord
 }
