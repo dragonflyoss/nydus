@@ -187,14 +187,13 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	if d.SharedDaemon {
 		return d.SharedUmount()
 	}
-	// if we found pid here, we need to kill and wait process to exit, Pid=-1 means somehow we lost
+	// if we found pid here, we need to kill and wait process to exit, Pid=0 means somehow we lost
 	// the daemon pid, so that we can't kill the process, just roughly umount the mountpoint
 	if d.Pid > 0 {
 		p, err := os.FindProcess(d.Pid)
 		if err != nil {
 			return err
 		}
-
 		err = p.Kill()
 		if err != nil {
 			return err
@@ -204,9 +203,7 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 			return err
 		}
 	}
-	err := m.mounter.Umount(d.MountPoint())
-	// EINVAL means it already is not a mount point
-	if err != nil && err != syscall.EINVAL {
+	if err := m.mounter.Umount(d.MountPoint()); err != nil && err != syscall.EINVAL {
 		return errors.Wrap(err, fmt.Sprintf("failed to umount mountpoint %s", d.MountPoint()))
 	}
 	return nil

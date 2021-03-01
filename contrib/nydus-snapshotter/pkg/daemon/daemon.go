@@ -108,6 +108,14 @@ func (d *Daemon) SharedMount() error {
 	return client.SharedMount(d.MountPoint(), bootstrap, d.ConfigFile())
 }
 
+func (d *Daemon) SharedUmount() error {
+	client, err := nydussdk.NewNydusClient(d.APISock())
+	if err != nil {
+		return errors.Wrap(err, "failed to mount")
+	}
+	return client.Umount(d.MountPoint())
+}
+
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
 	d := &Daemon{Pid: 0}
 	d.ID = newID()
