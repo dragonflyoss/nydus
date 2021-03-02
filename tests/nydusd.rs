@@ -27,7 +27,7 @@ pub fn new(
     digest_validate: bool,
 ) -> Result<Nydusd> {
     let cache_path = work_dir.join("cache");
-    fs::create_dir_all(cache_path.clone())?;
+    fs::create_dir_all(cache_path)?;
 
     let cache = format!(
         r###"
@@ -148,8 +148,8 @@ impl Nydusd {
     }
 
     pub fn is_mounted(&self, mount_path: &str) -> Result<bool> {
-        let ret = exec(format!("cat /proc/mounts").as_str(), true)?;
-        for line in ret.split("\n") {
+        let ret = exec("cat /proc/mounts", true)?;
+        for line in ret.split('\n') {
             if line.contains(self.work_dir.join(mount_path).to_str().unwrap()) {
                 return Ok(true);
             }

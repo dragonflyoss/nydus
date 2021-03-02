@@ -242,7 +242,7 @@ impl<'a> Builder<'a> {
     }
 
     pub fn build_upper(&mut self, compressor: &str) -> Result<()> {
-        let upper_dir = self.work_dir.join("upper").to_path_buf();
+        let upper_dir = self.work_dir.join("upper");
 
         exec(
             format!(
