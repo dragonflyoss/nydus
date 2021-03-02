@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #[macro_use]
 extern crate log;
-extern crate stderrlog;
 
 mod builder;
 mod nydusd;
@@ -13,7 +12,7 @@ use std::path::PathBuf;
 
 use vmm_sys_util::tempdir::TempDir;
 
-use nydus_utils::{eother, exec};
+use nydus_utils::{eother, exec, setup_logging};
 
 const COMPAT_BOOTSTRAPS: &'static [&'static str] = &[
     "blake3-lz4_block-non_repeatable",
@@ -130,13 +129,8 @@ fn test(
 }
 
 #[test]
-fn integration_test_init() -> Result<()> {
-    stderrlog::new()
-        .quiet(false)
-        .timestamp(stderrlog::Timestamp::Second)
-        .verbosity(log::LevelFilter::Trace as usize - 1)
-        .init()
-        .map_err(|e| eother!(e))
+fn integration_test_init() {
+    setup_logging(None, log::LevelFilter::Trace).unwrap()
 }
 
 #[test]
