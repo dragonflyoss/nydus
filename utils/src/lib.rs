@@ -120,10 +120,22 @@ impl<'a> BuildTimeInfo {
 /// is "bar", the newly created log file will be "bar.log"
 pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Result<()> {
     if let Some(ref path) = log_file_path {
-        // Do not try to canonicalize since the file may not exist yet.
-        // Basename can also have dot inside.
+        // Do not try to canonicalize the path since the file may not exist yet.
+
+        // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
+        // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
+        // can't change log level to a higher level than what is passed to `flexi_logger`.
+        let mut logger = Logger::with_env_or_str("trace")
+            .log_to_file()
+            .suppress_timestamp()
+            .append()
+            .format(opt_format);
+
+        // Parse log file to get the `basename` and `suffix`(extension) because `flexi_logger`
+        // will automatically add `.log` suffix if we don't set explicitly, see:
+        // https://github.com/emabee/flexi_logger/issues/74
         let basename = path
-            .file_name()
+            .file_stem()
             .ok_or_else(|| {
                 eprintln!("invalid file name input {:?}", path);
                 einval!()
@@ -133,18 +145,19 @@ pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Resu
                 eprintln!("invalid file name input {:?}", path);
                 einval!()
             })?;
+        logger = logger.basename(basename);
+
+        // `flexi_logger` automatically add `.log` suffix if the file name has not extension.
+        if let Some(suffix) = path.extension() {
+            let suffix = suffix.to_str().ok_or_else(|| {
+                eprintln!("invalid file extension {:?}", suffix);
+                einval!()
+            })?;
+            logger = logger.suffix(suffix);
+        }
+
+        // Set log directory
         let parent_dir = path.parent();
-
-        // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
-        // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
-        // can't change log level to a higher level than what is passed to `flexi_logger`.
-        let mut logger = Logger::with_env_or_str("trace")
-            .log_to_file()
-            .basename(basename)
-            .suppress_timestamp()
-            .append()
-            .format(opt_format);
-
         if let Some(p) = parent_dir {
             let cwd = current_dir()?;
             let dir = if !p.has_root() {

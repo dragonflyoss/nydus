@@ -160,7 +160,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
-                .help("Specify the path to log file")
+                .help("Specify the path to log file. If log filename has not extension, the default \".log\" will be added.")
                 .takes_value(true)
                 .required(false)
                 .global(true),
