@@ -73,6 +73,10 @@ pub struct Builder {
     /// Store all nodes during build, node index of root starting from 1,
     /// so the collection index equal to (node.index - 1).
     nodes: Vec<Node>,
+    /// When filling local blobcache file, chunks are arranged as per the
+    /// `decompress_offset` within chunk info. Therefore, provide a new flag
+    /// to image tool thus to align chunks in blob with 4k size.
+    aligned_chunk: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,6 +136,7 @@ impl Builder {
         prefetch_policy: PrefetchPolicy,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
+        aligned_chunk: bool,
     ) -> Result<Builder> {
         let f_blob = if let Some(blob_path) = blob_path {
             Some(Box::new(BufWriter::with_capacity(
@@ -194,6 +199,7 @@ impl Builder {
             hint_readahead_files,
             prefetch_policy,
             nodes: Vec::new(),
+            aligned_chunk,
         })
     }
 
@@ -488,6 +494,8 @@ impl Builder {
                                 self.compressor,
                                 self.digester,
                                 blob_index,
+                                // TODO: Introduce build context to enclose the sparse states?
+                                self.aligned_chunk,
                             )
                             .context("failed to dump readahead blob chunks")?;
                     }
@@ -516,6 +524,7 @@ impl Builder {
                                 self.compressor,
                                 self.digester,
                                 blob_index,
+                                self.aligned_chunk,
                             )
                             .context("failed to dump remaining blob chunks")?;
                     }

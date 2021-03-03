@@ -232,7 +232,7 @@ impl BlobBackend for OSS {
         _blob_readahead_size: u32,
     ) -> BackendResult<()> {
         Err(BackendError::Unsupported(
-            "Oss backend does not support prefetch per as to on-disk blob entries".to_string(),
+            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
         ))
     }
 

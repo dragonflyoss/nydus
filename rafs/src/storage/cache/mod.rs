@@ -109,7 +109,7 @@ pub trait RafsCache {
     /// Read a whole chunk directly from *backend*.
     /// The fetched chunk could be compressed or not by different compressors.
     /// It depends on `cki` how to describe the chunk data.
-    /// Moreover, chunk data from backend can be validated per as to nydus configuration.
+    /// Moreover, chunk data from backend can be validated as per nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
     fn read_backend_chunk<F>(
         &self,
@@ -204,7 +204,7 @@ pub trait RafsCache {
     }
 
     /// Before storing chunk data into blob cache file. We have cook the raw chunk from
-    /// backend a bit per as to the chunk description as blob cache always saves plain data
+    /// backend a bit as per the chunk description as blob cache always saves plain data
     /// into cache file rather than compressed.
     /// An inside trick is that it tries to directly save data into caller's buffer.
     fn process_raw_chunk(

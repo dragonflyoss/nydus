@@ -21,7 +21,7 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
-use nydus_utils::div_round_up;
+use nydus_utils::{div_round_up, try_round_up_4k};
 
 use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
@@ -220,6 +220,7 @@ impl Node {
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
         blob_index: u32,
+        aligned_chunk: bool,
     ) -> Result<usize> {
         if self.is_dir() {
             return Ok(0);
@@ -247,13 +248,15 @@ impl Node {
             // Use the configured value instead!
             let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
             let chunk_size = if i == self.inode.i_child_count - 1 {
-                file_size as usize - (RAFS_DEFAULT_BLOCK_SIZE as usize * i as usize)
+                file_size - (RAFS_DEFAULT_BLOCK_SIZE * i as u64)
             } else {
-                RAFS_DEFAULT_BLOCK_SIZE as usize
+                RAFS_DEFAULT_BLOCK_SIZE
             };
 
             // Read chunk data
-            let mut chunk_data = vec![0; chunk_size];
+            // TODO: Hopefully, we don't have to allocate memory from heap each time.
+            // and the `usize` type restriction won't bother us anymore.
+            let mut chunk_data = vec![0; chunk_size as usize];
             file.read_exact(&mut chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
@@ -300,7 +303,13 @@ impl Node {
 
             // Move cursor to offset of next chunk
             *compress_offset += compressed_size as u64;
-            *decompress_offset += chunk_size as u64;
+            *decompress_offset += if aligned_chunk {
+                // Safe to unwrap since we can't have such a large chunk
+                // and conversion between u64 values is safe.
+                try_round_up_4k(chunk_size).unwrap()
+            } else {
+                chunk_size
+            };
 
             // Calculate blob hash
             blob_hash.update(&compressed);
