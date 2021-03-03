@@ -6,122 +6,129 @@ package utils
 
 import (
 	"sync"
-	"sync/atomic"
 )
 
-type Job interface {
-	Do(method int) error
+type Job = func() error
+
+type RJob interface {
+	Do() error
+	Err() error
 }
 
-type JobRet struct {
-	idx int
-	Job Job
-	Err error
+// QueueWorkerPool creates a worker pool with fixed count, caller
+// puts some jobs to the pool by a fixed order and then wait all
+// jobs finish by the previous order
+type QueueWorkerPool struct {
+	err  error
+	jobs chan RJob
+	rets []chan RJob
 }
 
-func NewQueueWorkerPool(jobs []Job, worker uint, method int) []chan JobRet {
-	count := len(jobs)
-
-	if count <= 0 {
-		return nil
+// NewQueueWorkerPool creates a queued worker pool, `worker` is worker
+// count, `total` is expected job count
+func NewQueueWorkerPool(worker, total uint) *QueueWorkerPool {
+	pool := &QueueWorkerPool{
+		jobs: make(chan RJob, total),
+		rets: make([]chan RJob, total),
 	}
 
-	remain := uint64(count)
-	queue := make(chan JobRet, count)
-	results := []chan JobRet{}
-
-	for idx, job := range jobs {
-		jobRet := JobRet{
-			idx: idx,
-			Job: job,
-			Err: nil,
-		}
-		queue <- jobRet
-		results = append(results, make(chan JobRet))
+	for idx := range pool.rets {
+		pool.rets[idx] = make(chan RJob, 1)
 	}
+
+	current := uint(0)
+	var lock sync.Mutex
 
 	for count := uint(0); count < worker; count++ {
 		go func() {
 			for {
-				jobRet, ok := <-queue
+				lock.Lock()
+				current++
+				if current > total {
+					lock.Unlock()
+					break
+				}
+				index := current - 1
+				job, ok := <-pool.jobs
 				if !ok {
-					return
+					lock.Unlock()
+					break
 				}
-				err := jobRet.Job.Do(method)
-				jobRet.Err = err
-				results[jobRet.idx] <- jobRet
+				lock.Unlock()
+
+				err := job.Do()
+				pool.rets[index] <- job
 				if err != nil {
-					close(queue)
-					return
-				}
-				if atomic.AddUint64(&remain, ^uint64(0)) == 0 {
-					close(queue)
+					pool.err = err
+					break
 				}
 			}
 		}()
 	}
 
-	return results
+	return pool
 }
 
-type WorkerPool struct {
-	err   error
-	wg    sync.WaitGroup
-	queue chan JobRet
-}
-
-func NewWorkerPool(worker uint, method int) *WorkerPool {
-	queue := make(chan JobRet, worker)
-
-	workerPool := WorkerPool{
-		queue: queue,
-		wg:    sync.WaitGroup{},
-	}
-
-	for count := uint(0); count < worker; count++ {
-		go func() {
-			for {
-				jobRet, ok := <-queue
-				if !ok {
-					return
-				}
-				err := jobRet.Job.Do(method)
-				jobRet.Err = err
-				workerPool.wg.Done()
-				if workerPool.err != nil {
-					return
-				}
-				if err != nil {
-					workerPool.err = err
-					close(queue)
-					return
-				}
-			}
-		}()
-	}
-
-	return &workerPool
-}
-
-func (pool *WorkerPool) AddJob(job Job) error {
+func (pool *QueueWorkerPool) Put(_job RJob) error {
 	if pool.err != nil {
 		return pool.err
 	}
-	pool.wg.Add(1)
-	go func() {
-		pool.queue <- JobRet{
-			idx: 0,
-			Job: job,
-			Err: nil,
-		}
-	}()
+
+	pool.jobs <- _job
+
+	return nil
+}
+
+func (pool *QueueWorkerPool) Waiter() []chan RJob {
+	return pool.rets
+}
+
+// WorkerPool creates a worker pool with fixed count, caller
+// puts some jobs to the pool and then wait all jobs finish
+type WorkerPool struct {
+	err   error
+	wg    sync.WaitGroup
+	queue chan Job
+}
+
+// NewWorkerPool creates a worker pool, `worker` is worker
+// count, `total` is expected job count
+func NewWorkerPool(worker, total uint) *WorkerPool {
+	pool := &WorkerPool{
+		queue: make(chan Job, total),
+	}
+
+	for count := uint(0); count < worker; count++ {
+		pool.wg.Add(1)
+		go func() {
+			defer pool.wg.Done()
+			for {
+				job, ok := <-pool.queue
+				if !ok {
+					break
+				}
+
+				if err := job(); err != nil {
+					pool.err = err
+					break
+				}
+			}
+		}()
+	}
+
+	return pool
+}
+
+func (pool *WorkerPool) Put(job Job) error {
+	if pool.err != nil {
+		return pool.err
+	}
+	pool.queue <- job
 	return nil
 }
 
 func (pool *WorkerPool) Wait() error {
+	close(pool.queue)
 	pool.wg.Wait()
-	if pool.err == nil {
-		close(pool.queue)
-	}
 	return pool.err
 }

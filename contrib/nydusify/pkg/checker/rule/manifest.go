@@ -11,7 +11,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/checker/parser"
+	"contrib/nydusify/pkg/checker/parser"
 )
 
 // ManifestRule validates manifest format of Nydus image

@@ -106,7 +106,7 @@ func (cg *cacheGlue) Push(ctx context.Context, layer *buildLayer) error {
 	})
 
 	// Push bootstrap layer to cache image
-	bootstrapReader, err := utils.CompressTargz(
+	bootstrapReader, err := utils.PackTargz(
 		layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
 	)
 	if err != nil {

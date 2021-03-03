@@ -8,18 +8,16 @@ const (
 	ManifestOSFeatureNydus   = "nydus.remoteimage.v1"
 	MediaTypeNydusBlob       = "application/vnd.oci.image.layer.nydus.blob.v1"
 	BootstrapFileNameInLayer = "image/image.boot"
-	ManifestNydusCache       = "containerd.io/snapshot/nydus-cache"
-	ManifestNydusCacheV1     = "v1"
 
-	LayerAnnotationNydusBlob      = "containerd.io/snapshot/nydus-blob"
-	LayerAnnotationNydusBlobIDs   = "containerd.io/snapshot/nydus-blob-ids"
-	LayerAnnotationNydusBootstrap = "containerd.io/snapshot/nydus-bootstrap"
-	LayerAnnotationNydusSignature = "containerd.io/snapshot/nydus-signature"
+	ManifestNydusCache        = "containerd.io/snapshot/nydus-cache"
+	ManifestNydusCacheVersion = "v1"
 
-	LayerAnnotationNydusSourceChainID = "containerd.io/snapshot/nydus-source-chainid"
+	LayerAnnotationNydusBlob          = "containerd.io/snapshot/nydus-blob"
 	LayerAnnotationNydusBlobDigest    = "containerd.io/snapshot/nydus-blob-digest"
 	LayerAnnotationNydusBlobSize      = "containerd.io/snapshot/nydus-blob-size"
-	LayerAnnotationNydusRafsVersion   = "containerd.io/snapshot/nydus-rafs-version"
+	LayerAnnotationNydusBlobIDs       = "containerd.io/snapshot/nydus-blob-ids"
+	LayerAnnotationNydusBootstrap     = "containerd.io/snapshot/nydus-bootstrap"
+	LayerAnnotationNydusSourceChainID = "containerd.io/snapshot/nydus-source-chainid"
 
 	LayerAnnotationUncompressed = "containerd.io/uncompressed"
 )

@@ -6,11 +6,12 @@ package parser
 
 import (
 	"context"
-	"contrib/nydusify/remote"
-	"contrib/nydusify/utils"
 	"encoding/json"
 	"io"
 	"io/ioutil"
+
+	"contrib/nydusify/pkg/remote"
+	"contrib/nydusify/pkg/utils"
 
 	"github.com/containerd/containerd/images"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -18,17 +19,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Opt provides parser options.
-type Opt struct {
-	Ref      string
-	Insecure bool
-}
-
 // Parser parses Nydus image manifest, manifest index and
 // image config into Parsed object.
 type Parser struct {
-	Opt
-	remote *remote.Remote
+	Remote *remote.Remote
 }
 
 // Parsed presents OCI and Nydus image manifest.
@@ -42,25 +36,14 @@ type Parsed struct {
 }
 
 // New creates Nydus image parser instance.
-func New(opt Opt) (*Parser, error) {
-	remote, err := remote.NewRemote(remote.RemoteOpt{
-		Ref:      opt.Ref,
-		Insecure: opt.Insecure,
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "init remote")
+func New(remote *remote.Remote) *Parser {
+	return &Parser{
+		Remote: remote,
 	}
-
-	parser := &Parser{
-		Opt:    opt,
-		remote: remote,
-	}
-
-	return parser, nil
 }
 
 func (parser *Parser) pull(desc *ocispec.Descriptor, res interface{}) error {
-	reader, err := parser.remote.Pull(context.Background(), *desc, true)
+	reader, err := parser.Remote.Pull(context.Background(), *desc, true)
 	if err != nil {
 		return errors.Wrap(err, "pull image resource")
 	}
@@ -117,11 +100,11 @@ func findBootstrapDesc(manifest *ocispec.Manifest) *ocispec.Descriptor {
 
 // Parse parses Nydus image reference into Parsed object.
 func (parser *Parser) Parse() (*Parsed, error) {
-	logrus.Infof("Parsing image %s", parser.Ref)
+	logrus.Infof("Parsing image %s", parser.Remote.Ref)
 
 	parsed := Parsed{}
 
-	imageDesc, err := parser.remote.Resolve(context.Background())
+	imageDesc, err := parser.Remote.Resolve(context.Background())
 	if err != nil {
 		return nil, errors.Wrap(err, "resolve image")
 	}
@@ -196,7 +179,7 @@ func (parser *Parser) Parse() (*Parsed, error) {
 		// Parse bootstrap layer in Nydus image manifest
 		bootstrapDesc := findBootstrapDesc(parsed.NydusManifest)
 		if bootstrapDesc != nil {
-			parsed.NydusBootstrap, err = parser.remote.Pull(context.Background(), *bootstrapDesc, true)
+			parsed.NydusBootstrap, err = parser.Remote.Pull(context.Background(), *bootstrapDesc, true)
 			if err != nil {
 				return nil, errors.Wrap(err, "pull Nydus bootstrap layer")
 			}

@@ -11,9 +11,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/checker/parser"
-	"contrib/nydusify/checker/rule"
-	"contrib/nydusify/checker/tool"
+	"contrib/nydusify/pkg/checker/parser"
+	"contrib/nydusify/pkg/checker/rule"
+	"contrib/nydusify/pkg/checker/tool"
+	"contrib/nydusify/pkg/converter/provider"
 )
 
 // Opt defines Checker options.
@@ -40,23 +41,20 @@ type Checker struct {
 
 // New creates Checker instance, target is the Nydus image reference.
 func New(opt Opt) (*Checker, error) {
-	targetParser, err := parser.New(parser.Opt{
-		Ref:      opt.Target,
-		Insecure: opt.TargetInsecure,
-	})
+	// TODO: support source and target resolver
+	targetRemote, err := provider.DefaultRemote(opt.Target, opt.TargetInsecure)
 	if err != nil {
-		return nil, errors.Wrap(err, "new parser")
+		return nil, errors.Wrap(err, "Init target image parser")
 	}
+	targetParser := parser.New(targetRemote)
 
 	var sourceParser *parser.Parser
 	if opt.Source != "" {
-		sourceParser, err = parser.New(parser.Opt{
-			Ref:      opt.Source,
-			Insecure: opt.SourceInsecure,
-		})
+		sourceRemote, err := provider.DefaultRemote(opt.Source, opt.SourceInsecure)
 		if err != nil {
-			return nil, errors.Wrap(err, "new parser")
+			return nil, errors.Wrap(err, "Init source image parser")
 		}
+		sourceParser = parser.New(sourceRemote)
 	}
 
 	checker := &Checker{
@@ -131,7 +129,7 @@ func (checker *Checker) Check() error {
 		}
 	}
 
-	logrus.Infof("Verified Nydus image %s", checker.targetParser.Ref)
+	logrus.Infof("Verified Nydus image %s", checker.targetParser.Remote.Ref)
 
 	return nil
 }

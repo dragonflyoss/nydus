@@ -5,7 +5,7 @@
 package rule
 
 import (
-	"contrib/nydusify/checker/tool"
+	"contrib/nydusify/pkg/checker/tool"
 	"fmt"
 	"io"
 	"os"

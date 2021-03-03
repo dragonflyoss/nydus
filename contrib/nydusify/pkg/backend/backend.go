@@ -15,6 +15,7 @@ type Backend interface {
 	// TODO: Hopefully, we can pass `Layer` struct in, thus to be able to cook both
 	// file handle and file path.
 	Upload(blobID string, blobPath string) error
+	Check(blobID string) (bool, error)
 }
 
 func NewBackend(backendType, backendConfig string) (Backend, error) {

@@ -122,3 +122,8 @@ func (b *OSSBackend) Upload(blobID string, blobPath string) error {
 
 	return err
 }
+
+func (b *OSSBackend) Check(blobID string) (bool, error) {
+	blobID = b.objectPrefix + blobID
+	return b.bucket.IsObjectExist(blobID)
+}

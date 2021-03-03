@@ -12,8 +12,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/checker/parser"
-	"contrib/nydusify/utils"
+	"contrib/nydusify/pkg/checker/parser"
+	"contrib/nydusify/pkg/utils"
 )
 
 func prettyDump(obj interface{}, name string) error {

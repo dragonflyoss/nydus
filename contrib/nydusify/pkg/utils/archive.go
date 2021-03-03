@@ -8,16 +8,17 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
+	"github.com/opencontainers/go-digest"
 )
 
-func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error) {
+// PackTargz makes .tar(.gz) stream of file named `name` and return reader
+func PackTargz(src string, name string, compress bool) (io.ReadCloser, error) {
 	fi, err := os.Stat(src)
 	if err != nil {
 		return nil, err
@@ -95,19 +96,52 @@ func CompressTargz(src string, name string, compress bool) (io.ReadCloser, error
 	return reader, nil
 }
 
-func DecompressTargz(dst string, r io.Reader) error {
+// PackTargzInfo makes .tar(.gz) stream of file named `name` and return digest and size
+func PackTargzInfo(src, name string, compress bool) (digest.Digest, int64, error) {
+	reader, err := PackTargz(src, name, compress)
+	if err != nil {
+		return "", 0, err
+	}
+	defer reader.Close()
+
+	pipeReader, pipeWriter := io.Pipe()
+
+	chanSize := make(chan int64)
+	chanErr := make(chan error)
+	go func() {
+		size, err := io.Copy(pipeWriter, reader)
+		if err != nil {
+			err = pipeWriter.CloseWithError(err)
+		} else {
+			err = pipeWriter.Close()
+		}
+		chanSize <- size
+		chanErr <- err
+	}()
+
+	hash, err := digest.FromReader(pipeReader)
+	if err != nil {
+		return "", 0, err
+	}
+	defer pipeReader.Close()
+
+	return hash, <-chanSize, <-chanErr
+}
+
+// UnpackTargz unpacks .tar(.gz) stream, and write to dst path
+func UnpackTargz(ctx context.Context, dst string, r io.Reader) error {
 	ds, err := compression.DecompressStream(r)
 	if err != nil {
 		return err
 	}
 	defer ds.Close()
 
-	if err := os.MkdirAll(dst, 0755); err != nil {
+	if err := os.MkdirAll(dst, 0770); err != nil {
 		return err
 	}
 
 	if _, err := archive.Apply(
-		context.Background(),
+		ctx,
 		dst,
 		ds,
 		archive.WithConvertWhiteout(func(hdr *tar.Header, file string) (bool, error) {
@@ -115,45 +149,6 @@ func DecompressTargz(dst string, r io.Reader) error {
 		}),
 	); err != nil {
 		return err
-	}
-
-	return nil
-}
-
-func UnpackFile(reader io.Reader, source, target string) error {
-	rdr, err := compression.DecompressStream(reader)
-	if err != nil {
-		return err
-	}
-	defer rdr.Close()
-
-	found := false
-	tr := tar.NewReader(rdr)
-	for {
-		hdr, err := tr.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			} else {
-				return err
-			}
-		}
-		if hdr.Name == source {
-			file, err := os.Create(target)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			if _, err := io.Copy(file, tr); err != nil {
-				return err
-			}
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("Not found file %s in targz", source)
 	}
 
 	return nil
