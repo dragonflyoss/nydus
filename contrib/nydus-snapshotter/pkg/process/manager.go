@@ -130,6 +130,7 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 	args := []string{
 		"--apisock", d.APISock(),
 		"--log-level", "info",
+		"--log-file", d.LogFile(),
 		"--thread-num", "10",
 	}
 	if !d.SharedDaemon {

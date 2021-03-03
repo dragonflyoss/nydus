@@ -81,6 +81,10 @@ func (d *Daemon) APISock() string {
 	return filepath.Join(d.SocketDir, APISocketFileName)
 }
 
+func (d *Daemon) LogFile() string {
+	return filepath.Join(d.LogDir, "stderr.log")
+}
+
 func (d *Daemon) binary() string {
 	return "/bin/nydusd"
 }
