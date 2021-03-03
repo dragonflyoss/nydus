@@ -7,7 +7,6 @@
 package process
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -119,23 +118,12 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("failed to create start command for daemon %s", d.ID))
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("failed to get stderr pipe for daemon %s", d.ID))
-	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	d.Pid = cmd.Process.Pid
 	// make sure to wait after start
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.L.WithField("daemon", d.ID).Debug(scanner.Text())
-		}
-		log.L.WithField("daemon", d.ID).Info("quits")
-		cmd.Wait()
-	}()
+	go cmd.Wait()
 	return nil
 
 }
