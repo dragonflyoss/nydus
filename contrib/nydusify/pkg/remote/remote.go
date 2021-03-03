@@ -7,6 +7,7 @@ package remote
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
@@ -20,8 +21,10 @@ type Remote struct {
 	Ref      string
 	parsed   reference.Named
 	resolver remotes.Resolver
+	pushed   sync.Map
 }
 
+// New creates remote instance from docker remote resolver
 func New(ref string, resolver remotes.Resolver) (*Remote, error) {
 	parsed, err := reference.ParseNormalizedNamed(ref)
 	if err != nil {
@@ -35,7 +38,17 @@ func New(ref string, resolver remotes.Resolver) (*Remote, error) {
 	}, nil
 }
 
+// Push pushes blob to registry
 func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDigest bool, reader io.Reader) error {
+	// Concurrently push blob with same digest using containerd
+	// docker remote client will cause error:
+	// `failed commit on ref: unexpected size x, expected y`
+	// use ref key leveled mutex lock to avoid the issue.
+	refKey := remotes.MakeRefKey(ctx, desc)
+	lock, _ := remote.pushed.LoadOrStore(refKey, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
+
 	var ref string
 	if byDigest {
 		ref = remote.parsed.Name()
@@ -60,6 +73,7 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 	return content.Copy(ctx, writer, reader, desc.Size, desc.Digest)
 }
 
+// Pull pulls blob from registry
 func (remote *Remote) Pull(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (io.ReadCloser, error) {
 	var ref string
 	if byDigest {
@@ -81,6 +95,7 @@ func (remote *Remote) Pull(ctx context.Context, desc ocispec.Descriptor, byDiges
 	return reader, nil
 }
 
+// Resolve parses descriptor for given image reference
 func (remote *Remote) Resolve(ctx context.Context) (*ocispec.Descriptor, error) {
 	ref := reference.TagNameOnly(remote.parsed).String()
 
