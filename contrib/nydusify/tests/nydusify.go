@@ -5,6 +5,7 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"contrib/nydusify/checker"
-	"contrib/nydusify/converter"
+	"contrib/nydusify/pkg/checker"
+	"contrib/nydusify/pkg/converter"
+	"contrib/nydusify/pkg/converter/provider"
+	"contrib/nydusify/pkg/remote"
 )
 
 var nydusImagePath string
@@ -73,28 +76,51 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		buildCache = host + "/" + nydusify.Cache
 	}
 
-	opt := converter.Option{
-		Source:         host + "/" + nydusify.Source,
-		Target:         host + "/" + nydusify.Target,
-		SourceInsecure: true,
-		TargetInsecure: true,
-		WorkDir:        "./tmp",
+	logger, err := provider.DefaultLogger()
+	assert.Nil(t, err)
 
+	workDir := "./tmp"
+	sourceDir := filepath.Join(workDir, "source")
+	err = os.MkdirAll(sourceDir, 0755)
+	assert.Nil(t, err)
+
+	sourceProvider, err := provider.DefaultSource(host+"/"+nydusify.Source, true, sourceDir)
+	assert.Nil(t, err)
+
+	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
+	assert.Nil(t, err)
+
+	var cacheRemote *remote.Remote
+	if buildCache != "" {
+		buildCache = host + "/" + nydusify.Cache
+		cacheRemote, err = provider.DefaultRemote(buildCache, true)
+		assert.Nil(t, err)
+	}
+
+	opt := converter.Opt{
+		Logger:         logger,
+		SourceProvider: sourceProvider,
+
+		TargetRemote: targetRemote,
+
+		CacheRemote:     cacheRemote,
+		CacheMaxRecords: 10,
+
+		WorkDir:        "./tmp",
+		PrefetchDir:    "/",
 		NydusImagePath: nydusImagePath,
 		MultiPlatform:  false,
 		DockerV2Format: true,
-		BackendType:    nydusify.backendType,
-		BackendConfig:  nydusify.backendConfig,
+		WhiteoutSpec:   "oci",
 
-		BuildCache:           buildCache,
-		BuildCacheInsecure:   true,
-		BuildCacheMaxRecords: 10,
+		BackendType:   nydusify.backendType,
+		BackendConfig: nydusify.backendConfig,
 	}
 
-	c, err := converter.New(opt)
+	cvt, err := converter.New(opt)
 	assert.Nil(t, err)
 
-	err = c.Convert()
+	err = cvt.Convert(context.Background())
 	assert.Nil(t, err)
 }
 
