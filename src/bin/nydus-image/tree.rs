@@ -397,7 +397,7 @@ impl FilesystemTreeBuilder {
             )
             .with_context(|| format!("failed to create node {:?}", path))?;
 
-            // Per as to OCI spec, whiteout file should not be present within final image
+            // as per OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
             if child.whiteout_type(whiteout_spec).is_some()
                 && !child.is_overlayfs_opaque(whiteout_spec)

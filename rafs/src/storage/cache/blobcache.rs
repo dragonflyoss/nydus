@@ -387,7 +387,7 @@ impl BlobCache {
             let cki = &bios[index].chunkinfo;
             let prior_bio = &bios[index - 1];
             let cur_bio = &bios[index];
-            // Even more chunks are continuous, still split them per as certain size.
+            // Even more chunks are continuous, still split them as per certain size.
             // So that to achieve an appropriate request size to backend.
             if Self::is_chunk_continuous(prior_bio, cur_bio) && mr.blob_size <= merging_size as u32
             {
