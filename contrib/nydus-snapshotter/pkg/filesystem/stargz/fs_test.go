@@ -38,13 +38,18 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 	defer func() {
 		_ = os.RemoveAll(snapshotRoot)
 	}()
+
+	mgr, err := process.NewManager(process.Opt{
+		NydusdBinaryPath: "",
+		RootDir:          snapshotRoot,
+	})
+	require.Nil(t, err)
+
 	f := filesystem{
 		FileSystemMeta: meta.FileSystemMeta{
 			RootDir: snapshotRoot,
 		},
-		manager: process.NewManager(process.Opt{
-			NydusdBinaryPath: "",
-		}),
+		manager:     mgr,
 		daemonCfg:   nydus.DaemonConfig{},
 		resolver:    nil,
 		vpcRegistry: false,
@@ -66,13 +71,18 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 	var cfg nydus.DaemonConfig
 	err = json.Unmarshal(content, &cfg)
 	require.Nil(t, err)
+
+	mgr, err := process.NewManager(process.Opt{
+		NydusdBinaryPath: "",
+		RootDir:          snapshotRoot,
+	})
+	require.Nil(t, err)
+
 	f := filesystem{
 		FileSystemMeta: meta.FileSystemMeta{
 			RootDir: snapshotRoot,
 		},
-		manager: process.NewManager(process.Opt{
-			NydusdBinaryPath: "",
-		}),
+		manager:     mgr,
 		daemonCfg:   cfg,
 		resolver:    nil,
 		vpcRegistry: false,

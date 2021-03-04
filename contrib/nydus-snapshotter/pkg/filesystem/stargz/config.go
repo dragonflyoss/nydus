@@ -11,6 +11,7 @@ import (
 
 	"contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"contrib/nydus-snapshotter/pkg/process"
 )
 
 func WithMeta(root string) NewFSOpt {
@@ -31,6 +32,17 @@ func WithNydusdBinaryPath(p string) NewFSOpt {
 			return errors.New("nydusd binary path is required")
 		}
 		d.nydusdBinaryPath = p
+		return nil
+	}
+}
+
+func WithProcessManager(pm *process.Manager) NewFSOpt {
+	return func(d *filesystem) error {
+		if pm == nil {
+			return errors.New("process manager cannot be nil")
+		}
+
+		d.manager = pm
 		return nil
 	}
 }

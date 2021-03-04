@@ -18,6 +18,11 @@ import (
 	"contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
+const (
+	APISocketFileName   = "api.sock"
+	SharedNydusDaemonID = "shared_daemon"
+)
+
 type NewDaemonOpt func(d *Daemon) error
 
 type Daemon struct {
@@ -26,15 +31,15 @@ type Daemon struct {
 	ConfigDir      string
 	SocketDir      string
 	LogDir         string
-	Stdout         io.WriteCloser
-	Stderr         io.WriteCloser
+	Stdout         io.WriteCloser `json:"-"`
+	Stderr         io.WriteCloser `json:"-"`
 	CacheDir       string
 	SnapshotDir    string
 	Pid            int
 	client         nydussdk.Interface
 	ImageID        string
 	SharedDaemon   bool
-	apiSock        *string
+	ApiSock        *string
 	RootMountPoint *string
 	mu             sync.Mutex
 }
@@ -73,10 +78,10 @@ func (d *Daemon) ConfigFile() string {
 }
 
 func (d *Daemon) APISock() string {
-	if d.apiSock != nil {
-		return *d.apiSock
+	if d.ApiSock != nil {
+		return *d.ApiSock
 	}
-	return filepath.Join(d.SocketDir, "api.sock")
+	return filepath.Join(d.SocketDir, APISocketFileName)
 }
 
 func (d *Daemon) binary() string {
@@ -104,7 +109,7 @@ func (d *Daemon) SharedMount() error {
 }
 
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
-	d := &Daemon{Pid: -1}
+	d := &Daemon{Pid: 0}
 	d.ID = newID()
 	for _, o := range opt {
 		err := o(d)

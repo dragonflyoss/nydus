@@ -14,7 +14,7 @@ require (
 	github.com/sirupsen/logrus v1.6.0
 	github.com/stretchr/testify v1.5.1
 	github.com/urfave/cli/v2 v2.2.0
-	go.etcd.io/bbolt v1.3.5 // indirect
+	go.etcd.io/bbolt v1.3.5
 	google.golang.org/grpc v1.31.0
 	gotest.tools/v3 v3.0.2 // indirect
 )
