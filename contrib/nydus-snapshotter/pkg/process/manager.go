@@ -94,8 +94,6 @@ func (m *Manager) ListDaemons() []*daemon.Daemon {
 }
 
 func (m *Manager) CleanUpDaemonResource(d *daemon.Daemon) {
-	_ = d.Stderr.Close()
-	_ = d.Stdout.Close()
 	resource := []string{d.ConfigDir, d.LogDir}
 	if !d.SharedDaemon {
 		resource = append(resource, d.SocketDir)

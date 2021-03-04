@@ -7,7 +7,6 @@
 package daemon
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,8 +30,6 @@ type Daemon struct {
 	ConfigDir      string
 	SocketDir      string
 	LogDir         string
-	Stdout         io.WriteCloser `json:"-"`
-	Stderr         io.WriteCloser `json:"-"`
 	CacheDir       string
 	SnapshotDir    string
 	Pid            int

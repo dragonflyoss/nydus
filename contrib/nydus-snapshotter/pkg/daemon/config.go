@@ -7,7 +7,6 @@
 package daemon
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -54,18 +53,7 @@ func WithSocketDir(dir string) NewDaemonOpt {
 
 func WithLogDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
-		s := filepath.Join(dir, d.ID)
-		// this may be failed, should handle that
-		if err := os.MkdirAll(s, 0755); err != nil {
-			return errors.Wrapf(err, "failed to create log dir %s", s)
-		}
-		logs, err := prepareDaemonLogs(s)
-		if err != nil {
-			return errors.Wrap(err, "failed to prepare logs")
-		}
-		d.LogDir = s
-		d.Stdout = logs[0]
-		d.Stderr = logs[1]
+		d.LogDir = filepath.Join(dir, d.ID)
 		return nil
 	}
 }
@@ -118,20 +106,4 @@ func WithAPISock(apiSock string) NewDaemonOpt {
 		d.ApiSock = &apiSock
 		return nil
 	}
-}
-
-
-func prepareDaemonLogs(logDir string) ([]*os.File, error) {
-	var (
-		err      error
-		logFiles = make([]*os.File, 2)
-	)
-	for i, logName := range []string{"stdout.log", "stderr.log"} {
-		logPath := filepath.Join(logDir, logName)
-		logFiles[i], err = os.Create(logPath)
-		if err != nil {
-			return nil, errors.Wrap(err, fmt.Sprintf("failed to create logfile %s", logPath))
-		}
-	}
-	return logFiles, nil
 }
