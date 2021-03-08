@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #[macro_use]
 extern crate log;
-extern crate stderrlog;
 
 mod builder;
 mod nydusd;
@@ -13,9 +12,9 @@ use std::path::PathBuf;
 
 use vmm_sys_util::tempdir::TempDir;
 
-use nydus_utils::{eother, exec};
+use nydus_utils::{eother, exec, setup_logging};
 
-const COMPAT_BOOTSTRAPS: &'static [&'static str] = &[
+const COMPAT_BOOTSTRAPS: [&str; 2] = [
     "blake3-lz4_block-non_repeatable",
     "sha256-nocompress-repeatable",
 ];
@@ -59,7 +58,7 @@ fn test(
     let tmp_dir_prefix =
         std::env::var("TEST_WORKDIR_PREFIX").expect("Please specify `TEST_WORKDIR_PREFIX` env");
     let tmp_dir = {
-        let path = if tmp_dir_prefix.ends_with("/") {
+        let path = if tmp_dir_prefix.ends_with('/') {
             tmp_dir_prefix
         } else {
             format!("{}/", tmp_dir_prefix)
@@ -67,8 +66,8 @@ fn test(
         TempDir::new_with_prefix(path).map_err(|e| eother!(e))?
     };
     let work_dir = tmp_dir.as_path().to_path_buf();
-    let lower_texture = format!("directory/lower.result");
-    let overlay_texture = format!("directory/overlay.result");
+    let lower_texture = "directory/lower.result".to_string();
+    let overlay_texture = "directory/overlay.result".to_string();
 
     let mut builder = builder::new(&work_dir, whiteout_spec);
 
@@ -130,13 +129,8 @@ fn test(
 }
 
 #[test]
-fn integration_test_init() -> Result<()> {
-    stderrlog::new()
-        .quiet(false)
-        .timestamp(stderrlog::Timestamp::Second)
-        .verbosity(log::LevelFilter::Trace as usize - 1)
-        .init()
-        .map_err(|e| eother!(e))
+fn integration_test_init() {
+    setup_logging(None, log::LevelFilter::Trace).unwrap()
 }
 
 #[test]
@@ -214,7 +208,7 @@ fn integration_test_special_files() -> Result<()> {
 
     builder.build_special_files()?;
 
-    for mode in vec!["direct", "cached"] {
+    for mode in &["direct", "cached"] {
         let nydusd = nydusd::new(
             &work_dir,
             true,

@@ -3,10 +3,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::convert::{From, Infallible, Into, TryInto};
+use std::env::current_dir;
+use std::io::Result;
 use std::ops::{Add, BitAnd, Not, Sub};
+use std::path::PathBuf;
 
+use flexi_logger::{self, colored_opt_format, opt_format, Logger};
+use log::LevelFilter;
 use num_traits::CheckedAdd;
 use serde::Serialize;
+
+#[macro_use]
+extern crate log;
 
 #[macro_use]
 pub mod error;
@@ -15,8 +23,6 @@ pub use error::*;
 pub mod exec;
 pub use exec::*;
 
-#[macro_use]
-extern crate log;
 #[cfg(feature = "fusedev")]
 pub mod fuse;
 #[cfg(feature = "fusedev")]
@@ -105,6 +111,79 @@ impl<'a> BuildTimeInfo {
 
         (info_string, info)
     }
+}
+
+/// `log_file_path` absolute path to logging files or relative path from current working
+/// directory to logging file.
+/// Flexi logger always appends a suffix to file name whose default value is ".log"
+/// unless we set it intentionally. I don't like this passion. When the basename of `log_file_path`
+/// is "bar", the newly created log file will be "bar.log"
+pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Result<()> {
+    if let Some(ref path) = log_file_path {
+        // Do not try to canonicalize the path since the file may not exist yet.
+
+        // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
+        // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
+        // can't change log level to a higher level than what is passed to `flexi_logger`.
+        let mut logger = Logger::with_env_or_str("trace")
+            .log_to_file()
+            .suppress_timestamp()
+            .append()
+            .format(opt_format);
+
+        // Parse log file to get the `basename` and `suffix`(extension) because `flexi_logger`
+        // will automatically add `.log` suffix if we don't set explicitly, see:
+        // https://github.com/emabee/flexi_logger/issues/74
+        let basename = path
+            .file_stem()
+            .ok_or_else(|| {
+                eprintln!("invalid file name input {:?}", path);
+                einval!()
+            })?
+            .to_str()
+            .ok_or_else(|| {
+                eprintln!("invalid file name input {:?}", path);
+                einval!()
+            })?;
+        logger = logger.basename(basename);
+
+        // `flexi_logger` automatically add `.log` suffix if the file name has not extension.
+        if let Some(suffix) = path.extension() {
+            let suffix = suffix.to_str().ok_or_else(|| {
+                eprintln!("invalid file extension {:?}", suffix);
+                einval!()
+            })?;
+            logger = logger.suffix(suffix);
+        }
+
+        // Set log directory
+        let parent_dir = path.parent();
+        if let Some(p) = parent_dir {
+            let cwd = current_dir()?;
+            let dir = if !p.has_root() {
+                cwd.join(p)
+            } else {
+                p.to_path_buf()
+            };
+            logger = logger.directory(dir);
+        }
+
+        logger.start().map_err(|e| {
+            eprintln!("{:?}", e);
+            eother!(e)
+        })?;
+    } else {
+        // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
+        // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
+        // can't change log level to a higher level than what is passed to `flexi_logger`.
+        Logger::with_env_or_str("trace")
+            .format(colored_opt_format)
+            .start()
+            .map_err(|e| eother!(e))?;
+    }
+
+    log::set_max_level(level);
+    Ok(())
 }
 
 #[cfg(test)]

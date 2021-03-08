@@ -4,7 +4,6 @@
 
 #[macro_use(crate_authors, crate_version)]
 extern crate clap;
-extern crate stderrlog;
 
 mod builder;
 mod node;
@@ -37,7 +36,7 @@ use serde::Serialize;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
-use nydus_utils::{log_level_to_verbosity, BuildTimeInfo};
+use nydus_utils::{setup_logging, BuildTimeInfo};
 use rafs::metadata::digest;
 use rafs::storage::compress;
 use trace::*;
@@ -271,23 +270,15 @@ fn main() -> Result<()> {
                 .default_value("info")
                 .help("Specify log level: trace, debug, info, warn, error")
                 .takes_value(true)
+                .possible_values(&["trace", "debug", "info", "warn", "error"])
                 .required(false)
                 .global(true),
         )
         .get_matches();
 
-    let v = cmd
-        .value_of("log-level")
-        .unwrap()
-        .parse()
-        .unwrap_or(log::LevelFilter::Warn);
-
-    stderrlog::new()
-        .quiet(false)
-        .verbosity(log_level_to_verbosity(v))
-        .timestamp(stderrlog::Timestamp::Second)
-        .init()
-        .context("failed to init logger")?;
+    // Safe to unwrap because it has default value and possible values are defined.
+    let level = cmd.value_of("log-level").unwrap().parse().unwrap();
+    setup_logging(None, level)?;
 
     // FIXME: only register tracer in `create` subcommand.
     register_tracer!(TraceClass::Timing, TimingTracerClass);

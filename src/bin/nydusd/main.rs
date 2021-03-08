@@ -11,7 +11,6 @@ extern crate log;
 extern crate lazy_static;
 extern crate rafs;
 extern crate serde_json;
-extern crate stderrlog;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
@@ -36,7 +35,7 @@ use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use vmm_sys_util::eventfd::EventFd;
 
 use nydus_api::http::start_http_thread;
-use nydus_utils::{dump_program_info, log_level_to_verbosity, BuildTimeInfo};
+use nydus_utils::{dump_program_info, setup_logging, BuildTimeInfo};
 
 mod daemon;
 use daemon::{DaemonError, FsBackendMountCmd, FsBackendType, NydusDaemonSubscriber};
@@ -154,6 +153,15 @@ fn main() -> Result<()> {
                 .default_value("info")
                 .help("Specify log level: trace, debug, info, warn, error")
                 .takes_value(true)
+                .possible_values(&["trace", "debug", "info", "warn", "error"])
+                .required(false)
+                .global(true),
+        )
+        .arg(
+            Arg::with_name("log-file")
+                .long("log-file")
+                .help("Specify the path to log file. If log filename has not extension, the default \".log\" will be added.")
+                .takes_value(true)
                 .required(false)
                 .global(true),
         )
@@ -252,22 +260,16 @@ fn main() -> Result<()> {
 
     let cmd_arguments_parsed = cmd_arguments.get_matches();
 
-    let v = cmd_arguments_parsed
+    let logging_file = cmd_arguments_parsed.value_of("log-file").map(|l| l.into());
+    // Safe to unwrap because it has default value and possible values are defined
+    let level = cmd_arguments_parsed
         .value_of("log-level")
         .unwrap()
         .parse()
-        .unwrap_or(log::LevelFilter::Info);
-
-    stderrlog::new()
-        .quiet(false)
-        .verbosity(log_level_to_verbosity(log::LevelFilter::Trace))
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .init()
         .unwrap();
-    // We rely on `log` macro to limit current log level rather than `stderrlog`
-    // So we set stderrlog verbosity to TRACE which is High enough. Otherwise, we
-    // can't change log level to a higher level than what is passed to `stderrlog`.
-    log::set_max_level(v);
+
+    setup_logging(logging_file, level)?;
+
     dump_program_info();
 
     // Retrieve arguments
