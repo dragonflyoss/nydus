@@ -19,7 +19,7 @@ serde_json = ">=1.0.9"
 backtrace = "0.3"
 chrono = "0.4.19"
 vmm-sys-util = ">=0.3.1"
-fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true }
+fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca" }
 
 [features]
 fusedev = ["fuse-rs/fusedev"]

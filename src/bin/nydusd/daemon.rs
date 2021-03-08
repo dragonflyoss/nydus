@@ -23,7 +23,7 @@ use std::thread;
 use std::{convert, error, fmt, io};
 
 use event_manager::{EventOps, EventSubscriber, Events};
-use fuse_rs::api::{BackendFileSystem, Vfs};
+use fuse_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
 use fuse_rs::passthrough::{Config, PassthroughFs};
 #[cfg(feature = "virtiofs")]
 use fuse_rs::transport::Error as FuseTransportError;
@@ -45,6 +45,9 @@ use rafs::{
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
 use crate::EVENT_MANAGER_RUN;
+
+//TODO: Try to public below type from fuse-rs thus no need to redefine it here.
+type BackFileSystem = Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>;
 
 #[allow(dead_code)]
 #[derive(Debug, Hash, PartialEq, Eq, Serialize)]
@@ -74,16 +77,6 @@ impl From<i32> for DaemonState {
             _ => DaemonState::UNKNOWN,
         }
     }
-}
-
-//TODO: Hopefully, there is a day when we can move this to vfs crate and define its error code.
-#[derive(Debug)]
-pub enum VfsErrorKind {
-    Common(io::Error),
-    Mount(io::Error),
-    Umount(io::Error),
-    Restore(io::Error),
-    AlreadyMounted,
 }
 
 impl From<RafsError> for DaemonError {
@@ -126,7 +119,7 @@ pub enum DaemonError {
     AlreadyExists,
     Serde(SerdeError),
     UpgradeManager(UpgradeMgrError),
-    Vfs(VfsErrorKind),
+    Vfs(VfsError),
     Rafs(RafsError),
     /// Daemon does not reach the stable working state yet,
     /// some capabilities may not be provided.
@@ -161,6 +154,12 @@ impl error::Error for DaemonError {}
 impl convert::From<DaemonError> for io::Error {
     fn from(e: DaemonError) -> Self {
         einval!(e)
+    }
+}
+
+impl convert::From<VfsError> for DaemonError {
+    fn from(e: VfsError) -> Self {
+        DaemonError::Vfs(e)
     }
 }
 
@@ -304,42 +303,31 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
         serde_json::to_string(&response).map_err(DaemonError::Serde)
     }
     fn export_backend_info(&self, mountpoint: &str) -> DaemonResult<String> {
-        let fs = self.backend_from_mountpoint(mountpoint)?;
+        let fs = self
+            .backend_from_mountpoint(mountpoint)?
+            .ok_or(DaemonError::NotFound)?;
         let any_fs = fs.deref().as_any();
-
         let rafs = any_fs
             .downcast_ref::<Rafs>()
             .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
-
         let resp = serde_json::to_string(&rafs.sb.meta).map_err(DaemonError::Serde)?;
-
         Ok(resp)
     }
 
-    // TODO: returning type Arc<Box<>> is very strange, but we have to follow fuse-rs.
-    // We can redefine `get_rootfs` someday thus to make this neat.
-    fn backend_from_mountpoint(
-        &self,
-        mp: &str,
-    ) -> DaemonResult<Arc<Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>>>
-    {
-        self.get_vfs()
-            .get_rootfs(mp)
-            .map_err(|e| DaemonError::Vfs(VfsErrorKind::Common(e)))
+    fn backend_from_mountpoint(&self, mp: &str) -> DaemonResult<Option<Arc<BackFileSystem>>> {
+        let r = self.get_vfs().get_rootfs(mp)?;
+        Ok(r)
     }
+    fn export_inflight_ops(&self) -> DaemonResult<Option<String>>;
 
-    // FIXME: locking?
+    // NOTE: This method is not thread-safe, however, it is acceptable as
+    // mount/umount/remount/restore_mount is invoked from single thread in FSM
     fn mount(&self, cmd: FsBackendMountCmd) -> DaemonResult<()> {
-        // TODO: Fuse-rs and Vfs should be capable to handle that the mountpoint is already mounted.
-        // Otherwise vfs' clients will suffer a lot  :-(. So try to add this capability to it.
-        if self.backend_from_mountpoint(&cmd.mountpoint).is_ok() {
-            return Err(DaemonError::Vfs(VfsErrorKind::AlreadyMounted));
+        if self.backend_from_mountpoint(&cmd.mountpoint)?.is_some() {
+            return Err(DaemonError::AlreadyExists);
         }
         let backend = fs_backend_factory(&cmd)?;
-        let index = self
-            .get_vfs()
-            .mount(backend, &cmd.mountpoint)
-            .map_err(|e| DaemonError::Vfs(VfsErrorKind::Mount(e)))?;
+        let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
         info!("rafs mounted at {}", &cmd.mountpoint);
         self.backend_collection().add(&cmd.mountpoint, &cmd)?;
 
@@ -352,7 +340,9 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
     }
 
     fn remount(&self, cmd: FsBackendMountCmd) -> DaemonResult<()> {
-        let rootfs = self.backend_from_mountpoint(&cmd.mountpoint)?;
+        let rootfs = self
+            .backend_from_mountpoint(&cmd.mountpoint)?
+            .ok_or(DaemonError::NotFound)?;
         let rafs_config = RafsConfig::from_str(&&cmd.config)?;
         let mut bootstrap = RafsIoRead::from_file(&&cmd.source)?;
         let any_fs = rootfs.deref().as_any();
@@ -375,10 +365,10 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
     }
 
     fn umount(&self, cmd: FsBackendUmountCmd) -> DaemonResult<()> {
-        let _ = self.backend_from_mountpoint(&cmd.mountpoint)?;
-        self.get_vfs()
-            .umount(&cmd.mountpoint)
-            .map_err(|e| DaemonError::Vfs(VfsErrorKind::Umount(e)))?;
+        let _ = self
+            .backend_from_mountpoint(&cmd.mountpoint)?
+            .ok_or(DaemonError::NotFound)?;
+        self.get_vfs().umount(&cmd.mountpoint)?;
 
         self.backend_collection().del(&cmd.mountpoint);
 
@@ -411,9 +401,7 @@ fn input_prefetch_files_verify(input: &Option<Vec<String>>) -> DaemonResult<Opti
 
     Ok(prefetch_files)
 }
-fn fs_backend_factory(
-    cmd: &FsBackendMountCmd,
-) -> DaemonResult<Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>> {
+fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
     let prefetch_files = input_prefetch_files_verify(&cmd.prefetch_files)?;
     match cmd.fs_type {
         FsBackendType::Rafs => {

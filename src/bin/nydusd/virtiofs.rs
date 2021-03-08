@@ -93,6 +93,7 @@ impl VhostUserFsBackend {
                     self.vu_req
                         .as_mut()
                         .map(|x| x as &mut dyn FsCacheReqHandler),
+                    None,
                 )
                 .map_err(DaemonError::ProcessQueue)?;
 
@@ -266,6 +267,10 @@ impl<S: VhostUserBackend> NydusDaemon for VirtiofsDaemon<S> {
 
     fn version(&self) -> BuildTimeInfo {
         self.bti.clone()
+    }
+
+    fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
+        Err(DaemonError::Unsupported)
     }
 }
 

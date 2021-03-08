@@ -70,6 +70,7 @@ impl ApiServer {
             ApiRequest::ExportAccessPatterns(id) => Self::export_access_patterns(id),
             ApiRequest::ExportBackendMetrics(id) => Self::export_backend_metrics(id),
             ApiRequest::ExportBlobcacheMetrics(id) => Self::export_blobcache_metrics(id),
+            ApiRequest::ExportInflightMetrics => self.export_inflight_metrics(),
             ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
             ApiRequest::SendFuseFd => self.send_fuse_fd(),
             ApiRequest::Takeover => self.do_takeover(),
@@ -150,6 +151,45 @@ impl ApiServer {
         io_stats::export_blobcache_metrics(&id)
             .map(ApiResponsePayload::BlobcacheMetrics)
             .map_err(|e| ApiError::Metrics(format!("{:?}", e)))
+    }
+
+    /// Detect if there is fop being hang.
+    /// `ApiResponsePayload::Empty` will be converted to http status code 204, which means
+    /// there is no requests being processed right now.
+    /// Otherwise, json body within http response is provided,
+    /// ```json
+    /// [
+    ///  {
+    ///    "inode": 72057594037929010,
+    ///    "opcode": 44,
+    ///    "unique": 22728,
+    ///    "timestamp_secs": 1612245570
+    ///  },
+    ///  {
+    ///    "inode": 72057594037928480,
+    ///    "opcode": 15,
+    ///    "unique": 22656,
+    ///    "timestamp_secs": 1612245570
+    ///  },
+    ///  {
+    ///    "inode": 72057594037928940,
+    ///    "opcode": 15,
+    ///    "unique": 22700,
+    ///    "timestamp_secs": 1612245570
+    ///  }
+    /// ]
+    /// It means 3 threads are processing inflight requests.
+    fn export_inflight_metrics(&self) -> ApiResponse {
+        // TODO: Implement automatic error conversion between DaemonError and ApiError.
+        let d = self.daemon.as_ref();
+        if let Some(ops) = d
+            .export_inflight_ops()
+            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))?
+        {
+            Ok(ApiResponsePayload::InflightMetrics(ops))
+        } else {
+            Ok(ApiResponsePayload::Empty)
+        }
     }
 
     fn send_fuse_fd(&self) -> ApiResponse {

@@ -67,13 +67,13 @@ pub enum ApiResponsePayload {
     FsFilesPatterns(String),
     BackendMetrics(String),
     BlobcacheMetrics(String),
+    InflightMetrics(String),
 }
 
 /// This is the response sent by the API server through the mpsc channel.
 pub type ApiResponse = std::result::Result<ApiResponsePayload, ApiError>;
 pub type HttpResult = std::result::Result<Response, HttpError>;
 
-//#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ApiRequest {
     DaemonInfo,
@@ -87,6 +87,7 @@ pub enum ApiRequest {
     ExportAccessPatterns(Option<String>),
     ExportBackendMetrics(Option<String>),
     ExportBlobcacheMetrics(Option<String>),
+    ExportInflightMetrics,
     ExportFsBackendInfo(String),
     SendFuseFd,
     Takeover,
@@ -199,6 +200,7 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
                 BackendMetrics(d) => success_response(Some(d)),
                 BlobcacheMetrics(d) => success_response(Some(d)),
                 FsBackendInfo(d) => success_response(Some(d)),
+                InflightMetrics(d) => success_response(Some(d)),
             }
         }
         Err(e) => {
@@ -360,6 +362,23 @@ impl EndpointHandler for MetricsBlobcacheHandler {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportBlobcacheMetrics(id));
+                Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct MetricsInflightHandler {}
+impl EndpointHandler for MetricsInflightHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let r = kicker(ApiRequest::ExportInflightMetrics);
                 Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
             }
             _ => Err(HttpError::BadRequest),

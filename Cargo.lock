@@ -420,7 +420,7 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 [[package]]
 name = "fuse-rs"
 version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git#df052ef196718f1bfe974e0f108ea44f9a1ae280"
+source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=cfd2cca#cfd2ccae69fad616b7cc863dc230076838d9a245"
 dependencies = [
  "arc-swap",
  "bitflags",
