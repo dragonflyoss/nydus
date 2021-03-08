@@ -12,8 +12,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/checker/parser"
 	"contrib/nydusify/pkg/checker/tool"
+	"contrib/nydusify/pkg/parser"
 	"contrib/nydusify/pkg/utils"
 )
 
@@ -57,7 +57,7 @@ func (rule *BootstrapRule) Validate() error {
 
 	var blobIDs []string
 	// Parse blob list from layers in Nydus manifest
-	layers := rule.Parsed.NydusManifest.Layers
+	layers := rule.Parsed.NydusImage.Manifest.Layers
 	if len(layers) > 1 {
 		for _, layer := range layers[:len(layers)-1] {
 			blobIDs = append(blobIDs, layer.Digest.Hex())
@@ -65,7 +65,7 @@ func (rule *BootstrapRule) Validate() error {
 	}
 	// Parse blob list from bootstrap layer annotation in Nydus manifest
 	if len(blobIDs) == 0 {
-		blobIDStr := rule.Parsed.NydusManifest.Layers[len(layers)-1].Annotations[utils.LayerAnnotationNydusBlobIDs]
+		blobIDStr := rule.Parsed.NydusImage.Manifest.Layers[len(layers)-1].Annotations[utils.LayerAnnotationNydusBlobIDs]
 		if blobIDStr != "" {
 			if err := json.Unmarshal([]byte(blobIDStr), &blobIDs); err != nil {
 				return errors.Wrap(err, "unmarshal blob ids from layer annotation")

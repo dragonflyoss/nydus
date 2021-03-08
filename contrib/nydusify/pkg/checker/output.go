@@ -5,6 +5,7 @@
 package checker
 
 import (
+	"context"
 	"encoding/json"
 	"io/ioutil"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/checker/parser"
+	"contrib/nydusify/pkg/parser"
 	"contrib/nydusify/pkg/utils"
 )
 
@@ -26,7 +27,9 @@ func prettyDump(obj interface{}, name string) error {
 
 // Output outputs OCI and Nydus image manifest, index, config to JSON file.
 // Prefer to use source image to output OCI image information.
-func (checker *Checker) Output(sourceParsed, targetParsed *parser.Parsed, outputPath string) error {
+func (checker *Checker) Output(
+	ctx context.Context, sourceParsed, targetParsed *parser.Parsed, outputPath string,
+) error {
 	logrus.Infof("Dumping OCI and Nydus manifests to %s", outputPath)
 
 	if targetParsed.Index != nil {
@@ -38,49 +41,46 @@ func (checker *Checker) Output(sourceParsed, targetParsed *parser.Parsed, output
 		}
 	}
 
-	if sourceParsed.OCIManifest != nil {
+	if sourceParsed.OCIImage != nil {
 		if err := prettyDump(
-			sourceParsed.OCIManifest,
+			sourceParsed.OCIImage.Manifest,
 			filepath.Join(outputPath, "oci_manifest.json"),
 		); err != nil {
 			return errors.Wrap(err, "output OCI manifest file")
 		}
-	}
-
-	if sourceParsed.OCIConfig != nil {
 		if err := prettyDump(
-			sourceParsed.OCIConfig,
+			sourceParsed.OCIImage.Config,
 			filepath.Join(outputPath, "oci_config.json"),
 		); err != nil {
 			return errors.Wrap(err, "output OCI config file")
 		}
 	}
 
-	if targetParsed.NydusManifest != nil {
+	if targetParsed.NydusImage != nil {
 		if err := prettyDump(
-			targetParsed.NydusManifest,
+			targetParsed.NydusImage.Manifest,
 			filepath.Join(outputPath, "nydus_manifest.json"),
 		); err != nil {
 			return errors.Wrap(err, "output Nydus manifest file")
 		}
-	}
-
-	if targetParsed.NydusConfig != nil {
 		if err := prettyDump(
-			targetParsed.NydusConfig,
+			targetParsed.NydusImage.Config,
 			filepath.Join(outputPath, "nydus_config.json"),
 		); err != nil {
 			return errors.Wrap(err, "output Nydus config file")
 		}
-	}
 
-	if targetParsed.NydusBootstrap != nil {
 		target := filepath.Join(outputPath, "nydus_bootstrap")
 		logrus.Infof("Pulling Nydus bootstrap to %s", target)
-		if err := utils.UnpackFile(targetParsed.NydusBootstrap, utils.BootstrapFileNameInLayer, target); err != nil {
+		bootstrapReader, err := checker.targetParser.PullNydusBootstrap(ctx, targetParsed.NydusImage)
+		if err != nil {
+			return errors.Wrap(err, "pull Nydus bootstrap layer")
+		}
+		defer bootstrapReader.Close()
+
+		if err := utils.UnpackFile(bootstrapReader, utils.BootstrapFileNameInLayer, target); err != nil {
 			return errors.Wrap(err, "unpack Nydus bootstrap layer")
 		}
-		defer targetParsed.NydusBootstrap.Close()
 	}
 
 	return nil
