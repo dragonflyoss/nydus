@@ -246,6 +246,12 @@ fn main() -> Result<()> {
                         .help("JSON output path for build result")
                         .takes_value(true)
                 )
+                .arg(
+                    Arg::with_name("aligned-chunk")
+                        .long("aligned-chunk")
+                        .help("Whether to align chunks into blobcache")
+                        .takes_value(false)
+                )
         )
         .subcommand(
             SubCommand::with_name("check")
@@ -379,6 +385,8 @@ fn main() -> Result<()> {
             .unwrap_or_default()
             .parse()?;
 
+        let aligned_chunk = matches.is_present("aligned-chunk");
+
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
@@ -392,6 +400,7 @@ fn main() -> Result<()> {
             prefetch_policy,
             !repeatable,
             whiteout_spec,
+            aligned_chunk,
         )?;
 
         // Some operations like listing xattr pairs of certain namespace need the process

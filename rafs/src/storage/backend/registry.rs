@@ -595,7 +595,7 @@ impl BlobBackend for Registry {
         _blob_readahead_size: u32,
     ) -> BackendResult<()> {
         Err(BackendError::Unsupported(
-            "Registry backend does not support prefetch per as to on-disk blob entries".to_string(),
+            "Registry backend does not support prefetch as per on-disk blob entries".to_string(),
         ))
     }
 

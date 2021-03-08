@@ -61,7 +61,7 @@ const BLOCK_READ_COUNT_MAX: usize = 8;
 const READ_LATENCY_RANGE_MAX: usize = 8;
 
 // Defining below global static metrics set so that a specific metrics counter can
-// be found per as to the rafs backend mountpoint/id. Remind that nydusd can have
+// be found as per the rafs backend mountpoint/id. Remind that nydusd can have
 // multiple backends mounted.
 lazy_static! {
     static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIOStats>>> = Default::default();
@@ -601,7 +601,7 @@ pub struct BackendMetrics {
     // is responsible for calculating BPS from this field.
     read_amount_total: BasicMetric,
     read_cumulative_latency_total: BasicMetric,
-    // Categorize metrics per as to their latency and request size
+    // Categorize metrics as per their latency and request size
     read_latency_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_COUNT_MAX],
 }
 
