@@ -33,14 +33,14 @@ use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use chrono::{self, DateTime, Local};
 use rust_fsm::*;
-use serde::{Deserialize, Serialize};
+use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 use serde_with::{serde_as, DisplayFromStr};
 
 use nydus_utils::{einval, last_error, BuildTimeInfo};
 use rafs::{
     fs::{Rafs, RafsConfig},
-    RafsError, RafsIoRead,
+    trim_backend_config, RafsError, RafsIoRead,
 };
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
@@ -226,17 +226,15 @@ impl FsBackendCollection {
     fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> DaemonResult<()> {
         // We only wash Rafs backend now.
         let fs_config = if cmd.fs_type == FsBackendType::Rafs {
-            // TODO: This is ugly now. Use Rust `proc_macro` to wrap this wash.
             let mut config: serde_json::Value =
                 serde_json::from_str(&cmd.config).map_err(DaemonError::Serde)?;
-
-            if config["device"]["backend"]["type"] == "oss" {
-                config["device"]["backend"]["config"]["access_key_id"].take();
-                config["device"]["backend"]["config"]["access_key_secret"].take();
-            } else if config["device"]["backend"]["type"] == "registry" {
-                config["device"]["backend"]["config"]["auth"].take();
-                config["device"]["backend"]["config"]["registry_token"].take();
-            }
+            trim_backend_config!(
+                config,
+                "access_key_id",
+                "access_key_secret",
+                "auth",
+                "token"
+            );
             config
         } else {
             // Passthrough Fs has no config ever input.
