@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use serde::Serialize;
 use sha2::digest::Digest;
 use sha2::Sha256;
 
@@ -25,6 +24,8 @@ use rafs::storage::compress;
 use rafs::{RafsIoRead, RafsIoWrite};
 
 use crate::stargz;
+use crate::trace::*;
+use crate::{root_tracer, timing_tracer};
 
 use crate::node::*;
 use crate::tree::Tree;
@@ -72,12 +73,6 @@ pub struct Builder {
     /// Store all nodes during build, node index of root starting from 1,
     /// so the collection index equal to (node.index - 1).
     nodes: Vec<Node>,
-    output_json: Option<PathBuf>,
-}
-
-#[derive(Serialize)]
-pub struct ResultOutput {
-    blobs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,7 +132,6 @@ impl Builder {
         prefetch_policy: PrefetchPolicy,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
-        output_json: Option<PathBuf>,
     ) -> Result<Builder> {
         let f_blob = if let Some(blob_path) = blob_path {
             Some(Box::new(BufWriter::with_capacity(
@@ -200,7 +194,6 @@ impl Builder {
             hint_readahead_files,
             prefetch_policy,
             nodes: Vec::new(),
-            output_json,
         })
     }
 
@@ -406,15 +399,23 @@ impl Builder {
             .context("failed to build tree from bootstrap")?;
 
         // Apply new node (upper layer) to node tree (lower layer)
-        for node in &self.nodes {
-            tree.apply(&node, true, &self.whiteout_spec)
-                .context("failed to apply tree")?;
-        }
+        timing_tracer!(
+            {
+                for node in &self.nodes {
+                    tree.apply(&node, true, &self.whiteout_spec)
+                        .context("failed to apply tree")?;
+                }
+                Ok(true)
+            },
+            "apply layers",
+            Result<bool>
+        )?;
 
         self.lower_inode_map.clear();
         self.upper_inode_map.clear();
         self.readahead_files.clear();
-        self.build_rafs_wrap(&mut tree);
+
+        timing_tracer!({ self.build_rafs_wrap(&mut tree) }, "build rafs");
 
         Ok(())
     }
@@ -551,7 +552,10 @@ impl Builder {
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
     fn dump_to_file(&mut self) -> Result<(Vec<String>, usize)> {
-        let (blob_hash, blob_size, mut blob_readahead_size) = self.dump_blob()?;
+        let (blob_hash, blob_size, mut blob_readahead_size) = timing_tracer!(
+            { self.dump_blob() },
+            "write all nodes to blob including hashing"
+        )?;
 
         // Set blob hash as blob id if not specified.
         if self.blob_id.is_empty() {
@@ -657,18 +661,26 @@ impl Builder {
             .store(&mut self.f_bootstrap)
             .context("failed to store blob table")?;
 
-        for node in &mut self.nodes {
-            if self.source_type == SourceType::StargzIndex {
-                debug!("[{}]\t{}", node.overlay, node);
-                if log::max_level() >= log::LevelFilter::Debug {
-                    for chunk in node.chunks.iter_mut() {
-                        trace!("\t\tbuilding chunk: {}", chunk);
+        timing_tracer!(
+            {
+                for node in &mut self.nodes {
+                    if self.source_type == SourceType::StargzIndex {
+                        debug!("[{}]\t{}", node.overlay, node);
+                        if log::max_level() >= log::LevelFilter::Debug {
+                            for chunk in node.chunks.iter_mut() {
+                                trace!("\t\tbuilding chunk: {}", chunk);
+                            }
+                        }
                     }
+                    node.dump_bootstrap(&mut self.f_bootstrap)
+                        .context("failed to dump bootstrap")?;
                 }
-            }
-            node.dump_bootstrap(&mut self.f_bootstrap)
-                .context("failed to dump bootstrap")?;
-        }
+
+                Ok(())
+            },
+            "write all nodes to bootstrap",
+            Result<()>
+        )?;
 
         let blob_ids: Vec<String> = self
             .blob_table
@@ -720,22 +732,8 @@ impl Builder {
             self.apply_to_bootstrap()?;
         }
         // Dump blob and bootstrap file
-        let (blob_ids, blob_size) = self.dump_to_file()?;
-
-        if let Some(ref f) = self.output_json {
-            let w = OpenOptions::new()
-                .truncate(true)
-                .create(true)
-                .write(true)
-                .open(f)
-                .with_context(|| format!("{:?} can't be opened", f))?;
-
-            let output = ResultOutput {
-                blobs: blob_ids.clone(),
-            };
-
-            serde_json::to_writer(w, &output).context("Write output file failed")?;
-        }
+        let (blob_ids, blob_size) =
+            timing_tracer!({ self.dump_to_file() }, "dump bootstrap and blob")?;
 
         Ok((blob_ids, blob_size))
     }

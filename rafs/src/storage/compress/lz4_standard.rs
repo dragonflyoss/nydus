@@ -3,6 +3,7 @@
 
 use std::io::Result;
 
+use libc::c_char;
 use lz4_sys::{LZ4_compressBound, LZ4_compress_default, LZ4_decompress_safe};
 
 use nydus_utils::einval;
@@ -18,8 +19,8 @@ pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
     let mut dst_buf = Vec::with_capacity(compress_bound as usize);
     let dec_size = unsafe {
         LZ4_compress_default(
-            src.as_ptr() as *const i8,
-            dst_buf.as_mut_ptr() as *mut i8,
+            src.as_ptr() as *const c_char,
+            dst_buf.as_mut_ptr() as *mut c_char,
             src.len() as i32,
             compress_bound,
         )
@@ -46,8 +47,8 @@ pub(super) fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> Result<usize> {
 
     let dec_bytes = unsafe {
         LZ4_decompress_safe(
-            src.as_ptr() as *const i8,
-            dst.as_mut_ptr() as *mut i8,
+            src.as_ptr() as *const c_char,
+            dst.as_mut_ptr() as *mut c_char,
             src.len() as i32,
             size,
         )

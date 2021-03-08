@@ -9,6 +9,7 @@ extern crate stderrlog;
 mod builder;
 mod node;
 mod stargz;
+mod trace;
 mod tree;
 mod uploader;
 mod validator;
@@ -16,6 +17,8 @@ mod validator;
 #[macro_use]
 extern crate log;
 extern crate serde;
+#[macro_use]
+extern crate lazy_static;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
@@ -24,14 +27,20 @@ use clap::{App, Arg, SubCommand};
 
 use std::collections::BTreeMap;
 use std::fs::metadata;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use nix::unistd::{getegid, geteuid};
+use serde::Serialize;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
 use nydus_utils::{log_level_to_verbosity, BuildTimeInfo};
 use rafs::metadata::digest;
 use rafs::storage::compress;
+use trace::*;
 use uploader::Uploader;
 use validator::Validator;
 
@@ -73,6 +82,12 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     }
 
     Ok(files)
+}
+
+#[derive(Serialize, Default)]
+pub struct ResultOutput {
+    blobs: Vec<String>,
+    trace: serde_json::Map<String, serde_json::Value>,
 }
 
 fn main() -> Result<()> {
@@ -253,6 +268,9 @@ fn main() -> Result<()> {
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
         let repeatable = matches.is_present("repeatable");
 
+        register_tracer!(TraceClass::Timing, TimingTracerClass);
+        register_tracer!(TraceClass::Event, EventTracerClass);
+
         match source_type {
             SourceType::Directory => {
                 if !source_file.is_dir() {
@@ -329,10 +347,6 @@ fn main() -> Result<()> {
             .unwrap_or_default()
             .parse()?;
 
-        let output_json = matches
-            .value_of("output-json")
-            .map(|o| o.to_string().into());
-
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
@@ -346,19 +360,53 @@ fn main() -> Result<()> {
             prefetch_policy,
             !repeatable,
             whiteout_spec,
-            output_json,
         )?;
-        let (blob_ids, blob_size) = ib.build().context("build failed")?;
+
+        // Some operations like listing xattr pairs of certain namespace need the process
+        // to be privileged. Therefore, trace what euid and egid are
+        event_tracer!("euid", "{}", geteuid());
+        event_tracer!("egid", "{}", getegid());
+
+        let (blob_ids, blob_size) =
+            timing_tracer!({ ib.build().context("build failed") }, "total build time")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(&bootstrap_path)?;
-            let valid = validator
-                .check(false)
-                .context("failed to validate bootstrap")?;
+            let valid = timing_tracer!(
+                {
+                    validator
+                        .check(false)
+                        .context("failed to validate bootstrap")
+                },
+                "validate bootstrap out of band"
+            )?;
+
             if !valid {
                 bail!("failed to build bootstrap");
             }
+        }
+
+        let output_json: Option<PathBuf> = matches
+            .value_of("output-json")
+            .map(|o| o.to_string().into());
+
+        if let Some(ref f) = output_json {
+            let w = OpenOptions::new()
+                .truncate(true)
+                .create(true)
+                .write(true)
+                .open(f)
+                .with_context(|| format!("{:?} can't be opened", f))?;
+
+            let map = root_tracer!().dump_summary_map().unwrap_or_default();
+
+            let summary_output = ResultOutput {
+                trace: map,
+                blobs: blob_ids.clone(),
+            };
+
+            serde_json::to_writer(w, &summary_output).context("Write output file failed")?;
         }
 
         if blob_size > 0 {

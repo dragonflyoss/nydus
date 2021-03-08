@@ -28,6 +28,9 @@ use rafs::metadata::layout::*;
 use rafs::metadata::*;
 use rafs::storage::compress;
 
+use crate::trace::{BuildRootTracer, EventTracerClass, TraceClass, TraceEvent, BUILDING_RECORDER};
+use crate::{event_tracer, root_tracer};
+
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
@@ -304,6 +307,7 @@ impl Node {
 
             // Dump compressed chunk data to blob
             if let Some(f_blob) = f_blob.as_mut() {
+                event_tracer!("blob compressed size", +compressed_size);
                 f_blob
                     .write_all(&compressed)
                     .context("failed to write blob")?;

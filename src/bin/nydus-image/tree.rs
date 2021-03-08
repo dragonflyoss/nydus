@@ -24,8 +24,13 @@ use std::sync::Arc;
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
-use crate::node::*;
-use crate::stargz::{self, TocEntry};
+use crate::{
+    node::*,
+    stargz::{self, TocEntry},
+};
+
+use crate::trace::*;
+use crate::{event_tracer, root_tracer, timing_tracer};
 
 #[derive(Clone)]
 pub struct Tree {
@@ -58,6 +63,8 @@ impl<'a> MetadataTreeBuilder<'a> {
         } else {
             PathBuf::from_str("/").unwrap()
         };
+
+        event_tracer!("loading files from parent", +child_count);
 
         let mut children = Vec::new();
         if inode.is_dir() {
@@ -377,6 +384,8 @@ impl FilesystemTreeBuilder {
             .with_context(|| format!("failed to read dir {:?}", parent.path))?;
         let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
 
+        event_tracer!("loading files from directory", +children.len());
+
         for child in children {
             let path = child.path();
 
@@ -449,7 +458,10 @@ impl Tree {
         let root_node = tree_builder.parse_node(root_inode, PathBuf::from_str("/").unwrap())?;
         let mut tree = Tree::new(root_node);
 
-        tree.children = tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache)?;
+        tree.children = timing_tracer!(
+            { tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache) },
+            "load nodes from parent"
+        )?;
 
         Ok(tree)
     }
@@ -471,7 +483,10 @@ impl Tree {
         )?;
         let mut tree = Tree::new(node);
 
-        tree.children = tree_builder.load_children(&mut tree.node, whiteout_spec)?;
+        tree.children = timing_tracer!(
+            { tree_builder.load_children(&mut tree.node, whiteout_spec) },
+            "load nodes from local directory"
+        )?;
 
         Ok(tree)
     }
@@ -488,6 +503,7 @@ impl Tree {
         // Handle whiteout file
         if handle_whiteout {
             if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
+                event_tracer!("whiteout files", +1);
                 if whiteout_type == WhiteoutType::OverlayFSOpaque {
                     self.remove(target, whiteout_spec)?;
                     return self.apply(target, false, whiteout_spec);
