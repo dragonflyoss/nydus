@@ -201,7 +201,11 @@ func main() {
 				if err := os.MkdirAll(sourceDir, 0755); err != nil {
 					return err
 				}
-				sourceProvider, err := provider.DefaultSource(c.String("source"), c.Bool("source-insecure"), sourceDir)
+				sourceRemote, err := provider.DefaultRemote(c.String("source"), c.Bool("source-insecure"))
+				if err != nil {
+					return errors.Wrap(err, "Parse source reference")
+				}
+				sourceProvider, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
 				if err != nil {
 					return err
 				}
@@ -284,7 +288,7 @@ func main() {
 					return err
 				}
 
-				return checker.Check()
+				return checker.Check(context.Background())
 			},
 		},
 	}

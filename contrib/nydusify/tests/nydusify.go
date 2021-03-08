@@ -84,7 +84,10 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	err = os.MkdirAll(sourceDir, 0755)
 	assert.Nil(t, err)
 
-	sourceProvider, err := provider.DefaultSource(host+"/"+nydusify.Source, true, sourceDir)
+	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
+	assert.Nil(t, err)
+
+	sourceProvider, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
 	assert.Nil(t, err)
 
 	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
@@ -140,6 +143,6 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 	})
 	assert.Nil(t, err)
 
-	err = checker.Check()
+	err = checker.Check(context.Background())
 	assert.Nil(t, err)
 }
