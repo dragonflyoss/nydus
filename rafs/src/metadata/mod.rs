@@ -569,10 +569,9 @@ pub trait RafsSuperInodes {
                     let child_digest = child_digest.as_ref().as_ref();
                     hasher.digest_update(child_digest);
                 } else {
-                    let chunk = inode.get_chunk_info(idx as u32)?;
+                    let chunk = inode.get_chunk_info(idx)?;
                     let chunk_digest = chunk.block_id();
-                    let chunk_digest = chunk_digest.as_ref().as_ref();
-                    hasher.digest_update(chunk_digest);
+                    hasher.digest_update(chunk_digest.as_ref());
                 }
             }
         }
@@ -755,7 +754,7 @@ pub(crate) fn calculate_bio_chunk_index(
 pub trait RafsChunkInfo: Sync + Send {
     fn validate(&self, sb: &RafsSuperMeta) -> Result<()>;
 
-    fn block_id(&self) -> Arc<RafsDigest>;
+    fn block_id(&self) -> &RafsDigest;
     fn blob_index(&self) -> u32;
 
     fn compress_offset(&self) -> u64;

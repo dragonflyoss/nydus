@@ -727,7 +727,7 @@ impl RafsInode for OndiskInodeWrapper {
 pub struct OndiskChunkInfoWrapper {
     mapping: DirectMapping,
     offset: usize,
-    digest: Arc<RafsDigest>,
+    digest: RafsDigest,
 }
 
 unsafe impl Send for OndiskChunkInfoWrapper {}
@@ -739,7 +739,7 @@ impl OndiskChunkInfoWrapper {
         Self {
             mapping,
             offset,
-            digest: Arc::new(chunk.block_id),
+            digest: chunk.block_id,
         }
     }
 
@@ -774,8 +774,8 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
     }
 
     #[inline]
-    fn block_id(&self) -> Arc<RafsDigest> {
-        self.digest.clone()
+    fn block_id(&self) -> &RafsDigest {
+        &self.digest
     }
 
     fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {

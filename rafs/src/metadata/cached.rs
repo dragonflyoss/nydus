@@ -508,8 +508,8 @@ impl RafsChunkInfo for CachedChunkInfo {
         Ok(())
     }
 
-    fn block_id(&self) -> Arc<RafsDigest> {
-        self.c_block_id.clone()
+    fn block_id(&self) -> &RafsDigest {
+        &self.c_block_id
     }
 
     fn is_compressed(&self) -> bool {
@@ -522,7 +522,7 @@ impl RafsChunkInfo for CachedChunkInfo {
 
     fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
         Ok(OndiskChunkInfo {
-            block_id: *self.block_id().as_ref(),
+            block_id: *self.block_id(),
             blob_index: self.blob_index(),
             flags: self.c_flags,
             compress_size: self.compress_size(),
