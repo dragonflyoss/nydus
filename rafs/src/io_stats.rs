@@ -60,6 +60,9 @@ const BLOCK_READ_COUNT_MAX: usize = 8;
 /// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
 const READ_LATENCY_RANGE_MAX: usize = 8;
 
+// Defining below global static metrics set so that a specific metrics counter can
+// be found per as to the rafs backend mountpoint/id. Remind that nydusd can have
+// multiple backends mounted.
 lazy_static! {
     static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIOStats>>> = Default::default();
 }
@@ -310,6 +313,8 @@ impl GlobalIOStats {
                 Some(r) => {
                     r.nr_read.fetch_add(1, Ordering::Relaxed);
                     if r.first_access_time.load(Ordering::Relaxed) == 0 {
+                        // FIXME: Conversion from `u64` to `usize` on 32-bit platform
+                        // is not reliable. Fix this by using AtomicU64 instead.
                         r.first_access_time.store(
                             SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -641,7 +646,8 @@ impl BackendMetrics {
 
     pub fn end(&self, begin: &SystemTime, size: usize, error: bool) {
         if let Ok(d) = SystemTime::elapsed(begin) {
-            // FIXME: converting u128 to usize is fragile.
+            // Below conversion from u128 to usize is acceptable since elapsed
+            // is a short duration.
             let elapsed = d.as_micros() as usize;
             self.read_count.inc();
             self.read_cumulative_latency_total.add(elapsed);
