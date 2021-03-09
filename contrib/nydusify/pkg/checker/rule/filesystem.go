@@ -6,6 +6,7 @@ package rule
 
 import (
 	"contrib/nydusify/pkg/checker/tool"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,13 @@ type Node struct {
 	Mode   os.FileMode
 	Xattrs map[string][]byte
 	Hash   []byte
+}
+
+func (node *Node) String() string {
+	return fmt.Sprintf(
+		"Path: %s, Size: %d, Mode: %d, Xattrs: %v, Hash: %s",
+		node.Path, node.Size, node.Mode, node.Xattrs, hex.EncodeToString(node.Hash),
+	)
 }
 
 func (rule *FilesystemRule) Name() string {
@@ -100,7 +108,11 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 		}
 		rootfsPath = filepath.Join("/", rootfsPath)
 
-		size := info.Size()
+		var size int64
+		if !info.IsDir() {
+			// Ignore directory size check
+			size = info.Size()
+		}
 		mode := info.Mode()
 		xattrs, err := getXattrs(path)
 		if err != nil {
@@ -211,7 +223,7 @@ func (rule *FilesystemRule) verify() error {
 		delete(nydusNodes, path)
 
 		if path != "/" && !reflect.DeepEqual(sourceNode, nydusNode) {
-			logrus.Warnf("File not match in Nydus image: %s", path)
+			logrus.Warnf("File not match in Nydus image: %s <=> %s", sourceNode.String(), nydusNode.String())
 			validate = false
 		}
 	}
