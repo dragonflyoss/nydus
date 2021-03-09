@@ -42,7 +42,7 @@ type Opt struct {
 //
 // source_layer_chainid -> (nydus_blob_layer_digest, nydus_bootstrap_layer_digest)
 // If the converter hit cache record during build source layer, we can
-// skip the layer building, see cache image example: examples/cache_manifest.json.
+// skip the layer building, see cache image example: examples/manifest/cache_manifest.json.
 //
 // Here is the build cache workflow:
 // 1. Import cache records from registry;

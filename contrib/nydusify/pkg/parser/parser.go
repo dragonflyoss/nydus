@@ -22,7 +22,7 @@ import (
 
 // Parser parses OCI & Nydus image manifest, manifest index and
 // image config into Parsed object, see the Nydus image example:
-// examples/index.json, examples/manifest.json.
+// examples/manifest/index.json, examples/manifest/manifest.json.
 type Parser struct {
 	Remote *remote.Remote
 }
@@ -49,7 +49,7 @@ func New(remote *remote.Remote) *Parser {
 }
 
 // Try to find the topmost layer in Nydus manifest, it should
-// be a Nydus bootstrap layer, see examples/manifest.json
+// be a Nydus bootstrap layer, see examples/manifest/manifest.json
 func findNydusBootstrapDesc(manifest *ocispec.Manifest) *ocispec.Descriptor {
 	layers := manifest.Layers
 	if len(layers) != 0 {
@@ -116,12 +116,12 @@ func (parser *Parser) parseImage(
 	} else {
 		manifest, err = parser.pullManifest(ctx, desc)
 		if err != nil {
-			return nil, errors.Wrap(err, "pull OCI image manifest")
+			return nil, errors.Wrap(err, "pull image manifest")
 		}
 	}
 	config, err := parser.pullConfig(ctx, &manifest.Config)
 	if err != nil {
-		return nil, errors.Wrap(err, "pull OCI image config")
+		return nil, errors.Wrap(err, "pull image config")
 	}
 	return &Image{
 		Desc:     *desc,

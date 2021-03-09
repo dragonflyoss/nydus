@@ -6,13 +6,16 @@ package provider
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/remotes/docker"
 	dockerconfig "github.com/docker/cli/cli/config"
+	"github.com/pkg/errors"
 
 	"contrib/nydusify/pkg/remote"
 )
@@ -36,30 +39,17 @@ func newDefaultClient() *http.Client {
 	}
 }
 
-func hostWithCredential(host string) (string, string, error) {
-	// The host of docker hub image will be converted to `registry-1.docker.io` in:
-	// github.com/containerd/containerd/remotes/docker/registry.go
-	// But we need use the key `https://index.docker.io/v1/` to find auth from docker config.
-	if host == "registry-1.docker.io" {
-		host = "https://index.docker.io/v1/"
-	}
+// withCredentialFunc accepts host url parameter and returns with
+// username, password and error.
+type withCredentialFunc = func(string) (string, string, error)
 
-	config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
-	authConfig, err := config.GetAuthConfig(host)
-	if err != nil {
-		return "", "", err
-	}
-
-	return authConfig.Username, authConfig.Password, nil
-}
-
-// DefaultRemote uses the implemention of containerd docker remote
-// to access image from remote registry
-func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
+// withRemote creates an remote instance, it uses the implemention of containerd
+// docker remote to access image from remote registry.
+func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote.Remote, error) {
 	registryHosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(docker.NewAuthorizer(
 			newDefaultClient(),
-			hostWithCredential,
+			credFunc,
 		)),
 		docker.WithClient(newDefaultClient()),
 		docker.WithPlainHTTP(func(host string) (bool, error) {
@@ -84,4 +74,42 @@ func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
 	}
 
 	return remote, nil
+}
+
+// DefaultRemote creates an remote instance, it attempts to read docker auth config
+// file `$DOCKER_CONFIG/config.json` to communicate with remote registry, `$DOCKER_CONFIG`
+// defaults to `~/.docker`.
+func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
+	return withRemote(ref, insecure, func(host string) (string, string, error) {
+		// The host of docker hub image will be converted to `registry-1.docker.io` in:
+		// github.com/containerd/containerd/remotes/docker/registry.go
+		// But we need use the key `https://index.docker.io/v1/` to find auth from docker config.
+		if host == "registry-1.docker.io" {
+			host = "https://index.docker.io/v1/"
+		}
+
+		config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
+		authConfig, err := config.GetAuthConfig(host)
+		if err != nil {
+			return "", "", err
+		}
+
+		return authConfig.Username, authConfig.Password, nil
+	})
+}
+
+// DefaultRemoteWithAuth creates an remote instance, it parses base64 encoded auth string
+// to communicate with remote registry.
+func DefaultRemoteWithAuth(ref string, insecure bool, auth string) (*remote.Remote, error) {
+	return withRemote(ref, insecure, func(host string) (string, string, error) {
+		decoded, err := base64.StdEncoding.DecodeString(auth)
+		if err != nil {
+			return "", "", errors.Wrap(err, "Decode base64 encoded auth string")
+		}
+		ary := strings.Split(string(decoded), ":")
+		if len(ary) != 2 {
+			return "", "", errors.New("Invalid base64 encoded auth string")
+		}
+		return ary[0], ary[1], nil
+	})
 }
