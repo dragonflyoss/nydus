@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "manifests": [
+    {
+      "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+      "digest": "sha256:4e4bc990609ed865e07afc8427c30ffdddca5153fd4e82c20d8f0783a291e241",
+      "size": 943,
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:db30bb2870067ed3e0e73c7448d9f0b529169da8295b5b5155b417624d861d81",
+      "size": 1367,
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux",
+        "os.features": [
+          "nydus.remoteimage.v1"
+        ]
+      }
+    }
+  ]
+}

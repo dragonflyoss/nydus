@@ -21,7 +21,8 @@ import (
 )
 
 // Parser parses OCI & Nydus image manifest, manifest index and
-// image config into Parsed object.
+// image config into Parsed object, see the Nydus image example:
+// examples/index.json, examples/manifest.json.
 type Parser struct {
 	Remote *remote.Remote
 }
