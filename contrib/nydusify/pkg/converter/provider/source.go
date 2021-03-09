@@ -14,20 +14,17 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
+	"contrib/nydusify/pkg/parser"
+	"contrib/nydusify/pkg/remote"
 	"contrib/nydusify/pkg/utils"
 )
 
@@ -52,89 +49,43 @@ type SourceProvider interface {
 
 type defaultSourceProvider struct {
 	workDir string
-	image   v1.Image
+	image   parser.Image
+	remote  *remote.Remote
 }
 
 type defaultSourceLayer struct {
+	remote        *remote.Remote
 	mountDir      string
-	layer         v1.Layer
-	digest        digest.Digest
-	size          int64
+	desc          ocispec.Descriptor
 	chainID       digest.Digest
 	parentChainID *digest.Digest
 }
 
-func withDefaultAuth() authn.Keychain {
-	return authn.DefaultKeychain
-}
-
 func (sp *defaultSourceProvider) Manifest(ctx context.Context) (*ocispec.Descriptor, error) {
-	size, err := sp.image.Size()
-	if err != nil {
-		return nil, errors.Wrap(err, "Get source image manifest size")
-	}
-
-	mediaType, err := sp.image.MediaType()
-	if err != nil {
-		return nil, errors.Wrap(err, "Get source image manifest media type")
-	}
-
-	_digest, err := sp.image.Digest()
-	if err != nil {
-		return nil, errors.Wrap(err, "Get source image manifest digest")
-	}
-
-	return &ocispec.Descriptor{
-		Size:      size,
-		MediaType: string(mediaType),
-		Digest:    digest.Digest(_digest.String()),
-	}, nil
+	return &sp.image.Desc, nil
 }
 
 func (sp *defaultSourceProvider) Config(ctx context.Context) (*ocispec.Image, error) {
-	configBytes, err := sp.image.RawConfigFile()
-	if err != nil {
-		return nil, errors.Wrap(err, "Get source image config")
-	}
-
-	var config ocispec.Image
-	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return nil, errors.Wrap(err, "Unmarshal source image config")
-	}
-
-	return &config, nil
+	return &sp.image.Config, nil
 }
 
 func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, error) {
-	layers, err := sp.image.Layers()
-	if err != nil {
-		return nil, err
+	layers := sp.image.Manifest.Layers
+	diffIDs := sp.image.Config.RootFS.DiffIDs
+	if len(layers) != len(diffIDs) {
+		return nil, fmt.Errorf("Mismatched fs layers (%d) and diff ids (%d)", len(layers), len(diffIDs))
 	}
 
 	var parentChainID *digest.Digest
-	diffIDs := []digest.Digest{}
 	sourceLayers := []SourceLayer{}
 
-	for _, _layer := range layers {
-		diffID, err := _layer.DiffID()
-		if err != nil {
-			return nil, errors.Wrap(err, "Get source layer DiffID")
-		}
-		layerDigest, err := _layer.Digest()
-		if err != nil {
-			return nil, errors.Wrap(err, "Get source layer digest")
-		}
-		size, err := _layer.Size()
-		if err != nil {
-			return nil, errors.Wrap(err, "Get source layer size")
-		}
-		diffIDs = append(diffIDs, digest.Digest(diffID.String()))
-		chainID := identity.ChainID(diffIDs)
+	for i, desc := range layers {
+		layerDigest := desc.Digest
+		chainID := identity.ChainID(diffIDs[:i+1])
 		layer := &defaultSourceLayer{
+			remote:        sp.remote,
 			mountDir:      filepath.Join(sp.workDir, layerDigest.String()),
-			layer:         _layer,
-			digest:        digest.Digest(layerDigest.String()),
-			size:          size,
+			desc:          desc,
 			chainID:       chainID,
 			parentChainID: parentChainID,
 		}
@@ -146,17 +97,12 @@ func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, err
 }
 
 func (sl *defaultSourceLayer) Mount(ctx context.Context) (string, func() error, error) {
-	digestStr := sl.digest.String()
+	digestStr := sl.desc.Digest.String()
 
-	// Pull the layer from source, we need to retry in case of
-	// the layer is compressed or uncompressed
-	reader, err := sl.layer.Compressed()
+	// Pull the layer from source
+	reader, err := sl.remote.Pull(ctx, sl.desc, true)
 	if err != nil {
-		reader, err = sl.layer.Uncompressed()
-		if err != nil {
-			return "", nil, errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
-		}
-		defer reader.Close()
+		return "", nil, errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
 	}
 	defer reader.Close()
 
@@ -173,11 +119,11 @@ func (sl *defaultSourceLayer) Mount(ctx context.Context) (string, func() error, 
 }
 
 func (sl *defaultSourceLayer) Digest() digest.Digest {
-	return sl.digest
+	return sl.desc.Digest
 }
 
 func (sl *defaultSourceLayer) Size() int64 {
-	return sl.size
+	return sl.desc.Size
 }
 
 func (sl *defaultSourceLayer) ChainID() digest.Digest {
@@ -189,31 +135,21 @@ func (sl *defaultSourceLayer) ParentChainID() *digest.Digest {
 }
 
 // DefaultSource pulls image layers from specify image reference
-func DefaultSource(ref string, insecure bool, workDir string) (SourceProvider, error) {
-	sourceOpts := []name.Option{}
-	if insecure {
-		sourceOpts = append(sourceOpts, name.Insecure)
-	}
-	sourceRef, err := name.ParseReference(ref, sourceOpts...)
+func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (SourceProvider, error) {
+	parser := parser.New(remote)
+	parsed, err := parser.Parse(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "Parse source reference")
+		return nil, errors.Wrap(err, "Parse source image")
 	}
 
-	image, err := remote.Image(
-		sourceRef,
-		remote.WithAuthFromKeychain(withDefaultAuth()),
-		remote.WithPlatform(v1.Platform{
-			Architecture: defaultArch,
-			OS:           defaultOS,
-		}),
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "Fetch source image")
+	if parsed.OCIImage == nil {
+		return nil, errors.Wrap(err, "Not found linux/amd64 manifest in source image")
 	}
 
 	sp := defaultSourceProvider{
 		workDir: workDir,
-		image:   image,
+		image:   *parsed.OCIImage,
+		remote:  remote,
 	}
 
 	return &sp, nil

@@ -11,7 +11,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/checker/parser"
+	"contrib/nydusify/pkg/parser"
+	"contrib/nydusify/pkg/utils"
 )
 
 // ManifestRule validates manifest format of Nydus image
@@ -28,31 +29,37 @@ func (rule *ManifestRule) Validate() error {
 	logrus.Infof("Checking Nydus manifest")
 
 	// Check manifest of Nydus
-	if rule.TargetParsed.NydusManifest == nil {
+	if rule.TargetParsed.NydusImage == nil {
 		return errors.New("invalid nydus image manifest")
 	}
 
-	// Check image config of Nydus, and compare with OCI image
-	if rule.TargetParsed.NydusConfig == nil {
-		return errors.New("invalid nydus image config")
+	layers := rule.TargetParsed.NydusImage.Manifest.Layers
+	for i, layer := range layers {
+		if i == len(layers)-1 {
+			if layer.Annotations[utils.LayerAnnotationNydusBootstrap] != "true" {
+				return errors.New("invalid bootstrap layer in nydus image manifest")
+			}
+		} else {
+			if layer.MediaType != utils.MediaTypeNydusBlob ||
+				layer.Annotations[utils.LayerAnnotationNydusBlob] != "true" {
+				return errors.New("invalid blob layer in nydus image manifest")
+			}
+		}
 	}
-	if rule.SourceParsed.OCIConfig != nil {
-		ociConfig, err := json.Marshal(rule.SourceParsed.OCIConfig.Config)
+
+	// Check Nydus image config with OCI image
+	if rule.SourceParsed.OCIImage != nil {
+		ociConfig, err := json.Marshal(rule.SourceParsed.OCIImage.Config.Config)
 		if err != nil {
 			return errors.New("marshal oci image config")
 		}
-		nydusConfig, err := json.Marshal(rule.TargetParsed.NydusConfig.Config)
+		nydusConfig, err := json.Marshal(rule.TargetParsed.NydusImage.Config.Config)
 		if err != nil {
 			return errors.New("marshal nydus image config")
 		}
 		if !reflect.DeepEqual(ociConfig, nydusConfig) {
 			return errors.New("nydus image config should be equal with oci image config")
 		}
-	}
-
-	// Check bootstrap layer exists
-	if rule.TargetParsed.NydusBootstrap == nil {
-		return errors.New("invalid bootstrap layer in nydus image")
 	}
 
 	return nil

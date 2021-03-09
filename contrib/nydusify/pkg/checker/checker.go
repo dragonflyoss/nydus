@@ -5,16 +5,17 @@
 package checker
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/checker/parser"
 	"contrib/nydusify/pkg/checker/rule"
 	"contrib/nydusify/pkg/checker/tool"
 	"contrib/nydusify/pkg/converter/provider"
+	"contrib/nydusify/pkg/parser"
 )
 
 // Opt defines Checker options.
@@ -68,15 +69,15 @@ func New(opt Opt) (*Checker, error) {
 
 // Check checks Nydus image, and outputs image information to work
 // directory, the check workflow is composed of various rules.
-func (checker *Checker) Check() error {
-	targetParsed, err := checker.targetParser.Parse()
+func (checker *Checker) Check(ctx context.Context) error {
+	targetParsed, err := checker.targetParser.Parse(ctx)
 	if err != nil {
 		return errors.Wrap(err, "parse Nydus image")
 	}
 
 	var sourceParsed *parser.Parsed
 	if checker.sourceParser != nil {
-		sourceParsed, err = checker.sourceParser.Parse()
+		sourceParsed, err = checker.sourceParser.Parse(ctx)
 		if err != nil {
 			return errors.Wrap(err, "parse source image")
 		}
@@ -92,7 +93,7 @@ func (checker *Checker) Check() error {
 		return errors.Wrap(err, "create work directory")
 	}
 
-	if err := checker.Output(sourceParsed, targetParsed, checker.WorkDir); err != nil {
+	if err := checker.Output(ctx, sourceParsed, targetParsed, checker.WorkDir); err != nil {
 		return errors.Wrap(err, "output image information")
 	}
 
