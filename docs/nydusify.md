@@ -105,3 +105,9 @@ cmd/nydusify check \
 ## More Nydusify Options
 
 See `cmd/nydusify convert/check --help`
+
+## Use Nydusify as a package
+
+``` golang
+See `contrib/nydusify/examples/converter/main.go`
+```

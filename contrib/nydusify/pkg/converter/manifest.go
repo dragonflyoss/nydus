@@ -17,10 +17,10 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
-	"contrib/nydusify/pkg/backend"
-	"contrib/nydusify/pkg/converter/provider"
-	"contrib/nydusify/pkg/remote"
-	"contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 const defaultOS = "linux"

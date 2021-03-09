@@ -14,11 +14,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/backend"
-	"contrib/nydusify/pkg/build"
-	"contrib/nydusify/pkg/converter/provider"
-	"contrib/nydusify/pkg/remote"
-	"contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 // PullWorkerCount specifies source layer pull concurrency
