@@ -13,9 +13,9 @@ import (
 	"io/ioutil"
 	"strconv"
 
-	"contrib/nydusify/pkg/backend"
-	"contrib/nydusify/pkg/remote"
-	"contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 
 	"github.com/containerd/containerd/images"
 	digest "github.com/opencontainers/go-digest"

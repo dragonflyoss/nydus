@@ -11,8 +11,8 @@ import (
 	"io"
 	"io/ioutil"
 
-	"contrib/nydusify/pkg/remote"
-	"contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 
 	"github.com/containerd/containerd/images"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"

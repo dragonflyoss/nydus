@@ -5,13 +5,14 @@
 package rule
 
 import (
-	"contrib/nydusify/pkg/checker/tool"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 
 	"github.com/pkg/errors"
 	"github.com/pkg/xattr"

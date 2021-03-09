@@ -17,7 +17,7 @@ import (
 	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/pkg/errors"
 
-	"contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 )
 
 func newDefaultClient() *http.Client {

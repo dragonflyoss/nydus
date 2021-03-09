@@ -20,10 +20,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"contrib/nydusify/pkg/checker"
-	"contrib/nydusify/pkg/converter"
-	"contrib/nydusify/pkg/converter/provider"
-	"contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 )
 
 var versionGitCommit string

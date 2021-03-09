@@ -12,10 +12,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/checker/rule"
-	"contrib/nydusify/pkg/checker/tool"
-	"contrib/nydusify/pkg/converter/provider"
-	"contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
 )
 
 // Opt defines Checker options.

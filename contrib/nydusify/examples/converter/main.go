@@ -3,16 +3,16 @@ package main
 import (
 	"context"
 
-	"contrib/nydusify/pkg/converter"
-	"contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 )
 
 func main() {
 	// Configurable parameters for converter
 	wordDir := "./tmp"
 	nydusImagePath := "/path/to/nydus-image"
-	source := "localhost:5000"
-	target := "localhost:5000/latest-nydus"
+	source := "localhost:5000/ubuntu:latest"
+	target := "localhost:5000/ubuntu:latest-nydus"
 	auth := "<base64_encoded_auth>"
 	insecure := true
 

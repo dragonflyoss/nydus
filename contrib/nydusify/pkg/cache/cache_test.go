@@ -12,7 +12,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 
-	"contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 func makeRecord(id int64, hashBlob bool) *CacheRecord {

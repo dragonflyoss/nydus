@@ -11,8 +11,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"contrib/nydusify/pkg/parser"
-	"contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 // ManifestRule validates manifest format of Nydus image
