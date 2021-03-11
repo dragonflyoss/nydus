@@ -100,16 +100,22 @@ func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, err
 func (sl *defaultSourceLayer) Mount(ctx context.Context) (string, func() error, error) {
 	digestStr := sl.desc.Digest.String()
 
-	// Pull the layer from source
-	reader, err := sl.remote.Pull(ctx, sl.desc, true)
-	if err != nil {
-		return "", nil, errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
-	}
-	defer reader.Close()
+	if err := utils.WithRetry(func() error {
+		// Pull the layer from source
+		reader, err := sl.remote.Pull(ctx, sl.desc, true)
+		if err != nil {
+			return errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
+		}
+		defer reader.Close()
 
-	// Decompress layer from source stream
-	if err := utils.UnpackTargz(ctx, sl.mountDir, reader); err != nil {
-		return "", nil, errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
+		// Decompress layer from source stream
+		if err := utils.UnpackTargz(ctx, sl.mountDir, reader); err != nil {
+			return errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
+		}
+
+		return nil
+	}); err != nil {
+		return "", nil, err
 	}
 
 	umount := func() error {

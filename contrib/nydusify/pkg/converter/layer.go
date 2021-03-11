@@ -70,22 +70,28 @@ func (layer *buildLayer) pushBlob(ctx context.Context) (*ocispec.Descriptor, err
 		},
 	}
 
-	// Upload Nydus blob to backend if backend config be specified
-	if layer.backend != nil {
-		if err := layer.backend.Upload(blobID, blobPath); err != nil {
-			return nil, errors.Wrap(err, "Upload blob to backend")
+	if err := utils.WithRetry(func() error {
+		// Upload Nydus blob to backend if backend config be specified
+		if layer.backend != nil {
+			if err := layer.backend.Upload(blobID, blobPath); err != nil {
+				return errors.Wrap(err, "Upload blob to backend")
+			}
+			return nil
 		}
-		return &desc, nil
-	}
 
-	blobFile, err := os.Open(blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "Open blob file")
-	}
-	defer blobFile.Close()
+		blobFile, err := os.Open(blobPath)
+		if err != nil {
+			return errors.Wrap(err, "Open blob file")
+		}
+		defer blobFile.Close()
 
-	if err := layer.remote.Push(ctx, desc, true, blobFile); err != nil {
-		return nil, errors.Wrap(err, "Push blob layer")
+		if err := layer.remote.Push(ctx, desc, true, blobFile); err != nil {
+			return errors.Wrap(err, "Push blob layer")
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return &desc, nil
@@ -107,14 +113,6 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 		return nil, nil, errors.Wrap(err, "Calculate uncompressed boostrap digest")
 	}
 
-	compressedReader, err := utils.PackTargz(
-		layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
-	)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "Compress boostrap layer")
-	}
-	defer compressedReader.Close()
-
 	bootstrapMediaType := ocispec.MediaTypeImageLayerGzip
 	if layer.dockerV2Format {
 		bootstrapMediaType = images.MediaTypeDockerSchema2LayerGzip
@@ -132,8 +130,22 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 		},
 	}
 
-	if err := layer.remote.Push(ctx, desc, true, compressedReader); err != nil {
-		return nil, nil, errors.Wrap(err, "Push bootstrap layer")
+	if err := utils.WithRetry(func() error {
+		compressedReader, err := utils.PackTargz(
+			layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
+		)
+		if err != nil {
+			return errors.Wrap(err, "Compress boostrap layer")
+		}
+		defer compressedReader.Close()
+
+		if err := layer.remote.Push(ctx, desc, true, compressedReader); err != nil {
+			return errors.Wrap(err, "Push bootstrap layer")
+		}
+
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
 
 	return &desc, &uncompressedDigest, nil
@@ -184,7 +196,7 @@ func (layer *buildLayer) Push(ctx context.Context) error {
 	// Also push Nydus bootstrap and blob layer to cache image, because maybe
 	// the cache image is located in different namespace/repo
 	if err := layer.cacheGlue.Push(ctx, layer); err != nil {
-		return errors.Wrapf(err, "Push layer to cache image")
+		logrus.Warnf("Failed push layer to cache image: %s", err)
 	}
 
 	return nil
@@ -196,7 +208,7 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	// Give priority to checking & pulling Nydus layer from cache image
 	cacheRecord, err := layer.cacheGlue.Pull(ctx, layer.source.ChainID())
 	if err != nil {
-		return nil, errors.Wrap(err, "Get cache record")
+		logrus.Warnf("Failed to get cache record: %s", err)
 	}
 	if cacheRecord != nil {
 		layer.cacheRecord = cacheRecord
@@ -236,7 +248,7 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 			bootstrapName := strconv.Itoa(parentLayer.index+1) + "-" + parentLayer.source.ChainID().String()
 			parentLayer.bootstrapPath = filepath.Join(parentLayer.bootstrapsDir, bootstrapName+"-cached")
 			if err := parentLayer.cacheGlue.PullBootstrap(ctx, parentLayer.source.ChainID(), parentLayer.bootstrapPath); err != nil {
-				logrus.Warn(errors.Wrap(err, "Pull bootstrap from cache"))
+				logrus.Warn("Pull bootstrap from cache: %s", err)
 				// Error occurs, the cache is invalid
 				return buildDone(errInvalidCache)
 			}

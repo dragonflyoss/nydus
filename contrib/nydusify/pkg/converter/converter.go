@@ -218,7 +218,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		// probability caused by registry GC, for example the cache image be overwritten by another
 		// conversion progress, and the registry GC be triggered in the same time
 		if cvt.CacheRemote != nil && strings.Contains(err.Error(), "unexpected status: 400") {
-			logrus.Warn(errors.Wrap(err, "Push manifest"))
+			logrus.Warnf("Push manifest: %s", err)
 			return pushDone(errInvalidCache)
 		}
 		return pushDone(errors.Wrap(err, "Push target manifest"))
