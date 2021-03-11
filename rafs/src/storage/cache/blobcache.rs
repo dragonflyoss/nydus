@@ -762,7 +762,7 @@ pub fn new(
 
 #[cfg(test)]
 mod blob_cache_tests {
-    use std::alloc::{alloc, dealloc, Layout};
+    use std::alloc::{alloc, Layout};
     use std::slice::from_raw_parts;
     use std::sync::Arc;
 
@@ -862,7 +862,7 @@ mod blob_cache_tests {
 
         // generate chunk and bio
         let mut chunk = OndiskChunkInfo::new();
-        chunk.block_id = RafsDigest::from_buf(&expect, digest::Algorithm::Blake3).into();
+        chunk.block_id = RafsDigest::from_buf(&expect, digest::Algorithm::Blake3);
         chunk.file_offset = 0;
         chunk.compress_offset = 0;
         chunk.compress_size = 100;
@@ -882,8 +882,9 @@ mod blob_cache_tests {
             let ptr = alloc(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
-            let data = Vec::from(from_raw_parts(ptr, 50).clone());
-            dealloc(ptr, layout);
+            let data = Vec::from(from_raw_parts(ptr, 50));
+            // Don't dealloc as `data` already gets the ownership
+            // dealloc(ptr, layout);
             data
         };
 
@@ -892,8 +893,9 @@ mod blob_cache_tests {
             let ptr = alloc(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
-            let data = Vec::from(from_raw_parts(ptr, 50).clone());
-            dealloc(ptr, layout);
+            let data = Vec::from(from_raw_parts(ptr, 50));
+            // Don't dealloc as `data` already gets the ownership
+            // dealloc(ptr, layout);
             data
         };
 

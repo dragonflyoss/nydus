@@ -630,18 +630,20 @@ mod tests {
     #[test]
     fn it_should_add_new_backend() {
         let mut col: FsBackendCollection = Default::default();
-        match col.add(
-            "test",
-            &FsBackendMountCmd {
-                fs_type: FsBackendType::Rafs,
-                config: "{\"config\": \"test\"}".to_string(),
-                mountpoint: "testmonutount".to_string(),
-                source: "testsource".to_string(),
-                prefetch_files: Some(vec!["testfile".to_string()]),
-            },
-        ) {
-            Err(_) => assert!(false, "failed to add backend collection"),
-            Ok(_) => assert!(true),
+        if col
+            .add(
+                "test",
+                &FsBackendMountCmd {
+                    fs_type: FsBackendType::Rafs,
+                    config: "{\"config\": \"test\"}".to_string(),
+                    mountpoint: "testmonutount".to_string(),
+                    source: "testsource".to_string(),
+                    prefetch_files: Some(vec!["testfile".to_string()]),
+                },
+            )
+            .is_err()
+        {
+            panic!("failed to add backend collection")
         }
         assert_eq!(col.0.len(), 1);
 
@@ -652,16 +654,15 @@ mod tests {
     #[test]
     fn it_should_verify_prefetch_files() {
         match input_prefetch_files_verify(&Some(vec!["/etc/passwd".to_string()])) {
-            Err(_) => assert!(false, "failed to verify prefetch files"),
+            Err(_) => panic!("failed to verify prefetch files"),
             Ok(res) => match res {
                 Some(v) => assert_eq!(1, v.len()),
-                None => assert!(false, "failed to get verified prefetch files"),
+                None => panic!("failed to get verified prefetch files"),
             },
         }
 
-        match input_prefetch_files_verify(&Some(vec!["etc/passwd".to_string()])) {
-            Err(_) => assert!(true),
-            Ok(_) => assert!(false, "should not pass verify"),
+        if input_prefetch_files_verify(&Some(vec!["etc/passwd".to_string()])).is_ok() {
+            panic!("should not pass verify");
         }
     }
 
@@ -693,7 +694,7 @@ mod tests {
             }
           }"#;
         let bootstrap = "./tests/texture/bootstrap/nydusd_daemon_test_bootstrap";
-        match fs_backend_factory(&FsBackendMountCmd {
+        if fs_backend_factory(&FsBackendMountCmd {
             fs_type: FsBackendType::Rafs,
             config: config.to_string(),
             mountpoint: "testmountpoint".to_string(),
@@ -703,9 +704,9 @@ mod tests {
         .unwrap()
         .as_any()
         .downcast_ref::<Rafs>()
+        .is_none()
         {
-            Some(_) => assert!(true),
-            None => assert!(false, "failed to create rafs backend"),
+            panic!("failed to create rafs backend")
         }
     }
 }

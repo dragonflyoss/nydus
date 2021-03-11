@@ -787,9 +787,8 @@ mod tests {
             pid: 1,
             uid: 0,
         };
-        match rafs.access(ctx, 1, 0) {
-            Ok(_) => assert!(true),
-            Err(_) => assert!(false, "failed to access inode 1"),
+        if rafs.access(ctx, 1, 0).is_err() {
+            panic!("failed to access inode 1");
         }
     }
 
@@ -804,9 +803,9 @@ mod tests {
         match rafs.listxattr(ctx, 1, 0) {
             Ok(reply) => match reply {
                 ListxattrReply::Count(c) => assert_eq!(c, 0),
-                _ => assert!(false),
+                _ => panic!(),
             },
-            Err(_) => assert!(false, "failed to access inode 1"),
+            Err(_) => panic!("failed to access inode 1"),
         }
     }
 
@@ -826,7 +825,7 @@ mod tests {
                 assert_eq!(statfs.f_fsid, 1380009555);
                 assert_eq!(statfs.f_ffree, 0);
             }
-            Err(_) => assert!(false, "failed to statfs"),
+            Err(_) => panic!("failed to statfs"),
         }
     }
 
@@ -847,7 +846,7 @@ mod tests {
         match rafs.lookup(ctx, 1, &std::ffi::CString::new("/etc").unwrap()) {
             Err(e) => {
                 println!("{:?}", e);
-                assert!(false, "failed to lookup /etc from ino 1");
+                panic!("failed to lookup /etc from ino 1");
             }
             Ok(e) => {
                 assert_eq!(e.inode, 0);
