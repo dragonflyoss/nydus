@@ -139,7 +139,7 @@ impl Nydusd {
         );
 
         let texture_file = format!("./tests/texture/{}", expect_texture);
-        let mut texture = File::open(texture_file.clone()).expect("invalid texture file path");
+        let mut texture = File::open(texture_file).expect("invalid texture file path");
         let mut expected = String::new();
         texture.read_to_string(&mut expected).unwrap();
 
