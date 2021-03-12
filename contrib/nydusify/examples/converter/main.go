@@ -53,7 +53,6 @@ func main() {
 		NydusImagePath: nydusImagePath,
 		MultiPlatform:  false,
 		DockerV2Format: true,
-		WhiteoutSpec:   "oci",
 	}
 
 	cvt, err := converter.New(opt)

@@ -114,7 +114,6 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		NydusImagePath: nydusImagePath,
 		MultiPlatform:  false,
 		DockerV2Format: true,
-		WhiteoutSpec:   "oci",
 
 		BackendType:   nydusify.backendType,
 		BackendConfig: nydusify.backendConfig,

@@ -67,7 +67,6 @@ type Opt struct {
 	NydusImagePath string
 	WorkDir        string
 	PrefetchDir    string
-	WhiteoutSpec   string
 
 	MultiPlatform  bool
 	DockerV2Format bool
@@ -122,7 +121,6 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		NydusImagePath: cvt.NydusImagePath,
 		PrefetchDir:    cvt.PrefetchDir,
 		TargetDir:      cvt.WorkDir,
-		WhiteoutSpec:   cvt.WhiteoutSpec,
 	})
 	if err != nil {
 		return errors.Wrap(err, "Create build flow")

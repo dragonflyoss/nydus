@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/mount"
 	"github.com/dustin/go-humanize"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -25,6 +27,11 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
+
+type sourceMount struct {
+	Source       string
+	WhiteoutSpec string
+}
 
 type buildLayer struct {
 	index  int
@@ -42,9 +49,50 @@ type buildLayer struct {
 	bootstrapDesc   *ocispec.Descriptor
 	bootstrapDiffID *digest.Digest
 	parent          *buildLayer
-	sourceDir       string
+	sourceMount     *sourceMount
 	blobPath        string
 	bootstrapPath   string
+}
+
+func parseSourceMount(mounts []mount.Mount) (*sourceMount, error) {
+	if len(mounts) == 0 {
+		return nil, errors.New("Invalid layer mounts")
+	}
+
+	switch mounts[0].Type {
+	case "bind":
+		return &sourceMount{
+			Source:       mounts[0].Source,
+			WhiteoutSpec: "overlayfs",
+		}, nil
+
+	case "overlay":
+		var prefix = "lowerdir="
+		for _, option := range mounts[0].Options {
+			if strings.HasPrefix(option, prefix) {
+				dirs := strings.Split(option[len(prefix):], ":")
+				if len(dirs) > 0 {
+					return &sourceMount{
+						Source:       dirs[0],
+						WhiteoutSpec: "overlayfs",
+					}, nil
+				}
+			}
+		}
+		return nil, errors.Errorf(
+			"Failed to parse mount overlayfs options %v",
+			mounts[0].Options,
+		)
+
+	case "oci-directory":
+		return &sourceMount{
+			Source:       mounts[0].Source,
+			WhiteoutSpec: "oci",
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("Unsupported mount type: %s", mounts[0].Type)
+	}
 }
 
 func (layer *buildLayer) pushBlob(ctx context.Context) (*ocispec.Descriptor, error) {
@@ -223,10 +271,14 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 		"Digest": layer.source.Digest(),
 		"Size":   sourceLayerSize,
 	})
-	var umount func() error
-	layer.sourceDir, umount, err = layer.source.Mount(ctx)
+	mounts, umount, err := layer.source.Mount(ctx)
 	if err != nil {
 		return nil, mountDone(errors.Wrapf(err, "Mount source layer %s", layer.source.Digest()))
+	}
+
+	layer.sourceMount, err = parseSourceMount(mounts)
+	if err != nil {
+		return nil, mountDone(errors.Wrapf(err, "Parse source layer mount %s", layer.source.Digest()))
 	}
 
 	return umount, mountDone(nil)
@@ -255,7 +307,9 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 		}
 		parentBootstrapPath = parentLayer.bootstrapPath
 	}
-	blobPath, err := layer.buildWorkflow.Build(layer.sourceDir, parentBootstrapPath, layer.bootstrapPath)
+	blobPath, err := layer.buildWorkflow.Build(
+		layer.sourceMount.Source, layer.sourceMount.WhiteoutSpec, parentBootstrapPath, layer.bootstrapPath,
+	)
 	if err != nil {
 		return buildDone(errors.Wrapf(err, "Build source layer %s", layer.source.Digest()))
 	}

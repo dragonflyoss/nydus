@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/containerd/containerd/mount"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -33,7 +34,7 @@ const defaultArch = "amd64"
 
 // SourceLayer is a layer of source image
 type SourceLayer interface {
-	Mount(ctx context.Context) (string, func() error, error)
+	Mount(ctx context.Context) ([]mount.Mount, func() error, error)
 	Size() int64
 	Digest() digest.Digest
 	ChainID() digest.Digest
@@ -97,7 +98,7 @@ func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, err
 	return sourceLayers, nil
 }
 
-func (sl *defaultSourceLayer) Mount(ctx context.Context) (string, func() error, error) {
+func (sl *defaultSourceLayer) Mount(ctx context.Context) ([]mount.Mount, func() error, error) {
 	digestStr := sl.desc.Digest.String()
 
 	if err := utils.WithRetry(func() error {
@@ -115,14 +116,21 @@ func (sl *defaultSourceLayer) Mount(ctx context.Context) (string, func() error, 
 
 		return nil
 	}); err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 
 	umount := func() error {
 		return os.RemoveAll(sl.mountDir)
 	}
 
-	return sl.mountDir, umount, nil
+	mounts := []mount.Mount{
+		{
+			Type:   "oci-directory",
+			Source: sl.mountDir,
+		},
+	}
+
+	return mounts, umount, nil
 }
 
 func (sl *defaultSourceLayer) Digest() digest.Digest {

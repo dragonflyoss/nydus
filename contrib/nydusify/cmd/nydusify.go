@@ -229,7 +229,6 @@ func main() {
 					NydusImagePath: c.String("nydus-image"),
 					MultiPlatform:  c.Bool("multi-platform"),
 					DockerV2Format: c.Bool("docker-v2-format"),
-					WhiteoutSpec:   "oci",
 
 					BackendType:   backendType,
 					BackendConfig: backendConfig,
