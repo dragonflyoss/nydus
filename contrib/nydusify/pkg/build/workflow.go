@@ -78,6 +78,10 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 
 	debugJSONPath := filepath.Join(option.TargetDir, "output.json")
 
+	if option.PrefetchDir == "" {
+		option.PrefetchDir = "/"
+	}
+
 	return &Workflow{
 		WorkflowOption: option,
 		blobsDir:       blobsDir,

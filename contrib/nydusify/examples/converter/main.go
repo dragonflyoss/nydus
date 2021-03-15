@@ -38,15 +38,15 @@ func main() {
 	}
 
 	// Source provider gets source image manifest, config, and layer
-	sourceProvider, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir)
+	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir)
 	if err != nil {
 		panic(err)
 	}
 
 	opt := converter.Opt{
-		Logger:         logger,
-		SourceProvider: sourceProvider,
-		TargetRemote:   targetRemote,
+		Logger:          logger,
+		SourceProviders: sourceProviders,
+		TargetRemote:    targetRemote,
 
 		WorkDir:        wordDir,
 		PrefetchDir:    "/",

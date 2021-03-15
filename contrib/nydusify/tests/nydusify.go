@@ -87,7 +87,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
 	assert.Nil(t, err)
 
-	sourceProvider, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
+	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
 	assert.Nil(t, err)
 
 	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
@@ -101,8 +101,8 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	}
 
 	opt := converter.Opt{
-		Logger:         logger,
-		SourceProvider: sourceProvider,
+		Logger:          logger,
+		SourceProviders: sourceProviders,
 
 		TargetRemote: targetRemote,
 

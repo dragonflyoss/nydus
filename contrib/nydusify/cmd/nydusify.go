@@ -205,7 +205,7 @@ func main() {
 				if err != nil {
 					return errors.Wrap(err, "Parse source reference")
 				}
-				sourceProvider, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
+				sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
 				if err != nil {
 					return err
 				}
@@ -216,8 +216,8 @@ func main() {
 				}
 
 				opt := converter.Opt{
-					Logger:         logger,
-					SourceProvider: sourceProvider,
+					Logger:          logger,
+					SourceProviders: sourceProviders,
 
 					TargetRemote: targetRemote,
 

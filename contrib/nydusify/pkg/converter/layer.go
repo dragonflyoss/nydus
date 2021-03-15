@@ -267,7 +267,7 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	layer.bootstrapPath = filepath.Join(layer.bootstrapsDir, bootstrapName)
 
 	// Pull source layer for building on next if no cache hit
-	mountDone := logger.Log(ctx, fmt.Sprintf("[SOUR] Pull layer"), provider.LoggerFields{
+	mountDone := logger.Log(ctx, fmt.Sprintf("[SOUR] Mount layer"), provider.LoggerFields{
 		"Digest": layer.source.Digest(),
 		"Size":   sourceLayerSize,
 	})

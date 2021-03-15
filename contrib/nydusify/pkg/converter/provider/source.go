@@ -150,7 +150,7 @@ func (sl *defaultSourceLayer) ParentChainID() *digest.Digest {
 }
 
 // DefaultSource pulls image layers from specify image reference
-func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (SourceProvider, error) {
+func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) ([]SourceProvider, error) {
 	parser := parser.New(remote)
 	parsed, err := parser.Parse(ctx)
 	if err != nil {
@@ -161,11 +161,13 @@ func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (
 		return nil, errors.Wrap(err, "Not found linux/amd64 manifest in source image")
 	}
 
-	sp := defaultSourceProvider{
-		workDir: workDir,
-		image:   *parsed.OCIImage,
-		remote:  remote,
+	sp := []SourceProvider{
+		&defaultSourceProvider{
+			workDir: workDir,
+			image:   *parsed.OCIImage,
+			remote:  remote,
+		},
 	}
 
-	return &sp, nil
+	return sp, nil
 }
