@@ -11,13 +11,13 @@ import (
 
 	"github.com/pkg/errors"
 
-	"contrib/nydus-snapshotter/config"
-	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
-	"contrib/nydus-snapshotter/pkg/filesystem/stargz"
-	"contrib/nydus-snapshotter/pkg/signature"
-	"contrib/nydus-snapshotter/pkg/utils/signals"
-	"contrib/nydus-snapshotter/snapshot"
-	"contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/stargz"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/signals"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/snapshot"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 )
 
 func Start(ctx context.Context, cfg config.Config) error {

@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"contrib/nydus-snapshotter/pkg/auth"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/auth"
 )
 
 func TestResolver_resolve(t *testing.T) {

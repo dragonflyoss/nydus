@@ -23,10 +23,10 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/pkg/errors"
 
-	"contrib/nydus-snapshotter/pkg/daemon"
-	"contrib/nydus-snapshotter/pkg/label"
-	"contrib/nydus-snapshotter/pkg/process"
-	"contrib/nydus-snapshotter/pkg/snapshot"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/snapshot"
 )
 
 var _ snapshots.Snapshotter = &snapshotter{}

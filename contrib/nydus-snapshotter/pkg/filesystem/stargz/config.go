@@ -9,9 +9,9 @@ package stargz
 import (
 	"errors"
 
-	"contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
-	"contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 )
 
 func WithMeta(root string) NewFSOpt {

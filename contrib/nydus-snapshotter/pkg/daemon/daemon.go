@@ -13,8 +13,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"contrib/nydus-snapshotter/pkg/nydussdk"
-	"contrib/nydus-snapshotter/pkg/nydussdk/model"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
 const (

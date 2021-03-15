@@ -8,7 +8,7 @@ package config
 
 import (
 	"github.com/pkg/errors"
-	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 )
 
 const defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"

@@ -10,8 +10,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"contrib/nydus-snapshotter/config"
-	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"os"
 )
 

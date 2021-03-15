@@ -14,8 +14,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"contrib/nydus-snapshotter/pkg/label"
-	"contrib/nydus-snapshotter/pkg/utils/signer"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/signer"
 )
 
 type Verifier struct {

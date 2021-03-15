@@ -17,10 +17,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"contrib/nydus-snapshotter/pkg/filesystem/nydus"
-	"contrib/nydus-snapshotter/pkg/label"
-	"contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 )
 
 func ensureExists(path string) error {

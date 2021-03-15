@@ -13,11 +13,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
 
-	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/app/snapshotter"
-	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
-	"contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/logging"
-	"contrib/nydus-snapshotter/config"
-	"contrib/nydus-snapshotter/pkg/errdefs"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/app/snapshotter"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/command"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/cmd/containerd-nydus-grpc/pkg/logging"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
 )
 
 func main() {
