@@ -15,7 +15,7 @@ use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use nydus_api::http_endpoint::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
-    DaemonErrorKind,
+    DaemonErrorKind, MetricsErrorKind,
 };
 use nydus_utils::{epipe, last_error};
 use rafs::io_stats;
@@ -40,6 +40,7 @@ impl From<DaemonError> for DaemonErrorKind {
             UpgradeManager(_) => DaemonErrorKind::UpgradeManager,
             NotReady => DaemonErrorKind::NotReady,
             Unsupported => DaemonErrorKind::Unsupported,
+            Serde(e) => DaemonErrorKind::Serde(e),
             o => DaemonErrorKind::Other(o.to_string()),
         }
     }
@@ -92,7 +93,7 @@ impl ApiServer {
         let d = self.daemon.as_ref();
         let info = d
             .export_info()
-            .map_err(|e| ApiError::Metrics(e.to_string()))?;
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?;
         Ok(ApiResponsePayload::DaemonInfo(info))
     }
 
@@ -105,7 +106,7 @@ impl ApiServer {
         let d = self.daemon.as_ref();
         let info = d
             .export_backend_info(mountpoint)
-            .map_err(|e| ApiError::Metrics(e.to_string()))?;
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?;
         Ok(ApiResponsePayload::FsBackendInfo(info))
     }
 
@@ -125,32 +126,32 @@ impl ApiServer {
     fn export_global_metrics(id: Option<String>) -> ApiResponse {
         io_stats::export_global_stats(&id)
             .map(ApiResponsePayload::FsGlobalMetrics)
-            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_files_metrics(id: Option<String>) -> ApiResponse {
         // TODO: Use mount point name to refer to per rafs metrics.
         io_stats::export_files_stats(&id)
             .map(ApiResponsePayload::FsFilesMetrics)
-            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_access_patterns(id: Option<String>) -> ApiResponse {
         io_stats::export_files_access_pattern(&id)
             .map(ApiResponsePayload::FsFilesPatterns)
-            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_backend_metrics(id: Option<String>) -> ApiResponse {
         io_stats::export_backend_metrics(&id)
             .map(ApiResponsePayload::BackendMetrics)
-            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_blobcache_metrics(id: Option<String>) -> ApiResponse {
         io_stats::export_blobcache_metrics(&id)
             .map(ApiResponsePayload::BlobcacheMetrics)
-            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     /// Detect if there is fop being hang.
@@ -184,7 +185,7 @@ impl ApiServer {
         let d = self.daemon.as_ref();
         if let Some(ops) = d
             .export_inflight_ops()
-            .map_err(|e| ApiError::Metrics(format!("{:?}", e)))?
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?
         {
             Ok(ApiResponsePayload::InflightMetrics(ops))
         } else {

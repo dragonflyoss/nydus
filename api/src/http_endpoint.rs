@@ -3,15 +3,23 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! We keep HTTP and endpoints handlers in the separated crate because not only
+//! nydusd is using api server. Other component like `rafs` crate also rely this
+//! to export running metrics. So it will be easier to wrap different crates' Error
+//! into.
+
 use std::fmt::Debug;
 use std::io;
 use std::sync::mpsc::{RecvError, SendError};
 
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
+
 use serde::Deserialize;
 use serde_json::Error as SerdeError;
 
 use crate::http::{extract_query_part, EndpointHandler};
+
+use rafs::io_stats::IoStatsError;
 
 #[derive(Debug)]
 pub enum DaemonErrorKind {
@@ -23,7 +31,16 @@ pub enum DaemonErrorKind {
     RecvFd,
     Disconnect(io::Error),
     Channel,
+    Serde(SerdeError),
     Other(String),
+}
+
+#[derive(Debug)]
+pub enum MetricsErrorKind {
+    // Errors about daemon working status
+    Daemon(DaemonErrorKind),
+    // Errors about metrics/stats recorders
+    Stats(IoStatsError),
 }
 
 /// API errors are sent back from the Nydusd API server through the ApiResponse.
@@ -31,24 +48,17 @@ pub enum DaemonErrorKind {
 pub enum ApiError {
     /// Cannot write to EventFd.
     EventFdWrite(io::Error),
-
     /// Cannot mount a resource
     MountFailure(DaemonErrorKind),
-
     /// API request send error
     RequestSend(SendError<ApiRequest>),
-
     /// Wrong response payload type
     ResponsePayloadType,
-
     /// API response receive error
     ResponseRecv(RecvError),
-
     DaemonAbnormal(DaemonErrorKind),
-
     Events(String),
-
-    Metrics(String),
+    Metrics(MetricsErrorKind),
 }
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
@@ -181,6 +191,7 @@ fn translate_status_code(e: &ApiError) -> StatusCode {
             DaemonErrorKind::Unsupported => StatusCode::NotImplemented,
             _ => StatusCode::InternalServerError,
         },
+        ApiError::Metrics(MetricsErrorKind::Stats(IoStatsError::NoCounter)) => StatusCode::NotFound,
         _ => StatusCode::InternalServerError,
     }
 }
