@@ -10,11 +10,32 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sirupsen/logrus"
 )
+
+const defaultRetryAttempts = 3
+const defaultRetryInterval = time.Second * 2
+
+func WithRetry(op func() error) error {
+	var err error
+	attempts := defaultRetryAttempts
+	for attempts > 0 {
+		attempts--
+		if err != nil {
+			logrus.Warnf("Retry due to error: %s", err)
+			time.Sleep(defaultRetryInterval)
+		}
+		if err = op(); err == nil {
+			break
+		}
+	}
+	return err
+}
 
 func MarshalToDesc(data interface{}, mediaType string) (*ocispec.Descriptor, []byte, error) {
 	bytes, err := json.Marshal(data)

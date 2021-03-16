@@ -76,8 +76,10 @@ func (mm *manifestManager) getExistsManifests(ctx context.Context) ([]ocispec.De
 	return []ocispec.Descriptor{}, nil
 }
 
+// Merge OCI and Nydus manifest into a manifest index, the OCI
+// manifest of source image is not required to be provided
 func (mm *manifestManager) makeManifestIndex(
-	ctx context.Context, ociManifest, nydusManifest ocispec.Descriptor,
+	ctx context.Context, nydusManifest, ociManifest *ocispec.Descriptor,
 ) (*ocispec.Index, error) {
 	manifestDescs, err := mm.getExistsManifests(ctx)
 	if err != nil {
@@ -93,25 +95,25 @@ func (mm *manifestManager) makeManifestIndex(
 				if desc.Platform.OSFeatures != nil &&
 					len(desc.Platform.OSFeatures) == 1 &&
 					desc.Platform.OSFeatures[0] == utils.ManifestOSFeatureNydus {
-					manifestDescs[idx] = nydusManifest
+					manifestDescs[idx] = *nydusManifest
 					foundNydus = true
-				} else {
-					manifestDescs[idx] = ociManifest
+				} else if ociManifest != nil {
+					manifestDescs[idx] = *ociManifest
 					foundOCI = true
 				}
 			}
-		} else {
-			manifestDescs[idx] = ociManifest
+		} else if ociManifest != nil {
+			manifestDescs[idx] = *ociManifest
 			foundOCI = true
 		}
 	}
 
-	if !foundOCI {
-		manifestDescs = append(manifestDescs, ociManifest)
+	if !foundOCI && ociManifest != nil {
+		manifestDescs = append(manifestDescs, *ociManifest)
 	}
 
 	if !foundNydus {
-		manifestDescs = append(manifestDescs, nydusManifest)
+		manifestDescs = append(manifestDescs, *nydusManifest)
 	}
 
 	// Merge exists OCI manifests and Nydus manifest to manifest index
@@ -242,11 +244,13 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	if err != nil {
 		return errors.Wrap(err, "Get source image manifest")
 	}
-	ociManifestDesc.Platform = &ocispec.Platform{
-		OS:           defaultOS,
-		Architecture: defaultArch,
+	if ociManifestDesc != nil {
+		ociManifestDesc.Platform = &ocispec.Platform{
+			OS:           defaultOS,
+			Architecture: defaultArch,
+		}
 	}
-	_index, err := mm.makeManifestIndex(ctx, *ociManifestDesc, *nydusManifestDesc)
+	_index, err := mm.makeManifestIndex(ctx, nydusManifestDesc, ociManifestDesc)
 	if err != nil {
 		return errors.Wrap(err, "Make manifest index")
 	}

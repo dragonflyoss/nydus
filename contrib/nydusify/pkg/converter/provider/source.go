@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/containerd/containerd/mount"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -33,7 +34,7 @@ const defaultArch = "amd64"
 
 // SourceLayer is a layer of source image
 type SourceLayer interface {
-	Mount(ctx context.Context) (string, func() error, error)
+	Mount(ctx context.Context) ([]mount.Mount, func() error, error)
 	Size() int64
 	Digest() digest.Digest
 	ChainID() digest.Digest
@@ -97,26 +98,39 @@ func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, err
 	return sourceLayers, nil
 }
 
-func (sl *defaultSourceLayer) Mount(ctx context.Context) (string, func() error, error) {
+func (sl *defaultSourceLayer) Mount(ctx context.Context) ([]mount.Mount, func() error, error) {
 	digestStr := sl.desc.Digest.String()
 
-	// Pull the layer from source
-	reader, err := sl.remote.Pull(ctx, sl.desc, true)
-	if err != nil {
-		return "", nil, errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
-	}
-	defer reader.Close()
+	if err := utils.WithRetry(func() error {
+		// Pull the layer from source
+		reader, err := sl.remote.Pull(ctx, sl.desc, true)
+		if err != nil {
+			return errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
+		}
+		defer reader.Close()
 
-	// Decompress layer from source stream
-	if err := utils.UnpackTargz(ctx, sl.mountDir, reader); err != nil {
-		return "", nil, errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
+		// Decompress layer from source stream
+		if err := utils.UnpackTargz(ctx, sl.mountDir, reader); err != nil {
+			return errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
+		}
+
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
 
 	umount := func() error {
 		return os.RemoveAll(sl.mountDir)
 	}
 
-	return sl.mountDir, umount, nil
+	mounts := []mount.Mount{
+		{
+			Type:   "oci-directory",
+			Source: sl.mountDir,
+		},
+	}
+
+	return mounts, umount, nil
 }
 
 func (sl *defaultSourceLayer) Digest() digest.Digest {
@@ -136,7 +150,7 @@ func (sl *defaultSourceLayer) ParentChainID() *digest.Digest {
 }
 
 // DefaultSource pulls image layers from specify image reference
-func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (SourceProvider, error) {
+func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) ([]SourceProvider, error) {
 	parser := parser.New(remote)
 	parsed, err := parser.Parse(ctx)
 	if err != nil {
@@ -147,11 +161,13 @@ func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (
 		return nil, errors.Wrap(err, "Not found linux/amd64 manifest in source image")
 	}
 
-	sp := defaultSourceProvider{
-		workDir: workDir,
-		image:   *parsed.OCIImage,
-		remote:  remote,
+	sp := []SourceProvider{
+		&defaultSourceProvider{
+			workDir: workDir,
+			image:   *parsed.OCIImage,
+			remote:  remote,
+		},
 	}
 
-	return &sp, nil
+	return sp, nil
 }

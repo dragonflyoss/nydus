@@ -13,7 +13,9 @@ func main() {
 	nydusImagePath := "/path/to/nydus-image"
 	source := "localhost:5000/ubuntu:latest"
 	target := "localhost:5000/ubuntu:latest-nydus"
+	// Set to empty if no authorization be required
 	auth := "<base64_encoded_auth>"
+	// Set to false if using https registry
 	insecure := true
 
 	// Logger outputs Nydus image conversion progress
@@ -38,22 +40,21 @@ func main() {
 	}
 
 	// Source provider gets source image manifest, config, and layer
-	sourceProvider, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir)
+	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir)
 	if err != nil {
 		panic(err)
 	}
 
 	opt := converter.Opt{
-		Logger:         logger,
-		SourceProvider: sourceProvider,
-		TargetRemote:   targetRemote,
+		Logger:          logger,
+		SourceProviders: sourceProviders,
+		TargetRemote:    targetRemote,
 
 		WorkDir:        wordDir,
 		PrefetchDir:    "/",
 		NydusImagePath: nydusImagePath,
 		MultiPlatform:  false,
 		DockerV2Format: true,
-		WhiteoutSpec:   "oci",
 	}
 
 	cvt, err := converter.New(opt)

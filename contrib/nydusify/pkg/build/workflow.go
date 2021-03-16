@@ -18,7 +18,6 @@ type WorkflowOption struct {
 	TargetDir      string
 	NydusImagePath string
 	PrefetchDir    string
-	WhiteoutSpec   string
 }
 
 type Workflow struct {
@@ -79,6 +78,10 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 
 	debugJSONPath := filepath.Join(option.TargetDir, "output.json")
 
+	if option.PrefetchDir == "" {
+		option.PrefetchDir = "/"
+	}
+
 	return &Workflow{
 		WorkflowOption: option,
 		blobsDir:       blobsDir,
@@ -90,7 +93,7 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 
 // Build nydus bootstrap and blob, returned blobPath's basename is sha256 hex string
 func (workflow *Workflow) Build(
-	layerDir, parentBootstrapPath, bootstrapPath string,
+	layerDir, whiteoutSpec, parentBootstrapPath, bootstrapPath string,
 ) (string, error) {
 	workflow.bootstrapPath = bootstrapPath
 
@@ -105,7 +108,7 @@ func (workflow *Workflow) Build(
 		BackendType:         "localfs",
 		BackendConfig:       workflow.backendConfig,
 		PrefetchDir:         workflow.PrefetchDir,
-		WhiteoutSpec:        workflow.WhiteoutSpec,
+		WhiteoutSpec:        whiteoutSpec,
 		OutputJSONPath:      workflow.debugJSONPath,
 	}); err != nil {
 		return "", errors.Wrap(err, fmt.Sprintf("build layer %s", layerDir))

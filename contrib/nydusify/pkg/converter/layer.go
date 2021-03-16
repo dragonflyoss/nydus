@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/mount"
 	"github.com/dustin/go-humanize"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -25,6 +27,11 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
+
+type sourceMount struct {
+	Source       string
+	WhiteoutSpec string
+}
 
 type buildLayer struct {
 	index  int
@@ -42,9 +49,58 @@ type buildLayer struct {
 	bootstrapDesc   *ocispec.Descriptor
 	bootstrapDiffID *digest.Digest
 	parent          *buildLayer
-	sourceDir       string
+	sourceMount     *sourceMount
 	blobPath        string
 	bootstrapPath   string
+}
+
+// parseSourceMount parses mounts object returned by the Mount method in
+// SourceProvider, checks diff layer type then decides to use which kind
+// of whiteout spec applier in nydus-image during building. For example,
+// `overlay` mount type for containerd in buildkit, `oci-directory` for
+// unpacked OCI layer.
+func parseSourceMount(mounts []mount.Mount) (*sourceMount, error) {
+	if len(mounts) == 0 {
+		return nil, errors.New("Invalid layer mounts")
+	}
+
+	switch mounts[0].Type {
+	// For containerd mounted layer
+	case "bind":
+		return &sourceMount{
+			Source:       mounts[0].Source,
+			WhiteoutSpec: "overlayfs",
+		}, nil
+
+	// For containerd mounted layer
+	case "overlay":
+		var prefix = "lowerdir="
+		for _, option := range mounts[0].Options {
+			if strings.HasPrefix(option, prefix) {
+				dirs := strings.Split(option[len(prefix):], ":")
+				if len(dirs) > 0 {
+					return &sourceMount{
+						Source:       dirs[0],
+						WhiteoutSpec: "overlayfs",
+					}, nil
+				}
+			}
+		}
+		return nil, errors.Errorf(
+			"Failed to parse mount overlayfs options %v",
+			mounts[0].Options,
+		)
+
+	// For unpacked OCI layer
+	case "oci-directory":
+		return &sourceMount{
+			Source:       mounts[0].Source,
+			WhiteoutSpec: "oci",
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("Unsupported mount type: %s", mounts[0].Type)
+	}
 }
 
 func (layer *buildLayer) pushBlob(ctx context.Context) (*ocispec.Descriptor, error) {
@@ -70,22 +126,28 @@ func (layer *buildLayer) pushBlob(ctx context.Context) (*ocispec.Descriptor, err
 		},
 	}
 
-	// Upload Nydus blob to backend if backend config be specified
-	if layer.backend != nil {
-		if err := layer.backend.Upload(blobID, blobPath); err != nil {
-			return nil, errors.Wrap(err, "Upload blob to backend")
+	if err := utils.WithRetry(func() error {
+		// Upload Nydus blob to backend if backend config be specified
+		if layer.backend != nil {
+			if err := layer.backend.Upload(blobID, blobPath); err != nil {
+				return errors.Wrap(err, "Upload blob to backend")
+			}
+			return nil
 		}
-		return &desc, nil
-	}
 
-	blobFile, err := os.Open(blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "Open blob file")
-	}
-	defer blobFile.Close()
+		blobFile, err := os.Open(blobPath)
+		if err != nil {
+			return errors.Wrap(err, "Open blob file")
+		}
+		defer blobFile.Close()
 
-	if err := layer.remote.Push(ctx, desc, true, blobFile); err != nil {
-		return nil, errors.Wrap(err, "Push blob layer")
+		if err := layer.remote.Push(ctx, desc, true, blobFile); err != nil {
+			return errors.Wrap(err, "Push blob layer")
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return &desc, nil
@@ -107,14 +169,6 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 		return nil, nil, errors.Wrap(err, "Calculate uncompressed boostrap digest")
 	}
 
-	compressedReader, err := utils.PackTargz(
-		layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
-	)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "Compress boostrap layer")
-	}
-	defer compressedReader.Close()
-
 	bootstrapMediaType := ocispec.MediaTypeImageLayerGzip
 	if layer.dockerV2Format {
 		bootstrapMediaType = images.MediaTypeDockerSchema2LayerGzip
@@ -132,8 +186,22 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 		},
 	}
 
-	if err := layer.remote.Push(ctx, desc, true, compressedReader); err != nil {
-		return nil, nil, errors.Wrap(err, "Push bootstrap layer")
+	if err := utils.WithRetry(func() error {
+		compressedReader, err := utils.PackTargz(
+			layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
+		)
+		if err != nil {
+			return errors.Wrap(err, "Compress boostrap layer")
+		}
+		defer compressedReader.Close()
+
+		if err := layer.remote.Push(ctx, desc, true, compressedReader); err != nil {
+			return errors.Wrap(err, "Push bootstrap layer")
+		}
+
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
 
 	return &desc, &uncompressedDigest, nil
@@ -184,7 +252,7 @@ func (layer *buildLayer) Push(ctx context.Context) error {
 	// Also push Nydus bootstrap and blob layer to cache image, because maybe
 	// the cache image is located in different namespace/repo
 	if err := layer.cacheGlue.Push(ctx, layer); err != nil {
-		return errors.Wrapf(err, "Push layer to cache image")
+		logrus.Warnf("Failed push layer to cache image: %s", err)
 	}
 
 	return nil
@@ -196,7 +264,7 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	// Give priority to checking & pulling Nydus layer from cache image
 	cacheRecord, err := layer.cacheGlue.Pull(ctx, layer.source.ChainID())
 	if err != nil {
-		return nil, errors.Wrap(err, "Get cache record")
+		logrus.Warnf("Failed to get cache record: %s", err)
 	}
 	if cacheRecord != nil {
 		layer.cacheRecord = cacheRecord
@@ -207,14 +275,18 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	layer.bootstrapPath = filepath.Join(layer.bootstrapsDir, bootstrapName)
 
 	// Pull source layer for building on next if no cache hit
-	mountDone := logger.Log(ctx, fmt.Sprintf("[SOUR] Pull layer"), provider.LoggerFields{
+	mountDone := logger.Log(ctx, fmt.Sprintf("[SOUR] Mount layer"), provider.LoggerFields{
 		"Digest": layer.source.Digest(),
 		"Size":   sourceLayerSize,
 	})
-	var umount func() error
-	layer.sourceDir, umount, err = layer.source.Mount(ctx)
+	mounts, umount, err := layer.source.Mount(ctx)
 	if err != nil {
 		return nil, mountDone(errors.Wrapf(err, "Mount source layer %s", layer.source.Digest()))
+	}
+
+	layer.sourceMount, err = parseSourceMount(mounts)
+	if err != nil {
+		return nil, mountDone(errors.Wrapf(err, "Parse source layer mount %s", layer.source.Digest()))
 	}
 
 	return umount, mountDone(nil)
@@ -236,14 +308,16 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 			bootstrapName := strconv.Itoa(parentLayer.index+1) + "-" + parentLayer.source.ChainID().String()
 			parentLayer.bootstrapPath = filepath.Join(parentLayer.bootstrapsDir, bootstrapName+"-cached")
 			if err := parentLayer.cacheGlue.PullBootstrap(ctx, parentLayer.source.ChainID(), parentLayer.bootstrapPath); err != nil {
-				logrus.Warn(errors.Wrap(err, "Pull bootstrap from cache"))
+				logrus.Warn("Pull bootstrap from cache: %s", err)
 				// Error occurs, the cache is invalid
 				return buildDone(errInvalidCache)
 			}
 		}
 		parentBootstrapPath = parentLayer.bootstrapPath
 	}
-	blobPath, err := layer.buildWorkflow.Build(layer.sourceDir, parentBootstrapPath, layer.bootstrapPath)
+	blobPath, err := layer.buildWorkflow.Build(
+		layer.sourceMount.Source, layer.sourceMount.WhiteoutSpec, parentBootstrapPath, layer.bootstrapPath,
+	)
 	if err != nil {
 		return buildDone(errors.Wrapf(err, "Build source layer %s", layer.source.Digest()))
 	}

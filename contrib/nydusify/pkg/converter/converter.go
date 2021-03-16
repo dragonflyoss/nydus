@@ -21,6 +21,8 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
+const supportedPlatform = "linux/amd64"
+
 // PullWorkerCount specifies source layer pull concurrency
 var PullWorkerCount uint = 5
 
@@ -56,8 +58,12 @@ func (job *mountJob) Umount() error {
 }
 
 type Opt struct {
-	Logger         provider.ProgressLogger
-	SourceProvider provider.SourceProvider
+	Logger provider.ProgressLogger
+
+	// SourceProviders should be a slice, which means it can support multi-platforms,
+	// for example `linux/amd64` and `linux/arm64`, Nydusify will pick one or more
+	// to convert to Nydus image in the future.
+	SourceProviders []provider.SourceProvider
 
 	TargetRemote *remote.Remote
 
@@ -67,7 +73,6 @@ type Opt struct {
 	NydusImagePath string
 	WorkDir        string
 	PrefetchDir    string
-	WhiteoutSpec   string
 
 	MultiPlatform  bool
 	DockerV2Format bool
@@ -84,6 +89,19 @@ func New(opt Opt) (*Converter, error) {
 	return &Converter{
 		Opt: opt,
 	}, nil
+}
+
+func findSupportedSource(ctx context.Context, sources []provider.SourceProvider) (provider.SourceProvider, error) {
+	for _, source := range sources {
+		config, err := source.Config(ctx)
+		if err != nil {
+			return nil, errors.Wrap(err, "Failed to get image config from source provider")
+		}
+		if fmt.Sprintf("%s/%s", config.OS, config.Architecture) == supportedPlatform {
+			return source, nil
+		}
+	}
+	return nil, errors.New("Not found linux/amd64 platform in source image")
 }
 
 func (cvt *Converter) convert(ctx context.Context) error {
@@ -122,13 +140,20 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		NydusImagePath: cvt.NydusImagePath,
 		PrefetchDir:    cvt.PrefetchDir,
 		TargetDir:      cvt.WorkDir,
-		WhiteoutSpec:   cvt.WhiteoutSpec,
 	})
 	if err != nil {
 		return errors.Wrap(err, "Create build flow")
 	}
 
-	sourceLayers, err := cvt.SourceProvider.Layers(ctx)
+	if cvt.SourceProviders == nil || len(cvt.SourceProviders) == 0 {
+		return errors.New("Invalid source provider")
+	}
+	sourceProvider, err := findSupportedSource(ctx, cvt.SourceProviders)
+	if err != nil {
+		return errors.Wrap(err, "Find supported platform")
+	}
+
+	sourceLayers, err := sourceProvider.Layers(ctx)
 	if err != nil {
 		return errors.Wrap(err, "Get source layers")
 	}
@@ -205,7 +230,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{
-		sourceProvider: cvt.SourceProvider,
+		sourceProvider: sourceProvider,
 		remote:         cvt.TargetRemote,
 		backend:        _backend,
 		multiPlatform:  cvt.MultiPlatform,
@@ -218,7 +243,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		// probability caused by registry GC, for example the cache image be overwritten by another
 		// conversion progress, and the registry GC be triggered in the same time
 		if cvt.CacheRemote != nil && strings.Contains(err.Error(), "unexpected status: 400") {
-			logrus.Warn(errors.Wrap(err, "Push manifest"))
+			logrus.Warnf("Push manifest: %s", err)
 			return pushDone(errInvalidCache)
 		}
 		return pushDone(errors.Wrap(err, "Push target manifest"))

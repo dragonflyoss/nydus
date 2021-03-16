@@ -102,6 +102,10 @@ func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
 // to communicate with remote registry.
 func DefaultRemoteWithAuth(ref string, insecure bool, auth string) (*remote.Remote, error) {
 	return withRemote(ref, insecure, func(host string) (string, string, error) {
+		// Leave auth empty if no authorization be required
+		if strings.TrimSpace(auth) == "" {
+			return "", "", nil
+		}
 		decoded, err := base64.StdEncoding.DecodeString(auth)
 		if err != nil {
 			return "", "", errors.Wrap(err, "Decode base64 encoded auth string")
