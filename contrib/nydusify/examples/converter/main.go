@@ -13,7 +13,9 @@ func main() {
 	nydusImagePath := "/path/to/nydus-image"
 	source := "localhost:5000/ubuntu:latest"
 	target := "localhost:5000/ubuntu:latest-nydus"
+	// Set to empty if no authorization be required
 	auth := "<base64_encoded_auth>"
+	// Set to false if using https registry
 	insecure := true
 
 	// Logger outputs Nydus image conversion progress
