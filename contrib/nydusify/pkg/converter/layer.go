@@ -54,18 +54,25 @@ type buildLayer struct {
 	bootstrapPath   string
 }
 
+// parseSourceMount parses mounts object returned by the Mount method in
+// SourceProvider, checks diff layer type then decides to use which kind
+// of whiteout spec applier in nydus-image during building. For example,
+// `overlay` mount type for containerd in buildkit, `oci-directory` for
+// unpacked OCI layer.
 func parseSourceMount(mounts []mount.Mount) (*sourceMount, error) {
 	if len(mounts) == 0 {
 		return nil, errors.New("Invalid layer mounts")
 	}
 
 	switch mounts[0].Type {
+	// For containerd mounted layer
 	case "bind":
 		return &sourceMount{
 			Source:       mounts[0].Source,
 			WhiteoutSpec: "overlayfs",
 		}, nil
 
+	// For containerd mounted layer
 	case "overlay":
 		var prefix = "lowerdir="
 		for _, option := range mounts[0].Options {
@@ -84,6 +91,7 @@ func parseSourceMount(mounts []mount.Mount) (*sourceMount, error) {
 			mounts[0].Options,
 		)
 
+	// For unpacked OCI layer
 	case "oci-directory":
 		return &sourceMount{
 			Source:       mounts[0].Source,
