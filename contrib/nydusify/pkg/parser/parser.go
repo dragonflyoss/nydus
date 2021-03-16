@@ -183,11 +183,8 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 		for idx := range index.Manifests {
 			desc := index.Manifests[idx]
 			if desc.Platform != nil {
-				if desc.Platform.OS == "linux" && desc.Platform.Architecture == "amd64" ||
-					desc.Platform.OS == "" && desc.Platform.Architecture == "" {
-					if desc.Platform.OSFeatures != nil &&
-						len(desc.Platform.OSFeatures) == 1 &&
-						desc.Platform.OSFeatures[0] == utils.ManifestOSFeatureNydus {
+				if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
+					if utils.IsNydusPlatform(desc.Platform) {
 						nydusDesc = &desc
 					} else {
 						ociDesc = &desc

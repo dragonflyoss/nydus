@@ -23,9 +23,6 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
-const defaultOS = "linux"
-const defaultArch = "amd64"
-
 // manifestManager merges OCI and Nydus manifest, pushes them to
 // remote registry
 type manifestManager struct {
@@ -90,20 +87,29 @@ func (mm *manifestManager) makeManifestIndex(
 	foundNydus := false
 	for idx, desc := range manifestDescs {
 		if desc.Platform != nil {
-			if desc.Platform.OS == "linux" && desc.Platform.Architecture == "amd64" ||
-				desc.Platform.OS == "" && desc.Platform.Architecture == "" {
-				if desc.Platform.OSFeatures != nil &&
-					len(desc.Platform.OSFeatures) == 1 &&
-					desc.Platform.OSFeatures[0] == utils.ManifestOSFeatureNydus {
+			if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
+				if utils.IsNydusPlatform(desc.Platform) {
 					manifestDescs[idx] = *nydusManifest
 					foundNydus = true
-				} else if ociManifest != nil {
-					manifestDescs[idx] = *ociManifest
+				} else {
+					if ociManifest != nil {
+						manifestDescs[idx] = *ociManifest
+					} else {
+						manifestDescs[idx].Platform.OS = utils.SupportedOS
+						manifestDescs[idx].Platform.Architecture = utils.SupportedArch
+					}
 					foundOCI = true
 				}
 			}
-		} else if ociManifest != nil {
-			manifestDescs[idx] = *ociManifest
+		} else {
+			if ociManifest != nil {
+				manifestDescs[idx] = *ociManifest
+			} else {
+				manifestDescs[idx].Platform = &ocispec.Platform{
+					OS:           utils.SupportedOS,
+					Architecture: utils.SupportedArch,
+				}
+			}
 			foundOCI = true
 		}
 	}
@@ -223,8 +229,8 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 		return errors.Wrap(err, "Marshal Nydus image manifest")
 	}
 	nydusManifestDesc.Platform = &ocispec.Platform{
-		OS:           defaultOS,
-		Architecture: defaultArch,
+		OS:           utils.SupportedOS,
+		Architecture: utils.SupportedArch,
 		OSFeatures:   []string{utils.ManifestOSFeatureNydus},
 	}
 
@@ -246,8 +252,8 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	}
 	if ociManifestDesc != nil {
 		ociManifestDesc.Platform = &ocispec.Platform{
-			OS:           defaultOS,
-			Architecture: defaultArch,
+			OS:           utils.SupportedOS,
+			Architecture: utils.SupportedArch,
 		}
 	}
 	_index, err := mm.makeManifestIndex(ctx, nydusManifestDesc, ociManifestDesc)

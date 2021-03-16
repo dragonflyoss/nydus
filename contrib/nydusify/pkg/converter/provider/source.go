@@ -29,9 +29,6 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
-const defaultOS = "linux"
-const defaultArch = "amd64"
-
 // SourceLayer is a layer of source image
 type SourceLayer interface {
 	Mount(ctx context.Context) ([]mount.Mount, func() error, error)
