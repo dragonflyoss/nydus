@@ -51,6 +51,10 @@ func (job *mountJob) Err() error {
 	return job.err
 }
 
+func (job *mountJob) Umount() error {
+	return job.umount()
+}
+
 type Opt struct {
 	Logger         provider.ProgressLogger
 	SourceProvider provider.SourceProvider
@@ -174,7 +178,17 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		}
 
 		// Build source layer to Nydus layer by invoking Nydus image builder
-		if err := job.layer.Build(ctx); err != nil {
+		err := job.layer.Build(ctx)
+
+		go func() {
+			// Umount source layer after building in order to save the disk
+			// space during building, useful for default source provider
+			if err := job.Umount(); err != nil {
+				logrus.Warnf("Failed to umount layer %s: %s", job.layer.source.Digest(), err)
+			}
+		}()
+
+		if err != nil {
 			return errors.Wrap(err, "Build source layer")
 		}
 

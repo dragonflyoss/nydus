@@ -80,11 +80,12 @@ func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, err
 	sourceLayers := []SourceLayer{}
 
 	for i, desc := range layers {
-		layerDigest := desc.Digest
 		chainID := identity.ChainID(diffIDs[:i+1])
 		layer := &defaultSourceLayer{
-			remote:        sp.remote,
-			mountDir:      filepath.Join(sp.workDir, layerDigest.String()),
+			remote: sp.remote,
+			// Use layer ChainID as the mounted directory name, in case of
+			// the layers in the same Digest are removed by umount.
+			mountDir:      filepath.Join(sp.workDir, chainID.String()),
 			desc:          desc,
 			chainID:       chainID,
 			parentChainID: parentChainID,

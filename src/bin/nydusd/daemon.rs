@@ -20,7 +20,7 @@ use std::sync::{
     Arc, MutexGuard,
 };
 use std::thread;
-use std::{convert, error, fmt, io};
+use std::{error, fmt, io};
 
 use event_manager::{EventOps, EventSubscriber, Events};
 use fuse_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
@@ -151,13 +151,13 @@ impl fmt::Display for DaemonError {
 
 impl error::Error for DaemonError {}
 
-impl convert::From<DaemonError> for io::Error {
+impl From<DaemonError> for io::Error {
     fn from(e: DaemonError) -> Self {
         einval!(e)
     }
 }
 
-impl convert::From<VfsError> for DaemonError {
+impl From<VfsError> for DaemonError {
     fn from(e: VfsError) -> Self {
         DaemonError::Vfs(e)
     }
@@ -389,7 +389,7 @@ fn input_prefetch_files_verify(input: &Option<Vec<String>>) -> DaemonResult<Opti
         .as_ref()
         .map(|files| files.iter().map(PathBuf::from).collect());
 
-    if let Some(ref files) = prefetch_files {
+    if let Some(files) = &prefetch_files {
         for f in files.iter() {
             if !f.starts_with(Path::new("/")) {
                 return Err(DaemonError::Common("Illegal prefetch list".to_string()));
@@ -609,5 +609,104 @@ impl DaemonStateMachineContext {
                 self.result_sender.send(r).unwrap();
             })
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn it_should_convert_int_to_daemonstate() {
+        let stat = DaemonState::from(1);
+        assert_eq!(stat, DaemonState::INIT);
+    }
+
+    #[test]
+    fn it_should_convert_str_to_fsbackendtype() {
+        let backend_type: FsBackendType = "rafs".parse().unwrap();
+        assert!(backend_type == FsBackendType::Rafs);
+    }
+
+    #[test]
+    fn it_should_add_new_backend() {
+        let mut col: FsBackendCollection = Default::default();
+        if col
+            .add(
+                "test",
+                &FsBackendMountCmd {
+                    fs_type: FsBackendType::Rafs,
+                    config: "{\"config\": \"test\"}".to_string(),
+                    mountpoint: "testmonutount".to_string(),
+                    source: "testsource".to_string(),
+                    prefetch_files: Some(vec!["testfile".to_string()]),
+                },
+            )
+            .is_err()
+        {
+            panic!("failed to add backend collection")
+        }
+        assert_eq!(col.0.len(), 1);
+
+        col.del("test");
+        assert_eq!(col.0.len(), 0);
+    }
+
+    #[test]
+    fn it_should_verify_prefetch_files() {
+        match input_prefetch_files_verify(&Some(vec!["/etc/passwd".to_string()])) {
+            Err(_) => panic!("failed to verify prefetch files"),
+            Ok(res) => match res {
+                Some(v) => assert_eq!(1, v.len()),
+                None => panic!("failed to get verified prefetch files"),
+            },
+        }
+
+        if input_prefetch_files_verify(&Some(vec!["etc/passwd".to_string()])).is_ok() {
+            panic!("should not pass verify");
+        }
+    }
+
+    #[test]
+    fn it_should_create_rafs_backend() {
+        let config = r#"
+        {
+            "device": {
+              "backend": {
+                "type": "oss",
+                "config": {
+                  "endpoint": "test",
+                  "access_key_id": "test",
+                  "access_key_secret": "test",
+                  "bucket_name": "antsys-nydus",
+                  "object_prefix":"nydus_v2/",
+                  "scheme": "http"
+                }
+              }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+              "enable": true,
+              "threads_count": 10,
+              "merging_size": 131072,
+              "bandwidth_rate": 10485760
+            }
+          }"#;
+        let bootstrap = "./tests/texture/bootstrap/nydusd_daemon_test_bootstrap";
+        if fs_backend_factory(&FsBackendMountCmd {
+            fs_type: FsBackendType::Rafs,
+            config: config.to_string(),
+            mountpoint: "testmountpoint".to_string(),
+            source: bootstrap.to_string(),
+            prefetch_files: Some(vec!["/testfile".to_string()]),
+        })
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Rafs>()
+        .is_none()
+        {
+            panic!("failed to create rafs backend")
+        }
     }
 }

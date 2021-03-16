@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::{self, File};
-use std::io::{Read, Result, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::thread::*;
 use std::time;
 
-use nydus_utils::{einval, eother, exec};
+use nydus_utils::exec;
 use rafs::metadata::RafsMode;
 
 const NYDUSD: &str = "./target-fusedev/debug/nydusd";
@@ -25,9 +25,9 @@ pub fn new(
     rafs_mode: RafsMode,
     api_sock: PathBuf,
     digest_validate: bool,
-) -> Result<Nydusd> {
+) -> Nydusd {
     let cache_path = work_dir.join("cache");
-    fs::create_dir_all(cache_path)?;
+    fs::create_dir_all(cache_path).unwrap();
 
     let cache = format!(
         r###"
@@ -67,20 +67,23 @@ pub fn new(
         digest_validate,
     );
 
-    File::create(work_dir.join("config.json"))?.write_all(config.as_bytes())?;
+    File::create(work_dir.join("config.json"))
+        .unwrap()
+        .write_all(config.as_bytes())
+        .unwrap();
 
-    Ok(Nydusd {
+    Nydusd {
         work_dir: work_dir.clone(),
         api_sock,
-    })
+    }
 }
 
 impl Nydusd {
-    fn _start(&self, upgrade: bool, bootstrap_name: Option<&str>, mount_path: &str) -> Result<()> {
+    fn _start(&self, upgrade: bool, bootstrap_name: Option<&str>, mount_path: &str) {
         let work_dir = self.work_dir.clone();
         let api_sock = self.api_sock.clone();
 
-        fs::create_dir_all(work_dir.join(mount_path))?;
+        fs::create_dir_all(work_dir.join(mount_path)).unwrap();
 
         let upgrade_arg = if upgrade { "--upgrade" } else { "" };
         let bootstrap_name = if let Some(bootstrap_name) = bootstrap_name {
@@ -110,25 +113,24 @@ impl Nydusd {
 
         sleep(time::Duration::from_secs(2));
 
-        if !upgrade && !self.is_mounted(mount_path)? {
-            return Err(eother!("nydusd mount failed"));
+        if !upgrade && !self.is_mounted(mount_path) {
+            panic!("nydusd mount failed");
         }
-
-        Ok(())
     }
 
-    pub fn start(&self, bootstrap_name: Option<&str>, mount_path: &str) -> Result<()> {
+    pub fn start(&self, bootstrap_name: Option<&str>, mount_path: &str) {
         self._start(false, bootstrap_name, mount_path)
     }
 
-    pub fn check(&self, expect_texture: &str, mount_path: &str) -> Result<()> {
+    pub fn check(&self, expect_texture: &str, mount_path: &str) {
         let mount_path = self.work_dir.join(mount_path);
 
-        let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true)?;
+        let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true).unwrap();
         let md5_ret = exec(
             format!("find {:?} -type f -exec md5sum {{}} + | sort", mount_path).as_str(),
             true,
-        )?;
+        )
+        .unwrap();
 
         let ret = format!(
             "{}{}",
@@ -137,24 +139,21 @@ impl Nydusd {
         );
 
         let texture_file = format!("./tests/texture/{}", expect_texture);
-        let mut texture = File::open(texture_file.clone())
-            .map_err(|_| einval!(format!("invalid texture file path: {:?}", texture_file)))?;
+        let mut texture = File::open(texture_file).expect("invalid texture file path");
         let mut expected = String::new();
-        texture.read_to_string(&mut expected)?;
+        texture.read_to_string(&mut expected).unwrap();
 
         assert_eq!(ret.trim(), expected.trim());
-
-        Ok(())
     }
 
-    pub fn is_mounted(&self, mount_path: &str) -> Result<bool> {
-        let ret = exec("cat /proc/mounts", true)?;
+    pub fn is_mounted(&self, mount_path: &str) -> bool {
+        let ret = exec("cat /proc/mounts", true).unwrap();
         for line in ret.split('\n') {
             if line.contains(self.work_dir.join(mount_path).to_str().unwrap()) {
-                return Ok(true);
+                return true;
             }
         }
-        Ok(false)
+        false
     }
 
     pub fn umount(&self, mount_path: &str) {

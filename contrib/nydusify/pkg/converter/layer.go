@@ -208,8 +208,8 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 
 	// Pull source layer for building on next if no cache hit
 	mountDone := logger.Log(ctx, fmt.Sprintf("[SOUR] Pull layer"), provider.LoggerFields{
-		"ChainID": layer.source.ChainID(),
-		"Size":    sourceLayerSize,
+		"Digest": layer.source.Digest(),
+		"Size":   sourceLayerSize,
 	})
 	var umount func() error
 	layer.sourceDir, umount, err = layer.source.Mount(ctx)

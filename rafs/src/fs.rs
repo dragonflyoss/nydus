@@ -726,3 +726,131 @@ impl FileSystem for Rafs {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_rafs_backend() -> Box<Rafs> {
+        let config = r#"
+        {
+            "device": {
+              "backend": {
+                "type": "oss",
+                "config": {
+                  "endpoint": "test",
+                  "access_key_id": "test",
+                  "access_key_secret": "test",
+                  "bucket_name": "antsys-nydus",
+                  "object_prefix":"nydus_v2/",
+                  "scheme": "http"
+                }
+              }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+              "enable": true,
+              "threads_count": 10,
+              "merging_size": 131072,
+              "bandwidth_rate": 10485760
+            }
+          }"#;
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/image_v2.boot");
+        let mountpoint = "/mnt";
+        let rafs_config = RafsConfig::from_str(config).unwrap();
+        let bootstrapfile = source_path.to_str().unwrap();
+        let mut bootstrap = RafsIoRead::from_file(bootstrapfile).unwrap();
+        let mut rafs = Rafs::new(rafs_config, mountpoint, &mut bootstrap).unwrap();
+        rafs.import(&mut bootstrap, Some(vec![std::path::PathBuf::new()]))
+            .unwrap();
+        Box::new(rafs)
+    }
+
+    #[test]
+    fn it_should_create_new_rafs_fs() {
+        let rafs = new_rafs_backend();
+        let attr = rafs.get_inode_attr(1).unwrap();
+        assert_eq!(attr.ino, 1);
+        assert_eq!(attr.blocks, 8);
+        assert_eq!(attr.uid, 0);
+    }
+
+    #[test]
+    fn it_should_access() {
+        let rafs = new_rafs_backend();
+        let ctx = Context {
+            gid: 0,
+            pid: 1,
+            uid: 0,
+        };
+        if rafs.access(ctx, 1, 0).is_err() {
+            panic!("failed to access inode 1");
+        }
+    }
+
+    #[test]
+    fn it_should_listxattr() {
+        let rafs = new_rafs_backend();
+        let ctx = Context {
+            gid: 0,
+            pid: 1,
+            uid: 0,
+        };
+        match rafs.listxattr(ctx, 1, 0) {
+            Ok(reply) => match reply {
+                ListxattrReply::Count(c) => assert_eq!(c, 0),
+                _ => panic!(),
+            },
+            Err(_) => panic!("failed to access inode 1"),
+        }
+    }
+
+    #[test]
+    fn it_should_get_statfs() {
+        let rafs = new_rafs_backend();
+        let ctx = Context {
+            gid: 0,
+            pid: 1,
+            uid: 0,
+        };
+        match rafs.statfs(ctx, 1) {
+            Ok(statfs) => {
+                assert_eq!(statfs.f_files, 43082);
+                assert_eq!(statfs.f_bsize, 512);
+                assert_eq!(statfs.f_namemax, 255);
+                assert_eq!(statfs.f_fsid, 1380009555);
+                assert_eq!(statfs.f_ffree, 0);
+            }
+            Err(_) => panic!("failed to statfs"),
+        }
+    }
+
+    #[test]
+    fn it_should_enable_xattr() {
+        let rafs = new_rafs_backend();
+        assert_eq!(rafs.xattr_supported(), true);
+    }
+
+    #[test]
+    fn it_should_lookup_entry() {
+        let rafs = new_rafs_backend();
+        let ctx = Context {
+            gid: 0,
+            pid: 1,
+            uid: 0,
+        };
+        match rafs.lookup(ctx, 1, &std::ffi::CString::new("/etc").unwrap()) {
+            Err(e) => {
+                println!("{:?}", e);
+                panic!("failed to lookup /etc from ino 1");
+            }
+            Ok(e) => {
+                assert_eq!(e.inode, 0);
+            }
+        }
+    }
+}
