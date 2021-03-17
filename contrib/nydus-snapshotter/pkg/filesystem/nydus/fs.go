@@ -31,8 +31,6 @@ type FSMode int
 const (
 	SingleInstance FSMode = iota
 	MultiInstance
-
-	SharedNydusDaemonID = "shared_daemon"
 )
 
 type filesystem struct {
@@ -46,7 +44,7 @@ type filesystem struct {
 }
 
 // NewFileSystem initialize Filesystem instance
-func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_fs snapshot.FileSystem, retErr error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)
@@ -54,18 +52,34 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, e
 			return nil, err
 		}
 	}
-	fs.manager = process.NewManager(process.Opt{
-		NydusdBinaryPath: fs.nydusdBinaryPath,
-	})
+
+	// Try to reconnect to running daemons
+	if err := fs.manager.Reconnect(ctx); err != nil {
+		return nil, errors.Wrap(err, "failed to reconnect daemons")
+	}
+
 	if fs.mode == SingleInstance {
-		d, err := fs.newSharedDaemon()
+		// Check if daemon is already running
+		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
+		if err == nil && d != nil {
+			log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
+			return &fs, nil
+		}
+
+		d, err = fs.newSharedDaemon()
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to init shared daemon")
 		}
+
+		defer func() {
+			if retErr != nil {
+				fs.manager.DeleteDaemon(d);
+			}
+		}()
 		if err := fs.manager.StartDaemon(d); err != nil {
 			return nil, errors.Wrap(err, "failed to start shared daemon")
 		}
-		if err := fs.WaitUntilReady(ctx, SharedNydusDaemonID); err != nil {
+		if err := fs.WaitUntilReady(ctx, daemon.SharedNydusDaemonID); err != nil {
 			return nil, errors.Wrap(err, "failed to wait shared daemon")
 		}
 	}
@@ -74,8 +88,8 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, e
 
 func (fs *filesystem) newSharedDaemon() (*daemon.Daemon, error) {
 	d, err := daemon.NewDaemon(
-		daemon.WithID(SharedNydusDaemonID),
-		daemon.WithSnapshotID(SharedNydusDaemonID),
+		daemon.WithID(daemon.SharedNydusDaemonID),
+		daemon.WithSnapshotID(daemon.SharedNydusDaemonID),
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
 		daemon.WithLogDir(fs.LogRoot()),
@@ -240,7 +254,7 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		d            *daemon.Daemon
 		err          error
 	)
-	if sharedDaemon, err = fs.manager.GetByID(SharedNydusDaemonID); err != nil {
+	if sharedDaemon, err = fs.manager.GetByID(daemon.SharedNydusDaemonID); err != nil {
 		return nil, err
 	}
 	if d, err = daemon.NewDaemon(

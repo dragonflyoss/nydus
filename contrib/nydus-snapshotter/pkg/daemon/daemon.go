@@ -7,7 +7,6 @@
 package daemon
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,6 +17,11 @@ import (
 	"contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
+const (
+	APISocketFileName   = "api.sock"
+	SharedNydusDaemonID = "shared_daemon"
+)
+
 type NewDaemonOpt func(d *Daemon) error
 
 type Daemon struct {
@@ -26,15 +30,13 @@ type Daemon struct {
 	ConfigDir      string
 	SocketDir      string
 	LogDir         string
-	Stdout         io.WriteCloser
-	Stderr         io.WriteCloser
 	CacheDir       string
 	SnapshotDir    string
-	Process        *os.Process
+	Pid            int
 	client         nydussdk.Interface
 	ImageID        string
 	SharedDaemon   bool
-	apiSock        *string
+	ApiSock        *string
 	RootMountPoint *string
 	mu             sync.Mutex
 }
@@ -73,10 +75,14 @@ func (d *Daemon) ConfigFile() string {
 }
 
 func (d *Daemon) APISock() string {
-	if d.apiSock != nil {
-		return *d.apiSock
+	if d.ApiSock != nil {
+		return *d.ApiSock
 	}
-	return filepath.Join(d.SocketDir, "api.sock")
+	return filepath.Join(d.SocketDir, APISocketFileName)
+}
+
+func (d *Daemon) LogFile() string {
+	return filepath.Join(d.LogDir, "stderr.log")
 }
 
 func (d *Daemon) binary() string {
@@ -103,8 +109,16 @@ func (d *Daemon) SharedMount() error {
 	return client.SharedMount(d.MountPoint(), bootstrap, d.ConfigFile())
 }
 
+func (d *Daemon) SharedUmount() error {
+	client, err := nydussdk.NewNydusClient(d.APISock())
+	if err != nil {
+		return errors.Wrap(err, "failed to mount")
+	}
+	return client.Umount(d.MountPoint())
+}
+
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
-	d := &Daemon{}
+	d := &Daemon{Pid: 0}
 	d.ID = newID()
 	for _, o := range opt {
 		err := o(d)

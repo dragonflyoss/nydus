@@ -7,6 +7,7 @@
 package process
 
 import (
+	"context"
 	"contrib/nydus-snapshotter/pkg/daemon"
 	"contrib/nydus-snapshotter/pkg/store"
 )
@@ -15,9 +16,11 @@ type Store interface {
 	Get(id string) (*daemon.Daemon, error)
 	GetBySnapshot(snapshotID string) (*daemon.Daemon, error)
 	Add(*daemon.Daemon) error
-	Delete(*daemon.Daemon)
+	Delete(*daemon.Daemon) error
 	List() []*daemon.Daemon
 	Size() int
+	WalkDaemons(ctx context.Context, cb func(*daemon.Daemon) error) error
+	CleanupDatabase(ctx context.Context) error
 }
 
 var _ Store = &store.DaemonStore{}

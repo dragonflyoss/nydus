@@ -49,9 +49,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, e
 		}
 	}
 	fs.resolver = NewResolver()
-	fs.manager = process.NewManager(process.Opt{
-		NydusdBinaryPath: fs.nydusdBinaryPath,
-	})
+
 	return &fs, nil
 }
 

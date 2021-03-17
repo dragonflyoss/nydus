@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -34,6 +35,7 @@ const (
 type Interface interface {
 	CheckStatus() (model.DaemonInfo, error)
 	SharedMount(sharedMountPoint, bootstrap, daemonConfig string) error
+	Umount(sharedMountPoint string) error
 }
 
 type NydusClient struct {
@@ -70,8 +72,25 @@ func (c *NydusClient) CheckStatus() (model.DaemonInfo, error) {
 	return info, nil
 }
 
+func (c *NydusClient) Umount(sharedMountPoint string) error {
+	requestURL := fmt.Sprintf("http://unix%s?mountpoint=%s", mountEndpoint, sharedMountPoint)
+	req, err := http.NewRequest(http.MethodDelete, requestURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	return handleMountError(resp.Body)
+}
+
 func (c *NydusClient) SharedMount(sharedMountPoint, bootstrap, daemonConfig string) error {
-	requestURl := fmt.Sprintf("http://unix%s?mountpoint=%s", mountEndpoint, sharedMountPoint)
+	requestURL := fmt.Sprintf("http://unix%s?mountpoint=%s", mountEndpoint, sharedMountPoint)
 	content, err := ioutil.ReadFile(daemonConfig)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get content of daemon config %s", daemonConfig)
@@ -80,7 +99,7 @@ func (c *NydusClient) SharedMount(sharedMountPoint, bootstrap, daemonConfig stri
 	if err != nil {
 		return errors.Wrap(err, "failed to create mount request")
 	}
-	resp, err := c.httpClient.Post(requestURl, contentType, bytes.NewBuffer(body))
+	resp, err := c.httpClient.Post(requestURL, contentType, bytes.NewBuffer(body))
 	if err != nil {
 		return err
 	}
@@ -88,15 +107,7 @@ func (c *NydusClient) SharedMount(sharedMountPoint, bootstrap, daemonConfig stri
 	if resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
-	b, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	var errMessage model.ErrorMessage
-	if err = json.Unmarshal(b, &errMessage); err != nil {
-		return err
-	}
-	return errors.New(errMessage.Message)
+	return handleMountError(resp.Body)
 }
 
 func waitUntilSocketReady(sock string) error {
@@ -129,4 +140,15 @@ func buildTransport(sock string) (http.RoundTripper, error) {
 			return dialer.DialContext(ctx, "unix", sock)
 		},
 	}, nil
+}
+func handleMountError(r io.Reader) error {
+	b, err := ioutil.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	var errMessage model.ErrorMessage
+	if err = json.Unmarshal(b, &errMessage); err != nil {
+		return err
+	}
+	return errors.New(errMessage.Message)
 }

@@ -7,7 +7,7 @@
 package process
 
 import (
-	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,20 +28,29 @@ type configGenerator = func(*daemon.Daemon) error
 type Manager struct {
 	store            Store
 	nydusdBinaryPath string
+	SharedDaemon     bool
 	mounter          mount.Interface
 	mu               sync.Mutex
 }
 
 type Opt struct {
 	NydusdBinaryPath string
+	RootDir          string
+	SharedDaemon     bool
 }
 
-func NewManager(opt Opt) *Manager {
+func NewManager(opt Opt) (*Manager, error) {
+	s, err := store.NewDaemonStore(opt.RootDir)
+	if err != nil {
+		return &Manager{}, err
+	}
+
 	return &Manager{
-		store:            store.NewDaemonStore(),
+		store:            s,
 		mounter:          &mount.Mounter{},
 		nydusdBinaryPath: opt.NydusdBinaryPath,
-	}
+		SharedDaemon:     opt.SharedDaemon,
+	}, nil
 }
 
 func (m *Manager) NewDaemon(daemon *daemon.Daemon) error {
@@ -85,8 +94,6 @@ func (m *Manager) ListDaemons() []*daemon.Daemon {
 }
 
 func (m *Manager) CleanUpDaemonResource(d *daemon.Daemon) {
-	_ = d.Stderr.Close()
-	_ = d.Stdout.Close()
 	resource := []string{d.ConfigDir, d.LogDir}
 	if !d.SharedDaemon {
 		resource = append(resource, d.SocketDir)
@@ -109,30 +116,21 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("failed to create start command for daemon %s", d.ID))
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("failed to get stderr pipe for daemon %s", d.ID))
-	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	d.Process = cmd.Process
+	d.Pid = cmd.Process.Pid
 	// make sure to wait after start
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.L.WithField("daemon", d.ID).Debug(scanner.Text())
-		}
-		log.L.WithField("daemon", d.ID).Info("quits")
-		cmd.Wait()
-	}()
+	go cmd.Wait()
 	return nil
+
 }
 
 func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 	args := []string{
 		"--apisock", d.APISock(),
 		"--log-level", "info",
+		"--log-file", d.LogFile(),
 		"--thread-num", "10",
 	}
 	if !d.SharedDaemon {
@@ -171,21 +169,85 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	m.store.Delete(d)
 	m.CleanUpDaemonResource(d)
 	log.L.Infof("umount remote snapshot, mountpoint %s", d.MountPoint())
-	// The process only needs to be wait if it's a non shared daemon.
-	if d.Process != nil && !d.SharedDaemon {
-		err := d.Process.Kill()
+	// if daemon is shared mount, we should only umount the daemon with api instead of
+	// umount entire mountpoint
+	if d.SharedDaemon {
+		return d.SharedUmount()
+	}
+	// if we found pid here, we need to kill and wait process to exit, Pid=0 means somehow we lost
+	// the daemon pid, so that we can't kill the process, just roughly umount the mountpoint
+	if d.Pid > 0 {
+		p, err := os.FindProcess(d.Pid)
 		if err != nil {
 			return err
 		}
-		_, err = d.Process.Wait()
+		err = p.Kill()
+		if err != nil {
+			return err
+		}
+		_, err = p.Wait()
 		if err != nil {
 			return err
 		}
 	}
-	err := m.mounter.Umount(d.MountPoint())
-	// EINVAL means it already is not a mount point
-	if err != nil && err != syscall.EINVAL {
+	if err := m.mounter.Umount(d.MountPoint()); err != nil && err != syscall.EINVAL {
 		return errors.Wrap(err, fmt.Sprintf("failed to umount mountpoint %s", d.MountPoint()))
 	}
+	return nil
+}
+
+// Reconnect already running daemons，and rebuild daemons management structs.
+func (m *Manager) Reconnect(ctx context.Context) error {
+	var (
+		daemons      []*daemon.Daemon
+		sharedDaemon *daemon.Daemon = nil
+	)
+
+	if err := m.store.WalkDaemons(ctx, func(d *daemon.Daemon) error {
+		log.L.WithField("daemon", d.ID).
+			WithField("shared", d.SharedDaemon).
+			Info("found daemon in database")
+
+		// Get the global shared daemon
+		if d.ID == daemon.SharedNydusDaemonID {
+			sharedDaemon = d
+		}
+
+		// Do not check status on virtual daemons
+		if m.SharedDaemon && d.ID != daemon.SharedNydusDaemonID {
+			daemons = append(daemons, d)
+			log.L.WithField("daemon", d.ID).Infof("found virtual daemon")
+			return nil
+		}
+
+		_, err := d.CheckStatus()
+		if err != nil {
+			log.L.WithField("daemon", d.ID).Warnf("failed to check daemon status")
+			return nil
+		}
+		log.L.WithField("daemon", d.ID).Infof("found alive daemon")
+		daemons = append(daemons, d)
+
+		return nil
+	}); err != nil {
+		return errors.Wrapf(err, "failed to walk daemons to reconnect")
+	}
+
+	if !m.SharedDaemon && sharedDaemon != nil {
+		return errors.Errorf("SharedDaemon disabled, but shared daemon is found")
+	}
+
+	// cleanup database so that we'll have a clean database for this snapshotter process lifetime
+	log.L.Infof("found %d daemons running", len(daemons))
+	if err := m.store.CleanupDatabase(ctx); err != nil {
+		return errors.Wrapf(err, "failed to cleanup database")
+	}
+
+	for _, d := range daemons {
+		if err := m.NewDaemon(d); err != nil {
+			return errors.Wrapf(err, "failed to daemon(%s) to daemon store", d.ID)
+		}
+	}
+
 	return nil
 }
