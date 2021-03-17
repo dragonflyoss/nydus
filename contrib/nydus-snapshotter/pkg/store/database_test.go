@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"github.com/stretchr/testify/require"
-	"gitlab.alipay-inc.com/antsys/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"os"
 	"path/filepath"
 	"testing"
