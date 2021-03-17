@@ -10,7 +10,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/pkg/errors"
-	"contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"path/filepath"
 	"sync"
 )

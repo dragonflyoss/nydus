@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 
 	"github.com/pkg/errors"
 	bolt "go.etcd.io/bbolt"

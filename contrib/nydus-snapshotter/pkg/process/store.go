@@ -8,8 +8,8 @@ package process
 
 import (
 	"context"
-	"contrib/nydus-snapshotter/pkg/daemon"
-	"contrib/nydus-snapshotter/pkg/store"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
 )
 
 type Store interface {

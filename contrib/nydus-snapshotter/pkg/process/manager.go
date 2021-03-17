@@ -17,10 +17,10 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 
-	"contrib/nydus-snapshotter/pkg/daemon"
-	"contrib/nydus-snapshotter/pkg/errdefs"
-	"contrib/nydus-snapshotter/pkg/store"
-	"contrib/nydus-snapshotter/pkg/utils/mount"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/mount"
 )
 
 type configGenerator = func(*daemon.Daemon) error

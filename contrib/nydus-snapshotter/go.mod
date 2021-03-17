@@ -1,4 +1,4 @@
-module contrib/nydus-snapshotter
+module github.com/dragonflyoss/image-service/contrib/nydus-snapshotter
 
 go 1.14
 

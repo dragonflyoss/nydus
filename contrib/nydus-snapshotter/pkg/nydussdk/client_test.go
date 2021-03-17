@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"contrib/nydus-snapshotter/pkg/nydussdk/model"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
 var BTI = model.BuildTimeInfo{

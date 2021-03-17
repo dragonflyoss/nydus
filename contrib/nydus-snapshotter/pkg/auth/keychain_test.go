@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"contrib/nydus-snapshotter/pkg/label"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 )
 
 func TestFromLabels(t *testing.T) {

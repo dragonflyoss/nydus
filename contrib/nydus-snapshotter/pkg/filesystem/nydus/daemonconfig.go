@@ -12,9 +12,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"contrib/nydus-snapshotter/pkg/auth"
-	"contrib/nydus-snapshotter/pkg/daemon"
-	"contrib/nydus-snapshotter/pkg/utils/registry"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/auth"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/registry"
 )
 
 type DaemonConfig struct {
