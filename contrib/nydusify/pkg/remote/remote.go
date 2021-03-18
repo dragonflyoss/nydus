@@ -18,6 +18,7 @@ import (
 
 // Remote provides the ability to access remote registry
 type Remote struct {
+	// `Ref` is pointing to a remote image in formatted string host[:port]/[namespace/]repo[:tag]
 	Ref      string
 	parsed   reference.Named
 	resolver remotes.Resolver

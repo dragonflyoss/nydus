@@ -35,8 +35,10 @@ type Image struct {
 }
 
 // Parsed presents OCI and Nydus image manifest.
+// Nydus image conversion only works on top of an existed oci image whose platform is linux/amd64
 type Parsed struct {
-	Index      *ocispec.Index
+	Index *ocispec.Index
+	// The base image from which to generate nydus image.
 	OCIImage   *Image
 	NydusImage *Image
 }

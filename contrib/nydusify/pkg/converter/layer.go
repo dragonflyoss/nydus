@@ -33,11 +33,11 @@ type sourceMount struct {
 	WhiteoutSpec string
 }
 
+// Layer should have nothing to do with storage backend.
 type buildLayer struct {
 	index  int
 	source provider.SourceLayer
 
-	backend        backend.Backend
 	remote         *remote.Remote
 	buildWorkflow  *build.Workflow
 	cacheGlue      *cacheGlue
@@ -52,6 +52,7 @@ type buildLayer struct {
 	sourceMount     *sourceMount
 	blobPath        string
 	bootstrapPath   string
+	backend         backend.Backend
 }
 
 // parseSourceMount parses mounts object returned by the Mount method in
@@ -99,58 +100,34 @@ func parseSourceMount(mounts []mount.Mount) (*sourceMount, error) {
 		}, nil
 
 	default:
-		return nil, fmt.Errorf("Unsupported mount type: %s", mounts[0].Type)
+		return nil, fmt.Errorf("unsupported mount type: %s", mounts[0].Type)
 	}
 }
 
-func (layer *buildLayer) pushBlob(ctx context.Context) (*ocispec.Descriptor, error) {
+func (layer *buildLayer) pushBlob(ctx context.Context) error {
 	// Note: filepath.Base(blobPath) is a sha256 hex string
-	blobID := filepath.Base(layer.blobPath)
 	blobPath := layer.blobPath
+	blobID := filepath.Base(blobPath)
 
-	blobDigest := digest.NewDigestFromEncoded(digest.SHA256, blobID)
 	info, err := os.Stat(blobPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "Stat blob file")
-	}
-
-	desc := ocispec.Descriptor{
-		Digest:    blobDigest,
-		Size:      info.Size(),
-		MediaType: utils.MediaTypeNydusBlob,
-		Annotations: map[string]string{
-			// Use `utils.LayerAnnotationUncompressed` to generate
-			// DiffID of layer defined in OCI spec
-			utils.LayerAnnotationUncompressed: blobDigest.String(),
-			utils.LayerAnnotationNydusBlob:    "true",
-		},
+		return errors.Wrap(err, "Stat blob file")
 	}
 
 	if err := utils.WithRetry(func() error {
-		// Upload Nydus blob to backend if backend config be specified
-		if layer.backend != nil {
-			if err := layer.backend.Upload(blobID, blobPath); err != nil {
-				return errors.Wrap(err, "Upload blob to backend")
-			}
-			return nil
-		}
-
-		blobFile, err := os.Open(blobPath)
+		size := info.Size()
+		desc, err := layer.backend.Upload(ctx, blobID, blobPath, size)
 		if err != nil {
-			return errors.Wrap(err, "Open blob file")
+			return err
 		}
-		defer blobFile.Close()
-
-		if err := layer.remote.Push(ctx, desc, true, blobFile); err != nil {
-			return errors.Wrap(err, "Push blob layer")
-		}
+		layer.blobDesc = desc
 
 		return nil
 	}); err != nil {
-		return nil, err
+		return err
 	}
 
-	return &desc, nil
+	return nil
 }
 
 func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor, *digest.Digest, error) {
@@ -233,7 +210,7 @@ func (layer *buildLayer) Push(ctx context.Context) error {
 		}
 		blobSize := humanize.Bytes(uint64(info.Size()))
 		var op string
-		if layer.backend != nil {
+		if layer.backend.Type() == backend.OssBackend {
 			op = "Upload"
 		} else {
 			op = "Push"
@@ -242,10 +219,10 @@ func (layer *buildLayer) Push(ctx context.Context) error {
 			"Digest": blobDigest,
 			"Size":   blobSize,
 		})
-		layer.blobDesc, err = layer.pushBlob(ctx)
-		if err != nil {
+		if err := layer.pushBlob(ctx); err != nil {
 			return pushDone(errors.Wrapf(err, "Push Nydus blob layer"))
 		}
+
 		pushDone(nil)
 	}
 
@@ -275,7 +252,7 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	layer.bootstrapPath = filepath.Join(layer.bootstrapsDir, bootstrapName)
 
 	// Pull source layer for building on next if no cache hit
-	mountDone := logger.Log(ctx, fmt.Sprintf("[SOUR] Mount layer"), provider.LoggerFields{
+	mountDone := logger.Log(ctx, "[SOUR] Mount layer", provider.LoggerFields{
 		"Digest": layer.source.Digest(),
 		"Size":   sourceLayerSize,
 	})
@@ -296,7 +273,7 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 	sourceSize := humanize.Bytes(uint64(layer.source.Size()))
 
 	// Build Nydus blob and bootstrap file to temp directory
-	buildDone := logger.Log(ctx, fmt.Sprintf("[DUMP] Build layer"), provider.LoggerFields{
+	buildDone := logger.Log(ctx, "[DUMP] Build layer", provider.LoggerFields{
 		"Digest": layer.source.Digest(),
 		"Size":   sourceSize,
 	})

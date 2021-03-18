@@ -55,6 +55,8 @@ func (job *mountJob) Umount() error {
 	return job.umount()
 }
 
+// This is the main entrypoint for whom want to leverage the ability to convert a OCI image
+// Usually by importing this package and construct `Opt`
 type Opt struct {
 	Logger provider.ProgressLogger
 
@@ -80,12 +82,45 @@ type Opt struct {
 }
 
 type Converter struct {
-	Opt
+	Logger          provider.ProgressLogger
+	SourceProviders []provider.SourceProvider
+
+	TargetRemote *remote.Remote
+
+	CacheRemote     *remote.Remote
+	CacheMaxRecords uint
+
+	NydusImagePath string
+	WorkDir        string
+	PrefetchDir    string
+
+	MultiPlatform  bool
+	DockerV2Format bool
+
+	storageBackend backend.Backend
 }
 
 func New(opt Opt) (*Converter, error) {
+	// TODO: Add parameters sanity check here
+	// Built layer has to go somewhere. Storage backend is the media holing layer blob.
+	backend, err := backend.NewBackend(opt.BackendType, []byte(opt.BackendConfig), opt.TargetRemote)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Converter{
-		Opt: opt,
+		Logger:          opt.Logger,
+		SourceProviders: opt.SourceProviders,
+		TargetRemote:    opt.TargetRemote,
+		CacheRemote:     opt.CacheRemote,
+		CacheMaxRecords: opt.CacheMaxRecords,
+		NydusImagePath:  opt.NydusImagePath,
+		WorkDir:         opt.WorkDir,
+		PrefetchDir:     opt.PrefetchDir,
+		MultiPlatform:   opt.MultiPlatform,
+		DockerV2Format:  opt.DockerV2Format,
+
+		storageBackend: backend,
 	}, nil
 }
 
@@ -99,7 +134,7 @@ func findSupportedSource(ctx context.Context, sources []provider.SourceProvider)
 			return source, nil
 		}
 	}
-	return nil, fmt.Errorf("Not found supported platform in source image")
+	return nil, fmt.Errorf("not found supported platform in source image")
 }
 
 func (cvt *Converter) convert(ctx context.Context) error {
@@ -107,20 +142,9 @@ func (cvt *Converter) convert(ctx context.Context) error {
 
 	logrus.Infoln(fmt.Sprintf("Converting to %s", cvt.TargetRemote.Ref))
 
-	// Init backend to upload Nydus blob if the backend config
-	// option be specified
-	var _backend backend.Backend
-	var err error
-	if cvt.BackendConfig != "" {
-		_backend, err = backend.NewBackend(cvt.BackendType, cvt.BackendConfig)
-		if err != nil {
-			return errors.Wrap(err, "Init backend")
-		}
-	}
-
 	// Try to pull Nydus cache image from remote registry
 	cg, err := newCacheGlue(
-		ctx, cvt.CacheMaxRecords, cvt.DockerV2Format, cvt.TargetRemote, cvt.CacheRemote, _backend,
+		ctx, cvt.CacheMaxRecords, cvt.DockerV2Format, cvt.TargetRemote, cvt.CacheRemote, cvt.storageBackend,
 	)
 	if err != nil {
 		return errors.Wrap(err, "Pull cache image")
@@ -167,11 +191,11 @@ func (cvt *Converter) convert(ctx context.Context) error {
 			buildWorkflow:  buildWorkflow,
 			bootstrapsDir:  bootstrapsDir,
 			cacheGlue:      cg,
-			backend:        _backend,
 			remote:         cvt.TargetRemote,
 			source:         sourceLayer,
 			parent:         parentBuildLayer,
 			dockerV2Format: cvt.DockerV2Format,
+			backend:        cvt.storageBackend,
 		}
 		parentBuildLayer = buildLayer
 		buildLayers = append(buildLayers, buildLayer)
@@ -230,7 +254,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	mm := &manifestManager{
 		sourceProvider: sourceProvider,
 		remote:         cvt.TargetRemote,
-		backend:        _backend,
+		backend:        cvt.storageBackend,
 		multiPlatform:  cvt.MultiPlatform,
 		dockerV2Format: cvt.DockerV2Format,
 	}

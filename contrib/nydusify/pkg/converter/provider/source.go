@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package provider abstract interface to adapt to different build environments,
+// Package provider abstracts interface to adapt to different build environments,
 // the provider includes these components:
 // 	logger: output build progress for nydusify or buildkitd/buildctl;
 // 	remote: create a remote resolver, it communicates with remote registry;
