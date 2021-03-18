@@ -17,8 +17,9 @@ import (
 
 // ManifestRule validates manifest format of Nydus image
 type ManifestRule struct {
-	SourceParsed *parser.Parsed
-	TargetParsed *parser.Parsed
+	SourceParsed  *parser.Parsed
+	TargetParsed  *parser.Parsed
+	MultiPlatform bool
 }
 
 func (rule *ManifestRule) Name() string {
@@ -27,6 +28,34 @@ func (rule *ManifestRule) Name() string {
 
 func (rule *ManifestRule) Validate() error {
 	logrus.Infof("Checking Nydus manifest")
+
+	// Ensure the target image represents a manifest list,
+	// and it should consist of OCI and Nydus manifest
+	if rule.MultiPlatform {
+		if rule.TargetParsed.Index == nil {
+			return errors.New("not found image manifest list")
+		}
+		foundNydusDesc := false
+		foundOCIDesc := false
+		for _, desc := range rule.TargetParsed.Index.Manifests {
+			if desc.Platform == nil {
+				continue
+			}
+			if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
+				if utils.IsNydusPlatform(desc.Platform) {
+					foundNydusDesc = true
+				} else {
+					foundOCIDesc = true
+				}
+			}
+		}
+		if !foundNydusDesc {
+			return errors.New("not found nydus image in manifest list")
+		}
+		if !foundOCIDesc {
+			return errors.New("not found oci image in manifest list")
+		}
+	}
 
 	// Check manifest of Nydus
 	if rule.TargetParsed.NydusImage == nil {

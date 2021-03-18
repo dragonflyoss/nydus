@@ -26,6 +26,7 @@ type Opt struct {
 	Target         string
 	SourceInsecure bool
 	TargetInsecure bool
+	MultiPlatform  bool
 	NydusImagePath string
 	NydusdPath     string
 	BackendType    string
@@ -99,8 +100,9 @@ func (checker *Checker) Check(ctx context.Context) error {
 
 	rules := []rule.Rule{
 		&rule.ManifestRule{
-			SourceParsed: sourceParsed,
-			TargetParsed: targetParsed,
+			SourceParsed:  sourceParsed,
+			TargetParsed:  targetParsed,
+			MultiPlatform: checker.MultiPlatform,
 		},
 		&rule.BootstrapRule{
 			Parsed:          targetParsed,
