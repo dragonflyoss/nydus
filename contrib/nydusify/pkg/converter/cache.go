@@ -118,12 +118,15 @@ func (cg *cacheGlue) Push(ctx context.Context, layer *buildLayer) error {
 	}
 
 	// Push blob layer to cache image
-	if layer.backend == nil && layer.blobPath != "" {
+	if layer.backend.Type() == backend.RegistryBackend && layer.blobPath != "" {
+		// FIXME: With registry storage backend, is it an error when `blobPath == ""`
 		blobFile, err := os.Open(layer.blobPath)
 		if err != nil {
 			return pushDone(errors.Wrapf(err, "Open blob file"))
 		}
 		defer blobFile.Close()
+		// TODO: Better we can add a note/reminder to manual or restrict that build cache
+		// image should reside in the same repo
 		if err := cg.cache.Push(ctx, *layer.blobDesc, blobFile); err != nil {
 			return pushDone(errors.Wrapf(err, "Push target blob layer to nydus cache"))
 		}
@@ -146,7 +149,7 @@ func (cg *cacheGlue) PullBootstrap(
 			defer blobReader.Close()
 		}
 		bootstrapDesc := cacheRecord.NydusBootstrapDesc
-		pullDone := logger.Log(ctx, fmt.Sprintf("[CACH] Pull bootstrap"), provider.LoggerFields{
+		pullDone := logger.Log(ctx, "[CACH] Pull bootstrap", provider.LoggerFields{
 			"ChainID": chainID,
 		})
 		// Pull the bootstrap layer recorded in cache image for build workflow
@@ -156,7 +159,7 @@ func (cg *cacheGlue) PullBootstrap(
 		return pullDone(nil)
 	}
 
-	return fmt.Errorf("Not found bootstrap in cache")
+	return fmt.Errorf("not found bootstrap in cache")
 }
 
 func (cg *cacheGlue) Export(

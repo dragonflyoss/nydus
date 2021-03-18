@@ -41,7 +41,7 @@ type Opt struct {
 // every record presents the relationship like:
 //
 // source_layer_chainid -> (nydus_blob_layer_digest, nydus_bootstrap_layer_digest)
-// If the converter hit cache record during build source layer, we can
+// If the converter hits cache record during build source layer, we can
 // skip the layer building, see cache image example: examples/manifest/cache_manifest.json.
 //
 // Here is the build cache workflow:
@@ -64,7 +64,7 @@ func New(remote *remote.Remote, opt Opt) (*Cache, error) {
 	cache := &Cache{
 		opt:    opt,
 		remote: remote,
-		// source_layer_chainid -> cache_record
+		// source_layer_chain_id -> cache_record
 		pulledRecords: make(map[digest.Digest]*CacheRecord),
 		pushedRecords: []*CacheRecord{},
 	}
@@ -94,7 +94,7 @@ func (cache *Cache) recordToLayer(record *CacheRecord) (*ocispec.Descriptor, *oc
 	if record.NydusBlobDesc != nil {
 		// Record blob layer to cache image if the blob be pushed
 		// to registry instead of storage backend.
-		if cache.opt.Backend == nil {
+		if cache.opt.Backend.Type() == backend.RegistryBackend {
 			blobCacheDesc = &ocispec.Descriptor{
 				MediaType: utils.MediaTypeNydusBlob,
 				Digest:    record.NydusBlobDesc.Digest,
@@ -355,7 +355,7 @@ func (cache *Cache) Check(ctx context.Context, layerChainID digest.Digest) (*Cac
 
 	// Check blob layer on cache
 	if record.NydusBlobDesc != nil {
-		if cache.opt.Backend == nil {
+		if cache.opt.Backend.Type() == backend.RegistryBackend {
 			blobReader, err := cache.remote.Pull(ctx, *record.NydusBlobDesc, true)
 			if err != nil {
 				return nil, nil, nil, errors.Wrap(err, "Check blob layer")

@@ -5,36 +5,18 @@
 package backend
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
-
-type OSSBackend struct {
-	objectPrefix string
-	bucket       *oss.Bucket
-}
-
-func newOSSBackend(endpoint, bucket, objectPrefix, accessKeyID, accessKeySecret string) (*OSSBackend, error) {
-	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)
-	if err != nil {
-		return nil, errors.Wrap(err, "init oss backend")
-	}
-
-	_bucket, err := client.Bucket(bucket)
-	if err != nil {
-		return nil, errors.Wrap(err, "init oss backend")
-	}
-
-	return &OSSBackend{
-		objectPrefix: objectPrefix,
-		bucket:       _bucket,
-	}, nil
-}
 
 const (
 	splitPartsCount = 4
@@ -42,20 +24,61 @@ const (
 	multipartsUploadThreshold = 100 * 1024 * 1024
 )
 
+type OSSBackend struct {
+	// OSS storage does not support directory. Therefore add a prefix to each object
+	// to make it a path-like object.
+	objectPrefix string
+	bucket       *oss.Bucket
+}
+
+func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
+	var configMap map[string]string
+	if err := json.Unmarshal(rawConfig, &configMap); err != nil {
+		return nil, errors.Wrap(err, "Parse OSS storage backend configuration")
+	}
+
+	endpoint, ok1 := configMap["endpoint"]
+	bucketName, ok2 := configMap["bucket_name"]
+
+	// Below items are not mandatory
+	accessKeyID := configMap["access_key_id"]
+	accessKeySecret := configMap["access_key_secret"]
+	objectPrefix := configMap["object_prefix"]
+
+	if !ok1 || !ok2 {
+		return nil, fmt.Errorf("no endpoint or bucket is specified")
+	}
+
+	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)
+	if err != nil {
+		return nil, errors.Wrap(err, "Create client")
+	}
+
+	bucket, err := client.Bucket(bucketName)
+	if err != nil {
+		return nil, errors.Wrap(err, "Create bucket")
+	}
+
+	return &OSSBackend{
+		objectPrefix: objectPrefix,
+		bucket:       bucket,
+	}, nil
+}
+
 // Upload blob as image layer to oss backend. Depending on blob's size, upload it
 // by multiparts method or the normal method
-func (b *OSSBackend) Upload(blobID string, blobPath string) error {
+func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64) (*ocispec.Descriptor, error) {
 	blobID = b.objectPrefix + blobID
 	if exist, err := b.bucket.IsObjectExist(blobID); err != nil {
-		return err
+		return nil, err
 	} else if exist {
-		return nil
+		return nil, nil
 	}
 
 	var stat os.FileInfo
 	stat, err := os.Stat(blobPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	blobSize := stat.Size()
 
@@ -71,12 +94,12 @@ func (b *OSSBackend) Upload(blobID string, blobPath string) error {
 		logrus.Debugf("Upload %s using multiparts method", blobID)
 		chunks, err := oss.SplitFileByPartNum(blobPath, splitPartsCount)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		imur, err := b.bucket.InitiateMultipartUpload(blobID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		var parts []oss.UploadPart
@@ -97,33 +120,41 @@ func (b *OSSBackend) Upload(blobID string, blobPath string) error {
 		}
 
 		if err := g.Wait(); err != nil {
-			return errors.Wrap(err, "Uploading parts failed")
+			return nil, errors.Wrap(err, "Uploading parts failed")
 		}
 
 		_, err = b.bucket.CompleteMultipartUpload(imur, parts)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		reader, err := os.Open(blobPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer reader.Close()
 		err = b.bucket.PutObject(blobID, reader)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
+
+	// With OSS backend, no blob has to be pushed to registry, but have to push to build cache.
 
 	end := time.Now()
 	elapsed := end.Sub(start)
 	logrus.Debugf("Uploading blob %s costs %s", blobID, elapsed)
 
-	return err
+	desc := blobDesc(size, blobID)
+
+	return &desc, nil
 }
 
 func (b *OSSBackend) Check(blobID string) (bool, error) {
 	blobID = b.objectPrefix + blobID
 	return b.bucket.IsObjectExist(blobID)
+}
+
+func (r *OSSBackend) Type() BackendType {
+	return OssBackend
 }

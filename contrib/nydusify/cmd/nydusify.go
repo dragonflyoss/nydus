@@ -164,6 +164,8 @@ func main() {
 				if !isPossibleValue(possibleBackendTypes, backendType) {
 					return fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
 				}
+
+				// This only works for OSS backend rightnow
 				backendConfig, err := parseBackendConfig(c.String("backend-config"), c.String("backend-config-file"))
 				if err != nil {
 					return err
