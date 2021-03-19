@@ -22,7 +22,7 @@ vet:
 
 .PHONY: test
 test: vet
-	go test -v -mod vendor -cover ${PACKAGES}
+	go test -v -mod=mod -cover ${PACKAGES}
 
 .PHONY: cover
 cover: vet
