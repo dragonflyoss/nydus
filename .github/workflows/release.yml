@@ -86,4 +86,7 @@ jobs:
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
         echo "uploading ${tarball} for tag $tag ..."
+        GITHUB_TOKEN=${{ secrets.HUB_UPLOAD_TOKEN }} hub release delete "$tag" | true
+        # Give a bit of time for the release to actually be deleted
+        sleep 5
         GITHUB_TOKEN=${{ secrets.HUB_UPLOAD_TOKEN }} hub release create -m "Nydus Image Service $tag" -m "Nydus Image Service $tag release" -a "${tarball}" "$tag"
