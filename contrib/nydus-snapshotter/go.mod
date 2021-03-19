@@ -6,6 +6,7 @@ require (
 	github.com/Microsoft/hcsshim v0.8.9 // indirect
 	github.com/containerd/containerd v1.4.0-beta.1
 	github.com/containerd/continuity v0.0.0-20190426062206-aaeac12a7ffc
+	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e
 	github.com/google/go-containerregistry v0.1.2
 	github.com/google/uuid v1.1.1
