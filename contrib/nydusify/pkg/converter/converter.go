@@ -21,8 +21,6 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
-const supportedPlatform = "linux/amd64"
-
 // PullWorkerCount specifies source layer pull concurrency
 var PullWorkerCount uint = 5
 
@@ -97,11 +95,11 @@ func findSupportedSource(ctx context.Context, sources []provider.SourceProvider)
 		if err != nil {
 			return nil, errors.Wrap(err, "Failed to get image config from source provider")
 		}
-		if fmt.Sprintf("%s/%s", config.OS, config.Architecture) == supportedPlatform {
+		if utils.IsSupportedPlatform(config.OS, config.Architecture) {
 			return source, nil
 		}
 	}
-	return nil, errors.New("Not found linux/amd64 platform in source image")
+	return nil, fmt.Errorf("Not found supported platform in source image")
 }
 
 func (cvt *Converter) convert(ctx context.Context) error {

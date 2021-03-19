@@ -18,6 +18,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const SupportedOS = "linux"
+const SupportedArch = "amd64"
+
 const defaultRetryAttempts = 3
 const defaultRetryInterval = time.Second * 2
 
@@ -51,6 +54,30 @@ func MarshalToDesc(data interface{}, mediaType string) (*ocispec.Descriptor, []b
 	}
 
 	return &desc, bytes, nil
+}
+
+func IsSupportedPlatform(os, arch string) bool {
+	// Default we assume that empty OS/Arch should be
+	// a supported platform likes linux/amd64
+	if os == "" && arch == "" {
+		logrus.Warnln("Found empty OS/Arch platform manifest")
+		return true
+	}
+	if os == SupportedOS && arch == SupportedArch {
+		return true
+	}
+	return false
+}
+
+func IsNydusPlatform(platform *ocispec.Platform) bool {
+	if platform != nil && platform.OSFeatures != nil {
+		for _, key := range platform.OSFeatures {
+			if key == ManifestOSFeatureNydus {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func UnpackFile(reader io.Reader, source, target string) error {

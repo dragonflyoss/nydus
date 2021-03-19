@@ -252,6 +252,8 @@ func main() {
 				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
 				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
 
+				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Ensure the target image represents a manifest list, and it should consist of OCI and Nydus manifest", EnvVars: []string{"MULTI_PLATFORM"}},
+
 				&cli.StringFlag{Name: "work-dir", Value: "./output", Usage: "Work directory path for image check, will be cleaned before checking", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.StringFlag{Name: "nydusd", Value: "./nydusd", Usage: "The nydusd binary path", EnvVars: []string{"NYDUSD"}},
@@ -276,6 +278,7 @@ func main() {
 					WorkDir:        c.String("work-dir"),
 					Source:         c.String("source"),
 					Target:         c.String("target"),
+					MultiPlatform:  c.Bool("multi-platform"),
 					SourceInsecure: c.Bool("source-insecure"),
 					TargetInsecure: c.Bool("target-insecure"),
 					NydusImagePath: c.String("nydus-image"),
