@@ -59,3 +59,24 @@ Browse the documentation to learn more. Here are some topics you may be interest
 - [A Nydus Tutorial for Beginners](./docs/tutorial.md)
 - Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
 - [Nydus Design Doc](./docs/nydus-design.md)
+
+## Community
+
+Welcome to share your use cases and contribute to Nydus project.
+You can reach the community via Dingtalk and Slack
+
+Any bug report, feature requirement, and technique discussion and cooperation are welcomed and expected!
+
+* Slack
+
+    Join our Slack [workspace](https://join.slack.com/t/nydusimageservice/shared_invite/zt-o67n0ye9-HuN0c2MPzjUVJvF~W4PnXg)
+
+* Dingtalk
+
+    Join nydus-devel group by clicking [URL](https://qr.dingtalk.com/action/joingroup?code=v1,k1,YfGzhaTOnpm10Bf+/ohz4WcuDEIe9nTIjo+MPuIgRGQ=&_dt_no_comment=1&origin=11) from your phone.
+
+    You can also search our talking group by number *34971767* and QR code
+
+<img src="./misc/Dingtalk_QR.jpg" width="250" height="300"/>
+
+
