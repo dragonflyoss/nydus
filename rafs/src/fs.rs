@@ -18,7 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::unistd::{getegid, geteuid};
+use nix::unistd::{dup, getegid, geteuid};
 use serde::Deserialize;
 use std::time::SystemTime;
 
@@ -254,8 +254,8 @@ impl Rafs {
         if self.fs_prefetch {
             // We have to this unsafe conversion because RafsIoReader as a Box pointer can't
             // be shared between threads safely, even after cloning.
-            let _f: File = unsafe { FromRawFd::from_raw_fd(r.as_raw_fd()) };
-            let underlying_file = _f.try_clone().unwrap();
+            let fd = dup(r.as_raw_fd()).map_err(|e| RafsError::Prefetch(e.to_string()))?;
+            let underlying_file = unsafe { File::from_raw_fd(fd) };
             let sb = self.sb.clone();
             let device = self.device.clone();
 
