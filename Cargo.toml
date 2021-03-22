@@ -1,6 +1,6 @@
 [package]
 name = "nydus-rs"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["The Nydus Developers"]
 edition = "2018"
 
@@ -14,7 +14,7 @@ rlimit = "0.3.0"
 log = "0.4.8"
 epoll = ">=4.0.1"
 libc = "0.2"
-vmm-sys-util = ">=0.3.1"
+vmm-sys-util = "0.6.0"
 clap = "2.33"
 flexi_logger = { version = "0.17"}
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
@@ -41,7 +41,7 @@ vhost-user-backend = { git = "https://github.com/cloud-hypervisor/vhost-user-bac
 
 [dev-dependencies]
 sendfd = "0.3.3"
-vmm-sys-util = ">=0.3.1"
+vmm-sys-util = "0.6.0"
 env_logger = "0.8.2"
 
 [features]
