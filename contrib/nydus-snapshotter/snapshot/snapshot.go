@@ -169,12 +169,12 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 }
 
 func (o *snapshotter) prepareRemoteSnapshot(ctx context.Context, id string, labels map[string]string) error {
-	log.G(ctx).Infof("remote snapshot mountpoint %s, labels %v", o.upperPath(id), labels)
+	log.G(ctx).Infof("prepare remote snapshot mountpoint %s", o.upperPath(id))
 	return o.fs.Mount(o.context, id, labels)
 }
 
 func (o *snapshotter) prepareStargzRemoteSnapshot(ctx context.Context, id string, labels map[string]string) error {
-	log.G(ctx).Infof("prepare stargz remote snapshot mountpoint %s, labels %v", o.upperPath(id), labels)
+	log.G(ctx).Infof("prepare stargz remote snapshot mountpoint %s", o.upperPath(id))
 	return o.stargzFs.Mount(o.context, id, labels)
 }
 
