@@ -41,6 +41,7 @@ impl From<DaemonError> for DaemonErrorKind {
             NotReady => DaemonErrorKind::NotReady,
             Unsupported => DaemonErrorKind::Unsupported,
             Serde(e) => DaemonErrorKind::Serde(e),
+            UnexpectedEvent(e) => DaemonErrorKind::UnexpectedEvent(format!("{:?}", e)),
             o => DaemonErrorKind::Other(o.to_string()),
         }
     }
