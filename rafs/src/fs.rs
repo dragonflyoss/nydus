@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::unistd::{dup, getegid, geteuid};
+use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 use std::time::SystemTime;
 
