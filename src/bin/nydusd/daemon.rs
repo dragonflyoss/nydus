@@ -408,7 +408,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
             let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
             let mut bootstrap = RafsIoRead::from_file(&cmd.source)?;
             let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
-            rafs.import(&mut bootstrap, prefetch_files)?;
+            rafs.import(bootstrap, prefetch_files)?;
             info!("Rafs imported");
             Ok(Box::new(rafs))
         }
