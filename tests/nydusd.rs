@@ -11,7 +11,7 @@ use std::time;
 use nydus_utils::exec;
 use rafs::metadata::RafsMode;
 
-const NYDUSD: &str = "./target-fusedev/debug/nydusd";
+const NYDUSD: &str = "./target-fusedev/x86_64-unknown-linux-musl/release/nydusd";
 
 pub struct Nydusd {
     work_dir: PathBuf,

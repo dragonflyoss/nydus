@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use nydus_utils::exec;
 
-const NYDUS_IMAGE: &str = "./target-fusedev/debug/nydus-image";
+const NYDUS_IMAGE: &str = "./target-fusedev/x86_64-unknown-linux-musl/release/nydus-image";
 
 pub struct Builder<'a> {
     work_dir: &'a PathBuf,

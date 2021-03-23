@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestBasicConvert(t *testing.T) {
+func testBasicConvert(t *testing.T) {
 	registry := NewRegistry(t)
 	defer registry.Destory(t)
 
@@ -18,7 +18,7 @@ func TestBasicConvert(t *testing.T) {
 	nydusify.Check(t)
 }
 
-func TestConvertWithCache(t *testing.T) {
+func testConvertWithCache(t *testing.T) {
 	registry := NewRegistry(t)
 	defer registry.Destory(t)
 
@@ -40,4 +40,9 @@ func TestConvertWithCache(t *testing.T) {
 	nydusify4 := NewNydusify(registry, "image-from-2", "image-from-nydus-2", "cache:v1")
 	nydusify4.Convert(t)
 	nydusify4.Check(t)
+}
+
+func TestSmoke(t *testing.T) {
+	testBasicConvert(t)
+	testConvertWithCache(t)
 }

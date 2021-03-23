@@ -21,9 +21,9 @@ jobs:
           ~/.cargo/git
           target-fusedev
           target-virtiofs
-        key: ${{ runner.os }}-cargo-musl-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-musl-
+          ${{ runner.os }}-cargo
     - name: Build nydus-rs
       run: |
         make docker-static
@@ -45,9 +45,9 @@ jobs:
       uses: actions/cache@v2
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-static-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum') }}
+        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-static-
+          ${{ runner.os }}-go
     - name: build nydusify
       run: |
         make nydusify-static
