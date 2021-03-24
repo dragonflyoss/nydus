@@ -86,7 +86,7 @@ func (pool *QueueWorkerPool) Waiter() []chan RJob {
 // WorkerPool creates a worker pool with fixed count, caller
 // puts some jobs to the pool and then wait all jobs finish
 type WorkerPool struct {
-	err   error
+	err   chan error
 	wg    sync.WaitGroup
 	queue chan Job
 }
@@ -96,6 +96,7 @@ type WorkerPool struct {
 func NewWorkerPool(worker, total uint) *WorkerPool {
 	pool := &WorkerPool{
 		queue: make(chan Job, total),
+		err:   make(chan error, 1),
 	}
 
 	for count := uint(0); count < worker; count++ {
@@ -109,7 +110,7 @@ func NewWorkerPool(worker, total uint) *WorkerPool {
 				}
 
 				if err := job(); err != nil {
-					pool.err = err
+					pool.err <- err
 					break
 				}
 			}
@@ -119,16 +120,17 @@ func NewWorkerPool(worker, total uint) *WorkerPool {
 	return pool
 }
 
-func (pool *WorkerPool) Put(job Job) error {
-	if pool.err != nil {
-		return pool.err
-	}
+func (pool *WorkerPool) Put(job Job) {
 	pool.queue <- job
-	return nil
 }
 
-func (pool *WorkerPool) Wait() error {
+func (pool *WorkerPool) Err() chan error {
+	return pool.err
+}
+
+func (pool *WorkerPool) Waiter() chan error {
 	close(pool.queue)
 	pool.wg.Wait()
+	close(pool.err)
 	return pool.err
 }

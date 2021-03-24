@@ -213,41 +213,49 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	// layer be mounted in pull worker, and then put Nydus layer to the push worker,
 	// it can be uploaded to remote registry
 	for _, jobChan := range pullWorker.Waiter() {
-		_job := <-jobChan
-		if _job.Err() != nil {
-			return errors.Wrap(_job.Err(), "Pull source layer")
-		}
-		job := _job.(*mountJob)
-
-		// Skip building if we found the cache record in cache image
-		if job.layer.Cached() {
-			continue
-		}
-
-		// Build source layer to Nydus layer by invoking Nydus image builder
-		err := job.layer.Build(ctx)
-
-		go func() {
-			// Umount source layer after building in order to save the disk
-			// space during building, useful for default source provider
-			if err := job.Umount(); err != nil {
-				logrus.Warnf("Failed to umount layer %s: %s", job.layer.source.Digest(), err)
+		select {
+		case _job := <-jobChan:
+			if _job.Err() != nil {
+				return errors.Wrap(_job.Err(), "Pull source layer")
 			}
-		}()
+			job := _job.(*mountJob)
 
-		if err != nil {
-			return errors.Wrap(err, "Build source layer")
+			// Skip building if we found the cache record in cache image
+			if job.layer.Cached() {
+				continue
+			}
+
+			// Build source layer to Nydus layer by invoking Nydus image builder
+			err := job.layer.Build(ctx)
+
+			go func() {
+				// Umount source layer after building in order to save the disk
+				// space during building, useful for default source provider
+				if err := job.Umount(); err != nil {
+					logrus.Warnf("Failed to umount layer %s: %s", job.layer.source.Digest(), err)
+				}
+			}()
+
+			if err != nil {
+				return errors.Wrap(err, "Build source layer")
+			}
+
+			// Push Nydus layer (bootstrap & blob) to target registry
+			pushWorker.Put(func() error {
+				return job.layer.Push(ctx)
+			})
+		case err := <-pushWorker.Err():
+			// Should throw the error as soon as possible instead
+			// of waiting for all pull jobs to finish
+			if err != nil {
+				return errors.Wrap(err, "Push Nydus layer in worker")
+			}
 		}
-
-		// Push Nydus layer (bootstrap & blob) to target registry
-		pushWorker.Put(func() error {
-			return job.layer.Push(ctx)
-		})
 	}
 
 	// Wait all layer push job finish, then we can push image manifest on next
-	if err := pushWorker.Wait(); err != nil {
-		return errors.Wrap(err, "Push Nydus layer")
+	if err := <-pushWorker.Waiter(); err != nil {
+		return errors.Wrap(err, "Push Nydus layer in wait")
 	}
 
 	// Push OCI manifest, Nydus manifest and manifest index
@@ -264,7 +272,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		// manifest is invalid, maybe the cache layer is not available in registry with a high
 		// probability caused by registry GC, for example the cache image be overwritten by another
 		// conversion progress, and the registry GC be triggered in the same time
-		if cvt.CacheRemote != nil && strings.Contains(err.Error(), "unexpected status: 400") {
+		if cvt.CacheRemote != nil && strings.Contains(err.Error(), "400") {
 			logrus.Warnf("Push manifest: %s", err)
 			return pushDone(errInvalidCache)
 		}
