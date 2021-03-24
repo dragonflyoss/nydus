@@ -27,7 +27,6 @@ type Workflow struct {
 	backendConfig       string
 	parentBootstrapPath string
 	builder             *Builder
-	debugJSONPath       string
 	lastBlobID          string
 }
 
@@ -35,10 +34,16 @@ type debugJSON struct {
 	Blobs []string
 }
 
+// Dump output json file of every layer to $workdir/bootstraps directory
+// for debug or perf analysis purpose
+func (workflow *Workflow) buildOutputJSONPath() string {
+	return workflow.bootstrapPath + "-output.json"
+}
+
 // Get latest built blob from blobs directory
 func (workflow *Workflow) getLatestBlobPath() (string, error) {
 	var data debugJSON
-	jsonBytes, err := ioutil.ReadFile(workflow.debugJSONPath)
+	jsonBytes, err := ioutil.ReadFile(workflow.buildOutputJSONPath())
 	if err != nil {
 		return "", err
 	}
@@ -47,7 +52,7 @@ func (workflow *Workflow) getLatestBlobPath() (string, error) {
 	}
 	blobIDs := data.Blobs
 
-	if blobIDs == nil || len(blobIDs) == 0 {
+	if len(blobIDs) == 0 {
 		return "", nil
 	}
 
@@ -76,8 +81,6 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 	backendConfig := fmt.Sprintf(`{"dir": "%s"}`, blobsDir)
 	builder := NewBuilder(option.NydusImagePath)
 
-	debugJSONPath := filepath.Join(option.TargetDir, "output.json")
-
 	if option.PrefetchDir == "" {
 		option.PrefetchDir = "/"
 	}
@@ -87,7 +90,6 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 		blobsDir:       blobsDir,
 		backendConfig:  backendConfig,
 		builder:        builder,
-		debugJSONPath:  debugJSONPath,
 	}, nil
 }
 
@@ -109,7 +111,7 @@ func (workflow *Workflow) Build(
 		BackendConfig:       workflow.backendConfig,
 		PrefetchDir:         workflow.PrefetchDir,
 		WhiteoutSpec:        whiteoutSpec,
-		OutputJSONPath:      workflow.debugJSONPath,
+		OutputJSONPath:      workflow.buildOutputJSONPath(),
 	}); err != nil {
 		return "", errors.Wrap(err, fmt.Sprintf("build layer %s", layerDir))
 	}
