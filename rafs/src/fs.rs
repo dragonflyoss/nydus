@@ -251,8 +251,6 @@ impl Rafs {
 
         // Device should be ready before any prefetch.
         if self.fs_prefetch {
-            // We have to this unsafe conversion because RafsIoReader as a Box pointer can't
-            // be shared between threads safely, even after cloning.
             let sb = self.sb.clone();
             let device = self.device.clone();
 
