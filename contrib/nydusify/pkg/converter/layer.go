@@ -192,8 +192,8 @@ func (layer *buildLayer) Push(ctx context.Context) error {
 	}
 	bootstrapSize := humanize.Bytes(uint64(bootstrapInfo.Size()))
 	pushDone := logger.Log(ctx, "[BOOT] Push bootstrap", provider.LoggerFields{
-		"ChainID": layer.source.ChainID(),
-		"Size":    bootstrapSize,
+		"Digest": layer.source.Digest(),
+		"Size":   bootstrapSize,
 	})
 	layer.bootstrapDesc, layer.bootstrapDiffID, err = layer.pushBootstrap(ctx)
 	if err != nil {
@@ -248,7 +248,7 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 		return nil, nil
 	}
 
-	bootstrapName := strconv.Itoa(layer.index+1) + "-" + layer.source.ChainID().String()
+	bootstrapName := strconv.Itoa(layer.index+1) + "-" + layer.source.Digest().String()
 	layer.bootstrapPath = filepath.Join(layer.bootstrapsDir, bootstrapName)
 
 	// Pull source layer for building on next if no cache hit
@@ -282,7 +282,7 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 	if parentLayer != nil {
 		// Try to reuse the bootstrap of parent layer in cache record
 		if parentLayer.Cached() {
-			bootstrapName := strconv.Itoa(parentLayer.index+1) + "-" + parentLayer.source.ChainID().String()
+			bootstrapName := strconv.Itoa(parentLayer.index+1) + "-" + parentLayer.source.Digest().String()
 			parentLayer.bootstrapPath = filepath.Join(parentLayer.bootstrapsDir, bootstrapName+"-cached")
 			if err := parentLayer.cacheGlue.PullBootstrap(ctx, parentLayer.source.ChainID(), parentLayer.bootstrapPath); err != nil {
 				logrus.Warn("Pull bootstrap from cache: %s", err)
