@@ -48,7 +48,7 @@ pub enum RafsError {
 pub type RafsResult<T> = std::result::Result<T, RafsError>;
 
 /// A helper trait for RafsIoReader.
-pub trait RafsIoRead: Read + AsRawFd + Seek + Send{}
+pub trait RafsIoRead: Read + AsRawFd + Seek + Send {}
 
 /// A helper trait for RafsIoWriter.
 pub trait RafsIoWrite: Write + Seek {
