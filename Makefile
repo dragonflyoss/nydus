@@ -29,20 +29,48 @@ static-release:
 	cargo build --target x86_64-unknown-linux-musl --features=virtiofs --release --target-dir target-virtiofs
 
 ut:
+	RUST_BACKTRACE=1 cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15 --skip integration
 	RUST_BACKTRACE=1 cargo test --features=virtiofs --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
 
-test: build ut
-	# Run smoke test and unit tests
-	RUST_BACKTRACE=1 TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
-
-docker-smoke:
-	docker build -t nydus-rs-smoke misc/smoke
-	docker run --rm --privileged -v $(TEST_WORKDIR_PREFIX) -e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) -v ${current_dir}:/nydus-rs nydus-rs-smoke make test
+# Run smoke test including general integration tests and unit tests in container.
+# Nydus binaries should already be prepared.
+static-test:
+	# No clippy for virtiofs for now since it has much less updates.
+	cargo clippy --features=fusedev --tests --bins --workspace --target-dir target-fusedev  -- -Dclippy::all
+	# For virtiofs target UT
+	cargo test --target x86_64-unknown-linux-musl --features=virtiofs --release --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
+	# For fusedev target UT & integration
+	cargo test --target x86_64-unknown-linux-musl --features=fusedev --release --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
 
 docker-static:
-	# For static build with musl
 	docker build -t nydus-rs-static misc/musl-static
-	docker run --rm -v ${current_dir}:/nydus-rs -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo:/root/.cargo nydus-rs-static
+	docker run --rm \
+		-v ${current_dir}:/nydus-rs \
+		-v ~/.cargo/git:/root/.cargo/git \
+		-v ~/.cargo/registry:/root/.cargo/registry \
+		nydus-rs-static
+
+docker-nydus-smoke: docker-static
+	docker build -t nydus-smoke misc/nydus-smoke
+	docker run --rm --privileged \
+		-e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) \
+		-v $(TEST_WORKDIR_PREFIX) \
+		-v ${current_dir}:/nydus-rs \
+		-v ~/.cargo/git:/root/.cargo/git \
+		-v ~/.cargo/registry:/root/.cargo/registry \
+		nydus-smoke
+
+docker-nydusify-smoke: docker-static
+	docker run --rm -v ~/go:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs golang:1.14 make -C contrib/nydusify build-smoke
+	docker build -t nydusify-smoke misc/nydusify-smoke
+	docker run --rm -v $(current_dir):/nydus-rs --privileged nydusify-smoke TestSmoke
+
+docker-nydusify-image-test: docker-static
+	docker run --rm -v ~/go:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs golang:1.14 make -C contrib/nydusify build-smoke
+	docker build -t nydusify-smoke misc/nydusify-smoke
+	docker run --rm -v $(current_dir):/nydus-rs --privileged nydusify-smoke TestDockerHubImage
+
+docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 
 nydusify:
 	make -C contrib/nydusify

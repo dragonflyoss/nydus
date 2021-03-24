@@ -1,5 +1,8 @@
-FROM clux/muslrust:1.47.0
+FROM clux/muslrust:1.49.0
 
 WORKDIR /nydus-rs
 
-CMD rustup target add x86_64-unknown-linux-musl && make static-release
+CMD rustup component add clippy && \
+  rustup component add rustfmt && \
+  rustup target add x86_64-unknown-linux-musl && \
+  make static-release

@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  smoke:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -24,26 +24,7 @@ jobs:
           target-virtiofs
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-
-    - name: Build
-      run: |
-        rustup component add clippy rustfmt
-        make
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v2
-    - name: Cache cargo
-      uses: actions/cache@v2
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target-fusedev
-          target-virtiofs
-        key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-smoke
+          ${{ runner.os }}-cargo
     - name: Smoke test
       run: |
         make docker-smoke

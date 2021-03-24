@@ -77,6 +77,4 @@ Any bug report, feature requirement, and technique discussion and cooperation ar
 
     You can also search our talking group by number *34971767* and QR code
 
-<img src="./misc/Dingtalk_QR.jpg" width="250" height="300"/>
-
-
+<img src="./misc/dingtalk.jpg" width="250" height="300"/>
