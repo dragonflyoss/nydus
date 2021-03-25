@@ -6,6 +6,7 @@ package utils
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 type Job = func() error
@@ -83,6 +84,18 @@ func (pool *QueueWorkerPool) Waiter() []chan RJob {
 	return pool.rets
 }
 
+type Once int32
+
+func NewOnce() Once {
+	return Once(0)
+}
+
+func (o *Once) Do(callback func()) {
+	if atomic.CompareAndSwapInt32((*int32)(o), 0, 1) {
+		callback()
+	}
+}
+
 // WorkerPool creates a worker pool with fixed count, caller
 // puts some jobs to the pool and then wait all jobs finish
 type WorkerPool struct {
@@ -99,6 +112,8 @@ func NewWorkerPool(worker, total uint) *WorkerPool {
 		err:   make(chan error, 1),
 	}
 
+	once := NewOnce()
+
 	for count := uint(0); count < worker; count++ {
 		pool.wg.Add(1)
 		go func() {
@@ -108,9 +123,10 @@ func NewWorkerPool(worker, total uint) *WorkerPool {
 				if !ok {
 					break
 				}
-
 				if err := job(); err != nil {
-					pool.err <- err
+					once.Do(func() {
+						pool.err <- err
+					})
 					break
 				}
 			}
