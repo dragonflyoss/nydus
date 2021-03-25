@@ -23,6 +23,9 @@ pub use error::*;
 pub mod exec;
 pub use exec::*;
 
+pub mod types;
+pub use types::*;
+
 #[cfg(feature = "fusedev")]
 pub mod fuse;
 #[cfg(feature = "fusedev")]

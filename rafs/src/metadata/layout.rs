@@ -40,7 +40,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use serde::Serialize;
 
-use nydus_utils::{einval, enoent};
+use nydus_utils::{einval, enoent, ByteSize};
 
 use super::*;
 
@@ -951,7 +951,7 @@ impl XAttrs {
 
         for (key, value) in self.pairs.iter() {
             size += size_of::<u32>();
-            size += key.as_bytes().len() + 1 + value.len();
+            size += key.byte_size() + 1 + value.len();
         }
 
         size
@@ -989,7 +989,7 @@ impl RafsStore for XAttrs {
             size += size_data.len();
 
             for (key, value) in self.pairs.iter() {
-                let pair_size = key.as_bytes().len() + 1 + value.len();
+                let pair_size = key.byte_size() + 1 + value.len();
                 let pair_size_data = (pair_size as u32).to_le_bytes();
                 w.write_all(&pair_size_data)?;
                 size += pair_size_data.len();

@@ -16,11 +16,11 @@ use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::DirEntry;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use nydus_utils::ByteSize;
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
@@ -55,8 +55,14 @@ impl<'a> MetadataTreeBuilder<'a> {
         chunk_cache: &mut Option<&mut HashMap<RafsDigest, OndiskChunkInfo>>,
     ) -> Result<Vec<Tree>> {
         let inode = self.rs.get_inode(ino, true)?;
-        let child_index = inode.get_child_index()?;
+        let mut children = Vec::new();
+
+        if !inode.is_dir() {
+            return Ok(children);
+        }
+
         let child_count = inode.get_child_count();
+        event_tracer!("loading files from parent", +child_count);
 
         let parent_path = if let Some(parent) = parent {
             parent.join(inode.name())
@@ -64,26 +70,23 @@ impl<'a> MetadataTreeBuilder<'a> {
             PathBuf::from_str("/").unwrap()
         };
 
-        event_tracer!("loading files from parent", +child_count);
-
-        let mut children = Vec::new();
-        if inode.is_dir() {
-            for idx in child_index..(child_index + child_count) {
-                let child = self.rs.get_inode(idx as Inode, true)?;
-                let child_path = parent_path.join(child.name());
-                let child = self.parse_node(child, child_path.clone())?;
-                if let Some(chunk_cache) = chunk_cache {
-                    if child.is_reg() {
-                        for chunk in &child.chunks {
-                            chunk_cache.insert(chunk.block_id, *chunk);
-                        }
+        for idx in 0..child_count {
+            let child = inode.get_child_by_index(idx as Inode)?;
+            let child_ino = child.ino();
+            let child_path = parent_path.join(child.name());
+            let child = self.parse_node(child, child_path.clone())?;
+            if let Some(chunk_cache) = chunk_cache {
+                if child.is_reg() {
+                    for chunk in &child.chunks {
+                        chunk_cache.insert(chunk.block_id, *chunk);
                     }
                 }
-                let mut child = Tree::new(child);
-                child.children =
-                    self.load_children(idx as Inode, Some(&parent_path), chunk_cache)?;
-                children.push(child);
             }
+            let mut child = Tree::new(child);
+            if child.node.is_dir() {
+                child.children = self.load_children(child_ino, Some(&parent_path), chunk_cache)?;
+            }
+            children.push(child);
         }
 
         Ok(children)
@@ -283,7 +286,7 @@ impl StargzIndexTreeBuilder {
         let mut symlink_size = 0;
         let symlink = if entry.is_symlink() {
             flags |= RafsInodeFlags::SYMLINK;
-            symlink_size = symlink_link_path.as_os_str().as_bytes().len() as u16;
+            symlink_size = symlink_link_path.byte_size() as u16;
             file_size = symlink_size.into();
             Some(symlink_link_path.as_os_str().to_owned())
         } else {
@@ -319,7 +322,7 @@ impl StargzIndexTreeBuilder {
         }
 
         // Get file name size
-        let name_size = entry.name()?.as_os_str().as_bytes().len() as u16;
+        let name_size = entry.name()?.as_os_str().byte_size() as u16;
 
         let uid = if explicit_uidgid { entry.uid } else { 0 };
         let gid = if explicit_uidgid { entry.gid } else { 0 };

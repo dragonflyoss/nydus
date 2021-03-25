@@ -555,7 +555,7 @@ pub trait RafsSuperInodes {
         let mut hasher = RafsDigest::hasher(digester);
 
         if inode.is_symlink() {
-            hasher.digest_update(inode.get_symlink()?.as_os_str().as_bytes());
+            hasher.digest_update(inode.get_symlink()?.as_bytes());
         } else if inode.is_reg() || inode.is_dir() {
             for idx in 0..child_count {
                 if inode.is_dir() {

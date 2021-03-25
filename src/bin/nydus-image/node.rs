@@ -21,7 +21,7 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
-use nydus_utils::{div_round_up, try_round_up_4k};
+use nydus_utils::{div_round_up, try_round_up_4k, ByteSize};
 
 use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
@@ -407,7 +407,7 @@ impl Node {
     }
 
     fn build_inode(&mut self) -> Result<()> {
-        self.inode.set_name_size(self.name().as_bytes().len());
+        self.inode.set_name_size(self.name().byte_size());
 
         // NOTE: Always retrieve xattr before attr so that we can know
         // the size of xattr pairs.
@@ -422,7 +422,7 @@ impl Node {
             let target_path = fs::read_link(&self.path)?;
             self.symlink = Some(target_path.into());
             self.inode
-                .set_symlink_size(self.symlink.as_ref().unwrap().as_bytes().len());
+                .set_symlink_size(self.symlink.as_ref().unwrap().byte_size());
         }
 
         Ok(())
