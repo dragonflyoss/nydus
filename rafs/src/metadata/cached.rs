@@ -20,7 +20,7 @@ use crate::metadata::layout::*;
 use crate::metadata::*;
 use crate::RafsIoReader;
 
-use nydus_utils::{einval, enoent, enotdir};
+use nydus_utils::{einval, enoent, enotdir, ByteSize};
 
 pub struct CachedInodes {
     s_blob: Arc<OndiskBlobTable>,
@@ -429,6 +429,11 @@ impl RafsInode for CachedInode {
     }
 
     fn cast_ondisk(&self) -> Result<OndiskInode> {
+        let i_symlink_size = if self.is_symlink() {
+            self.get_symlink()?.byte_size() as u16
+        } else {
+            0
+        };
         Ok(OndiskInode {
             i_digest: self.i_digest,
             i_parent: self.i_parent,
@@ -444,7 +449,7 @@ impl RafsInode for CachedInode {
             i_child_index: self.i_child_idx,
             i_child_count: self.i_child_cnt,
             i_name_size: self.i_name.len() as u16,
-            i_symlink_size: self.get_symlink()?.len() as u16,
+            i_symlink_size,
             i_rdev: self.i_rdev,
             i_reserved: [0; 20],
         })
@@ -558,6 +563,7 @@ mod cached_tests {
     };
     use crate::metadata::{align_to_rafs, RafsInode, RafsStore, RafsSuperMeta};
     use crate::{RafsIoReader, RafsIoWriter};
+    use nydus_utils::ByteSize;
     use std::cmp;
     use std::ffi::{OsStr, OsString};
     use std::fs::OpenOptions;
@@ -582,7 +588,7 @@ mod cached_tests {
         let mut xattr = XAttrs::default();
         xattr.add(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
         xattr.add(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
-        ondisk_inode.i_name_size = file_name.as_bytes().len() as u16;
+        ondisk_inode.i_name_size = file_name.byte_size() as u16;
         ondisk_inode.i_child_count = 1;
         ondisk_inode.i_ino = 3;
         ondisk_inode.i_size = 8192;
@@ -643,8 +649,8 @@ mod cached_tests {
         let file_name = OsString::from("c_inode_2");
         let symlink_name = OsString::from("c_inode_1");
         let mut ondisk_inode = OndiskInode::new();
-        ondisk_inode.i_name_size = file_name.as_bytes().len() as u16;
-        ondisk_inode.i_symlink_size = symlink_name.as_bytes().len() as u16;
+        ondisk_inode.i_name_size = file_name.byte_size() as u16;
+        ondisk_inode.i_symlink_size = symlink_name.byte_size() as u16;
         ondisk_inode.i_mode = libc::S_IFLNK;
 
         let inode = OndiskInodeWrapper {
