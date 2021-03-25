@@ -10,8 +10,8 @@ import (
 	"errors"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 )
 
 type NewFSOpt func(d *filesystem) error

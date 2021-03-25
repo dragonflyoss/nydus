@@ -22,12 +22,12 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/auth"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/retry"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/snapshot"
 )
 
 type filesystem struct {
@@ -40,7 +40,7 @@ type filesystem struct {
 	nydusdImageBinaryPath string
 }
 
-func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (snapshot.FileSystem, error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (fs.FileSystem, error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)

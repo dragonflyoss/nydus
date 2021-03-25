@@ -18,12 +18,12 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/retry"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/snapshot"
 )
 
 type FSMode int
@@ -44,7 +44,7 @@ type filesystem struct {
 }
 
 // NewFileSystem initialize Filesystem instance
-func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_fs snapshot.FileSystem, retErr error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fs.FileSystem, retErr error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)
@@ -73,7 +73,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_fs snapshot.FileSyste
 
 		defer func() {
 			if retErr != nil {
-				fs.manager.DeleteDaemon(d);
+				fs.manager.DeleteDaemon(d)
 			}
 		}()
 		if err := fs.manager.StartDaemon(d); err != nil {

@@ -7,11 +7,11 @@
 package command
 
 import (
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"os"
 )
 
@@ -35,6 +35,7 @@ type Args struct {
 	NydusdBinaryPath     string
 	NydusImageBinaryPath string
 	SharedDaemon         bool
+	AsyncRemove          bool
 }
 
 type Flags struct {
@@ -103,6 +104,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether to use a single shared nydus daemon",
 			Destination: &args.SharedDaemon,
 		},
+		&cli.BoolFlag{
+			Name:        "async-remove",
+			Value:       true,
+			Usage:       "whether to cleanup snapshots asynchronously",
+			Destination: &args.AsyncRemove,
+		},
 	}
 }
 
@@ -134,5 +141,6 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.NydusdBinaryPath = args.NydusdBinaryPath
 	cfg.NydusImageBinaryPath = args.NydusImageBinaryPath
 	cfg.SharedDaemon = args.SharedDaemon
+	cfg.AsyncRemove = args.AsyncRemove
 	return nil
 }

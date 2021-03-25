@@ -8,9 +8,9 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/stargz"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/snapshot"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 )
 
 func init() {
@@ -33,48 +33,12 @@ func init() {
 				return nil, errors.New("failed to fillup nydus configuration with defaults")
 			}
 
-			verifier, err := signature.NewVerifier(cfg.PublicKeyFile, cfg.ValidateSignature)
+			rs, err := snapshot.NewSnapshotter(ic.Context, &cfg)
 			if err != nil {
-				return nil, errors.Wrap(err, "failed to initialize verifier")
+				return errors.Wrap(err, "failed to initialize snapshotter")
 			}
+			return rs
 
-			mgr, err := process.NewManager(process.Opt{
-				NydusdBinaryPath: cfg.NydusdBinaryPath,
-				RootDir:          cfg.RootDir,
-				SharedDaemon:     cfg.SharedDaemon,
-			})
-			if err != nil {
-				return nil, errors.Wrap(err, "failed to new process manager")
-			}
-
-			fs, err := nydus.NewFileSystem(
-				ic.Context,
-				nydus.WithProcessManager(mgr),
-				nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
-				nydus.WithMeta(cfg.RootDir),
-				nydus.WithDaemonConfig(cfg.DaemonCfg),
-				nydus.WithSharedDaemon(cfg.SharedDaemon),
-				nydus.WithVerifier(verifier),
-			)
-			if err != nil {
-				return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
-			}
-
-			stargzFs, err := stargz.NewFileSystem(
-				ic.Context,
-				stargz.WithProcessManager(mgr),
-			)
-			if err != nil {
-				return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
-			}
-
-			return snapshot.NewSnapshotter(
-				ic.Context,
-				cfg.RootDir,
-				cfg.NydusdBinaryPath,
-				fs,
-				stargzFs,
-				snapshot.AsynchronousRemove)
 		},
 	})
 }

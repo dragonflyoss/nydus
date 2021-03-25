@@ -23,34 +23,18 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	fspkg "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/stargz"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/snapshot"
 )
 
 var _ snapshots.Snapshotter = &snapshotter{}
-
-type FileSystem interface {
-	Mount(ctx context.Context, snapshotID string, labels map[string]string) error
-	WaitUntilReady(ctx context.Context, snapshotID string) error
-	Umount(ctx context.Context, mountPoint string) error
-	Cleanup(ctx context.Context) error
-	Support(ctx context.Context, labels map[string]string) bool
-	PrepareLayer(ctx context.Context, snapshot storage.Snapshot, labels map[string]string) error
-	MountPoint(snapshotID string) (string, error)
-}
-
-type SnapshotterConfig struct {
-	asyncRemove bool
-}
-
-type Opt func(config *SnapshotterConfig) error
-
-func AsynchronousRemove(config *SnapshotterConfig) error {
-	config.asyncRemove = true
-	return nil
-}
 
 type snapshotter struct {
 	context     context.Context
@@ -58,8 +42,8 @@ type snapshotter struct {
 	nydusdPath  string
 	ms          *storage.MetaStore
 	asyncRemove bool
-	fs          FileSystem
-	stargzFs    FileSystem
+	fs          fspkg.FileSystem
+	stargzFs    fspkg.FileSystem
 	manager     *process.Manager
 	daemon      *daemon.Daemon
 }
@@ -79,41 +63,76 @@ func (o *snapshotter) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-func NewSnapshotter(ctx context.Context, root, nydusdPath string, targetFs, stargzFs FileSystem, opts ...Opt) (snapshots.Snapshotter, error) {
-	var config SnapshotterConfig
-	for _, opt := range opts {
-		if err := opt(&config); err != nil {
-			return nil, err
-		}
+func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshotter, error) {
+	verifier, err := signature.NewVerifier(cfg.PublicKeyFile, cfg.ValidateSignature)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize verifier")
 	}
 
-	if err := os.MkdirAll(root, 0700); err != nil {
+	mgr, err := process.NewManager(process.Opt{
+		NydusdBinaryPath: cfg.NydusdBinaryPath,
+		RootDir:          cfg.RootDir,
+		SharedDaemon:     cfg.SharedDaemon,
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to new process manager")
+	}
+
+	nydusFs, err := nydus.NewFileSystem(
+		ctx,
+		nydus.WithProcessManager(mgr),
+		nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
+		nydus.WithMeta(cfg.RootDir),
+		nydus.WithDaemonConfig(cfg.DaemonCfg),
+		nydus.WithVPCRegistry(cfg.ConvertVpcRegistry),
+		nydus.WithVerifier(verifier),
+		nydus.WithSharedDaemon(cfg.SharedDaemon),
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
+	}
+
+	stargzFs, err := stargz.NewFileSystem(
+		ctx,
+		stargz.WithProcessManager(mgr),
+		stargz.WithMeta(cfg.RootDir),
+		stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
+		stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
+		stargz.WithDaemonConfig(cfg.DaemonCfg),
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+	}
+
+	if err := os.MkdirAll(cfg.RootDir, 0700); err != nil {
 		return nil, err
 	}
-	supportsDType, err := getSupportsDType(root)
+
+	supportsDType, err := getSupportsDType(cfg.RootDir)
 	if err != nil {
 		return nil, err
 	}
 	if !supportsDType {
-		return nil, fmt.Errorf("%s does not support d_type. If the backing filesystem is xfs, please reformat with ftype=1 to enable d_type support", root)
+		return nil, fmt.Errorf("%s does not support d_type. If the backing filesystem is xfs, please reformat with ftype=1 to enable d_type support", cfg.RootDir)
 	}
-	ms, err := storage.NewMetaStore(filepath.Join(root, "metadata.db"))
+
+	ms, err := storage.NewMetaStore(filepath.Join(cfg.RootDir, "metadata.db"))
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Mkdir(filepath.Join(root, "snapshots"), 0700); err != nil && !os.IsExist(err) {
+	if err := os.Mkdir(filepath.Join(cfg.RootDir, "snapshots"), 0700); err != nil && !os.IsExist(err) {
 		return nil, err
 	}
-	rs := &snapshotter{
+
+	return &snapshotter{
 		context:     ctx,
-		root:        root,
-		nydusdPath:  nydusdPath,
+		root:        cfg.RootDir,
+		nydusdPath:  cfg.NydusdBinaryPath,
 		ms:          ms,
-		asyncRemove: config.asyncRemove,
-		fs:          targetFs,
+		asyncRemove: cfg.AsyncRemove,
+		fs:          nydusFs,
 		stargzFs:    stargzFs,
-	}
-	return rs, nil
+	}, nil
 }
 
 func (o *snapshotter) Stat(ctx context.Context, key string) (snapshots.Info, error) {

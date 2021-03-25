@@ -7,8 +7,8 @@
 package config
 
 import (
-	"github.com/pkg/errors"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
+	"github.com/pkg/errors"
 )
 
 const defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"
@@ -25,6 +25,7 @@ type Config struct {
 	NydusdBinaryPath     string             `toml:"nydusd_binary_path"`
 	NydusImageBinaryPath string             `toml:"-"`
 	SharedDaemon         bool               `toml:"shared_daemon"`
+	AsyncRemove          bool               `toml:"async_remove"`
 }
 
 func (c *Config) FillupWithDefaults() error {
@@ -40,7 +41,7 @@ func (c *Config) FillupWithDefaults() error {
 	if err := nydus.LoadConfig(c.DaemonCfgPath, &daemonCfg); err != nil {
 		return errors.Wrapf(err, "failed to load config file %q", c.DaemonCfgPath)
 	}
-	c.DaemonCfg = daemonCfg;
+	c.DaemonCfg = daemonCfg
 
 	return nil
 }
