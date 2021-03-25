@@ -285,7 +285,7 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 			bootstrapName := strconv.Itoa(parentLayer.index+1) + "-" + parentLayer.source.Digest().String()
 			parentLayer.bootstrapPath = filepath.Join(parentLayer.bootstrapsDir, bootstrapName+"-cached")
 			if err := parentLayer.cacheGlue.PullBootstrap(ctx, parentLayer.source.ChainID(), parentLayer.bootstrapPath); err != nil {
-				logrus.Warn("Pull bootstrap from cache: %s", err)
+				logrus.Warnf("Pull bootstrap from cache: %s", err)
 				// Error occurs, the cache is invalid
 				return buildDone(errInvalidCache)
 			}

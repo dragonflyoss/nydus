@@ -5,6 +5,7 @@
 package cache
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
@@ -37,9 +39,9 @@ func makeRecord(id int64, hashBlob bool) *CacheRecord {
 	}
 }
 
-func makeBootstrapLayer(id int64) ocispec.Descriptor {
+func makeBootstrapLayer(id int64, hasBlob bool) ocispec.Descriptor {
 	idStr := strconv.FormatInt(id, 10)
-	return ocispec.Descriptor{
+	desc := ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageLayerGzip,
 		Digest:    digest.FromString("bootstrap-" + idStr),
 		Size:      id,
@@ -49,6 +51,11 @@ func makeBootstrapLayer(id int64) ocispec.Descriptor {
 			utils.LayerAnnotationUncompressed:       digest.FromString("bootstrap-uncompressed-" + idStr).String(),
 		},
 	}
+	if hasBlob {
+		desc.Annotations[utils.LayerAnnotationNydusBlobDigest] = digest.FromString("blob-" + idStr).String()
+		desc.Annotations[utils.LayerAnnotationNydusBlobSize] = fmt.Sprintf("%d", id)
+	}
+	return desc
 }
 
 func makeBlobLayer(id int64) ocispec.Descriptor {
@@ -64,10 +71,11 @@ func makeBlobLayer(id int64) ocispec.Descriptor {
 	}
 }
 
-func TestCache(t *testing.T) {
+func testWithBackend(t *testing.T, _backend backend.Backend) {
 	cache, err := New(nil, Opt{
 		MaxRecords:     3,
 		DockerV2Format: false,
+		Backend:        _backend,
 	})
 	assert.Nil(t, err)
 
@@ -80,13 +88,21 @@ func TestCache(t *testing.T) {
 	cache.Record(exported)
 	layers := cache.exportRecordsToLayers()
 
-	assert.Equal(t, layers, []ocispec.Descriptor{
-		makeBootstrapLayer(1),
-		makeBlobLayer(1),
-		makeBootstrapLayer(2),
-		makeBlobLayer(2),
-		makeBootstrapLayer(3),
-	})
+	if _backend.Type() == backend.RegistryBackend {
+		assert.Equal(t, layers, []ocispec.Descriptor{
+			makeBootstrapLayer(1, false),
+			makeBlobLayer(1),
+			makeBootstrapLayer(2, false),
+			makeBlobLayer(2),
+			makeBootstrapLayer(3, false),
+		})
+	} else {
+		assert.Equal(t, layers, []ocispec.Descriptor{
+			makeBootstrapLayer(1, true),
+			makeBootstrapLayer(2, true),
+			makeBootstrapLayer(3, false),
+		})
+	}
 
 	cache.importLayersToRecords(layers)
 	cache.Record([]*CacheRecord{
@@ -95,12 +111,25 @@ func TestCache(t *testing.T) {
 	})
 	layers = cache.exportRecordsToLayers()
 
-	assert.Equal(t, layers, []ocispec.Descriptor{
-		makeBootstrapLayer(4),
-		makeBlobLayer(4),
-		makeBootstrapLayer(5),
-		makeBlobLayer(5),
-		makeBootstrapLayer(1),
-		makeBlobLayer(1),
-	})
+	if _backend.Type() == backend.RegistryBackend {
+		assert.Equal(t, layers, []ocispec.Descriptor{
+			makeBootstrapLayer(4, false),
+			makeBlobLayer(4),
+			makeBootstrapLayer(5, false),
+			makeBlobLayer(5),
+			makeBootstrapLayer(1, false),
+			makeBlobLayer(1),
+		})
+	} else {
+		assert.Equal(t, layers, []ocispec.Descriptor{
+			makeBootstrapLayer(4, true),
+			makeBootstrapLayer(5, true),
+			makeBootstrapLayer(1, true),
+		})
+	}
+}
+
+func TestCache(t *testing.T) {
+	testWithBackend(t, &backend.Registry{})
+	testWithBackend(t, &backend.OSSBackend{})
 }

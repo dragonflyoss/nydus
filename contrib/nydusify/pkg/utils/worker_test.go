@@ -81,7 +81,7 @@ func TestWorkerPool1(t *testing.T) {
 		})
 	}
 
-	assert.Nil(t, pool.Wait())
+	assert.Nil(t, <-pool.Waiter())
 }
 
 func TestWorkerPool2(t *testing.T) {
@@ -99,20 +99,20 @@ func TestWorkerPool2(t *testing.T) {
 		return nil
 	})
 
-	assert.NotNil(t, pool.Wait())
+	assert.NotNil(t, <-pool.Waiter())
 }
 
 func TestWorkerPool3(t *testing.T) {
-	pool := NewWorkerPool(20, 50)
+	pool := NewWorkerPool(20, 5000)
 
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 5000; i++ {
 		pool.Put(func() error {
-			time.Sleep(time.Millisecond * 10)
+			time.Sleep(time.Millisecond * 1)
 			return fmt.Errorf("Job error")
 		})
 	}
 
-	assert.NotNil(t, pool.Wait())
+	assert.NotNil(t, <-pool.Waiter())
 }
 
 func TestWorkerPool4(t *testing.T) {
@@ -125,7 +125,7 @@ func TestWorkerPool4(t *testing.T) {
 		})
 	}
 
-	assert.Nil(t, pool.Wait())
+	assert.Nil(t, <-pool.Waiter())
 }
 
 func TestWorkerPool5(t *testing.T) {
@@ -143,5 +143,5 @@ func TestWorkerPool5(t *testing.T) {
 		return nil
 	})
 
-	assert.NotNil(t, pool.Wait())
+	assert.NotNil(t, <-pool.Waiter())
 }
