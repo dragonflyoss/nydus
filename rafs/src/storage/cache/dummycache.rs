@@ -46,7 +46,7 @@ impl RafsCache for DummyCache {
         Ok(())
     }
 
-    fn evict(&self, _blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
+    fn evict(&self, _cki: &dyn RafsChunkInfo) -> Result<()> {
         Ok(())
     }
 

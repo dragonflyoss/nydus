@@ -570,14 +570,9 @@ impl RafsCache for BlobCache {
         Ok(())
     }
 
-    fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
+    fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()> {
         // Doesn't expect poisoned lock here.
-        self.cache
-            .write()
-            .unwrap()
-            .chunk_map
-            .remove(&blk.block_id());
-
+        self.cache.write().unwrap().chunk_map.remove(cki.block_id());
         Ok(())
     }
 

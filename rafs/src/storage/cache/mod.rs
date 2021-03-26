@@ -78,7 +78,7 @@ pub trait RafsCache {
     fn init(&self, sb_info: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()>;
 
     /// Evict block data
-    fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()>;
+    fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()>;
 
     /// Flush cache
     fn flush(&self) -> Result<()>;
