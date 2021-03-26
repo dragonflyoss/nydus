@@ -18,19 +18,12 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
+	fspkg "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/retry"
-)
-
-type FSMode int
-
-const (
-	SingleInstance FSMode = iota
-	MultiInstance
 )
 
 type filesystem struct {
@@ -40,11 +33,11 @@ type filesystem struct {
 	daemonCfg        DaemonConfig
 	vpcRegistry      bool
 	nydusdBinaryPath string
-	mode             FSMode
+	mode             fspkg.FSMode
 }
 
 // NewFileSystem initialize Filesystem instance
-func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fs.FileSystem, retErr error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, retErr error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)
@@ -58,7 +51,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fs.FileSystem, retEr
 		return nil, errors.Wrap(err, "failed to reconnect daemons")
 	}
 
-	if fs.mode == SingleInstance {
+	if fs.mode == fspkg.SingleInstance {
 		// Check if daemon is already running
 		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
 		if err == nil && d != nil {
@@ -83,6 +76,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fs.FileSystem, retEr
 			return nil, errors.Wrap(err, "failed to wait shared daemon")
 		}
 	}
+
 	return &fs, nil
 }
 
@@ -192,7 +186,7 @@ func (fs *filesystem) Cleanup(ctx context.Context) error {
 
 func (fs *filesystem) MountPoint(snapshotID string) (string, error) {
 	if d, err := fs.manager.GetBySnapshotID(snapshotID); err == nil {
-		if fs.mode == SingleInstance {
+		if fs.mode == fspkg.SingleInstance {
 			return d.SharedMountPoint(), nil
 		}
 		return d.MountPoint(), nil
@@ -205,7 +199,7 @@ func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if fs.mode == SingleInstance {
+	if fs.mode == fspkg.SingleInstance {
 		err = d.SharedMount()
 		if err != nil {
 			return errors.Wrapf(err, "failed to shared mount")
@@ -216,7 +210,7 @@ func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 }
 
 func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
-	if fs.mode == SingleInstance {
+	if fs.mode == fspkg.SingleInstance {
 		return fs.createSharedDaemon(snapshotID, imageID)
 	}
 	return fs.createNewDaemon(snapshotID, imageID)

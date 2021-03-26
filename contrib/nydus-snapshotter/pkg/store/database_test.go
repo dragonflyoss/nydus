@@ -2,8 +2,8 @@ package store
 
 import (
 	"context"
-	"github.com/stretchr/testify/require"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"

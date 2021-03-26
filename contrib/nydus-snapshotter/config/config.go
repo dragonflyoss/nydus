@@ -11,8 +11,10 @@ import (
 	"github.com/pkg/errors"
 )
 
-const defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"
-const defaultNydusdBinaryPath string = "/usr/local/bin/nydusd"
+const (
+	defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"
+	defaultNydusdBinaryPath      string = "/usr/local/bin/nydusd"
+)
 
 type Config struct {
 	Address              string             `toml:"-"`
@@ -26,6 +28,7 @@ type Config struct {
 	NydusImageBinaryPath string             `toml:"-"`
 	SharedDaemon         bool               `toml:"shared_daemon"`
 	AsyncRemove          bool               `toml:"async_remove"`
+	EnableMetrics        bool               `toml:"enable_metrics"`
 }
 
 func (c *Config) FillupWithDefaults() error {

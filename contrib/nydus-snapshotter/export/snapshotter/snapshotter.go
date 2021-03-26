@@ -6,10 +6,6 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/stargz"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/snapshot"
 )
 
@@ -33,11 +29,11 @@ func init() {
 				return nil, errors.New("failed to fillup nydus configuration with defaults")
 			}
 
-			rs, err := snapshot.NewSnapshotter(ic.Context, &cfg)
+			rs, err := snapshot.NewSnapshotter(ic.Context, cfg)
 			if err != nil {
-				return errors.Wrap(err, "failed to initialize snapshotter")
+				return nil, errors.Wrap(err, "failed to initialize snapshotter")
 			}
-			return rs
+			return rs, nil
 
 		},
 	})

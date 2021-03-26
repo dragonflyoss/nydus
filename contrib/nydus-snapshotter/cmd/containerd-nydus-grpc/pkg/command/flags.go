@@ -36,6 +36,7 @@ type Args struct {
 	NydusImageBinaryPath string
 	SharedDaemon         bool
 	AsyncRemove          bool
+	EnableMetrics        bool
 }
 
 type Flags struct {
@@ -110,6 +111,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether to cleanup snapshots asynchronously",
 			Destination: &args.AsyncRemove,
 		},
+		&cli.BoolFlag{
+			Name:        "enable-metrics",
+			Value:       false,
+			Usage:       "whether to collect metrics",
+			Destination: &args.EnableMetrics,
+		},
 	}
 }
 
@@ -142,5 +149,6 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.NydusImageBinaryPath = args.NydusImageBinaryPath
 	cfg.SharedDaemon = args.SharedDaemon
 	cfg.AsyncRemove = args.AsyncRemove
+	cfg.EnableMetrics = args.EnableMetrics
 	return nil
 }

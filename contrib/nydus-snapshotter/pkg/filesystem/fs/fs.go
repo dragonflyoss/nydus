@@ -11,6 +11,13 @@ import (
 	"github.com/containerd/containerd/snapshots/storage"
 )
 
+type FSMode int
+
+const (
+	SingleInstance FSMode = iota
+	MultiInstance
+)
+
 type FileSystem interface {
 	Mount(ctx context.Context, snapshotID string, labels map[string]string) error
 	WaitUntilReady(ctx context.Context, snapshotID string) error

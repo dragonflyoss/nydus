@@ -21,7 +21,10 @@ import (
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/containerd/continuity/fs"
+	metrics "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric"
+	metricExp "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric/exporter"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
@@ -69,7 +72,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to initialize verifier")
 	}
 
-	mgr, err := process.NewManager(process.Opt{
+	pm, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: cfg.NydusdBinaryPath,
 		RootDir:          cfg.RootDir,
 		SharedDaemon:     cfg.SharedDaemon,
@@ -80,7 +83,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 
 	nydusFs, err := nydus.NewFileSystem(
 		ctx,
-		nydus.WithProcessManager(mgr),
+		nydus.WithProcessManager(pm),
 		nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 		nydus.WithMeta(cfg.RootDir),
 		nydus.WithDaemonConfig(cfg.DaemonCfg),
@@ -94,7 +97,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 
 	stargzFs, err := stargz.NewFileSystem(
 		ctx,
-		stargz.WithProcessManager(mgr),
+		stargz.WithProcessManager(pm),
 		stargz.WithMeta(cfg.RootDir),
 		stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 		stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
@@ -102,6 +105,40 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+	}
+
+	if cfg.EnableMetrics {
+		s, err := metrics.NewServer(
+			ctx,
+			metrics.WithSockPath(cfg.RootDir),
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to new metric server")
+		}
+		log.G(ctx).Infof("Starting metrics server on %s", s.SockPath)
+
+		exp, err := metricExp.NewExporter(
+			metricExp.WithOutputFile(cfg.RootDir),
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to new metric exporter")
+		}
+
+		// Process manager starts to collect metrics from daemons periodically.
+		errs, ctx := errgroup.WithContext(ctx)
+		errs.Go(func() error {
+			return pm.CollectDaemonMetric(ctx, exp)
+		})
+		if err := errs.Wait(); err != nil {
+			return nil, errors.Wrap(err, "failed to start metrics collecting routine")
+		}
+		// Start metrics http server.
+		errs.Go(func() error {
+			return s.Serve(ctx, ctx.Done())
+		})
+		if err := errs.Wait(); err != nil {
+			return nil, errors.Wrap(err, "failed to start metrics http server")
+		}
 	}
 
 	if err := os.MkdirAll(cfg.RootDir, 0700); err != nil {
