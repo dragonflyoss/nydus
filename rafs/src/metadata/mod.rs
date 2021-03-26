@@ -765,8 +765,7 @@ pub trait RafsChunkInfo: Sync + Send {
     fn file_offset(&self) -> u64;
     fn is_compressed(&self) -> bool;
     fn is_hole(&self) -> bool;
-
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo>;
+    fn flags(&self) -> RafsChunkFlags;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

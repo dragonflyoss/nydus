@@ -525,26 +525,13 @@ impl RafsChunkInfo for CachedChunkInfo {
         self.c_flags.contains(RafsChunkFlags::HOLECHUNK)
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
-        Ok(OndiskChunkInfo {
-            block_id: *self.block_id(),
-            blob_index: self.blob_index(),
-            flags: self.c_flags,
-            compress_size: self.compress_size(),
-            decompress_size: self.decompress_size(),
-            compress_offset: self.compress_offset(),
-            decompress_offset: self.decompress_offset(),
-            file_offset: self.file_offset(),
-            reserved: 0u64,
-        })
-    }
-
     impl_getter!(blob_index, c_blob_index, u32);
     impl_getter!(compress_offset, c_compress_offset, u64);
     impl_getter!(compress_size, c_compr_size, u32);
     impl_getter!(decompress_offset, c_decompress_offset, u64);
     impl_getter!(decompress_size, c_decompress_size, u32);
     impl_getter!(file_offset, c_file_offset, u64);
+    impl_getter!(flags, c_flags, RafsChunkFlags);
 }
 
 impl From<&OndiskChunkInfo> for CachedChunkInfo {

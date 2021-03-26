@@ -778,11 +778,6 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
         &self.digest
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
-        let state = self.state();
-        Ok(*self.chunk(state.deref()))
-    }
-
     impl_chunkinfo_getter!(blob_index, u32);
     impl_chunkinfo_getter!(compress_offset, u64);
     impl_chunkinfo_getter!(compress_size, u32);
@@ -791,4 +786,5 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
     impl_chunkinfo_getter!(file_offset, u64);
     impl_chunkinfo_getter!(is_compressed, bool);
     impl_chunkinfo_getter!(is_hole, bool);
+    impl_chunkinfo_getter!(flags, RafsChunkFlags);
 }

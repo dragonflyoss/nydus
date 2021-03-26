@@ -203,8 +203,6 @@ impl BlobCache {
         let chunk = cache_entry.chunk.clone();
         let mut reuse = false;
 
-        trace!("reading blobcache entry {:?}", chunk.cast_ondisk());
-
         // Hit cache if cache ready
         if !self.is_compressed && !self.need_validate() && cache_entry.is_ready() {
             trace!(

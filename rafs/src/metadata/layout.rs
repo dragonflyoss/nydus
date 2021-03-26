@@ -876,16 +876,13 @@ impl RafsChunkInfo for OndiskChunkInfo {
         self.flags.contains(RafsChunkFlags::HOLECHUNK)
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
-        Ok(*self)
-    }
-
     impl_getter!(blob_index, blob_index, u32);
     impl_getter!(compress_offset, compress_offset, u64);
     impl_getter!(compress_size, compress_size, u32);
     impl_getter!(decompress_offset, decompress_offset, u64);
     impl_getter!(decompress_size, decompress_size, u32);
     impl_getter!(file_offset, file_offset, u64);
+    impl_getter!(flags, flags, RafsChunkFlags);
 }
 
 impl_bootstrap_converter!(OndiskChunkInfo);
