@@ -42,6 +42,8 @@ pub mod direct;
 pub mod layout;
 pub mod noop;
 
+pub use storage::device::{RafsChunkFlags, RafsChunkInfo};
+
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
@@ -748,24 +750,6 @@ pub(crate) fn calculate_bio_chunk_index(
     };
 
     (index_start, index_end)
-}
-
-/// Trait to access Rafs Data Chunk Information.
-pub trait RafsChunkInfo: Sync + Send {
-    fn validate(&self, sb: &RafsSuperMeta) -> Result<()>;
-
-    fn block_id(&self) -> &RafsDigest;
-    fn blob_index(&self) -> u32;
-
-    fn compress_offset(&self) -> u64;
-    fn compress_size(&self) -> u32;
-    fn decompress_offset(&self) -> u64;
-    fn decompress_size(&self) -> u32;
-
-    fn file_offset(&self) -> u64;
-    fn is_compressed(&self) -> bool;
-    fn is_hole(&self) -> bool;
-    fn flags(&self) -> RafsChunkFlags;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

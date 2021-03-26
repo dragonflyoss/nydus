@@ -246,7 +246,7 @@ impl Rafs {
         }
 
         self.device
-            .init(&self.sb.meta, &self.sb.inodes.get_blobs())
+            .init(&self.sb.inodes.get_blobs())
             .map_err(RafsError::CreateDevice)?;
 
         // Device should be ready before any prefetch.

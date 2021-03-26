@@ -825,14 +825,6 @@ pub struct OndiskChunkInfo {
     pub reserved: u64,
 }
 
-bitflags! {
-    pub struct RafsChunkFlags: u32 {
-        /// chunk is compressed
-        const COMPRESSED = 0x0000_0001;
-        const HOLECHUNK = 0x0000_0002;
-    }
-}
-
 impl Default for RafsChunkFlags {
     fn default() -> Self {
         RafsChunkFlags::empty()
@@ -857,10 +849,6 @@ impl RafsStore for OndiskChunkInfo {
 }
 
 impl RafsChunkInfo for OndiskChunkInfo {
-    fn validate(&self, _sb: &RafsSuperMeta) -> Result<()> {
-        Ok(())
-    }
-
     #[inline]
     fn block_id(&self) -> &RafsDigest {
         &self.block_id

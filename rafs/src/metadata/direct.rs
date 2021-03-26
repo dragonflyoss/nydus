@@ -594,7 +594,6 @@ impl RafsInode for OndiskInodeWrapper {
 
         let chunk = state.cast_to_ref::<OndiskChunkInfo>(state.base, offset)?;
         let wrapper = OndiskChunkInfoWrapper::new(chunk, self.mapping.clone(), offset);
-        wrapper.validate(&state.meta)?;
 
         Ok(Arc::new(wrapper))
     }
@@ -764,15 +763,6 @@ impl OndiskChunkInfoWrapper {
 }
 
 impl RafsChunkInfo for OndiskChunkInfoWrapper {
-    #[inline]
-    fn validate(&self, sb: &RafsSuperMeta) -> Result<()> {
-        let state = self.state();
-
-        state.validate_range(self.offset, size_of::<OndiskChunkInfo>())?;
-
-        self.chunk(state.deref()).validate(sb)
-    }
-
     #[inline]
     fn block_id(&self) -> &RafsDigest {
         &self.digest

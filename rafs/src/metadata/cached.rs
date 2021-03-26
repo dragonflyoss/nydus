@@ -486,11 +486,10 @@ impl CachedChunkInfo {
         }
     }
 
-    pub fn load(&mut self, sb: &RafsSuperMeta, r: &mut RafsIoReader) -> Result<()> {
+    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         let mut chunk = OndiskChunkInfo::new();
 
         r.read_exact(chunk.as_mut())?;
-        chunk.validate(sb)?;
         self.copy_from_ondisk(&chunk);
 
         Ok(())
@@ -509,10 +508,6 @@ impl CachedChunkInfo {
 }
 
 impl RafsChunkInfo for CachedChunkInfo {
-    fn validate(&self, _sb: &RafsSuperMeta) -> Result<()> {
-        Ok(())
-    }
-
     fn block_id(&self) -> &RafsDigest {
         &self.c_block_id
     }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use vm_memory::VolatileSlice;
 
 use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
+use crate::metadata::RafsChunkInfo;
 use crate::storage::backend::BlobBackend;
 use crate::storage::compress;
 use crate::storage::device::RafsBio;
@@ -72,7 +72,7 @@ pub struct PrefetchWorker {
 
 pub trait RafsCache {
     /// Do init after super block loaded
-    fn init(&self, sb_info: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()>;
+    fn init(&self, blobs: &[OndiskBlobTableEntry]) -> Result<()>;
     /// Whether has block data
     fn has(&self, cki: &dyn RafsChunkInfo) -> bool;
     /// Evict block data

@@ -8,11 +8,10 @@ use std::sync::Arc;
 use vm_memory::VolatileSlice;
 
 use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::backend::BlobBackend;
 use crate::storage::cache::*;
 use crate::storage::compress;
-use crate::storage::device::RafsBio;
+use crate::storage::device::{RafsBio, RafsChunkInfo};
 use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv};
 use crate::{RafsError, RafsResult};
@@ -35,7 +34,7 @@ impl RafsCache for DummyCache {
         true
     }
 
-    fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
+    fn init(&self, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
         for b in blobs {
             let _ = self.backend.prefetch_blob(
                 b.blob_id.as_str(),

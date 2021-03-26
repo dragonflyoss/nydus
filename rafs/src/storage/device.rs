@@ -13,12 +13,11 @@ use fuse_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
 use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::cache::RafsCache;
 use crate::storage::{compress, factory};
 use crate::RafsResult;
 
-use nydus_utils::digest;
+use nydus_utils::digest::{self, RafsDigest};
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
@@ -26,6 +25,34 @@ static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, un
 #[derive(Clone)]
 pub struct RafsDevice {
     rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
+}
+
+bitflags! {
+    pub struct RafsChunkFlags: u32 {
+        /// chunk is compressed
+        const COMPRESSED = 0x0000_0001;
+        const HOLECHUNK = 0x0000_0002;
+    }
+}
+
+/// Trait to access Rafs Data Chunk Information.
+/// Rafs store file contents into blob, which is isolated from the metadata.
+/// ChunkInfo describes how a chunk is located and arranged within blob.
+/// It is abstracted because Rafs have several ways to load metadata from bootstrap
+/// TODO: Better we can put RafsChunkInfo back to rafs, but in order to isolate
+/// two components and have a better performance, use RafsChunkInfo as a parameter
+/// and keep it in storage trait. Otherwise we have to copy chunk digest everywhere.
+pub trait RafsChunkInfo: Sync + Send {
+    fn block_id(&self) -> &RafsDigest;
+    fn blob_index(&self) -> u32;
+    fn compress_offset(&self) -> u64;
+    fn compress_size(&self) -> u32;
+    fn decompress_offset(&self) -> u64;
+    fn decompress_size(&self) -> u32;
+    fn file_offset(&self) -> u64;
+    fn is_compressed(&self) -> bool;
+    fn is_hole(&self) -> bool;
+    fn flags(&self) -> RafsChunkFlags;
 }
 
 impl RafsDevice {
@@ -55,8 +82,8 @@ impl RafsDevice {
         Ok(())
     }
 
-    pub fn init(&self, sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> io::Result<()> {
-        self.rw_layer.load().init(sb_meta, blobs)
+    pub fn init(&self, blobs: &[OndiskBlobTableEntry]) -> io::Result<()> {
+        self.rw_layer.load().init(blobs)
     }
 
     pub fn close(&self) -> io::Result<()> {
