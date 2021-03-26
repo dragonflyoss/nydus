@@ -545,19 +545,6 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
 }
 
 impl RafsCache for BlobCache {
-    fn backend(&self) -> &(dyn BlobBackend + Sync + Send) {
-        self.backend.as_ref()
-    }
-
-    fn has(&self, blk: Arc<dyn RafsChunkInfo>) -> bool {
-        // Doesn't expected poisoned lock here.
-        self.cache
-            .read()
-            .unwrap()
-            .chunk_map
-            .contains_key(blk.block_id())
-    }
-
     fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
         for b in blobs {
             let _ = self.backend.prefetch_blob(
@@ -568,6 +555,19 @@ impl RafsCache for BlobCache {
         }
         // TODO start blob cache level prefetch
         Ok(())
+    }
+
+    fn backend(&self) -> &(dyn BlobBackend + Sync + Send) {
+        self.backend.as_ref()
+    }
+
+    fn has(&self, cki: &dyn RafsChunkInfo) -> bool {
+        // Doesn't expected poisoned lock here.
+        self.cache
+            .read()
+            .unwrap()
+            .chunk_map
+            .contains_key(cki.block_id())
     }
 
     fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()> {

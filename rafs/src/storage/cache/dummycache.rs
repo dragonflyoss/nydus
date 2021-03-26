@@ -31,7 +31,7 @@ impl RafsCache for DummyCache {
         self.backend.as_ref()
     }
 
-    fn has(&self, _blk: Arc<dyn RafsChunkInfo>) -> bool {
+    fn has(&self, _cki: &dyn RafsChunkInfo) -> bool {
         true
     }
 

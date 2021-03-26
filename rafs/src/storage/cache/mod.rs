@@ -71,12 +71,10 @@ pub struct PrefetchWorker {
 }
 
 pub trait RafsCache {
-    /// Whether has block data
-    fn has(&self, blk: Arc<dyn RafsChunkInfo>) -> bool;
-
     /// Do init after super block loaded
     fn init(&self, sb_info: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()>;
-
+    /// Whether has block data
+    fn has(&self, cki: &dyn RafsChunkInfo) -> bool;
     /// Evict block data
     fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()>;
 
