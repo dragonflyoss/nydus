@@ -40,7 +40,10 @@ use std::os::unix::ffi::OsStrExt;
 
 use serde::Serialize;
 
-use nydus_utils::{einval, enoent, ByteSize};
+use nydus_utils::{
+    digest::{self, RafsDigest},
+    einval, enoent, ByteSize,
+};
 
 use super::*;
 

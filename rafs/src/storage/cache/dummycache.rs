@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::metadata::digest;
 use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::backend::BlobBackend;
@@ -18,7 +17,7 @@ use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv};
 use crate::{RafsError, RafsResult};
 
-use nydus_utils::eother;
+use nydus_utils::{digest, eother};
 
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,

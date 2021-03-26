@@ -20,7 +20,7 @@ use crate::metadata::layout::*;
 use crate::metadata::*;
 use crate::RafsIoReader;
 
-use nydus_utils::{einval, enoent, enotdir, ByteSize};
+use nydus_utils::{digest::RafsDigest, einval, enoent, enotdir, ByteSize};
 
 pub struct CachedInodes {
     s_blob: Arc<OndiskBlobTable>,

@@ -30,6 +30,7 @@ pub use types::*;
 pub mod fuse;
 #[cfg(feature = "fusedev")]
 pub use self::fuse::{FuseChannel, FuseSession};
+pub mod digest;
 pub mod logger;
 pub mod signal;
 

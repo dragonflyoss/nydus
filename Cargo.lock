@@ -1117,6 +1117,7 @@ name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
  "backtrace",
+ "blake3",
  "built",
  "chrono",
  "epoll",
@@ -1128,6 +1129,7 @@ dependencies = [
  "num-traits",
  "serde",
  "serde_json",
+ "sha2",
  "vmm-sys-util 0.6.0",
 ]
 

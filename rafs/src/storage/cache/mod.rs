@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::metadata::digest;
 use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::backend::BlobBackend;
@@ -19,7 +18,7 @@ use crate::storage::device::RafsBio;
 use crate::storage::utils::{alloc_buf, digest_check};
 use crate::RafsResult;
 
-use nydus_utils::eio;
+use nydus_utils::{digest, eio};
 
 pub mod blobcache;
 pub mod dummycache;

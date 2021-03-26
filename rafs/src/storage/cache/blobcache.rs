@@ -23,7 +23,6 @@ use governor::{
 use vm_memory::VolatileSlice;
 
 use crate::io_stats::{BlobcacheMetrics, Metric};
-use crate::metadata::digest::{self, RafsDigest};
 use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::storage::backend::BlobBackend;
@@ -33,7 +32,7 @@ use crate::storage::device::RafsBio;
 use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv, readv};
 
-use nydus_utils::{einval, enoent, enosys, last_error};
+use nydus_utils::{digest::RafsDigest, einval, enoent, enosys, last_error};
 
 #[derive(Clone, Eq, PartialEq)]
 enum CacheStatus {
@@ -770,7 +769,6 @@ mod blob_cache_tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use crate::io_stats::BackendMetrics;
-    use crate::metadata::digest::{self, RafsDigest};
     use crate::metadata::layout::OndiskChunkInfo;
     use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
     use crate::storage::backend::{BackendResult, BlobBackend};
@@ -780,6 +778,8 @@ mod blob_cache_tests {
     use crate::storage::compress;
     use crate::storage::device::RafsBio;
     use crate::storage::factory::CacheConfig;
+
+    use nydus_utils::digest::{self, RafsDigest};
 
     struct MockBackend {
         metrics: Arc<BackendMetrics>,

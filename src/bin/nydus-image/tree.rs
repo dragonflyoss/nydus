@@ -12,7 +12,6 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::DirEntry;
@@ -28,6 +27,8 @@ use crate::{
     node::*,
     stargz::{self, TocEntry},
 };
+
+use nydus_utils::digest::RafsDigest;
 
 use crate::trace::*;
 use crate::{event_tracer, root_tracer, timing_tracer};

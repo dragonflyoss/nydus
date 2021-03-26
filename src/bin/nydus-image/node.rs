@@ -21,9 +21,11 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
-use nydus_utils::{div_round_up, try_round_up_4k, ByteSize};
+use nydus_utils::{
+    digest::{self, RafsDigest},
+    div_round_up, try_round_up_4k, ByteSize,
+};
 
-use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
 use rafs::metadata::*;
 use rafs::storage::compress;

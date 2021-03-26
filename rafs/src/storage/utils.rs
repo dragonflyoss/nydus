@@ -10,9 +10,10 @@ use libc::off64_t;
 use nix::sys::uio::{preadv, IoVec};
 use vm_memory::{Bytes, VolatileSlice};
 
-use nydus_utils::{einval, last_error, round_down_4k};
-
-use crate::metadata::digest::{self, RafsDigest};
+use nydus_utils::{
+    digest::{self, RafsDigest},
+    einval, last_error, round_down_4k,
+};
 
 pub fn readv(fd: RawFd, bufs: &[VolatileSlice], offset: u64, max_size: usize) -> Result<usize> {
     if bufs.is_empty() {

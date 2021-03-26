@@ -23,7 +23,6 @@ use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::Entry;
 use fuse_rs::api::filesystem::ROOT_ID;
 
-use self::digest::RafsDigest;
 use self::direct::DirectMapping;
 use self::layout::*;
 use self::noop::NoopInodes;
@@ -33,15 +32,16 @@ use crate::storage::compress;
 use crate::storage::device::{RafsBio, RafsBioDesc};
 use crate::*;
 
-use nydus_utils::{ebadf, einval, enoent};
+use nydus_utils::{
+    digest::{self, RafsDigest},
+    ebadf, einval, enoent,
+};
 
 pub mod cached;
-pub mod digest;
 pub mod direct;
 pub mod layout;
 pub mod noop;
 
-pub const RAFS_DIGEST_LENGTH: usize = 32;
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;

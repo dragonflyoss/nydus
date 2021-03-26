@@ -12,12 +12,13 @@ use fuse_rs::api::filesystem::{ZeroCopyReader, ZeroCopyWriter};
 use fuse_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
-use crate::metadata::digest;
 use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
 use crate::storage::cache::RafsCache;
 use crate::storage::{compress, factory};
 use crate::RafsResult;
+
+use nydus_utils::digest;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 

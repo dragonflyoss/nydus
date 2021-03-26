@@ -11,9 +11,11 @@ built = { version = "=0.4.3", features = ["git2", "chrono"] }
 
 [dependencies]
 log = "0.4.8"
-flexi_logger = { version = "0.17"}
+flexi_logger = { version = "0.17" }
 libc = "0.2"
 nix = "0.17"
+sha2 = { version = "0.9.1" }
+blake3 = "0.3.6"
 epoll = ">=4.0.1"
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"

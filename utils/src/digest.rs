@@ -12,11 +12,10 @@ use sha2::Sha256;
 use std::io::Error;
 use std::str::FromStr;
 
-use crate::metadata::RAFS_DIGEST_LENGTH;
-
-use nydus_utils::einval;
-
+pub const RAFS_DIGEST_LENGTH: usize = 32;
 type DigestData = [u8; RAFS_DIGEST_LENGTH];
+
+use crate::error::einval;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Algorithm {

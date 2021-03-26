@@ -36,8 +36,7 @@ use serde::Serialize;
 
 use builder::SourceType;
 use node::WhiteoutSpec;
-use nydus_utils::{setup_logging, BuildTimeInfo};
-use rafs::metadata::digest;
+use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use rafs::storage::compress;
 use trace::*;
 use uploader::Uploader;
