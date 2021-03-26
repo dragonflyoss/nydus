@@ -9,11 +9,10 @@ use vm_memory::VolatileSlice;
 
 use crate::storage::backend::BlobBackend;
 use crate::storage::cache::*;
-use crate::storage::compress;
 use crate::storage::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
 use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv};
-use crate::{RafsError, RafsResult};
+use crate::storage::{compress, StorageError, StorageResult};
 
 use nydus_utils::{digest, eother};
 
@@ -91,12 +90,12 @@ impl RafsCache for DummyCache {
     }
 
     /// Prefetch works when blobcache is enabled
-    fn prefetch(&self, _bios: &mut [RafsBio]) -> RafsResult<usize> {
-        Err(RafsError::Unsupported)
+    fn prefetch(&self, _bios: &mut [RafsBio]) -> StorageResult<usize> {
+        Err(StorageError::Unsupported)
     }
 
-    fn stop_prefetch(&self) -> RafsResult<()> {
-        Err(RafsError::Unsupported)
+    fn stop_prefetch(&self) -> StorageResult<()> {
+        Err(StorageError::Unsupported)
     }
 
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize> {

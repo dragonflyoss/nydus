@@ -15,11 +15,12 @@ use std::thread;
 
 use nix::sys::uio;
 use nix::unistd::dup;
-extern crate spmc;
+
 use futures::executor::block_on;
 use governor::{
     clock::QuantaClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
 };
+
 use vm_memory::VolatileSlice;
 
 use crate::storage::backend::BlobBackend;
@@ -616,7 +617,7 @@ impl RafsCache for BlobCache {
         // TODO: Cache is responsible to release backend's resources
         self.backend().release()
     }
-    fn prefetch(&self, bios: &mut [RafsBio]) -> RafsResult<usize> {
+    fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
         let merging_size = self.prefetch_worker.merging_size;
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
 
@@ -629,7 +630,7 @@ impl RafsCache for BlobCache {
         Ok(0)
     }
 
-    fn stop_prefetch(&self) -> RafsResult<()> {
+    fn stop_prefetch(&self) -> StorageResult<()> {
         drop(self.mr_sender.lock().unwrap().take().unwrap());
         Ok(())
     }

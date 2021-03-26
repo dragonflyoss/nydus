@@ -11,10 +11,9 @@ use std::sync::Arc;
 use vm_memory::VolatileSlice;
 
 use crate::storage::backend::BlobBackend;
-use crate::storage::compress;
 use crate::storage::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
 use crate::storage::utils::{alloc_buf, digest_check};
-use crate::RafsResult;
+use crate::storage::{compress, StorageResult};
 
 use nydus_utils::{digest, eio};
 
@@ -89,8 +88,8 @@ pub trait RafsCache {
     /// Get the size of a blob
     fn blob_size(&self, blob_id: &str) -> Result<u64>;
 
-    fn prefetch(&self, bio: &mut [RafsBio]) -> RafsResult<usize>;
-    fn stop_prefetch(&self) -> RafsResult<()>;
+    fn prefetch(&self, bio: &mut [RafsBio]) -> StorageResult<usize>;
+    fn stop_prefetch(&self) -> StorageResult<()>;
 
     /// Release cache
     fn release(&self);

@@ -13,8 +13,7 @@ use fuse_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
 use crate::storage::cache::RafsCache;
-use crate::storage::{compress, factory};
-use crate::RafsResult;
+use crate::storage::{compress, factory, StorageResult};
 
 use nydus_utils::digest::{self, RafsDigest};
 
@@ -121,13 +120,13 @@ impl RafsDevice {
         Ok(count)
     }
 
-    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> RafsResult<usize> {
+    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> StorageResult<usize> {
         self.rw_layer.load().prefetch(desc.bi_vec.as_mut_slice())?;
 
         Ok(desc.bi_size)
     }
 
-    pub fn stop_prefetch(&self) -> RafsResult<()> {
+    pub fn stop_prefetch(&self) -> StorageResult<()> {
         self.rw_layer.load().stop_prefetch()
     }
 }
