@@ -25,11 +25,11 @@ use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::*;
 use fuse_rs::api::BackendFileSystem;
 
-use crate::io_stats::{self, FopRecorder, StatsFop::*};
 use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::storage::*;
 use crate::storage::{cache::PrefetchWorker, device};
 use crate::*;
+use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 
 use nydus_utils::eacces;
 
@@ -140,7 +140,7 @@ pub struct Rafs {
     fs_prefetch: bool,
     initialized: bool,
     xattr_enabled: bool,
-    ios: Arc<io_stats::GlobalIOStats>,
+    ios: Arc<metrics::GlobalIOStats>,
     // static inode attributes
     i_uid: u32,
     i_gid: u32,
@@ -186,7 +186,7 @@ impl Rafs {
             .map_err(RafsError::CreateDevice)?,
             sb: Arc::new(sb),
             initialized: false,
-            ios: io_stats::new(id),
+            ios: metrics::new(id),
             digest_validate: conf.digest_validate,
             fs_prefetch: conf.fs_prefetch.enable,
             xattr_enabled: conf.enable_xattr,

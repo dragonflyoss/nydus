@@ -7,7 +7,8 @@ use std::path::Path;
 
 use vm_memory::VolatileSlice;
 
-use crate::io_stats::{BackendMetrics, ERROR_HOLDER};
+use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
+
 #[cfg(feature = "backend-localfs")]
 use crate::storage::backend::localfs::LocalFsError;
 #[cfg(feature = "backend-oss")]

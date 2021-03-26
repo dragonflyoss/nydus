@@ -17,4 +17,4 @@ serde_json = ">=1.0.9"
 vmm-sys-util = "0.6.0"
 url = "2.1.1"
 http = "0.2.1"
-rafs = {path = "../rafs"}
+nydus-utils = { path = "../utils" }

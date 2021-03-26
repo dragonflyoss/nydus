@@ -19,7 +19,7 @@ use serde_json::Error as SerdeError;
 
 use crate::http::{extract_query_part, EndpointHandler};
 
-use rafs::io_stats::IoStatsError;
+use nydus_utils::metrics::IoStatsError;
 
 #[derive(Debug)]
 pub enum DaemonErrorKind {

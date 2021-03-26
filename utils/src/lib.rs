@@ -15,6 +15,10 @@ use serde::Serialize;
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate serde;
+#[macro_use]
+extern crate lazy_static;
 
 #[macro_use]
 pub mod error;
@@ -32,6 +36,8 @@ pub mod fuse;
 pub use self::fuse::{FuseChannel, FuseSession};
 pub mod digest;
 pub mod logger;
+
+pub mod metrics;
 pub mod signal;
 
 pub fn log_level_to_verbosity(level: log::LevelFilter) -> usize {

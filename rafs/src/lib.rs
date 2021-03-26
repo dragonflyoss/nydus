@@ -25,11 +25,6 @@ pub mod fs;
 pub mod metadata;
 pub mod storage;
 
-#[macro_use]
-extern crate lazy_static;
-#[allow(dead_code)]
-pub mod io_stats;
-
 #[derive(Debug)]
 pub enum RafsError {
     Unsupported,

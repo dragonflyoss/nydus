@@ -13,12 +13,11 @@ use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Method, StatusCode};
 use sha1::Sha1;
 
-use crate::io_stats::BackendMetrics;
 use crate::storage::backend::request::{HeaderMap, Progress, ReqBody, Request, RequestError};
 use crate::storage::backend::{default_http_scheme, BackendError, BackendResult};
 use crate::storage::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 
-use nydus_utils::einval;
+use nydus_utils::{einval, metrics::BackendMetrics};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";

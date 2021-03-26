@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use serde_json::Error as SerdeError;
 
-use nydus_utils::logger::ErrorHolder;
+use crate::logger::ErrorHolder;
 
 pub type Inode = u64;
 
@@ -50,8 +50,6 @@ impl Clone for StatsFop {
         *self
     }
 }
-
-type FilesStatsCounters = RwLock<Vec<Arc<Option<InodeIOStats>>>>;
 
 /// Block size separated counters.
 /// 1K; 4K; 16K; 64K, 128K, 512K, 1M
