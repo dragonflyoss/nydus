@@ -497,12 +497,12 @@ impl CachedChunkInfo {
 
     fn copy_from_ondisk(&mut self, chunk: &OndiskChunkInfo) {
         self.c_block_id = Arc::new(chunk.block_id);
-        self.c_blob_index = chunk.blob_index();
-        self.c_compress_offset = chunk.compress_offset();
-        self.c_decompress_offset = chunk.decompress_offset();
-        self.c_decompress_size = chunk.decompress_size();
-        self.c_file_offset = chunk.file_offset();
-        self.c_compr_size = chunk.compress_size();
+        self.c_blob_index = chunk.blob_index;
+        self.c_compress_offset = chunk.compress_offset;
+        self.c_decompress_offset = chunk.decompress_offset;
+        self.c_decompress_size = chunk.decompress_size;
+        self.c_file_offset = chunk.file_offset;
+        self.c_compr_size = chunk.compress_size;
         self.c_flags = chunk.flags;
     }
 }

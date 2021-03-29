@@ -848,31 +848,6 @@ impl RafsStore for OndiskChunkInfo {
     }
 }
 
-impl RafsChunkInfo for OndiskChunkInfo {
-    #[inline]
-    fn block_id(&self) -> &RafsDigest {
-        &self.block_id
-    }
-
-    #[inline]
-    fn is_compressed(&self) -> bool {
-        self.flags.contains(RafsChunkFlags::COMPRESSED)
-    }
-
-    #[inline]
-    fn is_hole(&self) -> bool {
-        self.flags.contains(RafsChunkFlags::HOLECHUNK)
-    }
-
-    impl_getter!(blob_index, blob_index, u32);
-    impl_getter!(compress_offset, compress_offset, u64);
-    impl_getter!(compress_size, compress_size, u32);
-    impl_getter!(decompress_offset, decompress_offset, u64);
-    impl_getter!(decompress_size, decompress_size, u32);
-    impl_getter!(file_offset, file_offset, u64);
-    impl_getter!(flags, flags, RafsChunkFlags);
-}
-
 impl_bootstrap_converter!(OndiskChunkInfo);
 
 impl fmt::Display for OndiskChunkInfo {
@@ -887,7 +862,7 @@ impl fmt::Display for OndiskChunkInfo {
             self.decompress_size,
             self.blob_index,
             self.block_id,
-            self.is_compressed(),
+            self.flags.contains(RafsChunkFlags::COMPRESSED),
         )
     }
 }
