@@ -22,13 +22,12 @@ use governor::{
 };
 use vm_memory::VolatileSlice;
 
-use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
 
 use crate::storage::backend::BlobBackend;
 use crate::storage::cache::RafsCache;
 use crate::storage::cache::*;
-use crate::storage::device::RafsBio;
+use crate::storage::device::{BlobPrefetchControl, RafsBio};
 use crate::storage::factory::CacheConfig;
 use crate::storage::utils::{alloc_buf, copyv, readv};
 
@@ -547,16 +546,12 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
 }
 
 impl RafsCache for BlobCache {
-    fn init(&self, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
+    fn init(&self, blobs: &[BlobPrefetchControl]) -> Result<()> {
         // Backend may be capable to prefetch a range of blob bypass upper file system
         // to blobcache. This should be asynchronous, so filesystem read cache hit
         // should validate data integrity.
         for b in blobs {
-            let _ = self.backend.prefetch_blob(
-                b.blob_id.as_str(),
-                b.readahead_offset,
-                b.readahead_size,
-            );
+            let _ = self.backend.prefetch_blob(&b.blob_id, b.offset, b.len);
         }
         Ok(())
     }

@@ -12,7 +12,6 @@ use fuse_rs::api::filesystem::{ZeroCopyReader, ZeroCopyWriter};
 use fuse_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
-use crate::metadata::layout::OndiskBlobTableEntry;
 use crate::storage::cache::RafsCache;
 use crate::storage::{compress, factory};
 use crate::RafsResult;
@@ -56,6 +55,15 @@ pub trait RafsChunkInfo: Sync + Send {
     fn flags(&self) -> RafsChunkFlags;
 }
 
+/// Backend may be capable to prefetch a range of blob bypass upper file system
+/// to blobcache. This should be asynchronous, so filesystem read cache hit
+/// should validate data integrity.
+pub struct BlobPrefetchControl {
+    pub blob_id: String,
+    pub offset: u32,
+    pub len: u32,
+}
+
 impl RafsDevice {
     pub fn new(
         config: factory::Config,
@@ -83,8 +91,8 @@ impl RafsDevice {
         Ok(())
     }
 
-    pub fn init(&self, blobs: &[OndiskBlobTableEntry]) -> io::Result<()> {
-        self.rw_layer.load().init(blobs)
+    pub fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> io::Result<()> {
+        self.rw_layer.load().init(prefetch_vec)
     }
 
     pub fn close(&self) -> io::Result<()> {

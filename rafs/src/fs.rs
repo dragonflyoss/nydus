@@ -26,6 +26,7 @@ use fuse_rs::api::filesystem::*;
 use fuse_rs::api::BackendFileSystem;
 
 use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::storage::device::BlobPrefetchControl;
 use crate::storage::*;
 use crate::storage::{cache::PrefetchWorker, device};
 use crate::*;
@@ -245,8 +246,21 @@ impl Rafs {
             return Err(RafsError::AlreadyMounted);
         }
 
+        // Without too much layout concern, just prefetch a certain range from backend.
+        let prefetch_vec = self
+            .sb
+            .inodes
+            .get_blobs()
+            .iter()
+            .map(|b| BlobPrefetchControl {
+                blob_id: b.blob_id.clone(),
+                offset: b.readahead_offset,
+                len: b.readahead_size,
+            })
+            .collect::<Vec<BlobPrefetchControl>>();
+
         self.device
-            .init(&self.sb.inodes.get_blobs())
+            .init(&prefetch_vec)
             .map_err(RafsError::CreateDevice)?;
 
         // Device should be ready before any prefetch.
