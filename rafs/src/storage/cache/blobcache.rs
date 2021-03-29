@@ -767,14 +767,14 @@ mod blob_cache_tests {
     use vm_memory::{VolatileMemory, VolatileSlice};
     use vmm_sys_util::tempdir::TempDir;
 
-    use crate::metadata::layout::OndiskChunkInfo;
+    use crate::impl_getter;
     use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
     use crate::storage::backend::{BackendResult, BlobBackend};
     use crate::storage::cache::blobcache;
     use crate::storage::cache::PrefetchWorker;
     use crate::storage::cache::RafsCache;
     use crate::storage::compress;
-    use crate::storage::device::RafsBio;
+    use crate::storage::device::{RafsBio, RafsChunkFlags, RafsChunkInfo};
     use crate::storage::factory::CacheConfig;
 
     use nydus_utils::{
@@ -822,6 +822,44 @@ mod blob_cache_tests {
         }
     }
 
+    #[derive(Default, Clone)]
+    struct MockChunkInfo {
+        pub block_id: RafsDigest,
+        pub blob_index: u32,
+        pub flags: RafsChunkFlags,
+        pub compress_size: u32,
+        pub decompress_size: u32,
+        pub compress_offset: u64,
+        pub decompress_offset: u64,
+        pub file_offset: u64,
+        pub reserved: u64,
+    }
+
+    impl MockChunkInfo {
+        fn new() -> Self {
+            MockChunkInfo::default()
+        }
+    }
+
+    impl RafsChunkInfo for MockChunkInfo {
+        fn block_id(&self) -> &RafsDigest {
+            &self.block_id
+        }
+        fn is_compressed(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::COMPRESSED)
+        }
+        fn is_hole(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::HOLECHUNK)
+        }
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(compress_offset, compress_offset, u64);
+        impl_getter!(compress_size, compress_size, u32);
+        impl_getter!(decompress_offset, decompress_offset, u64);
+        impl_getter!(decompress_size, decompress_size, u32);
+        impl_getter!(file_offset, file_offset, u64);
+        impl_getter!(flags, flags, RafsChunkFlags);
+    }
+
     #[test]
     fn test_add() {
         // new blob cache
@@ -862,7 +900,7 @@ mod blob_cache_tests {
             .unwrap();
 
         // generate chunk and bio
-        let mut chunk = OndiskChunkInfo::new();
+        let mut chunk = MockChunkInfo::new();
         chunk.block_id = RafsDigest::from_buf(&expect, digest::Algorithm::Blake3);
         chunk.file_offset = 0;
         chunk.compress_offset = 0;

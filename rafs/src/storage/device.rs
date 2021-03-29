@@ -42,6 +42,7 @@ bitflags! {
 /// TODO: Better we can put RafsChunkInfo back to rafs, but in order to isolate
 /// two components and have a better performance, use RafsChunkInfo as a parameter
 /// and keep it in storage trait. Otherwise we have to copy chunk digest everywhere.
+/// We didn't make RafsChunkInfo as struct because we don't want to copy from memory mapped region of rafs metadata.
 pub trait RafsChunkInfo: Sync + Send {
     fn block_id(&self) -> &RafsDigest;
     fn blob_index(&self) -> u32;

@@ -23,6 +23,7 @@ use nydus_utils::{einval, last_error};
 mod error;
 pub mod fs;
 pub mod metadata;
+#[macro_use]
 pub mod storage;
 
 #[derive(Debug)]
