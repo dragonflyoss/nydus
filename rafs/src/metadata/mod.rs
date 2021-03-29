@@ -30,6 +30,8 @@ use crate::impl_getter;
 use crate::metadata::cached::CachedInodes;
 use crate::storage::compress;
 use crate::storage::device::{RafsBio, RafsBioDesc};
+// FIXME: Move this definition to metadata crate if we have it some day.
+pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
 use crate::*;
 
 mod noop;
@@ -49,8 +51,6 @@ pub use storage::device::{RafsChunkFlags, RafsChunkInfo};
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
-// FIXME: u64 for this constant is extremely large, which is unnecessary as `u32` can represent block size 4GB.
-pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
 const DOT: &str = ".";
 const DOTDOT: &str = "..";

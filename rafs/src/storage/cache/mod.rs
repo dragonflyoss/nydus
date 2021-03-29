@@ -10,11 +10,9 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::metadata::RafsChunkInfo;
-
 use crate::storage::backend::BlobBackend;
 use crate::storage::compress;
-use crate::storage::device::{BlobPrefetchControl, RafsBio};
+use crate::storage::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
 use crate::storage::utils::{alloc_buf, digest_check};
 use crate::RafsResult;
 
