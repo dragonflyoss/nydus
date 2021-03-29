@@ -2,6 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate serde;
+#[macro_use]
+extern crate bitflags;
+
 pub mod backend;
 pub mod cache;
 pub mod compress;

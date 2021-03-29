@@ -6,7 +6,9 @@ use std::io::Result;
 use libc::c_char;
 use lz4_sys::{LZ4_compressBound, LZ4_compress_default, LZ4_decompress_safe};
 
-use nydus_utils::einval;
+// FIXME: Basically, with `macro_use` declared before crate, we don't have to import
+// those macros.
+use nydus_utils::{einval, eio};
 
 pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
     // 0 iff src too large
@@ -26,7 +28,7 @@ pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
         )
     };
     if dec_size <= 0 {
-        return Err(err_decompress_failed!());
+        return Err(eio!("decompression failed"));
     }
 
     assert!(dec_size as usize <= dst_buf.capacity());
@@ -55,7 +57,7 @@ pub(super) fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> Result<usize> {
     };
 
     if dec_bytes < 0 {
-        return Err(err_decompress_failed!());
+        return Err(eio!("decompression failed"));
     }
 
     Ok(dec_bytes as usize)

@@ -23,13 +23,13 @@ use governor::{
 
 use vm_memory::VolatileSlice;
 
-use crate::storage::backend::BlobBackend;
-use crate::storage::cache::RafsCache;
-use crate::storage::cache::*;
-use crate::storage::device::{BlobPrefetchControl, RafsBio};
-use crate::storage::factory::CacheConfig;
-use crate::storage::utils::{alloc_buf, copyv, readv};
-use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
+use crate::backend::BlobBackend;
+use crate::cache::RafsCache;
+use crate::cache::*;
+use crate::device::{BlobPrefetchControl, RafsBio};
+use crate::factory::CacheConfig;
+use crate::utils::{alloc_buf, copyv, readv};
+use crate::RAFS_DEFAULT_BLOCK_SIZE;
 
 use nydus_utils::{
     digest::RafsDigest,
@@ -762,15 +762,15 @@ mod blob_cache_tests {
     use vm_memory::{VolatileMemory, VolatileSlice};
     use vmm_sys_util::tempdir::TempDir;
 
+    use crate::backend::{BackendResult, BlobBackend};
+    use crate::cache::blobcache;
+    use crate::cache::PrefetchWorker;
+    use crate::cache::RafsCache;
+    use crate::compress;
+    use crate::device::{RafsBio, RafsChunkFlags, RafsChunkInfo};
+    use crate::factory::CacheConfig;
     use crate::impl_getter;
-    use crate::storage::backend::{BackendResult, BlobBackend};
-    use crate::storage::cache::blobcache;
-    use crate::storage::cache::PrefetchWorker;
-    use crate::storage::cache::RafsCache;
-    use crate::storage::compress;
-    use crate::storage::device::{RafsBio, RafsChunkFlags, RafsChunkInfo};
-    use crate::storage::factory::CacheConfig;
-    use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
+    use crate::RAFS_DEFAULT_BLOCK_SIZE;
 
     use nydus_utils::{
         digest::{self, RafsDigest},

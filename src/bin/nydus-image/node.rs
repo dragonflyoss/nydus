@@ -28,7 +28,7 @@ use nydus_utils::{
 
 use rafs::metadata::layout::*;
 use rafs::metadata::*;
-use rafs::storage::compress;
+use storage::compress;
 
 use crate::trace::{BuildRootTracer, EventTracerClass, TraceClass, TraceEvent, BUILDING_RECORDER};
 use crate::{event_tracer, root_tracer};

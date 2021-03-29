@@ -14,11 +14,11 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
-use crate::storage::backend::request::{
+use crate::backend::request::{
     is_success_status, respond, Progress, ReqBody, Request, RequestError,
 };
-use crate::storage::backend::{default_http_scheme, BackendError, BackendResult};
-use crate::storage::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
+use crate::backend::{default_http_scheme, BackendError, BackendResult};
+use crate::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 use nydus_utils::metrics::BackendMetrics;
 
 use nydus_utils::{einval, epipe};

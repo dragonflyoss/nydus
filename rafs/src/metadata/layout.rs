@@ -264,7 +264,7 @@ impl OndiskSuperBlock {
             || self.version() > RAFS_SUPER_VERSION_V5 as u32
             || self.sb_size() != RAFS_SUPERBLOCK_SIZE as u32
         {
-            return Err(err_invalid_superblock!());
+            return Err(einval!("invalid superblock"));
         }
 
         match self.version() {
@@ -273,7 +273,7 @@ impl OndiskSuperBlock {
                     || self.inode_table_offset() != 0
                     || self.inode_table_entries() != 0
                 {
-                    return Err(err_invalid_superblock!());
+                    return Err(einval!("invalid superblock"));
                 }
             }
             RAFS_SUPER_VERSION_V5 => {
@@ -281,7 +281,7 @@ impl OndiskSuperBlock {
                     || self.inode_table_offset() < RAFS_SUPERBLOCK_SIZE as u64
                     || self.inode_table_offset() & 0x7 != 0
                 {
-                    return Err(err_invalid_superblock!());
+                    return Err(einval!("invalid superblock"));
                 }
             }
             _ => {
@@ -823,12 +823,6 @@ pub struct OndiskChunkInfo {
     pub file_offset: u64,
     /// reserved
     pub reserved: u64,
-}
-
-impl Default for RafsChunkFlags {
-    fn default() -> Self {
-        RafsChunkFlags::empty()
-    }
 }
 
 impl OndiskChunkInfo {

@@ -19,8 +19,9 @@ use sha2::Sha256;
 
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsMode, RafsStore, RafsSuper};
-use rafs::storage::compress;
 use rafs::{RafsIoRead, RafsIoWrite};
+// FIXME: Must image tool depend on storage backend?
+use storage::compress;
 
 use nydus_utils::digest::{self, RafsDigest};
 

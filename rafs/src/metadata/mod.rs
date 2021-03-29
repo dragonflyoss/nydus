@@ -26,10 +26,9 @@ use fuse_rs::api::filesystem::ROOT_ID;
 use self::direct::DirectMapping;
 use self::layout::*;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
-use crate::impl_getter;
 use crate::metadata::cached::CachedInodes;
-use crate::storage::compress;
-use crate::storage::device::{RafsBio, RafsBioDesc};
+use storage::compress;
+use storage::device::{RafsBio, RafsBioDesc};
 // FIXME: Move this definition to metadata crate if we have it some day.
 pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
 use crate::*;
@@ -760,13 +759,12 @@ pub trait RafsStore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use crate::impl_getter;
     use crate::metadata::{add_chunk_to_bio_desc, calculate_bio_chunk_index};
-    use crate::storage::device::RafsBioDesc;
-    use crate::storage::device::{RafsChunkFlags, RafsChunkInfo};
     use nydus_utils::digest::RafsDigest;
+    use std::sync::Arc;
+    use storage::device::RafsBioDesc;
+    use storage::device::{RafsChunkFlags, RafsChunkInfo};
+    use storage::impl_getter;
 
     #[derive(Default, Copy, Clone)]
     struct MockChunkInfo {

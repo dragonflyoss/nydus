@@ -31,7 +31,7 @@ use crate::{
 // TODO: Import RafsChunkFlags from storage::device is very strange,
 /// perhaps move it to a separate lib someday. And future inspect tool can also
 /// rely on this.
-use rafs::storage::device::RafsChunkFlags;
+use storage::device::RafsChunkFlags;
 
 use nydus_utils::digest::RafsDigest;
 

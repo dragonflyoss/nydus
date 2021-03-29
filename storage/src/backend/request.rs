@@ -18,7 +18,7 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use crate::storage::backend::CommonConfig;
+use crate::backend::CommonConfig;
 use nydus_utils::einval;
 
 pub use reqwest::header::HeaderMap;

@@ -12,10 +12,11 @@ use fuse_rs::api::filesystem::{ZeroCopyReader, ZeroCopyWriter};
 use fuse_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
-use crate::storage::cache::RafsCache;
-use crate::storage::{compress, factory, StorageResult};
+use crate::cache::RafsCache;
+use crate::{compress, factory, StorageResult};
 
 use nydus_utils::digest::{self, RafsDigest};
+use nydus_utils::eio;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
@@ -52,6 +53,12 @@ pub trait RafsChunkInfo: Sync + Send {
     fn is_compressed(&self) -> bool;
     fn is_hole(&self) -> bool;
     fn flags(&self) -> RafsChunkFlags;
+}
+
+impl Default for RafsChunkFlags {
+    fn default() -> Self {
+        RafsChunkFlags::empty()
+    }
 }
 
 /// Backend may be capable to prefetch a range of blob bypass upper file system
@@ -193,7 +200,7 @@ impl RafsBioDevice<'_> {
             while total > 0 {
                 let cnt = cmp::min(total, ZEROS.len());
                 buf.write_slice(&ZEROS[0..cnt], offset)
-                    .map_err(|_| err_decompress_failed!())?;
+                    .map_err(|_| eio!("decompression failed"))?;
                 count += cnt;
                 remain -= cnt;
                 total -= cnt;

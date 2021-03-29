@@ -10,10 +10,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::value::Value;
 
-use crate::storage::backend::*;
-use crate::storage::cache::*;
-
-use crate::storage::compress;
+use crate::backend::*;
+use crate::cache::*;
+use crate::compress;
 
 use nydus_utils::{digest, einval};
 

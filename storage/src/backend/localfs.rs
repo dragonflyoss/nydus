@@ -14,8 +14,8 @@ use std::{thread, time};
 use nix::sys::uio;
 use vm_memory::VolatileSlice;
 
-use crate::storage::backend::{BackendError, BackendResult, BlobBackend, BlobBackendUploader};
-use crate::storage::utils::{readahead, readv};
+use crate::backend::{BackendError, BackendResult, BlobBackend, BlobBackendUploader};
+use crate::utils::{readahead, readv};
 
 use nydus_utils::{
     ebadf, einval, eio, last_error, metrics::BackendMetrics, round_down_4k, try_round_up_4k,

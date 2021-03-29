@@ -7,8 +7,6 @@
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate serde;
-#[macro_use]
 extern crate bitflags;
 
 use std::any::Any;
@@ -19,12 +17,10 @@ use std::os::unix::io::AsRawFd;
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
 use nydus_utils::{einval, last_error};
 
-#[macro_use]
-mod error;
 pub mod fs;
 pub mod metadata;
 #[macro_use]
-pub mod storage;
+extern crate storage;
 
 #[derive(Debug)]
 pub enum RafsError {

@@ -30,7 +30,7 @@ use arc_swap::{ArcSwap, Guard};
 
 use crate::metadata::layout::*;
 use crate::metadata::*;
-use crate::storage::utils::readahead;
+use storage::utils::readahead;
 
 use nydus_utils::{digest::RafsDigest, ebadf, einval, enoent, enotdir, last_error};
 

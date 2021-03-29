@@ -26,13 +26,13 @@ use fuse_rs::api::filesystem::*;
 use fuse_rs::api::BackendFileSystem;
 
 use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
-use crate::storage::device::BlobPrefetchControl;
-use crate::storage::*;
-use crate::storage::{cache::PrefetchWorker, device};
 use crate::*;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
+use storage::device::BlobPrefetchControl;
+use storage::*;
+use storage::{cache::PrefetchWorker, device};
 
-use nydus_utils::eacces;
+use nydus_utils::{eacces, enotdir};
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -338,7 +338,7 @@ impl Rafs {
 
         let parent = self.sb.get_inode(ino, self.digest_validate)?;
         if !parent.is_dir() {
-            return Err(err_not_directory!());
+            return Err(enotdir!("is not a directory"));
         }
 
         let mut cur_offset = offset;
@@ -482,7 +482,7 @@ impl FileSystem for Rafs {
         let target = OsStr::from_bytes(name.to_bytes());
         let parent = self.sb.get_inode(ino, self.digest_validate)?;
         if !parent.is_dir() {
-            return Err(err_not_directory!());
+            return Err(enotdir!("is not a directory"));
         }
 
         rec.mark_success(0);

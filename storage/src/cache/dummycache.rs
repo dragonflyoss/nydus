@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::storage::backend::BlobBackend;
-use crate::storage::cache::*;
-use crate::storage::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
-use crate::storage::factory::CacheConfig;
-use crate::storage::utils::{alloc_buf, copyv};
-use crate::storage::{compress, StorageError, StorageResult};
+use crate::backend::BlobBackend;
+use crate::cache::*;
+use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
+use crate::factory::CacheConfig;
+use crate::utils::{alloc_buf, copyv};
+use crate::{compress, StorageError, StorageResult};
 
 use nydus_utils::{digest, eother};
 

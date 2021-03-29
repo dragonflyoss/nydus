@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::storage::backend::BlobBackend;
-use crate::storage::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
-use crate::storage::utils::{alloc_buf, digest_check};
-use crate::storage::{compress, StorageResult};
+use crate::backend::BlobBackend;
+use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
+use crate::utils::{alloc_buf, digest_check};
+use crate::{compress, StorageResult};
 
 use nydus_utils::{digest, eio};
 

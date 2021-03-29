@@ -10,12 +10,12 @@ use vm_memory::VolatileSlice;
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
 
 #[cfg(feature = "backend-localfs")]
-use crate::storage::backend::localfs::LocalFsError;
+use crate::backend::localfs::LocalFsError;
 #[cfg(feature = "backend-oss")]
-use crate::storage::backend::oss::OssError;
+use crate::backend::oss::OssError;
 #[cfg(feature = "backend-registry")]
-use crate::storage::backend::registry::RegistryError;
-use crate::storage::utils::copyv;
+use crate::backend::registry::RegistryError;
+use crate::utils::copyv;
 
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
