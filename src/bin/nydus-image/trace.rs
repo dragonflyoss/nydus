@@ -153,10 +153,9 @@ lazy_static! {
     };
 }
 
-#[macro_export]
 macro_rules! root_tracer {
     () => {
-        &BUILDING_RECORDER as &BuildRootTracer
+        &crate::trace::BUILDING_RECORDER as &$crate::trace::BuildRootTracer
     };
 }
 
@@ -164,16 +163,16 @@ macro_rules! root_tracer {
 macro_rules! timing_tracer {
     () => {
         root_tracer!()
-            .tracer(TraceClass::Timing)
+            .tracer($crate::trace::TraceClass::Timing)
             .as_any()
-            .downcast_ref::<TimingTracerClass>()
+            .downcast_ref::<$crate::trace::TimingTracerClass>()
             .unwrap()
     };
     ($f:block, $key:expr) => {
-        trace_timing($key, timing_tracer!(), || $f)
+        $crate::trace::trace_timing($key, timing_tracer!(), || $f)
     };
     ($f:block, $key:expr, $t:ty) => {
-        trace_timing::<_, $t>($key, timing_tracer!(), || $f)
+        $crate::trace::trace_timing::<_, $t>($key, timing_tracer!(), || $f)
     };
 }
 
@@ -188,23 +187,22 @@ macro_rules! register_tracer {
 macro_rules! event_tracer {
     () => {
         root_tracer!()
-            .tracer(TraceClass::Event)
+            .tracer($crate::trace::TraceClass::Event)
             .as_any()
-            .downcast_ref::<EventTracerClass>()
+            .downcast_ref::<$crate::trace::EventTracerClass>()
             .unwrap()
     };
     ($event:expr, $desc:expr) => {
-        event_tracer!()
-            .events
-            .write()
-            .unwrap()
-            .insert($event.to_string(), TraceEvent::Fixed($desc as u64))
+        event_tracer!().events.write().unwrap().insert(
+            $event.to_string(),
+            $crate::trace::TraceEvent::Fixed($desc as u64),
+        )
     };
     ($event:expr, +$value:expr) => {
         use std::sync::atomic::{AtomicU64, Ordering};
         let mut new: bool = true;
         {
-            if let Some(TraceEvent::Counter(ref e)) =
+            if let Some($crate::trace::TraceEvent::Counter(ref e)) =
                 event_tracer!().events.read().unwrap().get($event)
             {
                 e.fetch_add($value as u64, Ordering::Relaxed);
@@ -215,10 +213,13 @@ macro_rules! event_tracer {
         if new {
             // Double check to close the race that another thread has already inserted.
             if let Ok(ref mut guard) = event_tracer!().events.write() {
-                if let Some(TraceEvent::Counter(ref e)) = guard.get($event) {
+                if let Some($crate::trace::TraceEvent::Counter(ref e)) = guard.get($event) {
                     e.fetch_add($value as u64, Ordering::Relaxed);
                 } else {
-                    guard.insert($event.to_string(), TraceEvent::Counter(AtomicU64::new(0)));
+                    guard.insert(
+                        $event.to_string(),
+                        $crate::trace::TraceEvent::Counter(AtomicU64::new(0)),
+                    );
                 }
             }
         }
@@ -227,7 +228,7 @@ macro_rules! event_tracer {
         if let Ok(ref mut guard) = event_tracer!().events.write() {
             guard.insert(
                 $event.to_string(),
-                TraceEvent::Desc(format!($format, $value)),
+                $crate::trace::TraceEvent::Desc(format!($format, $value)),
             );
         }
     };
