@@ -217,8 +217,14 @@ Then use curl to mount a bootstrap to `/path/to/mountpoint/sub`:
 curl --unix-socket api.sock \
      -X POST "http://localhost/api/v1/mount?mountpoint=/sub" \
      -H "Content-Type: application/json" \
-     -d '{"source":"/path/to/bootstrap","config":"/path/to/config.json"}'
+     -d '{
+        "source":"/path/to/bootstrap",
+        "fs_type":"rafs",
+        "config":"{\"device\":{\"backend\":{\"type\":\"localfs\",\"config\":{\"dir\":\"blobs\"}},\"cache\":{\"type\":\"blobcache\",\"config\":{\"work_dir\":\"cache\"}}},\"mode\":\"direct\",\"digest_validate\":true}"
+	}'
 ```
+
+The `config` field is a JSON format string that can be obtained by `cat rafs.config | jq tostring`.
 
 ### Multiple Pseudo Mounts
 
