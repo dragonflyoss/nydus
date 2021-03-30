@@ -21,8 +21,6 @@ use crate::backend::{default_http_scheme, BackendError, BackendResult};
 use crate::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 use nydus_utils::metrics::BackendMetrics;
 
-use nydus_utils::{einval, epipe};
-
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 
 const HEADER_AUTHORIZATION: &str = "Authorization";

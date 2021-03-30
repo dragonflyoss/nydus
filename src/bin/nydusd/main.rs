@@ -12,6 +12,9 @@ extern crate lazy_static;
 extern crate rafs;
 extern crate serde_json;
 
+#[macro_use]
+extern crate nydus_utils;
+
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
 use std::fs::File;

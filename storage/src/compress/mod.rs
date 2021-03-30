@@ -15,8 +15,6 @@ use flate2::Compression;
 mod lz4_standard;
 use self::lz4_standard::*;
 
-use nydus_utils::einval;
-
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

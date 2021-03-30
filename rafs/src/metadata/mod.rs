@@ -36,10 +36,7 @@ use crate::*;
 mod noop;
 use noop::NoopInodes;
 
-use nydus_utils::{
-    digest::{self, RafsDigest},
-    ebadf, einval, enoent,
-};
+use nydus_utils::digest::{self, RafsDigest};
 
 pub mod cached;
 pub mod direct;

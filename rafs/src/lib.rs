@@ -8,6 +8,8 @@
 extern crate log;
 #[macro_use]
 extern crate bitflags;
+#[macro_use]
+extern crate nydus_utils;
 
 use std::any::Any;
 use std::fs::File;
@@ -15,7 +17,6 @@ use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
-use nydus_utils::{einval, last_error};
 
 pub mod fs;
 pub mod metadata;

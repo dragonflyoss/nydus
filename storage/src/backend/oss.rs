@@ -17,7 +17,7 @@ use crate::backend::request::{HeaderMap, Progress, ReqBody, Request, RequestErro
 use crate::backend::{default_http_scheme, BackendError, BackendResult};
 use crate::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
 
-use nydus_utils::{einval, metrics::BackendMetrics};
+use nydus_utils::metrics::BackendMetrics;
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";

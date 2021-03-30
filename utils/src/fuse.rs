@@ -17,7 +17,6 @@ use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{close, dup, getgid, getuid, read};
 use nix::Error as nixError;
 
-use crate::error::*;
 use epoll::{ControlOptions, Event, Events};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 

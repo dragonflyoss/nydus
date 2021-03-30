@@ -17,9 +17,7 @@ use vm_memory::VolatileSlice;
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobBackendUploader};
 use crate::utils::{readahead, readv};
 
-use nydus_utils::{
-    ebadf, einval, eio, last_error, metrics::BackendMetrics, round_down_4k, try_round_up_4k,
-};
+use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
 
 const BLOB_ACCESSED_SUFFIX: &str = ".access";
 const BLOB_ACCESS_RECORD_SECOND: u32 = 10;

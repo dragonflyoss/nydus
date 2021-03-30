@@ -37,7 +37,7 @@ use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 use serde_with::{serde_as, DisplayFromStr};
 
-use nydus_utils::{einval, last_error, BuildTimeInfo};
+use nydus_utils::BuildTimeInfo;
 use rafs::{
     fs::{Rafs, RafsConfig},
     trim_backend_config, RafsError, RafsIoRead,
