@@ -50,7 +50,7 @@ impl<'a> Builder<'a> {
 
         for i in 1..size_in_mb + 1 {
             // Write 1MB data
-            file.write_all(&vec![i; 1024 * 1024]).unwrap();
+            file.write_all(&[i; 1024 * 1024]).unwrap();
         }
     }
 
@@ -82,7 +82,7 @@ impl<'a> Builder<'a> {
     fn create_opaque_entry(&mut self, path: &PathBuf) {
         match self.whiteout_spec {
             "overlayfs" => {
-                self.set_xattr(path, "trusted.overlay.opaque", "y".as_bytes());
+                self.set_xattr(path, "trusted.overlay.opaque", b"y");
             }
             "oci" => {
                 self.create_file(&path.join(".wh..wh..opq"), b"");
@@ -159,17 +159,9 @@ impl<'a> Builder<'a> {
         let long_name = &"test-😉-name.".repeat(100)[..255];
         self.create_file(&dir.join(long_name), b"lower:long-name");
 
-        self.set_xattr(
-            &dir.join("sub/sub-1"),
-            "user.key-foo",
-            "value-foo".as_bytes(),
-        );
+        self.set_xattr(&dir.join("sub/sub-1"), "user.key-foo", b"value-foo");
 
-        self.set_xattr(
-            &dir.join("sub/sub-1"),
-            "user.key-bar",
-            "value-bar".as_bytes(),
-        );
+        self.set_xattr(&dir.join("sub/sub-1"), "user.key-bar", b"value-bar");
     }
 
     pub fn make_upper(&mut self) {
