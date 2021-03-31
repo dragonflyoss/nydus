@@ -128,6 +128,8 @@ pub enum DaemonError {
     Unsupported,
     /// State-machine related error codes if something bad happens when to communicate with state-machine
     Channel(String),
+    /// Input event to stat-machine is not expected.
+    UnexpectedEvent(DaemonStateMachineInput),
     /// File system backend service related errors.
     StartService(String),
     ServiceStop,
@@ -406,7 +408,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
             let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
             let mut bootstrap = RafsIoRead::from_file(&cmd.source)?;
             let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
-            rafs.import(&mut bootstrap, prefetch_files)?;
+            rafs.import(bootstrap, prefetch_files)?;
             info!("Rafs imported");
             Ok(Box::new(rafs))
         }
@@ -560,10 +562,20 @@ impl DaemonStateMachineContext {
                 let last = self.sm.state().clone();
                 let sm_rollback = StateMachine::<DaemonStateMachine>::from_state(last.clone());
                 let input = &event;
-                let action = self.sm.consume(&event).unwrap_or_else(|_| {
-                    error!("Event={:?}, CurrentState={:?}", input, &last);
-                    panic!("Daemon state machine goes insane, this is critical error!")
-                });
+
+                let action = if let Ok(a) = self.sm.consume(&event) {
+                    a
+                } else {
+                    error!(
+                        "Wrong event input. Event={:?}, CurrentState={:?}",
+                        input, &last
+                    );
+                    // Safe to unwrap because channel is never closed
+                    self.result_sender
+                        .send(Err(DaemonError::UnexpectedEvent(input.clone())))
+                        .unwrap();
+                    continue;
+                };
 
                 let d = self.daemon.as_ref();
                 let cur = self.sm.state();
@@ -606,6 +618,8 @@ impl DaemonStateMachineContext {
                     self.sm = sm_rollback;
                     e
                 });
+
+                // Safe to unwrap because channel is never closed
                 self.result_sender.send(r).unwrap();
             })
             .map(|_| ())

@@ -71,9 +71,10 @@ pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
-pub fn dump_program_info() {
+pub fn dump_program_info(prog_version: &str) {
     info!(
-        "Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
+        "Program Version: {}, Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
+        prog_version,
         built_info::GIT_COMMIT_HASH.unwrap_or_default(),
         built_info::BUILT_TIME_UTC,
         built_info::PROFILE,

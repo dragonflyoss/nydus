@@ -12,7 +12,6 @@ use std::ffi::{CStr, OsStr};
 use std::fmt;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -239,7 +238,7 @@ impl Rafs {
     /// Import an rafs bootstrap to initialize the filesystem instance.
     pub fn import(
         &mut self,
-        r: &mut RafsIoReader,
+        r: RafsIoReader,
         prefetch_files: Option<Vec<PathBuf>>,
     ) -> RafsResult<()> {
         if self.initialized {
@@ -252,15 +251,11 @@ impl Rafs {
 
         // Device should be ready before any prefetch.
         if self.fs_prefetch {
-            // We have to this unsafe conversion because RafsIoReader as a Box pointer can't
-            // be shared between threads safely, even after cloning.
-            let _f: File = unsafe { FromRawFd::from_raw_fd(r.as_raw_fd()) };
-            let underlying_file = _f.try_clone().unwrap();
             let sb = self.sb.clone();
             let device = self.device.clone();
 
             let _ = std::thread::spawn(move || {
-                let mut reader = Box::new(underlying_file) as RafsIoReader;
+                let mut reader = r;
                 let inodes = match prefetch_files {
                     Some(files) => {
                         let mut inodes = Vec::<Inode>::new();
@@ -765,7 +760,7 @@ mod tests {
         let bootstrapfile = source_path.to_str().unwrap();
         let mut bootstrap = RafsIoRead::from_file(bootstrapfile).unwrap();
         let mut rafs = Rafs::new(rafs_config, mountpoint, &mut bootstrap).unwrap();
-        rafs.import(&mut bootstrap, Some(vec![std::path::PathBuf::new()]))
+        rafs.import(bootstrap, Some(vec![std::path::PathBuf::new()]))
             .unwrap();
         Box::new(rafs)
     }

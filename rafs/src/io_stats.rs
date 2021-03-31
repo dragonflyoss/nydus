@@ -57,6 +57,28 @@ type FilesStatsCounters = RwLock<Vec<Arc<Option<InodeIOStats>>>>;
 /// 1K; 4K; 16K; 64K, 128K, 512K, 1M
 const BLOCK_READ_COUNT_MAX: usize = 8;
 
+fn request_size_index(size: usize) -> usize {
+    match size {
+        // <=1K
+        _ if size >> 10 == 0 => 0,
+        // <=4K
+        _ if size >> 12 == 0 => 1,
+        // <=16K
+        _ if size >> 14 == 0 => 2,
+        // <=64K
+        _ if size >> 16 == 0 => 3,
+        // <=128K
+        _ if size >> 17 == 0 => 4,
+        // <=512K
+        _ if size >> 19 == 0 => 5,
+        // <=1M
+        _ if size >> 20 == 0 => 6,
+        // > 1M
+        // Match `BLOCK_READ_COUNT_MAX = 8`
+        _ => 7,
+    }
+}
+
 /// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
 const READ_LATENCY_RANGE_MAX: usize = 8;
 
@@ -182,19 +204,10 @@ impl InodeStatsCounter for InodeIOStats {
     fn stats_cumulative(&self, fop: StatsFop, value: usize) {
         if fop == StatsFop::Read {
             self.data_read.fetch_add(value, Ordering::Relaxed);
-            // We put block count into 5 catagories e.g. 1K; 4K; 16K; 64K, 128K.
-            match value {
-                // <=1K
-                _ if value >> 10 == 0 => self.block_count_read[0].fetch_add(1, Ordering::Relaxed),
-                // <=4K
-                _ if value >> 12 == 0 => self.block_count_read[1].fetch_add(1, Ordering::Relaxed),
-                // <=16K
-                _ if value >> 14 == 0 => self.block_count_read[2].fetch_add(1, Ordering::Relaxed),
-                // <=64K
-                _ if value >> 16 == 0 => self.block_count_read[3].fetch_add(1, Ordering::Relaxed),
-                // >64K
-                _ => self.block_count_read[4].fetch_add(1, Ordering::Relaxed),
-            };
+            // Put counters into $BLOCK_READ_COUNT_MAX catagories
+            // 1K; 4K; 16K; 64K, 128K, 512K, 1M
+            let idx = request_size_index(value);
+            self.block_count_read[idx].fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -219,27 +232,6 @@ fn latency_range_index(elapsed: usize) -> usize {
         _ if elapsed <= 500_000 => 4,
         _ if elapsed <= 1_000_000 => 5,
         _ if elapsed <= 2_000_000 => 6,
-        _ => 7,
-    }
-}
-
-fn request_size_index(size: usize) -> usize {
-    match size {
-        // <=1K
-        _ if size >> 10 == 0 => 0,
-        // <=4K
-        _ if size >> 12 == 0 => 1,
-        // <=16K
-        _ if size >> 14 == 0 => 2,
-        // <=64K
-        _ if size >> 16 == 0 => 3,
-        // <=128K
-        _ if size >> 17 == 0 => 4,
-        // <=512K
-        _ if size >> 19 == 0 => 5,
-        // <=1M
-        _ if size >> 20 == 0 => 6,
-        // > 1M
         _ => 7,
     }
 }

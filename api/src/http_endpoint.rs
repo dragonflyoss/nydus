@@ -32,6 +32,7 @@ pub enum DaemonErrorKind {
     Disconnect(io::Error),
     Channel,
     Serde(SerdeError),
+    UnexpectedEvent(String),
     Other(String),
 }
 
@@ -189,6 +190,7 @@ fn translate_status_code(e: &ApiError) -> StatusCode {
         ApiError::DaemonAbnormal(kind) | ApiError::MountFailure(kind) => match kind {
             DaemonErrorKind::NotReady => StatusCode::ServiceUnavailable,
             DaemonErrorKind::Unsupported => StatusCode::NotImplemented,
+            DaemonErrorKind::UnexpectedEvent(_) => StatusCode::BadRequest,
             _ => StatusCode::InternalServerError,
         },
         ApiError::Metrics(MetricsErrorKind::Stats(IoStatsError::NoCounter)) => StatusCode::NotFound,
