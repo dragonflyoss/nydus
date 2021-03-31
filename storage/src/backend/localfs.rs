@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, remove_file, File, OpenOptions};
-use std::io::{self, Error, Result};
+use std::io::{Error, Result};
 use std::mem::{size_of, ManuallyDrop};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::{thread, time};
 use nix::sys::uio;
 use vm_memory::VolatileSlice;
 
-use crate::backend::{BackendError, BackendResult, BlobBackend, BlobBackendUploader};
+use crate::backend::{BackendError, BackendResult, BlobBackend};
 use crate::utils::{readahead, readv};
 
 use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
@@ -525,48 +525,5 @@ impl BlobBackend for LocalFs {
 
     fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
         unimplemented!("write operation not supported with localfs");
-    }
-}
-
-impl BlobBackendUploader for LocalFs {
-    fn upload(
-        &self,
-        blob_id: &str,
-        blob_path: &Path,
-        _callback: fn((usize, usize)),
-    ) -> Result<usize> {
-        let target_path = if self.use_blob_file() {
-            Path::new(&self.blob_file).to_path_buf()
-        } else {
-            Path::new(&self.dir).join(blob_id)
-        };
-
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let size = fs::metadata(blob_path)?.len() as usize;
-
-        if let Err(err) = fs::rename(blob_path, &target_path) {
-            warn!(
-                "localfs blob upload: file rename failed {:?}, fallback to copy",
-                err
-            );
-            let mut blob_file = OpenOptions::new().read(true).open(blob_path).map_err(|e| {
-                error!("localfs blob upload: open blob file failed {:?}", e);
-                e
-            })?;
-            let mut target_file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(target_path)
-                .map_err(|e| {
-                    error!("localfs blob upload: open target file failed {:?}", e);
-                    e
-                })?;
-            io::copy(&mut blob_file, &mut target_file)?;
-        }
-
-        Ok(size)
     }
 }

@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{Error, Result};
-use std::path::Path;
+use std::io::Error;
 
 use vm_memory::VolatileSlice;
 
@@ -168,16 +167,6 @@ pub trait BlobBackend {
 
     /// Write a range of data to blob from the provided slice
     fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize>;
-}
-
-// Rafs blob backend upload API
-pub trait BlobBackendUploader {
-    fn upload(
-        &self,
-        blob_id: &str,
-        blob_path: &Path,
-        callback: fn((usize, usize)),
-    ) -> Result<usize>;
 }
 
 #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
