@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 type WorkflowOption struct {
@@ -60,9 +62,7 @@ func (workflow *Workflow) getLatestBlobPath() (string, error) {
 	if latestBlobID != workflow.lastBlobID {
 		workflow.lastBlobID = latestBlobID
 		blobPath := filepath.Join(workflow.blobsDir, latestBlobID)
-		if _, err := os.Stat(blobPath); err == nil {
-			return blobPath, nil
-		}
+		return blobPath, nil
 	}
 
 	return "", nil
@@ -103,25 +103,38 @@ func (workflow *Workflow) Build(
 		workflow.parentBootstrapPath = parentBootstrapPath
 	}
 
+	blobPath := filepath.Join(workflow.blobsDir, uuid.NewString())
+
 	if err := workflow.builder.Run(BuilderOption{
 		ParentBootstrapPath: workflow.parentBootstrapPath,
 		BootstrapPath:       workflow.bootstrapPath,
 		RootfsPath:          layerDir,
-		BackendType:         "localfs",
-		BackendConfig:       workflow.backendConfig,
 		PrefetchDir:         workflow.PrefetchDir,
 		WhiteoutSpec:        whiteoutSpec,
 		OutputJSONPath:      workflow.buildOutputJSONPath(),
+		BlobPath:            blobPath,
 	}); err != nil {
 		return "", errors.Wrap(err, fmt.Sprintf("build layer %s", layerDir))
 	}
 
 	workflow.parentBootstrapPath = workflow.bootstrapPath
 
-	blobPath, err := workflow.getLatestBlobPath()
+	digestedBlobPath, err := workflow.getLatestBlobPath()
 	if err != nil {
 		return "", errors.Wrap(err, "get latest blob")
 	}
 
-	return blobPath, nil
+	logrus.Debugf("original: %s. digested: %s", blobPath, digestedBlobPath)
+
+	// Rename the newly generated blob to its sha256 digest.
+	// Because the flow will use the basename as the blob object to be pushed to registry.
+	// When `digestedBlobPath` is void, this layer's bootsrap can be pushed meanwhile not for blob
+	if digestedBlobPath != "" {
+		err = os.Rename(blobPath, digestedBlobPath)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return digestedBlobPath, nil
 }

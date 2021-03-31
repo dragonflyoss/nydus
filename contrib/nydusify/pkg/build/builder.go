@@ -22,6 +22,8 @@ type BuilderOption struct {
 	PrefetchDir         string
 	WhiteoutSpec        string
 	OutputJSONPath      string
+	// A regular file or fifo into which commands nydus-image to dump contents.
+	BlobPath string
 }
 
 type Builder struct {
@@ -56,17 +58,15 @@ func (builder *Builder) Run(option BuilderOption) error {
 		args,
 		"--bootstrap",
 		option.BootstrapPath,
-		"--backend-type",
-		option.BackendType,
-		"--backend-config",
-		option.BackendConfig,
-		option.RootfsPath,
 		"--log-level",
 		"warn",
 		"--whiteout-spec",
 		option.WhiteoutSpec,
 		"--output-json",
 		option.OutputJSONPath,
+		"--blob",
+		option.BlobPath,
+		option.RootfsPath,
 	)
 
 	if option.PrefetchDir != "" {
