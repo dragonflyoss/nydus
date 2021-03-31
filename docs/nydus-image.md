@@ -11,46 +11,19 @@
 nydus-image create \
   --bootstrap /path/to/bootstrap
   --backend-type localfs
-  --backend-config '{"dir":"/path/to/blobs/dir"}'
+  --blob /path/to/blob
   /path/to/source/dir
 ```
 
 ## Output Blob
 
-We can upload the blob to a storage backend or specify an output path, here are some examples with backend config in JSON string:
+Nydus-image tool writes data portion into a file which is generally called `blob`. It has two options to control where `blob` is saved.
 
-Localfs Backend:
+- With `--blob <BLOB_FILE>` option, nydus-image tool will write blob contents into the custom file path `BLOB_FILE`
 
-``` shell
-# Build blob file to specified file path
---backend-type localfs --backend-config '{"blob_file":"/path/to/blob"}'
-# Build blob file to specified directory path
---backend-type localfs --backend-config '{"dir":"/path/to/blobs/dir"}'
-```
+- With `--blob-dir BLOB_DIR` provided to command, nydus-image tool creates the blob file named as its sha-256 digest. This is useful when you don't want to set a custom name or you are building a layered nydus image. Please create the `BLOB_DIR` before perform the command.
 
-OSS Backend:
-
-``` shell
---backend-type oss --backend-config '{"endpoint":"region.aliyuncs.com","access_key_id":"","access_key_secret":"","bucket_name":""}'
-```
-
-Container Image Registry Backend:
-
-``` shell
---backend-type registry --backend-config '{"scheme":"https","host":"my-registry:5000","repo":"test/repo","auth":"<base64_encoded_auth>"}'
-```
-
-Or using a backend JSON config file:
-
-``` shell
---backend-type registry --backend-config-file /path/to/config.json
-```
-
-Or using `--blob` option to specify an output path:
-
-``` shell
---blob /path/to/blob
-```
+Generally, this is regular file which blob content will be dumped into. It can also be a fifo(named pipe) from which nydusify or other tool can receive blob content.
 
 ## Layered Build Nydus Image
 
@@ -60,15 +33,13 @@ Or using `--blob` option to specify an output path:
 # Build from lower layer
 nydus-image create \
   --bootstrap /path/to/parent-bootstrap
-  --backend-type localfs
-  --backend-config '{"dir":"/path/to/blobs"}'
+  --blob /path/to/blob
   /path/to/lower/dir
 # Build from upper layer based on lower layer
 nydus-image create \
   --parent-bootstrap /path/to/parent-bootstrap
   --bootstrap /path/to/bootstrap
-  --backend-type localfs
-  --backend-config '{"dir":"/path/to/blobs"}'
+  --blob /path/to/blob
   /path/to/upper/dir
 ```
 
