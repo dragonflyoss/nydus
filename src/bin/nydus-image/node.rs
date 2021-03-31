@@ -211,7 +211,7 @@ impl Node {
     #[allow(clippy::too_many_arguments)]
     pub fn dump_blob(
         &mut self,
-        mut f_blob: Option<&mut RafsIoWriter>,
+        f_blob: &mut RafsIoWriter,
         blob_hash: &mut Sha256,
         compress_offset: &mut u64,
         decompress_offset: &mut u64,
@@ -322,13 +322,11 @@ impl Node {
             blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
-            if let Some(f_blob) = f_blob.as_mut() {
-                event_tracer!("blob_decompressed_size", +chunk_size);
-                event_tracer!("blob_compressed_size", +compressed_size);
-                f_blob
-                    .write_all(&compressed)
-                    .context("failed to write blob")?;
-            }
+            event_tracer!("blob_decompressed_size", +chunk_size);
+            event_tracer!("blob_compressed_size", +compressed_size);
+            f_blob
+                .write_all(&compressed)
+                .context("failed to write blob")?;
 
             // Cache chunk digest info
             chunk_cache.insert(chunk.block_id, chunk);

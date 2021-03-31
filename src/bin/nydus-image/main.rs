@@ -12,7 +12,6 @@ mod builder;
 mod node;
 mod stargz;
 mod tree;
-mod uploader;
 mod validator;
 
 #[macro_use]
@@ -23,7 +22,7 @@ extern crate lazy_static;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
 use std::collections::BTreeMap;
@@ -40,7 +39,6 @@ use node::WhiteoutSpec;
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
-use uploader::Uploader;
 use validator::Validator;
 
 #[derive(Serialize, Default)]
@@ -151,8 +149,8 @@ fn main() -> Result<()> {
                     Arg::with_name("blob")
                         .long("blob")
                         .help("blob file path")
+                        .required(true)
                         .takes_value(true)
-                        .conflicts_with("backend-type"),
                 )
                 .arg(
                     Arg::with_name("bootstrap")
@@ -164,7 +162,7 @@ fn main() -> Result<()> {
                 .arg(
                     Arg::with_name("blob-id")
                         .long("blob-id")
-                        .help("blob id (as object id in backend)")
+                        .help("blob id (as object id in backend/oss)")
                         .takes_value(true),
                 )
                 .arg(
@@ -189,25 +187,6 @@ fn main() -> Result<()> {
                         .help("bootstrap file path of parent (optional)")
                         .takes_value(true)
                         .required(false),
-                )
-                .arg(
-                    Arg::with_name("backend-type")
-                        .long("backend-type")
-                        .help("blob storage backend type (enable blob upload if specified)")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("backend-config")
-                        .long("backend-config")
-                        .help("blob storage backend config (JSON string)")
-                        .takes_value(true)
-                        .conflicts_with("backend-config-file"),
-                )
-                .arg(
-                    Arg::with_name("backend-config-file")
-                        .long("backend-config-file")
-                        .help("blob storage backend config (JSON file)")
-                        .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("prefetch-policy")
@@ -335,34 +314,9 @@ fn main() -> Result<()> {
 
         let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
 
-        let mut uploader = None;
-        let mut blob_path = match matches.value_of("blob") {
-            Some(p) => Some(PathBuf::from(p)),
-            None => {
-                if source_type == SourceType::Directory {
-                    let backend_type = matches
-                        .value_of("backend-type")
-                        .ok_or_else(|| anyhow!("blob or backend-type must be specified"))?;
-
-                    let real_uploader =
-                        if let Some(backend_config) = matches.value_of("backend-config") {
-                            Uploader::from_config_str(backend_type, backend_config)?
-                        } else if let Some(backend_config_file) =
-                            matches.value_of("backend-config-file")
-                        {
-                            Uploader::from_config_file(backend_type, backend_config_file)?
-                        } else {
-                            bail!("backend-config or backend-config-file must be specified")
-                        };
-
-                    let blob_path = Some(real_uploader.blob_path.clone());
-                    uploader = Some(real_uploader);
-                    blob_path
-                } else {
-                    None
-                }
-            }
-        };
+        // Must specify a path to blob file.
+        // Safe to unwrap because it is marked as required parameter.
+        let blob_path: PathBuf = matches.value_of("blob").map(|b| b.into()).unwrap();
 
         let mut parent_bootstrap = Path::new("");
         if let Some(_parent_bootstrap) = matches.value_of("parent-bootstrap") {
@@ -387,10 +341,11 @@ fn main() -> Result<()> {
 
         let aligned_chunk = matches.is_present("aligned-chunk");
 
+        // External tool like `nydusify` might rename the blob to a OCI distribution compatible one.
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
-            blob_path.as_deref(),
+            &blob_path,
             bootstrap_path,
             parent_bootstrap,
             blob_id,
@@ -427,19 +382,10 @@ fn main() -> Result<()> {
         dump_result_output(matches, blob_ids.clone())?;
 
         if blob_size > 0 {
-            // Upload blob file
-            if let Some(uploader) = uploader {
-                let blob_id = blob_ids.last().unwrap();
-                blob_path = uploader.upload(blob_id)?;
-            }
-            if let Some(blob_path) = blob_path.as_ref() {
-                info!(
-                    "build finished, blob id: {:?}, blob file: {:?}",
-                    blob_ids, blob_path,
-                );
-            } else {
-                info!("build finished, blob id: {:?}", blob_ids);
-            }
+            info!(
+                "build finished, blob id: {:?}, blob file: {:?}",
+                blob_ids, blob_path,
+            );
         } else {
             info!("build finished, no blob output");
         }
