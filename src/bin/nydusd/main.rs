@@ -217,6 +217,15 @@ fn main() -> Result<()> {
                 .takes_value(true)
                 .required(false)
                 .global(true),
+        )
+        .arg(
+            Arg::with_name("virtual-mountpoint")
+                .long("virtual-mountpoint")
+                .help("Mount bootstrap or shared-dir (if provided) to specificed virtual mountpoint")
+                .takes_value(true)
+                .default_value("/")
+                .required(false)
+                .global(true),
         );
 
     #[cfg(feature = "fusedev")]
@@ -277,6 +286,8 @@ fn main() -> Result<()> {
     let shared_dir = cmd_arguments_parsed.value_of("shared-dir");
     // bootstrap means rafs only
     let bootstrap = cmd_arguments_parsed.value_of("bootstrap");
+    // safe as virtual_mountpoint default to "/"
+    let virtual_mnt = cmd_arguments_parsed.value_of("virtual-mountpoint").unwrap();
     // apisock means admin api socket support
     let apisock = cmd_arguments_parsed.value_of("apisock");
     let rlimit_nofile_default = get_default_rlimit_nofile()?;
@@ -300,7 +311,7 @@ fn main() -> Result<()> {
             fs_type: FsBackendType::PassthroughFs,
             source: shared_dir.to_string(),
             config: "".to_string(),
-            mountpoint: "/".to_string(),
+            mountpoint: virtual_mnt.to_string(),
             prefetch_files: None,
         };
 
@@ -321,7 +332,7 @@ fn main() -> Result<()> {
             fs_type: FsBackendType::Rafs,
             source: b.to_string(),
             config: std::fs::read_to_string(config)?,
-            mountpoint: "/".to_string(),
+            mountpoint: virtual_mnt.to_string(),
             prefetch_files,
         };
 
