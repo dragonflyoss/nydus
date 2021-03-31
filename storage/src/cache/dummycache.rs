@@ -7,18 +7,14 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::metadata::digest;
-use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
-use crate::storage::backend::BlobBackend;
-use crate::storage::cache::*;
-use crate::storage::compress;
-use crate::storage::device::RafsBio;
-use crate::storage::factory::CacheConfig;
-use crate::storage::utils::{alloc_buf, copyv};
-use crate::{RafsError, RafsResult};
+use crate::backend::BlobBackend;
+use crate::cache::*;
+use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
+use crate::factory::CacheConfig;
+use crate::utils::{alloc_buf, copyv};
+use crate::{compress, StorageError, StorageResult};
 
-use nydus_utils::eother;
+use nydus_utils::{digest, eother};
 
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,
@@ -32,22 +28,18 @@ impl RafsCache for DummyCache {
         self.backend.as_ref()
     }
 
-    fn has(&self, _blk: Arc<dyn RafsChunkInfo>) -> bool {
+    fn has(&self, _cki: &dyn RafsChunkInfo) -> bool {
         true
     }
 
-    fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
-        for b in blobs {
-            let _ = self.backend.prefetch_blob(
-                b.blob_id.as_str(),
-                b.readahead_offset,
-                b.readahead_size,
-            );
+    fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()> {
+        for b in prefetch_vec {
+            let _ = self.backend.prefetch_blob(&b.blob_id, b.offset, b.len);
         }
         Ok(())
     }
 
-    fn evict(&self, _blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
+    fn evict(&self, _cki: &dyn RafsChunkInfo) -> Result<()> {
         Ok(())
     }
 
@@ -98,12 +90,12 @@ impl RafsCache for DummyCache {
     }
 
     /// Prefetch works when blobcache is enabled
-    fn prefetch(&self, _bios: &mut [RafsBio]) -> RafsResult<usize> {
-        Err(RafsError::Unsupported)
+    fn prefetch(&self, _bios: &mut [RafsBio]) -> StorageResult<usize> {
+        Err(StorageError::Unsupported)
     }
 
-    fn stop_prefetch(&self) -> RafsResult<()> {
-        Err(RafsError::Unsupported)
+    fn stop_prefetch(&self) -> StorageResult<()> {
+        Err(StorageError::Unsupported)
     }
 
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize> {

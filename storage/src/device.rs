@@ -12,12 +12,11 @@ use fuse_rs::api::filesystem::{ZeroCopyReader, ZeroCopyWriter};
 use fuse_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
-use crate::metadata::digest;
-use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
-use crate::storage::cache::RafsCache;
-use crate::storage::{compress, factory};
-use crate::RafsResult;
+use crate::cache::RafsCache;
+use crate::{compress, factory, StorageResult};
+
+use nydus_utils::digest::{self, RafsDigest};
+use nydus_utils::eio;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
@@ -25,6 +24,50 @@ static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, un
 #[derive(Clone)]
 pub struct RafsDevice {
     rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
+}
+
+bitflags! {
+    pub struct RafsChunkFlags: u32 {
+        /// chunk is compressed
+        const COMPRESSED = 0x0000_0001;
+        const HOLECHUNK = 0x0000_0002;
+    }
+}
+
+/// Trait to access Rafs Data Chunk Information.
+/// Rafs store file contents into blob, which is isolated from the metadata.
+/// ChunkInfo describes how a chunk is located and arranged within blob.
+/// It is abstracted because Rafs have several ways to load metadata from bootstrap
+/// TODO: Better we can put RafsChunkInfo back to rafs, but in order to isolate
+/// two components and have a better performance, use RafsChunkInfo as a parameter
+/// and keep it in storage trait. Otherwise we have to copy chunk digest everywhere.
+/// We didn't make RafsChunkInfo as struct because we don't want to copy from memory mapped region of rafs metadata.
+pub trait RafsChunkInfo: Sync + Send {
+    fn block_id(&self) -> &RafsDigest;
+    fn blob_index(&self) -> u32;
+    fn compress_offset(&self) -> u64;
+    fn compress_size(&self) -> u32;
+    fn decompress_offset(&self) -> u64;
+    fn decompress_size(&self) -> u32;
+    fn file_offset(&self) -> u64;
+    fn is_compressed(&self) -> bool;
+    fn is_hole(&self) -> bool;
+    fn flags(&self) -> RafsChunkFlags;
+}
+
+impl Default for RafsChunkFlags {
+    fn default() -> Self {
+        RafsChunkFlags::empty()
+    }
+}
+
+/// Backend may be capable to prefetch a range of blob bypass upper file system
+/// to blobcache. This should be asynchronous, so filesystem read cache hit
+/// should validate data integrity.
+pub struct BlobPrefetchControl {
+    pub blob_id: String,
+    pub offset: u32,
+    pub len: u32,
 }
 
 impl RafsDevice {
@@ -54,8 +97,8 @@ impl RafsDevice {
         Ok(())
     }
 
-    pub fn init(&self, sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> io::Result<()> {
-        self.rw_layer.load().init(sb_meta, blobs)
+    pub fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> io::Result<()> {
+        self.rw_layer.load().init(prefetch_vec)
     }
 
     pub fn close(&self) -> io::Result<()> {
@@ -84,13 +127,13 @@ impl RafsDevice {
         Ok(count)
     }
 
-    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> RafsResult<usize> {
+    pub fn prefetch(&self, desc: &mut RafsBioDesc) -> StorageResult<usize> {
         self.rw_layer.load().prefetch(desc.bi_vec.as_mut_slice())?;
 
         Ok(desc.bi_size)
     }
 
-    pub fn stop_prefetch(&self) -> RafsResult<()> {
+    pub fn stop_prefetch(&self) -> StorageResult<()> {
         self.rw_layer.load().stop_prefetch()
     }
 }
@@ -157,7 +200,7 @@ impl RafsBioDevice<'_> {
             while total > 0 {
                 let cnt = cmp::min(total, ZEROS.len());
                 buf.write_slice(&ZEROS[0..cnt], offset)
-                    .map_err(|_| err_decompress_failed!())?;
+                    .map_err(|_| eio!("decompression failed"))?;
                 count += cnt;
                 remain -= cnt;
                 total -= cnt;

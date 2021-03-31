@@ -1070,7 +1070,7 @@ dependencies = [
  "lazy_static",
  "log",
  "micro_http",
- "rafs",
+ "nydus-utils",
  "serde",
  "serde_derive",
  "serde_json",
@@ -1105,6 +1105,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2",
+ "storage",
  "vhost",
  "vhost_user_backend",
  "vm-memory",
@@ -1117,17 +1118,20 @@ name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
  "backtrace",
+ "blake3",
  "built",
  "chrono",
  "epoll",
  "flexi_logger",
  "fuse-rs",
+ "lazy_static",
  "libc",
  "log",
  "nix",
  "num-traits",
  "serde",
  "serde_json",
+ "sha2",
  "vmm-sys-util 0.6.0",
 ]
 
@@ -1327,22 +1331,20 @@ dependencies = [
  "flate2",
  "fuse-rs",
  "futures",
- "governor",
  "hmac",
- "httpdate",
  "lazy_static",
  "libc",
  "log",
  "lz4-sys",
  "nix",
  "nydus-utils",
- "reqwest",
  "serde",
  "serde_json",
  "serde_with",
  "sha-1",
  "sha2",
  "spmc",
+ "storage",
  "url",
  "vm-memory",
  "vmm-sys-util 0.6.0",
@@ -1731,6 +1733,37 @@ name = "spmc"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02a8428da277a8e3a15271d79943e80ccc2ef254e78813a166a08d65e4c3ece5"
+
+[[package]]
+name = "storage"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "base64",
+ "bitflags",
+ "flate2",
+ "fuse-rs",
+ "futures",
+ "governor",
+ "hmac",
+ "httpdate",
+ "libc",
+ "log",
+ "lz4-sys",
+ "nix",
+ "nydus-utils",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha-1",
+ "sha2",
+ "spmc",
+ "url",
+ "vm-memory",
+ "vmm-sys-util 0.4.0",
+]
 
 [[package]]
 name = "strsim"

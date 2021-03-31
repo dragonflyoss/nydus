@@ -10,16 +10,12 @@ use std::sync::Arc;
 
 use vm_memory::VolatileSlice;
 
-use crate::metadata::digest;
-use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta};
-use crate::storage::backend::BlobBackend;
-use crate::storage::compress;
-use crate::storage::device::RafsBio;
-use crate::storage::utils::{alloc_buf, digest_check};
-use crate::RafsResult;
+use crate::backend::BlobBackend;
+use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
+use crate::utils::{alloc_buf, digest_check};
+use crate::{compress, StorageResult};
 
-use nydus_utils::eio;
+use nydus_utils::{digest, eio};
 
 pub mod blobcache;
 pub mod dummycache;
@@ -72,14 +68,12 @@ pub struct PrefetchWorker {
 }
 
 pub trait RafsCache {
-    /// Whether has block data
-    fn has(&self, blk: Arc<dyn RafsChunkInfo>) -> bool;
-
     /// Do init after super block loaded
-    fn init(&self, sb_info: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()>;
-
+    fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()>;
+    /// Whether has block data
+    fn has(&self, cki: &dyn RafsChunkInfo) -> bool;
     /// Evict block data
-    fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()>;
+    fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()>;
 
     /// Flush cache
     fn flush(&self) -> Result<()>;
@@ -94,8 +88,8 @@ pub trait RafsCache {
     /// Get the size of a blob
     fn blob_size(&self, blob_id: &str) -> Result<u64>;
 
-    fn prefetch(&self, bio: &mut [RafsBio]) -> RafsResult<usize>;
-    fn stop_prefetch(&self) -> RafsResult<()>;
+    fn prefetch(&self, bio: &mut [RafsBio]) -> StorageResult<usize>;
+    fn stop_prefetch(&self) -> StorageResult<()>;
 
     /// Release cache
     fn release(&self);

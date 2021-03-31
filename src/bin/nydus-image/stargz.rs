@@ -14,7 +14,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use rafs::metadata::digest::{Algorithm, RafsDigest};
+use nydus_utils::digest::{Algorithm, RafsDigest};
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
 

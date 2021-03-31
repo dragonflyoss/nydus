@@ -17,11 +17,13 @@ use anyhow::{anyhow, bail, Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
-use rafs::metadata::digest::{self, RafsDigest};
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsMode, RafsStore, RafsSuper};
-use rafs::storage::compress;
 use rafs::{RafsIoRead, RafsIoWrite};
+// FIXME: Must image tool depend on storage backend?
+use storage::compress;
+
+use nydus_utils::digest::{self, RafsDigest};
 
 use crate::stargz;
 use crate::trace::*;

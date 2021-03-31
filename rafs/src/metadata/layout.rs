@@ -40,7 +40,10 @@ use std::os::unix::ffi::OsStrExt;
 
 use serde::Serialize;
 
-use nydus_utils::{einval, enoent, ByteSize};
+use nydus_utils::{
+    digest::{self, RafsDigest},
+    einval, enoent, ByteSize,
+};
 
 use super::*;
 
@@ -261,7 +264,7 @@ impl OndiskSuperBlock {
             || self.version() > RAFS_SUPER_VERSION_V5 as u32
             || self.sb_size() != RAFS_SUPERBLOCK_SIZE as u32
         {
-            return Err(err_invalid_superblock!());
+            return Err(einval!("invalid superblock"));
         }
 
         match self.version() {
@@ -270,7 +273,7 @@ impl OndiskSuperBlock {
                     || self.inode_table_offset() != 0
                     || self.inode_table_entries() != 0
                 {
-                    return Err(err_invalid_superblock!());
+                    return Err(einval!("invalid superblock"));
                 }
             }
             RAFS_SUPER_VERSION_V5 => {
@@ -278,7 +281,7 @@ impl OndiskSuperBlock {
                     || self.inode_table_offset() < RAFS_SUPERBLOCK_SIZE as u64
                     || self.inode_table_offset() & 0x7 != 0
                 {
-                    return Err(err_invalid_superblock!());
+                    return Err(einval!("invalid superblock"));
                 }
             }
             _ => {
@@ -822,20 +825,6 @@ pub struct OndiskChunkInfo {
     pub reserved: u64,
 }
 
-bitflags! {
-    pub struct RafsChunkFlags: u32 {
-        /// chunk is compressed
-        const COMPRESSED = 0x0000_0001;
-        const HOLECHUNK = 0x0000_0002;
-    }
-}
-
-impl Default for RafsChunkFlags {
-    fn default() -> Self {
-        RafsChunkFlags::empty()
-    }
-}
-
 impl OndiskChunkInfo {
     pub fn new() -> Self {
         OndiskChunkInfo::default()
@@ -853,38 +842,6 @@ impl RafsStore for OndiskChunkInfo {
     }
 }
 
-impl RafsChunkInfo for OndiskChunkInfo {
-    fn validate(&self, _sb: &RafsSuperMeta) -> Result<()> {
-        Ok(())
-    }
-
-    #[inline]
-    fn block_id(&self) -> &RafsDigest {
-        &self.block_id
-    }
-
-    #[inline]
-    fn is_compressed(&self) -> bool {
-        self.flags.contains(RafsChunkFlags::COMPRESSED)
-    }
-
-    #[inline]
-    fn is_hole(&self) -> bool {
-        self.flags.contains(RafsChunkFlags::HOLECHUNK)
-    }
-
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
-        Ok(*self)
-    }
-
-    impl_getter!(blob_index, blob_index, u32);
-    impl_getter!(compress_offset, compress_offset, u64);
-    impl_getter!(compress_size, compress_size, u32);
-    impl_getter!(decompress_offset, decompress_offset, u64);
-    impl_getter!(decompress_size, decompress_size, u32);
-    impl_getter!(file_offset, file_offset, u64);
-}
-
 impl_bootstrap_converter!(OndiskChunkInfo);
 
 impl fmt::Display for OndiskChunkInfo {
@@ -899,7 +856,7 @@ impl fmt::Display for OndiskChunkInfo {
             self.decompress_size,
             self.blob_index,
             self.block_id,
-            self.is_compressed(),
+            self.flags.contains(RafsChunkFlags::COMPRESSED),
         )
     }
 }

@@ -17,8 +17,8 @@ use nydus_api::http_endpoint::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
     DaemonErrorKind, MetricsErrorKind,
 };
+use nydus_utils::metrics;
 use nydus_utils::{epipe, last_error};
-use rafs::io_stats;
 
 use crate::daemon::{
     DaemonError, FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, NydusDaemon,
@@ -99,7 +99,7 @@ impl ApiServer {
     }
 
     fn events() -> ApiResponse {
-        let events = io_stats::export_events().map_err(|e| ApiError::Events(format!("{:?}", e)))?;
+        let events = metrics::export_events().map_err(|e| ApiError::Events(format!("{:?}", e)))?;
         Ok(ApiResponsePayload::Events(events))
     }
 
@@ -125,32 +125,32 @@ impl ApiServer {
     }
 
     fn export_global_metrics(id: Option<String>) -> ApiResponse {
-        io_stats::export_global_stats(&id)
+        metrics::export_global_stats(&id)
             .map(ApiResponsePayload::FsGlobalMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_files_metrics(id: Option<String>) -> ApiResponse {
         // TODO: Use mount point name to refer to per rafs metrics.
-        io_stats::export_files_stats(&id)
+        metrics::export_files_stats(&id)
             .map(ApiResponsePayload::FsFilesMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_access_patterns(id: Option<String>) -> ApiResponse {
-        io_stats::export_files_access_pattern(&id)
+        metrics::export_files_access_pattern(&id)
             .map(ApiResponsePayload::FsFilesPatterns)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_backend_metrics(id: Option<String>) -> ApiResponse {
-        io_stats::export_backend_metrics(&id)
+        metrics::export_backend_metrics(&id)
             .map(ApiResponsePayload::BackendMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
     fn export_blobcache_metrics(id: Option<String>) -> ApiResponse {
-        io_stats::export_blobcache_metrics(&id)
+        metrics::export_blobcache_metrics(&id)
             .map(ApiResponsePayload::BlobcacheMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }

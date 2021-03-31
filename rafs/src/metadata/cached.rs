@@ -20,7 +20,7 @@ use crate::metadata::layout::*;
 use crate::metadata::*;
 use crate::RafsIoReader;
 
-use nydus_utils::{einval, enoent, enotdir, ByteSize};
+use nydus_utils::{digest::RafsDigest, einval, enoent, enotdir, ByteSize};
 
 pub struct CachedInodes {
     s_blob: Arc<OndiskBlobTable>,
@@ -486,11 +486,10 @@ impl CachedChunkInfo {
         }
     }
 
-    pub fn load(&mut self, sb: &RafsSuperMeta, r: &mut RafsIoReader) -> Result<()> {
+    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         let mut chunk = OndiskChunkInfo::new();
 
         r.read_exact(chunk.as_mut())?;
-        chunk.validate(sb)?;
         self.copy_from_ondisk(&chunk);
 
         Ok(())
@@ -498,21 +497,17 @@ impl CachedChunkInfo {
 
     fn copy_from_ondisk(&mut self, chunk: &OndiskChunkInfo) {
         self.c_block_id = Arc::new(chunk.block_id);
-        self.c_blob_index = chunk.blob_index();
-        self.c_compress_offset = chunk.compress_offset();
-        self.c_decompress_offset = chunk.decompress_offset();
-        self.c_decompress_size = chunk.decompress_size();
-        self.c_file_offset = chunk.file_offset();
-        self.c_compr_size = chunk.compress_size();
+        self.c_blob_index = chunk.blob_index;
+        self.c_compress_offset = chunk.compress_offset;
+        self.c_decompress_offset = chunk.decompress_offset;
+        self.c_decompress_size = chunk.decompress_size;
+        self.c_file_offset = chunk.file_offset;
+        self.c_compr_size = chunk.compress_size;
         self.c_flags = chunk.flags;
     }
 }
 
 impl RafsChunkInfo for CachedChunkInfo {
-    fn validate(&self, _sb: &RafsSuperMeta) -> Result<()> {
-        Ok(())
-    }
-
     fn block_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
@@ -525,26 +520,13 @@ impl RafsChunkInfo for CachedChunkInfo {
         self.c_flags.contains(RafsChunkFlags::HOLECHUNK)
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
-        Ok(OndiskChunkInfo {
-            block_id: *self.block_id(),
-            blob_index: self.blob_index(),
-            flags: self.c_flags,
-            compress_size: self.compress_size(),
-            decompress_size: self.decompress_size(),
-            compress_offset: self.compress_offset(),
-            decompress_offset: self.decompress_offset(),
-            file_offset: self.file_offset(),
-            reserved: 0u64,
-        })
-    }
-
     impl_getter!(blob_index, c_blob_index, u32);
     impl_getter!(compress_offset, c_compress_offset, u64);
     impl_getter!(compress_size, c_compr_size, u32);
     impl_getter!(decompress_offset, c_decompress_offset, u64);
     impl_getter!(decompress_size, c_decompress_size, u32);
     impl_getter!(file_offset, c_file_offset, u64);
+    impl_getter!(flags, c_flags, RafsChunkFlags);
 }
 
 impl From<&OndiskChunkInfo> for CachedChunkInfo {

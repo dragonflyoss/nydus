@@ -30,9 +30,9 @@ use arc_swap::{ArcSwap, Guard};
 
 use crate::metadata::layout::*;
 use crate::metadata::*;
-use crate::storage::utils::readahead;
+use storage::utils::readahead;
 
-use nydus_utils::{ebadf, einval, enoent, enotdir, last_error};
+use nydus_utils::{digest::RafsDigest, ebadf, einval, enoent, enotdir, last_error};
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {
@@ -67,7 +67,7 @@ macro_rules! impl_chunkinfo_getter {
         fn $G(&self) -> $U {
             let state = self.state();
 
-            self.chunk(state.deref()).$G()
+            self.chunk(state.deref()).$G
         }
     };
 }
@@ -594,7 +594,6 @@ impl RafsInode for OndiskInodeWrapper {
 
         let chunk = state.cast_to_ref::<OndiskChunkInfo>(state.base, offset)?;
         let wrapper = OndiskChunkInfoWrapper::new(chunk, self.mapping.clone(), offset);
-        wrapper.validate(&state.meta)?;
 
         Ok(Arc::new(wrapper))
     }
@@ -733,6 +732,7 @@ pub struct OndiskChunkInfoWrapper {
 unsafe impl Send for OndiskChunkInfoWrapper {}
 unsafe impl Sync for OndiskChunkInfoWrapper {}
 
+// This is *direct* metadata mode in-memory chunk info object.
 impl OndiskChunkInfoWrapper {
     #[inline]
     fn new(chunk: &OndiskChunkInfo, mapping: DirectMapping, offset: usize) -> Self {
@@ -765,22 +765,20 @@ impl OndiskChunkInfoWrapper {
 
 impl RafsChunkInfo for OndiskChunkInfoWrapper {
     #[inline]
-    fn validate(&self, sb: &RafsSuperMeta) -> Result<()> {
-        let state = self.state();
-
-        state.validate_range(self.offset, size_of::<OndiskChunkInfo>())?;
-
-        self.chunk(state.deref()).validate(sb)
-    }
-
-    #[inline]
     fn block_id(&self) -> &RafsDigest {
         &self.digest
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo> {
-        let state = self.state();
-        Ok(*self.chunk(state.deref()))
+    fn is_compressed(&self) -> bool {
+        self.chunk(self.state().deref())
+            .flags
+            .contains(RafsChunkFlags::COMPRESSED)
+    }
+
+    fn is_hole(&self) -> bool {
+        self.chunk(self.state().deref())
+            .flags
+            .contains(RafsChunkFlags::HOLECHUNK)
     }
 
     impl_chunkinfo_getter!(blob_index, u32);
@@ -789,6 +787,5 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
     impl_chunkinfo_getter!(decompress_offset, u64);
     impl_chunkinfo_getter!(decompress_size, u32);
     impl_chunkinfo_getter!(file_offset, u64);
-    impl_chunkinfo_getter!(is_compressed, bool);
-    impl_chunkinfo_getter!(is_hole, bool);
+    impl_chunkinfo_getter!(flags, RafsChunkFlags);
 }

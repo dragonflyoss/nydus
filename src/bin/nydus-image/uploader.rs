@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use vmm_sys_util::tempfile::TempFile;
 
-use rafs::storage::{backend, factory};
+use storage::{backend, factory};
 
 #[derive(PartialEq)]
 enum Behavior {

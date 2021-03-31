@@ -10,13 +10,11 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::value::Value;
 
-use crate::metadata::digest;
-use crate::storage::backend::*;
-use crate::storage::cache::*;
+use crate::backend::*;
+use crate::cache::*;
+use crate::compress;
 
-use crate::storage::compress;
-
-use nydus_utils::einval;
+use nydus_utils::{digest, einval};
 
 // storage backend config
 #[derive(Default, Clone, Deserialize)]

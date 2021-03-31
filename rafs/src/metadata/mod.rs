@@ -23,30 +23,33 @@ use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::Entry;
 use fuse_rs::api::filesystem::ROOT_ID;
 
-use self::digest::RafsDigest;
 use self::direct::DirectMapping;
 use self::layout::*;
-use self::noop::NoopInodes;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::metadata::cached::CachedInodes;
-use crate::storage::compress;
-use crate::storage::device::{RafsBio, RafsBioDesc};
+use storage::compress;
+use storage::device::{RafsBio, RafsBioDesc};
+// FIXME: Move this definition to metadata crate if we have it some day.
+pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
 use crate::*;
 
-use nydus_utils::{ebadf, einval, enoent};
+mod noop;
+use noop::NoopInodes;
+
+use nydus_utils::{
+    digest::{self, RafsDigest},
+    ebadf, einval, enoent,
+};
 
 pub mod cached;
-pub mod digest;
 pub mod direct;
 pub mod layout;
-pub mod noop;
 
-pub const RAFS_DIGEST_LENGTH: usize = 32;
+pub use storage::device::{RafsChunkFlags, RafsChunkInfo};
+
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
-// FIXME: u64 for this constant is extremely large, which is unnecessary as `u32` can represent block size 4GB.
-pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
 const DOT: &str = ".";
 const DOTDOT: &str = "..";
@@ -63,15 +66,6 @@ macro_rules! impl_getter_setter {
 
         fn $S(&mut self, $F: $U) {
             self.$F = $F;
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! impl_getter {
-    ($G: ident, $F: ident, $U: ty) => {
-        fn $G(&self) -> $U {
-            self.$F
         }
     };
 }
@@ -750,25 +744,6 @@ pub(crate) fn calculate_bio_chunk_index(
     (index_start, index_end)
 }
 
-/// Trait to access Rafs Data Chunk Information.
-pub trait RafsChunkInfo: Sync + Send {
-    fn validate(&self, sb: &RafsSuperMeta) -> Result<()>;
-
-    fn block_id(&self) -> &RafsDigest;
-    fn blob_index(&self) -> u32;
-
-    fn compress_offset(&self) -> u64;
-    fn compress_size(&self) -> u32;
-    fn decompress_offset(&self) -> u64;
-    fn decompress_size(&self) -> u32;
-
-    fn file_offset(&self) -> u64;
-    fn is_compressed(&self) -> bool;
-    fn is_hole(&self) -> bool;
-
-    fn cast_ondisk(&self) -> Result<OndiskChunkInfo>;
-}
-
 /// Trait to store Rafs meta block and validate alignment.
 pub trait RafsStore {
     fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize>;
@@ -784,14 +759,54 @@ pub trait RafsStore {
 
 #[cfg(test)]
 mod tests {
+    use crate::metadata::{add_chunk_to_bio_desc, calculate_bio_chunk_index};
+    use nydus_utils::digest::RafsDigest;
     use std::sync::Arc;
+    use storage::device::RafsBioDesc;
+    use storage::device::{RafsChunkFlags, RafsChunkInfo};
+    use storage::impl_getter;
 
-    use crate::metadata::{add_chunk_to_bio_desc, calculate_bio_chunk_index, OndiskChunkInfo};
-    use crate::storage::device::RafsBioDesc;
+    #[derive(Default, Copy, Clone)]
+    struct MockChunkInfo {
+        pub block_id: RafsDigest,
+        pub blob_index: u32,
+        pub flags: RafsChunkFlags,
+        pub compress_size: u32,
+        pub decompress_size: u32,
+        pub compress_offset: u64,
+        pub decompress_offset: u64,
+        pub file_offset: u64,
+        pub reserved: u64,
+    }
+
+    impl MockChunkInfo {
+        fn new() -> Self {
+            MockChunkInfo::default()
+        }
+    }
+
+    impl RafsChunkInfo for MockChunkInfo {
+        fn block_id(&self) -> &RafsDigest {
+            &self.block_id
+        }
+        fn is_compressed(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::COMPRESSED)
+        }
+        fn is_hole(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::HOLECHUNK)
+        }
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(compress_offset, compress_offset, u64);
+        impl_getter!(compress_size, compress_size, u32);
+        impl_getter!(decompress_offset, decompress_offset, u64);
+        impl_getter!(decompress_size, decompress_size, u32);
+        impl_getter!(file_offset, file_offset, u64);
+        impl_getter!(flags, flags, RafsChunkFlags);
+    }
 
     #[test]
     fn test_add_chunk_to_bio_desc() {
-        let mut chunk = OndiskChunkInfo::new();
+        let mut chunk = MockChunkInfo::new();
         let offset = 4096;
         let size: u64 = 1024;
         // [offset, offset + size)

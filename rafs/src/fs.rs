@@ -25,13 +25,14 @@ use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::*;
 use fuse_rs::api::BackendFileSystem;
 
-use crate::io_stats::{self, FopRecorder, StatsFop::*};
 use crate::metadata::{Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
-use crate::storage::*;
-use crate::storage::{cache::PrefetchWorker, device};
 use crate::*;
+use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
+use storage::device::BlobPrefetchControl;
+use storage::*;
+use storage::{cache::PrefetchWorker, device};
 
-use nydus_utils::eacces;
+use nydus_utils::{eacces, enotdir};
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -140,7 +141,7 @@ pub struct Rafs {
     fs_prefetch: bool,
     initialized: bool,
     xattr_enabled: bool,
-    ios: Arc<io_stats::GlobalIOStats>,
+    ios: Arc<metrics::GlobalIOStats>,
     // static inode attributes
     i_uid: u32,
     i_gid: u32,
@@ -186,7 +187,7 @@ impl Rafs {
             .map_err(RafsError::CreateDevice)?,
             sb: Arc::new(sb),
             initialized: false,
-            ios: io_stats::new(id),
+            ios: metrics::new(id),
             digest_validate: conf.digest_validate,
             fs_prefetch: conf.fs_prefetch.enable,
             xattr_enabled: conf.enable_xattr,
@@ -245,8 +246,21 @@ impl Rafs {
             return Err(RafsError::AlreadyMounted);
         }
 
+        // Without too much layout concern, just prefetch a certain range from backend.
+        let prefetch_vec = self
+            .sb
+            .inodes
+            .get_blobs()
+            .iter()
+            .map(|b| BlobPrefetchControl {
+                blob_id: b.blob_id.clone(),
+                offset: b.readahead_offset,
+                len: b.readahead_size,
+            })
+            .collect::<Vec<BlobPrefetchControl>>();
+
         self.device
-            .init(&self.sb.meta, &self.sb.inodes.get_blobs())
+            .init(&prefetch_vec)
             .map_err(RafsError::CreateDevice)?;
 
         // Device should be ready before any prefetch.
@@ -324,7 +338,7 @@ impl Rafs {
 
         let parent = self.sb.get_inode(ino, self.digest_validate)?;
         if !parent.is_dir() {
-            return Err(err_not_directory!());
+            return Err(enotdir!("is not a directory"));
         }
 
         let mut cur_offset = offset;
@@ -468,7 +482,7 @@ impl FileSystem for Rafs {
         let target = OsStr::from_bytes(name.to_bytes());
         let parent = self.sb.get_inode(ino, self.digest_validate)?;
         if !parent.is_dir() {
-            return Err(err_not_directory!());
+            return Err(enotdir!("is not a directory"));
         }
 
         rec.mark_success(0);

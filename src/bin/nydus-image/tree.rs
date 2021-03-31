@@ -12,7 +12,6 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use rafs::metadata::digest::RafsDigest;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::DirEntry;
@@ -22,12 +21,19 @@ use std::sync::Arc;
 
 use nydus_utils::ByteSize;
 use rafs::metadata::layout::*;
-use rafs::metadata::{Inode, RafsInode, RafsSuper};
+use rafs::metadata::{Inode, RafsChunkInfo, RafsInode, RafsSuper};
 
 use crate::{
     node::*,
     stargz::{self, TocEntry},
 };
+
+// TODO: Import RafsChunkFlags from storage::device is very strange,
+/// perhaps move it to a separate lib someday. And future inspect tool can also
+/// rely on this.
+use storage::device::RafsChunkFlags;
+
+use nydus_utils::digest::RafsDigest;
 
 use crate::trace::*;
 use crate::{event_tracer, root_tracer, timing_tracer};
@@ -36,6 +42,25 @@ use crate::{event_tracer, root_tracer, timing_tracer};
 pub struct Tree {
     pub node: Node,
     pub children: Vec<Tree>,
+}
+
+// TODO: To decouple from storage backend from Rafs/metadata, use this function to
+// digest status from trait object. Is it possible also to do this for `RafsInode`?
+// Right now, it is hard. Perhaps someday we can get rid of the rafs import procedure,
+//  which involve the whole nydusd rafs/mount. It is hard to optimize a process that
+// serves another goal. Luckily, `RafsInode` won't affect the work of decouple.
+fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> OndiskChunkInfo {
+    OndiskChunkInfo {
+        block_id: *cki.block_id(),
+        blob_index: cki.blob_index(),
+        flags: cki.flags(),
+        compress_size: cki.compress_size(),
+        decompress_size: cki.decompress_size(),
+        compress_offset: cki.compress_offset(),
+        decompress_offset: cki.decompress_offset(),
+        file_offset: cki.file_offset(),
+        reserved: 0u64,
+    }
 }
 
 struct MetadataTreeBuilder<'a> {
@@ -100,7 +125,8 @@ impl<'a> MetadataTreeBuilder<'a> {
         if inode.is_reg() {
             let chunk_count = child_count;
             for i in 0..chunk_count {
-                let chunk = inode.get_chunk_info(i as u32)?.cast_ondisk()?;
+                let cki = inode.get_chunk_info(i as u32)?;
+                let chunk = cast_chunk_info(cki.as_ref());
                 chunks.push(chunk);
             }
         }

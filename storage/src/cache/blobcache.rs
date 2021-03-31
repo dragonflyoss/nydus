@@ -15,25 +15,27 @@ use std::thread;
 
 use nix::sys::uio;
 use nix::unistd::dup;
-extern crate spmc;
+
 use futures::executor::block_on;
 use governor::{
     clock::QuantaClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
 };
+
 use vm_memory::VolatileSlice;
 
-use crate::io_stats::{BlobcacheMetrics, Metric};
-use crate::metadata::digest::{self, RafsDigest};
-use crate::metadata::layout::OndiskBlobTableEntry;
-use crate::metadata::{RafsChunkInfo, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
-use crate::storage::backend::BlobBackend;
-use crate::storage::cache::RafsCache;
-use crate::storage::cache::*;
-use crate::storage::device::RafsBio;
-use crate::storage::factory::CacheConfig;
-use crate::storage::utils::{alloc_buf, copyv, readv};
+use crate::backend::BlobBackend;
+use crate::cache::RafsCache;
+use crate::cache::*;
+use crate::device::{BlobPrefetchControl, RafsBio};
+use crate::factory::CacheConfig;
+use crate::utils::{alloc_buf, copyv, readv};
+use crate::RAFS_DEFAULT_BLOCK_SIZE;
 
-use nydus_utils::{einval, enoent, enosys, last_error};
+use nydus_utils::{
+    digest::RafsDigest,
+    einval, enoent, enosys, last_error,
+    metrics::{BlobcacheMetrics, Metric},
+};
 
 #[derive(Clone, Eq, PartialEq)]
 enum CacheStatus {
@@ -200,8 +202,6 @@ impl BlobCache {
         let mut cache_entry = entry.lock().unwrap();
         let chunk = cache_entry.chunk.clone();
         let mut reuse = false;
-
-        trace!("reading blobcache entry {:?}", chunk.cast_ondisk());
 
         // Hit cache if cache ready
         if !self.is_compressed && !self.need_validate() && cache_entry.is_ready() {
@@ -546,39 +546,32 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
 }
 
 impl RafsCache for BlobCache {
+    fn init(&self, blobs: &[BlobPrefetchControl]) -> Result<()> {
+        // Backend may be capable to prefetch a range of blob bypass upper file system
+        // to blobcache. This should be asynchronous, so filesystem read cache hit
+        // should validate data integrity.
+        for b in blobs {
+            let _ = self.backend.prefetch_blob(&b.blob_id, b.offset, b.len);
+        }
+        Ok(())
+    }
+
     fn backend(&self) -> &(dyn BlobBackend + Sync + Send) {
         self.backend.as_ref()
     }
 
-    fn has(&self, blk: Arc<dyn RafsChunkInfo>) -> bool {
+    fn has(&self, cki: &dyn RafsChunkInfo) -> bool {
         // Doesn't expected poisoned lock here.
         self.cache
             .read()
             .unwrap()
             .chunk_map
-            .contains_key(blk.block_id())
+            .contains_key(cki.block_id())
     }
 
-    fn init(&self, _sb_meta: &RafsSuperMeta, blobs: &[OndiskBlobTableEntry]) -> Result<()> {
-        for b in blobs {
-            let _ = self.backend.prefetch_blob(
-                b.blob_id.as_str(),
-                b.readahead_offset,
-                b.readahead_size,
-            );
-        }
-        // TODO start blob cache level prefetch
-        Ok(())
-    }
-
-    fn evict(&self, blk: Arc<dyn RafsChunkInfo>) -> Result<()> {
+    fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()> {
         // Doesn't expect poisoned lock here.
-        self.cache
-            .write()
-            .unwrap()
-            .chunk_map
-            .remove(&blk.block_id());
-
+        self.cache.write().unwrap().chunk_map.remove(cki.block_id());
         Ok(())
     }
 
@@ -624,7 +617,7 @@ impl RafsCache for BlobCache {
         // TODO: Cache is responsible to release backend's resources
         self.backend().release()
     }
-    fn prefetch(&self, bios: &mut [RafsBio]) -> RafsResult<usize> {
+    fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
         let merging_size = self.prefetch_worker.merging_size;
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
 
@@ -637,7 +630,7 @@ impl RafsCache for BlobCache {
         Ok(0)
     }
 
-    fn stop_prefetch(&self) -> RafsResult<()> {
+    fn stop_prefetch(&self) -> StorageResult<()> {
         drop(self.mr_sender.lock().unwrap().take().unwrap());
         Ok(())
     }
@@ -769,17 +762,20 @@ mod blob_cache_tests {
     use vm_memory::{VolatileMemory, VolatileSlice};
     use vmm_sys_util::tempdir::TempDir;
 
-    use crate::io_stats::BackendMetrics;
-    use crate::metadata::digest::{self, RafsDigest};
-    use crate::metadata::layout::OndiskChunkInfo;
-    use crate::metadata::RAFS_DEFAULT_BLOCK_SIZE;
-    use crate::storage::backend::{BackendResult, BlobBackend};
-    use crate::storage::cache::blobcache;
-    use crate::storage::cache::PrefetchWorker;
-    use crate::storage::cache::RafsCache;
-    use crate::storage::compress;
-    use crate::storage::device::RafsBio;
-    use crate::storage::factory::CacheConfig;
+    use crate::backend::{BackendResult, BlobBackend};
+    use crate::cache::blobcache;
+    use crate::cache::PrefetchWorker;
+    use crate::cache::RafsCache;
+    use crate::compress;
+    use crate::device::{RafsBio, RafsChunkFlags, RafsChunkInfo};
+    use crate::factory::CacheConfig;
+    use crate::impl_getter;
+    use crate::RAFS_DEFAULT_BLOCK_SIZE;
+
+    use nydus_utils::{
+        digest::{self, RafsDigest},
+        metrics::BackendMetrics,
+    };
 
     struct MockBackend {
         metrics: Arc<BackendMetrics>,
@@ -819,6 +815,44 @@ mod blob_cache_tests {
             // but use backend instance to upload blob.
             &self.metrics
         }
+    }
+
+    #[derive(Default, Clone)]
+    struct MockChunkInfo {
+        pub block_id: RafsDigest,
+        pub blob_index: u32,
+        pub flags: RafsChunkFlags,
+        pub compress_size: u32,
+        pub decompress_size: u32,
+        pub compress_offset: u64,
+        pub decompress_offset: u64,
+        pub file_offset: u64,
+        pub reserved: u64,
+    }
+
+    impl MockChunkInfo {
+        fn new() -> Self {
+            MockChunkInfo::default()
+        }
+    }
+
+    impl RafsChunkInfo for MockChunkInfo {
+        fn block_id(&self) -> &RafsDigest {
+            &self.block_id
+        }
+        fn is_compressed(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::COMPRESSED)
+        }
+        fn is_hole(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::HOLECHUNK)
+        }
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(compress_offset, compress_offset, u64);
+        impl_getter!(compress_size, compress_size, u32);
+        impl_getter!(decompress_offset, decompress_offset, u64);
+        impl_getter!(decompress_size, decompress_size, u32);
+        impl_getter!(file_offset, file_offset, u64);
+        impl_getter!(flags, flags, RafsChunkFlags);
     }
 
     #[test]
@@ -861,7 +895,7 @@ mod blob_cache_tests {
             .unwrap();
 
         // generate chunk and bio
-        let mut chunk = OndiskChunkInfo::new();
+        let mut chunk = MockChunkInfo::new();
         chunk.block_id = RafsDigest::from_buf(&expect, digest::Algorithm::Blake3);
         chunk.file_offset = 0;
         chunk.compress_offset = 0;
