@@ -14,7 +14,7 @@ use crate::backend::*;
 use crate::cache::*;
 use crate::compress;
 
-use nydus_utils::{digest, einval};
+use nydus_utils::digest;
 
 // storage backend config
 #[derive(Default, Clone, Deserialize)]

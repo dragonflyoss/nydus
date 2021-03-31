@@ -16,7 +16,6 @@ use crate::cache::RafsCache;
 use crate::{compress, factory, StorageResult};
 
 use nydus_utils::digest::{self, RafsDigest};
-use nydus_utils::eio;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 

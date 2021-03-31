@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use crate::daemon::{DaemonResult, FsBackendMountCmd, FsBackendUmountCmd};
 
-use nydus_utils::einval;
-
 #[derive(Debug)]
 pub enum UpgradeMgrError {}
 pub struct UpgradeManager {}

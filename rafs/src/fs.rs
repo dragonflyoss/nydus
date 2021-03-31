@@ -32,8 +32,6 @@ use storage::device::BlobPrefetchControl;
 use storage::*;
 use storage::{cache::PrefetchWorker, device};
 
-use nydus_utils::{eacces, enotdir};
-
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
 

@@ -15,8 +15,6 @@ use std::str::FromStr;
 pub const RAFS_DIGEST_LENGTH: usize = 32;
 type DigestData = [u8; RAFS_DIGEST_LENGTH];
 
-use crate::error::einval;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Algorithm {
     Blake3,

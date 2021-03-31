@@ -18,7 +18,6 @@ use nydus_api::http_endpoint::{
     DaemonErrorKind, MetricsErrorKind,
 };
 use nydus_utils::metrics;
-use nydus_utils::{epipe, last_error};
 
 use crate::daemon::{
     DaemonError, FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, NydusDaemon,

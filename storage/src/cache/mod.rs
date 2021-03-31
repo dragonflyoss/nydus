@@ -15,7 +15,7 @@ use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
 use crate::utils::{alloc_buf, digest_check};
 use crate::{compress, StorageResult};
 
-use nydus_utils::{digest, eio};
+use nydus_utils::digest;
 
 pub mod blobcache;
 pub mod dummycache;

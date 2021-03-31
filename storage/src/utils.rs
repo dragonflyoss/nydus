@@ -12,7 +12,7 @@ use vm_memory::{Bytes, VolatileSlice};
 
 use nydus_utils::{
     digest::{self, RafsDigest},
-    einval, last_error, round_down_4k,
+    round_down_4k,
 };
 
 pub fn readv(fd: RawFd, bufs: &[VolatileSlice], offset: u64, max_size: usize) -> Result<usize> {

@@ -19,7 +19,6 @@ use reqwest::{
 };
 
 use crate::backend::CommonConfig;
-use nydus_utils::einval;
 
 pub use reqwest::header::HeaderMap;
 

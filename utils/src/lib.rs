@@ -22,7 +22,6 @@ extern crate lazy_static;
 
 #[macro_use]
 pub mod error;
-pub use error::*;
 
 pub mod exec;
 pub use exec::*;

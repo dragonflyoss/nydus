@@ -32,7 +32,7 @@ use crate::metadata::layout::*;
 use crate::metadata::*;
 use storage::utils::readahead;
 
-use nydus_utils::{digest::RafsDigest, ebadf, einval, enoent, enotdir, last_error};
+use nydus_utils::digest::RafsDigest;
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {

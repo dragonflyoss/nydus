@@ -35,9 +35,6 @@ use storage::device::RafsChunkFlags;
 
 use nydus_utils::digest::RafsDigest;
 
-use crate::trace::*;
-use crate::{event_tracer, root_tracer, timing_tracer};
-
 #[derive(Clone)]
 pub struct Tree {
     pub node: Node,

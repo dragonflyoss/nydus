@@ -7,31 +7,35 @@ use std::fmt::Debug;
 
 use backtrace::Backtrace;
 
+/// Display line number, file path and backtrace when an error occurs
+pub fn make_error(err: std::io::Error, raw: impl Debug, file: &str, line: u32) -> std::io::Error {
+    if cfg!(debug_assertions) {
+        if let Ok(val) = env::var("RUST_BACKTRACE") {
+            if val.trim() != "0" {
+                error!("Stack:\n{:?}", Backtrace::new());
+                error!("Error:\n\t{:?}\n\tat {}:{}", raw, file, line);
+                return err;
+            }
+        }
+    }
+    error!(
+        "Error:\n\t{:?}\n\tat {}:{}\n\tnote: enable `RUST_BACKTRACE=1` env to display a backtrace",
+        raw, file, line
+    );
+    err
+}
+
 /// Define error macro like `x!()` or `x!(err)`.
 /// Note: The `x!()` macro will convert any origin error (Os, Simple, Custom) to Custom error.
 macro_rules! define_error_macro {
     ($fn:ident, $err:expr) => {
-        /// Display line number, file path and backtrace when an error occurs
-        pub fn $fn(err: std::io::Error, raw: impl Debug, file: &str, line: u32) -> std::io::Error {
-            if cfg!(debug_assertions) {
-                if let Ok(val) = env::var("RUST_BACKTRACE") {
-                    if val.trim() != "0" {
-                        error!("Stack:\n{:?}", Backtrace::new());
-                        error!("Error:\n\t{:?}\n\tat {}:{}", raw, file, line);
-                        return err;
-                    }
-                }
-            }
-            error!("Error:\n\t{:?}\n\tat {}:{}\n\tnote: enable `RUST_BACKTRACE=1` env to display a backtrace", raw, file, line);
-            err
-        }
         #[macro_export]
         macro_rules! $fn {
             () => {
                 std::io::Error::new($err.kind(), format!("{}: {}:{}", $err, file!(), line!()))
             };
             ($raw:expr) => {
-                $fn($err, &$raw, file!(), line!())
+                $crate::error::make_error($err, &$raw, file!(), line!())
             };
         }
     };
@@ -44,6 +48,7 @@ macro_rules! define_libc_error_macro {
     };
 }
 
+// TODO: Add format string support
 // Add more libc error macro here if necessary
 define_libc_error_macro!(einval, EINVAL);
 define_libc_error_macro!(enoent, ENOENT);

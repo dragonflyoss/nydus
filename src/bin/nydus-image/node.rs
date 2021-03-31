@@ -30,9 +30,6 @@ use rafs::metadata::layout::*;
 use rafs::metadata::*;
 use storage::compress;
 
-use crate::trace::{BuildRootTracer, EventTracerClass, TraceClass, TraceEvent, BUILDING_RECORDER};
-use crate::{event_tracer, root_tracer};
-
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";

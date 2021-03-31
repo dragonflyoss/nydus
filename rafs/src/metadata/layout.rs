@@ -42,7 +42,7 @@ use serde::Serialize;
 
 use nydus_utils::{
     digest::{self, RafsDigest},
-    einval, enoent, ByteSize,
+    ByteSize,
 };
 
 use super::*;

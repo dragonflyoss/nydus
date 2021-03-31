@@ -5,10 +5,12 @@
 #[macro_use(crate_authors, crate_version)]
 extern crate clap;
 
+#[macro_use]
+mod trace;
+
 mod builder;
 mod node;
 mod stargz;
-mod trace;
 mod tree;
 mod uploader;
 mod validator;
@@ -38,7 +40,7 @@ use builder::SourceType;
 use node::WhiteoutSpec;
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use storage::compress;
-use trace::*;
+use trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use uploader::Uploader;
 use validator::Validator;
 

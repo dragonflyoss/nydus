@@ -25,11 +25,8 @@ use storage::compress;
 
 use nydus_utils::digest::{self, RafsDigest};
 
-use crate::stargz;
-use crate::trace::*;
-use crate::{root_tracer, timing_tracer};
-
 use crate::node::*;
+use crate::stargz;
 use crate::tree::Tree;
 
 // TODO: select BufWriter capacity by performance testing.

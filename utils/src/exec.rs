@@ -5,8 +5,6 @@
 use std::io::Result;
 use std::process::{Command, Stdio};
 
-use crate::error::*;
-
 pub fn exec(cmd: &str, output: bool) -> Result<String> {
     debug!("exec `{}`", cmd);
 
