@@ -4,6 +4,8 @@
 
 #[macro_use(crate_authors, crate_version)]
 extern crate clap;
+#[macro_use]
+extern crate anyhow;
 
 #[macro_use]
 mod trace;
@@ -124,6 +126,7 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
 fn main() -> Result<()> {
     let (bti_string, _) = BuildTimeInfo::dump(crate_version!());
 
+    // TODO: Try to use yaml to define below options
     let cmd = App::new("nydus image builder")
         .version(bti_string.as_str())
         .author(crate_authors!())
@@ -146,18 +149,18 @@ fn main() -> Result<()> {
                         .possible_values(&["directory", "stargz_index"])
                 )
                 .arg(
-                    Arg::with_name("blob")
-                        .long("blob")
-                        .help("blob file path")
-                        .required(true)
-                        .takes_value(true)
-                )
-                .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .required(true)
-                        .help("bootstrap file path (required)")
+                        .help("A path to bootstrap file which stores nydus image metadata portion")
                         .takes_value(true),
+                ).arg(
+                    Arg::with_name("blob")
+                        .long("blob")
+                        .help("A path to blob file which stores nydus image data portion")
+                        .required_unless("backend-type")
+                        .required_unless("source-type")
+                        .takes_value(true)
                 )
                 .arg(
                     Arg::with_name("blob-id")
@@ -230,6 +233,20 @@ fn main() -> Result<()> {
                         .long("aligned-chunk")
                         .help("Whether to align chunks into blobcache")
                         .takes_value(false)
+                )
+                .arg(
+                    Arg::with_name("backend-type")
+                        .long("backend-type")
+                        .help("[deprecated!] Blob storage backend type, only support localfs for compatibility. Try use --blob instead.")
+                        .takes_value(true)
+                        .requires("backend-config")
+                        .possible_values(&["localfs"]),
+                )
+                .arg(
+                    Arg::with_name("backend-config")
+                        .long("backend-config")
+                        .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
+                        .takes_value(true)
                 )
         )
         .subcommand(
@@ -315,8 +332,22 @@ fn main() -> Result<()> {
         let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
 
         // Must specify a path to blob file.
-        // Safe to unwrap because it is marked as required parameter.
-        let blob_path: PathBuf = matches.value_of("blob").map(|b| b.into()).unwrap();
+        // For cli/binary interface compatibility sake, keep option `backend-config`, but
+        // it only receives "localfs" backend type and it will be REMOVED in the future
+        let blob_path: PathBuf = if let Some(p) = matches.value_of("blob").map(|b| b.into()) {
+            p
+        } else {
+            // Safe because `backend-type` must be specified if `blob` is not and `backend-config` must be
+            // provided as per clap restriction.
+            let config_json = matches.value_of("backend-config").unwrap();
+            let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
+            if config.get("blob_file").is_none() {
+                error!("Wrong backend config input!");
+                return Err(anyhow!("invalid backend config"));
+            }
+            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
+            config["blob_file"].as_str().unwrap().to_string().into()
+        };
 
         let mut parent_bootstrap = Path::new("");
         if let Some(_parent_bootstrap) = matches.value_of("parent-bootstrap") {
