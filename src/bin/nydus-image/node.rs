@@ -281,8 +281,9 @@ impl Node {
                         compressor
                     );
 
-                    event_tracer!("dedup total chunk size", +chunk_size);
-                    event_tracer!("dedup chunks", +1);
+                    event_tracer!("dedup_decompressed_size", +chunk_size);
+                    event_tracer!("dedup_chunks", +1);
+
                     continue;
                 }
             }
@@ -318,7 +319,8 @@ impl Node {
 
             // Dump compressed chunk data to blob
             if let Some(f_blob) = f_blob.as_mut() {
-                event_tracer!("blob compressed size", +compressed_size);
+                event_tracer!("blob_decompressed_size", +chunk_size);
+                event_tracer!("blob_compressed_size", +compressed_size);
                 f_blob
                     .write_all(&compressed)
                     .context("failed to write blob")?;

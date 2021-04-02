@@ -84,7 +84,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         }
 
         let child_count = inode.get_child_count();
-        event_tracer!("loading files from parent", +child_count);
+        event_tracer!("load_from_parent_bootstrap", +child_count);
 
         let parent_path = if let Some(parent) = parent {
             parent.join(inode.name())
@@ -410,7 +410,7 @@ impl FilesystemTreeBuilder {
             .with_context(|| format!("failed to read dir {:?}", parent.path))?;
         let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
 
-        event_tracer!("loading files from directory", +children.len());
+        event_tracer!("load_from_directory", +children.len());
 
         for child in children {
             let path = child.path();
@@ -486,7 +486,7 @@ impl Tree {
 
         tree.children = timing_tracer!(
             { tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache) },
-            "load nodes from parent"
+            "load_from_parent_bootstrap"
         )?;
 
         Ok(tree)
@@ -511,7 +511,7 @@ impl Tree {
 
         tree.children = timing_tracer!(
             { tree_builder.load_children(&mut tree.node, whiteout_spec) },
-            "load nodes from local directory"
+            "load_from_directory"
         )?;
 
         Ok(tree)
@@ -529,7 +529,7 @@ impl Tree {
         // Handle whiteout file
         if handle_whiteout {
             if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
-                event_tracer!("whiteout files", +1);
+                event_tracer!("whiteout_files", +1);
                 if whiteout_type == WhiteoutType::OverlayFSOpaque {
                     self.remove(target, whiteout_spec)?;
                     return self.apply(target, false, whiteout_spec);

@@ -412,7 +412,7 @@ impl Builder {
                 }
                 Ok(true)
             },
-            "apply layers",
+            "apply_tree",
             Result<bool>
         )?;
 
@@ -420,7 +420,7 @@ impl Builder {
         self.upper_inode_map.clear();
         self.readahead_files.clear();
 
-        timing_tracer!({ self.build_rafs_wrap(&mut tree) }, "build rafs");
+        timing_tracer!({ self.build_rafs_wrap(&mut tree) }, "build_rafs");
 
         Ok(())
     }
@@ -560,10 +560,8 @@ impl Builder {
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
     fn dump_to_file(&mut self) -> Result<(Vec<String>, usize)> {
-        let (blob_hash, blob_size, mut blob_readahead_size) = timing_tracer!(
-            { self.dump_blob() },
-            "write all nodes to blob including hashing"
-        )?;
+        let (blob_hash, blob_size, mut blob_readahead_size) =
+            timing_tracer!({ self.dump_blob() }, "dump_blob")?;
 
         // Set blob hash as blob id if not specified.
         if self.blob_id.is_empty() {
@@ -686,7 +684,7 @@ impl Builder {
 
                 Ok(())
             },
-            "write all nodes to bootstrap",
+            "dump_bootstrap",
             Result<()>
         )?;
 
@@ -740,8 +738,7 @@ impl Builder {
             self.apply_to_bootstrap()?;
         }
         // Dump blob and bootstrap file
-        let (blob_ids, blob_size) =
-            timing_tracer!({ self.dump_to_file() }, "dump bootstrap and blob")?;
+        let (blob_ids, blob_size) = self.dump_to_file()?;
 
         Ok((blob_ids, blob_size))
     }
