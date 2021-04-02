@@ -155,7 +155,7 @@ lazy_static! {
 
 macro_rules! root_tracer {
     () => {
-        &crate::trace::BUILDING_RECORDER as &$crate::trace::BuildRootTracer
+        &$crate::trace::BUILDING_RECORDER as &$crate::trace::BuildRootTracer
     };
 }
 
@@ -199,26 +199,23 @@ macro_rules! event_tracer {
         )
     };
     ($event:expr, +$value:expr) => {
-        use std::sync::atomic::{AtomicU64, Ordering};
         let mut new: bool = true;
+        if let Some($crate::trace::TraceEvent::Counter(ref e)) =
+            event_tracer!().events.read().unwrap().get($event)
         {
-            if let Some($crate::trace::TraceEvent::Counter(ref e)) =
-                event_tracer!().events.read().unwrap().get($event)
-            {
-                e.fetch_add($value as u64, Ordering::Relaxed);
-                new = false;
-            }
+            e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
+            new = false;
         }
 
         if new {
             // Double check to close the race that another thread has already inserted.
             if let Ok(ref mut guard) = event_tracer!().events.write() {
                 if let Some($crate::trace::TraceEvent::Counter(ref e)) = guard.get($event) {
-                    e.fetch_add($value as u64, Ordering::Relaxed);
+                    e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     guard.insert(
                         $event.to_string(),
-                        $crate::trace::TraceEvent::Counter(AtomicU64::new(0)),
+                        $crate::trace::TraceEvent::Counter(std::sync::atomic::AtomicU64::new(0)),
                     );
                 }
             }
