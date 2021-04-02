@@ -179,7 +179,7 @@ macro_rules! timing_tracer {
 #[macro_export]
 macro_rules! register_tracer {
     ($class:expr, $r:ty) => {
-        root_tracer!().register($class, Arc::new(<$r>::default()));
+        root_tracer!().register($class, std::sync::Arc::new(<$r>::default()));
     };
 }
 
@@ -209,13 +209,16 @@ macro_rules! event_tracer {
 
         if new {
             // Double check to close the race that another thread has already inserted.
+            // Cast integer to u64 should be reliable for most cases.
             if let Ok(ref mut guard) = event_tracer!().events.write() {
                 if let Some($crate::trace::TraceEvent::Counter(ref e)) = guard.get($event) {
                     e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     guard.insert(
                         $event.to_string(),
-                        $crate::trace::TraceEvent::Counter(std::sync::atomic::AtomicU64::new(0)),
+                        $crate::trace::TraceEvent::Counter(std::sync::atomic::AtomicU64::new(
+                            $value as u64,
+                        )),
                     );
                 }
             }
