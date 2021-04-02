@@ -50,6 +50,8 @@ pub enum TraceClass {
     Event = 2,
 }
 }
+
+#[derive(Debug)]
 pub enum TraceError {
     Serde(Error),
 }
@@ -232,4 +234,58 @@ macro_rules! event_tracer {
             );
         }
     };
+}
+
+#[cfg(test)]
+pub mod tests {
+
+    use super::{EventTracerClass, TraceClass};
+    use std::thread;
+
+    #[test]
+    fn test_event_trace() {
+        //register_tracer!(TraceClass::Timing, TimingTracerClass);
+        register_tracer!(TraceClass::Event, EventTracerClass);
+
+        let t1 = thread::Builder::new()
+            .spawn(move || {
+                for _i in 0..100 {
+                    event_tracer!("event_1", +2);
+                    event_tracer!("event_2", +3);
+                }
+            })
+            .unwrap();
+
+        let t2 = thread::Builder::new()
+            .spawn(move || {
+                for _i in 0..100 {
+                    event_tracer!("event_1", +2);
+                    event_tracer!("event_2", +3);
+                }
+            })
+            .unwrap();
+
+        let t3 = thread::Builder::new()
+            .spawn(move || {
+                for _i in 0..100 {
+                    event_tracer!("event_1", +2);
+                    event_tracer!("event_2", +3);
+                }
+            })
+            .unwrap();
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+
+        let map = root_tracer!().dump_summary_map().unwrap();
+        assert_eq!(
+            map["registered_events"]["event_1"].as_u64(),
+            serde::export::Some(600)
+        );
+        assert_eq!(
+            map["registered_events"]["event_2"].as_u64(),
+            serde::export::Some(900)
+        );
+    }
 }

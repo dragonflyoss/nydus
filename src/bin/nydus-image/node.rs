@@ -281,8 +281,12 @@ impl Node {
                         compressor
                     );
 
-                    event_tracer!("dedup_decompressed_size", +chunk_size);
-                    event_tracer!("dedup_chunks", +1);
+                    // The chunks of hardlink should be always deduplicated, so don't
+                    // trace this situation here.
+                    if !self.is_hardlink() {
+                        event_tracer!("dedup_decompressed_size", +chunk_size);
+                        event_tracer!("dedup_chunks", +1);
+                    }
 
                     continue;
                 }

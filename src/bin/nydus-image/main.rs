@@ -31,7 +31,6 @@ use std::fs::metadata;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
