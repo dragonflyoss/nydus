@@ -278,8 +278,11 @@ impl Node {
                     trace!(
                         "\t\tbuilding duplicated chunk: {} compressor {}",
                         chunk,
-                        compressor,
+                        compressor
                     );
+
+                    event_tracer!("dedup total chunk size", +chunk_size);
+                    event_tracer!("dedup chunks", +1);
                     continue;
                 }
             }
