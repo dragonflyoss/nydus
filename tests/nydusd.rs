@@ -67,6 +67,8 @@ pub fn new(
         digest_validate,
     );
 
+    fs::create_dir_all(work_dir.join("blobs")).unwrap();
+
     File::create(work_dir.join("config.json"))
         .unwrap()
         .write_all(config.as_bytes())
