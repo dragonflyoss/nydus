@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
-use builder::SourceType;
+use builder::{BlobStorage, SourceType};
 use node::WhiteoutSpec;
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use storage::compress;
@@ -160,6 +160,7 @@ fn main() -> Result<()> {
                         .help("A path to blob file which stores nydus image data portion")
                         .required_unless("backend-type")
                         .required_unless("source-type")
+                        .required_unless("blob-dir")
                         .takes_value(true)
                 )
                 .arg(
@@ -233,6 +234,12 @@ fn main() -> Result<()> {
                         .long("aligned-chunk")
                         .help("Whether to align chunks into blobcache")
                         .takes_value(false)
+                )
+                .arg(
+                    Arg::with_name("blob-dir")
+                        .long("blob-dir")
+                        .help("A directory where blob files are saved named as their sha256 digest. It's very useful when multiple layers are built at the same time.")
+                        .takes_value(true)
                 )
                 .arg(
                     Arg::with_name("backend-type")
@@ -334,19 +341,36 @@ fn main() -> Result<()> {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
-        let blob_path: PathBuf = if let Some(p) = matches.value_of("blob").map(|b| b.into()) {
-            p
+        let blob_stor = if source_type == SourceType::Directory {
+            Some(
+                if let Some(p) = matches
+                    .value_of("blob")
+                    .map(|b| BlobStorage::SingleFile(b.into()))
+                {
+                    p
+                } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
+                    BlobStorage::BlobsDir(d.join(nydus_utils::gen_uuid()))
+                } else {
+                    // Safe because `backend-type` must be specified if `blob` is not with `Directory` source
+                    // and `backend-config` must be provided as per clap restriction.
+                    // This branch is majorly for compatibility. Hopefully, we can remove this branch.
+                    let config_json = matches
+                        .value_of("backend-config")
+                        .ok_or_else(|| anyhow!("backend-config is not provided"))?;
+                    let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
+                    warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
+                    if let Some(bf) = config.get("blob_file") {
+                        // Even unwrap, it is caused by invalid json. Image creation just can't start.
+                        let b: PathBuf = bf.as_str().unwrap().to_string().into();
+                        BlobStorage::SingleFile(b)
+                    } else {
+                        error!("Wrong backend config input!");
+                        return Err(anyhow!("invalid backend config"));
+                    }
+                },
+            )
         } else {
-            // Safe because `backend-type` must be specified if `blob` is not and `backend-config` must be
-            // provided as per clap restriction.
-            let config_json = matches.value_of("backend-config").unwrap();
-            let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
-            if config.get("blob_file").is_none() {
-                error!("Wrong backend config input!");
-                return Err(anyhow!("invalid backend config"));
-            }
-            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
-            config["blob_file"].as_str().unwrap().to_string().into()
+            None
         };
 
         let mut parent_bootstrap = Path::new("");
@@ -376,7 +400,7 @@ fn main() -> Result<()> {
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
-            &blob_path,
+            &blob_stor,
             bootstrap_path,
             parent_bootstrap,
             blob_id,
@@ -412,14 +436,24 @@ fn main() -> Result<()> {
 
         dump_result_output(matches, blob_ids.clone())?;
 
+        // Is possible that two layers are exactly the safe after dedup, so the
+        // blob size is ZERO.
         if blob_size > 0 {
-            info!(
-                "build finished, blob id: {:?}, blob file: {:?}",
-                blob_ids, blob_path,
-            );
-        } else {
-            info!("build finished, no blob output");
+            if let Some(BlobStorage::BlobsDir(s)) = &blob_stor {
+                let n = ib
+                    .this_blob_id()
+                    .ok_or_else(|| anyhow!("Can't find blob id"))?;
+                // Safe to unwrap because `BlobDir` should guarantee that `blob-dir` option must bu provided.
+                let p: PathBuf = matches.value_of("blob-dir").unwrap().into();
+                let final_name = p.join(n);
+                std::fs::rename(s, final_name)?;
+            }
         }
+
+        info!(
+            "Image build(size={}Bytes) successfully. Blobs table: {:?}",
+            blob_size, blob_ids
+        );
     }
 
     if let Some(matches) = cmd.subcommand_matches("check") {
