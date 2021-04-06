@@ -65,7 +65,6 @@ pub struct CommonConfig {
     proxy: ProxyConfig,
     timeout: u64,
     connect_timeout: u64,
-    force_upload: bool,
     retry_limit: u8,
 }
 
@@ -75,7 +74,6 @@ impl Default for CommonConfig {
             proxy: ProxyConfig::default(),
             timeout: 5,
             connect_timeout: 5,
-            force_upload: false,
             retry_limit: 0,
         }
     }

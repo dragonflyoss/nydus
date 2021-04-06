@@ -49,7 +49,6 @@ pub struct OSS {
     object_prefix: String,
     endpoint: String,
     bucket_name: String,
-    force_upload: bool,
     retry_limit: u8,
     metrics: Option<Arc<BackendMetrics>>,
     id: Option<String>,
@@ -164,7 +163,6 @@ impl OSS {
 pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
-    let force_upload = common_config.force_upload;
     let retry_limit = common_config.retry_limit;
     let request = Request::new(common_config)?;
 
@@ -178,7 +176,6 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
         access_key_secret: config.access_key_secret,
         bucket_name: config.bucket_name,
         request,
-        force_upload,
         retry_limit,
         metrics: id.map(|i| BackendMetrics::new(i, "oss")),
         id: id.map(|i| i.to_string()),
