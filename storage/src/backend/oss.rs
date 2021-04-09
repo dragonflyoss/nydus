@@ -32,8 +32,6 @@ pub enum OssError {
     Response(String),
 }
 
-type OssResult<T> = std::result::Result<T, OssError>;
-
 impl From<OssError> for BackendError {
     fn from(error: OssError) -> Self {
         BackendError::Oss(error)
@@ -141,22 +139,6 @@ impl OSS {
             let url = format!("{}{}", url.as_str(), &query_str);
             (resource, url)
         }
-    }
-
-    #[allow(dead_code)]
-    fn create_bucket(&self) -> OssResult<()> {
-        let query = &[];
-        let (resource, url) = self.url("", query);
-        let headers = self
-            .sign(Method::PUT, HeaderMap::new(), resource.as_str())
-            .map_err(OssError::Auth)?;
-
-        // Safe because the the call() is a synchronous operation.
-        self.request
-            .call::<&[u8]>(Method::PUT, url.as_str(), None, headers, true)
-            .map_err(OssError::Request)?;
-
-        Ok(())
     }
 }
 
