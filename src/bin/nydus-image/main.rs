@@ -6,6 +6,8 @@
 extern crate clap;
 #[macro_use]
 extern crate anyhow;
+#[macro_use]
+extern crate nydus_utils;
 
 #[macro_use]
 mod trace;
@@ -349,7 +351,10 @@ fn main() -> Result<()> {
                 {
                     p
                 } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
-                    BlobStorage::BlobsDir(d.join(nydus_utils::gen_uuid()))
+                    if !d.exists() {
+                        bail!("Directory holding blobs is not existed")
+                    }
+                    BlobStorage::BlobsDir(d)
                 } else {
                     // Safe because `backend-type` must be specified if `blob` is not with `Directory` source
                     // and `backend-config` must be provided as per clap restriction.
@@ -400,7 +405,7 @@ fn main() -> Result<()> {
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
-            &blob_stor,
+            blob_stor,
             bootstrap_path,
             parent_bootstrap,
             blob_id,
@@ -435,20 +440,6 @@ fn main() -> Result<()> {
         }
 
         dump_result_output(matches, blob_ids.clone())?;
-
-        // Is possible that two layers are exactly the safe after dedup, so the
-        // blob size is ZERO.
-        if blob_size > 0 {
-            if let Some(BlobStorage::BlobsDir(s)) = &blob_stor {
-                let n = ib
-                    .this_blob_id()
-                    .ok_or_else(|| anyhow!("Can't find blob id"))?;
-                // Safe to unwrap because `BlobDir` should guarantee that `blob-dir` option must bu provided.
-                let p: PathBuf = matches.value_of("blob-dir").unwrap().into();
-                let final_name = p.join(n);
-                std::fs::rename(s, final_name)?;
-            }
-        }
 
         info!(
             "Image build(size={}Bytes) successfully. Blobs table: {:?}",

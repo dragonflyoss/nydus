@@ -5,21 +5,24 @@
 //! Bootstrap and blob file builder for RAFS format
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
-use std::fs::OpenOptions;
-use std::io::BufWriter;
+use std::ffi::{CString, OsString};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Mutex;
 
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsMode, RafsStore, RafsSuper};
 use rafs::{RafsIoRead, RafsIoWrite};
+use vmm_sys_util::tempfile::TempFile;
 // FIXME: Must image tool depend on storage backend?
 use storage::compress;
 
@@ -32,22 +35,6 @@ use crate::tree::Tree;
 // TODO: select BufWriter capacity by performance testing.
 const BUF_WRITER_CAPACITY: usize = 2 << 17;
 
-#[derive(Debug)]
-pub enum BlobStorage {
-    SingleFile(PathBuf),
-    BlobsDir(PathBuf),
-}
-
-impl BlobStorage {
-    fn decide_blob_storage(&self) -> &Path {
-        use BlobStorage::*;
-        match self {
-            SingleFile(p) => p,
-            BlobsDir(p) => p,
-        }
-    }
-}
-
 pub struct Builder {
     /// Source type: Directory | StargzIndex
     source_type: SourceType,
@@ -58,7 +45,7 @@ pub struct Builder {
     /// Blob id (user specified or sha256(blob)).
     blob_id: String,
     /// Blob file writer.
-    f_blob: Option<Box<dyn RafsIoWrite>>,
+    blob_writer: Mutex<Option<BlobBufferWriter>>,
     /// Bootstrap file writer.
     f_bootstrap: Box<dyn RafsIoWrite>,
     /// Parent bootstrap file reader.
@@ -92,6 +79,8 @@ pub struct Builder {
     /// `decompress_offset` within chunk info. Therefore, provide a new flag
     /// to image tool thus to align chunks in blob with 4k size.
     aligned_chunk: bool,
+    /// The size of newly generated blob. It might be ZERO if everything is the same with upper layer.
+    blob_size: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,12 +125,104 @@ impl FromStr for SourceType {
     }
 }
 
+pub struct BlobBufferWriter {
+    parent_dir: Option<File>,
+    file: BufWriter<File>,
+    blob_stor: BlobStorage,
+    // Keep this because tmp file will be removed automatically when it is dropped.
+    // But we will rename/link the tmp file before it is removed.
+    _tmp_file: Option<TempFile>,
+}
+
+#[derive(Debug)]
+pub enum BlobStorage {
+    // Won't rename user's specification
+    SingleFile(PathBuf),
+    // Will rename it from tmp file as user didn't specify a
+    BlobsDir(PathBuf),
+}
+
+impl BlobBufferWriter {
+    fn new(blob_stor: BlobStorage) -> Result<Self> {
+        match blob_stor {
+            BlobStorage::SingleFile(ref p) => {
+                let b = BufWriter::with_capacity(
+                    BUF_WRITER_CAPACITY,
+                    OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(p)?,
+                );
+                Ok(Self {
+                    file: b,
+                    parent_dir: None,
+                    blob_stor,
+                    _tmp_file: None,
+                })
+            }
+            BlobStorage::BlobsDir(ref p) => {
+                // Better we can use open(2) O_TMPFILE, but for compatibility sake, we delay this job.
+                // TODO: Blob dir existence?
+                let tmp = TempFile::new_in(&p)?;
+                Ok(Self {
+                    file: BufWriter::with_capacity(
+                        BUF_WRITER_CAPACITY,
+                        // Safe to unwrap because it should not be a bad fd.
+                        tmp.as_file().try_clone().unwrap(),
+                    ),
+                    parent_dir: Some(File::open(p)?),
+                    blob_stor,
+                    _tmp_file: Some(tmp),
+                })
+            }
+        }
+    }
+
+    pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        self.file.write_all(buf).map_err(|e| anyhow!(e))
+    }
+
+    fn release(self, new_name: &str) -> Result<()> {
+        let mut f = self.file.into_inner()?;
+        let empty = CString::default();
+        let name = CString::new(new_name)?;
+
+        f.flush()?;
+
+        if let BlobStorage::BlobsDir(_s) = &self.blob_stor {
+            // Safe because this doesn't modify any memory and we check the return value.
+            // Being used fd never be closed before.
+            let res = unsafe {
+                libc::linkat(
+                    f.as_raw_fd(),
+                    empty.as_ptr(),
+                    // Safe because it is using BlobsDir storage.
+                    self.parent_dir.unwrap().as_raw_fd(),
+                    name.as_ptr(),
+                    libc::AT_EMPTY_PATH,
+                )
+            };
+
+            if res < 0 {
+                bail!(
+                    "Rename blob to {} failed. error: {:?} ",
+                    &new_name,
+                    last_error!()
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl Builder {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_type: SourceType,
         source_path: &Path,
-        blob_path: &Option<BlobStorage>,
+        blob_path: Option<BlobStorage>,
         bootstrap_path: &Path,
         parent_bootstrap_path: &Path,
         blob_id: String,
@@ -153,16 +234,8 @@ impl Builder {
         whiteout_spec: WhiteoutSpec,
         aligned_chunk: bool,
     ) -> Result<Builder> {
-        let f_blob: Option<Box<dyn RafsIoWrite>> = if let Some(p) = blob_path {
-            Some(Box::new(BufWriter::with_capacity(
-                BUF_WRITER_CAPACITY,
-                OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(p.decide_blob_storage())
-                    .with_context(|| format!("failed to create blob file {:?}", blob_path))?,
-            )))
+        let bw = if let Some(bs) = blob_path {
+            Some(BlobBufferWriter::new(bs)?)
         } else {
             None
         };
@@ -199,7 +272,7 @@ impl Builder {
             source_type,
             source_path: PathBuf::from(source_path),
             blob_id,
-            f_blob,
+            blob_writer: Mutex::new(bw),
             f_bootstrap,
             f_parent_bootstrap,
             compressor,
@@ -215,6 +288,7 @@ impl Builder {
             prefetch_policy,
             nodes: Vec::new(),
             aligned_chunk,
+            blob_size: 0,
         })
     }
 
@@ -492,6 +566,9 @@ impl Builder {
 
         match self.source_type {
             SourceType::Directory => {
+                // Safe to unwrap because `Directory source` must have blob
+                let mut guard = self.blob_writer.lock().expect("Poisoned lock");
+                let blob_writer = guard.as_mut().unwrap();
                 // Dump readahead nodes
                 for index in &readahead_files {
                     let node = self.nodes.get_mut(**index as usize - 1).unwrap();
@@ -499,10 +576,9 @@ impl Builder {
                     if node.overlay == Overlay::UpperAddition
                         || node.overlay == Overlay::UpperModification
                     {
-                        // Safe to unwrap because `Directory source` must have blob
                         blob_readahead_size += node
                             .dump_blob(
-                                self.f_blob.as_mut().unwrap(),
+                                blob_writer,
                                 &mut blob_hash,
                                 &mut compress_offset,
                                 &mut decompress_offset,
@@ -533,7 +609,7 @@ impl Builder {
                         // Safe to unwrap because `Directory source` must have blob
                         blob_size += node
                             .dump_blob(
-                                self.f_blob.as_mut().unwrap(),
+                                blob_writer,
                                 &mut blob_hash,
                                 &mut compress_offset,
                                 &mut decompress_offset,
@@ -713,10 +789,14 @@ impl Builder {
             .map(|entry| entry.blob_id.clone())
             .collect();
 
+        self.blob_size = blob_size;
+
         // Flush remaining data in BufWriter to file
         self.f_bootstrap.flush()?;
-        if let Some(ref mut b) = self.f_blob {
-            b.flush()?;
+        if let Some(bw) = self.blob_writer.lock().unwrap().take() {
+            if let Some(id) = self.this_blob_id() {
+                bw.release(id)?;
+            }
         }
 
         Ok((blob_ids, blob_size))
@@ -761,9 +841,14 @@ impl Builder {
         Ok((blob_ids, blob_size))
     }
 
+    /// `None` means no blob was created after this building progress.
     fn this_blob_id(&self) -> Option<&str> {
-        (&self.blob_table.entries)
-            .last()
-            .map(|d| d.blob_id.as_str())
+        if self.blob_size > 0 {
+            (&self.blob_table.entries)
+                .last()
+                .map(|d| d.blob_id.as_str())
+        } else {
+            None
+        }
     }
 }

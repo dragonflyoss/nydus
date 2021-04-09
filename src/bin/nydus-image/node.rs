@@ -4,8 +4,6 @@
 
 //! File node for RAFS format
 
-use nix::sys::stat;
-use rafs::RafsIoWriter;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -17,7 +15,10 @@ use std::path::{Component, Path, PathBuf};
 use std::str;
 use std::str::FromStr;
 
-use anyhow::{anyhow, bail, Context, Error, Result};
+use nix::sys::stat;
+use rafs::RafsIoWriter;
+
+use anyhow::{Context, Error, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
@@ -25,6 +26,8 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     div_round_up, try_round_up_4k, ByteSize,
 };
+
+use crate::builder::BlobBufferWriter;
 
 use rafs::metadata::layout::*;
 use rafs::metadata::*;
@@ -211,7 +214,7 @@ impl Node {
     #[allow(clippy::too_many_arguments)]
     pub fn dump_blob(
         &mut self,
-        f_blob: &mut RafsIoWriter,
+        blob_writer: &mut BlobBufferWriter,
         blob_hash: &mut Sha256,
         compress_offset: &mut u64,
         decompress_offset: &mut u64,
@@ -324,7 +327,7 @@ impl Node {
             // Dump compressed chunk data to blob
             event_tracer!("blob_decompressed_size", +chunk_size);
             event_tracer!("blob_compressed_size", +compressed_size);
-            f_blob
+            blob_writer
                 .write_all(&compressed)
                 .context("failed to write blob")?;
 
