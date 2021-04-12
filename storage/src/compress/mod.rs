@@ -20,7 +20,7 @@ const COMPRESSION_MINIMUM_RATIO: usize = 100;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Algorithm {
     None,
-    LZ4Block,
+    Lz4Block,
     GZip,
 }
 
@@ -36,7 +36,7 @@ impl FromStr for Algorithm {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
-            "lz4_block" => Ok(Self::LZ4Block),
+            "lz4_block" => Ok(Self::Lz4Block),
             "gzip" => Ok(Self::GZip),
             _ => Err(einval!("compression algorithm should be none or lz4_block")),
         }
@@ -64,7 +64,7 @@ pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
 
     let compressed = match algorithm {
         Algorithm::None => return Ok((Cow::Borrowed(src), false)),
-        Algorithm::LZ4Block => lz4_compress(src)?,
+        Algorithm::Lz4Block => lz4_compress(src)?,
         Algorithm::GZip => {
             let dst: Vec<u8> = Vec::new();
             let mut gz = GzEncoder::new(dst, Compression::default());
@@ -92,7 +92,7 @@ pub fn decompress(
 ) -> Result<usize> {
     match algorithm {
         Algorithm::None => Ok(dst.len()),
-        Algorithm::LZ4Block => lz4_decompress(src, dst),
+        Algorithm::Lz4Block => lz4_decompress(src, dst),
         Algorithm::GZip => {
             if let Some(f) = src_file {
                 let mut gz = GzDecoder::new(BufReader::new(f));
@@ -167,7 +167,7 @@ mod tests {
             &compressed,
             None,
             decompressed.as_mut_slice(),
-            Algorithm::LZ4Block,
+            Algorithm::Lz4Block,
         )
         .unwrap();
 
@@ -184,7 +184,7 @@ mod tests {
             &compressed,
             None,
             decompressed.as_mut_slice(),
-            Algorithm::LZ4Block,
+            Algorithm::Lz4Block,
         )
         .unwrap();
 
@@ -204,7 +204,7 @@ mod tests {
             &compressed,
             None,
             decompressed.as_mut_slice(),
-            Algorithm::LZ4Block,
+            Algorithm::Lz4Block,
         )
         .unwrap();
 
@@ -221,7 +221,7 @@ mod tests {
             &compressed,
             None,
             decompressed.as_mut_slice(),
-            Algorithm::LZ4Block,
+            Algorithm::Lz4Block,
         )
         .unwrap();
 
@@ -238,7 +238,7 @@ mod tests {
             &compressed,
             None,
             decompressed.as_mut_slice(),
-            Algorithm::LZ4Block,
+            Algorithm::Lz4Block,
         )
         .unwrap();
 
@@ -255,7 +255,7 @@ mod tests {
             &compressed,
             None,
             decompressed.as_mut_slice(),
-            Algorithm::LZ4Block,
+            Algorithm::Lz4Block,
         )
         .unwrap();
 
