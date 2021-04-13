@@ -37,6 +37,7 @@ type Args struct {
 	SharedDaemon         bool
 	AsyncRemove          bool
 	EnableMetrics        bool
+	EnableStargz         bool
 }
 
 type Flags struct {
@@ -117,6 +118,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether to collect metrics",
 			Destination: &args.EnableMetrics,
 		},
+		&cli.BoolFlag{
+			Name:        "enable-stargz",
+			Value:       false,
+			Usage:       "whether to support stargz image",
+			Destination: &args.EnableStargz,
+		},
 	}
 }
 
@@ -150,5 +157,6 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.SharedDaemon = args.SharedDaemon
 	cfg.AsyncRemove = args.AsyncRemove
 	cfg.EnableMetrics = args.EnableMetrics
+	cfg.EnableStargz = args.EnableStargz
 	return nil
 }
