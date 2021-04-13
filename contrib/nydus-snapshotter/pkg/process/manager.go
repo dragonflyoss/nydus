@@ -13,6 +13,9 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
+
+	metricExp "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric/exporter"
 
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
@@ -21,6 +24,8 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/mount"
+
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
 )
 
 type configGenerator = func(*daemon.Daemon) error
@@ -246,6 +251,44 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 	for _, d := range daemons {
 		if err := m.NewDaemon(d); err != nil {
 			return errors.Wrapf(err, "failed to daemon(%s) to daemon store", d.ID)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) CollectDaemonMetric(ctx context.Context, exp *metricExp.Exporter) error {
+	// TODO(renzhen): make collect interval time configurable
+	timer := time.NewTicker(time.Duration(1) * time.Minute)
+
+	for {
+		select {
+		case <-timer.C:
+			daemons := m.ListDaemons()
+			for _, d := range daemons {
+				if d.ID == daemon.SharedNydusDaemonID {
+					continue
+				}
+
+				client, err := nydussdk.NewNydusClient(d.APISock())
+				if err != nil {
+					log.G(ctx).Errorf("failed to connect nydusd: %v", err)
+					continue
+				}
+
+				fsMetrics, err := client.GetFsMetric(m.SharedDaemon, d.SnapshotID)
+				if err != nil {
+					log.G(ctx).Errorf("failed to get fs metric: %v", err)
+					continue
+				}
+
+				if err := exp.ExportFsMetrics(fsMetrics, d.ImageID); err != nil {
+					log.G(ctx).Errorf("failed to export fs metrics for %s: %v", d.ImageID, err)
+					continue
+				}
+			}
+		case <-ctx.Done():
+			log.G(ctx).Infof("cancel daemom metrics collecting")
 		}
 	}
 

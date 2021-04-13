@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	infoEndpoint  = "/api/v1/daemon"
-	mountEndpoint = "/api/v1/mount"
+	infoEndpoint   = "/api/v1/daemon"
+	mountEndpoint  = "/api/v1/mount"
+	metricEndpoint = "/api/v1/metrics"
 
 	defaultHttpClientTimeout = 30 * time.Second
 	contentType              = "application/json"
@@ -36,6 +37,7 @@ type Interface interface {
 	CheckStatus() (model.DaemonInfo, error)
 	SharedMount(sharedMountPoint, bootstrap, daemonConfig string) error
 	Umount(sharedMountPoint string) error
+	GetFsMetric(sharedDaemon bool, sid string) (*model.FsMetric, error)
 }
 
 type NydusClient struct {
@@ -87,6 +89,35 @@ func (c *NydusClient) Umount(sharedMountPoint string) error {
 		return nil
 	}
 	return handleMountError(resp.Body)
+}
+
+func (c *NydusClient) GetFsMetric(sharedDaemon bool, sid string) (*model.FsMetric, error) {
+	var getStatURL string
+
+	if sharedDaemon {
+		getStatURL = fmt.Sprintf("http://unix%s?id=/%s/fs", metricEndpoint, sid)
+	} else {
+		getStatURL = fmt.Sprintf("http://unix%s", metricEndpoint)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, getStatURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, err
+	}
+
+	var m model.FsMetric
+	if err = json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
 }
 
 func (c *NydusClient) SharedMount(sharedMountPoint, bootstrap, daemonConfig string) error {
