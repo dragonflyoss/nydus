@@ -2,20 +2,18 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::OpenOptions;
 use std::io::{Error, Result};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use hmac::{Hmac, Mac, NewMac};
 use reqwest::header::CONTENT_LENGTH;
-use reqwest::{Method, StatusCode};
+use reqwest::Method;
 use sha1::Sha1;
 
-use crate::backend::request::{HeaderMap, Progress, ReqBody, Request, RequestError};
+use crate::backend::request::{HeaderMap, Request, RequestError};
 use crate::backend::{default_http_scheme, BackendError, BackendResult};
-use crate::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
+use crate::backend::{BlobBackend, CommonConfig};
 
 use nydus_utils::metrics::BackendMetrics;
 
@@ -34,8 +32,6 @@ pub enum OssError {
     Response(String),
 }
 
-type OssResult<T> = std::result::Result<T, OssError>;
-
 impl From<OssError> for BackendError {
     fn from(error: OssError) -> Self {
         BackendError::Oss(error)
@@ -51,7 +47,6 @@ pub struct OSS {
     object_prefix: String,
     endpoint: String,
     bucket_name: String,
-    force_upload: bool,
     retry_limit: u8,
     metrics: Option<Arc<BackendMetrics>>,
     id: Option<String>,
@@ -145,47 +140,11 @@ impl OSS {
             (resource, url)
         }
     }
-
-    #[allow(dead_code)]
-    fn create_bucket(&self) -> OssResult<()> {
-        let query = &[];
-        let (resource, url) = self.url("", query);
-        let headers = self
-            .sign(Method::PUT, HeaderMap::new(), resource.as_str())
-            .map_err(OssError::Auth)?;
-
-        // Safe because the the call() is a synchronous operation.
-        self.request
-            .call::<&[u8]>(Method::PUT, url.as_str(), None, headers, true)
-            .map_err(OssError::Request)?;
-
-        Ok(())
-    }
-
-    fn blob_exists(&self, blob_id: &str) -> OssResult<bool> {
-        let (resource, url) = self.url(blob_id, &[]);
-        let headers = HeaderMap::new();
-        let headers = self
-            .sign(Method::HEAD, headers, resource.as_str())
-            .map_err(OssError::Auth)?;
-
-        let resp = self
-            .request
-            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, false)
-            .map_err(OssError::Request)?;
-
-        if resp.status() == StatusCode::OK {
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
 }
 
 pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
-    let force_upload = common_config.force_upload;
     let retry_limit = common_config.retry_limit;
     let request = Request::new(common_config)?;
 
@@ -199,7 +158,6 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
         access_key_secret: config.access_key_secret,
         bucket_name: config.bucket_name,
         request,
-        force_upload,
         retry_limit,
         metrics: id.map(|i| BackendMetrics::new(i, "oss")),
         id: id.map(|i| i.to_string()),
@@ -305,46 +263,5 @@ impl BlobBackend for OSS {
             .map_err(OssError::Request)?;
 
         Ok(buf.len())
-    }
-}
-
-impl BlobBackendUploader for OSS {
-    fn upload(
-        &self,
-        blob_id: &str,
-        blob_path: &Path,
-        callback: fn((usize, usize)),
-    ) -> Result<usize> {
-        if !self.force_upload && self.blob_exists(blob_id).map_err(|e| einval!(e))? {
-            return Ok(0);
-        }
-
-        let query = &[];
-        let (resource, url) = self.url(blob_id, query);
-        let headers = self.sign(Method::PUT, HeaderMap::new(), resource.as_str())?;
-
-        let blob_file = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(blob_path)
-            .map_err(|e| {
-                error!("oss blob upload: open failed {:?}", e);
-                e
-            })?;
-        let size = blob_file.metadata()?.len() as usize;
-
-        let body = Progress::new(blob_file, size, callback);
-
-        self.request
-            .call(
-                Method::PUT,
-                url.as_str(),
-                Some(ReqBody::Read(body, size)),
-                headers,
-                true,
-            )
-            .map_err(|e| einval!(e))?;
-
-        Ok(size as usize)
     }
 }

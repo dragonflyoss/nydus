@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{Error, Result};
-use std::path::Path;
+use std::io::Error;
 
 use vm_memory::VolatileSlice;
 
@@ -66,7 +65,6 @@ pub struct CommonConfig {
     proxy: ProxyConfig,
     timeout: u64,
     connect_timeout: u64,
-    force_upload: bool,
     retry_limit: u8,
 }
 
@@ -76,7 +74,6 @@ impl Default for CommonConfig {
             proxy: ProxyConfig::default(),
             timeout: 5,
             connect_timeout: 5,
-            force_upload: false,
             retry_limit: 0,
         }
     }
@@ -168,16 +165,6 @@ pub trait BlobBackend {
 
     /// Write a range of data to blob from the provided slice
     fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize>;
-}
-
-// Rafs blob backend upload API
-pub trait BlobBackendUploader {
-    fn upload(
-        &self,
-        blob_id: &str,
-        blob_path: &Path,
-        callback: fn((usize, usize)),
-    ) -> Result<usize>;
 }
 
 #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]

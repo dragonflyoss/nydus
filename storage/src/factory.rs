@@ -85,33 +85,6 @@ pub fn new_backend(
     }
 }
 
-pub fn new_uploader(mut config: BackendConfig) -> IOResult<Arc<dyn BlobBackendUploader>> {
-    // Disable http timeout for upload request
-    config.backend_config["connect_timeout"] = 0.into();
-    config.backend_config["timeout"] = 0.into();
-    match config.backend_type.as_str() {
-        #[cfg(feature = "backend-oss")]
-        "oss" => {
-            let backend = oss::new(config.backend_config, None)?;
-            Ok(Arc::new(backend) as Arc<dyn BlobBackendUploader>)
-        }
-        #[cfg(feature = "backend-registry")]
-        "registry" => {
-            let backend = registry::new(config.backend_config, None)?;
-            Ok(Arc::new(backend) as Arc<dyn BlobBackendUploader>)
-        }
-        #[cfg(feature = "backend-localfs")]
-        "localfs" => {
-            let backend = localfs::new(config.backend_config, None)?;
-            Ok(Arc::new(backend) as Arc<dyn BlobBackendUploader>)
-        }
-        _ => Err(einval!(format!(
-            "unsupported backend type '{}'",
-            config.backend_type
-        ))),
-    }
-}
-
 pub fn new_rw_layer(
     config: Config,
     compressor: compress::Algorithm,

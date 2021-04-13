@@ -3,9 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::io::{Error, Read, Result};
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use reqwest::blocking::Response;
@@ -14,17 +12,13 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
-use crate::backend::request::{
-    is_success_status, respond, Progress, ReqBody, Request, RequestError,
-};
+use crate::backend::request::{is_success_status, respond, ReqBody, Request, RequestError};
 use crate::backend::{default_http_scheme, BackendError, BackendResult};
-use crate::backend::{BlobBackend, BlobBackendUploader, CommonConfig};
+use crate::backend::{BlobBackend, CommonConfig};
 use nydus_utils::metrics::BackendMetrics;
 
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
-
 const HEADER_AUTHORIZATION: &str = "Authorization";
-const HEADER_LOCATION: &str = "Location";
 const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 
 #[derive(Default)]
@@ -100,8 +94,6 @@ pub struct Registry {
     auth: Option<String>,
     username: String,
     password: String,
-    // Still upload even if blob exists on blob server
-    force_upload: bool,
     // Retry limit for read operation
     retry_limit: u8,
     // Scheme specified for blob server
@@ -178,7 +170,6 @@ fn trim(val: Option<String>) -> Option<String> {
 pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
-    let force_upload = common_config.force_upload;
     let retry_limit = common_config.retry_limit;
     let request = Request::new(common_config)?;
 
@@ -226,7 +217,6 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registr
         cached_auth,
         username,
         password,
-        force_upload,
         retry_limit,
         blob_url_scheme: config.blob_url_scheme,
         cached_redirect: HashCache::new(),
@@ -246,40 +236,6 @@ impl Registry {
         let url = url.join(path.as_str())?;
 
         Ok(url.to_string())
-    }
-
-    fn blob_exists(&self, blob_id: &str) -> RegistryResult<bool> {
-        let url = self
-            .url(&format!("/blobs/sha256:{}", blob_id), &[])
-            .map_err(RegistryError::Url)?;
-
-        let resp =
-            self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), false)?;
-
-        if resp.status() == StatusCode::OK {
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    fn create_upload(&self) -> RegistryResult<String> {
-        let url = self
-            .url("/blobs/uploads/", &[])
-            .map_err(RegistryError::Url)?;
-
-        let resp =
-            self.request::<&[u8]>(Method::POST, url.as_str(), None, HeaderMap::new(), true)?;
-
-        match resp.headers().get(HEADER_LOCATION) {
-            Some(location) => Ok(location
-                .to_str()
-                .map_err(|e| RegistryError::ResponseHead(e.to_string()))?
-                .to_owned()),
-            None => Err(RegistryError::ResponseHead(
-                "location not found in header".to_string(),
-            )),
-        }
     }
 
     /// Request registry authentication server to get bearer token
@@ -624,61 +580,5 @@ impl BlobBackend for Registry {
 
     fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
         Ok(_buf.len())
-    }
-}
-
-impl BlobBackendUploader for Registry {
-    fn upload(
-        &self,
-        blob_id: &str,
-        blob_path: &Path,
-        callback: fn((usize, usize)),
-    ) -> Result<usize> {
-        if !self.force_upload && self.blob_exists(blob_id).map_err(|e| einval!(e))? {
-            return Ok(0);
-        }
-
-        let location = self.create_upload().map_err(|e| einval!(e))?;
-
-        let blob_id_storage;
-        let blob_id_val = if !blob_id.starts_with("sha256:") {
-            blob_id_storage = format!("sha256:{}", blob_id);
-            &blob_id_storage
-        } else {
-            blob_id
-        };
-        let url = Url::parse_with_params(location.as_str(), &[("digest", blob_id_val)])
-            .map_err(|e| einval!(e))?;
-
-        let url = format!(
-            "{}://{}{}?{}",
-            self.scheme,
-            self.host,
-            url.path(),
-            url.query().unwrap()
-        );
-
-        let blob_file = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(blob_path)
-            .map_err(|e| {
-                error!("registry blob upload: open failed {:?}", e);
-                e
-            })?;
-        let size = blob_file.metadata()?.len() as usize;
-
-        let body = Progress::new(blob_file, size, callback);
-
-        self.request(
-            Method::PUT,
-            url.as_str(),
-            Some(ReqBody::Read(body, size)),
-            HeaderMap::new(),
-            true,
-        )
-        .map_err(|e| epipe!(e))?;
-
-        Ok(size as usize)
     }
 }

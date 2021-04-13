@@ -194,7 +194,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("blobs"),
@@ -212,7 +212,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("bootstrap-overlay"),
@@ -268,10 +268,10 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"dir\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"blob_file\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
                 NYDUS_IMAGE,
                 self.work_dir.join("bootstrap-specialfiles"),
-                self.work_dir.join("blobs"),
+                self.work_dir.join("smoke-localfs-blob"),
                 "lz4_block",
                 self.whiteout_spec,
                 dir,

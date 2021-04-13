@@ -4,6 +4,10 @@
 
 #[macro_use(crate_authors, crate_version)]
 extern crate clap;
+#[macro_use]
+extern crate anyhow;
+#[macro_use]
+extern crate nydus_utils;
 
 #[macro_use]
 mod trace;
@@ -12,7 +16,6 @@ mod builder;
 mod node;
 mod stargz;
 mod tree;
-mod uploader;
 mod validator;
 
 #[macro_use]
@@ -23,7 +26,7 @@ extern crate lazy_static;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
 use std::collections::BTreeMap;
@@ -35,12 +38,11 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
-use builder::SourceType;
+use builder::{BlobStorage, SourceType};
 use node::WhiteoutSpec;
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
-use uploader::Uploader;
 use validator::Validator;
 
 #[derive(Serialize, Default)]
@@ -126,6 +128,7 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
 fn main() -> Result<()> {
     let (bti_string, _) = BuildTimeInfo::dump(crate_version!());
 
+    // TODO: Try to use yaml to define below options
     let cmd = App::new("nydus image builder")
         .version(bti_string.as_str())
         .author(crate_authors!())
@@ -148,23 +151,24 @@ fn main() -> Result<()> {
                         .possible_values(&["directory", "stargz_index"])
                 )
                 .arg(
-                    Arg::with_name("blob")
-                        .long("blob")
-                        .help("blob file path")
-                        .takes_value(true)
-                        .conflicts_with("backend-type"),
-                )
-                .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .required(true)
-                        .help("bootstrap file path (required)")
+                        .help("A path to bootstrap file which stores nydus image metadata portion")
                         .takes_value(true),
+                ).arg(
+                    Arg::with_name("blob")
+                        .long("blob")
+                        .help("A path to blob file which stores nydus image data portion")
+                        .required_unless("backend-type")
+                        .required_unless("source-type")
+                        .required_unless("blob-dir")
+                        .takes_value(true)
                 )
                 .arg(
                     Arg::with_name("blob-id")
                         .long("blob-id")
-                        .help("blob id (as object id in backend)")
+                        .help("blob id (as object id in backend/oss)")
                         .takes_value(true),
                 )
                 .arg(
@@ -189,25 +193,6 @@ fn main() -> Result<()> {
                         .help("bootstrap file path of parent (optional)")
                         .takes_value(true)
                         .required(false),
-                )
-                .arg(
-                    Arg::with_name("backend-type")
-                        .long("backend-type")
-                        .help("blob storage backend type (enable blob upload if specified)")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("backend-config")
-                        .long("backend-config")
-                        .help("blob storage backend config (JSON string)")
-                        .takes_value(true)
-                        .conflicts_with("backend-config-file"),
-                )
-                .arg(
-                    Arg::with_name("backend-config-file")
-                        .long("backend-config-file")
-                        .help("blob storage backend config (JSON file)")
-                        .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("prefetch-policy")
@@ -251,6 +236,26 @@ fn main() -> Result<()> {
                         .long("aligned-chunk")
                         .help("Whether to align chunks into blobcache")
                         .takes_value(false)
+                )
+                .arg(
+                    Arg::with_name("blob-dir")
+                        .long("blob-dir")
+                        .help("A directory where blob files are saved named as their sha256 digest. It's very useful when multiple layers are built at the same time.")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("backend-type")
+                        .long("backend-type")
+                        .help("[deprecated!] Blob storage backend type, only support localfs for compatibility. Try use --blob instead.")
+                        .takes_value(true)
+                        .requires("backend-config")
+                        .possible_values(&["localfs"]),
+                )
+                .arg(
+                    Arg::with_name("backend-config")
+                        .long("backend-config")
+                        .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
+                        .takes_value(true)
                 )
         )
         .subcommand(
@@ -335,33 +340,42 @@ fn main() -> Result<()> {
 
         let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
 
-        let mut uploader = None;
-        let mut blob_path = match matches.value_of("blob") {
-            Some(p) => Some(PathBuf::from(p)),
-            None => {
-                if source_type == SourceType::Directory {
-                    let backend_type = matches
-                        .value_of("backend-type")
-                        .ok_or_else(|| anyhow!("blob or backend-type must be specified"))?;
-
-                    let real_uploader =
-                        if let Some(backend_config) = matches.value_of("backend-config") {
-                            Uploader::from_config_str(backend_type, backend_config)?
-                        } else if let Some(backend_config_file) =
-                            matches.value_of("backend-config-file")
-                        {
-                            Uploader::from_config_file(backend_type, backend_config_file)?
-                        } else {
-                            bail!("backend-config or backend-config-file must be specified")
-                        };
-
-                    let blob_path = Some(real_uploader.blob_path.clone());
-                    uploader = Some(real_uploader);
-                    blob_path
+        // Must specify a path to blob file.
+        // For cli/binary interface compatibility sake, keep option `backend-config`, but
+        // it only receives "localfs" backend type and it will be REMOVED in the future
+        let blob_stor = if source_type == SourceType::Directory {
+            Some(
+                if let Some(p) = matches
+                    .value_of("blob")
+                    .map(|b| BlobStorage::SingleFile(b.into()))
+                {
+                    p
+                } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
+                    if !d.exists() {
+                        bail!("Directory holding blobs is not existed")
+                    }
+                    BlobStorage::BlobsDir(d)
                 } else {
-                    None
-                }
-            }
+                    // Safe because `backend-type` must be specified if `blob` is not with `Directory` source
+                    // and `backend-config` must be provided as per clap restriction.
+                    // This branch is majorly for compatibility. Hopefully, we can remove this branch.
+                    let config_json = matches
+                        .value_of("backend-config")
+                        .ok_or_else(|| anyhow!("backend-config is not provided"))?;
+                    let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
+                    warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
+                    if let Some(bf) = config.get("blob_file") {
+                        // Even unwrap, it is caused by invalid json. Image creation just can't start.
+                        let b: PathBuf = bf.as_str().unwrap().to_string().into();
+                        BlobStorage::SingleFile(b)
+                    } else {
+                        error!("Wrong backend config input!");
+                        return Err(anyhow!("invalid backend config"));
+                    }
+                },
+            )
+        } else {
+            None
         };
 
         let mut parent_bootstrap = Path::new("");
@@ -387,10 +401,11 @@ fn main() -> Result<()> {
 
         let aligned_chunk = matches.is_present("aligned-chunk");
 
+        // External tool like `nydusify` might rename the blob to a OCI distribution compatible one.
         let mut ib = builder::Builder::new(
             source_type,
             source_path,
-            blob_path.as_deref(),
+            blob_stor,
             bootstrap_path,
             parent_bootstrap,
             blob_id,
@@ -426,23 +441,10 @@ fn main() -> Result<()> {
 
         dump_result_output(matches, blob_ids.clone())?;
 
-        if blob_size > 0 {
-            // Upload blob file
-            if let Some(uploader) = uploader {
-                let blob_id = blob_ids.last().unwrap();
-                blob_path = uploader.upload(blob_id)?;
-            }
-            if let Some(blob_path) = blob_path.as_ref() {
-                info!(
-                    "build finished, blob id: {:?}, blob file: {:?}",
-                    blob_ids, blob_path,
-                );
-            } else {
-                info!("build finished, blob id: {:?}", blob_ids);
-            }
-        } else {
-            info!("build finished, no blob output");
-        }
+        info!(
+            "Image build(size={}Bytes) successfully. Blobs table: {:?}",
+            blob_size, blob_ids
+        );
     }
 
     if let Some(matches) = cmd.subcommand_matches("check") {
