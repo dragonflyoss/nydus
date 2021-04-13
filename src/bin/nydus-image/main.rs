@@ -31,7 +31,6 @@ use std::fs::metadata;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
@@ -410,7 +409,7 @@ fn main() -> Result<()> {
         event_tracer!("egid", "{}", getegid());
 
         let (blob_ids, blob_size) =
-            timing_tracer!({ ib.build().context("build failed") }, "total build time")?;
+            timing_tracer!({ ib.build().context("build failed") }, "total_build")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
@@ -421,7 +420,7 @@ fn main() -> Result<()> {
                         .check(false)
                         .context("failed to validate bootstrap")
                 },
-                "validate bootstrap out of band"
+                "validate_bootstrap"
             )?;
         }
 

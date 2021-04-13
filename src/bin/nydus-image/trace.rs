@@ -50,6 +50,8 @@ pub enum TraceClass {
     Event = 2,
 }
 }
+
+#[derive(Debug)]
 pub enum TraceError {
     Serde(Error),
 }
@@ -155,7 +157,7 @@ lazy_static! {
 
 macro_rules! root_tracer {
     () => {
-        &crate::trace::BUILDING_RECORDER as &$crate::trace::BuildRootTracer
+        &$crate::trace::BUILDING_RECORDER as &$crate::trace::BuildRootTracer
     };
 }
 
@@ -179,7 +181,7 @@ macro_rules! timing_tracer {
 #[macro_export]
 macro_rules! register_tracer {
     ($class:expr, $r:ty) => {
-        root_tracer!().register($class, Arc::new(<$r>::default()));
+        root_tracer!().register($class, std::sync::Arc::new(<$r>::default()));
     };
 }
 
@@ -199,26 +201,26 @@ macro_rules! event_tracer {
         )
     };
     ($event:expr, +$value:expr) => {
-        use std::sync::atomic::{AtomicU64, Ordering};
         let mut new: bool = true;
+        if let Some($crate::trace::TraceEvent::Counter(ref e)) =
+            event_tracer!().events.read().unwrap().get($event)
         {
-            if let Some($crate::trace::TraceEvent::Counter(ref e)) =
-                event_tracer!().events.read().unwrap().get($event)
-            {
-                e.fetch_add($value as u64, Ordering::Relaxed);
-                new = false;
-            }
+            e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
+            new = false;
         }
 
         if new {
             // Double check to close the race that another thread has already inserted.
+            // Cast integer to u64 should be reliable for most cases.
             if let Ok(ref mut guard) = event_tracer!().events.write() {
                 if let Some($crate::trace::TraceEvent::Counter(ref e)) = guard.get($event) {
-                    e.fetch_add($value as u64, Ordering::Relaxed);
+                    e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     guard.insert(
                         $event.to_string(),
-                        $crate::trace::TraceEvent::Counter(AtomicU64::new(0)),
+                        $crate::trace::TraceEvent::Counter(std::sync::atomic::AtomicU64::new(
+                            $value as u64,
+                        )),
                     );
                 }
             }
@@ -232,4 +234,58 @@ macro_rules! event_tracer {
             );
         }
     };
+}
+
+#[cfg(test)]
+pub mod tests {
+
+    use super::{EventTracerClass, TraceClass};
+    use std::thread;
+
+    #[test]
+    fn test_event_trace() {
+        //register_tracer!(TraceClass::Timing, TimingTracerClass);
+        register_tracer!(TraceClass::Event, EventTracerClass);
+
+        let t1 = thread::Builder::new()
+            .spawn(move || {
+                for _i in 0..100 {
+                    event_tracer!("event_1", +2);
+                    event_tracer!("event_2", +3);
+                }
+            })
+            .unwrap();
+
+        let t2 = thread::Builder::new()
+            .spawn(move || {
+                for _i in 0..100 {
+                    event_tracer!("event_1", +2);
+                    event_tracer!("event_2", +3);
+                }
+            })
+            .unwrap();
+
+        let t3 = thread::Builder::new()
+            .spawn(move || {
+                for _i in 0..100 {
+                    event_tracer!("event_1", +2);
+                    event_tracer!("event_2", +3);
+                }
+            })
+            .unwrap();
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+
+        let map = root_tracer!().dump_summary_map().unwrap();
+        assert_eq!(
+            map["registered_events"]["event_1"].as_u64(),
+            serde::export::Some(600)
+        );
+        assert_eq!(
+            map["registered_events"]["event_2"].as_u64(),
+            serde::export::Some(900)
+        );
+    }
 }

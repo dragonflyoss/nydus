@@ -278,8 +278,16 @@ impl Node {
                     trace!(
                         "\t\tbuilding duplicated chunk: {} compressor {}",
                         chunk,
-                        compressor,
+                        compressor
                     );
+
+                    // The chunks of hardlink should be always deduplicated, so don't
+                    // trace this situation here.
+                    if !self.is_hardlink() {
+                        event_tracer!("dedup_decompressed_size", +chunk_size);
+                        event_tracer!("dedup_chunks", +1);
+                    }
+
                     continue;
                 }
             }
@@ -315,7 +323,8 @@ impl Node {
 
             // Dump compressed chunk data to blob
             if let Some(f_blob) = f_blob.as_mut() {
-                event_tracer!("blob compressed size", +compressed_size);
+                event_tracer!("blob_decompressed_size", +chunk_size);
+                event_tracer!("blob_compressed_size", +compressed_size);
                 f_blob
                     .write_all(&compressed)
                     .context("failed to write blob")?;
