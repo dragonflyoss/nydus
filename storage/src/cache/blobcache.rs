@@ -242,6 +242,7 @@ impl BlobCache {
                 .is_ok()
         {
             self.metrics.whole_hits.inc();
+            cache_entry.set_ready();
             trace!(
                 "recover blob cache {} {} reuse {} offset {} size {}",
                 chunk.block_id(),
