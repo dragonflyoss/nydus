@@ -194,6 +194,10 @@ func (fs *filesystem) MountPoint(snapshotID string) (string, error) {
 	return "", fmt.Errorf("failed to find nydus mountpoint of snapshot %s", snapshotID)
 }
 
+func (fs *filesystem) BootstrapFile(id string) (string, error) {
+	return daemon.GetBootstrapFile(fs.SnapshotRoot(), id)
+}
+
 func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 	err := fs.generateDaemonConfig(d, labels)
 	if err != nil {
