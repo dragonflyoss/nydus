@@ -13,7 +13,6 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/auth"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/registry"
 )
 
@@ -79,10 +78,10 @@ func SaveConfig(c DaemonConfig, configFile string) error {
 	return ioutil.WriteFile(configFile, b, 0755)
 }
 
-func NewDaemonConfig(cfg DaemonConfig, d *daemon.Daemon, vpcRegistry bool, labels map[string]string) (DaemonConfig, error) {
-	image, err := registry.ParseImage(d.ImageID)
+func NewDaemonConfig(cfg DaemonConfig, imageID string, vpcRegistry bool, labels map[string]string) (DaemonConfig, error) {
+	image, err := registry.ParseImage(imageID)
 	if err != nil {
-		return DaemonConfig{}, errors.Wrapf(err, "failed to parse image %s", d.ImageID)
+		return DaemonConfig{}, errors.Wrapf(err, "failed to parse image %s", imageID)
 	}
 	registryHost := image.Host
 	if vpcRegistry {

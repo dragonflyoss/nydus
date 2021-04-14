@@ -190,7 +190,7 @@ func (f *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 }
 
 func (f *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]string) error {
-	cfg, err := nydus.NewDaemonConfig(f.daemonCfg, d, f.vpcRegistry, labels)
+	cfg, err := nydus.NewDaemonConfig(f.daemonCfg, d.ImageID, f.vpcRegistry, labels)
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
 	}

@@ -275,7 +275,7 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 
 // generateDaemonConfig generate Daemon configuration
 func (fs *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]string) error {
-	cfg, err := NewDaemonConfig(fs.daemonCfg, d, fs.vpcRegistry, labels)
+	cfg, err := NewDaemonConfig(fs.daemonCfg, d.ImageID, fs.vpcRegistry, labels)
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
 	}
