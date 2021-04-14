@@ -22,6 +22,7 @@ const (
 	defaultPublicKey      = "/signing/nydus-image-signing-public.key"
 	defaultNydusdPath     = "/bin/nydusd"
 	defaultNydusImagePath = "/bin/nydusd-img"
+	defaultDaemonMode     = "multiple"
 )
 
 type Args struct {
@@ -34,7 +35,7 @@ type Args struct {
 	ConvertVpcRegistry   bool
 	NydusdBinaryPath     string
 	NydusImageBinaryPath string
-	SharedDaemon         bool
+	DaemonMode           string
 	AsyncRemove          bool
 	EnableMetrics        bool
 	MetricsFile          string
@@ -101,11 +102,11 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether automatically convert the image to vpc registry to accelerate image pulling",
 			Destination: &args.ConvertVpcRegistry,
 		},
-		&cli.BoolFlag{
-			Name:        "shared-daemon",
-			Value:       false,
-			Usage:       "whether to use a single shared nydus daemon",
-			Destination: &args.SharedDaemon,
+		&cli.StringFlag{
+			Name:        "daemon-mode",
+			Value:       defaultDaemonMode,
+			Usage:       "daemon mode to use, could be \"multiple\" or \"shared\"",
+			Destination: &args.DaemonMode,
 		},
 		&cli.BoolFlag{
 			Name:        "async-remove",
@@ -160,7 +161,7 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.Address = args.Address
 	cfg.NydusdBinaryPath = args.NydusdBinaryPath
 	cfg.NydusImageBinaryPath = args.NydusImageBinaryPath
-	cfg.SharedDaemon = args.SharedDaemon
+	cfg.DaemonMode = args.DaemonMode
 	cfg.AsyncRemove = args.AsyncRemove
 	cfg.EnableMetrics = args.EnableMetrics
 	cfg.MetricsFile = args.MetricsFile

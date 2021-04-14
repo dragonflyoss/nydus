@@ -8,6 +8,7 @@ package nydus
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
@@ -74,11 +75,15 @@ func WithVPCRegistry(vpcRegistry bool) NewFSOpt {
 	}
 }
 
-func WithSharedDaemon(sharedDaemon bool) NewFSOpt {
+func WithDaemonMode(daemonMode string) NewFSOpt {
 	return func(d *filesystem) error {
-		if sharedDaemon {
+		mode := strings.ToLower(daemonMode)
+		switch mode {
+		case "single", "shared":
 			d.mode = fs.SingleInstance
-		} else {
+		case "multiple":
+			fallthrough
+		default:
 			d.mode = fs.MultiInstance
 		}
 		return nil

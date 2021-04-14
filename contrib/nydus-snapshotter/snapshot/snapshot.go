@@ -70,10 +70,11 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to initialize verifier")
 	}
 
+	cfg.DaemonMode = strings.ToLower(cfg.DaemonMode)
 	pm, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: cfg.NydusdBinaryPath,
 		RootDir:          cfg.RootDir,
-		SharedDaemon:     cfg.SharedDaemon,
+		DaemonMode:       cfg.DaemonMode,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new process manager")
@@ -87,7 +88,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		nydus.WithDaemonConfig(cfg.DaemonCfg),
 		nydus.WithVPCRegistry(cfg.ConvertVpcRegistry),
 		nydus.WithVerifier(verifier),
-		nydus.WithSharedDaemon(cfg.SharedDaemon),
+		nydus.WithDaemonMode(cfg.DaemonMode),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")

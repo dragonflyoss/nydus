@@ -27,7 +27,7 @@ type Config struct {
 	ValidateSignature    bool               `toml:"validate_signature"`
 	NydusdBinaryPath     string             `toml:"nydusd_binary_path"`
 	NydusImageBinaryPath string             `toml:"nydus_image_binary"`
-	SharedDaemon         bool               `toml:"shared_daemon"`
+	DaemonMode           string             `toml:"daemon_mode"`
 	AsyncRemove          bool               `toml:"async_remove"`
 	EnableMetrics        bool               `toml:"enable_metrics"`
 	MetricsFile          string             `toml:"metrics_file"`
@@ -45,6 +45,10 @@ func (c *Config) FillupWithDefaults() error {
 
 	if c.NydusImageBinaryPath == "" {
 		c.NydusImageBinaryPath = defaultNydusImageBinaryPath
+	}
+
+	if c.DaemonMode == "" {
+		c.DaemonMode = "multiple"
 	}
 
 	var daemonCfg nydus.DaemonConfig

@@ -96,7 +96,7 @@ func WithImageID(imageID string) NewDaemonOpt {
 
 func WithSharedDaemon() NewDaemonOpt {
 	return func(d *Daemon) error {
-		d.SharedDaemon = true
+		d.DaemonMode = "shared"
 		return nil
 	}
 }

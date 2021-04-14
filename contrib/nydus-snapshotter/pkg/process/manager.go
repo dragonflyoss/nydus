@@ -28,7 +28,7 @@ type configGenerator = func(*daemon.Daemon) error
 type Manager struct {
 	store            Store
 	nydusdBinaryPath string
-	SharedDaemon     bool
+	DaemonMode       string
 	mounter          mount.Interface
 	mu               sync.Mutex
 }
@@ -36,7 +36,7 @@ type Manager struct {
 type Opt struct {
 	NydusdBinaryPath string
 	RootDir          string
-	SharedDaemon     bool
+	DaemonMode       string
 }
 
 func NewManager(opt Opt) (*Manager, error) {
@@ -49,7 +49,7 @@ func NewManager(opt Opt) (*Manager, error) {
 		store:            s,
 		mounter:          &mount.Mounter{},
 		nydusdBinaryPath: opt.NydusdBinaryPath,
-		SharedDaemon:     opt.SharedDaemon,
+		DaemonMode:       opt.DaemonMode,
 	}, nil
 }
 
@@ -95,7 +95,7 @@ func (m *Manager) ListDaemons() []*daemon.Daemon {
 
 func (m *Manager) CleanUpDaemonResource(d *daemon.Daemon) {
 	resource := []string{d.ConfigDir, d.LogDir}
-	if !d.SharedDaemon {
+	if d.IsMultipleDaemon() {
 		resource = append(resource, d.SocketDir)
 	}
 	for _, dir := range resource {
@@ -133,7 +133,7 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 		"--log-file", d.LogFile(),
 		"--thread-num", "10",
 	}
-	if !d.SharedDaemon {
+	if d.IsMultipleDaemon() {
 		bootstrap, err := d.BootstrapFile()
 		if err != nil {
 			return nil, err
@@ -171,7 +171,7 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	log.L.Infof("umount remote snapshot, mountpoint %s", d.MountPoint())
 	// if daemon is shared mount, we should only umount the daemon with api instead of
 	// umount entire mountpoint
-	if d.SharedDaemon {
+	if d.IsSharedDaemon() {
 		return d.SharedUmount()
 	}
 	// if we found pid here, we need to kill and wait process to exit, Pid=0 means somehow we lost
@@ -196,6 +196,10 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	return nil
 }
 
+func (m *Manager) IsSharedDaemon() bool {
+	return m.DaemonMode == "shared" || m.DaemonMode == "single"
+}
+
 // Reconnect already running daemons，and rebuild daemons management structs.
 func (m *Manager) Reconnect(ctx context.Context) error {
 	var (
@@ -205,11 +209,11 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 
 	if err := m.store.WalkDaemons(ctx, func(d *daemon.Daemon) error {
 		log.L.WithField("daemon", d.ID).
-			WithField("shared", d.SharedDaemon).
+			WithField("shared", d.IsSharedDaemon()).
 			Info("found daemon in database")
 
 		// Do not check status on virtual daemons
-		if m.SharedDaemon && d.ID != daemon.SharedNydusDaemonID {
+		if m.IsSharedDaemon() && d.ID != daemon.SharedNydusDaemonID {
 			daemons = append(daemons, d)
 			log.L.WithField("daemon", d.ID).Infof("found virtual daemon")
 			return nil
@@ -234,11 +238,11 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 		return errors.Wrapf(err, "failed to walk daemons to reconnect")
 	}
 
-	if !m.SharedDaemon && sharedDaemon != nil {
+	if !m.IsSharedDaemon() && sharedDaemon != nil {
 		return errors.Errorf("SharedDaemon disabled, but shared daemon is found")
 	}
 
-	if m.SharedDaemon && sharedDaemon == nil && len(daemons) > 0 {
+	if m.IsSharedDaemon() && sharedDaemon == nil && len(daemons) > 0 {
 		log.L.Warnf("SharedDaemon enabled, but cannot find alive shared daemon")
 		// Clear daemon list to skip adding them into daemon store
 		daemons = nil

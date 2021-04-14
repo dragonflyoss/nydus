@@ -33,7 +33,7 @@ type Daemon struct {
 	SnapshotDir    string
 	Pid            int
 	ImageID        string
-	SharedDaemon   bool
+	DaemonMode     string
 	ApiSock        *string
 	RootMountPoint *string
 }
@@ -110,9 +110,18 @@ func (d *Daemon) SharedUmount() error {
 	return client.Umount(d.MountPoint())
 }
 
+func (d *Daemon) IsMultipleDaemon() bool {
+	return d.DaemonMode == "multiple"
+}
+
+func (d *Daemon) IsSharedDaemon() bool {
+	return d.DaemonMode == "shared" || d.DaemonMode == "single"
+}
+
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
 	d := &Daemon{Pid: 0}
 	d.ID = newID()
+	d.DaemonMode = "multiple"
 	for _, o := range opt {
 		err := o(d)
 		if err != nil {

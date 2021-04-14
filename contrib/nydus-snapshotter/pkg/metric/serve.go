@@ -119,7 +119,7 @@ outer:
 					continue
 				}
 
-				fsMetrics, err := client.GetFsMetric(s.pm.SharedDaemon, d.SnapshotID)
+				fsMetrics, err := client.GetFsMetric(s.pm.IsSharedDaemon(), d.SnapshotID)
 				if err != nil {
 					log.G(ctx).Errorf("failed to get fs metric: %v", err)
 					continue
