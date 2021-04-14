@@ -25,7 +25,6 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	fspkg "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/stargz"
@@ -46,7 +45,6 @@ type snapshotter struct {
 	fs          fspkg.FileSystem
 	stargzFs    fspkg.FileSystem
 	manager     *process.Manager
-	daemon      *daemon.Daemon
 }
 
 func (o *snapshotter) Cleanup(ctx context.Context) error {
