@@ -22,9 +22,7 @@ import (
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/containerd/continuity/fs"
 	metrics "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric"
-	metricExp "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric/exporter"
 	"github.com/pkg/errors"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
@@ -111,37 +109,20 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	}
 
 	if cfg.EnableMetrics {
-		s, err := metrics.NewServer(
+		metricServer, err := metrics.NewServer(
 			ctx,
-			metrics.WithSockPath(cfg.RootDir),
+			metrics.WithRootDir(cfg.RootDir),
+			metrics.WithProcessManager(pm),
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to new metric server")
 		}
-		log.G(ctx).Infof("Starting metrics server on %s", s.SockPath)
-
-		exp, err := metricExp.NewExporter(
-			metricExp.WithOutputFile(cfg.RootDir),
-		)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to new metric exporter")
-		}
-
-		// Process manager starts to collect metrics from daemons periodically.
-		errs, ctx := errgroup.WithContext(ctx)
-		errs.Go(func() error {
-			return pm.CollectDaemonMetric(ctx, exp)
-		})
-		if err := errs.Wait(); err != nil {
-			return nil, errors.Wrap(err, "failed to start metrics collecting routine")
-		}
 		// Start metrics http server.
-		errs.Go(func() error {
-			return s.Serve(ctx, ctx.Done())
-		})
-		if err := errs.Wait(); err != nil {
-			return nil, errors.Wrap(err, "failed to start metrics http server")
-		}
+		go func() {
+			if err := metricServer.Serve(ctx); err != nil {
+				log.G(ctx).Error(err)
+			}
+		}()
 	}
 
 	if err := os.MkdirAll(cfg.RootDir, 0700); err != nil {

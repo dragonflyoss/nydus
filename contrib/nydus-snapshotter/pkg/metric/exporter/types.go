@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package metrics
+package exporter
 
 import (
 	"fmt"
