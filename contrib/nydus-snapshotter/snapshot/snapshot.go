@@ -95,16 +95,19 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
 	}
 
-	stargzFs, err := stargz.NewFileSystem(
-		ctx,
-		stargz.WithProcessManager(pm),
-		stargz.WithMeta(cfg.RootDir),
-		stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
-		stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
-		stargz.WithDaemonConfig(cfg.DaemonCfg),
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+	var stargzFs fspkg.FileSystem = nil
+	if cfg.EnableStargz {
+		stargzFs, err = stargz.NewFileSystem(
+			ctx,
+			stargz.WithProcessManager(pm),
+			stargz.WithMeta(cfg.RootDir),
+			stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
+			stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
+			stargz.WithDaemonConfig(cfg.DaemonCfg),
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+		}
 	}
 
 	if cfg.EnableMetrics {
@@ -213,13 +216,15 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 			return nil, err
 		}
 		return o.remoteMounts(ctx, *s, id)
-	} else if id, _, rErr := o.findStargzMetaLayer(ctx, key); rErr == nil {
-		err = o.stargzFs.WaitUntilReady(ctx, id)
-		if err != nil {
-			log.G(ctx).Errorf("snapshot %s is not ready, err: %v", id, err)
-			return nil, err
+	} else if o.stargzFs != nil {
+		if id, _, rErr := o.findStargzMetaLayer(ctx, key); rErr == nil {
+			err = o.stargzFs.WaitUntilReady(ctx, id)
+			if err != nil {
+				log.G(ctx).Errorf("snapshot %s is not ready, err: %v", id, err)
+				return nil, err
+			}
+			return o.remoteMounts(ctx, *s, id)
 		}
-		return o.remoteMounts(ctx, *s, id)
 	}
 	return o.mounts(ctx, *s)
 }
@@ -261,7 +266,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		}
 		// check if image layer is stargz layer, we need to download the stargz toc and convert it to nydus formated meta
 		// then skip layer download
-		if o.stargzFs.Support(ctx, base.Labels) {
+		if o.stargzFs != nil && o.stargzFs.Support(ctx, base.Labels) {
 			// Mark this snapshot as remote
 			base.Labels[label.RemoteLabel] = fmt.Sprintf("remote snapshot")
 			err := o.stargzFs.PrepareLayer(ctx, s, base.Labels)
@@ -282,10 +287,12 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 			if err := o.prepareRemoteSnapshot(ctx, id, info.Labels); err != nil {
 				return nil, err
 			}
-		} else if id, info, err := o.findStargzMetaLayer(ctx, key); err == nil {
-			logCtx.Infof("found stargz meta layer id %s, parpare remote snapshot", id)
-			if err := o.prepareStargzRemoteSnapshot(ctx, id, info.Labels); err != nil {
-				return nil, err
+		} else if o.stargzFs != nil {
+			if id, info, err := o.findStargzMetaLayer(ctx, key); err == nil {
+				logCtx.Infof("found stargz meta layer id %s, parpare remote snapshot", id)
+				if err := o.prepareStargzRemoteSnapshot(ctx, id, info.Labels); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -415,8 +422,11 @@ func (o *snapshotter) upperPath(id string) string {
 	if mnt, err := o.fs.MountPoint(id); err == nil {
 		return mnt
 	}
-	if mnt, err := o.stargzFs.MountPoint(id); err == nil {
-		return mnt
+
+	if o.stargzFs != nil {
+		if mnt, err := o.stargzFs.MountPoint(id); err == nil {
+			return mnt
+		}
 	}
 
 	return filepath.Join(o.root, "snapshots", id, "fs")
@@ -661,10 +671,12 @@ func (o *snapshotter) cleanupSnapshotDirectory(ctx context.Context, dir string) 
 	log.G(ctx).WithField("dir", dir).Infof("cleanupSnapshotDirectory %s", dir)
 	if err := o.fs.Umount(ctx, dir); err != nil {
 		log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
+	} else if o.stargzFs != nil {
+		if err := o.stargzFs.Umount(ctx, dir); err != nil {
+			log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
+		}
 	}
-	if err := o.stargzFs.Umount(ctx, dir); err != nil {
-		log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
-	}
+
 	if err := os.RemoveAll(dir); err != nil {
 		return errors.Wrapf(err, "failed to remove directory %q", dir)
 	}
