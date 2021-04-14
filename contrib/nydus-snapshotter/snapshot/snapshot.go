@@ -269,12 +269,14 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 			if err := o.prepareRemoteSnapshot(ctx, id, info.Labels); err != nil {
 				return nil, err
 			}
+			return o.remoteMounts(ctx, s, id)
 		} else if o.stargzFs != nil {
 			if id, info, err := o.findStargzMetaLayer(ctx, key); err == nil {
 				logCtx.Infof("found stargz meta layer id %s, parpare remote snapshot", id)
 				if err := o.prepareStargzRemoteSnapshot(ctx, id, info.Labels); err != nil {
 					return nil, err
 				}
+				return o.remoteMounts(ctx, s, id)
 			}
 		}
 	}
