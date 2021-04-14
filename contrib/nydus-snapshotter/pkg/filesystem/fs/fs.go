@@ -16,6 +16,7 @@ type FSMode int
 const (
 	SingleInstance FSMode = iota
 	MultiInstance
+	NoneInstance
 )
 
 type FileSystem interface {
@@ -26,4 +27,6 @@ type FileSystem interface {
 	Support(ctx context.Context, labels map[string]string) bool
 	PrepareLayer(ctx context.Context, snapshot storage.Snapshot, labels map[string]string) error
 	MountPoint(snapshotID string) (string, error)
+	BootstrapFile(snapshotID string) (string, error)
+	NewDaemonConfigContent(labels map[string]string) (string, error)
 }

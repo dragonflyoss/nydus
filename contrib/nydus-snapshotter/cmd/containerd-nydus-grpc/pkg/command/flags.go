@@ -105,7 +105,7 @@ func buildFlags(args *Args) []cli.Flag {
 		&cli.StringFlag{
 			Name:        "daemon-mode",
 			Value:       defaultDaemonMode,
-			Usage:       "daemon mode to use, could be \"multiple\" or \"shared\"",
+			Usage:       "daemon mode to use, could be \"multiple\", \"shared\" or \"none\"",
 			Destination: &args.DaemonMode,
 		},
 		&cli.BoolFlag{

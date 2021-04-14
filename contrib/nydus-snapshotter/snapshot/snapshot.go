@@ -45,6 +45,7 @@ type snapshotter struct {
 	fs          fspkg.FileSystem
 	stargzFs    fspkg.FileSystem
 	manager     *process.Manager
+	hasDaemon   bool
 }
 
 func (o *snapshotter) Cleanup(ctx context.Context) error {
@@ -153,6 +154,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		asyncRemove: cfg.AsyncRemove,
 		fs:          nydusFs,
 		stargzFs:    stargzFs,
+		hasDaemon:   cfg.DaemonMode != "none" && cfg.DaemonMode != "no",
 	}, nil
 }
 
@@ -190,13 +192,13 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get active mount")
 	}
-	if id, _, rErr := o.findNydusMetaLayer(ctx, key); rErr == nil {
+	if id, info, rErr := o.findNydusMetaLayer(ctx, key); rErr == nil {
 		err = o.fs.WaitUntilReady(ctx, id)
 		if err != nil {
 			log.G(ctx).Errorf("snapshot %s is not ready, err: %v", id, err)
 			return nil, err
 		}
-		return o.remoteMounts(ctx, *s, id)
+		return o.remoteMounts(ctx, *s, id, info.Labels)
 	} else if o.stargzFs != nil {
 		if id, _, rErr := o.findStargzMetaLayer(ctx, key); rErr == nil {
 			err = o.stargzFs.WaitUntilReady(ctx, id)
@@ -204,7 +206,7 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 				log.G(ctx).Errorf("snapshot %s is not ready, err: %v", id, err)
 				return nil, err
 			}
-			return o.remoteMounts(ctx, *s, id)
+			return o.remoteMounts(ctx, *s, id, info.Labels)
 		}
 	}
 	return o.mounts(ctx, *s)
@@ -268,14 +270,14 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 			if err := o.prepareRemoteSnapshot(ctx, id, info.Labels); err != nil {
 				return nil, err
 			}
-			return o.remoteMounts(ctx, s, id)
+			return o.remoteMounts(ctx, s, id, info.Labels)
 		} else if o.stargzFs != nil {
 			if id, info, err := o.findStargzMetaLayer(ctx, key); err == nil {
 				logCtx.Infof("found stargz meta layer id %s, parpare remote snapshot", id)
 				if err := o.prepareStargzRemoteSnapshot(ctx, id, info.Labels); err != nil {
 					return nil, err
 				}
-				return o.remoteMounts(ctx, s, id)
+				return o.remoteMounts(ctx, s, id, info.Labels)
 			}
 		}
 	}
@@ -516,20 +518,44 @@ func overlayMount(options []string) []mount.Mount {
 	}
 }
 
-func (o *snapshotter) remoteMounts(ctx context.Context, s storage.Snapshot, id string) ([]mount.Mount, error) {
+func (o *snapshotter) remoteMounts(ctx context.Context, s storage.Snapshot, id string, labels map[string]string) ([]mount.Mount, error) {
 	var options []string
-	if s.Kind == snapshots.KindActive {
-		options = append(options,
-			fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
-			fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
-		)
-	} else if len(s.ParentIDs) == 1 {
-		return bindMount(o.upperPath(s.ParentIDs[0])), nil
+	if o.hasDaemon {
+		if s.Kind == snapshots.KindActive {
+			options = append(options,
+				fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
+				fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
+			)
+		} else if len(s.ParentIDs) == 1 {
+			return bindMount(o.upperPath(s.ParentIDs[0])), nil
+		}
+		lowerDirOption := fmt.Sprintf("lowerdir=%s", o.upperPath(id))
+		options = append(options, lowerDirOption)
+		log.G(ctx).Infof("mount options %v", options)
+		return overlayMount(options), nil
+	} else {
+		// Only nydus can work without daemon
+		source, err := o.fs.BootstrapFile(id)
+		if err != nil {
+			return nil, err
+		}
+
+		configContent, err := o.fs.NewDaemonConfigContent(labels)
+		if err != nil {
+			return nil, errors.Wrapf(err, fmt.Sprintf("remoteMounts: failed to generate nydus config for snapshot %s, label: %v", id, labels))
+		}
+		configOption := fmt.Sprintf("config=%s", configContent)
+		options = append(options, configOption)
+		// TODO: don't print options, as it contains registry secrets
+		log.G(ctx).Infof("Bootstrap file for snapshotID %s: %s, options %v", id, source, options)
+		return []mount.Mount{
+			{
+				Type:    "nydus",
+				Source:  source,
+				Options: options,
+			},
+		}, nil
 	}
-	lowerDirOption := fmt.Sprintf("lowerdir=%s", o.upperPath(id))
-	options = append(options, lowerDirOption)
-	log.G(ctx).Infof("mount options %v", options)
-	return overlayMount(options), nil
 }
 
 func (o *snapshotter) mounts(ctx context.Context, s storage.Snapshot) ([]mount.Mount, error) {
