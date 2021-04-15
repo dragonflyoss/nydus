@@ -78,6 +78,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new process manager")
 	}
+	hasDaemon := cfg.DaemonMode != "none" && cfg.DaemonMode != "no"
 
 	nydusFs, err := nydus.NewFileSystem(
 		ctx,
@@ -95,16 +96,21 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 
 	var stargzFs fspkg.FileSystem = nil
 	if cfg.EnableStargz {
-		stargzFs, err = stargz.NewFileSystem(
-			ctx,
-			stargz.WithProcessManager(pm),
-			stargz.WithMeta(cfg.RootDir),
-			stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
-			stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
-			stargz.WithDaemonConfig(cfg.DaemonCfg),
-		)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+		if hasDaemon {
+			stargzFs, err = stargz.NewFileSystem(
+				ctx,
+				stargz.WithProcessManager(pm),
+				stargz.WithMeta(cfg.RootDir),
+				stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
+				stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
+				stargz.WithDaemonConfig(cfg.DaemonCfg),
+			)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+			}
+		} else {
+			// stargz support requires nydusd to run
+			log.G(ctx).Info("DaemonMode is none, disable stargz support")
 		}
 	}
 
@@ -154,7 +160,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		asyncRemove: cfg.AsyncRemove,
 		fs:          nydusFs,
 		stargzFs:    stargzFs,
-		hasDaemon:   cfg.DaemonMode != "none" && cfg.DaemonMode != "no",
+		hasDaemon:   hasDaemon,
 	}, nil
 }
 
