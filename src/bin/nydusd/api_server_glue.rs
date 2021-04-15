@@ -70,6 +70,7 @@ impl ApiServer {
             ApiRequest::ExportFilesMetrics(id) => Self::export_files_metrics(id),
             ApiRequest::ExportAccessPatterns(id) => Self::export_access_patterns(id),
             ApiRequest::ExportBackendMetrics(id) => Self::export_backend_metrics(id),
+            ApiRequest::ExportLatestReadFilesMetrics(id) => Self::export_latest_read_files(id),
             ApiRequest::ExportBlobcacheMetrics(id) => Self::export_blobcache_metrics(id),
             ApiRequest::ExportInflightMetrics => self.export_inflight_metrics(),
             ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
@@ -139,6 +140,12 @@ impl ApiServer {
     fn export_access_patterns(id: Option<String>) -> ApiResponse {
         metrics::export_files_access_pattern(&id)
             .map(ApiResponsePayload::FsFilesPatterns)
+            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
+    }
+
+    fn export_latest_read_files(id: Option<String>) -> ApiResponse {
+        metrics::export_latest_read_files(&id)
+            .map(ApiResponsePayload::FsFilesLatestReadMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 

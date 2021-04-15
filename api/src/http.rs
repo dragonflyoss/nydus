@@ -21,8 +21,8 @@ use vmm_sys_util::eventfd::EventFd;
 use crate::http_endpoint::{
     error_response, ApiError, ApiRequest, ApiResponse, EventsHandler, ExitHandler, FsBackendInfo,
     HttpError, HttpResult, InfoHandler, MetricsBackendHandler, MetricsBlobcacheHandler,
-    MetricsFilesHandler, MetricsHandler, MetricsInflightHandler, MetricsPatternHandler,
-    MountHandler, SendFuseFdHandler, TakeoverHandler,
+    MetricsFilesHandler, MetricsHandler, MetricsInflightHandler, MetricsLatestReadFilesHandler,
+    MetricsPatternHandler, MountHandler, SendFuseFdHandler, TakeoverHandler,
 };
 
 const HTTP_ROOT: &str = "/api/v1";
@@ -70,6 +70,7 @@ lazy_static! {
         r.routes.insert(endpoint!("/metrics"), Box::new(MetricsHandler{}));
         r.routes.insert(endpoint!("/metrics/files"), Box::new(MetricsFilesHandler{}));
         r.routes.insert(endpoint!("/metrics/pattern"), Box::new(MetricsPatternHandler{}));
+        r.routes.insert(endpoint!("/metrics/latest_read_files"), Box::new(MetricsLatestReadFilesHandler{}));
         r.routes.insert(endpoint!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
         r.routes.insert(endpoint!("/metrics/inflight"), Box::new(MetricsInflightHandler{}));

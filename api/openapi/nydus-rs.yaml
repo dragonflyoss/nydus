@@ -230,6 +230,30 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorMsg"
           description: Internal Server Error
+  /metrics/latest_read_files:
+    get:
+      operationId: exportRafsLatestReadFiles
+      summary: Rafs latest read files
+      parameters:
+        - name: id
+          in: query
+          description: "Specify rafs id to get its latest read files"
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RafsLatestReadFiles"
+          description: Rafs latest read files exporting
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMsg"
+          description: Internal Server Error
   /metrics/backend:
     get:
       parameters:
@@ -425,6 +449,15 @@ components:
         first_access_time:
           type: integer
           description: First time point at which this file is read. It's wall-time in unit of seconds
+    RafsLatestReadFiles:
+      properties:
+        inode_range:
+          type: array
+          description: File ino array, [start,end] -- include inode from start to end, [ino] -- include inode ino
+          items:
+            type: array
+            items:
+              type: integer
     RafsBackend:
       type: object
       properties:

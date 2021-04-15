@@ -97,6 +97,8 @@ pub struct RafsConfig {
     pub enable_xattr: bool,
     #[serde(default)]
     pub access_pattern: bool,
+    #[serde(default)]
+    pub latest_read_files: bool,
 }
 
 impl FromStr for RafsConfig {
@@ -124,8 +126,8 @@ impl fmt::Display for RafsConfig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "mode={} digest_validate={} iostats_files={}",
-            self.mode, self.digest_validate, self.iostats_files
+            "mode={} digest_validate={} iostats_files={} latest_read_files={}",
+            self.mode, self.digest_validate, self.iostats_files, self.latest_read_files
         )
     }
 }
@@ -199,6 +201,8 @@ impl Rafs {
 
         rafs.ios.toggle_files_recording(conf.iostats_files);
         rafs.ios.toggle_access_pattern(conf.access_pattern);
+        rafs.ios
+            .toggle_latest_read_files_recording(conf.latest_read_files);
 
         Ok(rafs)
     }
