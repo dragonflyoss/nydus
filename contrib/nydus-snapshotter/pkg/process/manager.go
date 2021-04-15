@@ -208,11 +208,6 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 			WithField("shared", d.SharedDaemon).
 			Info("found daemon in database")
 
-		// Get the global shared daemon
-		if d.ID == daemon.SharedNydusDaemonID {
-			sharedDaemon = d
-		}
-
 		// Do not check status on virtual daemons
 		if m.SharedDaemon && d.ID != daemon.SharedNydusDaemonID {
 			daemons = append(daemons, d)
@@ -228,6 +223,12 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 		log.L.WithField("daemon", d.ID).Infof("found alive daemon")
 		daemons = append(daemons, d)
 
+		// Get the global shared daemon here after CheckStatus() by attention
+		// so that we're sure it's alive.
+		if d.ID == daemon.SharedNydusDaemonID {
+			sharedDaemon = d
+		}
+
 		return nil
 	}); err != nil {
 		return errors.Wrapf(err, "failed to walk daemons to reconnect")
@@ -235,6 +236,12 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 
 	if !m.SharedDaemon && sharedDaemon != nil {
 		return errors.Errorf("SharedDaemon disabled, but shared daemon is found")
+	}
+
+	if m.SharedDaemon && sharedDaemon == nil && len(daemons) > 0 {
+		log.L.Warnf("SharedDaemon enabled, but cannot find alive shared daemon")
+		// Clear daemon list to skip adding them into daemon store
+		daemons = nil
 	}
 
 	// cleanup database so that we'll have a clean database for this snapshotter process lifetime
@@ -245,7 +252,7 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 
 	for _, d := range daemons {
 		if err := m.NewDaemon(d); err != nil {
-			return errors.Wrapf(err, "failed to daemon(%s) to daemon store", d.ID)
+			return errors.Wrapf(err, "failed to add daemon(%s) to daemon store", d.ID)
 		}
 	}
 
