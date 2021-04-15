@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/pkg/errors"
@@ -27,10 +26,16 @@ type Exporter struct {
 	outputFile string
 }
 
-func WithOutputFile(dir string) Opt {
+func WithOutputFile(metricsFile string) Opt {
 	return func(e *Exporter) error {
-		e.outputFile = filepath.Join(dir, "metrics.log")
+		if metricsFile == "" {
+			return errors.New("metrics file path is empty")
+		}
 
+		if _, err := os.Create(metricsFile); err != nil {
+			return errors.Wrapf(err, "failed to create metrics file: %s", metricsFile)
+		}
+		e.outputFile = metricsFile
 		return nil
 	}
 }

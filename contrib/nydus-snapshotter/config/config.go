@@ -30,6 +30,7 @@ type Config struct {
 	SharedDaemon         bool               `toml:"shared_daemon"`
 	AsyncRemove          bool               `toml:"async_remove"`
 	EnableMetrics        bool               `toml:"enable_metrics"`
+	MetricsFile          string             `toml:"metrics_file"`
 	EnableStargz         bool               `toml:"enable_stargz"`
 }
 

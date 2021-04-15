@@ -28,15 +28,31 @@ type ServerOpt func(*Server) error
 const sockFileName = "metrics.sock"
 
 type Server struct {
-	listener net.Listener
-	rootDir  string
-	pm       *process.Manager
-	exp      *exporter.Exporter
+	listener    net.Listener
+	rootDir     string
+	metricsFile string
+	pm          *process.Manager
+	exp         *exporter.Exporter
 }
 
 func WithRootDir(rootDir string) ServerOpt {
 	return func(s *Server) error {
 		s.rootDir = rootDir
+		return nil
+	}
+}
+
+func WithMetricsFile(metricsFile string) ServerOpt {
+	return func(s *Server) error {
+		if s.rootDir == "" {
+			return errors.New("root dir is required")
+		}
+
+		if metricsFile == "" {
+			metricsFile = filepath.Join(s.rootDir, "metrics.log")
+		}
+
+		s.metricsFile = metricsFile
 		return nil
 	}
 }
@@ -57,7 +73,7 @@ func NewServer(ctx context.Context, opts ...ServerOpt) (*Server, error) {
 	}
 
 	exp, err := exporter.NewExporter(
-		exporter.WithOutputFile(s.rootDir),
+		exporter.WithOutputFile(s.metricsFile),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new metric exporter")
