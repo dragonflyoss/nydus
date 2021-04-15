@@ -9,16 +9,17 @@ package store
 import (
 	"context"
 	"fmt"
-	"github.com/pkg/errors"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
+	"github.com/pkg/errors"
 )
 
 const (
 	databaseFileName = "nydus.db"
 )
-
 
 type DaemonStore struct {
 	sync.Mutex
@@ -49,7 +50,7 @@ func (s *DaemonStore) Get(id string) (*daemon.Daemon, error) {
 	if d, ok := s.idxByID[id]; ok {
 		return d, nil
 	}
-	return nil, fmt.Errorf("failed to get daemon by id (%s)", id)
+	return nil, os.ErrNotExist
 }
 
 func (s *DaemonStore) GetBySnapshot(snapshotID string) (*daemon.Daemon, error) {
@@ -58,7 +59,8 @@ func (s *DaemonStore) GetBySnapshot(snapshotID string) (*daemon.Daemon, error) {
 	if d, ok := s.idxBySnapshotID[snapshotID]; ok {
 		return d, nil
 	}
-	return nil, fmt.Errorf("failed to get daemon by snapshotID (%s)", snapshotID)
+
+	return nil, os.ErrNotExist
 }
 
 func (s *DaemonStore) List() []*daemon.Daemon {

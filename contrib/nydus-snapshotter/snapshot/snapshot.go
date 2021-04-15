@@ -669,10 +669,10 @@ func (o *snapshotter) cleanupSnapshotDirectory(ctx context.Context, dir string) 
 	// We use Filesystem's Unmount API so that it can do necessary finalization
 	// before/after the unmount.
 	log.G(ctx).WithField("dir", dir).Infof("cleanupSnapshotDirectory %s", dir)
-	if err := o.fs.Umount(ctx, dir); err != nil {
+	if err := o.fs.Umount(ctx, dir); err != nil && !os.IsNotExist(err) {
 		log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
 	} else if o.stargzFs != nil {
-		if err := o.stargzFs.Umount(ctx, dir); err != nil {
+		if err := o.stargzFs.Umount(ctx, dir); err != nil && !os.IsNotExist(err) {
 			log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
 		}
 	}
