@@ -9,7 +9,6 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/pkg/errors"
 
@@ -33,12 +32,10 @@ type Daemon struct {
 	CacheDir       string
 	SnapshotDir    string
 	Pid            int
-	client         nydussdk.Interface
 	ImageID        string
 	SharedDaemon   bool
 	ApiSock        *string
 	RootMountPoint *string
-	mu             sync.Mutex
 }
 
 func (d *Daemon) SharedMountPoint() string {
@@ -53,14 +50,14 @@ func (d *Daemon) MountPoint() string {
 }
 
 func (d *Daemon) BootstrapFile() (string, error) {
-	// for backward compatibility check meta file from legacy location
+	// the meta file is stored to <snapshotid>/image/image.boot
 	bootstrap := filepath.Join(d.SnapshotDir, d.SnapshotID, "fs", "image", "image.boot")
 	_, err := os.Stat(bootstrap)
 	if err == nil {
 		return bootstrap, nil
 	}
 	if os.IsNotExist(err) {
-		// meta file has been changed to <snapshotid>/fs/image.boot
+		// for backward compatibility check meta file from legacy location
 		bootstrap = filepath.Join(d.SnapshotDir, d.SnapshotID, "fs", "image.boot")
 		_, err = os.Stat(bootstrap)
 		if err == nil {
@@ -83,10 +80,6 @@ func (d *Daemon) APISock() string {
 
 func (d *Daemon) LogFile() string {
 	return filepath.Join(d.LogDir, "stderr.log")
-}
-
-func (d *Daemon) binary() string {
-	return "/bin/nydusd"
 }
 
 func (d *Daemon) CheckStatus() (model.DaemonInfo, error) {
