@@ -8,7 +8,7 @@ use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc, Mutex, RwLock,
 };
 use std::thread;
@@ -172,11 +172,46 @@ impl BlobCacheState {
     }
 }
 
+struct PrefetchContext {
+    pub enable: bool,
+    pub threads_count: usize,
+    pub merging_size: usize,
+    // In unit of Bytes and Zero means no rate limit is set.
+    pub bandwidth_rate: u32,
+    pub workers: AtomicU32,
+}
+
+impl From<PrefetchWorker> for PrefetchContext {
+    fn from(p: PrefetchWorker) -> Self {
+        PrefetchContext {
+            enable: p.enable,
+            threads_count: p.threads_count,
+            merging_size: p.merging_size,
+            bandwidth_rate: p.bandwidth_rate,
+            workers: AtomicU32::new(0),
+        }
+    }
+}
+
+impl PrefetchContext {
+    fn is_working(&self) -> bool {
+        self.enable && self.workers.load(Ordering::Relaxed) != 0
+    }
+
+    fn shrink_n(&self, n: u32) {
+        self.workers.fetch_sub(n, Ordering::Relaxed);
+    }
+
+    fn grow_n(&self, n: u32) {
+        self.workers.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
 pub struct BlobCache {
     cache: Arc<RwLock<BlobCacheState>>,
     validate: bool,
     pub backend: Arc<dyn BlobBackend + Sync + Send>,
-    prefetch_worker: PrefetchWorker,
+    prefetch_ctx: PrefetchContext,
     is_compressed: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
@@ -412,7 +447,7 @@ impl BlobCache {
 
 // TODO: This function is too long... :-(
 fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
-    for num in 0..cache.prefetch_worker.threads_count {
+    for num in 0..cache.prefetch_ctx.threads_count {
         let blobcache = cache.clone();
         let rx = blobcache.mr_receiver.clone();
         // TODO: We now don't define prefetch policy. Prefetch works according to hints coming
@@ -424,6 +459,7 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
         let _thread = thread::Builder::new()
             .name(format!("prefetch_thread_{}", num))
             .spawn(move || {
+                blobcache.prefetch_ctx.grow_n(1);
                 blobcache
                     .metrics
                     .prefetch_workers
@@ -541,6 +577,7 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                     .metrics
                     .prefetch_workers
                     .fetch_sub(1, Ordering::Relaxed);
+                blobcache.prefetch_ctx.shrink_n(1);
                 info!("Prefetch thread exits.")
             });
     }
@@ -595,6 +632,15 @@ impl RafsCache for BlobCache {
             )?;
             entry = Some(en);
         };
+        // Try to get rid of effect from prefetch.
+        if self.prefetch_ctx.is_working() {
+            if let Some(ref limiter) = self.limiter {
+                if let Some(v) = NonZeroU32::new(bufs.len() as u32) {
+                    // Even fails in getting tokens, continue to read
+                    limiter.check_n(v).unwrap_or(());
+                }
+            }
+        }
 
         self.entry_read(blob_id, &entry.unwrap(), bufs, offset, bio.size)
     }
@@ -619,7 +665,7 @@ impl RafsCache for BlobCache {
         self.backend().release()
     }
     fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
-        let merging_size = self.prefetch_worker.merging_size;
+        let merging_size = self.prefetch_ctx.merging_size;
         let seq = self.prefetch_seq.fetch_add(1, Ordering::Relaxed);
 
         self.metrics.prefetch_unmerged_chunks.add(bios.len());
@@ -730,7 +776,7 @@ pub fn new(
         validate: config.cache_validate,
         is_compressed: config.cache_compressed,
         backend,
-        prefetch_worker: config.prefetch_worker,
+        prefetch_ctx: config.prefetch_worker.into(),
         compressor,
         digester,
         limiter,
