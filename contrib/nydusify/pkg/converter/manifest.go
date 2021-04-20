@@ -135,27 +135,28 @@ func (mm *manifestManager) makeManifestIndex(
 
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
 	layers := []ocispec.Descriptor{}
-	blobIDs := []string{}
+	blobListInAnnotation := []string{}
+
 	for idx, _layer := range buildLayers {
 		record := _layer.GetCacheRecord()
 
-		// Maybe no blob file be outputted in this building,
-		// so just ignore it in target layers
-		if mm.backend == nil && record.NydusBlobDesc != nil {
-			layers = append(layers, *record.NydusBlobDesc)
-		}
-
 		if record.NydusBlobDesc != nil {
-			blobIDs = append(blobIDs, record.NydusBlobDesc.Digest.Hex())
+			// Write blob digest list in JSON format to layer annotation of bootstrap.
+			blobListInAnnotation = append(blobListInAnnotation, record.NydusBlobDesc.Digest.Hex())
+			// For registry backend, we need to write the blob layer to
+			// manifest to prevent them from being deleted by registry GC.
+			if mm.backend.Type() == backend.RegistryBackend {
+				layers = append(layers, *record.NydusBlobDesc)
+			}
 		}
 
 		// Only need to write lastest bootstrap layer in nydus manifest
 		if idx == len(buildLayers)-1 {
-			blobIDsBytes, err := json.Marshal(blobIDs)
+			blobListBytes, err := json.Marshal(blobListInAnnotation)
 			if err != nil {
 				return errors.Wrap(err, "Marshal blob list")
 			}
-			record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobIDs] = string(blobIDsBytes)
+			record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobIDs] = string(blobListBytes)
 			layers = append(layers, *record.NydusBootstrapDesc)
 		}
 	}

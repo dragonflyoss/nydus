@@ -103,6 +103,7 @@ func (checker *Checker) Check(ctx context.Context) error {
 			SourceParsed:  sourceParsed,
 			TargetParsed:  targetParsed,
 			MultiPlatform: checker.MultiPlatform,
+			BackendType:   checker.BackendType,
 		},
 		&rule.BootstrapRule{
 			Parsed:          targetParsed,
