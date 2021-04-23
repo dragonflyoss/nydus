@@ -409,7 +409,7 @@ impl GlobalIOStats {
     }
 
     fn export_latest_read_files(&self) -> Result<String, IoStatsError> {
-        Ok(serde_json::json!({"latest_read_files": self.recent_read_files.bitmap_to_array_and_clear()}).to_string())
+        Ok(serde_json::json!(self.recent_read_files.bitmap_to_array_and_clear()).to_string())
     }
 
     fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
