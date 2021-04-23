@@ -287,15 +287,15 @@ impl BlobCache {
                 size,
             );
         } else {
-            self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |c1, c2| {
-                let (chunk, c_offset) = if self.is_compressed {
-                    (c1, cache_entry.chunk.compress_offset())
+            self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |chunk| {
+                let offset = if self.is_compressed {
+                    cache_entry.chunk.compress_offset()
                 } else {
-                    (c2, cache_entry.chunk.decompress_offset())
+                    cache_entry.chunk.decompress_offset()
                 };
                 // TODO: Try to make this as a following asynchronous step writing cache
-                // This should be help to reduce read latency.
-                cache_entry.cache(chunk, c_offset)
+                // This should be helpful to reduce read latency.
+                cache_entry.cache(chunk, offset)
             })?;
         }
 

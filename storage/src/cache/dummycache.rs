@@ -64,7 +64,7 @@ impl RafsCache for DummyCache {
             d.as_mut_slice()
         };
 
-        self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |_, _| Ok(()))?;
+        self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |_| Ok(()))?;
 
         if reuse {
             Ok(one_chunk_buf.len())
