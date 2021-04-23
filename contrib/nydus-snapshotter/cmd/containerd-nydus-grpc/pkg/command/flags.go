@@ -33,6 +33,7 @@ type Args struct {
 	ConvertVpcRegistry   bool
 	NydusdBinaryPath     string
 	NydusImageBinaryPath string
+	SharedDaemon         bool
 	DaemonMode           string
 	AsyncRemove          bool
 	EnableMetrics        bool
@@ -100,6 +101,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether automatically convert the image to vpc registry to accelerate image pulling",
 			Destination: &args.ConvertVpcRegistry,
 		},
+	       &cli.BoolFlag{
+			Name:        "shared-daemon",
+			Value:       false,
+			Usage:       "Deprecated, equivalent to \"--daemon-mode shared\"",
+			Destination: &args.SharedDaemon,
+		},
 		&cli.StringFlag{
 			Name:        "daemon-mode",
 			Value:       config.DefaultDaemonMode,
@@ -160,6 +167,10 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.NydusdBinaryPath = args.NydusdBinaryPath
 	cfg.NydusImageBinaryPath = args.NydusImageBinaryPath
 	cfg.DaemonMode = args.DaemonMode
+	// Give --shared-daemon higher priority
+	if args.SharedDaemon {
+		cfg.DaemonMode = config.DaemonModeShared
+	}
 	cfg.AsyncRemove = args.AsyncRemove
 	cfg.EnableMetrics = args.EnableMetrics
 	cfg.MetricsFile = args.MetricsFile
