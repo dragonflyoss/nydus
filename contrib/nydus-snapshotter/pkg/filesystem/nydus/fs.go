@@ -8,7 +8,6 @@ package nydus
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -224,23 +223,18 @@ func (fs *filesystem) BootstrapFile(id string) (string, error) {
 	return daemon.GetBootstrapFile(fs.SnapshotRoot(), id)
 }
 
-func (fs *filesystem) NewDaemonConfigContent(labels map[string]string) (string, error) {
+func (fs *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonConfig, error) {
 	imageID, ok := labels[label.ImageRef]
 	if !ok {
-		return "", fmt.Errorf("no image ID found in label")
+		return config.DaemonConfig{}, fmt.Errorf("no image ID found in label")
 	}
 
-	config, err := config.NewDaemonConfig(fs.daemonCfg, imageID, fs.vpcRegistry, labels)
+	cfg, err := config.NewDaemonConfig(fs.daemonCfg, imageID, fs.vpcRegistry, labels)
 	if err != nil {
-		return "", err
+		return config.DaemonConfig{}, err
 	}
 
-	b, err := json.Marshal(config)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to marshal config")
-	}
-
-	return string(b), nil
+	return cfg, nil
 }
 
 func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {

@@ -9,6 +9,7 @@ package fs
 import (
 	"context"
 	"github.com/containerd/containerd/snapshots/storage"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 )
 
 type FSMode int
@@ -28,5 +29,5 @@ type FileSystem interface {
 	PrepareLayer(ctx context.Context, snapshot storage.Snapshot, labels map[string]string) error
 	MountPoint(snapshotID string) (string, error)
 	BootstrapFile(snapshotID string) (string, error)
-	NewDaemonConfigContent(labels map[string]string) (string, error)
+	NewDaemonConfig(labels map[string]string) (config.DaemonConfig, error)
 }

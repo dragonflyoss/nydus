@@ -185,7 +185,7 @@ func (fs *filesystem) BootstrapFile(id string) (string, error) {
 	panic("stargz has no bootstrap file")
 }
 
-func (fs *filesystem) NewDaemonConfigContent(labels map[string]string) (string, error) {
+func (fs *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonConfig, error) {
 	panic("implement me")
 }
 

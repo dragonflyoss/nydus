@@ -8,6 +8,7 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -546,14 +547,30 @@ func (o *snapshotter) remoteMounts(ctx context.Context, s storage.Snapshot, id s
 			return nil, err
 		}
 
-		configContent, err := o.fs.NewDaemonConfigContent(labels)
+		cfg, err := o.fs.NewDaemonConfig(labels)
 		if err != nil {
 			return nil, errors.Wrapf(err, fmt.Sprintf("remoteMounts: failed to generate nydus config for snapshot %s, label: %v", id, labels))
 		}
+
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
+		}
+
+		configContent := string(b)
 		configOption := fmt.Sprintf("config=%s", configContent)
 		options = append(options, configOption)
-		// TODO: don't print options, as it contains registry secrets
-		log.G(ctx).Infof("Bootstrap file for snapshotID %s: %s, options %v", id, source, options)
+
+		// We already Marshal config and save it in configContent, reset Auth and
+		// RegistryToken so it could be printed and to make debug easier
+		cfg.Device.Backend.Config.Auth = ""
+		cfg.Device.Backend.Config.RegistryToken = ""
+		b, err = json.Marshal(cfg)
+		if err != nil {
+			return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
+		}
+		log.G(ctx).Infof("Bootstrap file for snapshotID %s: %s, config %s", id, source, string(b))
+
 		return []mount.Mount{
 			{
 				Type:    "nydus",
