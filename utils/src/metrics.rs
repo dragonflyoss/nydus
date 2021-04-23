@@ -143,7 +143,7 @@ pub struct GlobalIOStats {
     access_patterns: RwLock<HashMap<Inode, Arc<AccessPattern>>>,
     // record regular file read
     #[serde(skip_serializing, skip_deserializing)]
-    files_read_map: InodeBitmap,
+    recent_read_files: InodeBitmap,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -334,7 +334,7 @@ impl GlobalIOStats {
         }
 
         if self.record_latest_read_files_enabled() && fop == StatsFop::Read && success {
-            self.files_read_map.set(ino);
+            self.recent_read_files.set(ino);
         }
     }
 
@@ -408,6 +408,10 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
+    fn export_latest_read_files(&self) -> Result<String, IoStatsError> {
+        Ok(serde_json::json!({"latest_read_files": self.recent_read_files.bitmap_to_array_and_clear()}).to_string())
+    }
+
     fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(
             &self
@@ -420,10 +424,6 @@ impl GlobalIOStats {
                 .collect::<Vec<&Arc<AccessPattern>>>(),
         )
         .map_err(IoStatsError::Serialize)
-    }
-
-    fn export_latest_read_files(&self) -> Result<String, IoStatsError> {
-        Ok(self.files_read_map.to_json_and_clear())
     }
 
     fn export_global_stats(&self) -> Result<String, IoStatsError> {
@@ -473,18 +473,28 @@ impl<'a> FopRecorder<'a> {
     }
 }
 
-pub fn export_files_stats(name: &Option<String>) -> Result<String, IoStatsError> {
+pub fn export_files_stats(
+    name: &Option<String>,
+    latest_read_files: bool,
+) -> Result<String, IoStatsError> {
     let ios_set = IOS_SET.read().unwrap();
 
     match name {
-        Some(k) => ios_set
-            .get(k)
-            .ok_or(IoStatsError::NoCounter)
-            .map(|v| v.export_files_stats())?,
+        Some(k) => ios_set.get(k).ok_or(IoStatsError::NoCounter).map(|v| {
+            if !latest_read_files {
+                v.export_files_stats()
+            } else {
+                v.export_latest_read_files()
+            }
+        })?,
         None => {
             if ios_set.len() == 1 {
                 if let Some(ios) = ios_set.values().next() {
-                    return ios.export_files_stats();
+                    return if !latest_read_files {
+                        ios.export_files_stats()
+                    } else {
+                        ios.export_latest_read_files()
+                    };
                 }
             }
             Err(IoStatsError::NoCounter)
@@ -503,24 +513,6 @@ pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoSt
             if ios_set.len() == 1 {
                 if let Some(ios) = ios_set.values().next() {
                     return ios.export_files_access_patterns();
-                }
-            }
-            Err(IoStatsError::NoCounter)
-        }
-    }
-}
-
-pub fn export_latest_read_files(name: &Option<String>) -> Result<String, IoStatsError> {
-    let ios_set = IOS_SET.read().unwrap();
-    match name {
-        Some(k) => ios_set
-            .get(k)
-            .ok_or(IoStatsError::NoCounter)
-            .map(|v| v.export_latest_read_files())?,
-        None => {
-            if ios_set.len() == 1 {
-                if let Some(ios) = ios_set.values().next() {
-                    return ios.export_latest_read_files();
                 }
             }
             Err(IoStatsError::NoCounter)

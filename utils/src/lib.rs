@@ -224,7 +224,11 @@ impl Debug for InodeBitmap {
 
 impl Display for InodeBitmap {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.to_json().as_str())
+        f.write_str(
+            serde_json::json!({"inode_range": self.bitmap_to_array()})
+                .to_string()
+                .as_str(),
+        )
     }
 }
 
@@ -295,50 +299,46 @@ impl InodeBitmap {
         }
     }
 
-    /// "{"inode_range":[[1,5],[8],[10],[100,199],...]}"
-    fn bitmap_to_json(&self, load: fn(&AtomicU64) -> u64) -> String {
-        let inode_list = {
-            let m = self.map.read().unwrap();
-            let mut ret: Vec<Vec<u64>> = Vec::new();
-            let mut start: Option<u64> = None;
-            let mut last: u64 = 0;
+    /// "[[1,5],[8],[10],[100,199],...]"
+    fn bitmap_to_vec(&self, load: fn(&AtomicU64) -> u64) -> Vec<Vec<u64>> {
+        let m = self.map.read().unwrap();
+        let mut ret: Vec<Vec<u64>> = Vec::new();
+        let mut start: Option<u64> = None;
+        let mut last: u64 = 0;
 
-            for it in m.iter() {
-                let base = it.0.mul(64);
-                let mut v = load(it.1);
-                while v != 0 {
-                    // trailing_zeros need rustup version >= 1.46
-                    let ino = base + v.trailing_zeros() as u64;
-                    v &= v - 1;
-                    start = match start {
-                        None => Some(ino),
-                        Some(s) => {
-                            if ino != last + 1 {
-                                ret.push(InodeBitmap::range_to_vec(s, last));
-                                Some(ino)
-                            } else {
-                                Some(s)
-                            }
+        for it in m.iter() {
+            let base = it.0.mul(64);
+            let mut v = load(it.1);
+            while v != 0 {
+                // trailing_zeros need rustup version >= 1.46
+                let ino = base + v.trailing_zeros() as u64;
+                v &= v - 1;
+                start = match start {
+                    None => Some(ino),
+                    Some(s) => {
+                        if ino != last + 1 {
+                            ret.push(InodeBitmap::range_to_vec(s, last));
+                            Some(ino)
+                        } else {
+                            Some(s)
                         }
-                    };
-                    last = ino;
-                }
+                    }
+                };
+                last = ino;
             }
-            if let Some(s) = start {
-                ret.push(InodeBitmap::range_to_vec(s, last));
-            }
-            ret
-        };
-
-        serde_json::json!({ "inode_range": inode_list }).to_string()
+        }
+        if let Some(s) = start {
+            ret.push(InodeBitmap::range_to_vec(s, last));
+        }
+        ret
     }
 
-    pub fn to_json(&self) -> String {
-        self.bitmap_to_json(|v| v.load(Ordering::Relaxed))
+    pub fn bitmap_to_array(&self) -> Vec<Vec<u64>> {
+        self.bitmap_to_vec(|v| v.load(Ordering::Relaxed))
     }
 
-    pub fn to_json_and_clear(&self) -> String {
-        self.bitmap_to_json(|v| v.fetch_and(0_u64, Ordering::Relaxed))
+    pub fn bitmap_to_array_and_clear(&self) -> Vec<Vec<u64>> {
+        self.bitmap_to_vec(|v| v.fetch_and(0_u64, Ordering::Relaxed))
     }
 }
 
@@ -383,22 +383,17 @@ mod tests {
 
     #[test]
     fn test_inode_bitmap() {
+        let empty: Vec<Vec<u64>> = Vec::new();
         let m = InodeBitmap::new();
         m.set(1);
         m.set(2);
         m.set(5);
-        assert_eq!(
-            m.to_json(),
-            serde_json::json!({"inode_range": [[1,2],[5]]}).to_string()
-        );
+        assert_eq!(m.bitmap_to_array(), [vec![1, 2], vec![5]]);
 
         assert_eq!(m.is_set(2), true);
         m.clear(2);
         assert_eq!(m.is_set(2), false);
-        assert_eq!(
-            m.to_json(),
-            serde_json::json!({"inode_range": [[1],[5]]}).to_string()
-        );
+        assert_eq!(m.bitmap_to_array(), [[1], [5]]);
 
         m.set(65);
         m.set(66);
@@ -407,35 +402,32 @@ mod tests {
         m.set(40002);
         m.set(40003);
         assert_eq!(
-            m.to_json(),
-            serde_json::json!({"inode_range": [[1],[5],[65,66],[4000],[40001,40003]]}).to_string()
+            m.bitmap_to_array(),
+            [
+                vec![1],
+                vec![5],
+                vec![65, 66],
+                vec![4000],
+                vec![40001, 40003]
+            ]
         );
 
         m.clear_all();
-        assert_eq!(
-            m.to_json(),
-            serde_json::json!({"inode_range": []}).to_string()
-        );
+        assert_eq!(m.bitmap_to_array(), empty);
 
         m.set(65);
         m.set(40001);
-        assert_eq!(
-            m.to_json(),
-            serde_json::json!({"inode_range": [[65],[40001]]}).to_string()
-        );
+        assert_eq!(m.bitmap_to_array(), [vec![65], vec![40001]]);
 
         for i in 0..100000 {
             m.set(i);
         }
         m.set(100002);
         assert_eq!(
-            m.to_json_and_clear(),
-            serde_json::json!({"inode_range": [[0,99999],[100002]]}).to_string()
+            m.bitmap_to_array_and_clear(),
+            [vec![0, 99999], vec![100002]]
         );
         assert_eq!(m.is_set(9000), false);
-        assert_eq!(
-            m.to_json(),
-            serde_json::json!({"inode_range": []}).to_string()
-        );
+        assert_eq!(m.bitmap_to_array(), empty);
     }
 }

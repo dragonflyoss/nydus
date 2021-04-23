@@ -67,10 +67,11 @@ impl ApiServer {
             ApiRequest::Umount(mountpoint) => self.do_umount(mountpoint),
             ApiRequest::ConfigureDaemon(conf) => self.configure_daemon(conf),
             ApiRequest::ExportGlobalMetrics(id) => Self::export_global_metrics(id),
-            ApiRequest::ExportFilesMetrics(id) => Self::export_files_metrics(id),
+            ApiRequest::ExportFilesMetrics(id, latest_read_files) => {
+                Self::export_files_metrics(id, latest_read_files)
+            }
             ApiRequest::ExportAccessPatterns(id) => Self::export_access_patterns(id),
             ApiRequest::ExportBackendMetrics(id) => Self::export_backend_metrics(id),
-            ApiRequest::ExportLatestReadFilesMetrics(id) => Self::export_latest_read_files(id),
             ApiRequest::ExportBlobcacheMetrics(id) => Self::export_blobcache_metrics(id),
             ApiRequest::ExportInflightMetrics => self.export_inflight_metrics(),
             ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
@@ -130,9 +131,9 @@ impl ApiServer {
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 
-    fn export_files_metrics(id: Option<String>) -> ApiResponse {
+    fn export_files_metrics(id: Option<String>, latest_read_files: bool) -> ApiResponse {
         // TODO: Use mount point name to refer to per rafs metrics.
-        metrics::export_files_stats(&id)
+        metrics::export_files_stats(&id, latest_read_files)
             .map(ApiResponsePayload::FsFilesMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
@@ -140,12 +141,6 @@ impl ApiServer {
     fn export_access_patterns(id: Option<String>) -> ApiResponse {
         metrics::export_files_access_pattern(&id)
             .map(ApiResponsePayload::FsFilesPatterns)
-            .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
-    }
-
-    fn export_latest_read_files(id: Option<String>) -> ApiResponse {
-        metrics::export_latest_read_files(&id)
-            .map(ApiResponsePayload::FsFilesLatestReadMetrics)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Stats(e)))
     }
 

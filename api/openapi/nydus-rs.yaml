@@ -193,12 +193,21 @@ paths:
           required: false
           schema:
             type: string
+        - name: latest
+          desciption: "The returned list represents all files that are ever read ignoring the frequency. The metics of each file will be cleared after this request."
+          in: query
+          required: false
+          schema:
+            type: bool
       responses:
         "200":
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RafsFilesMetrics"
+                latest:
+                  $ref: "#/components/schemas/RafsLatestReadFiles"
+                other:
+                  $ref: "#/components/schemas/RafsFilesMetrics"
           description: Rafs all opened files metrics export
         "500":
           content:
@@ -224,30 +233,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/RafsFilesAccessPatterns"
           description: Rafs access pattern exporting
-        "500":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorMsg"
-          description: Internal Server Error
-  /metrics/latest_read_files:
-    get:
-      operationId: exportRafsLatestReadFiles
-      summary: Rafs latest read files
-      parameters:
-        - name: id
-          in: query
-          description: "Specify rafs id to get its latest read files"
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RafsLatestReadFiles"
-          description: Rafs latest read files exporting
         "500":
           content:
             application/json:
@@ -438,6 +423,13 @@ components:
           type: array
           items:
             type: integer
+    RafsLatestReadFiles:
+      type: array
+      description: File ino array, [start,end] -- include inode from start to end, [ino] -- include inode ino
+      items:
+        type: array
+        items:
+          type: integer
     RafsFilesAccessPatterns:
       properties:
         ino:
@@ -449,15 +441,6 @@ components:
         first_access_time:
           type: integer
           description: First time point at which this file is read. It's wall-time in unit of seconds
-    RafsLatestReadFiles:
-      properties:
-        inode_range:
-          type: array
-          description: File ino array, [start,end] -- include inode from start to end, [ino] -- include inode ino
-          items:
-            type: array
-            items:
-              type: integer
     RafsBackend:
       type: object
       properties:

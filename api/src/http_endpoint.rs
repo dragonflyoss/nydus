@@ -76,7 +76,6 @@ pub enum ApiResponsePayload {
     /// Nydus filesystem per-file metrics
     FsFilesMetrics(String),
     FsFilesPatterns(String),
-    FsFilesLatestReadMetrics(String),
     BackendMetrics(String),
     BlobcacheMetrics(String),
     InflightMetrics(String),
@@ -95,10 +94,9 @@ pub enum ApiRequest {
     Umount(String),
     ConfigureDaemon(DaemonConf),
     ExportGlobalMetrics(Option<String>),
-    ExportFilesMetrics(Option<String>),
+    ExportFilesMetrics(Option<String>, bool),
     ExportAccessPatterns(Option<String>),
     ExportBackendMetrics(Option<String>),
-    ExportLatestReadFilesMetrics(Option<String>),
     ExportBlobcacheMetrics(Option<String>),
     ExportInflightMetrics,
     ExportFsBackendInfo(String),
@@ -149,7 +147,6 @@ pub enum HttpError {
     GlobalMetrics(ApiError),
     FsFilesMetrics(ApiError),
     Pattern(ApiError),
-    LatestReadFileMetrics(ApiError),
     Configure(ApiError),
     Upgrade(ApiError),
     BlobcacheMetrics(ApiError),
@@ -221,7 +218,6 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
                 BlobcacheMetrics(d) => success_response(Some(d)),
                 FsBackendInfo(d) => success_response(Some(d)),
                 InflightMetrics(d) => success_response(Some(d)),
-                FsFilesLatestReadMetrics(d) => success_response(Some(d)),
             }
         }
         Err(e) => {
@@ -328,7 +324,9 @@ impl EndpointHandler for MetricsFilesHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
                 let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportFilesMetrics(id));
+                let latest_read_files = extract_query_part(req, "latest")
+                    .map_or(false, |b| b.parse::<bool>().unwrap_or(false));
+                let r = kicker(ApiRequest::ExportFilesMetrics(id, latest_read_files));
                 Ok(convert_to_response(r, HttpError::FsFilesMetrics))
             }
             _ => Err(HttpError::BadRequest),
@@ -348,24 +346,6 @@ impl EndpointHandler for MetricsPatternHandler {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportAccessPatterns(id));
                 Ok(convert_to_response(r, HttpError::Pattern))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsLatestReadFilesHandler {}
-impl EndpointHandler for MetricsLatestReadFilesHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportLatestReadFilesMetrics(id));
-                Ok(convert_to_response(r, HttpError::LatestReadFileMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }
