@@ -11,6 +11,12 @@ import (
 )
 
 const (
+	DefaultDaemonMode  string = "multiple"
+	DaemonModeMultiple string = "multiple"
+	DaemonModeShared   string = "shared"
+	DaemonModeSingle   string = "single"
+	DaemonModeNone     string = "none"
+
 	defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"
 	defaultNydusdBinaryPath      string = "/usr/local/bin/nydusd"
 	defaultNydusImageBinaryPath  string = "/usr/local/bin/nydus-image"
@@ -47,7 +53,7 @@ func (c *Config) FillupWithDefaults() error {
 	}
 
 	if c.DaemonMode == "" {
-		c.DaemonMode = "multiple"
+		c.DaemonMode = DefaultDaemonMode
 	}
 
 	var daemonCfg DaemonConfig

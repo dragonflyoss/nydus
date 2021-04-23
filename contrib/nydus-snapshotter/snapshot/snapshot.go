@@ -78,7 +78,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new process manager")
 	}
-	hasDaemon := cfg.DaemonMode != "none" && cfg.DaemonMode != "no"
+	hasDaemon := cfg.DaemonMode != config.DaemonModeNone
 
 	nydusFs, err := nydus.NewFileSystem(
 		ctx,

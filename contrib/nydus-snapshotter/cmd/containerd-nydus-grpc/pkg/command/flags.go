@@ -21,7 +21,6 @@ const (
 	defaultPublicKey      = "/signing/nydus-image-signing-public.key"
 	defaultNydusdPath     = "/bin/nydusd"
 	defaultNydusImagePath = "/bin/nydusd-img"
-	defaultDaemonMode     = "multiple"
 )
 
 type Args struct {
@@ -103,7 +102,7 @@ func buildFlags(args *Args) []cli.Flag {
 		},
 		&cli.StringFlag{
 			Name:        "daemon-mode",
-			Value:       defaultDaemonMode,
+			Value:       config.DefaultDaemonMode,
 			Usage:       "daemon mode to use, could be \"multiple\", \"shared\" or \"none\"",
 			Destination: &args.DaemonMode,
 		},

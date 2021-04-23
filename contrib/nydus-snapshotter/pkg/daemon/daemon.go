@@ -13,6 +13,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
@@ -98,17 +99,17 @@ func (d *Daemon) SharedUmount() error {
 }
 
 func (d *Daemon) IsMultipleDaemon() bool {
-	return d.DaemonMode == "multiple"
+	return d.DaemonMode == config.DaemonModeMultiple
 }
 
 func (d *Daemon) IsSharedDaemon() bool {
-	return d.DaemonMode == "shared" || d.DaemonMode == "single"
+	return d.DaemonMode == config.DaemonModeShared || d.DaemonMode == config.DaemonModeSingle
 }
 
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
 	d := &Daemon{Pid: 0}
 	d.ID = newID()
-	d.DaemonMode = "multiple"
+	d.DaemonMode = config.DefaultDaemonMode
 	for _, o := range opt {
 		err := o(d)
 		if err != nil {

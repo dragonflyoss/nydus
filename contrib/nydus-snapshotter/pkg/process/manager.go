@@ -17,6 +17,7 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
@@ -197,7 +198,7 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 }
 
 func (m *Manager) IsSharedDaemon() bool {
-	return m.DaemonMode == "shared" || m.DaemonMode == "single"
+	return m.DaemonMode == config.DaemonModeShared || m.DaemonMode == config.DaemonModeSingle
 }
 
 // Reconnect already running daemons，and rebuild daemons management structs.

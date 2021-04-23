@@ -80,11 +80,11 @@ func WithDaemonMode(daemonMode string) NewFSOpt {
 	return func(d *filesystem) error {
 		mode := strings.ToLower(daemonMode)
 		switch mode {
-		case "none", "no":
+		case config.DaemonModeNone:
 			d.mode = fs.NoneInstance
-		case "single", "shared":
+		case config.DaemonModeShared, config.DaemonModeSingle:
 			d.mode = fs.SingleInstance
-		case "multiple":
+		case config.DaemonModeMultiple:
 			fallthrough
 		default:
 			d.mode = fs.MultiInstance
