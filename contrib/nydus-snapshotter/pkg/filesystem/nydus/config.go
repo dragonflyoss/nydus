@@ -10,6 +10,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
@@ -58,9 +59,9 @@ func WithVerifier(verifier *signature.Verifier) NewFSOpt {
 	}
 }
 
-func WithDaemonConfig(cfg DaemonConfig) NewFSOpt {
+func WithDaemonConfig(cfg config.DaemonConfig) NewFSOpt {
 	return func(d *filesystem) error {
-		if (DaemonConfig{}) == cfg {
+		if (config.DaemonConfig{}) == cfg {
 			return errors.New("daemon config is empty")
 		}
 		d.daemonCfg = cfg

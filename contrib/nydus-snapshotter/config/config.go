@@ -7,7 +7,6 @@
 package config
 
 import (
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/pkg/errors"
 )
 
@@ -21,7 +20,7 @@ type Config struct {
 	Address              string             `toml:"-"`
 	ConvertVpcRegistry   bool               `toml:"-"`
 	DaemonCfgPath        string             `toml:"daemon_cfg_path"`
-	DaemonCfg            nydus.DaemonConfig `toml:"-"`
+	DaemonCfg            DaemonConfig       `toml:"-"`
 	PublicKeyFile        string             `toml:"-"`
 	RootDir              string             `toml:"-"`
 	ValidateSignature    bool               `toml:"validate_signature"`
@@ -51,8 +50,8 @@ func (c *Config) FillupWithDefaults() error {
 		c.DaemonMode = "multiple"
 	}
 
-	var daemonCfg nydus.DaemonConfig
-	if err := nydus.LoadConfig(c.DaemonCfgPath, &daemonCfg); err != nil {
+	var daemonCfg DaemonConfig
+	if err := LoadConfig(c.DaemonCfgPath, &daemonCfg); err != nil {
 		return errors.Wrapf(err, "failed to load config file %q", c.DaemonCfgPath)
 	}
 	c.DaemonCfg = daemonCfg

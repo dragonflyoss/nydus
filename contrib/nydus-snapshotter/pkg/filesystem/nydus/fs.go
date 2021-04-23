@@ -17,6 +17,7 @@ import (
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
 	fspkg "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
@@ -31,7 +32,7 @@ type filesystem struct {
 	meta.FileSystemMeta
 	manager          *process.Manager
 	verifier         *signature.Verifier
-	daemonCfg        DaemonConfig
+	daemonCfg        config.DaemonConfig
 	vpcRegistry      bool
 	nydusdBinaryPath string
 	mode             fspkg.FSMode
@@ -229,7 +230,7 @@ func (fs *filesystem) NewDaemonConfigContent(labels map[string]string) (string, 
 		return "", fmt.Errorf("no image ID found in label")
 	}
 
-	config, err := NewDaemonConfig(fs.daemonCfg, imageID, fs.vpcRegistry, labels)
+	config, err := config.NewDaemonConfig(fs.daemonCfg, imageID, fs.vpcRegistry, labels)
 	if err != nil {
 		return "", err
 	}
@@ -319,11 +320,11 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 
 // generateDaemonConfig generate Daemon configuration
 func (fs *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]string) error {
-	cfg, err := NewDaemonConfig(fs.daemonCfg, d.ImageID, fs.vpcRegistry, labels)
+	cfg, err := config.NewDaemonConfig(fs.daemonCfg, d.ImageID, fs.vpcRegistry, labels)
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
 	}
-	return SaveConfig(cfg, d.ConfigFile())
+	return config.SaveConfig(cfg, d.ConfigFile())
 }
 
 func (fs *filesystem) hasDaemon() bool {

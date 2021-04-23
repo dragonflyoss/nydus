@@ -8,7 +8,6 @@ package command
 
 import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -143,8 +142,8 @@ func NewFlags() *Flags {
 }
 
 func Validate(args *Args, cfg *config.Config) error {
-	var daemonCfg nydus.DaemonConfig
-	if err := nydus.LoadConfig(args.ConfigPath, &daemonCfg); err != nil {
+	var daemonCfg config.DaemonConfig
+	if err := config.LoadConfig(args.ConfigPath, &daemonCfg); err != nil {
 		return errors.Wrapf(err, "failed to load config file %q", args.ConfigPath)
 	}
 
