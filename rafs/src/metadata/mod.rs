@@ -647,7 +647,7 @@ pub trait RafsInode {
             self.has_hole(),
         );
 
-        debug!(
+        trace!(
             "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
             offset, size, self.size(), blksize, index_start, index_end, self.get_child_count()
         );
