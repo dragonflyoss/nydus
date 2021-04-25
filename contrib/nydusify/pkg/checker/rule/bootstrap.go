@@ -6,6 +6,7 @@ package rule
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"reflect"
 
@@ -69,8 +70,8 @@ func (rule *BootstrapRule) Validate() error {
 	// Blob list recorded in manifest annotation should be equal with
 	// the blob list recorded in blob table of bootstrap
 	if !reflect.DeepEqual(bootstrap.Blobs, blobListInAnnotation) {
-		logrus.Warnf(
-			"nydus blob list in bootstrap(%d) is not match with manifest(%d)'s",
+		return fmt.Errorf(
+			"nydus blob list in bootstrap(%d) does not match with manifest(%d)'s",
 			len(bootstrap.Blobs),
 			len(blobListInAnnotation),
 		)
