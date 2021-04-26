@@ -220,10 +220,14 @@ impl Rafs {
 
         info!("update sb is successful");
 
+        let mut device_conf = conf.device.clone();
+        device_conf.cache.cache_validate = conf.digest_validate;
+        device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
+
         // step 2: update device (only localfs is supported)
         self.device
             .update(
-                conf.device,
+                device_conf,
                 self.sb.meta.get_compressor(),
                 self.sb.meta.get_digester(),
                 self.id.as_str(),
