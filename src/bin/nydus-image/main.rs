@@ -14,9 +14,7 @@ mod trace;
 
 mod builder;
 mod core;
-mod node;
 mod stargz;
-mod tree;
 mod validator;
 
 #[macro_use]
@@ -38,7 +36,10 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
+use crate::core::node;
 use crate::core::prefetch::Prefetch;
+use crate::core::tree;
+
 use builder::{BlobStorage, SourceType};
 use node::WhiteoutSpec;
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
