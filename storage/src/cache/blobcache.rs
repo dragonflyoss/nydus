@@ -25,6 +25,7 @@ use governor::{
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
+use crate::cache::chunkmap::{digested::DigestedChunkMap, indexed::IndexedChunkMap, ChunkMap};
 use crate::cache::RafsCache;
 use crate::cache::*;
 use crate::device::{BlobPrefetchControl, RafsBio};

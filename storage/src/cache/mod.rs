@@ -18,6 +18,7 @@ use crate::{compress, StorageResult};
 use nydus_utils::digest;
 
 pub mod blobcache;
+pub mod chunkmap;
 pub mod dummycache;
 
 #[derive(Default, Clone)]
