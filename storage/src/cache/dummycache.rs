@@ -28,10 +28,6 @@ impl RafsCache for DummyCache {
         self.backend.as_ref()
     }
 
-    fn has(&self, _cki: &dyn RafsChunkInfo) -> bool {
-        true
-    }
-
     fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()> {
         for b in prefetch_vec {
             let _ = self.backend.prefetch_blob(&b.blob_id, b.offset, b.len);
@@ -39,16 +35,7 @@ impl RafsCache for DummyCache {
         Ok(())
     }
 
-    fn evict(&self, _cki: &dyn RafsChunkInfo) -> Result<()> {
-        Ok(())
-    }
-
-    fn flush(&self) -> Result<()> {
-        Ok(())
-    }
-
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
-        let blob_id = &bio.blob_id;
         let chunk = &bio.chunkinfo;
         let mut reuse = false;
 
@@ -64,7 +51,7 @@ impl RafsCache for DummyCache {
             d.as_mut_slice()
         };
 
-        self.read_backend_chunk(blob_id, chunk.as_ref(), one_chunk_buf, |_| Ok(()))?;
+        self.read_backend_chunk(&bio.blob, chunk.as_ref(), one_chunk_buf, |_| Ok(()))?;
 
         if reuse {
             Ok(one_chunk_buf.len())
@@ -73,8 +60,10 @@ impl RafsCache for DummyCache {
         }
     }
 
-    fn blob_size(&self, blob_id: &str) -> Result<u64> {
-        self.backend().blob_size(blob_id).map_err(|e| eother!(e))
+    fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64> {
+        self.backend()
+            .blob_size(&blob.blob_id)
+            .map_err(|e| eother!(e))
     }
 
     fn digester(&self) -> digest::Algorithm {

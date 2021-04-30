@@ -11,7 +11,7 @@ use std::sync::Arc;
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
-use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
+use crate::device::{BlobPrefetchControl, RafsBio, RafsBlobEntry, RafsChunkInfo};
 use crate::utils::{alloc_buf, digest_check};
 use crate::{compress, StorageResult};
 
@@ -28,7 +28,7 @@ struct MergedBackendRequest {
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
     pub blob_offset: u64,
     pub blob_size: u32,
-    pub blob_id: String,
+    pub blob_entry: Arc<RafsBlobEntry>,
 }
 
 impl MergedBackendRequest {
@@ -42,15 +42,14 @@ impl MergedBackendRequest {
     fn reset(&mut self) {
         self.blob_offset = 0;
         self.blob_size = 0;
-        self.blob_id.truncate(0);
         self.chunks.clear();
     }
 
-    fn merge_begin(&mut self, first_cki: Arc<dyn RafsChunkInfo>, blob_id: &str) {
+    fn merge_begin(&mut self, first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) {
         self.blob_offset = first_cki.compress_offset();
         self.blob_size = first_cki.compress_size();
         self.chunks.push(first_cki);
-        self.blob_id = String::from(blob_id);
+        self.blob_entry = blob;
     }
 
     fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>) {
@@ -71,13 +70,6 @@ pub struct PrefetchWorker {
 pub trait RafsCache {
     /// Do init after super block loaded
     fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()>;
-    /// Whether has block data
-    fn has(&self, cki: &dyn RafsChunkInfo) -> bool;
-    /// Evict block data
-    fn evict(&self, cki: &dyn RafsChunkInfo) -> Result<()>;
-
-    /// Flush cache
-    fn flush(&self) -> Result<()>;
 
     /// Read a chunk data through cache
     /// offset is relative to chunk start
@@ -90,7 +82,7 @@ pub trait RafsCache {
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize>;
 
     /// Get the size of a blob
-    fn blob_size(&self, blob_id: &str) -> Result<u64>;
+    fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64>;
 
     fn prefetch(&self, bio: &mut [RafsBio]) -> StorageResult<usize>;
     fn stop_prefetch(&self) -> StorageResult<()>;
@@ -111,7 +103,7 @@ pub trait RafsCache {
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
     fn read_backend_chunk<F>(
         &self,
-        blob_id: &str,
+        blob: &RafsBlobEntry,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
         cacher: F,
@@ -172,10 +164,7 @@ pub trait RafsCache {
                 // Ideally we should introduce a streaming cache for stargz that maintains internal
                 // chunks and expose stream APIs.
                 let size = chunk.len() + 10 + 8 + 5 + (chunk.len() / (16 << 10)) * 5 + 128;
-                cmp::min(
-                    size as u64,
-                    self.blob_size(blob_id)? - cki.compress_offset(),
-                ) as usize
+                cmp::min(size as u64, self.blob_size(blob)? - cki.compress_offset()) as usize
             };
             d = alloc_buf(c_size);
             d.as_mut_slice()
@@ -185,7 +174,7 @@ pub trait RafsCache {
         };
 
         self.backend()
-            .read(blob_id, raw_chunk, offset)
+            .read(&blob.blob_id, raw_chunk, offset)
             .map_err(|e| eio!(e))?;
         // Try to validate data just fetched from backend inside.
         self.process_raw_chunk(

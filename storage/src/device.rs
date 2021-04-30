@@ -44,6 +44,7 @@ bitflags! {
 pub trait RafsChunkInfo: Sync + Send {
     fn block_id(&self) -> &RafsDigest;
     fn blob_index(&self) -> u32;
+    fn index(&self) -> u32;
     fn compress_offset(&self) -> u64;
     fn compress_size(&self) -> u32;
     fn decompress_offset(&self) -> u64;
@@ -188,7 +189,7 @@ impl FileReadWriteVolatile for RafsBioDevice<'_> {
         self.dev
             .rw_layer
             .load()
-            .write(&self.bio.blob_id, self.bio.chunkinfo.as_ref(), buf)
+            .write(&self.bio.blob.blob_id, self.bio.chunkinfo.as_ref(), buf)
     }
 }
 
@@ -215,6 +216,22 @@ impl RafsBioDevice<'_> {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RafsBlobEntry {
+    /// Number of chunks in blob file.
+    pub chunk_count: u32,
+    /// The data range to be prefetched in blob file.
+    ///
+    /// The readahead_offset field has been deprecated and defaults to 0,
+    /// meaning that the data segment to be prefetched is always put at
+    /// the head of a blob file.
+    pub readahead_size: u32,
+    /// A sha256 hex string generally.
+    pub blob_id: String,
+    /// The index of blob in RAFS blob table.
+    pub blob_index: u32,
+}
+
 // Rafs device blob IO descriptor
 #[derive(Default)]
 pub struct RafsBioDesc {
@@ -239,8 +256,8 @@ impl RafsBioDesc {
 pub struct RafsBio {
     /// reference to the chunk
     pub chunkinfo: Arc<dyn RafsChunkInfo>,
-    /// blob id of chunk
-    pub blob_id: String,
+    /// reference to the blob where the chunk is located
+    pub blob: Arc<RafsBlobEntry>,
     /// offset within the chunk
     pub offset: u32,
     /// size within the chunk
@@ -252,14 +269,14 @@ pub struct RafsBio {
 impl RafsBio {
     pub fn new(
         chunkinfo: Arc<dyn RafsChunkInfo>,
-        blob_id: String,
+        blob: Arc<RafsBlobEntry>,
         offset: u32,
         size: usize,
         blksize: u32,
     ) -> Self {
         RafsBio {
             chunkinfo,
-            blob_id,
+            blob,
             offset,
             size,
             blksize,
