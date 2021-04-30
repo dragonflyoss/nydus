@@ -13,6 +13,7 @@ extern crate nydus_utils;
 mod trace;
 
 mod builder;
+mod core;
 mod node;
 mod stargz;
 mod tree;
@@ -29,7 +30,6 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
-use std::collections::BTreeMap;
 use std::fs::metadata;
 use std::fs::OpenOptions;
 use std::io;
@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
+use crate::core::prefetch::Prefetch;
 use builder::{BlobStorage, SourceType};
 use node::WhiteoutSpec;
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
@@ -83,46 +84,6 @@ fn dump_result_output(matches: &clap::ArgMatches, blob_ids: Vec<String>) -> Resu
     }
 
     Ok(())
-}
-
-/// Gather readahead file paths line by line from stdin
-/// Input format:
-///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/1"
-/// This routine does not guarantee that specified file must exist in local filesystem,
-/// this is because we can't guarantee that source rootfs directory of parent bootstrap
-/// is located in local file system.
-fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
-    let stdin = io::stdin();
-    let mut files = BTreeMap::new();
-
-    loop {
-        let mut file = String::new();
-
-        let size = stdin
-            .read_line(&mut file)
-            .context("failed to parse readahead files")?;
-        if size == 0 {
-            break;
-        }
-        let file_trimmed: PathBuf = file.trim().into();
-        // Sanity check for the list format.
-        if !file_trimmed.starts_with(Path::new("/")) {
-            warn!(
-                "Illegal file path specified. It {:?} must start with '/'",
-                file
-            );
-            continue;
-        }
-
-        debug!(
-            "readahead file: {}, trimmed file name {:?}",
-            file, file_trimmed
-        );
-        // The inode index is not decided yet, but will do during fs-walk.
-        files.insert(file_trimmed, None);
-    }
-
-    Ok(files)
 }
 
 fn main() -> Result<()> {
@@ -383,21 +344,16 @@ fn main() -> Result<()> {
             parent_bootstrap = Path::new(_parent_bootstrap);
         }
 
-        let prefetch_policy = matches
-            .value_of("prefetch-policy")
-            .unwrap_or_default()
-            .parse()?;
-
-        let hint_readahead_files = if prefetch_policy != builder::PrefetchPolicy::None {
-            gather_readahead_files().context("failed to get readahead files")?
-        } else {
-            BTreeMap::new()
-        };
-
         let whiteout_spec: WhiteoutSpec = matches
             .value_of("whiteout-spec")
             .unwrap_or_default()
             .parse()?;
+
+        let prefetch_policy = matches
+            .value_of("prefetch-policy")
+            .unwrap_or_default()
+            .parse()?;
+        let prefetch = Prefetch::new(prefetch_policy)?;
 
         let aligned_chunk = matches.is_present("aligned-chunk");
 
@@ -411,11 +367,10 @@ fn main() -> Result<()> {
             blob_id,
             compressor,
             digester,
-            hint_readahead_files,
-            prefetch_policy,
             !repeatable,
             whiteout_spec,
             aligned_chunk,
+            prefetch,
         )?;
 
         // Some operations like listing xattr pairs of certain namespace need the process

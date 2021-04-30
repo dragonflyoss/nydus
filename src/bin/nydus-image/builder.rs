@@ -4,7 +4,7 @@
 
 //! Bootstrap and blob file builder for RAFS format
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ffi::{CString, OsString};
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -28,6 +28,7 @@ use storage::compress;
 
 use nydus_utils::digest::{self, RafsDigest};
 
+use crate::core::prefetch::{Prefetch, PrefetchPolicy};
 use crate::node::*;
 use crate::stargz;
 use crate::tree::Tree;
@@ -65,13 +66,6 @@ pub struct Builder {
     chunk_cache: HashMap<RafsDigest, OndiskChunkInfo>,
     /// Store all blob id entry during build.
     blob_table: OndiskBlobTable,
-    /// Readahead file list, use BTreeMap to keep stable iteration order, HashMap<path, Option<index>>.
-    /// Files from this collection are all regular files and will be persisted to blob following a certain scheme.
-    readahead_files: BTreeMap<PathBuf, Option<u64>>,
-    /// Specify files or directories which need to prefetch. Their inode indexes will
-    /// be persist to prefetch table. They could be directory's or regular file's index
-    hint_readahead_files: BTreeMap<PathBuf, Option<u64>>,
-    prefetch_policy: PrefetchPolicy,
     /// Store all nodes during build, node index of root starting from 1,
     /// so the collection index equal to (node.index - 1).
     nodes: Vec<Node>,
@@ -81,31 +75,7 @@ pub struct Builder {
     aligned_chunk: bool,
     /// The size of newly generated blob. It might be ZERO if everything is the same with upper layer.
     blob_size: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PrefetchPolicy {
-    None,
-    /// Readahead will be issued from Fs layer, which leverages inode/chunkinfo to prefetch data
-    /// from blob no mather where it resides(OSS/Localfs). Basically, it is willing to cache the
-    /// data into blobcache(if exists). It's more nimble. With this policy applied, image builder
-    /// currently puts readahead files' data into a continuous region within blob which behaves very
-    /// similar to `Blob` policy.
-    Fs,
-    /// Readahead will be issued directly from backend/blob layer
-    Blob,
-}
-
-impl FromStr for PrefetchPolicy {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "none" => Ok(Self::None),
-            "fs" => Ok(Self::Fs),
-            "blob" => Ok(Self::Blob),
-            _ => Err(anyhow!("invalid prefetch policy")),
-        }
-    }
+    prefetch: Prefetch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,11 +203,10 @@ impl Builder {
         blob_id: String,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
-        hint_readahead_files: BTreeMap<PathBuf, Option<u64>>,
-        prefetch_policy: PrefetchPolicy,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
         aligned_chunk: bool,
+        prefetch: Prefetch,
     ) -> Result<Builder> {
         let bw = if let Some(bs) = blob_path {
             Some(BlobBufferWriter::new(bs)?)
@@ -288,45 +257,11 @@ impl Builder {
             upper_inode_map: HashMap::new(),
             chunk_cache: HashMap::new(),
             blob_table: OndiskBlobTable::new(),
-            readahead_files: BTreeMap::new(),
-            hint_readahead_files,
-            prefetch_policy,
             nodes: Vec::new(),
             aligned_chunk,
             blob_size: 0,
+            prefetch,
         })
-    }
-
-    /// Gain file or directory inode indexes which will be put into prefetch table.
-    fn need_prefetch(&mut self, node: &Node) -> bool {
-        let path = &node.rootfs();
-        let index = node.inode.i_ino;
-
-        if self.prefetch_policy == PrefetchPolicy::None || node.inode.i_size == 0 {
-            return false;
-        }
-
-        for f in self.hint_readahead_files.keys() {
-            // As path is canonicalized, it should be reliable.
-            if path.as_os_str() == f.as_os_str() {
-                if self.prefetch_policy == PrefetchPolicy::Fs {
-                    if let Some(i) = self.hint_readahead_files.get_mut(path) {
-                        *i = Some(index);
-                    }
-                }
-                return true;
-            } else if path.starts_with(f) {
-                // Users can specify hinted parent directory with its child files hinted as well.
-                // Only put the parent directory into ondisk prefetch table since a hinted directory's
-                // all child files will be prefetched after mount.
-                if self.hint_readahead_files.get(path).is_some() {
-                    self.hint_readahead_files.remove(path);
-                }
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Traverse node tree, set inode index, ino, child_index and
@@ -426,10 +361,7 @@ impl Builder {
                 }
             }
 
-            if self.need_prefetch(&child.node) {
-                self.readahead_files
-                    .insert(child.node.rootfs(), Some(child.node.index));
-            }
+            self.prefetch.insert_if_need(&child.node);
 
             if child.node.is_dir() {
                 dirs.push(child);
@@ -458,10 +390,7 @@ impl Builder {
 
         // Filesystem walking skips root inode within subsequent while loop, however, we allow
         // user to pass the source root as prefetch hint. Check it here.
-        let root_path = Path::new("/").to_path_buf();
-        if self.need_prefetch(&tree.node) {
-            self.readahead_files.insert(root_path, Some(index));
-        }
+        self.prefetch.insert_if_need(&tree.node);
 
         let mut nodes = vec![tree.node.clone()];
         self.build_rafs(&mut tree, &mut nodes);
@@ -513,7 +442,6 @@ impl Builder {
 
         self.lower_inode_map.clear();
         self.upper_inode_map.clear();
-        self.readahead_files.clear();
 
         timing_tracer!({ self.build_rafs_wrap(&mut tree) }, "build_rafs");
 
@@ -555,11 +483,7 @@ impl Builder {
         // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
         // belonging to the same directory arranged in adjacent in blob file. Together with
         // BFS style collecting descendants inodes, it will have a higher merging possibility.
-        let readahead_files = self
-            .readahead_files
-            .values()
-            .filter_map(|index| index.as_ref())
-            .collect::<Vec<&u64>>();
+        let readahead_files = self.prefetch.get_file_indexs();
 
         let blob_index = self.blob_table.entries.len() as u32;
 
@@ -602,7 +526,7 @@ impl Builder {
 
                 // Dump other nodes
                 for node in &mut self.nodes {
-                    if self.readahead_files.get(&node.rootfs()).is_some() {
+                    if self.prefetch.contains(node) {
                         continue;
                     }
                     // Ignore lower layer node when dump blob
@@ -669,7 +593,7 @@ impl Builder {
         if blob_size > 0
             || (self.source_type == SourceType::StargzIndex && !self.blob_id.is_empty())
         {
-            if self.prefetch_policy != PrefetchPolicy::Blob {
+            if self.prefetch.policy != PrefetchPolicy::Blob {
                 blob_readahead_size = 0;
             }
             self.blob_table
@@ -688,21 +612,12 @@ impl Builder {
         let inode_table_size = inode_table.size();
 
         // Set prefetch table
-        let mut prefetch_table = PrefetchTable::new();
-        let mut prefetch_table_size = 0;
-        let prefetch_table_entries = if self.prefetch_policy == PrefetchPolicy::Fs {
-            for i in self
-                .hint_readahead_files
-                .iter()
-                .filter_map(|(_, v)| v.as_ref())
-            {
-                prefetch_table.add_entry(*i as u32);
-            }
-            prefetch_table_size = prefetch_table.size();
-            prefetch_table.len() as u32
-        } else {
-            0u32
-        };
+        let (prefetch_table_size, prefetch_table_entries) =
+            if let Some(prefetch_table) = self.prefetch.get_prefetch_table() {
+                (prefetch_table.size(), prefetch_table.len() as u32)
+            } else {
+                (0, 0u32)
+            };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
         let blob_table_size = self.blob_table.size();
@@ -759,7 +674,7 @@ impl Builder {
         inode_table
             .store(&mut self.f_bootstrap)
             .context("failed to store inode table")?;
-        if self.prefetch_policy == PrefetchPolicy::Fs {
+        if let Some(mut prefetch_table) = self.prefetch.get_prefetch_table() {
             prefetch_table.store(&mut self.f_bootstrap)?;
         }
         self.blob_table
