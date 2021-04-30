@@ -4,6 +4,7 @@
 
 //! File node for RAFS format
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -98,6 +99,35 @@ impl fmt::Display for Overlay {
             Overlay::UpperRemoval => write!(f, "REMOVED"),
             Overlay::UpperModification => write!(f, "MODIFIED"),
         }
+    }
+}
+
+#[derive(Default)]
+pub struct ChunkCountMap {
+    /// Store the number of chunks in blob, it's HashMap<blob_index, chunk_count>.
+    chunks: HashMap<u32, u32>,
+}
+
+impl ChunkCountMap {
+    /// Allocate a count index sequentially by the index of blob table.
+    pub fn alloc_index(&mut self, blob_index: u32) -> u32 {
+        match self.chunks.entry(blob_index) {
+            Entry::Occupied(entry) => {
+                let chunk_count = entry.into_mut();
+                let index = *chunk_count;
+                *chunk_count += 1;
+                index
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(1);
+                0
+            }
+        }
+    }
+
+    /// Get the number of counts in a blob by the index of blob table.
+    pub fn count(&self, blob_index: u32) -> Option<&u32> {
+        self.chunks.get(&blob_index)
     }
 }
 
@@ -219,6 +249,7 @@ impl Node {
         compress_offset: &mut u64,
         decompress_offset: &mut u64,
         chunk_cache: &mut HashMap<RafsDigest, OndiskChunkInfo>,
+        chunk_count_map: &mut ChunkCountMap,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
         blob_index: u32,
@@ -309,6 +340,7 @@ impl Node {
             chunk.decompress_offset = *decompress_offset;
             chunk.compress_size = compressed_size as u32;
             chunk.decompress_size = chunk_size as u32;
+            chunk.index = chunk_count_map.alloc_index(blob_index);
             blob_size += compressed_size;
 
             // Move cursor to offset of next chunk

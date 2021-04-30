@@ -67,6 +67,7 @@ pub struct BuildContext {
     pub upper_inode_map: HashMap<(Inode, u64), Vec<u64>>,
     /// Store all chunk digest for chunk deduplicate during build.
     pub chunk_cache: HashMap<RafsDigest, OndiskChunkInfo>,
+    pub chunk_count_map: ChunkCountMap,
     /// Store all blob id entry during build.
     pub blob_table: OndiskBlobTable,
     /// Store all nodes during build, node index of root starting from 1,

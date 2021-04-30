@@ -369,7 +369,8 @@ impl StargzIndexTreeBuilder {
                     // No available data on entry
                     decompress_offset: 0,
                     file_offset: entry.chunk_offset as u64,
-                    reserved: 0u64,
+                    index: 0,
+                    reserved: 0,
                 };
                 if let Some((size, chunks)) = file_chunk_map.get_mut(&entry.path()?) {
                     chunks.push(chunk);
@@ -532,6 +533,8 @@ impl StargzBuilder {
 
             let blob_index = ctx.blob_table.entries.len() as u32;
             for chunk in node.chunks.iter_mut() {
+                let chunk_index = ctx.chunk_count_map.alloc_index(blob_index);
+                (*chunk).index = chunk_index;
                 (*chunk).blob_index = blob_index;
                 inode_hasher.digest_update(chunk.block_id.as_ref());
             }

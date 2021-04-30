@@ -44,6 +44,7 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     ByteSize,
 };
+use storage::device::RafsBlobEntry;
 
 use super::*;
 
@@ -515,22 +516,8 @@ impl PrefetchTable {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct OndiskBlobTableEntry {
-    // Blob's own meta should be put onto its head, so `u32` should be sufficient.
-    pub readahead_offset: u32,
-    pub readahead_size: u32,
-    pub blob_id: String,
-}
-
-impl OndiskBlobTableEntry {
-    pub fn size(&self) -> usize {
-        size_of::<u32>() * 2 + self.blob_id.len()
-    }
-}
-
-#[derive(Clone, Debug, Default)]
 pub struct OndiskBlobTable {
-    pub entries: Vec<OndiskBlobTableEntry>,
+    pub entries: Vec<Arc<RafsBlobEntry>>,
 }
 
 impl OndiskBlobTable {
@@ -547,24 +534,26 @@ impl OndiskBlobTable {
         }
         // Blob entry split with '\0'
         align_to_rafs(
-            self.entries
-                .iter()
-                .fold(0usize, |size, entry| size + entry.size() + 1)
-                - 1,
+            self.entries.iter().fold(0usize, |size, entry| {
+                let entry_size = size_of::<u32>() * 2 + entry.blob_id.len();
+                size + entry_size + 1
+            }) - 1,
         )
     }
 
-    pub fn add(&mut self, blob_id: String, readahead_offset: u32, readahead_size: u32) -> u32 {
-        self.entries.push(OndiskBlobTableEntry {
+    pub fn add(&mut self, blob_id: String, readahead_size: u32, chunk_count: u32) -> u32 {
+        let blob_index = self.entries.len() as u32;
+        self.entries.push(Arc::new(RafsBlobEntry {
             blob_id,
-            readahead_offset,
+            blob_index,
             readahead_size,
-        });
-        (self.entries.len() - 1) as u32
+            chunk_count,
+        }));
+        blob_index
     }
 
     #[inline]
-    pub fn get(&self, blob_index: u32) -> Result<OndiskBlobTableEntry> {
+    pub fn get(&self, blob_index: u32) -> Result<Arc<RafsBlobEntry>> {
         if blob_index > (self.entries.len() - 1) as u32 {
             return Err(enoent!("blob not found"));
         }
@@ -577,6 +566,7 @@ impl OndiskBlobTable {
         r.read_exact(&mut input)?;
         self.load_from_slice(&input)
     }
+
     pub fn load_from_slice(&mut self, input: &[u8]) -> Result<()> {
         let mut input_rest = input;
 
@@ -592,20 +582,20 @@ impl OndiskBlobTable {
             if readahead.len() < split_at_32 + 1 {
                 break;
             }
-            let (readahead_offset, readahead_size) = readahead.split_at(split_at_32);
+            let (chunk_count, readahead_size) = readahead.split_at(split_at_32);
 
-            let readahead_offset =
-                u32::from_le_bytes(readahead_offset.try_into().map_err(|e| einval!(e))?);
+            let chunk_count = u32::from_le_bytes(chunk_count.try_into().map_err(|e| einval!(e))?);
             let readahead_size =
                 u32::from_le_bytes(readahead_size.try_into().map_err(|e| einval!(e))?);
 
             let (blob_id, rest) = parse_string(rest)?;
 
-            self.entries.push(OndiskBlobTableEntry {
+            self.entries.push(Arc::new(RafsBlobEntry {
                 blob_id: blob_id.to_string(),
-                readahead_offset,
+                blob_index: self.entries.len() as u32,
+                chunk_count,
                 readahead_size,
-            });
+            }));
 
             // Break blob id search loop, when rest bytes length is zero,
             // or not split with '\0', or not have enough data to read (ending with padding data).
@@ -623,7 +613,7 @@ impl OndiskBlobTable {
         Ok(())
     }
 
-    pub fn get_all(&self) -> Vec<OndiskBlobTableEntry> {
+    pub fn get_all(&self) -> Vec<Arc<RafsBlobEntry>> {
         self.entries.clone()
     }
 }
@@ -823,8 +813,11 @@ pub struct OndiskChunkInfo {
 
     /// offset in file
     pub file_offset: u64,
+    /// chunk index, it's allocated sequentially
+    /// starting from 0 for one blob.
+    pub index: u32,
     /// reserved
-    pub reserved: u64,
+    pub reserved: u32,
 }
 
 impl OndiskChunkInfo {
@@ -850,7 +843,7 @@ impl fmt::Display for OndiskChunkInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "file_offset {}, compress_offset {}, compress_size {}, decompress_offset {}, decompress_size {}, blob_index {}, block_id {}, is_compressed {}",
+            "file_offset {}, compress_offset {}, compress_size {}, decompress_offset {}, decompress_size {}, blob_index {}, block_id {}, index {}, is_compressed {}",
             self.file_offset,
             self.compress_offset,
             self.compress_size,
@@ -858,6 +851,7 @@ impl fmt::Display for OndiskChunkInfo {
             self.decompress_size,
             self.blob_index,
             self.block_id,
+            self.index,
             self.flags.contains(RafsChunkFlags::COMPRESSED),
         )
     }

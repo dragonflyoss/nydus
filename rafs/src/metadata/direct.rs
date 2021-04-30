@@ -82,7 +82,7 @@ macro_rules! impl_chunkinfo_getter {
 struct DirectMappingState {
     meta: RafsSuperMeta,
     inode_table: ManuallyDrop<OndiskInodeTable>,
-    blob_table: OndiskBlobTable,
+    blob_table: Arc<OndiskBlobTable>,
     base: *const u8,
     end: *const u8,
     size: usize,
@@ -96,7 +96,7 @@ impl DirectMappingState {
         DirectMappingState {
             meta: *meta,
             inode_table: ManuallyDrop::new(OndiskInodeTable::default()),
-            blob_table: OndiskBlobTable::default(),
+            blob_table: Arc::new(OndiskBlobTable::default()),
             fd: -1,
             base: std::ptr::null(),
             end: std::ptr::null(),
@@ -296,7 +296,7 @@ impl DirectMapping {
         let state = DirectMappingState {
             meta: old_state.meta,
             inode_table: ManuallyDrop::new(inode_table),
-            blob_table,
+            blob_table: Arc::new(blob_table),
             fd: file.into_raw_fd(),
             base,
             end,
@@ -347,7 +347,7 @@ impl RafsSuperInodes for DirectMapping {
 
     fn get_blob_table(&self) -> Arc<OndiskBlobTable> {
         let state = self.state.load();
-        Arc::new(state.blob_table.clone())
+        state.blob_table.clone()
     }
 
     fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
@@ -599,8 +599,8 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     #[inline]
-    fn get_chunk_blob_id(&self, idx: u32) -> Result<String> {
-        Ok(self.state().blob_table.get(idx)?.blob_id)
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+        Ok(self.state().blob_table.get(idx)?)
     }
 
     fn get_entry(&self) -> Entry {
@@ -782,6 +782,7 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
     }
 
     impl_chunkinfo_getter!(blob_index, u32);
+    impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(compress_offset, u64);
     impl_chunkinfo_getter!(compress_size, u32);
     impl_chunkinfo_getter!(decompress_offset, u64);

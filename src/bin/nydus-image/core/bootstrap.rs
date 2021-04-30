@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::convert::TryFrom;
 use std::ffi::OsString;
 use std::mem::size_of;
 
@@ -249,8 +250,12 @@ impl Bootstrap {
                 blob_readahead_size = 0;
             }
             // Add new blob to blob table
-            ctx.blob_table
-                .add(ctx.blob_id.clone(), 0, blob_readahead_size as u32);
+            let blob_index = u32::try_from(ctx.blob_table.entries.len())?;
+            ctx.blob_table.add(
+                ctx.blob_id.clone(),
+                u32::try_from(blob_readahead_size)?,
+                *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
+            );
         }
 
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
