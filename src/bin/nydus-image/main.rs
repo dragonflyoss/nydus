@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
+use crate::core::blob::BlobStorage;
 use crate::core::context::BuildContext;
 use crate::core::context::SourceType;
 use crate::core::context::BUF_WRITER_CAPACITY;
@@ -44,7 +45,6 @@ use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
-use builder::{BlobBufferWriter, BlobStorage};
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use rafs::metadata::layout::OndiskBlobTable;
 use rafs::RafsIoRead;
@@ -411,12 +411,6 @@ fn main() -> Result<()> {
             nodes: Vec::new(),
         };
 
-        // External tool like `nydusify` might rename the blob to a OCI distribution compatible one.
-        let writer = if let Some(bs) = blob_stor {
-            Some(BlobBufferWriter::new(bs)?)
-        } else {
-            None
-        };
         let mut ib = builder::Builder::new()?;
 
         // Some operations like listing xattr pairs of certain namespace need the process
@@ -425,7 +419,7 @@ fn main() -> Result<()> {
         event_tracer!("egid", "{}", getegid());
 
         let (blob_ids, blob_size) = timing_tracer!(
-            { ib.build(&mut ctx, writer).context("build failed") },
+            { ib.build(&mut ctx, blob_stor).context("build failed") },
             "total_build"
         )?;
 

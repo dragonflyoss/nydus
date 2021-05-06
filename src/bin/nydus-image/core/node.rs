@@ -27,7 +27,7 @@ use nydus_utils::{
     div_round_up, try_round_up_4k, ByteSize,
 };
 
-use crate::builder::BlobBufferWriter;
+use super::blob::BlobBufferWriter;
 
 use rafs::metadata::layout::*;
 use rafs::metadata::*;

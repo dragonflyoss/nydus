@@ -76,7 +76,5 @@ pub struct BuildContext {
     /// `decompress_offset` within chunk info. Therefore, provide a new flag
     /// to image tool thus to align chunks in blob with 4k size.
     pub aligned_chunk: bool,
-    /// The size of newly generated blob. It might be ZERO if everything is the same with upper layer.
-    // pub blob_size: usize,
     pub prefetch: Prefetch,
 }
