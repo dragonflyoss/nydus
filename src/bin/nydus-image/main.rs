@@ -28,21 +28,26 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
+use std::collections::HashMap;
 use std::fs::metadata;
 use std::fs::OpenOptions;
-use std::io;
+use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
-use crate::core::node;
+use crate::core::context::BuildContext;
+use crate::core::context::SourceType;
+use crate::core::context::BUF_WRITER_CAPACITY;
+use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
-use builder::{BlobStorage, SourceType};
-use node::WhiteoutSpec;
+use builder::{BlobBufferWriter, BlobStorage};
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
+use rafs::metadata::layout::OndiskBlobTable;
+use rafs::RafsIoRead;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use validator::Validator;
@@ -258,10 +263,10 @@ fn main() -> Result<()> {
     register_tracer!(TraceClass::Event, EventTracerClass);
 
     if let Some(matches) = cmd.subcommand_matches("create") {
-        let source_path = Path::new(matches.value_of("SOURCE").unwrap());
+        let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
 
-        let source_file = metadata(source_path)
+        let source_file = metadata(&source_path)
             .context(format!("failed to get source path {:?}", source_path))?;
 
         let mut blob_id = String::new();
@@ -340,9 +345,9 @@ fn main() -> Result<()> {
             None
         };
 
-        let mut parent_bootstrap = Path::new("");
-        if let Some(_parent_bootstrap) = matches.value_of("parent-bootstrap") {
-            parent_bootstrap = Path::new(_parent_bootstrap);
+        let mut parent_bootstrap_path = Path::new("");
+        if let Some(_parent_bootstrap_path) = matches.value_of("parent-bootstrap") {
+            parent_bootstrap_path = Path::new(_parent_bootstrap_path);
         }
 
         let whiteout_spec: WhiteoutSpec = matches
@@ -358,29 +363,71 @@ fn main() -> Result<()> {
 
         let aligned_chunk = matches.is_present("aligned-chunk");
 
-        // External tool like `nydusify` might rename the blob to a OCI distribution compatible one.
-        let mut ib = builder::Builder::new(
+        let f_bootstrap = Box::new(BufWriter::with_capacity(
+            BUF_WRITER_CAPACITY,
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(bootstrap_path)
+                .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
+        ));
+
+        let f_parent_bootstrap: Option<Box<dyn RafsIoRead>> =
+            if parent_bootstrap_path != Path::new("") {
+                Some(Box::new(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(false)
+                        .open(parent_bootstrap_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to open parent bootstrap file {:?}",
+                                parent_bootstrap_path
+                            )
+                        })?,
+                ))
+            } else {
+                None
+            };
+
+        let mut ctx = BuildContext {
             source_type,
             source_path,
-            blob_stor,
-            bootstrap_path,
-            parent_bootstrap,
             blob_id,
+            f_bootstrap,
+            f_parent_bootstrap,
             compressor,
             digester,
-            !repeatable,
+            explicit_uidgid: !repeatable,
             whiteout_spec,
             aligned_chunk,
             prefetch,
-        )?;
+
+            lower_inode_map: HashMap::new(),
+            upper_inode_map: HashMap::new(),
+            chunk_cache: HashMap::new(),
+            blob_table: OndiskBlobTable::new(),
+            nodes: Vec::new(),
+        };
+
+        // External tool like `nydusify` might rename the blob to a OCI distribution compatible one.
+        let writer = if let Some(bs) = blob_stor {
+            Some(BlobBufferWriter::new(bs)?)
+        } else {
+            None
+        };
+        let mut ib = builder::Builder::new()?;
 
         // Some operations like listing xattr pairs of certain namespace need the process
         // to be privileged. Therefore, trace what euid and egid are
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
 
-        let (blob_ids, blob_size) =
-            timing_tracer!({ ib.build().context("build failed") }, "total_build")?;
+        let (blob_ids, blob_size) = timing_tracer!(
+            { ib.build(&mut ctx, writer).context("build failed") },
+            "total_build"
+        )?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
