@@ -10,28 +10,17 @@
 //! 1. Apply FilesystemTree (from upper layer) to MetadataTree (from lower layer) as overlay node tree;
 //! 2. Traverse overlay node tree then dump to bootstrap and blob file according to RAFS format.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::Result;
 
 use std::collections::HashMap;
-use std::fs;
-use std::fs::DirEntry;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use nydus_utils::ByteSize;
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsChunkInfo, RafsInode, RafsSuper};
 
-use crate::{
-    node::*,
-    stargz::{self, TocEntry},
-};
-
-// TODO: Import RafsChunkFlags from storage::device is very strange,
-/// perhaps move it to a separate lib someday. And future inspect tool can also
-/// rely on this.
-use storage::device::RafsChunkFlags;
+use crate::node::*;
 
 use nydus_utils::digest::RafsDigest;
 
@@ -165,282 +154,6 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 }
 
-struct StargzIndexTreeBuilder {
-    stargz_index_path: PathBuf,
-    path_inode_map: HashMap<PathBuf, Inode>,
-    blob_id: String,
-}
-
-impl StargzIndexTreeBuilder {
-    fn new(stargz_index_path: PathBuf, blob_id: &str) -> Self {
-        Self {
-            stargz_index_path,
-            path_inode_map: HashMap::new(),
-            blob_id: blob_id.to_owned(),
-        }
-    }
-
-    // Create middle directory nodes which is not in entry list,
-    // for example `/a/b/c`, we need to create `/a`, `/a/b` nodes first.
-    fn make_lost_dirs(&mut self, entry: &TocEntry, dirs: &mut Vec<TocEntry>) -> Result<()> {
-        if let Some(parent_path) = entry.path()?.parent() {
-            let parent_path = parent_path.to_path_buf();
-            if self.path_inode_map.get(&parent_path).is_none() {
-                let dir_entry = TocEntry::new_dir(parent_path);
-                self.make_lost_dirs(&dir_entry, dirs)?;
-                dirs.push(dir_entry);
-            }
-        }
-        Ok(())
-    }
-
-    fn build(&mut self, explicit_uidgid: bool, whiteout_spec: &WhiteoutSpec) -> Result<Tree> {
-        // Parse stargz TOC index from a file
-        let toc_index = stargz::parse_index(&self.stargz_index_path)?;
-
-        if toc_index.entries.is_empty() {
-            bail!("the stargz index has no toc entry");
-        }
-
-        let mut tree: Option<Tree> = None;
-
-        // Map hardlink path to linked path: HashMap<<hardlink_path>, <linked_path>>
-        let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
-
-        // Map regular file path to chunks: HashMap<<file_path>, <(file_size, chunks)>>
-        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<OndiskChunkInfo>)> = HashMap::new();
-        let mut nodes = Vec::new();
-
-        let mut last_reg_entry: Option<&TocEntry> = None;
-        for entry in toc_index.entries.iter() {
-            if !entry.is_supported() {
-                continue;
-            }
-
-            // Figure out decompress_size for the last chunk entry of regular file
-            let mut decompress_size = entry.chunk_size;
-            if entry.is_chunk() && entry.chunk_size == 0 {
-                if let Some(reg_entry) = last_reg_entry {
-                    decompress_size = reg_entry.size - entry.chunk_offset;
-                }
-            }
-            // Figure out decompress_size for regular file entry
-            if entry.chunk_size == 0 && entry.size != 0 {
-                decompress_size = entry.size;
-            }
-
-            if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
-                let block_id = entry.block_id(&self.blob_id)?;
-                let chunk = OndiskChunkInfo {
-                    block_id,
-                    // Will be set later
-                    blob_index: 0,
-                    flags: RafsChunkFlags::COMPRESSED,
-                    // No available data on entry
-                    compress_size: 0,
-                    decompress_size: decompress_size as u32,
-                    compress_offset: entry.offset as u64,
-                    // No available data on entry
-                    decompress_offset: 0,
-                    file_offset: entry.chunk_offset as u64,
-                    reserved: 0u64,
-                };
-                if let Some((size, chunks)) = file_chunk_map.get_mut(&entry.path()?) {
-                    chunks.push(chunk);
-                    if entry.is_reg() {
-                        *size = entry.size;
-                    }
-                } else {
-                    let size = if entry.is_reg() { entry.size } else { 0 };
-                    file_chunk_map.insert(entry.path()?, (size, vec![chunk]));
-                }
-            }
-            if entry.is_reg() {
-                last_reg_entry = Some(&entry);
-            }
-            if entry.is_chunk() {
-                continue;
-            }
-
-            let mut lost_dirs = Vec::new();
-            self.make_lost_dirs(&entry, &mut lost_dirs)?;
-            for dir in &lost_dirs {
-                let node = self.parse_node(dir, explicit_uidgid)?;
-                nodes.push(node);
-            }
-
-            if entry.is_hardlink() {
-                hardlink_map.insert(entry.path()?, entry.hardlink_link_path());
-            }
-
-            let node = self.parse_node(entry, explicit_uidgid)?;
-            if entry.path()? == PathBuf::from("/") {
-                tree = Some(Tree::new(node.clone()));
-            }
-            nodes.push(node);
-        }
-
-        // Set chunks and i_size to nodes
-        for node in &mut nodes {
-            let link_path = hardlink_map.get(&node.path).unwrap_or(&node.path);
-            if let Some((size, chunks)) = file_chunk_map.get(link_path) {
-                node.chunks = chunks.clone();
-                node.inode.i_child_count = node.chunks.len() as u32;
-                node.inode.i_size = *size;
-            }
-            if let Some(tree) = &mut tree {
-                tree.apply(node, false, whiteout_spec)?;
-            }
-        }
-
-        tree.ok_or_else(|| anyhow!("the stargz index has no root toc entry"))
-    }
-
-    /// Parse stargz toc entry to Node in builder
-    fn parse_node(&mut self, entry: &TocEntry, explicit_uidgid: bool) -> Result<Node> {
-        let chunks = Vec::new();
-        let entry_path = entry.path()?;
-        let symlink_link_path = entry.symlink_link_path();
-
-        let mut flags = RafsInodeFlags::default();
-
-        // Parse symlink
-        let mut file_size = entry.size;
-        let mut symlink_size = 0;
-        let symlink = if entry.is_symlink() {
-            flags |= RafsInodeFlags::SYMLINK;
-            symlink_size = symlink_link_path.byte_size() as u16;
-            file_size = symlink_size.into();
-            Some(symlink_link_path.as_os_str().to_owned())
-        } else {
-            None
-        };
-
-        // Parse xattrs
-        let mut xattrs = XAttrs::new();
-        if entry.has_xattr() {
-            for (name, value) in entry.xattrs.iter() {
-                flags |= RafsInodeFlags::XATTR;
-                let value = base64::decode(value).with_context(|| {
-                    format!(
-                        "parse xattr name {:?} of file {:?} failed",
-                        entry_path, name,
-                    )
-                })?;
-                xattrs.add(name.into(), value);
-            }
-        }
-
-        // Handle hardlink ino
-        let mut ino = (self.path_inode_map.len() + 1) as Inode;
-        if entry.is_hardlink() {
-            flags |= RafsInodeFlags::HARDLINK;
-            if let Some(_ino) = self.path_inode_map.get(&entry.hardlink_link_path()) {
-                ino = *_ino;
-            } else {
-                self.path_inode_map.insert(entry.path()?, ino);
-            }
-        } else {
-            self.path_inode_map.insert(entry.path()?, ino);
-        }
-
-        // Get file name size
-        let name_size = entry.name()?.as_os_str().byte_size() as u16;
-
-        let uid = if explicit_uidgid { entry.uid } else { 0 };
-        let gid = if explicit_uidgid { entry.gid } else { 0 };
-
-        // Parse inode info
-        let inode = OndiskInode {
-            i_digest: RafsDigest::default(),
-            i_parent: 0,
-            i_ino: ino,
-            i_projid: 0,
-            i_uid: uid,
-            i_gid: gid,
-            i_mode: entry.mode(),
-            i_size: file_size,
-            i_nlink: entry.num_link,
-            i_blocks: 0,
-            i_flags: flags,
-            i_child_index: 0,
-            i_child_count: 0,
-            i_name_size: name_size,
-            i_symlink_size: symlink_size,
-            i_rdev: entry.rdev(),
-            i_reserved: [0; 20],
-        };
-
-        Ok(Node {
-            index: 0,
-            real_ino: ino,
-            dev: u64::MAX,
-            rdev: inode.i_rdev as u64,
-            overlay: Overlay::UpperAddition,
-            explicit_uidgid,
-            source: PathBuf::from_str("/").unwrap(),
-            path: entry.path()?,
-            inode,
-            chunks,
-            symlink,
-            xattrs,
-        })
-    }
-}
-
-struct FilesystemTreeBuilder {
-    root_path: PathBuf,
-    layered: bool,
-}
-
-impl FilesystemTreeBuilder {
-    fn new(root_path: PathBuf, layered: bool) -> Self {
-        Self { root_path, layered }
-    }
-
-    /// Walk directory to build node tree by DFS,
-    fn load_children(&self, parent: &mut Node, whiteout_spec: &WhiteoutSpec) -> Result<Vec<Tree>> {
-        let mut result = Vec::new();
-
-        if !parent.is_dir() {
-            return Ok(result);
-        }
-
-        let children = fs::read_dir(&parent.path)
-            .with_context(|| format!("failed to read dir {:?}", parent.path))?;
-        let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
-
-        event_tracer!("load_from_directory", +children.len());
-
-        for child in children {
-            let path = child.path();
-
-            let child = Node::new(
-                self.root_path.clone(),
-                path.clone(),
-                Overlay::UpperAddition,
-                parent.explicit_uidgid,
-            )
-            .with_context(|| format!("failed to create node {:?}", path))?;
-
-            // as per OCI spec, whiteout file should not be present within final image
-            // or filesystem, only existed in layers.
-            if child.whiteout_type(whiteout_spec).is_some()
-                && !child.is_overlayfs_opaque(whiteout_spec)
-                && !self.layered
-            {
-                continue;
-            }
-
-            let mut child = Tree::new(child);
-            child.children = self.load_children(&mut child.node, whiteout_spec)?;
-            result.push(child);
-        }
-
-        Ok(result)
-    }
-}
-
 impl Tree {
     pub fn new(node: Node) -> Self {
         Tree {
@@ -462,17 +175,6 @@ impl Tree {
         Ok(())
     }
 
-    /// Build node tree from stargz index json file
-    pub fn from_stargz_index(
-        stargz_index_path: &PathBuf,
-        blob_id: &str,
-        explicit_uidgid: bool,
-        whiteout_spec: &WhiteoutSpec,
-    ) -> Result<Self> {
-        let mut tree_builder = StargzIndexTreeBuilder::new(stargz_index_path.clone(), blob_id);
-        tree_builder.build(explicit_uidgid, whiteout_spec)
-    }
-
     /// Build node tree from a bootstrap file
     pub fn from_bootstrap(
         rs: &RafsSuper,
@@ -487,31 +189,6 @@ impl Tree {
         tree.children = timing_tracer!(
             { tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache) },
             "load_from_parent_bootstrap"
-        )?;
-
-        Ok(tree)
-    }
-
-    /// Build node tree from a filesystem directory
-    pub fn from_filesystem(
-        root_path: &PathBuf,
-        explicit_uidgid: bool,
-        layered: bool,
-        whiteout_spec: &WhiteoutSpec,
-    ) -> Result<Self> {
-        let tree_builder = FilesystemTreeBuilder::new(root_path.clone(), layered);
-
-        let node = Node::new(
-            root_path.clone(),
-            root_path.clone(),
-            Overlay::UpperAddition,
-            explicit_uidgid,
-        )?;
-        let mut tree = Tree::new(node);
-
-        tree.children = timing_tracer!(
-            { tree_builder.load_children(&mut tree.node, whiteout_spec) },
-            "load_from_directory"
         )?;
 
         Ok(tree)

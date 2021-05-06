@@ -27,7 +27,7 @@ pub struct BlobBufferWriter {
     _tmp_file: Option<TempFile>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BlobStorage {
     // Won't rename user's specification
     SingleFile(PathBuf),

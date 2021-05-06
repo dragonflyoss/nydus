@@ -14,7 +14,6 @@ mod trace;
 
 mod builder;
 mod core;
-mod stargz;
 mod validator;
 
 #[macro_use]
@@ -36,6 +35,10 @@ use std::path::{Path, PathBuf};
 
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
+
+use crate::builder::directory::DirectoryBuilder;
+use crate::builder::stargz::StargzBuilder;
+use crate::builder::Builder;
 
 use crate::core::blob::BlobStorage;
 use crate::core::context::BuildContext;
@@ -411,17 +414,21 @@ fn main() -> Result<()> {
             nodes: Vec::new(),
         };
 
-        let mut ib = builder::Builder::new()?;
+        let mut builder: Box<dyn Builder> = match source_type {
+            SourceType::Directory => {
+                Box::new(DirectoryBuilder::new(blob_stor.as_ref().unwrap().clone()))
+            }
+            SourceType::StargzIndex => Box::new(StargzBuilder::new()),
+        };
+        let (blob_ids, blob_size) = timing_tracer!(
+            { builder.build(&mut ctx).context("build failed") },
+            "total_build"
+        )?;
 
         // Some operations like listing xattr pairs of certain namespace need the process
         // to be privileged. Therefore, trace what euid and egid are
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
-
-        let (blob_ids, blob_size) = timing_tracer!(
-            { ib.build(&mut ctx, blob_stor).context("build failed") },
-            "total_build"
-        )?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {
