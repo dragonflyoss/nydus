@@ -621,7 +621,13 @@ impl FileSystem for Rafs {
                 x if x < value.len() as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
                 _ => Ok(GetxattrReply::Value(value)),
             },
-            None => Err(std::io::Error::from_raw_os_error(libc::ENODATA)),
+            None => {
+                // TODO: Hopefully, we can have a 'decorator' procedure macro in
+                // the future to wrap this method thus to handle different reasonable
+                // errors in a clean way.
+                recorder.mark_success(0);
+                Err(std::io::Error::from_raw_os_error(libc::ENODATA))
+            }
         };
 
         r.map(|v| {
