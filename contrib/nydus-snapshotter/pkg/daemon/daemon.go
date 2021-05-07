@@ -7,12 +7,13 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
@@ -33,12 +34,10 @@ type Daemon struct {
 	CacheDir       string
 	SnapshotDir    string
 	Pid            int
-	client         nydussdk.Interface
 	ImageID        string
-	SharedDaemon   bool
+	DaemonMode     string
 	ApiSock        *string
 	RootMountPoint *string
-	mu             sync.Mutex
 }
 
 func (d *Daemon) SharedMountPoint() string {
@@ -53,21 +52,7 @@ func (d *Daemon) MountPoint() string {
 }
 
 func (d *Daemon) BootstrapFile() (string, error) {
-	// for backward compatibility check meta file from legacy location
-	bootstrap := filepath.Join(d.SnapshotDir, d.SnapshotID, "fs", "image", "image.boot")
-	_, err := os.Stat(bootstrap)
-	if err == nil {
-		return bootstrap, nil
-	}
-	if os.IsNotExist(err) {
-		// meta file has been changed to <snapshotid>/fs/image.boot
-		bootstrap = filepath.Join(d.SnapshotDir, d.SnapshotID, "fs", "image.boot")
-		_, err = os.Stat(bootstrap)
-		if err == nil {
-			return bootstrap, nil
-		}
-	}
-	return "", errors.Wrap(err, "failed to find bootstrap file")
+	return GetBootstrapFile(d.SnapshotDir, d.SnapshotID)
 }
 
 func (d *Daemon) ConfigFile() string {
@@ -83,10 +68,6 @@ func (d *Daemon) APISock() string {
 
 func (d *Daemon) LogFile() string {
 	return filepath.Join(d.LogDir, "stderr.log")
-}
-
-func (d *Daemon) binary() string {
-	return "/bin/nydusd"
 }
 
 func (d *Daemon) CheckStatus() (model.DaemonInfo, error) {
@@ -117,9 +98,18 @@ func (d *Daemon) SharedUmount() error {
 	return client.Umount(d.MountPoint())
 }
 
+func (d *Daemon) IsMultipleDaemon() bool {
+	return d.DaemonMode == config.DaemonModeMultiple
+}
+
+func (d *Daemon) IsSharedDaemon() bool {
+	return d.DaemonMode == config.DaemonModeShared || d.DaemonMode == config.DaemonModeSingle
+}
+
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
 	d := &Daemon{Pid: 0}
 	d.ID = newID()
+	d.DaemonMode = config.DefaultDaemonMode
 	for _, o := range opt {
 		err := o(d)
 		if err != nil {
@@ -127,4 +117,22 @@ func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
 		}
 	}
 	return d, nil
+}
+
+func GetBootstrapFile(dir, id string) (string, error) {
+	// the meta file is stored to <snapshotid>/image/image.boot
+	bootstrap := filepath.Join(dir, id, "fs", "image", "image.boot")
+	_, err := os.Stat(bootstrap)
+	if err == nil {
+		return bootstrap, nil
+	}
+	if os.IsNotExist(err) {
+		// for backward compatibility check meta file from legacy location
+		bootstrap = filepath.Join(dir, id, "fs", "image.boot")
+		_, err = os.Stat(bootstrap)
+		if err == nil {
+			return bootstrap, nil
+		}
+	}
+	return "", errors.Wrap(err, fmt.Sprintf("failed to find bootstrap file for ID %s", id))
 }

@@ -8,6 +8,7 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -22,12 +23,9 @@ import (
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/containerd/continuity/fs"
 	metrics "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric"
-	metricExp "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric/exporter"
 	"github.com/pkg/errors"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	fspkg "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/stargz"
@@ -48,7 +46,7 @@ type snapshotter struct {
 	fs          fspkg.FileSystem
 	stargzFs    fspkg.FileSystem
 	manager     *process.Manager
-	daemon      *daemon.Daemon
+	hasDaemon   bool
 }
 
 func (o *snapshotter) Cleanup(ctx context.Context) error {
@@ -72,14 +70,16 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to initialize verifier")
 	}
 
+	cfg.DaemonMode = strings.ToLower(cfg.DaemonMode)
 	pm, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: cfg.NydusdBinaryPath,
 		RootDir:          cfg.RootDir,
-		SharedDaemon:     cfg.SharedDaemon,
+		DaemonMode:       cfg.DaemonMode,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new process manager")
 	}
+	hasDaemon := cfg.DaemonMode != config.DaemonModeNone
 
 	nydusFs, err := nydus.NewFileSystem(
 		ctx,
@@ -89,7 +89,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		nydus.WithDaemonConfig(cfg.DaemonCfg),
 		nydus.WithVPCRegistry(cfg.ConvertVpcRegistry),
 		nydus.WithVerifier(verifier),
-		nydus.WithSharedDaemon(cfg.SharedDaemon),
+		nydus.WithDaemonMode(cfg.DaemonMode),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
@@ -97,51 +97,40 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 
 	var stargzFs fspkg.FileSystem = nil
 	if cfg.EnableStargz {
-		stargzFs, err = stargz.NewFileSystem(
-			ctx,
-			stargz.WithProcessManager(pm),
-			stargz.WithMeta(cfg.RootDir),
-			stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
-			stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
-			stargz.WithDaemonConfig(cfg.DaemonCfg),
-		)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+		if hasDaemon {
+			stargzFs, err = stargz.NewFileSystem(
+				ctx,
+				stargz.WithProcessManager(pm),
+				stargz.WithMeta(cfg.RootDir),
+				stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
+				stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
+				stargz.WithDaemonConfig(cfg.DaemonCfg),
+			)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to initialize stargz filesystem")
+			}
+		} else {
+			// stargz support requires nydusd to run
+			log.G(ctx).Info("DaemonMode is none, disable stargz support")
 		}
 	}
 
 	if cfg.EnableMetrics {
-		s, err := metrics.NewServer(
+		metricServer, err := metrics.NewServer(
 			ctx,
-			metrics.WithSockPath(cfg.RootDir),
+			metrics.WithRootDir(cfg.RootDir),
+			metrics.WithMetricsFile(cfg.MetricsFile),
+			metrics.WithProcessManager(pm),
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to new metric server")
 		}
-		log.G(ctx).Infof("Starting metrics server on %s", s.SockPath)
-
-		exp, err := metricExp.NewExporter(
-			metricExp.WithOutputFile(cfg.RootDir),
-		)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to new metric exporter")
-		}
-
-		// Process manager starts to collect metrics from daemons periodically.
-		errs, ctx := errgroup.WithContext(ctx)
-		errs.Go(func() error {
-			return pm.CollectDaemonMetric(ctx, exp)
-		})
-		if err := errs.Wait(); err != nil {
-			return nil, errors.Wrap(err, "failed to start metrics collecting routine")
-		}
 		// Start metrics http server.
-		errs.Go(func() error {
-			return s.Serve(ctx, ctx.Done())
-		})
-		if err := errs.Wait(); err != nil {
-			return nil, errors.Wrap(err, "failed to start metrics http server")
-		}
+		go func() {
+			if err := metricServer.Serve(ctx); err != nil {
+				log.G(ctx).Error(err)
+			}
+		}()
 	}
 
 	if err := os.MkdirAll(cfg.RootDir, 0700); err != nil {
@@ -172,6 +161,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		asyncRemove: cfg.AsyncRemove,
 		fs:          nydusFs,
 		stargzFs:    stargzFs,
+		hasDaemon:   hasDaemon,
 	}, nil
 }
 
@@ -209,13 +199,13 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get active mount")
 	}
-	if id, _, rErr := o.findNydusMetaLayer(ctx, key); rErr == nil {
+	if id, info, rErr := o.findNydusMetaLayer(ctx, key); rErr == nil {
 		err = o.fs.WaitUntilReady(ctx, id)
 		if err != nil {
 			log.G(ctx).Errorf("snapshot %s is not ready, err: %v", id, err)
 			return nil, err
 		}
-		return o.remoteMounts(ctx, *s, id)
+		return o.remoteMounts(ctx, *s, id, info.Labels)
 	} else if o.stargzFs != nil {
 		if id, _, rErr := o.findStargzMetaLayer(ctx, key); rErr == nil {
 			err = o.stargzFs.WaitUntilReady(ctx, id)
@@ -223,7 +213,7 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 				log.G(ctx).Errorf("snapshot %s is not ready, err: %v", id, err)
 				return nil, err
 			}
-			return o.remoteMounts(ctx, *s, id)
+			return o.remoteMounts(ctx, *s, id, info.Labels)
 		}
 	}
 	return o.mounts(ctx, *s)
@@ -287,12 +277,14 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 			if err := o.prepareRemoteSnapshot(ctx, id, info.Labels); err != nil {
 				return nil, err
 			}
+			return o.remoteMounts(ctx, s, id, info.Labels)
 		} else if o.stargzFs != nil {
 			if id, info, err := o.findStargzMetaLayer(ctx, key); err == nil {
 				logCtx.Infof("found stargz meta layer id %s, parpare remote snapshot", id)
 				if err := o.prepareStargzRemoteSnapshot(ctx, id, info.Labels); err != nil {
 					return nil, err
 				}
+				return o.remoteMounts(ctx, s, id, info.Labels)
 			}
 		}
 	}
@@ -533,20 +525,60 @@ func overlayMount(options []string) []mount.Mount {
 	}
 }
 
-func (o *snapshotter) remoteMounts(ctx context.Context, s storage.Snapshot, id string) ([]mount.Mount, error) {
+func (o *snapshotter) remoteMounts(ctx context.Context, s storage.Snapshot, id string, labels map[string]string) ([]mount.Mount, error) {
 	var options []string
-	if s.Kind == snapshots.KindActive {
-		options = append(options,
-			fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
-			fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
-		)
-	} else if len(s.ParentIDs) == 1 {
-		return bindMount(o.upperPath(s.ParentIDs[0])), nil
+	if o.hasDaemon {
+		if s.Kind == snapshots.KindActive {
+			options = append(options,
+				fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
+				fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
+			)
+		} else if len(s.ParentIDs) == 1 {
+			return bindMount(o.upperPath(s.ParentIDs[0])), nil
+		}
+		lowerDirOption := fmt.Sprintf("lowerdir=%s", o.upperPath(id))
+		options = append(options, lowerDirOption)
+		log.G(ctx).Infof("mount options %v", options)
+		return overlayMount(options), nil
+	} else {
+		// Only nydus can work without daemon
+		source, err := o.fs.BootstrapFile(id)
+		if err != nil {
+			return nil, err
+		}
+
+		cfg, err := o.fs.NewDaemonConfig(labels)
+		if err != nil {
+			return nil, errors.Wrapf(err, fmt.Sprintf("remoteMounts: failed to generate nydus config for snapshot %s, label: %v", id, labels))
+		}
+
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
+		}
+
+		configContent := string(b)
+		configOption := fmt.Sprintf("config=%s", configContent)
+		options = append(options, configOption)
+
+		// We already Marshal config and save it in configContent, reset Auth and
+		// RegistryToken so it could be printed and to make debug easier
+		cfg.Device.Backend.Config.Auth = ""
+		cfg.Device.Backend.Config.RegistryToken = ""
+		b, err = json.Marshal(cfg)
+		if err != nil {
+			return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
+		}
+		log.G(ctx).Infof("Bootstrap file for snapshotID %s: %s, config %s", id, source, string(b))
+
+		return []mount.Mount{
+			{
+				Type:    "nydus",
+				Source:  source,
+				Options: options,
+			},
+		}, nil
 	}
-	lowerDirOption := fmt.Sprintf("lowerdir=%s", o.upperPath(id))
-	options = append(options, lowerDirOption)
-	log.G(ctx).Infof("mount options %v", options)
-	return overlayMount(options), nil
 }
 
 func (o *snapshotter) mounts(ctx context.Context, s storage.Snapshot) ([]mount.Mount, error) {
@@ -669,10 +701,10 @@ func (o *snapshotter) cleanupSnapshotDirectory(ctx context.Context, dir string) 
 	// We use Filesystem's Unmount API so that it can do necessary finalization
 	// before/after the unmount.
 	log.G(ctx).WithField("dir", dir).Infof("cleanupSnapshotDirectory %s", dir)
-	if err := o.fs.Umount(ctx, dir); err != nil {
+	if err := o.fs.Umount(ctx, dir); err != nil && !os.IsNotExist(err) {
 		log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
 	} else if o.stargzFs != nil {
-		if err := o.stargzFs.Umount(ctx, dir); err != nil {
+		if err := o.stargzFs.Umount(ctx, dir); err != nil && !os.IsNotExist(err) {
 			log.G(ctx).WithError(err).WithField("dir", dir).Error("failed to unmount")
 		}
 	}

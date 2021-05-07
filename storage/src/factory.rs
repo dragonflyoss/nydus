@@ -55,14 +55,16 @@ impl BackendConfig {
 
 #[derive(Default, Clone, Deserialize)]
 pub struct CacheConfig {
-    #[serde(default, rename = "validate")]
-    pub cache_validate: bool,
     #[serde(default, rename = "compressed")]
     pub cache_compressed: bool,
     #[serde(default, rename = "type")]
     pub cache_type: String,
     #[serde(default, rename = "config")]
     pub cache_config: Value,
+    // Whether to validate cache is up to upper layer - Rafs. So don't try to
+    // get it from a user configuration file.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub cache_validate: bool,
     #[serde(skip_serializing, skip_deserializing)]
     pub prefetch_worker: PrefetchWorker,
 }

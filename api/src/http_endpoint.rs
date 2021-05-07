@@ -152,6 +152,7 @@ pub enum HttpError {
     BlobcacheMetrics(ApiError),
     BackendMetrics(ApiError),
     FsBackendInfo(ApiError),
+    InflightMetrics(ApiError),
 }
 
 fn success_response(body: Option<String>) -> Response {
@@ -395,7 +396,7 @@ impl EndpointHandler for MetricsInflightHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
                 let r = kicker(ApiRequest::ExportInflightMetrics);
-                Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
+                Ok(convert_to_response(r, HttpError::InflightMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }

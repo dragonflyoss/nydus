@@ -8,7 +8,6 @@ package command
 
 import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -35,8 +34,10 @@ type Args struct {
 	NydusdBinaryPath     string
 	NydusImageBinaryPath string
 	SharedDaemon         bool
+	DaemonMode           string
 	AsyncRemove          bool
 	EnableMetrics        bool
+	MetricsFile          string
 	EnableStargz         bool
 }
 
@@ -100,11 +101,17 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether automatically convert the image to vpc registry to accelerate image pulling",
 			Destination: &args.ConvertVpcRegistry,
 		},
-		&cli.BoolFlag{
+	       &cli.BoolFlag{
 			Name:        "shared-daemon",
 			Value:       false,
-			Usage:       "whether to use a single shared nydus daemon",
+			Usage:       "Deprecated, equivalent to \"--daemon-mode shared\"",
 			Destination: &args.SharedDaemon,
+		},
+		&cli.StringFlag{
+			Name:        "daemon-mode",
+			Value:       config.DefaultDaemonMode,
+			Usage:       "daemon mode to use, could be \"multiple\", \"shared\" or \"none\"",
+			Destination: &args.DaemonMode,
 		},
 		&cli.BoolFlag{
 			Name:        "async-remove",
@@ -117,6 +124,11 @@ func buildFlags(args *Args) []cli.Flag {
 			Value:       false,
 			Usage:       "whether to collect metrics",
 			Destination: &args.EnableMetrics,
+		},
+		&cli.StringFlag{
+			Name:        "metrics-file",
+			Usage:       "file path to output metrics",
+			Destination: &args.MetricsFile,
 		},
 		&cli.BoolFlag{
 			Name:        "enable-stargz",
@@ -136,8 +148,8 @@ func NewFlags() *Flags {
 }
 
 func Validate(args *Args, cfg *config.Config) error {
-	var daemonCfg nydus.DaemonConfig
-	if err := nydus.LoadConfig(args.ConfigPath, &daemonCfg); err != nil {
+	var daemonCfg config.DaemonConfig
+	if err := config.LoadConfig(args.ConfigPath, &daemonCfg); err != nil {
 		return errors.Wrapf(err, "failed to load config file %q", args.ConfigPath)
 	}
 
@@ -154,9 +166,14 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.Address = args.Address
 	cfg.NydusdBinaryPath = args.NydusdBinaryPath
 	cfg.NydusImageBinaryPath = args.NydusImageBinaryPath
-	cfg.SharedDaemon = args.SharedDaemon
+	cfg.DaemonMode = args.DaemonMode
+	// Give --shared-daemon higher priority
+	if args.SharedDaemon {
+		cfg.DaemonMode = config.DaemonModeShared
+	}
 	cfg.AsyncRemove = args.AsyncRemove
 	cfg.EnableMetrics = args.EnableMetrics
+	cfg.MetricsFile = args.MetricsFile
 	cfg.EnableStargz = args.EnableStargz
 	return nil
 }

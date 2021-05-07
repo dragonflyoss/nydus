@@ -13,19 +13,15 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
-	"time"
-
-	metricExp "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric/exporter"
 
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/mount"
-
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
 )
 
 type configGenerator = func(*daemon.Daemon) error
@@ -33,7 +29,7 @@ type configGenerator = func(*daemon.Daemon) error
 type Manager struct {
 	store            Store
 	nydusdBinaryPath string
-	SharedDaemon     bool
+	DaemonMode       string
 	mounter          mount.Interface
 	mu               sync.Mutex
 }
@@ -41,7 +37,7 @@ type Manager struct {
 type Opt struct {
 	NydusdBinaryPath string
 	RootDir          string
-	SharedDaemon     bool
+	DaemonMode       string
 }
 
 func NewManager(opt Opt) (*Manager, error) {
@@ -54,7 +50,7 @@ func NewManager(opt Opt) (*Manager, error) {
 		store:            s,
 		mounter:          &mount.Mounter{},
 		nydusdBinaryPath: opt.NydusdBinaryPath,
-		SharedDaemon:     opt.SharedDaemon,
+		DaemonMode:       opt.DaemonMode,
 	}, nil
 }
 
@@ -100,7 +96,7 @@ func (m *Manager) ListDaemons() []*daemon.Daemon {
 
 func (m *Manager) CleanUpDaemonResource(d *daemon.Daemon) {
 	resource := []string{d.ConfigDir, d.LogDir}
-	if !d.SharedDaemon {
+	if d.IsMultipleDaemon() {
 		resource = append(resource, d.SocketDir)
 	}
 	for _, dir := range resource {
@@ -138,7 +134,7 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 		"--log-file", d.LogFile(),
 		"--thread-num", "10",
 	}
-	if !d.SharedDaemon {
+	if d.IsMultipleDaemon() {
 		bootstrap, err := d.BootstrapFile()
 		if err != nil {
 			return nil, err
@@ -176,7 +172,7 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	log.L.Infof("umount remote snapshot, mountpoint %s", d.MountPoint())
 	// if daemon is shared mount, we should only umount the daemon with api instead of
 	// umount entire mountpoint
-	if d.SharedDaemon {
+	if d.IsSharedDaemon() {
 		return d.SharedUmount()
 	}
 	// if we found pid here, we need to kill and wait process to exit, Pid=0 means somehow we lost
@@ -201,6 +197,10 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 	return nil
 }
 
+func (m *Manager) IsSharedDaemon() bool {
+	return m.DaemonMode == config.DaemonModeShared || m.DaemonMode == config.DaemonModeSingle
+}
+
 // Reconnect already running daemons，and rebuild daemons management structs.
 func (m *Manager) Reconnect(ctx context.Context) error {
 	var (
@@ -210,16 +210,11 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 
 	if err := m.store.WalkDaemons(ctx, func(d *daemon.Daemon) error {
 		log.L.WithField("daemon", d.ID).
-			WithField("shared", d.SharedDaemon).
+			WithField("shared", d.IsSharedDaemon()).
 			Info("found daemon in database")
 
-		// Get the global shared daemon
-		if d.ID == daemon.SharedNydusDaemonID {
-			sharedDaemon = d
-		}
-
 		// Do not check status on virtual daemons
-		if m.SharedDaemon && d.ID != daemon.SharedNydusDaemonID {
+		if m.IsSharedDaemon() && d.ID != daemon.SharedNydusDaemonID {
 			daemons = append(daemons, d)
 			log.L.WithField("daemon", d.ID).Infof("found virtual daemon")
 			return nil
@@ -233,13 +228,25 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 		log.L.WithField("daemon", d.ID).Infof("found alive daemon")
 		daemons = append(daemons, d)
 
+		// Get the global shared daemon here after CheckStatus() by attention
+		// so that we're sure it's alive.
+		if d.ID == daemon.SharedNydusDaemonID {
+			sharedDaemon = d
+		}
+
 		return nil
 	}); err != nil {
 		return errors.Wrapf(err, "failed to walk daemons to reconnect")
 	}
 
-	if !m.SharedDaemon && sharedDaemon != nil {
+	if !m.IsSharedDaemon() && sharedDaemon != nil {
 		return errors.Errorf("SharedDaemon disabled, but shared daemon is found")
+	}
+
+	if m.IsSharedDaemon() && sharedDaemon == nil && len(daemons) > 0 {
+		log.L.Warnf("SharedDaemon enabled, but cannot find alive shared daemon")
+		// Clear daemon list to skip adding them into daemon store
+		daemons = nil
 	}
 
 	// cleanup database so that we'll have a clean database for this snapshotter process lifetime
@@ -250,45 +257,7 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 
 	for _, d := range daemons {
 		if err := m.NewDaemon(d); err != nil {
-			return errors.Wrapf(err, "failed to daemon(%s) to daemon store", d.ID)
-		}
-	}
-
-	return nil
-}
-
-func (m *Manager) CollectDaemonMetric(ctx context.Context, exp *metricExp.Exporter) error {
-	// TODO(renzhen): make collect interval time configurable
-	timer := time.NewTicker(time.Duration(1) * time.Minute)
-
-	for {
-		select {
-		case <-timer.C:
-			daemons := m.ListDaemons()
-			for _, d := range daemons {
-				if d.ID == daemon.SharedNydusDaemonID {
-					continue
-				}
-
-				client, err := nydussdk.NewNydusClient(d.APISock())
-				if err != nil {
-					log.G(ctx).Errorf("failed to connect nydusd: %v", err)
-					continue
-				}
-
-				fsMetrics, err := client.GetFsMetric(m.SharedDaemon, d.SnapshotID)
-				if err != nil {
-					log.G(ctx).Errorf("failed to get fs metric: %v", err)
-					continue
-				}
-
-				if err := exp.ExportFsMetrics(fsMetrics, d.ImageID); err != nil {
-					log.G(ctx).Errorf("failed to export fs metrics for %s: %v", d.ImageID, err)
-					continue
-				}
-			}
-		case <-ctx.Done():
-			log.G(ctx).Infof("cancel daemom metrics collecting")
+			return errors.Wrapf(err, "failed to add daemon(%s) to daemon store", d.ID)
 		}
 	}
 

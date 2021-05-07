@@ -9,8 +9,8 @@ package stargz
 import (
 	"errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 )
 
@@ -57,9 +57,9 @@ func WithNydusImageBinaryPath(p string) NewFSOpt {
 	}
 }
 
-func WithDaemonConfig(cfg nydus.DaemonConfig) NewFSOpt {
+func WithDaemonConfig(cfg config.DaemonConfig) NewFSOpt {
 	return func(d *filesystem) error {
-		if (nydus.DaemonConfig{}) == cfg {
+		if (config.DaemonConfig{}) == cfg {
 			return errors.New("daemon config is empty")
 		}
 		d.daemonCfg = cfg

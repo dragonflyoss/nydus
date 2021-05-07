@@ -11,14 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/pkg/errors"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 
-	metrics "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
 )
 
@@ -28,10 +26,16 @@ type Exporter struct {
 	outputFile string
 }
 
-func WithOutputFile(dir string) Opt {
+func WithOutputFile(metricsFile string) Opt {
 	return func(e *Exporter) error {
-		e.outputFile = filepath.Join(dir, "metrics.log")
+		if metricsFile == "" {
+			return errors.New("metrics file path is empty")
+		}
 
+		if _, err := os.Create(metricsFile); err != nil {
+			return errors.Wrapf(err, "failed to create metrics file: %s", metricsFile)
+		}
+		e.outputFile = metricsFile
 		return nil
 	}
 }
@@ -49,12 +53,12 @@ func NewExporter(opts ...Opt) (*Exporter, error) {
 }
 
 func (e *Exporter) ExportFsMetrics(m *model.FsMetric, imageRef string) error {
-	metrics.ReadCount.WithLabelValues(imageRef).Set(float64(m.DataRead))
-	metrics.OpenFdCount.WithLabelValues(imageRef).Set(float64(m.NrOpens))
-	metrics.OpenFdMaxCount.WithLabelValues(imageRef).Set(float64(m.NrMaxOpens))
-	metrics.LastFopTimestamp.WithLabelValues(imageRef).Set(float64(m.LastFopTp))
+	ReadCount.WithLabelValues(imageRef).Set(float64(m.DataRead))
+	OpenFdCount.WithLabelValues(imageRef).Set(float64(m.NrOpens))
+	OpenFdMaxCount.WithLabelValues(imageRef).Set(float64(m.NrMaxOpens))
+	LastFopTimestamp.WithLabelValues(imageRef).Set(float64(m.LastFopTp))
 
-	for _, h := range metrics.FsMetricHists {
+	for _, h := range FsMetricHists {
 		o, err := h.ToConstHistogram(m, imageRef)
 		if err != nil {
 			return errors.Wrapf(err, "failed to new const histogram for %s", h.Desc.String())
@@ -66,7 +70,7 @@ func (e *Exporter) ExportFsMetrics(m *model.FsMetric, imageRef string) error {
 }
 
 func (e *Exporter) output() error {
-	ms, err := metrics.Registry.Gather()
+	ms, err := Registry.Gather()
 	if err != nil {
 		return errors.Wrap(err, "failed to gather all prometheus collectors")
 	}

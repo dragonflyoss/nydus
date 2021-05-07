@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package nydus
+package config
 
 import (
 	"encoding/json"

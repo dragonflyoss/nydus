@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/pkg/errors"
 )
 
@@ -96,7 +97,7 @@ func WithImageID(imageID string) NewDaemonOpt {
 
 func WithSharedDaemon() NewDaemonOpt {
 	return func(d *Daemon) error {
-		d.SharedDaemon = true
+		d.DaemonMode = config.DaemonModeShared
 		return nil
 	}
 }

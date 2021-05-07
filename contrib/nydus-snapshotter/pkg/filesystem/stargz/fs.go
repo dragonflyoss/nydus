@@ -19,12 +19,12 @@ import (
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/auth"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/errdefs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/retry"
@@ -33,7 +33,7 @@ import (
 type filesystem struct {
 	meta.FileSystemMeta
 	manager               *process.Manager
-	daemonCfg             nydus.DaemonConfig
+	daemonCfg             config.DaemonConfig
 	resolver              *Resolver
 	vpcRegistry           bool
 	nydusdBinaryPath      string
@@ -181,6 +181,14 @@ func (f *filesystem) Mount(ctx context.Context, snapshotID string, labels map[st
 	return nil
 }
 
+func (fs *filesystem) BootstrapFile(id string) (string, error) {
+	panic("stargz has no bootstrap file")
+}
+
+func (fs *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonConfig, error) {
+	panic("implement me")
+}
+
 func (f *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 	err := f.generateDaemonConfig(d, labels)
 	if err != nil {
@@ -190,13 +198,13 @@ func (f *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 }
 
 func (f *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]string) error {
-	cfg, err := nydus.NewDaemonConfig(f.daemonCfg, d, f.vpcRegistry, labels)
+	cfg, err := config.NewDaemonConfig(f.daemonCfg, d.ImageID, f.vpcRegistry, labels)
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
 	}
 	cfg.Device.Cache.Compressed = true
 	cfg.DigestValidate = false
-	return nydus.SaveConfig(cfg, d.ConfigFile())
+	return config.SaveConfig(cfg, d.ConfigFile())
 }
 
 func (f *filesystem) WaitUntilReady(ctx context.Context, snapshotID string) error {
