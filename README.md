@@ -10,26 +10,26 @@ The following benchmarking result shows the performance improvement compared wit
 
 Nydus' key features include:
 
-* Container images are downloaded on demand
-* Chunk level data deduplication
-* Flatten image metadata and data to remove all intermediate layers
-* Only usable image data is saved when building a container image
-* Only usable image data is downloaded when running a container
-* End-to-end image data integrity
-* Compatible with the OCI artifacts spec and distribution spec
-* Integrated with existing CNCF project Dragonfly to support image distribution in large clusters
-* Different container image storage backends are supported
+- Container images are downloaded on demand
+- Chunk level data deduplication
+- Flatten image metadata and data to remove all intermediate layers
+- Only usable image data is saved when building a container image
+- Only usable image data is downloaded when running a container
+- End-to-end image data integrity
+- Compatible with the OCI artifacts spec and distribution spec
+- Integrated with existing CNCF project Dragonfly to support image distribution in large clusters
+- Different container image storage backends are supported
 
 Currently the repository includes following tools:
 
-* A `nydusify` tool to convert an OCI format container image into a nydus format container image
-* A `containerd-nydus-grpc` daemon to serve as containerd remote snapshotter and setup container rootfs with nydus
-* A `nydus-image` tool to convert an unpacked container image into a nydus format image
-* A `nydusd` daemon to parse a nydus format image and expose a FUSE mountpoint for containers to access
+- A `nydusify` tool to convert an OCI format container image into a nydus format container image
+- A `containerd-nydus-grpc` daemon to serve as containerd remote snapshotter and setup container rootfs with nydus
+- A `nydus-image` tool to convert an unpacked container image into a nydus format image
+- A `nydusd` daemon to parse a nydus format image and expose a FUSE mountpoint for containers to access
 
 ## Build Binary
 
-``` shell
+```shell
 # build debug binary
 make
 # build release binary
@@ -67,14 +67,14 @@ You can reach the community via Dingtalk and Slack
 
 Any bug report, feature requirement, and technique discussion and cooperation are welcomed and expected!
 
-* Slack
+- Slack
 
-    Join our Slack [workspace](https://join.slack.com/t/nydusimageservice/shared_invite/zt-o67n0ye9-HuN0c2MPzjUVJvF~W4PnXg)
+  Join our Slack [workspace](https://join.slack.com/t/nydusimageservice/shared_invite/zt-pz4qvl4y-WIh4itPNILGhPS8JqdFm_w)
 
-* Dingtalk
+- Dingtalk
 
-    Join nydus-devel group by clicking [URL](https://qr.dingtalk.com/action/joingroup?code=v1,k1,YfGzhaTOnpm10Bf+/ohz4WcuDEIe9nTIjo+MPuIgRGQ=&_dt_no_comment=1&origin=11) from your phone.
+  Join nydus-devel group by clicking [URL](https://qr.dingtalk.com/action/joingroup?code=v1,k1,YfGzhaTOnpm10Bf+/ohz4WcuDEIe9nTIjo+MPuIgRGQ=&_dt_no_comment=1&origin=11) from your phone.
 
-    You can also search our talking group by number *34971767* and QR code
+  You can also search our talking group by number _34971767_ and QR code
 
 <img src="./misc/dingtalk.jpg" width="250" height="300"/>
