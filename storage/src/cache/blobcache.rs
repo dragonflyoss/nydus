@@ -82,10 +82,13 @@ impl BlobCacheState {
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
         let chunk_map = if blob.chunk_count != 0 {
-            Arc::new(IndexedChunkMap::new(&blob_file_path, blob.chunk_count)?)
-                as Arc<dyn ChunkMap + Sync + Send>
+            Arc::new(IndexedChunkMap::new(
+                self.metrics.clone(),
+                &blob_file_path,
+                blob.chunk_count,
+            )?) as Arc<dyn ChunkMap + Sync + Send>
         } else {
-            Arc::new(DigestedChunkMap::new()) as Arc<dyn ChunkMap + Sync + Send>
+            Arc::new(DigestedChunkMap::new(self.metrics.clone())) as Arc<dyn ChunkMap + Sync + Send>
         };
 
         self.blob_map
