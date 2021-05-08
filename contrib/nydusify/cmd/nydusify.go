@@ -28,6 +28,7 @@ import (
 
 var versionGitCommit string
 var versionBuildTime string
+var maxCacheMaxRecords uint = 50
 
 func isPossibleValue(excepted []string, value string) bool {
 	for _, v := range excepted {
@@ -145,7 +146,11 @@ func main() {
 				&cli.StringFlag{Name: "build-cache", Value: "", Usage: "An remote image reference for accelerating nydus image build", EnvVars: []string{"BUILD_CACHE"}},
 				&cli.StringFlag{Name: "build-cache-tag", Value: "", Usage: "Use $target:$build-cache-tag as cache image reference, conflict with --build-cache", EnvVars: []string{"BUILD_CACHE_TAG"}},
 				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
-				&cli.UintFlag{Name: "build-cache-max-records", Value: 200, Usage: "Maximum cache records in cache image", EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"}},
+				// The --build-cache-max-records flag represents the maximum number
+				// of layers in cache image. 50 (bootstrap + blob in one record) was
+				// chosen to make it compatible with the 127 max in graph driver of
+				// docker so that we can pull cache image using docker.
+				&cli.UintFlag{Name: "build-cache-max-records", Value: maxCacheMaxRecords, Usage: "Maximum cache records in cache image", EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"}},
 			},
 			Action: func(c *cli.Context) error {
 				logLevel, err := logrus.ParseLevel(c.String("log-level"))
@@ -189,6 +194,9 @@ func main() {
 				cacheMaxRecords := c.Uint("build-cache-max-records")
 				if cacheMaxRecords < 1 {
 					return fmt.Errorf("--build-cache-max-records should be greater than 0")
+				}
+				if cacheMaxRecords > maxCacheMaxRecords {
+					return fmt.Errorf("--build-cache-max-records should not be greater than %d", maxCacheMaxRecords)
 				}
 
 				logger, err := provider.DefaultLogger()

@@ -16,6 +16,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/sirupsen/logrus"
 
 	"github.com/containerd/containerd/images"
 	digest "github.com/opencontainers/go-digest"
@@ -254,6 +255,22 @@ func (cache *Cache) Export(ctx context.Context) error {
 
 	layers := cache.exportRecordsToLayers()
 
+	// Ensure layers from manifest match with image config,
+	// this will keep image compatibility when using docker pull.
+	diffIDs := []digest.Digest{}
+	for _, layer := range layers {
+		diffID := digest.Digest(layer.Annotations[utils.LayerAnnotationUncompressed])
+		if diffID.Validate() == nil {
+			diffIDs = append(diffIDs, diffID)
+		} else {
+			logrus.Warn("Drop the entire diff id list due to an invalid diff id")
+			diffIDs = []digest.Digest{}
+			// It is possible that some existing cache images don't have diff ids,
+			// but we can't break the cache export, so just break the loop.
+			break
+		}
+	}
+
 	// Prepare empty image config, just for registry API compatibility,
 	// manifest requires a valid config field.
 	configMediaType := ocispec.MediaTypeImageConfig
@@ -262,7 +279,11 @@ func (cache *Cache) Export(ctx context.Context) error {
 	}
 	config := ocispec.Image{
 		Config: ocispec.ImageConfig{},
-		RootFS: ocispec.RootFS{},
+		RootFS: ocispec.RootFS{
+			Type: "layers",
+			// Layers from manifest must be match image config.
+			DiffIDs: diffIDs,
+		},
 	}
 	configDesc, configBytes, err := utils.MarshalToDesc(config, configMediaType)
 	if err != nil {
