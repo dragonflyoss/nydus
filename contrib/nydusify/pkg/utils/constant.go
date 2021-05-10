@@ -9,8 +9,7 @@ const (
 	MediaTypeNydusBlob       = "application/vnd.oci.image.layer.nydus.blob.v1"
 	BootstrapFileNameInLayer = "image/image.boot"
 
-	ManifestNydusCache        = "containerd.io/snapshot/nydus-cache"
-	ManifestNydusCacheVersion = "v1"
+	ManifestNydusCache = "containerd.io/snapshot/nydus-cache"
 
 	LayerAnnotationNydusBlob          = "containerd.io/snapshot/nydus-blob"
 	LayerAnnotationNydusBlobDigest    = "containerd.io/snapshot/nydus-blob-digest"

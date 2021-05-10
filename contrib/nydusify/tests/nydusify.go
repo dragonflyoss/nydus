@@ -108,6 +108,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 
 		CacheRemote:     cacheRemote,
 		CacheMaxRecords: 10,
+		CacheVersion:    "v1",
 
 		WorkDir:        "./tmp",
 		PrefetchDir:    "/",

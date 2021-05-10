@@ -146,6 +146,7 @@ func main() {
 				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
 				&cli.StringFlag{Name: "build-cache", Value: "", Usage: "An remote image reference for accelerating nydus image build", EnvVars: []string{"BUILD_CACHE"}},
 				&cli.StringFlag{Name: "build-cache-tag", Value: "", Usage: "Use $target:$build-cache-tag as cache image reference, conflict with --build-cache", EnvVars: []string{"BUILD_CACHE_TAG"}},
+				&cli.StringFlag{Name: "build-cache-version", Value: "v1", Usage: "Specify the version of cache image, if the existed remote cache image does not match the version, cache records will be dropped", EnvVars: []string{"BUILD_CACHE_VERSION"}},
 				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
 				// The --build-cache-max-records flag represents the maximum number
 				// of layers in cache image. 50 (bootstrap + blob in one record) was
@@ -199,6 +200,7 @@ func main() {
 				if cacheMaxRecords > maxCacheMaxRecords {
 					return fmt.Errorf("--build-cache-max-records should not be greater than %d", maxCacheMaxRecords)
 				}
+				cacheVersion := c.String("build-cache-version")
 
 				logger, err := provider.DefaultLogger()
 				if err != nil {
@@ -234,6 +236,7 @@ func main() {
 
 					CacheRemote:     cacheRemote,
 					CacheMaxRecords: cacheMaxRecords,
+					CacheVersion:    cacheVersion,
 
 					WorkDir:        c.String("work-dir"),
 					PrefetchDir:    c.String("prefetch-dir"),

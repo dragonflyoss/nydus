@@ -29,6 +29,7 @@ import (
 type Opt struct {
 	// Maximum records(bootstrap layer + blob layer) in cache image.
 	MaxRecords uint
+	Version    string
 	// Make cache image manifest compatible with the docker v2 media
 	// type defined in github.com/containerd/containerd/images.
 	DockerV2Format bool
@@ -310,7 +311,7 @@ func (cache *Cache) Export(ctx context.Context) error {
 			Config: *configDesc,
 			Layers: layers,
 			Annotations: map[string]string{
-				utils.ManifestNydusCache: utils.ManifestNydusCacheVersion,
+				utils.ManifestNydusCache: cache.opt.Version,
 			},
 		},
 	}
@@ -352,8 +353,11 @@ func (cache *Cache) Import(ctx context.Context) error {
 	}
 
 	// Discard the cache mismatched version
-	if manifest.Annotations[utils.ManifestNydusCache] != utils.ManifestNydusCacheVersion {
-		return fmt.Errorf("Unmatched cache version %s", manifest.Annotations[utils.ManifestNydusCache])
+	if manifest.Annotations[utils.ManifestNydusCache] != cache.opt.Version {
+		return fmt.Errorf(
+			"Unmatched cache image version %s, required to be %s",
+			manifest.Annotations[utils.ManifestNydusCache], cache.opt.Version,
+		)
 	}
 
 	cache.importLayersToRecords(manifest.Layers)
