@@ -17,7 +17,21 @@ use super::ChunkMap;
 use crate::device::RafsChunkInfo;
 use crate::utils::readahead;
 
-const CHUNK_MAP_FILE_SUFFIX: &str = "chunk_map";
+/// The magic number of blob chunk_map file, it's ASCII hex of string "BMAP".
+const MAGIC: u32 = 0x424D_4150;
+/// The name suffix of blob chunk_map file, named $blob_id.chunk_map.
+const FILE_SUFFIX: &str = "chunk_map";
+/// The header of blob chunk_map file.
+const HEADER_SIZE: usize = 4096;
+const HEADER_RESERVED_SIZE: usize = HEADER_SIZE - 4;
+
+/// The blob chunk map file header, 4096 bytes.
+#[repr(C)]
+struct Header {
+    /// IndexedChunkMap magic number
+    magic: u32,
+    reserved: [u8; HEADER_RESERVED_SIZE],
+}
 
 /// The IndexedChunkMap is an implementation that uses a file as bitmap
 /// (like HashMap<chunk_index, has_ready>). It creates or opens a file with
@@ -44,7 +58,7 @@ impl IndexedChunkMap {
             return Err(einval!("chunk count should be greater than 0"));
         }
 
-        let cache_path = format!("{}.{}", blob_path, CHUNK_MAP_FILE_SUFFIX);
+        let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
 
         let file = OpenOptions::new()
             .read(true)
@@ -59,15 +73,12 @@ impl IndexedChunkMap {
             })?;
 
         let file_size = file.metadata()?.len();
-        let expected_size = div_round_up(chunk_count as u64, 8u64);
+        let bitmap_size = div_round_up(chunk_count as u64, 8u64);
+        let expected_size = HEADER_SIZE as u64 + bitmap_size;
 
         if file_size != expected_size {
             if file_size > 0 {
-                warn!(
-                    "blob chunk_map file may be corrupted: {:?}, reset all chunk states",
-                    cache_path
-                );
-                file.set_len(0)?;
+                warn!("blob chunk_map file may be corrupted: {:?}", cache_path);
             }
             file.set_len(expected_size)?;
         }
@@ -88,6 +99,16 @@ impl IndexedChunkMap {
         }
         if base.is_null() {
             return Err(ebadf!("failed to mmap blob chunk_map"));
+        }
+
+        let mut header = unsafe { &mut *(base as *mut Header) };
+        if file_size == 0 {
+            header.magic = MAGIC
+        } else if header.magic != MAGIC {
+            return Err(einval!(format!(
+                "invalid blob chunk_map file header: {:?}",
+                cache_path
+            )));
         }
 
         readahead(fd, 0, expected_size);
@@ -113,7 +134,7 @@ impl IndexedChunkMap {
 
     fn read_u8(&self, idx: u32) -> Result<(u8, u8)> {
         self.check_index(idx)?;
-        let start = idx as usize >> 3;
+        let start = HEADER_SIZE + (idx as usize >> 3);
         let current = unsafe { self.base.add(start) as *mut u8 as *const AtomicU8 };
         let pos = 8 - ((idx & 0b111) + 1);
         let mask = 1 << pos;
@@ -122,7 +143,7 @@ impl IndexedChunkMap {
 
     fn write_u8(&self, idx: u32, current: u8, expected: u8) -> Result<bool> {
         self.check_index(idx)?;
-        let start = idx as usize >> 3;
+        let start = HEADER_SIZE + (idx as usize >> 3);
         let atomic_value = unsafe { &*{ self.base.add(start) as *mut u8 as *const AtomicU8 } };
         Ok(atomic_value
             .compare_exchange(current, expected, Ordering::Acquire, Ordering::Relaxed)
