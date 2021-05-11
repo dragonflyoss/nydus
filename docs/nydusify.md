@@ -2,29 +2,15 @@
 
 The Nydusify CLI tool converts an OCI container image from source registry into a Nydus image using `nydus-image` CLI layer by layer, then pushes Nydus image to target registry.
 
-## Dependencies
+### Get binaries from release page
 
-- Golang 1.14 or above
-
-## Build
-
-```
-cd contrib/nydusify
-make
-```
-
-## Release Build
-
-```
-cd contrib/nydusify
-make static-release
-```
+Get `nydus-image` and `nydusify` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
 
 ## Basic Usage
 
 ```
-cmd/nydusify convert \
-  --nydus-image ../../target-fusedev/debug/nydus-image \
+nydusify convert \
+  --nydus-image /path/to/nydus-image \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
 ```
@@ -46,8 +32,8 @@ cat /path/to/backend-config.json
 ```
 
 ``` shell
-cmd/nydusify convert \
-  --nydus-image ../../target-fusedev/debug/nydus-image \
+nydusify convert \
+  --nydus-image /path/to/nydus-image \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus \
   --backend-type oss \
@@ -61,8 +47,8 @@ Nydusify provides a checker to validate Nydus image, the checklist includes imag
 Only check the manifest and bootstrap of Nydus image:
 
 ``` shell
-cmd/nydusify check \
-  --nydus-image ../../target-fusedev/debug/nydus-image \
+nydusify check \
+  --nydus-image /path/to/nydus-image \
   --target myregistry/repo:tag-nydus
 ```
 
@@ -83,9 +69,9 @@ $ tree ./output
 Specify `--source` and `--nydusd` options to walk the rootfs of OCI image and Nydus image to compare file metadata:
 
 ``` shell
-cmd/nydusify check \
-  --nydus-image ../../target-fusedev/debug/nydus-image \
-  --nydusd ../../target-fusedev/debug/nydusd \
+nydusify check \
+  --nydus-image /path/to/nydus-image \
+  --nydusd /path/to/nydusd \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
 ```
@@ -93,9 +79,9 @@ cmd/nydusify check \
 Specify `--backend-type` and `--backend-config` options to compare file metadata and file data consistency:
 
 ``` shell
-cmd/nydusify check \
-  --nydus-image ../../target-fusedev/debug/nydus-image \
-  --nydusd ../../target-fusedev/debug/nydusd \
+nydusify check \
+  --nydus-image /path/to/nydus-image \
+  --nydusd /path/to/nydusd \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus \
   --backend-type oss \
@@ -104,7 +90,7 @@ cmd/nydusify check \
 
 ## More Nydusify Options
 
-See `cmd/nydusify convert/check --help`
+See `nydusify convert/check --help`
 
 ## Use Nydusify as a package
 

@@ -5,12 +5,15 @@
 - `bootstrap` is a file presenting filesystem metadata information of the directory;
 - `blob` stores all files data in the directory;
 
+### Get binary from release page
+
+Get `nydus-image` binary from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+
 ## Build Nydus Image From Directory Source
 
 ```shell
 nydus-image create \
   --bootstrap /path/to/bootstrap
-  --backend-type localfs
   --blob /path/to/blob
   /path/to/source/dir
 ```

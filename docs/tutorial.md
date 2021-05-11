@@ -11,6 +11,7 @@ Currently, Nydus includes the following tools:
 - A `nydusify` tool to convert an OCI format container image into a nydus format container image.
 - A `nydus-image` tool to convert an unpacked container image into a nydus format image.
 - A `nydusd` daemon to parse a nydus format image and expose a FUSE mountpoint for containers to access. `nydusd` can also work as a virtiofs backend, therefore, guest is capable of accessing files in the host.
+- A `containerd-nydus-grpc` daemon provides a containerd remote snapshotter plugin, allows to run nydus image in containerd.
 
 ### What will this tutorial teach me?
 
@@ -22,13 +23,13 @@ This tutorial aims to be the one-stop shop for getting your hands dirty with Nyd
 
 The getting started guide on Docker has detailed instructions for setting up Docker on [Linux](https://docs.docker.com/engine/install/centos/).
 
-### Build tools in this repository
+### Get binaries from release page
 
-Please refer to [README](../README.md) to build the `nydusd` and `nydus-image`. And refer to [nydusify document](./nydusify.md) to build the `nydusify`. And refert to [nydus snapshotter document](../contrib/nydus-snapshotter/README.md) to build `containerd-nydus-grpc`.
+Get `nydus-image`, `nydusd`, `nydusify`, and `containerd-nydus-grpc` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
 
 ## Build Nydus Image through nydusify
 
-Nydus offers a powerful tool that converts an OCI format container image into a nydus format container image easily. Here we demonstrate how to use it with a local registry.
+Nydus offers a powerful tool that converts an OCI image into a nydus image easily. Here we demonstrate how to use it with a local registry.
 
 ### Deploy a local registry server
 
@@ -46,44 +47,46 @@ You can pull an image from Docker Hub and push it to your local registry. The fo
 
 ```bash
 # workdir: nydus-rs/contrib/nydusify
-  $ sudo cmd/nydusify convert \
-  --nydus-image ../../target-fusedev/debug/nydus-image \
-  --source docker.io/library/ubuntu:16.04 \
-  --target localhost:5000/ubuntu:16.04-nydus \
-  --target-insecure=true
+  $ sudo nydusify convert \
+  --nydus-image /path/to/nydus-image \
+  --source ubuntu:16.04 \
+  --target localhost:5000/ubuntu:16.04-nydus
 
-INFO[2020-10-22T19:16:57+08:00] Pulling image docker.io/library/ubuntu:16.04 with platform linux/amd64
-INFO[2020-10-22T19:17:04+08:00] Unpacking layer sha256:4f53fa4d2cf0e29c6a522433e0ac71a7ce0fdab158481052b2198b5518b83248
-INFO[2020-10-22T19:17:07+08:00] Building layer sha256:4f53fa4d2cf0e29c6a522433e0ac71a7ce0fdab158481052b2198b5518b83248
-2020-10-22T19:17:16+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:16+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:16+08:00 - INFO - build finished, blob id: ["61db3e721c7bcc5ddea0ca808568ff848a05c62adad6d9a544f5b03efb3c2a2e"], blob file: "MP8GAz"
-INFO[2020-10-22T19:17:16+08:00] Unpacking layer sha256:6af7c939e38e8e3160fbbdcc26a32669529b962c79f7337df0a26bf0e9a76d59
-INFO[2020-10-22T19:17:16+08:00] Pushing blob layer sha256:61db3e721c7bcc5ddea0ca808568ff848a05c62adad6d9a544f5b03efb3c2a2e
-INFO[2020-10-22T19:17:16+08:00] Building layer sha256:6af7c939e38e8e3160fbbdcc26a32669529b962c79f7337df0a26bf0e9a76d59
-2020-10-22T19:17:16+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:17+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:17+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:17+08:00 - INFO - build finished, blob id: ["61db3e721c7bcc5ddea0ca808568ff848a05c62adad6d9a544f5b03efb3c2a2e", "dbdb78d70d50e6c44a71eff2100d3fcb7a440698c57ec5bf3bafe9736dbfb7f8"], blob file: "UT0Gcj"
-INFO[2020-10-22T19:17:17+08:00] Unpacking layer sha256:903d0ffd64f6ca1355d2b2df702fc674f5663981dfd100fe4588fb390dd3382c
-INFO[2020-10-22T19:17:17+08:00] Pushing blob layer sha256:dbdb78d70d50e6c44a71eff2100d3fcb7a440698c57ec5bf3bafe9736dbfb7f8
-INFO[2020-10-22T19:17:17+08:00] Building layer sha256:903d0ffd64f6ca1355d2b2df702fc674f5663981dfd100fe4588fb390dd3382c
-2020-10-22T19:17:17+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:18+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:18+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:18+08:00 - INFO - build finished, blob id: ["61db3e721c7bcc5ddea0ca808568ff848a05c62adad6d9a544f5b03efb3c2a2e", "dbdb78d70d50e6c44a71eff2100d3fcb7a440698c57ec5bf3bafe9736dbfb7f8"]
-INFO[2020-10-22T19:17:18+08:00] Unpacking layer sha256:04feeed388b71fdca5cc3bce619d65a34f8a1a3e5b0ef03f8392d499970818eb
-INFO[2020-10-22T19:17:18+08:00] Pushing blob layer sha256:dbdb78d70d50e6c44a71eff2100d3fcb7a440698c57ec5bf3bafe9736dbfb7f8
-INFO[2020-10-22T19:17:18+08:00] Building layer sha256:04feeed388b71fdca5cc3bce619d65a34f8a1a3e5b0ef03f8392d499970818eb
-2020-10-22T19:17:18+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:19+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:19+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T19:17:19+08:00 - INFO - build finished, blob id: ["61db3e721c7bcc5ddea0ca808568ff848a05c62adad6d9a544f5b03efb3c2a2e", "dbdb78d70d50e6c44a71eff2100d3fcb7a440698c57ec5bf3bafe9736dbfb7f8", "00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd"], blob file: "feYSYp"
-INFO[2020-10-22T19:17:19+08:00] Pushing blob layer sha256:00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd
-INFO[2020-10-22T19:17:19+08:00] Pushing bootstrap layer sha256:4f7841616a4c102560462516cf125eaa0a677d5007598a26195a259712c2e5e7
-INFO[2020-10-22T19:17:19+08:00] Pushing nydus manifest
-INFO[2020-10-22T19:17:19+08:00] Pushing manifest index
-INFO[2020-10-22T19:17:19+08:00] Success convert image docker.io/library/ubuntu:16.04 to localhost:5000/ubuntu:16.04-nydus
+INFO[2021-04-11T03:06:19Z] Parsing image ubuntu:16.04
+INFO[2021-04-11T03:06:39Z] Converting to localhost:5000/ubuntu:16.04-nydus
+INFO[2021-04-11T03:06:39Z] [SOUR] Mount layer          Digest="sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068" Size="46 MB"
+INFO[2021-04-11T03:06:39Z] [SOUR] Mount layer          Digest="sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947" Size="851 B"
+INFO[2021-04-11T03:06:39Z] [SOUR] Mount layer          Digest="sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef" Size="169 B"
+INFO[2021-04-11T03:06:39Z] [SOUR] Mount layer          Digest="sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae" Size="527 B"
+INFO[2021-04-11T03:06:42Z] [SOUR] Mount layer          Digest="sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947" Size="851 B" Time=3.214077176s
+INFO[2021-04-11T03:06:42Z] [SOUR] Mount layer          Digest="sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae" Size="527 B" Time=3.213687722s
+INFO[2021-04-11T03:06:42Z] [SOUR] Mount layer          Digest="sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef" Size="169 B" Time=3.229410571s
+INFO[2021-04-11T03:07:21Z] [SOUR] Mount layer          Digest="sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068" Size="46 MB" Time=42.020599192s
+INFO[2021-04-11T03:07:21Z] [DUMP] Build layer          Digest="sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068" Size="46 MB"
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068" Size="46 MB" Time=944.69207ms
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947" Size="851 B"
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068" Size="1.2 MB"
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947" Size="851 B" Time=102.295903ms
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae" Size="527 B"
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947" Size="1.2 MB"
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae" Size="527 B" Time=111.598031ms
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef" Size="169 B"
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae" Size="1.2 MB"
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068" Size="1.2 MB" Time=236.172323ms
+INFO[2021-04-11T03:07:22Z] [BLOB] Push blob            Digest="sha256:4a1e761661afac28c47e032d167edd965f11adac17b9318186c6d4dbb2d72cde" Size="66 MB"
+INFO[2021-04-11T03:07:22Z] [DUMP] Build layer          Digest="sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef" Size="169 B" Time=107.079253ms
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef" Size="1.2 MB"
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947" Size="1.2 MB" Time=303.798017ms
+INFO[2021-04-11T03:07:22Z] [BLOB] Push blob            Digest="sha256:3584e42078bf684ee823a0f31d9d0b57c75f565c1130656352cf4bea102b5d06" Size="420 B"
+INFO[2021-04-11T03:07:22Z] [BLOB] Push blob            Digest="sha256:3584e42078bf684ee823a0f31d9d0b57c75f565c1130656352cf4bea102b5d06" Size="420 B" Time=22.279049ms
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae" Size="1.2 MB" Time=305.908405ms
+INFO[2021-04-11T03:07:22Z] [BOOT] Push bootstrap       Digest="sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef" Size="1.2 MB" Time=268.819724ms
+INFO[2021-04-11T03:07:22Z] [BLOB] Push blob            Digest="sha256:00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd" Size="7 B"
+INFO[2021-04-11T03:07:22Z] [BLOB] Push blob            Digest="sha256:00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd" Size="7 B" Time=5.520117ms
+INFO[2021-04-11T03:07:22Z] [BLOB] Push blob            Digest="sha256:4a1e761661afac28c47e032d167edd965f11adac17b9318186c6d4dbb2d72cde" Size="66 MB" Time=373.357074ms
+INFO[2021-04-11T03:07:22Z] [MANI] Push manifest
+INFO[2021-04-11T03:07:23Z] [MANI] Push manifest        Time=28.019532ms
+INFO[2021-04-11T03:07:23Z] Converted to localhost:5000/ubuntu:16.04-nydus
 ```
 
 The Nydus image is converted layer by layer automatically under the `tmp` directory of current working directory.
@@ -92,45 +95,27 @@ The Nydus image is converted layer by layer automatically under the `tmp` direct
 # workdir: nydus-rs/contrib/nydusify
 $sudo tree tmp -L 4
 tmp
-├── docker.io
-│   └── library
-│       └── ubuntu:16.04
-│           ├── sha256:04feeed388b71fdca5cc3bce619d65a34f8a1a3e5b0ef03f8392d499970818eb
-│           ├── sha256:4f53fa4d2cf0e29c6a522433e0ac71a7ce0fdab158481052b2198b5518b83248
-│           ├── sha256:6af7c939e38e8e3160fbbdcc26a32669529b962c79f7337df0a26bf0e9a76d59
-│           └── sha256:903d0ffd64f6ca1355d2b2df702fc674f5663981dfd100fe4588fb390dd3382c
-└── localhost:5000
-    └── ubuntu:16.04-nydus
-        ├── blobs
-        │   ├── 00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd
-        │   ├── 61db3e721c7bcc5ddea0ca808568ff848a05c62adad6d9a544f5b03efb3c2a2e
-        │   └── dbdb78d70d50e6c44a71eff2100d3fcb7a440698c57ec5bf3bafe9736dbfb7f8
-        ├── bootstrap
-        └── bootstrap-parent
-
+├── blobs
+│   ├── 00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd
+│   ├── 3584e42078bf684ee823a0f31d9d0b57c75f565c1130656352cf4bea102b5d06
+│   └── 4a1e761661afac28c47e032d167edd965f11adac17b9318186c6d4dbb2d72cde
+├── bootstraps
+│   ├── 1-sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068
+│   ├── 1-sha256:92473f7ef45574f608989888a6cfc8187d3a1425e3a63f974434acab03fed068-output.json
+│   ├── 2-sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947
+│   ├── 2-sha256:fb52bde70123ac7f3a1b88fee95e74f4bdcdbd81917a91a35b56a52ec7671947-output.json
+│   ├── 3-sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae
+│   ├── 3-sha256:64788f86be3fd71809b5de602deff9445f3de18d2f44a49d0a053dfc9a2008ae-output.json
+│   ├── 4-sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef
+│   └── 4-sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef-output.json
+└── source
 ```
 
 Tips: The local registry is an http server, therefore, we set the `target-insecure=true`. Otherwise, we will meet a FATA with `http: server gave HTTP response to HTTPS client`.
 
 After you have converted the image format, we could use `nydusd` to parse it and expose a FUSE mount point for containers to access.
 
-```bash
-# workdir: nydus-rs
-$ sudo target-fusedev/debug/nydusd \
-  --config  ./registry.json \
-  --mountpoint ./mnt \
-  --bootstrap ./contrib/nydusify/tmp/localhost:5000/ubuntu:16.04-nydus/bootstrap \
-  --log-level info
-2020-10-22T10:22:23+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
-2020-10-22T10:22:23+08:00 - INFO - backend config: CommonConfig { proxy: ProxyConfig { url: "", ping_url: "", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, force_upload: false, retry_limit: 0 }
-2020-10-22T10:22:23+08:00 - INFO - rafs imported
-2020-10-22T10:22:23+08:00 - INFO - rafs mounted: mode=direct digest_validate=false iostats_files=false
-2020-10-22T10:22:23+08:00 - INFO - vfs mounted
-2020-10-22T10:22:23+08:00 - INFO - mount source nydusfs dest /media/nvme/user/nydus/nydus-rs/mnt with fstype fuse opts default_permissions,allow_other,fd=11,rootmode=40000,user_id=0,group_id=0 fd 11
-2020-10-22T10:22:23+08:00 - INFO - starting fuse daemon
-```
-
-The `Nydusd` runs with a container image registry as a storage backend. Therefor, the registry backend is configured with the following json file.
+The `Nydusd` runs with a container image registry as a storage backend. Therefore, the registry backend is configured with the following json file.
 
 ```json
 $ cat registry.json
@@ -148,6 +133,22 @@ $ cat registry.json
   },
   "mode": "direct"
 }
+```
+
+```bash
+# workdir: nydus-rs
+$ sudo nydusd \
+  --config  ./registry.json \
+  --mountpoint ./mnt \
+  --bootstrap ./contrib/nydusify/tmp/bootstraps/4-sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef \
+  --log-level info
+2020-10-22T10:22:23+08:00 - INFO - rafs superblock features: COMPRESS_LZ4_BLOCK DIGESTER_BLAKE3 EXPLICIT_UID_GID
+2020-10-22T10:22:23+08:00 - INFO - backend config: CommonConfig { proxy: ProxyConfig { url: "", ping_url: "", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, force_upload: false, retry_limit: 0 }
+2020-10-22T10:22:23+08:00 - INFO - rafs imported
+2020-10-22T10:22:23+08:00 - INFO - rafs mounted: mode=direct digest_validate=false iostats_files=false
+2020-10-22T10:22:23+08:00 - INFO - vfs mounted
+2020-10-22T10:22:23+08:00 - INFO - mount source nydusfs dest /media/nvme/user/nydus/nydus-rs/mnt with fstype fuse opts default_permissions,allow_other,fd=11,rootmode=40000,user_id=0,group_id=0 fd 11
+2020-10-22T10:22:23+08:00 - INFO - starting fuse daemon
 ```
 
 And the image files are mounted on the `mnt` directory.
@@ -224,11 +225,11 @@ $ tree -L 2 ./nydus-image
 Then, we convert the lowest layer to the `layer1` directory.
 
 ```bash
-$ sudo ./target-fusedev/debug/nydus-image create \
-            --bootstrap ./nydus-image/layer1/bootstrap \
-            --blob-dir ./nydus-image/blobs \
-            --log-level debug \
-            --compressor none /var/lib/docker/overlay2/2d0abffedd569eb9485e95008c5c4a2344b33e2c69a26f949eff636a3132db08/diff
+$ sudo nydus-image create \
+  --bootstrap ./nydus-image/layer1/bootstrap \
+  --blob-dir ./nydus-image/blobs \
+  --log-level debug \
+  --compressor none /var/lib/docker/overlay2/2d0abffedd569eb9485e95008c5c4a2344b33e2c69a26f949eff636a3132db08/diff
 ```
 
 And the directory `nydus-image` will look like below.
@@ -249,32 +250,32 @@ $ tree -L 2 ./nydus-image
 Next, we convert the Second-lowest layer(layer2) and we need to specify the `./nydus-image/layer1/bootstrap` converted in the last step as parent bootstrap.
 
 ```bash
-$ sudo ./target-fusedev/debug/nydus-image create \
-            --parent-bootstrap ./nydus-image/layer1/bootstrap \
-            --bootstrap ./nydus-image/layer2/bootstrap \
-            --blob-dir ./nydus-image/blobs \
-            --log-level debug \
-            --compressor none /var/lib/docker/overlay2/13d9b589b51a8a6f58eeaca6afd6ecd1bec77ce32e978ee5b037950b060b7909/diff
+$ sudo nydus-image create \
+  --parent-bootstrap ./nydus-image/layer1/bootstrap \
+  --bootstrap ./nydus-image/layer2/bootstrap \
+  --blob-dir ./nydus-image/blobs \
+  --log-level debug \
+  --compressor none /var/lib/docker/overlay2/13d9b589b51a8a6f58eeaca6afd6ecd1bec77ce32e978ee5b037950b060b7909/diff
 ```
 
 The third-lowest layer(layer3) and fourth-lowest layer(layer4) are converted by the following command. And we need to specify their parent bootstrap separately.
 
 ```bash
 # third-lowest layer(layer3)
-$ sudo ./target-fusedev/debug/nydus-image create \
-            --parent-bootstrap ./nydus-image/layer2/bootstrap \
-            --bootstrap ./nydus-image/layer3/bootstrap \
-            --blob-dir ./nydus-image/blobs \
-            --log-level debug \
-            --compressor none /var/lib/docker/overlay2/747f5ea4b306b2cbe5c389053355653290fa749428877ec6ff0be10c28593f5b/diff
+$ sudo nydus-image create \
+  --parent-bootstrap ./nydus-image/layer2/bootstrap \
+  --bootstrap ./nydus-image/layer3/bootstrap \
+  --blob-dir ./nydus-image/blobs \
+  --log-level debug \
+  --compressor none /var/lib/docker/overlay2/747f5ea4b306b2cbe5c389053355653290fa749428877ec6ff0be10c28593f5b/diff
 
 # fourth-lowest layer(layer4)
-$ sudo ./target-fusedev/debug/nydus-image create \
-            --parent-bootstrap ./nydus-image/layer3/bootstrap \
-            --bootstrap ./nydus-image/layer4/bootstrap \
-            --blob-dir ./nydus-image/blobs \
-            --log-level debug \
-            --compressor none /var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/diff
+$ sudo nydus-image create \
+  --parent-bootstrap ./nydus-image/layer3/bootstrap \
+  --bootstrap ./nydus-image/layer4/bootstrap \
+  --blob-dir ./nydus-image/blobs \
+  --log-level debug \
+  --compressor none /var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/diff
 ```
 
 And the directory `nydus-image` will look like below.
@@ -301,7 +302,7 @@ $ tree -L 2 ./nydus-image
 Finaly, we use `nydusd` to mount the converted nydus image with last converted bootstrap (`./nydus-image/layer4/bootstrap`).
 
 ```bash
-$ sudo target-fusedev/debug/nydusd \
+$ sudo nydusd \
   --config  ./localfs.json \
   --mountpoint ./mnt \
   --bootstrap ./nydus-image/layer4/bootstrap \
