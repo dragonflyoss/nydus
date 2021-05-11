@@ -82,13 +82,10 @@ impl BlobCacheState {
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
         let chunk_map = if blob.chunk_count != 0 {
-            Arc::new(IndexedChunkMap::new(
-                self.metrics.clone(),
-                &blob_file_path,
-                blob.chunk_count,
-            )?) as Arc<dyn ChunkMap + Sync + Send>
+            Arc::new(IndexedChunkMap::new(&blob_file_path, blob.chunk_count)?)
+                as Arc<dyn ChunkMap + Sync + Send>
         } else {
-            Arc::new(DigestedChunkMap::new(self.metrics.clone())) as Arc<dyn ChunkMap + Sync + Send>
+            Arc::new(DigestedChunkMap::new()) as Arc<dyn ChunkMap + Sync + Send>
         };
 
         self.blob_map
@@ -166,7 +163,7 @@ impl BlobCache {
         bufs: &[VolatileSlice],
         offset: u64,
         size: usize,
-    ) -> Result<usize> {
+    ) -> Result<(usize, bool)> {
         let cache_guard = self.cache.read().unwrap();
         let (fd, _, chunk_map) = match cache_guard.get(blob) {
             Some(entry) => entry,
@@ -175,17 +172,20 @@ impl BlobCache {
                 self.cache.write().unwrap().set(blob)?
             }
         };
+        let has_ready = chunk_map.has_ready(chunk)?;
         let mut reuse = false;
 
         // Hit cache if cache ready
-        if !self.is_compressed && !self.need_validate() && chunk_map.has_ready(chunk)? {
+        if !self.is_compressed && !self.need_validate() && has_ready {
             trace!(
                 "hit blob cache {} {}",
                 chunk.block_id().to_string(),
                 chunk.compress_size()
             );
             self.metrics.partial_hits.inc();
-            return self.read_partial_chunk(fd, bufs, offset + chunk.decompress_offset(), size);
+            let read_size =
+                self.read_partial_chunk(fd, bufs, offset + chunk.decompress_offset(), size)?;
+            return Ok((read_size, has_ready));
         }
 
         let d_size = chunk.decompress_size() as usize;
@@ -205,14 +205,9 @@ impl BlobCache {
         // Try to recover cache from blobcache first
         // For gzip, we can only trust ready blobcache because we cannot validate chunks due to
         // stargz format limitations (missing chunk level digest)
-        if (self.compressor() != compress::Algorithm::GZip || chunk_map.has_ready(chunk)?)
+        if (self.compressor() != compress::Algorithm::GZip || has_ready)
             && self
-                .read_blobcache_chunk(
-                    fd,
-                    chunk,
-                    one_chunk_buf,
-                    !chunk_map.has_ready(chunk)? || self.need_validate(),
-                )
+                .read_blobcache_chunk(fd, chunk, one_chunk_buf, !has_ready || self.need_validate())
                 .is_ok()
         {
             self.metrics.whole_hits.inc();
@@ -241,12 +236,13 @@ impl BlobCache {
         }
 
         if reuse {
-            Ok(one_chunk_buf.len())
+            Ok((one_chunk_buf.len(), has_ready))
         } else {
-            copyv(one_chunk_buf, bufs, offset, size).map_err(|e| {
+            let read_size = copyv(one_chunk_buf, bufs, offset, size).map_err(|e| {
                 error!("failed to copy from chunk buf to buf: {:?}", e);
                 e
-            })
+            })?;
+            Ok((read_size, has_ready))
         }
     }
 
@@ -597,7 +593,16 @@ impl RafsCache for BlobCache {
             }
         }
 
-        self.entry_read(&bio.blob, bio.chunkinfo.as_ref(), bufs, offset, bio.size)
+        let (size, before_ready) =
+            self.entry_read(&bio.blob, bio.chunkinfo.as_ref(), bufs, offset, bio.size)?;
+
+        // The flag means the chunk is not ready before, but now ready,
+        // so increase the entries_count metric.
+        if !before_ready {
+            self.metrics.entries_count.inc();
+        }
+
+        Ok(size)
     }
 
     fn write(&self, _blob_id: &str, _blk: &dyn RafsChunkInfo, _buf: &[u8]) -> Result<usize> {

@@ -704,8 +704,7 @@ pub struct BlobcacheMetrics {
     pub whole_hits: BasicMetric,
     pub total: BasicMetric,
     // Scale of blobcache. Blobcache does not evict entries.
-    // For IndexedChunkMap, means the number of all chunks.
-    // For DigestedChunkMap, means the number of chunks in ready status.
+    // Means the number of chunks in ready status.
     pub entries_count: BasicMetric,
     // In unit of Bytes
     pub prefetch_data_amount: BasicMetric,

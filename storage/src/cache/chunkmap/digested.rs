@@ -4,10 +4,9 @@
 
 use std::collections::HashMap;
 use std::io::Result;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 
 use super::ChunkMap;
 use crate::device::RafsChunkInfo;
@@ -18,15 +17,13 @@ use crate::device::RafsChunkInfo;
 /// old nydus bootstrap format.
 #[derive(Default)]
 pub struct DigestedChunkMap {
-    metrics: Arc<BlobcacheMetrics>,
     /// HashMap<chunk_digest, has_ready>
     cache: RwLock<HashMap<RafsDigest, bool>>,
 }
 
 impl DigestedChunkMap {
-    pub fn new(metrics: Arc<BlobcacheMetrics>) -> Self {
+    pub fn new() -> Self {
         Self {
-            metrics,
             cache: RwLock::new(HashMap::new()),
         }
     }
@@ -39,7 +36,6 @@ impl ChunkMap for DigestedChunkMap {
 
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
         if self.has_ready(chunk)? {
-            self.metrics.entries_count.inc();
             return Ok(());
         }
         self.cache.write().unwrap().insert(*chunk.block_id(), true);

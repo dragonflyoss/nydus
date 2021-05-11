@@ -29,7 +29,6 @@ mod tests {
     use super::*;
     use crate::device::{RafsChunkFlags, RafsChunkInfo};
     use nydus_utils::digest::{Algorithm, RafsDigest};
-    use nydus_utils::metrics::BlobcacheMetrics;
 
     struct Chunk {
         index: u32,
@@ -101,14 +100,10 @@ mod tests {
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
         let chunk_count = 1000000;
         let skip_index = 77;
-        let metrics = BlobcacheMetrics::new("", "");
 
-        let indexed_chunk_map1 =
-            Arc::new(IndexedChunkMap::new(metrics.clone(), &blob_path, chunk_count).unwrap());
-        let indexed_chunk_map2 =
-            Arc::new(IndexedChunkMap::new(metrics.clone(), &blob_path, chunk_count).unwrap());
-        let indexed_chunk_map3 =
-            Arc::new(IndexedChunkMap::new(metrics, &blob_path, chunk_count).unwrap());
+        let indexed_chunk_map1 = Arc::new(IndexedChunkMap::new(&blob_path, chunk_count).unwrap());
+        let indexed_chunk_map2 = Arc::new(IndexedChunkMap::new(&blob_path, chunk_count).unwrap());
+        let indexed_chunk_map3 = Arc::new(IndexedChunkMap::new(&blob_path, chunk_count).unwrap());
 
         let now = Instant::now();
 
@@ -170,20 +165,18 @@ mod tests {
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
         let chunk_count = 1000000;
-        let metrics = BlobcacheMetrics::new("", "");
 
         let mut chunks = Vec::new();
         for idx in 0..chunk_count {
             chunks.push(Chunk::new(idx))
         }
 
-        let indexed_chunk_map =
-            IndexedChunkMap::new(metrics.clone(), &blob_path, chunk_count).unwrap();
+        let indexed_chunk_map = IndexedChunkMap::new(&blob_path, chunk_count).unwrap();
         let now = Instant::now();
         iterate(&chunks, &indexed_chunk_map as &dyn ChunkMap, chunk_count);
         let elapsed1 = now.elapsed().as_millis();
 
-        let digested_chunk_map = DigestedChunkMap::new(metrics);
+        let digested_chunk_map = DigestedChunkMap::new();
         let now = Instant::now();
         iterate(&chunks, &digested_chunk_map as &dyn ChunkMap, chunk_count);
         let elapsed2 = now.elapsed().as_millis();

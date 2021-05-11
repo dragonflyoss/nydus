@@ -6,12 +6,8 @@ use std::fs::OpenOptions;
 use std::io::Result;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
 
-use nydus_utils::{
-    div_round_up,
-    metrics::{BlobcacheMetrics, Metric},
-};
+use nydus_utils::div_round_up;
 
 use super::ChunkMap;
 use crate::device::RafsChunkInfo;
@@ -53,7 +49,7 @@ unsafe impl Send for IndexedChunkMap {}
 unsafe impl Sync for IndexedChunkMap {}
 
 impl IndexedChunkMap {
-    pub fn new(metrics: Arc<BlobcacheMetrics>, blob_path: &str, chunk_count: u32) -> Result<Self> {
+    pub fn new(blob_path: &str, chunk_count: u32) -> Result<Self> {
         if chunk_count == 0 {
             return Err(einval!("chunk count should be greater than 0"));
         }
@@ -112,8 +108,6 @@ impl IndexedChunkMap {
         }
 
         readahead(fd, 0, expected_size);
-
-        metrics.entries_count.add(chunk_count as usize);
 
         Ok(Self {
             chunk_count,
