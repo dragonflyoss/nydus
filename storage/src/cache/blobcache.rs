@@ -935,6 +935,7 @@ mod blob_cache_tests {
             Arc::new(chunk),
             Arc::new(RafsBlobEntry {
                 chunk_count: 0,
+                readahead_offset: 0,
                 readahead_size: 0,
                 blob_id: blob_id.to_string(),
                 blob_index: 0,

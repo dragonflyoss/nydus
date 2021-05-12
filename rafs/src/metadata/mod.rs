@@ -40,6 +40,7 @@ use nydus_utils::digest::{self, RafsDigest};
 
 pub mod cached;
 pub mod direct;
+pub mod extended;
 pub mod layout;
 
 pub use storage::device::{RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
@@ -84,6 +85,7 @@ pub struct RafsSuperMeta {
     pub inode_table_offset: u64,
     pub blob_table_size: u32,
     pub blob_table_offset: u64,
+    pub extended_blob_table_offset: u32,
     pub blob_readahead_offset: u32,
     pub blob_readahead_size: u32,
     pub prefetch_table_offset: u64,
@@ -159,6 +161,7 @@ impl Default for RafsSuper {
                 inode_table_offset: 0,
                 blob_table_size: 0,
                 blob_table_offset: 0,
+                extended_blob_table_offset: 0,
                 blob_readahead_offset: 0,
                 blob_readahead_size: 0,
                 prefetch_table_offset: 0,
@@ -235,6 +238,7 @@ impl RafsSuper {
                 self.meta.inode_table_offset = sb.inode_table_offset();
                 self.meta.blob_table_offset = sb.blob_table_offset();
                 self.meta.blob_table_size = sb.blob_table_size();
+                self.meta.extended_blob_table_offset = sb.extended_blob_table_offset();
             }
             _ => return Err(ebadf!("invalid superblock version number")),
         }
@@ -840,6 +844,7 @@ mod tests {
                 100,
                 Arc::new(RafsBlobEntry {
                     chunk_count: 0,
+                    readahead_offset: 0,
                     readahead_size: 0,
                     blob_id: String::from("blobid"),
                     blob_index: 0,

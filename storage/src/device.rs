@@ -221,10 +221,7 @@ pub struct RafsBlobEntry {
     /// Number of chunks in blob file.
     pub chunk_count: u32,
     /// The data range to be prefetched in blob file.
-    ///
-    /// The readahead_offset field has been deprecated and defaults to 0,
-    /// meaning that the data segment to be prefetched is always put at
-    /// the head of a blob file.
+    pub readahead_offset: u32,
     pub readahead_size: u32,
     /// A sha256 hex string generally.
     pub blob_id: String,

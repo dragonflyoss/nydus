@@ -242,6 +242,15 @@ impl DirectMapping {
             return Err(ebadf!("invalid blob table"));
         }
 
+        // Validate extended blob table layout
+        let extended_blob_table_offset = old_state.meta.extended_blob_table_offset;
+        if extended_blob_table_offset > 0
+            && ((extended_blob_table_offset as u64) < blob_table_start
+                || extended_blob_table_offset as u64 >= len)
+        {
+            return Err(ebadf!("invalid extended blob table"));
+        }
+
         // Prefetch the bootstrap file
         readahead(fd, 0, len);
 
@@ -265,18 +274,9 @@ impl DirectMapping {
         // Safe because the mmap area should covered the range [start, end)
         let end = unsafe { base.add(size) };
 
-        // Load blob table. Safe because we have validated the inode table layout.
-        let blob_slice = unsafe {
-            slice::from_raw_parts(
-                base.add(blob_table_start as usize),
-                blob_table_size as usize,
-            )
-        };
+        // Load blob table. Safe because we have validated the blob table layout.
         let mut blob_table = OndiskBlobTable::new();
-        blob_table.load_from_slice(blob_slice).map_err(|e| {
-            unsafe { libc::munmap(base as *mut u8 as *mut libc::c_void, size) };
-            e
-        })?;
+        blob_table.load(r, &old_state.meta)?;
 
         // Load(Map) inode table. Safe because we have validated the inode table layout.
         // Though we have passed *mut u32 to Vec::from_raw_parts(), it will trigger invalid memory

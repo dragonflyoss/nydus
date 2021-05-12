@@ -40,6 +40,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use serde::Serialize;
 
+use crate::metadata::extended::blob_table::ExtendedBlobTable;
 use nydus_utils::{
     digest::{self, RafsDigest},
     ByteSize,
@@ -151,7 +152,8 @@ pub struct OndiskSuperBlock {
     s_prefetch_table_entries: u32,
     /// V5: Entries of blob table
     s_blob_table_size: u32,
-    s_reserved: u32,
+    /// Extended Blob Table
+    s_extended_blob_table_offset: u32,
     /// Unused area
     s_reserved2: [u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
 }
@@ -248,7 +250,7 @@ impl Default for OndiskSuperBlock {
             s_prefetch_table_entries: u32::to_le(0),
             s_blob_table_size: u32::to_le(0),
             s_blob_table_offset: u64::to_le(0),
-            s_reserved: u32::to_le(0),
+            s_extended_blob_table_offset: u32::to_le(0),
             s_reserved2: [0u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
         }
     }
@@ -348,6 +350,12 @@ impl OndiskSuperBlock {
         prefetch_table_entries,
         set_prefetch_table_entries,
         s_prefetch_table_entries,
+        u32
+    );
+    impl_pub_getter_setter!(
+        extended_blob_table_offset,
+        set_extended_blob_table_offset,
+        s_extended_blob_table_offset,
         u32
     );
 
@@ -518,12 +526,14 @@ impl PrefetchTable {
 #[derive(Clone, Debug, Default)]
 pub struct OndiskBlobTable {
     pub entries: Vec<Arc<RafsBlobEntry>>,
+    pub extended: ExtendedBlobTable,
 }
 
 impl OndiskBlobTable {
     pub fn new() -> Self {
         OndiskBlobTable {
             entries: Vec::new(),
+            extended: ExtendedBlobTable::new(),
         }
     }
 
@@ -541,14 +551,22 @@ impl OndiskBlobTable {
         )
     }
 
-    pub fn add(&mut self, blob_id: String, readahead_size: u32, chunk_count: u32) -> u32 {
+    pub fn add(
+        &mut self,
+        blob_id: String,
+        readahead_offset: u32,
+        readahead_size: u32,
+        chunk_count: u32,
+    ) -> u32 {
         let blob_index = self.entries.len() as u32;
         self.entries.push(Arc::new(RafsBlobEntry {
             blob_id,
             blob_index,
+            readahead_offset,
             readahead_size,
             chunk_count,
         }));
+        self.extended.add(chunk_count);
         blob_index
     }
 
@@ -560,16 +578,16 @@ impl OndiskBlobTable {
         Ok(self.entries[blob_index as usize].clone())
     }
 
-    pub fn load(&mut self, r: &mut RafsIoReader, size: usize) -> Result<()> {
-        let mut input = vec![0u8; size];
+    pub fn load(&mut self, r: &mut RafsIoReader, meta: &RafsSuperMeta) -> Result<()> {
+        // FIXME: Better to mmap ondisk data for direct mode.
 
-        r.read_exact(&mut input)?;
-        self.load_from_slice(&input)
-    }
+        // Load blob table
+        r.seek(SeekFrom::Start(meta.blob_table_offset))?;
+        let mut data = vec![0u8; meta.blob_table_size as usize];
+        r.read_exact(&mut data)?;
 
-    pub fn load_from_slice(&mut self, input: &[u8]) -> Result<()> {
-        let mut input_rest = input;
-
+        let mut input_rest = data.as_slice();
+        let mut entries = Vec::new();
         loop {
             let split_at_64 = std::mem::size_of::<u64>();
             let split_at_32 = std::mem::size_of::<u32>();
@@ -582,21 +600,24 @@ impl OndiskBlobTable {
             if readahead.len() < split_at_32 + 1 {
                 break;
             }
-            let (chunk_count, readahead_size) = readahead.split_at(split_at_32);
+            let (readahead_offset, readahead_size) = readahead.split_at(split_at_32);
 
-            let chunk_count = u32::from_le_bytes(chunk_count.try_into().map_err(|e| einval!(e))?);
+            let readahead_offset =
+                u32::from_le_bytes(readahead_offset.try_into().map_err(|e| einval!(e))?);
             let readahead_size =
                 u32::from_le_bytes(readahead_size.try_into().map_err(|e| einval!(e))?);
 
             let (blob_id, rest) = parse_string(rest)?;
 
-            self.entries.push(Arc::new(RafsBlobEntry {
-                blob_id: blob_id.to_string(),
-                blob_index: self.entries.len() as u32,
-                chunk_count,
-                readahead_size,
-            }));
+            let blob_index = entries.len() as u32;
 
+            entries.push(RafsBlobEntry {
+                blob_id: blob_id.to_string(),
+                blob_index,
+                chunk_count: 0,
+                readahead_offset,
+                readahead_size,
+            });
             // Break blob id search loop, when rest bytes length is zero,
             // or not split with '\0', or not have enough data to read (ending with padding data).
             if rest.is_empty()
@@ -610,11 +631,37 @@ impl OndiskBlobTable {
             input_rest = &rest.as_bytes()[1..];
         }
 
+        // Load extended blob table, only for the bootstrap included
+        // extended blob table data.
+        if meta.extended_blob_table_offset > 0 {
+            r.seek(SeekFrom::Start(meta.extended_blob_table_offset as u64))?;
+            self.extended.load(r, entries.len() as u32)?;
+        }
+
+        self.entries = entries
+            .into_iter()
+            .map(|mut entry| {
+                // The chunk_count should be non-zero if the bootstrap included
+                // extended blob table data.
+                let chunk_count = self
+                    .extended
+                    .get(entry.blob_index)
+                    .map(|entry| entry.chunk_count)
+                    .unwrap_or_default();
+                entry.chunk_count = chunk_count;
+                Arc::new(entry)
+            })
+            .collect();
+
         Ok(())
     }
 
     pub fn get_all(&self) -> Vec<Arc<RafsBlobEntry>> {
         self.entries.clone()
+    }
+
+    pub fn store_extended(&self, w: &mut RafsIoWriter) -> Result<usize> {
+        self.extended.store(w)
     }
 }
 

@@ -11,7 +11,7 @@ use sha2::digest::Digest;
 use sha2::Sha256;
 
 use rafs::metadata::layout::*;
-use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
+use rafs::metadata::{extended::blob_table::ExtendedBlobTable, RafsMode, RafsStore, RafsSuper};
 
 use nydus_utils::digest::RafsDigest;
 
@@ -253,6 +253,7 @@ impl Bootstrap {
             let blob_index = u32::try_from(ctx.blob_table.entries.len())?;
             ctx.blob_table.add(
                 ctx.blob_id.clone(),
+                0,
                 u32::try_from(blob_readahead_size)?,
                 *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
             );
@@ -279,9 +280,12 @@ impl Bootstrap {
             };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
-        let blob_table_size = ctx.blob_table.size();
         let prefetch_table_offset = super_block_size + inode_table_size;
-        let blob_table_offset = (prefetch_table_offset + prefetch_table_size) as u64;
+        let blob_table_offset = prefetch_table_offset + prefetch_table_size;
+        let blob_table_size = ctx.blob_table.size();
+        let extended_blob_table_offset = u32::try_from(blob_table_offset + blob_table_size)?;
+        let extended_blob_table_size =
+            ExtendedBlobTable::size(u32::try_from(ctx.blob_table.entries.len())?);
 
         // Set super block
         let mut super_block = OndiskSuperBlock::new();
@@ -289,8 +293,9 @@ impl Bootstrap {
         super_block.set_inodes_count(inodes_count);
         super_block.set_inode_table_offset(super_block_size as u64);
         super_block.set_inode_table_entries(inode_table_entries);
-        super_block.set_blob_table_offset(blob_table_offset);
+        super_block.set_blob_table_offset(blob_table_offset as u64);
         super_block.set_blob_table_size(blob_table_size as u32);
+        super_block.set_extended_blob_table_offset(extended_blob_table_offset);
         super_block.set_prefetch_table_offset(prefetch_table_offset as u64);
         super_block.set_compressor(ctx.compressor);
         super_block.set_digester(ctx.digester);
@@ -303,8 +308,11 @@ impl Bootstrap {
         super_block.set_prefetch_table_entries(prefetch_table_entries);
 
         // Set inodes and chunks
-        let mut inode_offset =
-            (super_block_size + inode_table_size + prefetch_table_size + blob_table_size) as u32;
+        let mut inode_offset = (super_block_size
+            + inode_table_size
+            + prefetch_table_size
+            + blob_table_size
+            + extended_blob_table_size) as u32;
 
         let mut has_xattr = false;
         for node in &mut ctx.nodes {
@@ -339,13 +347,20 @@ impl Bootstrap {
 
         // Dump prefetch table
         if let Some(mut prefetch_table) = ctx.prefetch.get_prefetch_table() {
-            prefetch_table.store(&mut ctx.f_bootstrap)?;
+            prefetch_table
+                .store(&mut ctx.f_bootstrap)
+                .context("failed to store prefetch table")?;
         }
 
         // Dump blob table
         ctx.blob_table
             .store(&mut ctx.f_bootstrap)
             .context("failed to store blob table")?;
+
+        // Dump extended blob table
+        ctx.blob_table
+            .store_extended(&mut ctx.f_bootstrap)
+            .context("failed to store extended blob table")?;
 
         // Dump inodes and chunks
         timing_tracer!(
