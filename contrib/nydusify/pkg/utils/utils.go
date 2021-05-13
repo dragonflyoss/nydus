@@ -70,6 +70,13 @@ func IsSupportedPlatform(os, arch string) bool {
 	return false
 }
 
+func CheckRuntimePlatform() bool {
+	if SupportedArch != "amd64" && SupportedArch != "arm64" {
+		return false
+	}
+	return true
+}
+
 func IsNydusPlatform(platform *ocispec.Platform) bool {
 	if platform != nil && platform.OSFeatures != nil {
 		for _, key := range platform.OSFeatures {

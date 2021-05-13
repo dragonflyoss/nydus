@@ -24,6 +24,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 var versionGitCommit string
@@ -62,10 +63,10 @@ func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, er
 func addReferenceSuffix(source, suffix string) (string, error) {
 	named, err := docker.ParseDockerRef(source)
 	if err != nil {
-		return "", fmt.Errorf("Invalid source image reference: %s", err)
+		return "", fmt.Errorf("invalid source image reference: %s", err)
 	}
 	if _, ok := named.(docker.Digested); ok {
-		return "", fmt.Errorf("Unsupported digested image reference: %s", named.String())
+		return "", fmt.Errorf("unsupported digested image reference: %s", named.String())
 	}
 	named = docker.TagNameOnly(named)
 	target := named.String() + suffix
@@ -100,7 +101,7 @@ func getCacheReference(c *cli.Context, target string) (string, error) {
 	if cacheTag != "" {
 		named, err := docker.ParseDockerRef(target)
 		if err != nil {
-			return "", fmt.Errorf("Invalid target image reference: %s", err)
+			return "", fmt.Errorf("invalid target image reference: %s", err)
 		}
 		cache = fmt.Sprintf("%s/%s:%s", docker.Domain(named), docker.Path(named), cacheTag)
 	}
@@ -303,6 +304,15 @@ func main() {
 				return checker.Check(context.Background())
 			},
 		},
+	}
+
+	// Under platform linux/arm64, containerd/compression prioritizes using `unpigz`
+	// to decompress tar.giz, which will be corruppted somehow. By disabling it,
+	// keep nydusify behavior the same with x86_64 platform.
+	os.Setenv("CONTAINERD_DISABLE_PIGZ", "1")
+
+	if !utils.CheckRuntimePlatform() {
+		logrus.Fatal("Nydusify can only work under architeture 'amd64' and 'arm64'")
 	}
 
 	if err := app.Run(os.Args); err != nil {
