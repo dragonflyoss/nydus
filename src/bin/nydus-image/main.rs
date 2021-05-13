@@ -14,6 +14,7 @@ mod trace;
 
 mod builder;
 mod core;
+mod inspect;
 mod validator;
 
 #[macro_use]
@@ -105,7 +106,7 @@ fn main() -> Result<()> {
         .about("Build image using nydus format.")
         .subcommand(
             SubCommand::with_name("create")
-                .about("dump image bootstrap and upload blob to storage backend")
+                .about("Create a nydus format accelerated container image")
                 .arg(
                     Arg::with_name("SOURCE")
                         .help("source path")
@@ -242,6 +243,29 @@ fn main() -> Result<()> {
                     Arg::with_name("output-json")
                         .long("output-json")
                         .help("JSON output path for check result")
+                        .takes_value(true)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("inspect")
+                .about("Inspect nydus format")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .help("bootstrap path")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("interactive")
+                        .long("interactive")
+                        .help("Inspect image in interactive mode")
+                        .required(false)
+                        .takes_value(false),
+                )
+                .arg(
+                    Arg::with_name("blob-dir").help("A directory holding all layers related to a single image")
+                        .long("blob-dir").required(false)
                         .takes_value(true)
                 )
         )
@@ -462,6 +486,11 @@ fn main() -> Result<()> {
         info!("bootstrap is valid, blobs: {:?}", blob_ids);
 
         ResultOutput::dump(matches, &build_info, blob_ids)?;
+    }
+
+    if let Some(matches) = cmd.subcommand_matches("inspect") {
+        // Safe to unwrap since `bootstrap` has default value.
+        let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
     }
 
     Ok(())
