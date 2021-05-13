@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/containerd/containerd/archive/compression"
@@ -19,7 +20,7 @@ import (
 )
 
 const SupportedOS = "linux"
-const SupportedArch = "amd64"
+const SupportedArch = runtime.GOARCH
 
 const defaultRetryAttempts = 3
 const defaultRetryInterval = time.Second * 2
