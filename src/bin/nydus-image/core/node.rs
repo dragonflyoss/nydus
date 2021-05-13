@@ -110,17 +110,19 @@ pub struct ChunkCountMap {
 
 impl ChunkCountMap {
     /// Allocate a count index sequentially by the index of blob table.
-    pub fn alloc_index(&mut self, blob_index: u32) -> u32 {
+    pub fn alloc_index(&mut self, blob_index: u32) -> Result<u32> {
         match self.chunks.entry(blob_index) {
             Entry::Occupied(entry) => {
                 let chunk_count = entry.into_mut();
                 let index = *chunk_count;
-                *chunk_count += 1;
-                index
+                *chunk_count = index.checked_add(1).ok_or_else(|| {
+                    Error::msg("the number of chunks in blob exceeds the u32 limit")
+                })?;
+                Ok(index)
             }
             Entry::Vacant(entry) => {
                 entry.insert(1);
-                0
+                Ok(0)
             }
         }
     }
@@ -340,7 +342,7 @@ impl Node {
             chunk.decompress_offset = *decompress_offset;
             chunk.compress_size = compressed_size as u32;
             chunk.decompress_size = chunk_size as u32;
-            chunk.index = chunk_count_map.alloc_index(blob_index);
+            chunk.index = chunk_count_map.alloc_index(blob_index)?;
             blob_size += compressed_size;
 
             // Move cursor to offset of next chunk

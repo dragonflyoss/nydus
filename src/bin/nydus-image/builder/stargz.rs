@@ -522,7 +522,7 @@ impl StargzBuilder {
         Self {}
     }
 
-    fn digest_node(&mut self, ctx: &mut BuildContext) {
+    fn digest_node(&mut self, ctx: &mut BuildContext) -> Result<()> {
         // Set blob index and inode digest for upper nodes
         for node in &mut ctx.nodes {
             if node.overlay.lower_layer() {
@@ -533,7 +533,7 @@ impl StargzBuilder {
 
             let blob_index = ctx.blob_table.entries.len() as u32;
             for chunk in node.chunks.iter_mut() {
-                let chunk_index = ctx.chunk_count_map.alloc_index(blob_index);
+                let chunk_index = ctx.chunk_count_map.alloc_index(blob_index)?;
                 (*chunk).index = chunk_index;
                 (*chunk).blob_index = blob_index;
                 inode_hasher.digest_update(chunk.block_id.as_ref());
@@ -549,6 +549,8 @@ impl StargzBuilder {
             };
             node.inode.i_digest = digest;
         }
+
+        Ok(())
     }
 
     fn build_tree_from_index(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
@@ -577,7 +579,7 @@ impl Builder for StargzBuilder {
         }
 
         // Calculate node digest
-        self.digest_node(&mut ctx);
+        self.digest_node(&mut ctx)?;
 
         // Dump bootstrap file
         bootstrap.dump(&mut ctx, Sha256::new(), 0, 0)
