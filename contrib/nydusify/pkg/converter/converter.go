@@ -143,7 +143,7 @@ func findSupportedSource(ctx context.Context, sources []provider.SourceProvider)
 func (cvt *Converter) convert(ctx context.Context) error {
 	logger = cvt.Logger
 
-	logrus.Infoln(fmt.Sprintf("Converting to %s", cvt.TargetRemote.Ref))
+	logrus.Infof("Converting to %s", cvt.TargetRemote.Ref)
 
 	// Try to pull Nydus cache image from remote registry
 	cg, err := newCacheGlue(
@@ -288,7 +288,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		return errors.Wrap(err, "Get cache record")
 	}
 
-	logrus.Infoln(fmt.Sprintf("Converted to %s", cvt.TargetRemote.Ref))
+	logrus.Infof("Converted to %s", cvt.TargetRemote.Ref)
 
 	return nil
 }
