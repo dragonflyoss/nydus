@@ -878,28 +878,26 @@ impl_bootstrap_converter!(OndiskInode);
 #[derive(Default, Clone, Copy, Debug)]
 pub struct OndiskChunkInfo {
     /// sha256(chunk), [char; RAFS_SHA256_LENGTH]
-    pub block_id: RafsDigest,
+    pub block_id: RafsDigest, // 32
     /// blob index (blob_id = blob_table[blob_index])
     pub blob_index: u32,
     /// chunk flags
-    pub flags: RafsChunkFlags,
-
+    pub flags: RafsChunkFlags, // 40
     /// compressed size in blob
     pub compress_size: u32,
     /// decompressed size in blob
-    pub decompress_size: u32,
+    pub decompress_size: u32, // 48
     /// compressed offset in blob
-    pub compress_offset: u64,
+    pub compress_offset: u64, // 56
     /// decompressed offset in blob
-    pub decompress_offset: u64,
-
+    pub decompress_offset: u64, // 64
     /// offset in file
-    pub file_offset: u64,
+    pub file_offset: u64, // 72
     /// chunk index, it's allocated sequentially
     /// starting from 0 for one blob.
     pub index: u32,
     /// reserved
-    pub reserved: u32,
+    pub reserved: u32, //80
 }
 
 impl OndiskChunkInfo {
