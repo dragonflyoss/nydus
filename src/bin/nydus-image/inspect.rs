@@ -8,7 +8,7 @@ use std::io::Write;
 use std::mem::size_of;
 use std::path::Path;
 
-use rafs::metadata::layout::{OndiskBlobTable, OndiskInode, OndiskSuperBlock};
+use rafs::metadata::layout::{OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable};
 use rafs::{RafsIoRead, RafsIoReader};
 
 pub(crate) struct RafsInspector<'a> {
@@ -33,6 +33,7 @@ pub(crate) struct RafsMeta {
     inode_table_offset: u64,
     inode_table_size: u32,
     prefetch_table_offset: u64,
+    prefetch_table_entries: u32,
     blob_table_offset: u64,
     blob_table_size: u32,
 }
@@ -45,6 +46,7 @@ impl From<&OndiskSuperBlock> for RafsMeta {
             prefetch_table_offset: sb.prefetch_table_offset(),
             blob_table_offset: sb.blob_table_offset(),
             blob_table_size: sb.blob_table_size(),
+            prefetch_table_entries: sb.prefetch_table_entries(),
         }
     }
 }
@@ -138,6 +140,30 @@ impl RafsInspector<'_> {
         Ok(sb)
     }
 
+    fn info_prefetch(&mut self) {
+        let mut pt = PrefetchTable::new();
+        pt.load_prefetch_table_from(
+            &mut self.bootstrap,
+            self.rafs_meta.prefetch_table_offset,
+            self.rafs_meta.prefetch_table_entries as usize,
+        )
+        .unwrap();
+        println!(
+            "Prefetched Files: {}",
+            self.rafs_meta.prefetch_table_entries
+        );
+        for idx in pt.inode_indexes {
+            let (inode, name) = self.stat_inode(idx as usize).unwrap();
+
+            println!(
+                r#"Name: {name:?} Inode Number: {inode_number} Index: {index}"#,
+                name = name,
+                inode_number = inode.i_ino,
+                index = idx
+            );
+        }
+    }
+
     /// Index is u32, by which the inode can be found.
     fn stat_inode(&mut self, index: usize) -> Result<(OndiskInode, OsString)> {
         // Safe to truncate `inode_table_offset` now.
@@ -176,9 +202,46 @@ impl RafsInspector<'_> {
         }
     }
 
+    pub fn stat_by_name(&mut self, name: &str) {
+        self.iter_dir(|f, inode, idx| {
+            if f == name {
+                println!(
+                    r#"
+    Inode Number:       {inode_number}
+    Index:              {index}
+    Name:               {name:?}
+    Size:               {size}
+    Mode:               {mode}
+    Nlink:              {nlink}
+    UID:                {uid}
+    GID:                {gid}
+    Blocks:             {blocks}"#,
+                    inode_number = inode.i_ino,
+                    name = f,
+                    index = idx,
+                    size = inode.i_size,
+                    mode = inode.i_mode,
+                    nlink = inode.i_nlink,
+                    uid = inode.i_uid,
+                    gid = inode.i_gid,
+                    blocks = inode.i_blocks,
+                );
+                return Action::Break;
+            }
+            Action::Continue
+        });
+    }
+
     pub fn list_dir(&mut self) {
         self.iter_dir(|f, inode, _idx| {
-            info!("inode {:?}, name: {:?}", inode, f);
+            trace!("inode {:?}, name: {:?}", inode, f);
+
+            println!(
+                r#"     {inode_number}            {name:?}"#,
+                name = f,
+                inode_number = inode.i_ino,
+            );
+
             Action::Continue
         })
     }
@@ -215,6 +278,16 @@ impl RafsInspector<'_> {
 
     pub fn stats(&mut self) {
         let sb = Self::super_block(&mut self.bootstrap, &self.layout_profile).unwrap();
+        println!(
+            r#"
+        Version:            {version}
+        Inodes Count:       {inodes_count}
+        Flags:              {flags}
+        "#,
+            version = sb.version(),
+            inodes_count = sb.inodes_count(),
+            flags = sb.flags()
+        )
     }
 
     pub fn list_blobs(&mut self) {
@@ -226,6 +299,19 @@ impl RafsInspector<'_> {
         blobs
             .load(&mut self.bootstrap, self.rafs_meta.blob_table_size)
             .unwrap();
+
+        for b in blobs.entries {
+            println!(
+                r#"
+            Blob ID:            {blob_id}
+            Readahead Offset:   {readahead_offset}
+            Readahead Size:     {readahead_size}
+            "#,
+                blob_id = b.blob_id,
+                readahead_offset = b.readahead_offset,
+                readahead_size = b.readahead_size,
+            )
+        }
     }
 }
 
@@ -234,6 +320,9 @@ pub(crate) struct Prompt {}
 impl Prompt {
     pub(crate) fn run(mut inspector: RafsInspector) {
         loop {
+            print!("Inspecting Rafs :> ");
+            std::io::stdout().flush().unwrap();
+
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap();
 
@@ -241,23 +330,27 @@ impl Prompt {
             let cmd = raw.next().unwrap();
             let args = raw.next();
 
-            info!("execute {:?} {:?}", cmd, args);
+            debug!("execute {:?} {:?}", cmd, args);
 
-            if cmd == "exit" {
+            if cmd == "exit" || cmd == "quit" || cmd == "q" {
                 break;
             }
 
-            if cmd == "stats" {
-                inspector.stats()
-            }
-
-            if cmd == "ls" {
-                inspector.list_dir();
-            }
-
-            if cmd == "cd" {
-                inspector.change_dir(args.unwrap())
+            match cmd {
+                "help" => Self::usage(),
+                "stats" => inspector.stats(),
+                "ls" => inspector.list_dir(),
+                "cd" => inspector.change_dir(args.unwrap()),
+                "stat" => inspector.stat_by_name(args.unwrap()),
+                "blobs" => inspector.list_blobs(),
+                "prefetch" => inspector.info_prefetch(),
+                _ => {
+                    println!("Unsupported command");
+                    Self::usage()
+                }
             }
         }
     }
+
+    pub(crate) fn usage() {}
 }
