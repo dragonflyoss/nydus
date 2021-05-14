@@ -490,6 +490,8 @@ fn main() -> Result<()> {
     if let Some(matches) = cmd.subcommand_matches("inspect") {
         // Safe to unwrap since `bootstrap` has default value.
         let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
+        let inspector = inspect::RafsInspector::new(bootstrap_path).unwrap();
+        inspect::Prompt::run(inspector);
     }
 
     Ok(())
