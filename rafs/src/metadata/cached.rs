@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Read, Result};
+use std::mem::size_of;
 use std::sync::Arc;
 
 use fuse_rs::abi::linux_abi;
@@ -30,9 +31,9 @@ pub struct CachedInodes {
 }
 
 impl CachedInodes {
-    pub fn new(meta: RafsSuperMeta, blobs: OndiskBlobTable, digest_validate: bool) -> Self {
+    pub fn new(meta: RafsSuperMeta, digest_validate: bool) -> Self {
         CachedInodes {
-            s_blob: Arc::new(blobs),
+            s_blob: Arc::new(OndiskBlobTable::new()),
             s_inodes: BTreeMap::new(),
             s_meta: Arc::new(meta),
             digest_validate,
@@ -42,10 +43,17 @@ impl CachedInodes {
     /// v5 layout is based on BFS, which means parents always are in front of children
     fn load_all_inodes(&mut self, r: &mut RafsIoReader) -> Result<()> {
         let mut dir_ino_set = Vec::new();
+        let mut entries = 0;
         loop {
+            // Stopping after loading all inodes helps to append possible
+            // new structure to the tail of bootstrap in the future.
+            if entries >= self.s_meta.inode_table_entries {
+                break;
+            }
             let mut inode = CachedInode::new(self.s_blob.clone(), self.s_meta.clone());
             match inode.load(&self.s_meta, r) {
                 Ok(_) => {
+                    entries += 1;
                     trace!(
                         "got inode ino {} parent {} size {} child_idx {} child_cnt {}",
                         inode.ino(),
@@ -113,6 +121,25 @@ impl CachedInodes {
 
 impl RafsSuperInodes for CachedInodes {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        // FIXME: add validator for all load operations.
+
+        // Now the seek offset points to inode table, so we can easily
+        // find first inode offset.
+        r.seek(SeekFrom::Start(self.s_meta.inode_table_offset))?;
+        let mut offset = [0u8; size_of::<u32>()];
+        r.read_exact(&mut offset)?;
+        // The offset is aligned with 8 bytes to make it easier to
+        // validate OndiskInode.
+        let inode_offset = u32::from_le_bytes(offset) << 3;
+
+        // Load blob table.
+        r.seek(SeekFrom::Start(self.s_meta.blob_table_offset))?;
+        let mut blob_table = OndiskBlobTable::new();
+        blob_table.load(r, self.s_meta.blob_table_size as usize)?;
+        self.s_blob = Arc::new(blob_table);
+
+        // Load all inodes started from first inode offset.
+        r.seek(SeekFrom::Start(inode_offset as u64))?;
         self.load_all_inodes(r)?;
 
         // Validate inode digest tree
