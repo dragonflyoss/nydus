@@ -10,15 +10,18 @@ use std::path::{Path, PathBuf};
 
 use nydus_utils::exec;
 
-const NYDUS_IMAGE: &str = "./target-fusedev/x86_64-unknown-linux-musl/release/nydus-image";
-
 pub struct Builder<'a> {
+    builder: String,
     work_dir: &'a PathBuf,
     whiteout_spec: &'a str,
 }
 
 pub fn new<'a>(work_dir: &'a PathBuf, whiteout_spec: &'a str) -> Builder<'a> {
+    let builder = std::env::var("NYDUS_IMAGE").unwrap_or_else(|_| {
+        String::from("./target-fusedev/x86_64-unknown-linux-musl/release/nydus-image")
+    });
     Builder {
+        builder,
         work_dir,
         whiteout_spec,
     }
@@ -195,7 +198,7 @@ impl<'a> Builder<'a> {
         exec(
             format!(
                 "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} {:?}",
-                NYDUS_IMAGE,
+                self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("blobs"),
                 compressor,
@@ -213,7 +216,7 @@ impl<'a> Builder<'a> {
         exec(
             format!(
                 "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} {:?}",
-                NYDUS_IMAGE,
+                self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("bootstrap-overlay"),
                 self.work_dir.join("blobs"),
@@ -230,7 +233,7 @@ impl<'a> Builder<'a> {
         exec(
             format!(
                 "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level info {:?}",
-                NYDUS_IMAGE,
+                self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 "lower.stargz",
                 self.work_dir.join("stargz.index-lower.json"),
@@ -244,7 +247,7 @@ impl<'a> Builder<'a> {
         exec(
             format!(
                 "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
-                NYDUS_IMAGE,
+                self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("bootstrap-overlay"),
                 "upper.stargz",
@@ -269,7 +272,7 @@ impl<'a> Builder<'a> {
         exec(
             format!(
                 "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"blob_file\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
-                NYDUS_IMAGE,
+                self.builder,
                 self.work_dir.join("bootstrap-specialfiles"),
                 self.work_dir.join("smoke-localfs-blob"),
                 "lz4_block",

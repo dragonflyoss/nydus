@@ -11,9 +11,8 @@ use std::time;
 use nydus_utils::exec;
 use rafs::metadata::RafsMode;
 
-const NYDUSD: &str = "./target-fusedev/x86_64-unknown-linux-musl/release/nydusd";
-
 pub struct Nydusd {
+    nydusd: String,
     work_dir: PathBuf,
     pub api_sock: PathBuf,
 }
@@ -74,8 +73,13 @@ pub fn new(
         .write_all(config.as_bytes())
         .unwrap();
 
+    let nydusd = std::env::var("NYDUSD").unwrap_or_else(|_| {
+        String::from("./target-fusedev/x86_64-unknown-linux-musl/release/nydusd")
+    });
+
     Nydusd {
-        work_dir: work_dir.clone(),
+        nydusd,
+        work_dir: work_dir.to_path_buf(),
         api_sock,
     }
 }
@@ -95,11 +99,12 @@ impl Nydusd {
         };
 
         let _mount_path = mount_path.to_string();
+        let nydusd = self.nydusd.clone();
         spawn(move || {
             exec(
                 format!(
                     "{} {} --config {:?} --apisock {:?} --mountpoint {:?} {} --log-level info --id {:?} --supervisor {:?}",
-                    NYDUSD,
+                    nydusd,
                     upgrade_arg,
                     work_dir.join("config.json"),
                     work_dir.join(api_sock),
