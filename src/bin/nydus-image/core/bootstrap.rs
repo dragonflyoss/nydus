@@ -242,11 +242,13 @@ impl Bootstrap {
         if ctx.blob_id.is_empty() {
             ctx.blob_id = format!("{:x}", blob_hash.finalize());
         }
+
         if blob_size > 0 || (ctx.source_type == SourceType::StargzIndex && !ctx.blob_id.is_empty())
         {
             if ctx.prefetch.policy != PrefetchPolicy::Blob {
                 blob_readahead_size = 0;
             }
+            // Add new blob to blob table
             ctx.blob_table
                 .add(ctx.blob_id.clone(), 0, blob_readahead_size as u32);
         }
@@ -295,6 +297,7 @@ impl Bootstrap {
         }
         super_block.set_prefetch_table_entries(prefetch_table_entries);
 
+        // Set inodes and chunks
         let mut inode_offset =
             (super_block_size + inode_table_size + prefetch_table_size + blob_table_size) as u32;
 
@@ -319,20 +322,27 @@ impl Bootstrap {
             super_block.set_has_xattr();
         }
 
-        // Dump bootstrap
+        // Dump super block
         super_block
             .store(&mut ctx.f_bootstrap)
             .context("failed to store superblock")?;
+
+        // Dump inode table
         inode_table
             .store(&mut ctx.f_bootstrap)
             .context("failed to store inode table")?;
+
+        // Dump prefetch table
         if let Some(mut prefetch_table) = ctx.prefetch.get_prefetch_table() {
             prefetch_table.store(&mut ctx.f_bootstrap)?;
         }
+
+        // Dump blob table
         ctx.blob_table
             .store(&mut ctx.f_bootstrap)
             .context("failed to store blob table")?;
 
+        // Dump inodes and chunks
         timing_tracer!(
             {
                 for node in &mut ctx.nodes {
