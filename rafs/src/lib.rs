@@ -85,10 +85,12 @@ impl dyn RafsIoRead {
     }
 
     pub fn from_file(path: &str) -> RafsResult<Box<dyn RafsIoRead>> {
-        Ok(Box::new(File::open(path).map_err(|err| {
-            last_error!(format!("Failed to open file {:?}: {:?}", path, err));
-            RafsError::ReadMetadata(err)
-        })?))
+        let f = File::open(path).map_err(|e| {
+            error!("Failed to open rafs meta file {:?}: {:?}", path, e);
+            RafsError::ReadMetadata(e)
+        })?;
+
+        Ok(Box::new(f))
     }
 }
 
