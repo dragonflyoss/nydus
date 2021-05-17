@@ -83,7 +83,7 @@ impl dyn RafsIoWrite {
 }
 
 impl dyn RafsIoRead {
-    pub fn try_seek_aligned(&mut self, last_read_len: usize) {
+    pub fn seek_to_next_aligned(&mut self, last_read_len: usize) {
         // Seek should not fail otherwise rafs goes insane.
         self.seek(SeekFrom::Current(
             (align_to_rafs(last_read_len) - last_read_len) as i64,
