@@ -51,7 +51,7 @@ use crate::core::tree;
 
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use rafs::metadata::layout::OndiskBlobTable;
-use rafs::RafsIoRead;
+use rafs::RafsIoReader;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use validator::Validator;
@@ -400,23 +400,22 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
         ));
 
-        let f_parent_bootstrap: Option<Box<dyn RafsIoRead>> =
-            if parent_bootstrap_path != Path::new("") {
-                Some(Box::new(
-                    OpenOptions::new()
-                        .read(true)
-                        .write(false)
-                        .open(parent_bootstrap_path)
-                        .with_context(|| {
-                            format!(
-                                "failed to open parent bootstrap file {:?}",
-                                parent_bootstrap_path
-                            )
-                        })?,
-                ))
-            } else {
-                None
-            };
+        let f_parent_bootstrap: Option<RafsIoReader> = if parent_bootstrap_path != Path::new("") {
+            Some(Box::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(false)
+                    .open(parent_bootstrap_path)
+                    .with_context(|| {
+                        format!(
+                            "failed to open parent bootstrap file {:?}",
+                            parent_bootstrap_path
+                        )
+                    })?,
+            ))
+        } else {
+            None
+        };
 
         let mut ctx = BuildContext {
             source_type,

@@ -55,7 +55,13 @@ impl RafsIoWrite for File {
     }
 }
 
-// Rust file I/O is unbuffered by default. If we have many small write calls
+/// Handler to read file system bootstrap.
+pub type RafsIoReader = Box<dyn RafsIoRead>;
+
+/// Handler to write file system bootstrap.
+pub type RafsIoWriter = Box<dyn RafsIoWrite>;
+
+// Rust file I/O is un-buffered by default. If we have many small write calls
 // to a file, should use BufWriter. BufWriter maintains an in-memory buffer
 // for writing, minimizing the number of system calls required.
 impl RafsIoWrite for BufWriter<File> {
@@ -84,7 +90,7 @@ impl dyn RafsIoRead {
         .unwrap();
     }
 
-    pub fn from_file(path: &str) -> RafsResult<Box<dyn RafsIoRead>> {
+    pub fn from_file(path: &str) -> RafsResult<RafsIoReader> {
         let f = File::open(path).map_err(|e| {
             error!("Failed to open rafs meta file {:?}: {:?}", path, e);
             RafsError::ReadMetadata(e)
@@ -93,9 +99,3 @@ impl dyn RafsIoRead {
         Ok(Box::new(f))
     }
 }
-
-/// Handler to read file system bootstrap.
-pub type RafsIoReader = Box<dyn RafsIoRead>;
-
-/// Handler to write file system bootstrap.
-pub type RafsIoWriter = Box<dyn RafsIoWrite>;

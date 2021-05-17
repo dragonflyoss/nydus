@@ -9,13 +9,13 @@ use std::fs::OpenOptions;
 use std::path::Path;
 
 use rafs::metadata::{RafsMode, RafsSuper};
-use rafs::RafsIoRead;
+use rafs::RafsIoReader;
 
 use crate::tree::Tree;
 
 pub struct Validator {
     /// Bootstrap file reader.
-    f_bootstrap: Box<dyn RafsIoRead>,
+    f_bootstrap: RafsIoReader,
 }
 
 impl Validator {
