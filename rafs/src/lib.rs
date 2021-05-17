@@ -15,6 +15,7 @@ use std::any::Any;
 use std::fs::File;
 use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::Path;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
 
@@ -28,7 +29,7 @@ pub enum RafsError {
     Unsupported,
     Uninitialized,
     AlreadyMounted,
-    ReadMetadata(Error),
+    ReadMetadata(Error, String),
     LoadConfig(Error),
     ParseConfig(serde_json::Error),
     SwapBackend(Error),
@@ -90,10 +91,18 @@ impl dyn RafsIoRead {
         .unwrap();
     }
 
-    pub fn from_file(path: &str) -> RafsResult<RafsIoReader> {
-        let f = File::open(path).map_err(|e| {
-            error!("Failed to open rafs meta file {:?}: {:?}", path, e);
-            RafsError::ReadMetadata(e)
+    pub fn seek_plus_offset(&mut self, plus_offset: i64) {
+        // Seek should not fail otherwise rafs goes insane.
+        self.seek(SeekFrom::Current(plus_offset)).unwrap();
+    }
+
+    pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
+        self.seek(SeekFrom::Start(offset))
+    }
+
+    pub fn from_file(path: impl AsRef<Path>) -> RafsResult<RafsIoReader> {
+        let f = File::open(&path).map_err(|e| {
+            RafsError::ReadMetadata(e, path.as_ref().to_string_lossy().into_owned())
         })?;
 
         Ok(Box::new(f))

@@ -208,7 +208,8 @@ impl RafsSuper {
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
         let mut sb = OndiskSuperBlock::new();
 
-        r.read_exact(sb.as_mut()).map_err(RafsError::ReadMetadata)?;
+        r.read_exact(sb.as_mut())
+            .map_err(|e| RafsError::ReadMetadata(e, "Updating meta".to_string()))?;
         self.inodes.update(r)
     }
 
