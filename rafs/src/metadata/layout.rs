@@ -834,6 +834,12 @@ impl OndiskInode {
     pub fn has_hole(&self) -> bool {
         self.i_flags.contains(RafsInodeFlags::HAS_HOLE)
     }
+
+    pub fn file_name(&self, r: &mut RafsIoReader) -> Result<OsString> {
+        let mut name_buf = vec![0u8; self.i_name_size as usize];
+        r.read_exact(name_buf.as_mut_slice())?;
+        Ok(bytes_to_os_str(&name_buf).to_os_string())
+    }
 }
 
 pub struct OndiskInodeWrapper<'a> {
