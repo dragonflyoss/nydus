@@ -390,7 +390,7 @@ impl fmt::Display for OndiskSuperBlock {
 
 #[derive(Clone, Default)]
 pub struct OndiskInodeTable {
-    pub(crate) data: Vec<u32>,
+    pub data: Vec<u32>,
 }
 
 impl OndiskInodeTable {
