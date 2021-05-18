@@ -64,7 +64,7 @@ You can configure nydus snapshotter with custom configurations. The config file 
 
 ### Start Nydus snapshotter
 
-Nydus snapshotter is implemented as a [pproxy plugin](https://github.com/containerd/containerd/blob/04985039cede6aafbb7dfb3206c9c4d04e2f924d/PLUGINS.md#proxy-plugins) daemon (`containerd-nydus-grpc`) for containerd. You can start the daemon as following
+Nydus snapshotter is implemented as a [proxy plugin](https://github.com/containerd/containerd/blob/04985039cede6aafbb7dfb3206c9c4d04e2f924d/PLUGINS.md#proxy-plugins) daemon (`containerd-nydus-grpc`) for containerd. You can start the daemon as following
 
 ```bash
 # nydusd-path is the path of nydusd binary, you need to compile the binary first

@@ -2,6 +2,10 @@
 
 `nydusd` running as daemon to expose a [FUSE](https://www.kernel.org/doc/html/latest/filesystems/fuse.html) mountpoint or a [Virtio-FS](https://virtio-fs.gitlab.io/) mountpoint inside guest for containers to access.
 
+### Get binary from release page
+
+Get `nydusd` binary from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+
 ## Run Nydusd Daemon
 
 ``` shell
@@ -22,7 +26,7 @@ cat /path/to/config-localfs.json
 ### Run With FUSE
 
 ``` shell
-sudo target-fusedev/debug/nydusd \
+sudo nydusd \
   --config /path/to/config-localfs.json \
   --mountpoint /path/to/mnt \
   --bootstrap /path/to/bootstrap \
@@ -34,7 +38,7 @@ sudo target-fusedev/debug/nydusd \
 Virtio-fs is supported by both [QEMU](https://www.qemu.org/) and [Cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor). To run `nydusd` with virtio-fs support, first start it with `--sock` option to expose a virtio-fs socket endpoint.
 
 ``` shell
-sudo target-virtiofs/debug/nydusd \
+sudo nydusd \
   --config /path/to/config-localfs.json \
   --sock /path/to/vhost-user-fs.sock \
   --bootstrap /path/to/bootstrap \
@@ -205,7 +209,7 @@ We are working on enabling cloud-hypervisor support for nydus.
 To mount a bootstrap via api, first launch nydusd without a bootstrap:
 
 ``` shell
-sudo target-fusedev/debug/nydusd \
+sudo nydusd \
   --apisock /path/to/api.sock \
   --config /path/to/config.json \
   --mountpoint /path/to/mountpoint
