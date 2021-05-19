@@ -5,7 +5,7 @@
 use anyhow::Result;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rafs::metadata::layout::{
     OndiskBlobTable, OndiskInode, OndiskInodeTable, OndiskSuperBlock, PrefetchTable,
@@ -120,14 +120,11 @@ impl RafsInspector {
         );
 
         for idx in pt.inode_indexes {
-            let inode_offset = self.inodes_table.get(idx as u64).unwrap();
-            let (ondisk_inode, file_name) = self.load_ondisk_inode(inode_offset).unwrap();
-
+            let path = self.path_from_ino(idx as u64).unwrap();
             println!(
-                r#"Name: {name:?} Inode Number: {inode_number} Index: {index}"#,
-                name = file_name,
-                inode_number = ondisk_inode.i_ino,
-                index = idx
+                r#"Inode Number:{inode_number:10}   |   Path: {path:?} "#,
+                path = path,
+                inode_number = idx,
             );
         }
     }
@@ -143,6 +140,27 @@ impl RafsInspector {
         let file_name = ondisk_inode.file_name(&mut self.bootstrap).unwrap();
 
         Ok((ondisk_inode, file_name))
+    }
+
+    fn path_from_ino(&mut self, mut ino: u64) -> Result<PathBuf> {
+        let mut path = PathBuf::new();
+        let mut entries = Vec::<PathBuf>::new();
+
+        loop {
+            let offset = self.inodes_table.get(ino).unwrap();
+            let (inode, file_name) = self.load_ondisk_inode(offset).unwrap();
+            entries.push(file_name.into());
+            if inode.i_parent == 0 {
+                break;
+            }
+            ino = inode.i_parent;
+        }
+        entries.reverse();
+        for e in entries {
+            path.push(e);
+        }
+
+        Ok(path)
     }
 
     /// Index is u32, by which the inode can be found.
