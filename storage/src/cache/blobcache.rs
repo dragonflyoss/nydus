@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::num::NonZeroU32;
+use std::ops::DerefMut;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
     Arc, Mutex, RwLock,
 };
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use nix::sys::uio;
 use nix::unistd::dup;
@@ -223,6 +224,7 @@ pub struct BlobCache {
     mr_receiver: Option<spmc::Receiver<MergedBackendRequest>>,
     prefetch_seq: AtomicU64,
     metrics: Arc<BlobcacheMetrics>,
+    prefetch_threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl BlobCache {
@@ -456,7 +458,7 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
         // another new prefetch policy triggering prefetch files belonging to the same
         // directory while one of them is read. We can easily get a continuous region on blob
         // that way.
-        let _thread = thread::Builder::new()
+        thread::Builder::new()
             .name(format!("prefetch_thread_{}", num))
             .spawn(move || {
                 blobcache.prefetch_ctx.grow_n(1);
@@ -579,7 +581,15 @@ fn kick_prefetch_workers(cache: &Arc<BlobCache>) {
                     .fetch_sub(1, Ordering::Relaxed);
                 blobcache.prefetch_ctx.shrink_n(1);
                 info!("Prefetch thread exits.")
-            });
+            })
+            .map(|t| {
+                cache
+                    .prefetch_threads
+                    .lock()
+                    .expect("Not expect poisoned lock")
+                    .push(t)
+            })
+            .unwrap_or_else(|e| error!("Create prefetch worker failed, {:?}", e));
     }
 }
 
@@ -678,7 +688,21 @@ impl RafsCache for BlobCache {
     }
 
     fn stop_prefetch(&self) -> StorageResult<()> {
-        drop(self.mr_sender.lock().unwrap().take().unwrap());
+        if let Some(s) = self.mr_sender.lock().unwrap().take() {
+            drop(s);
+        }
+
+        let mut guard = self
+            .prefetch_threads
+            .lock()
+            .expect("Not expect poisoned lock");
+        let threads = guard.deref_mut();
+
+        while let Some(t) = threads.pop() {
+            t.join()
+                .unwrap_or_else(|e| error!("Thread might panic, {:?}", e));
+        }
+
         Ok(())
     }
 
@@ -784,6 +808,7 @@ pub fn new(
         mr_receiver: rx,
         prefetch_seq: AtomicU64::new(0),
         metrics: BlobcacheMetrics::new(id, work_dir),
+        prefetch_threads: Mutex::new(Vec::<_>::new()),
     });
 
     cache

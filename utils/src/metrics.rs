@@ -724,6 +724,9 @@ impl BlobcacheMetrics {
             ..Default::default()
         });
 
+        // Old metrics will be dropped when BlobCache is swapped. So we don't
+        // have to worry about swapping its metrics either which means it's
+        // not necessary to release metrics recorder when blobcache is dropped due to swapping.
         BLOBCACHE_METRICS
             .write()
             .unwrap()
