@@ -848,6 +848,7 @@ mod tests {
                     readahead_size: 0,
                     blob_id: String::from("blobid"),
                     blob_index: 0,
+                    blob_cache_size: 0,
                 }),
             );
             assert_eq!(*result, res);

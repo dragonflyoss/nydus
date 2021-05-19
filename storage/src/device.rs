@@ -227,6 +227,8 @@ pub struct RafsBlobEntry {
     pub blob_id: String,
     /// The index of blob in RAFS blob table.
     pub blob_index: u32,
+    /// The expected decompress size of blob cache file.
+    pub blob_cache_size: u64,
 }
 
 // Rafs device blob IO descriptor

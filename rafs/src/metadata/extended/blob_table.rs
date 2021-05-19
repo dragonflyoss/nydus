@@ -18,14 +18,19 @@ pub const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 32;
 pub struct ExtendedBlobTableEntry {
     /// Number of chunks in a blob file.
     pub chunk_count: u32,
-    pub reserved: [u8; EXTENDED_BLOB_TABLE_ENTRY_SIZE - 4],
+    pub reserved1: [u8; 4],
+    /// The expected decompress size of blob cache file.
+    pub blob_cache_size: u64,
+    pub reserved2: [u8; EXTENDED_BLOB_TABLE_ENTRY_SIZE - 16],
 }
 
 impl ExtendedBlobTableEntry {
-    pub fn new(chunk_count: u32) -> Self {
+    pub fn new(chunk_count: u32, blob_cache_size: u64) -> Self {
         Self {
             chunk_count,
-            reserved: [0; EXTENDED_BLOB_TABLE_ENTRY_SIZE - 4],
+            reserved1: [0; 4],
+            blob_cache_size,
+            reserved2: [0; EXTENDED_BLOB_TABLE_ENTRY_SIZE - 16],
         }
     }
 }
@@ -48,9 +53,11 @@ impl ExtendedBlobTable {
         align_to_rafs(size_of::<ExtendedBlobTableEntry>() * entries_count as usize)
     }
 
-    pub fn add(&mut self, chunk_count: u32) {
-        self.entries
-            .push(Arc::new(ExtendedBlobTableEntry::new(chunk_count)));
+    pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64) {
+        self.entries.push(Arc::new(ExtendedBlobTableEntry::new(
+            chunk_count,
+            blob_cache_size,
+        )));
     }
 
     pub fn get(&self, blob_index: u32) -> Option<Arc<ExtendedBlobTableEntry>> {
@@ -89,8 +96,13 @@ impl RafsStore for ExtendedBlobTable {
             .enumerate()
             .try_for_each::<_, Result<()>>(|(_idx, entry)| {
                 w.write_all(&u32::to_le_bytes(entry.chunk_count))?;
-                w.write_all(&entry.reserved)?;
-                size += size_of::<u32>() + entry.reserved.len();
+                w.write_all(&entry.reserved1)?;
+                w.write_all(&u64::to_le_bytes(entry.blob_cache_size))?;
+                w.write_all(&entry.reserved2)?;
+                size += size_of::<u32>()
+                    + entry.reserved1.len()
+                    + size_of::<u64>()
+                    + entry.reserved2.len();
                 Ok(())
             })?;
 
@@ -120,7 +132,7 @@ mod tests {
         // Create extended blob table
         let mut table = ExtendedBlobTable::new();
         for i in 0..5 {
-            table.add(i * 3);
+            table.add(i * 3, 100);
         }
 
         // Store extended blob table
@@ -145,7 +157,9 @@ mod tests {
         // Check expected blob table
         for i in 0..5 {
             assert_eq!(table.get(i).unwrap().chunk_count, i * 3);
-            assert_eq!(table.get(i).unwrap().reserved, [0u8; 28]);
+            assert_eq!(table.get(i).unwrap().reserved1, [0u8; 4]);
+            assert_eq!(table.get(i).unwrap().blob_cache_size, 100);
+            assert_eq!(table.get(i).unwrap().reserved2, [0u8; 16]);
         }
     }
 }

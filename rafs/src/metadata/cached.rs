@@ -728,7 +728,7 @@ mod cached_tests {
         let mut blob_table = Arc::new(OndiskBlobTable::new());
         Arc::get_mut(&mut blob_table)
             .unwrap()
-            .add(String::from("123333"), 0, 0, 0);
+            .add(String::from("123333"), 0, 0, 0, 0);
         let mut cached_inode = CachedInode::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         let desc1 = cached_inode.alloc_bio_desc(0, 100).unwrap();

@@ -238,6 +238,7 @@ impl Bootstrap {
         blob_hash: Sha256,
         blob_size: usize,
         mut blob_readahead_size: usize,
+        blob_cache_size: u64,
     ) -> Result<(Vec<String>, usize)> {
         // Set blob hash as blob id if not specified.
         if ctx.blob_id.is_empty() {
@@ -256,6 +257,7 @@ impl Bootstrap {
                 0,
                 u32::try_from(blob_readahead_size)?,
                 *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
+                blob_cache_size,
             );
         }
 

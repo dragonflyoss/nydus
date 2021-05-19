@@ -939,6 +939,7 @@ mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: blob_id.to_string(),
                 blob_index: 0,
+                blob_cache_size: 0,
             }),
             50,
             50,

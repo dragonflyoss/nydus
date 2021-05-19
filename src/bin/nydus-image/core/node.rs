@@ -250,6 +250,7 @@ impl Node {
         blob_hash: &mut Sha256,
         compress_offset: &mut u64,
         decompress_offset: &mut u64,
+        blob_cache_size: &mut u64,
         chunk_cache: &mut HashMap<RafsDigest, OndiskChunkInfo>,
         chunk_count_map: &mut ChunkCountMap,
         compressor: compress::Algorithm,
@@ -347,13 +348,15 @@ impl Node {
 
             // Move cursor to offset of next chunk
             *compress_offset += compressed_size as u64;
-            *decompress_offset += if aligned_chunk {
+            let aligned_chunk_size = if aligned_chunk {
                 // Safe to unwrap since we can't have such a large chunk
                 // and conversion between u64 values is safe.
                 try_round_up_4k(chunk_size).unwrap()
             } else {
                 chunk_size
             };
+            *blob_cache_size = *decompress_offset + chunk_size;
+            *decompress_offset += aligned_chunk_size;
 
             // Calculate blob hash
             blob_hash.update(&compressed);

@@ -522,7 +522,9 @@ impl StargzBuilder {
         Self {}
     }
 
-    fn digest_node(&mut self, ctx: &mut BuildContext) -> Result<()> {
+    fn calculate_nodes(&mut self, ctx: &mut BuildContext) -> Result<u64> {
+        let mut blob_cache_size = 0u64;
+
         // Set blob index and inode digest for upper nodes
         for node in &mut ctx.nodes {
             if node.overlay.lower_layer() {
@@ -533,6 +535,7 @@ impl StargzBuilder {
 
             let blob_index = ctx.blob_table.entries.len() as u32;
             for chunk in node.chunks.iter_mut() {
+                blob_cache_size += chunk.decompress_size as u64;
                 let chunk_index = ctx.chunk_count_map.alloc_index(blob_index)?;
                 (*chunk).index = chunk_index;
                 (*chunk).blob_index = blob_index;
@@ -550,7 +553,7 @@ impl StargzBuilder {
             node.inode.i_digest = digest;
         }
 
-        Ok(())
+        Ok(blob_cache_size)
     }
 
     fn build_tree_from_index(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
@@ -578,10 +581,10 @@ impl Builder for StargzBuilder {
             bootstrap.build(&mut ctx, &mut tree);
         }
 
-        // Calculate node digest
-        self.digest_node(&mut ctx)?;
+        // Calculate node chunks and digest
+        let blob_cache_size = self.calculate_nodes(&mut ctx)?;
 
         // Dump bootstrap file
-        bootstrap.dump(&mut ctx, Sha256::new(), 0, 0)
+        bootstrap.dump(&mut ctx, Sha256::new(), 0, 0, blob_cache_size)
     }
 }

@@ -557,6 +557,7 @@ impl OndiskBlobTable {
         readahead_offset: u32,
         readahead_size: u32,
         chunk_count: u32,
+        blob_cache_size: u64,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         self.entries.push(Arc::new(RafsBlobEntry {
@@ -565,8 +566,9 @@ impl OndiskBlobTable {
             readahead_offset,
             readahead_size,
             chunk_count,
+            blob_cache_size,
         }));
-        self.extended.add(chunk_count);
+        self.extended.add(chunk_count, blob_cache_size);
         blob_index
     }
 
@@ -617,6 +619,7 @@ impl OndiskBlobTable {
                 chunk_count: 0,
                 readahead_offset,
                 readahead_size,
+                blob_cache_size: 0,
             });
             // Break blob id search loop, when rest bytes length is zero,
             // or not split with '\0', or not have enough data to read (ending with padding data).
@@ -641,14 +644,11 @@ impl OndiskBlobTable {
         self.entries = entries
             .into_iter()
             .map(|mut entry| {
-                // The chunk_count should be non-zero if the bootstrap included
+                let extended_entry = self.extended.get(entry.blob_index).unwrap_or_default();
+                // These extended fields should be non-zero if the bootstrap included
                 // extended blob table data.
-                let chunk_count = self
-                    .extended
-                    .get(entry.blob_index)
-                    .map(|entry| entry.chunk_count)
-                    .unwrap_or_default();
-                entry.chunk_count = chunk_count;
+                entry.chunk_count = extended_entry.chunk_count;
+                entry.blob_cache_size = extended_entry.blob_cache_size;
                 Arc::new(entry)
             })
             .collect();
