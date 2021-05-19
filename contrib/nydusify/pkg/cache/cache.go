@@ -257,10 +257,16 @@ func (cache *Cache) Export(ctx context.Context) error {
 	layers := cache.exportRecordsToLayers()
 
 	// Ensure layers from manifest match with image config,
-	// this will keep image compatibility when using docker pull.
+	// this will keep compatibility when using docker pull
+	// for the image that only included bootstrap layers.
 	diffIDs := []digest.Digest{}
 	for _, layer := range layers {
-		diffID := digest.Digest(layer.Annotations[utils.LayerAnnotationUncompressed])
+		var diffID digest.Digest
+		if layer.MediaType == utils.MediaTypeNydusBlob {
+			diffID = layer.Digest
+		} else {
+			diffID = digest.Digest(layer.Annotations[utils.LayerAnnotationUncompressed])
+		}
 		if diffID.Validate() == nil {
 			diffIDs = append(diffIDs, diffID)
 		} else {
