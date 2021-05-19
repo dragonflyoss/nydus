@@ -220,7 +220,7 @@ func main() {
 				}
 				sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
 				if err != nil {
-					return err
+					return errors.Wrap(err, "Parse source image")
 				}
 
 				targetRemote, err := provider.DefaultRemote(target, c.Bool("target-insecure"))
@@ -315,7 +315,7 @@ func main() {
 	os.Setenv("CONTAINERD_DISABLE_PIGZ", "1")
 
 	if !utils.CheckRuntimePlatform() {
-		logrus.Fatal("Nydusify can only work under architeture 'amd64' and 'arm64'")
+		logrus.Fatal("Nydusify can only work under architecture 'amd64' and 'arm64'")
 	}
 
 	if err := app.Run(os.Args); err != nil {
