@@ -119,12 +119,12 @@ impl RafsInspector {
             self.rafs_meta.prefetch_table_entries
         );
 
-        for idx in pt.inode_indexes {
-            let path = self.path_from_ino(idx as u64).unwrap();
+        for ino in pt.inodes {
+            let path = self.path_from_ino(ino as u64).unwrap();
             println!(
                 r#"Inode Number:{inode_number:10}   |   Path: {path:?} "#,
                 path = path,
-                inode_number = idx,
+                inode_number = ino,
             );
         }
     }

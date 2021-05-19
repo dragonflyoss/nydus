@@ -460,7 +460,9 @@ impl RafsStore for OndiskInodeTable {
 
 #[derive(Clone, Default)]
 pub struct PrefetchTable {
-    pub inode_indexes: Vec<u32>,
+    /// Store inode numbers of files that have to prefetch.
+    /// Note: It's not inode index of inodes table being stored here.
+    pub inodes: Vec<u32>,
 }
 
 /// Introduce a prefetch table to rafs v5 disk layout.
@@ -474,21 +476,19 @@ pub struct PrefetchTable {
 /// when rafs is mounted at the very beginning.
 impl PrefetchTable {
     pub fn new() -> PrefetchTable {
-        PrefetchTable {
-            inode_indexes: vec![],
-        }
+        PrefetchTable { inodes: vec![] }
     }
 
     pub fn len(&self) -> usize {
-        self.inode_indexes.len()
+        self.inodes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inode_indexes.is_empty()
+        self.inodes.is_empty()
     }
 
-    pub fn add_entry(&mut self, inode_idx: u32) {
-        self.inode_indexes.push(inode_idx);
+    pub fn add_entry(&mut self, ino: u32) {
+        self.inodes.push(ino);
     }
 
     pub fn size(&self) -> usize {
@@ -498,14 +498,14 @@ impl PrefetchTable {
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
         // Sort prefetch table by inode index, hopefully, it can save time when mounting rafs
         // Because file data is dumped in the order of inode index.
-        self.inode_indexes.sort_unstable();
+        self.inodes.sort_unstable();
 
-        let (_, data, _) = unsafe { self.inode_indexes.align_to::<u8>() };
+        let (_, data, _) = unsafe { self.inodes.align_to::<u8>() };
 
         w.write_all(data.as_ref())?;
 
         // OK. Let's see if we have to align... :-(
-        let cur_len = self.inode_indexes.len() * size_of::<u32>();
+        let cur_len = self.inodes.len() * size_of::<u32>();
         let padding_bytes = align_to_rafs(cur_len) - cur_len;
         w.write_padding(padding_bytes)?;
 
@@ -521,8 +521,8 @@ impl PrefetchTable {
         offset: u64,
         table_size: usize,
     ) -> RafsResult<()> {
-        self.inode_indexes = vec![0u32; table_size];
-        let (_, data, _) = unsafe { self.inode_indexes.align_to_mut::<u8>() };
+        self.inodes = vec![0u32; table_size];
+        let (_, data, _) = unsafe { self.inodes.align_to_mut::<u8>() };
         nix::sys::uio::pread(r.as_raw_fd(), data, offset as i64)
             .map_err(|e| RafsError::Prefetch(e.to_string()))?;
 
