@@ -7,7 +7,7 @@ use std::fs::{remove_file, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -81,10 +81,18 @@ impl BlobBufferWriter {
         f.flush()?;
 
         if let Some(name) = new_name {
-            if let BlobStorage::BlobsDir(_s) = &self.blob_stor {
+            if let BlobStorage::BlobsDir(s) = &self.blob_stor {
                 let empty = CString::default();
-                // Safe because this doesn't modify any memory and we check the return value.
-                // Being used fd never be closed before.
+
+                // NOTE: File with same name will be deleted ahead of time.
+                // So each newly generated blob can be stored.
+                let might_exist_path = Path::new(s).join(name);
+                if might_exist_path.exists() {
+                    remove_file(might_exist_path)?;
+                }
+
+                // Safe because this doesn't modify any memory and we check the
+                // return value. Being used fd never be closed before.
                 let res = unsafe {
                     libc::linkat(
                         f.as_raw_fd(),
