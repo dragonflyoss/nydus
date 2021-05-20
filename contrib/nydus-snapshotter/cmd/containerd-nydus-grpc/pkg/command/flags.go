@@ -7,17 +7,21 @@
 package command
 
 import (
+	"os"
+	"path/filepath"
+	"time"
+
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"os"
 )
 
 const (
 	defaultAddress        = "/run/containerd-nydus-grpc/containerd-nydus-grpc.sock"
 	defaultLogLevel       = logrus.InfoLevel
 	defaultRootDir        = "/var/lib/containerd-nydus-grpc"
+	defaultGCPeriod       = "24h"
 	defaultPublicKey      = "/signing/nydus-image-signing-public.key"
 	defaultNydusdPath     = "/bin/nydusd"
 	defaultNydusImagePath = "/bin/nydusd-img"
@@ -28,6 +32,8 @@ type Args struct {
 	LogLevel             string
 	ConfigPath           string
 	RootDir              string
+	CacheDir             string
+	GCPeriod             string
 	ValidateSignature    bool
 	PublicKeyFile        string
 	ConvertVpcRegistry   bool
@@ -71,6 +77,18 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "path to the root directory for this snapshotter",
 			Destination: &args.RootDir,
 		},
+		&cli.StringFlag{
+			Name:        "cache-dir",
+			Value:       "",
+			Usage:       "path to the cache dir",
+			Destination: &args.CacheDir,
+		},
+		&cli.StringFlag{
+			Name:        "gc-period",
+			Value:       defaultGCPeriod,
+			Usage:       "period for gc blob cache, for example, 1m, 2h",
+			Destination: &args.GCPeriod,
+		},
 		&cli.BoolFlag{
 			Name:        "validate-signature",
 			Value:       false,
@@ -101,7 +119,7 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether automatically convert the image to vpc registry to accelerate image pulling",
 			Destination: &args.ConvertVpcRegistry,
 		},
-	       &cli.BoolFlag{
+		&cli.BoolFlag{
 			Name:        "shared-daemon",
 			Value:       false,
 			Usage:       "Deprecated, equivalent to \"--daemon-mode shared\"",
@@ -160,6 +178,11 @@ func Validate(args *Args, cfg *config.Config) error {
 	}
 	cfg.DaemonCfg = daemonCfg
 	cfg.RootDir = args.RootDir
+
+	cfg.CacheDir = args.CacheDir
+	if len(cfg.CacheDir) == 0 {
+		cfg.CacheDir = filepath.Join(cfg.RootDir, "cache")
+	}
 	cfg.ValidateSignature = args.ValidateSignature
 	cfg.PublicKeyFile = args.PublicKeyFile
 	cfg.ConvertVpcRegistry = args.ConvertVpcRegistry
@@ -175,5 +198,11 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.EnableMetrics = args.EnableMetrics
 	cfg.MetricsFile = args.MetricsFile
 	cfg.EnableStargz = args.EnableStargz
+
+	d, err := time.ParseDuration(args.GCPeriod)
+	if err != nil {
+		return errors.Wrapf(err, "parse gc period %v failed", args.GCPeriod)
+	}
+	cfg.GCPeriod = d
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
 
@@ -18,9 +19,18 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+const (
+	databaseFileName = "nydus.db"
+)
+
 // Bucket names
 var (
 	daemonsBucketName = []byte("daemons") // Contains daemon info <daemon_id>=<daemon>
+
+	cachesBucketName   = []byte("caches")
+	snapshotBucketName = []byte("snapshots")
+
+	blobBucketName = []byte("blobs")
 )
 
 var (
@@ -36,7 +46,8 @@ type Database struct {
 }
 
 // NewDatabase creates a new or open existing database file
-func NewDatabase(dbfile string) (*Database, error) {
+func NewDatabase(rootDir string) (*Database, error) {
+	dbfile := filepath.Join(rootDir, databaseFileName)
 	if err := ensureDirectory(filepath.Dir(dbfile)); err != nil {
 		return nil, err
 	}
@@ -63,6 +74,15 @@ func ensureDirectory(dir string) error {
 func (d *Database) initDatabase() error {
 	return d.db.Update(func(tx *bolt.Tx) error {
 		if _, err := tx.CreateBucketIfNotExists(daemonsBucketName); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(cachesBucketName); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(snapshotBucketName); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(blobBucketName); err != nil {
 			return err
 		}
 		return nil
@@ -141,6 +161,21 @@ func putObject(bucket *bolt.Bucket, key string, obj interface{}) error {
 	return nil
 }
 
+func updateObject(bucket *bolt.Bucket, key string, obj interface{}) error {
+	keyBytes := []byte(key)
+
+	value, err := json.Marshal(obj)
+	if err != nil {
+		return errors.Wrapf(err, "failed to marshall object with key %q", key)
+	}
+
+	if err := bucket.Put(keyBytes, value); err != nil {
+		return errors.Wrapf(err, "failed to insert object with key %q", key)
+	}
+
+	return nil
+}
+
 func getObject(bucket *bolt.Bucket, key string, obj interface{}) error {
 	if obj == nil {
 		return errors.Errorf("invalid arg: obj cannot be nil")
@@ -156,4 +191,125 @@ func getObject(bucket *bolt.Bucket, key string, obj interface{}) error {
 	}
 
 	return nil
+}
+
+func (d *Database) addSnapshot(imageID string, snapshot *Snapshot) error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		cbkt := tx.Bucket(cachesBucketName)
+		sbkt, err := cbkt.CreateBucketIfNotExists(snapshotBucketName)
+		if err != nil {
+			return err
+		}
+		exist := &Snapshot{}
+
+		if err := getObject(sbkt, imageID, exist); err == nil {
+			exist.Blobs = snapshot.Blobs
+			exist.UpdateAt = time.Now()
+			return updateObject(sbkt, imageID, exist)
+		}
+
+		return putObject(sbkt, imageID, snapshot)
+	})
+}
+
+func (d *Database) addBlob(blobID string, blob *Blob) error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		cbkt := tx.Bucket(cachesBucketName)
+		bbkt, err := cbkt.CreateBucketIfNotExists(blobBucketName)
+		if err != nil {
+			return err
+		}
+
+		exist := &Blob{}
+		if err := getObject(bbkt, blobID, exist); err == nil {
+			exist.UpdateAt = time.Now()
+			return updateObject(bbkt, blobID, exist)
+		}
+		return putObject(bbkt, blobID, blob)
+	})
+}
+
+func (d *Database) delSnapshot(imageID string) error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		cbkt := tx.Bucket(cachesBucketName)
+		sbkt, err := cbkt.CreateBucketIfNotExists(snapshotBucketName)
+		if err != nil {
+			return err
+		}
+		if err := sbkt.Delete([]byte(imageID)); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (d *Database) delBlob(blobID string) error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		cbkt := tx.Bucket(cachesBucketName)
+		bbkt, err := cbkt.CreateBucketIfNotExists(blobBucketName)
+		if err != nil {
+			return err
+		}
+		if err := bbkt.Delete([]byte(blobID)); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (d *Database) getMarked() (map[string]struct{}, error) {
+	var results = make(map[string]struct{})
+	if err := d.db.View(func(tx *bolt.Tx) error {
+		cbkt := tx.Bucket(cachesBucketName)
+		sbkt := cbkt.Bucket(snapshotBucketName)
+
+		return sbkt.ForEach(func(k, v []byte) error {
+			snapshot := &Snapshot{}
+			if err := json.Unmarshal(v, snapshot); err != nil {
+				return err
+			}
+			for _, blobID := range snapshot.Blobs {
+				results[blobID] = struct{}{}
+			}
+			return nil
+		})
+	}); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (d *Database) walkBlobs(filter func(blobID string) bool) ([]string, error) {
+	var results []string
+	if err := d.db.View(func(tx *bolt.Tx) error {
+		cbkt := tx.Bucket(cachesBucketName)
+		bbkt := cbkt.Bucket(blobBucketName)
+
+		if err := bbkt.ForEach(func(k, v []byte) error {
+			key := string(k)
+			if filter(key) {
+				results = append(results, key)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (d *Database) getUnusedBlobs() ([]string, error) {
+	blobSeens, err := d.getMarked()
+	if err != nil {
+		return nil, err
+	}
+	return d.walkBlobs(func(blob string) bool {
+		if _, ok := blobSeens[blob]; !ok {
+			return true
+		}
+		return false
+	})
 }

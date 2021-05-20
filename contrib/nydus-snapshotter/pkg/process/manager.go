@@ -36,14 +36,14 @@ type Manager struct {
 
 type Opt struct {
 	NydusdBinaryPath string
-	RootDir          string
+	Database         *store.Database
 	DaemonMode       string
 }
 
 func NewManager(opt Opt) (*Manager, error) {
-	s, err := store.NewDaemonStore(opt.RootDir)
+	s, err := store.NewDaemonStore(opt.Database)
 	if err != nil {
-		return &Manager{}, err
+		return nil, err
 	}
 
 	return &Manager{

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/cache"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/fs"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
@@ -48,6 +49,17 @@ func WithProcessManager(pm *process.Manager) NewFSOpt {
 		}
 
 		d.manager = pm
+		return nil
+	}
+}
+
+func WithCacheManager(cm *cache.Manager) NewFSOpt {
+	return func(d *filesystem) error {
+		if cm == nil {
+			return errors.New("cache manager cannot be nil")
+		}
+
+		d.cacheMgr = cm
 		return nil
 	}
 }
