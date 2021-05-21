@@ -520,13 +520,10 @@ impl PrefetchTable {
         r: &mut RafsIoReader,
         offset: u64,
         table_size: usize,
-    ) -> RafsResult<()> {
+    ) -> nix::Result<usize> {
         self.inodes = vec![0u32; table_size];
         let (_, data, _) = unsafe { self.inodes.align_to_mut::<u8>() };
         nix::sys::uio::pread(r.as_raw_fd(), data, offset as i64)
-            .map_err(|e| RafsError::Prefetch(e.to_string()))?;
-
-        Ok(())
     }
 }
 
