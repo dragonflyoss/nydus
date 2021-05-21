@@ -15,6 +15,7 @@ use rafs::metadata::layout::{
 use rafs::{RafsIoRead, RafsIoReader};
 
 pub(crate) struct RafsInspector {
+    request_mode: bool,
     bootstrap: RafsIoReader,
     layout_profile: RafsLayoutV5,
     rafs_meta: RafsMeta,
@@ -71,7 +72,7 @@ pub enum Action {
 }
 
 impl RafsInspector {
-    pub fn new(b: &Path) -> Result<Self> {
+    pub fn new(b: &Path, request_mode: bool) -> Result<Self> {
         let layout_profile = RafsLayoutV5::new();
         let mut f = RafsIoRead::from_file(b)
             .map_err(|e| anyhow!("Can't find bootstrap, path={:?}, {:?}", b, e))?;
@@ -83,6 +84,7 @@ impl RafsInspector {
         inodes_table.load(&mut f)?;
 
         Ok(RafsInspector {
+            request_mode,
             bootstrap: f,
             layout_profile,
             rafs_meta,
@@ -192,21 +194,32 @@ impl RafsInspector {
             self.rafs_meta.prefetch_table_offset,
             self.rafs_meta.prefetch_table_entries as usize,
         )?;
-        println!(
-            "Prefetched Files: {}",
-            self.rafs_meta.prefetch_table_entries
-        );
 
-        for ino in pt.inodes {
-            let path = self.path_from_ino(ino as u64)?;
+        let o = if self.request_mode {
+            let mut value = json!([]);
+            for ino in pt.inodes {
+                let path = self.path_from_ino(ino as u64)?;
+                let v = json!({"inode":ino, "path": path});
+                value.as_array_mut().unwrap().push(v);
+            }
+            Some(value)
+        } else {
             println!(
-                r#"Inode Number:{inode_number:10}   |   Path: {path:?} "#,
-                path = path,
-                inode_number = ino,
+                "Prefetched Files: {}",
+                self.rafs_meta.prefetch_table_entries
             );
-        }
+            for ino in pt.inodes {
+                let path = self.path_from_ino(ino as u64)?;
+                println!(
+                    r#"Inode Number:{inode_number:10} | Path: {path:?} "#,
+                    path = path,
+                    inode_number = ino,
+                );
+            }
+            None
+        };
 
-        Ok(None)
+        Ok(o)
     }
 
     pub fn cmd_stat_file(&mut self, name: &str) -> Result<Option<Value>> {
@@ -276,17 +289,23 @@ impl RafsInspector {
     pub fn cmd_stats(&mut self) -> Result<Option<Value>> {
         let sb = Self::super_block(&mut self.bootstrap, &self.layout_profile)?;
 
-        println!(
-            r#"
+        let o = if self.request_mode {
+            Some(json!({"inodes_count": sb.inodes_count()}))
+        } else {
+            println!(
+                r#"
     Version:            {version}
     Inodes Count:       {inodes_count}
     Flags:              {flags}"#,
-            version = sb.version(),
-            inodes_count = sb.inodes_count(),
-            flags = sb.flags()
-        );
+                version = sb.version(),
+                inodes_count = sb.inodes_count(),
+                flags = sb.flags()
+            );
 
-        Ok(None)
+            None
+        };
+
+        Ok(o)
     }
 
     pub fn cmd_list_blobs(&mut self) -> Result<Option<Value>> {
@@ -296,23 +315,84 @@ impl RafsInspector {
         let mut blobs = OndiskBlobTable::new();
         blobs.load(&mut self.bootstrap, self.rafs_meta.blob_table_size)?;
 
-        for b in blobs.entries {
-            println!(
-                r#"
+        let o = if self.request_mode {
+            let mut value = json!([]);
+            for b in blobs.entries {
+                let v = json!({"blob_id": b.blob_id, "readahead_offset": b.readahead_offset, "readahead_size":b.readahead_size});
+                value.as_array_mut().unwrap().push(v);
+            }
+            Some(value)
+        } else {
+            for b in blobs.entries {
+                println!(
+                    r#"
     Blob ID:            {blob_id}
     Readahead Offset:   {readahead_offset}
     Readahead Size:     {readahead_size}"#,
-                blob_id = b.blob_id,
-                readahead_offset = b.readahead_offset,
-                readahead_size = b.readahead_size,
-            )
-        }
+                    blob_id = b.blob_id,
+                    readahead_offset = b.readahead_offset,
+                    readahead_size = b.readahead_size,
+                )
+            }
+            None
+        };
 
-        Ok(None)
+        Ok(o)
     }
 }
 
 pub(crate) struct Prompt {}
+
+#[derive(Debug)]
+pub(crate) enum ExecuteError {
+    HelpCommand,
+    IllegalCommand,
+    Exit,
+    ExecuteError(anyhow::Error),
+}
+
+pub(crate) struct Executor {}
+
+impl Executor {
+    pub fn execute(
+        inspector: &mut RafsInspector,
+        input: String,
+    ) -> std::result::Result<Option<Value>, ExecuteError> {
+        let mut raw = input.strip_suffix("\n").unwrap_or(&input).split(' ');
+        let cmd = raw.next().unwrap();
+        let args = raw.next();
+
+        debug!("execute {:?} {:?}", cmd, args);
+
+        let output = match (cmd, args) {
+            ("help", _) => {
+                Self::usage().unwrap();
+                return Err(ExecuteError::HelpCommand);
+            }
+            ("exit", _) => return Err(ExecuteError::Exit),
+            ("stats", None) => inspector.cmd_stats(),
+            ("ls", None) => inspector.cmd_list_dir(),
+            ("cd", Some(dir)) => inspector.cmd_change_dir(dir),
+            ("stat", Some(file_name)) => inspector.cmd_stat_file(file_name),
+            ("blobs", None) => inspector.cmd_list_blobs(),
+            ("prefetch", None) => inspector.cmd_list_prefetch(),
+            _ => {
+                println!("Unsupported command or argument is needed!");
+                {
+                    Self::usage().unwrap();
+                    return Err(ExecuteError::IllegalCommand);
+                };
+            }
+        }
+        .map_err(ExecuteError::ExecuteError)?;
+
+        Ok(output)
+    }
+
+    pub(crate) fn usage() -> Result<Option<Value>> {
+        Ok(None)
+    }
+}
 
 impl Prompt {
     pub(crate) fn run(mut inspector: RafsInspector) {
@@ -323,41 +403,20 @@ impl Prompt {
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap();
 
-            let mut raw = input.strip_suffix("\n").unwrap().split(' ');
-            let cmd = raw.next().unwrap();
-            let args = raw.next();
-
-            debug!("execute {:?} {:?}", cmd, args);
-
-            if cmd == "exit" || cmd == "quit" || cmd == "q" {
-                break;
-            }
-
-            let output = match (cmd, args) {
-                ("help", None) => Self::usage(),
-                ("stats", None) => inspector.cmd_stats(),
-                ("ls", None) => inspector.cmd_list_dir(),
-                ("cd", Some(dir)) => inspector.cmd_change_dir(dir),
-                ("stat", Some(file_name)) => inspector.cmd_stat_file(file_name),
-                ("blobs", None) => inspector.cmd_list_blobs(),
-                ("prefetch", None) => inspector.cmd_list_prefetch(),
-                _ => {
-                    println!("Unsupported command or argument is needed!");
-                    Self::usage()
+            match Executor::execute(&mut inspector, input) {
+                Err(ExecuteError::Exit) => break,
+                Err(ExecuteError::IllegalCommand) => continue,
+                Err(ExecuteError::HelpCommand) => continue,
+                Err(ExecuteError::ExecuteError(e)) => {
+                    println!("Failed in executing command, {:?}", e);
+                    continue;
                 }
-            };
-
-            if let Ok(Some(o)) = output {
-                serde_json::to_writer(std::io::stdout(), &o)
-                    .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
-            } else if let Err(e) = output {
-                println!("Failed in executing command, {:?}", e);
-            } else {
+                Ok(Some(o)) => {
+                    serde_json::to_writer(std::io::stdout(), &o)
+                        .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
+                }
+                _ => continue,
             }
         }
-    }
-
-    pub(crate) fn usage() -> Result<Option<Value>> {
-        Ok(None)
     }
 }

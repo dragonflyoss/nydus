@@ -21,6 +21,8 @@ mod validator;
 extern crate log;
 extern crate serde;
 #[macro_use]
+extern crate serde_json;
+#[macro_use]
 extern crate lazy_static;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
@@ -257,11 +259,12 @@ fn main() -> Result<()> {
                         .takes_value(true),
                 )
                 .arg(
-                    Arg::with_name("interactive")
-                        .long("interactive")
-                        .help("Inspect image in interactive mode")
+                    Arg::with_name("request")
+                        .long("request")
+                        .short("R")
+                        .help("Inspect image in request mode")
                         .required(false)
-                        .takes_value(false),
+                        .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("blob-dir").help("A directory holding all layers related to a single image")
@@ -490,11 +493,21 @@ fn main() -> Result<()> {
     if let Some(matches) = cmd.subcommand_matches("inspect") {
         // Safe to unwrap since `bootstrap` has default value.
         let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
-        let inspector = inspect::RafsInspector::new(bootstrap_path).map_err(|e| {
-            error!("Failed to instantiate inspector, {:?}", e);
-            e
-        })?;
-        inspect::Prompt::run(inspector);
+        let cmd = matches.value_of("request");
+
+        let mut inspector =
+            inspect::RafsInspector::new(bootstrap_path, cmd.is_some()).map_err(|e| {
+                error!("Failed to instantiate inspector, {:?}", e);
+                e
+            })?;
+
+        if let Some(c) = cmd {
+            let o = inspect::Executor::execute(&mut inspector, c.to_string()).unwrap();
+            serde_json::to_writer(std::io::stdout(), &o)
+                .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
+        } else {
+            inspect::Prompt::run(inspector);
+        }
     }
 
     Ok(())
