@@ -231,7 +231,7 @@ impl CachedInode {
             r.read_exact(name_buf.as_mut_slice())?;
             self.i_name = bytes_to_os_str(&name_buf).to_os_string();
         }
-        r.seek_to_next_aligned(name_size);
+        r.seek_to_next_aligned(name_size)?;
         Ok(())
     }
 
@@ -241,7 +241,7 @@ impl CachedInode {
             r.read_exact(symbol_buf.as_mut_slice())?;
             self.i_target = bytes_to_os_str(&symbol_buf).to_os_string();
         }
-        r.seek_to_next_aligned(symlink_size);
+        r.seek_to_next_aligned(symlink_size)?;
         Ok(())
     }
 
