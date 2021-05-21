@@ -83,17 +83,16 @@ impl dyn RafsIoWrite {
 }
 
 impl dyn RafsIoRead {
-    pub fn seek_to_next_aligned(&mut self, last_read_len: usize) {
+    pub fn seek_to_next_aligned(&mut self, last_read_len: usize) -> Result<u64> {
         // Seek should not fail otherwise rafs goes insane.
         self.seek(SeekFrom::Current(
             (align_to_rafs(last_read_len) - last_read_len) as i64,
         ))
-        .unwrap();
     }
 
-    pub fn seek_plus_offset(&mut self, plus_offset: i64) {
+    pub fn seek_plus_offset(&mut self, plus_offset: i64) -> Result<u64> {
         // Seek should not fail otherwise rafs goes insane.
-        self.seek(SeekFrom::Current(plus_offset)).unwrap();
+        self.seek(SeekFrom::Current(plus_offset))
     }
 
     pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {

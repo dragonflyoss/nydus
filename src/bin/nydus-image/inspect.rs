@@ -7,6 +7,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use rafs::metadata::layout::{
     OndiskBlobTable, OndiskInode, OndiskInodeTable, OndiskSuperBlock, PrefetchTable,
 };
@@ -73,12 +75,12 @@ impl RafsInspector {
         let layout_profile = RafsLayoutV5::new();
         let mut f = RafsIoRead::from_file(b)
             .map_err(|e| anyhow!("Can't find bootstrap, path={:?}, {:?}", b, e))?;
-        let sb = Self::super_block(&mut f, &layout_profile).unwrap();
+        let sb = Self::super_block(&mut f, &layout_profile)?;
         let rafs_meta: RafsMeta = (&sb).into();
 
         let mut inodes_table = OndiskInodeTable::new(rafs_meta.inode_table_entries as usize);
-        f.seek_to_offset(rafs_meta.inode_table_offset).unwrap();
-        inodes_table.load(&mut f).unwrap();
+        f.seek_to_offset(rafs_meta.inode_table_offset)?;
+        inodes_table.load(&mut f)?;
 
         Ok(RafsInspector {
             bootstrap: f,
@@ -97,49 +99,69 @@ impl RafsInspector {
     ) -> Result<OndiskSuperBlock> {
         let mut sb = OndiskSuperBlock::new();
 
-        // Rafs super block always start from the very beginning of bootstrap.
-        b.seek_to_offset(layout_profile.super_block_offset as u64)
-            .unwrap();
+        b.seek_to_offset(layout_profile.super_block_offset as u64)?;
         sb.load(b)
             .map_err(|e| anyhow!("Failed in loading super block, {:?}", e))?;
 
         Ok(sb)
     }
 
-    fn info_prefetch(&mut self) {
-        let mut pt = PrefetchTable::new();
-        pt.load_prefetch_table_from(
-            &mut self.bootstrap,
-            self.rafs_meta.prefetch_table_offset,
-            self.rafs_meta.prefetch_table_entries as usize,
-        )
-        .unwrap();
-        println!(
-            "Prefetched Files: {}",
-            self.rafs_meta.prefetch_table_entries
-        );
-
-        for ino in pt.inodes {
-            let path = self.path_from_ino(ino as u64).unwrap();
-            println!(
-                r#"Inode Number:{inode_number:10}   |   Path: {path:?} "#,
-                path = path,
-                inode_number = ino,
-            );
-        }
-    }
-
     fn load_ondisk_inode(&mut self, offset: u32) -> Result<(OndiskInode, OsString)> {
         let mut ondisk_inode = OndiskInode::new();
-        self.bootstrap.seek_to_offset(offset as u64).unwrap();
+        self.bootstrap.seek_to_offset(offset as u64)?;
         ondisk_inode
             .load(&mut self.bootstrap)
             .map_err(|e| anyhow!("failed to jump to inode offset={}, {:?}", offset, e))?;
 
         // No need to move offset forward
-        let file_name = ondisk_inode.file_name(&mut self.bootstrap).unwrap();
+        let file_name = ondisk_inode.file_name(&mut self.bootstrap)?;
 
         Ok((ondisk_inode, file_name))
+    }
+
+    /// Index is u32, by which the inode can be found.
+    fn load_inode_by_index(&mut self, index: usize) -> Result<(OndiskInode, OsString)> {
+        // Safe to truncate `inode_table_offset` now.
+        let inode_offset = self.inodes_table.data[index] << 3;
+        self.load_ondisk_inode(inode_offset)
+    }
+
+    pub fn cmd_list_dir(&mut self) -> Result<Option<Value>> {
+        self.iter_dir(|f, inode, _idx| {
+            trace!("inode {:?}, name: {:?}", inode, f);
+
+            println!(
+                r#"     {inode_number}            {name:?}"#,
+                name = f,
+                inode_number = inode.i_ino,
+            );
+
+            Action::Continue
+        })?;
+
+        Ok(None)
+    }
+
+    pub fn iter_dir(
+        &mut self,
+        mut op: impl FnMut(&OsStr, &OndiskInode, u32) -> Action,
+    ) -> Result<()> {
+        let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
+
+        let children_count = dir_inode.i_child_count;
+        let first_index = dir_inode.i_child_index;
+        let last_index = first_index + children_count;
+
+        for idx in first_index..=last_index {
+            let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
+            trace!("inode: {:?}; name: {:?}", child_inode, name);
+            match op(name.as_os_str(), &child_inode, idx) {
+                Action::Break => break,
+                Action::Continue => continue,
+            }
+        }
+
+        Ok(())
     }
 
     fn path_from_ino(&mut self, mut ino: u64) -> Result<PathBuf> {
@@ -147,8 +169,8 @@ impl RafsInspector {
         let mut entries = Vec::<PathBuf>::new();
 
         loop {
-            let offset = self.inodes_table.get(ino).unwrap();
-            let (inode, file_name) = self.load_ondisk_inode(offset).unwrap();
+            let offset = self.inodes_table.get(ino)?;
+            let (inode, file_name) = self.load_ondisk_inode(offset)?;
             entries.push(file_name.into());
             if inode.i_parent == 0 {
                 break;
@@ -163,32 +185,31 @@ impl RafsInspector {
         Ok(path)
     }
 
-    /// Index is u32, by which the inode can be found.
-    fn stat_inode(&mut self, index: usize) -> Result<(OndiskInode, OsString)> {
-        // Safe to truncate `inode_table_offset` now.
-        let inode_offset = self.inodes_table.data[index] << 3;
+    fn cmd_list_prefetch(&mut self) -> Result<Option<Value>> {
+        let mut pt = PrefetchTable::new();
+        pt.load_prefetch_table_from(
+            &mut self.bootstrap,
+            self.rafs_meta.prefetch_table_offset,
+            self.rafs_meta.prefetch_table_entries as usize,
+        )?;
+        println!(
+            "Prefetched Files: {}",
+            self.rafs_meta.prefetch_table_entries
+        );
 
-        self.load_ondisk_inode(inode_offset)
-    }
-
-    pub fn iter_dir(&mut self, mut op: impl FnMut(&OsStr, &OndiskInode, u32) -> Action) {
-        let (dir_inode, _) = self.stat_inode(self.cur_dir_index as usize).unwrap();
-
-        let children_count = dir_inode.i_child_count;
-        let first_index = dir_inode.i_child_index;
-        let last_index = first_index + children_count;
-
-        for idx in first_index..=last_index {
-            let (child_inode, name) = self.stat_inode(idx as usize).unwrap();
-            trace!("inode: {:?}; name: {:?}", child_inode, name);
-            match op(name.as_os_str(), &child_inode, idx) {
-                Action::Break => break,
-                Action::Continue => continue,
-            }
+        for ino in pt.inodes {
+            let path = self.path_from_ino(ino as u64)?;
+            println!(
+                r#"Inode Number:{inode_number:10}   |   Path: {path:?} "#,
+                path = path,
+                inode_number = ino,
+            );
         }
+
+        Ok(None)
     }
 
-    pub fn stat_by_name(&mut self, name: &str) {
+    pub fn cmd_stat_file(&mut self, name: &str) -> Result<Option<Value>> {
         self.iter_dir(|f, inode, idx| {
             if f == name {
                 println!(
@@ -215,33 +236,21 @@ impl RafsInspector {
                 return Action::Break;
             }
             Action::Continue
-        });
+        })?;
+
+        Ok(None)
     }
 
-    pub fn list_dir(&mut self) {
-        self.iter_dir(|f, inode, _idx| {
-            trace!("inode {:?}, name: {:?}", inode, f);
-
-            println!(
-                r#"     {inode_number}            {name:?}"#,
-                name = f,
-                inode_number = inode.i_ino,
-            );
-
-            Action::Continue
-        })
-    }
-
-    pub fn change_dir(&mut self, name: &str) {
+    pub fn cmd_change_dir(&mut self, name: &str) -> Result<Option<Value>> {
         if name == "." {
-            return;
+            return Ok(None);
         }
 
         if name == ".." {
             if let Some(p) = self.parent_indexes.pop() {
                 self.cur_dir_index = p
             }
-            return;
+            return Ok(None);
         }
 
         let mut new_dir_index = None;
@@ -252,7 +261,7 @@ impl RafsInspector {
                 return Action::Break;
             }
             Action::Continue
-        });
+        })?;
 
         if let Some(n) = new_dir_index {
             self.parent_indexes.push(self.cur_dir_index);
@@ -260,10 +269,13 @@ impl RafsInspector {
         } else {
             println!("File does not exist");
         }
+
+        Ok(None)
     }
 
-    pub fn stats(&mut self) {
-        let sb = Self::super_block(&mut self.bootstrap, &self.layout_profile).unwrap();
+    pub fn cmd_stats(&mut self) -> Result<Option<Value>> {
+        let sb = Self::super_block(&mut self.bootstrap, &self.layout_profile)?;
+
         println!(
             r#"
     Version:            {version}
@@ -272,18 +284,17 @@ impl RafsInspector {
             version = sb.version(),
             inodes_count = sb.inodes_count(),
             flags = sb.flags()
-        )
+        );
+
+        Ok(None)
     }
 
-    pub fn list_blobs(&mut self) {
+    pub fn cmd_list_blobs(&mut self) -> Result<Option<Value>> {
         self.bootstrap
-            .seek_to_offset(self.rafs_meta.blob_table_offset)
-            .unwrap();
+            .seek_to_offset(self.rafs_meta.blob_table_offset)?;
 
         let mut blobs = OndiskBlobTable::new();
-        blobs
-            .load(&mut self.bootstrap, self.rafs_meta.blob_table_size)
-            .unwrap();
+        blobs.load(&mut self.bootstrap, self.rafs_meta.blob_table_size)?;
 
         for b in blobs.entries {
             println!(
@@ -296,6 +307,8 @@ impl RafsInspector {
                 readahead_size = b.readahead_size,
             )
         }
+
+        Ok(None)
     }
 }
 
@@ -320,21 +333,31 @@ impl Prompt {
                 break;
             }
 
-            match cmd {
-                "help" => Self::usage(),
-                "stats" => inspector.stats(),
-                "ls" => inspector.list_dir(),
-                "cd" => inspector.change_dir(args.unwrap()),
-                "stat" => inspector.stat_by_name(args.unwrap()),
-                "blobs" => inspector.list_blobs(),
-                "prefetch" => inspector.info_prefetch(),
+            let output = match (cmd, args) {
+                ("help", None) => Self::usage(),
+                ("stats", None) => inspector.cmd_stats(),
+                ("ls", None) => inspector.cmd_list_dir(),
+                ("cd", Some(dir)) => inspector.cmd_change_dir(dir),
+                ("stat", Some(file_name)) => inspector.cmd_stat_file(file_name),
+                ("blobs", None) => inspector.cmd_list_blobs(),
+                ("prefetch", None) => inspector.cmd_list_prefetch(),
                 _ => {
-                    println!("Unsupported command");
+                    println!("Unsupported command or argument is needed!");
                     Self::usage()
                 }
+            };
+
+            if let Ok(Some(o)) = output {
+                serde_json::to_writer(std::io::stdout(), &o)
+                    .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
+            } else if let Err(e) = output {
+                println!("Failed in executing command, {:?}", e);
+            } else {
             }
         }
     }
 
-    pub(crate) fn usage() {}
+    pub(crate) fn usage() -> Result<Option<Value>> {
+        Ok(None)
+    }
 }
