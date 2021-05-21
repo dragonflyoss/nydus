@@ -32,7 +32,7 @@ hmac = { version = "0.8.1", optional = true }
 url = { version = "2.1.1", optional = true }
 vm-memory = ">=0.2.0"
 nydus-utils = { path = "../utils" }
-storage = { path = "../storage", features = ["backend-localfs", "backend-oss", "backend-registry"] }
+storage = { path = "../storage", features = ["backend-localfs"] }
 
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "cfd2cca" }
 
@@ -44,3 +44,5 @@ vmm-sys-util = "0.6.0"
 fusedev = ["fuse-rs/fusedev"]
 virtio-fs = ["fuse-rs/virtiofs"]
 vhost-user-fs = ["fuse-rs/vhost-user-fs"]
+backend-oss = ["storage/backend-oss"]
+backend-registry = ["storage/backend-registry"]
