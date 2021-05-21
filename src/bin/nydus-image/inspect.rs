@@ -231,7 +231,7 @@ impl RafsInspector {
     Index:              {index}
     Name:               {name:?}
     Size:               {size}
-    Mode:               {mode}
+    Mode:               0x{mode:X}
     Nlink:              {nlink}
     UID:                {uid}
     GID:                {gid}
@@ -377,7 +377,7 @@ impl Executor {
             ("blobs", None) => inspector.cmd_list_blobs(),
             ("prefetch", None) => inspector.cmd_list_prefetch(),
             _ => {
-                println!("Unsupported command or argument is needed!");
+                println!("Unsupported command!");
                 {
                     Self::usage().unwrap();
                     return Err(ExecuteError::IllegalCommand);
@@ -390,6 +390,17 @@ impl Executor {
     }
 
     pub(crate) fn usage() -> Result<Option<Value>> {
+        println!(
+            r#"
+    stats:              Display global rafs metadata
+    ls:                 Show files in current directory
+    cd DIR:             Change current directory
+    stat FILE_NAME:     Show particular information of rafs inode
+    blobs:              Show blobs table
+    prefetch:           Show prefetch table
+        "#
+        );
+
         Ok(None)
     }
 }
