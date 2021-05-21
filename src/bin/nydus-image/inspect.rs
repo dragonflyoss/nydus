@@ -128,22 +128,6 @@ impl RafsInspector {
         self.load_ondisk_inode(inode_offset)
     }
 
-    pub fn cmd_list_dir(&mut self) -> Result<Option<Value>> {
-        self.iter_dir(|f, inode, _idx| {
-            trace!("inode {:?}, name: {:?}", inode, f);
-
-            println!(
-                r#"     {inode_number}            {name:?}"#,
-                name = f,
-                inode_number = inode.i_ino,
-            );
-
-            Action::Continue
-        })?;
-
-        Ok(None)
-    }
-
     pub fn iter_dir(
         &mut self,
         mut op: impl FnMut(&OsStr, &OndiskInode, u32) -> Action,
@@ -151,8 +135,10 @@ impl RafsInspector {
         let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
 
         let children_count = dir_inode.i_child_count;
-        let first_index = dir_inode.i_child_index;
-        let last_index = first_index + children_count;
+        // FIXME: In fact, `i_child_index` is the first inode number rather than index
+        // Fix naming and logics in `nydus-image` building progress.
+        let first_index = dir_inode.i_child_index - 1;
+        let last_index = first_index + children_count - 1;
 
         for idx in first_index..=last_index {
             let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
@@ -185,6 +171,22 @@ impl RafsInspector {
         }
 
         Ok(path)
+    }
+
+    pub fn cmd_list_dir(&mut self) -> Result<Option<Value>> {
+        self.iter_dir(|f, inode, _idx| {
+            trace!("inode {:?}, name: {:?}", inode, f);
+
+            println!(
+                r#"     {inode_number}            {name:?}"#,
+                name = f,
+                inode_number = inode.i_ino,
+            );
+
+            Action::Continue
+        })?;
+
+        Ok(None)
     }
 
     fn cmd_list_prefetch(&mut self) -> Result<Option<Value>> {
@@ -267,11 +269,17 @@ impl RafsInspector {
         }
 
         let mut new_dir_index = None;
+        let mut err = "File does not exist";
 
-        self.iter_dir(|f, _inode, idx| {
+        self.iter_dir(|f, i, idx| {
             if f == name {
-                new_dir_index = Some(idx);
-                return Action::Break;
+                if i.is_dir() {
+                    new_dir_index = Some(idx);
+                    return Action::Break;
+                } else {
+                    err = "Not a directory";
+                    return Action::Break;
+                }
             }
             Action::Continue
         })?;
@@ -280,7 +288,7 @@ impl RafsInspector {
             self.parent_indexes.push(self.cur_dir_index);
             self.cur_dir_index = n;
         } else {
-            println!("File does not exist");
+            println!("{}", err);
         }
 
         Ok(None)
@@ -369,7 +377,7 @@ impl Executor {
                 Self::usage().unwrap();
                 return Err(ExecuteError::HelpCommand);
             }
-            ("exit", _) => return Err(ExecuteError::Exit),
+            ("exit", _) | ("q", _) => return Err(ExecuteError::Exit),
             ("stats", None) => inspector.cmd_stats(),
             ("ls", None) => inspector.cmd_list_dir(),
             ("cd", Some(dir)) => inspector.cmd_change_dir(dir),
