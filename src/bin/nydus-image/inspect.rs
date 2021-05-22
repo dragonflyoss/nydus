@@ -133,6 +133,7 @@ impl RafsInspector {
         mut op: impl FnMut(&OsStr, &OndiskInode, u32) -> Action,
     ) -> Result<()> {
         let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
+        let parent_ino = dir_inode.i_ino;
 
         let children_count = dir_inode.i_child_count;
         // FIXME: In fact, `i_child_index` is the first inode number rather than index
@@ -142,6 +143,11 @@ impl RafsInspector {
 
         for idx in first_index..=last_index {
             let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
+
+            if child_inode.i_parent != parent_ino {
+                bail!("File {:?} is not a child of CWD", name);
+            }
+
             trace!("inode: {:?}; name: {:?}", child_inode, name);
             match op(name.as_os_str(), &child_inode, idx) {
                 Action::Break => break,
