@@ -25,6 +25,11 @@ import (
 // examples/manifest/index.json, examples/manifest/manifest.json.
 type Parser struct {
 	Remote *remote.Remote
+	// Principle to select platform arch/os is that nydus only works on top of linux
+	// and interestedArch has to be specified in case of manifest list. So nydusify
+	// knowns how to choose the source image. In case of single manifest, `interestedArch`
+	// is the same with origin.
+	interestedArch string
 }
 
 // Image presents image contents.
@@ -44,10 +49,14 @@ type Parsed struct {
 }
 
 // New creates Nydus image parser instance.
-func New(remote *remote.Remote) *Parser {
-	return &Parser{
-		Remote: remote,
+func New(remote *remote.Remote, interestedArch string) (*Parser, error) {
+	if interestedArch != "arm64" && interestedArch != "amd64" {
+		return nil, fmt.Errorf("invalid arch %s", interestedArch)
 	}
+	return &Parser{
+		Remote:         remote,
+		interestedArch: interestedArch,
+	}, nil
 }
 
 // Try to find the topmost layer in Nydus manifest, it should
@@ -125,6 +134,12 @@ func (parser *Parser) parseImage(
 	if err != nil {
 		return nil, errors.Wrap(err, "pull image config")
 	}
+
+	// Just give user a simple hint telling option was ignored.
+	if config.Architecture != parser.interestedArch {
+		logrus.Warnf("Specified %s architecture was ignored", parser.interestedArch)
+	}
+
 	return &Image{
 		Desc:     *desc,
 		Manifest: *manifest,
@@ -145,6 +160,13 @@ func (parser *Parser) PullNydusBootstrap(ctx context.Context, image *Image) (io.
 	return reader, nil
 }
 
+func (p *Parser) matchImagePlatform(desc *ocispec.Descriptor) bool {
+	if p.interestedArch == desc.Platform.Architecture && desc.Platform.OS == "linux" {
+		return true
+	}
+	return false
+}
+
 // Parse parses Nydus image reference into Parsed object.
 func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 	logrus.Infof("Parsing image %s", parser.Remote.Ref)
@@ -163,10 +185,13 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 	switch imageDesc.MediaType {
 	// Handle image manifest
 	case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
+		// Because there is only one manifest, the source is determined,
+		//`interestedArch` does not have effect.
 		onlyManifest, err = parser.pullManifest(ctx, imageDesc)
 		if err != nil {
 			return nil, err
 		}
+
 		bootstrapDesc := findNydusBootstrapDesc(onlyManifest)
 		if bootstrapDesc != nil {
 			nydusDesc = imageDesc
@@ -185,15 +210,20 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 		for idx := range index.Manifests {
 			desc := index.Manifests[idx]
 			if desc.Platform != nil {
-				if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
+				// Currently, parser only find one interest image.
+				if parser.matchImagePlatform(&desc) {
 					if utils.IsNydusPlatform(desc.Platform) {
 						nydusDesc = &desc
 					} else {
 						ociDesc = &desc
 					}
+					break
 				}
 			} else {
+				// FIXME: Returning the first image without platform specified is subtle.
+				// It might not violate Image spec.
 				ociDesc = &desc
+				break
 			}
 		}
 	}

@@ -21,16 +21,17 @@ import (
 // Opt defines Checker options.
 // Note: target is the Nydus image reference.
 type Opt struct {
-	WorkDir        string
-	Source         string
-	Target         string
-	SourceInsecure bool
-	TargetInsecure bool
-	MultiPlatform  bool
-	NydusImagePath string
-	NydusdPath     string
-	BackendType    string
-	BackendConfig  string
+	WorkDir          string
+	Source           string
+	Target           string
+	SourceInsecure   bool
+	TargetInsecure   bool
+	MultiPlatform    bool
+	NydusImagePath   string
+	NydusdPath       string
+	BackendType      string
+	BackendConfig    string
+	ExpectedPlatform string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
@@ -48,7 +49,10 @@ func New(opt Opt) (*Checker, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "Init target image parser")
 	}
-	targetParser := parser.New(targetRemote)
+	targetParser, err := parser.New(targetRemote, opt.ExpectedPlatform)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create parser")
+	}
 
 	var sourceParser *parser.Parser
 	if opt.Source != "" {
@@ -56,7 +60,10 @@ func New(opt Opt) (*Checker, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "Init source image parser")
 		}
-		sourceParser = parser.New(sourceRemote)
+		sourceParser, err = parser.New(sourceRemote, opt.ExpectedPlatform)
+		if sourceParser == nil {
+			return nil, errors.Wrap(err, "failed to create parser")
+		}
 	}
 
 	checker := &Checker{

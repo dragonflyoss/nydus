@@ -87,7 +87,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
 	assert.Nil(t, err)
 
-	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
+	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir, "amd64")
 	assert.Nil(t, err)
 
 	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
@@ -140,6 +140,7 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 		NydusdPath:     nydusdPath,
 		BackendType:    nydusify.backendType,
 		BackendConfig:  nydusify.backendConfig,
+		TargetArch:     "amd64",
 	})
 	assert.Nil(t, err)
 

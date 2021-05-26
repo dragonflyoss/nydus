@@ -132,14 +132,13 @@ func main() {
 				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
 				&cli.StringFlag{Name: "target", Required: false, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
 				&cli.StringFlag{Name: "target-suffix", Required: false, Usage: "Add suffix to source image reference as target image reference, conflict with --target", EnvVars: []string{"TARGET_SUFFIX"}},
-
 				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
 				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
-
 				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image conversion", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "prefetch-dir", Value: "/", Usage: "Prefetch directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Merge OCI & Nydus manifest to manifest index for target image, please ensure that OCI manifest already exists in target image", EnvVars: []string{"MULTI_PLATFORM"}},
+				&cli.StringFlag{Name: "platform", Value: "amd64", Usage: "Specified coverted image platform"},
 				&cli.BoolFlag{Name: "docker-v2-format", Value: false, Usage: "Use docker image manifest v2, schema 2 format", EnvVars: []string{"DOCKER_V2_FORMAT"}},
 				&cli.StringFlag{Name: "backend-type", Value: "registry", Usage: "Specify Nydus blob storage backend type", EnvVars: []string{"BACKEND_TYPE"}},
 				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
@@ -218,7 +217,9 @@ func main() {
 				if err != nil {
 					return errors.Wrap(err, "Parse source reference")
 				}
-				sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir)
+				targetPlatform := c.String("platform")
+
+				sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir, targetPlatform)
 				if err != nil {
 					return errors.Wrap(err, "Parse source image")
 				}
@@ -267,7 +268,7 @@ func main() {
 				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
 
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Ensure the target image represents a manifest list, and it should consist of OCI and Nydus manifest", EnvVars: []string{"MULTI_PLATFORM"}},
-
+				&cli.StringFlag{Name: "platform", Value: "amd64", Usage: "Specified coverted image platform"},
 				&cli.StringFlag{Name: "work-dir", Value: "./output", Usage: "Work directory path for image check, will be cleaned before checking", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.StringFlag{Name: "nydusd", Value: "./nydusd", Usage: "The nydusd binary path", EnvVars: []string{"NYDUSD"}},
@@ -299,6 +300,7 @@ func main() {
 					NydusdPath:     c.String("nydusd"),
 					BackendType:    backendType,
 					BackendConfig:  backendConfig,
+					TargetArch:     c.String("platform"),
 				})
 				if err != nil {
 					return err
@@ -310,7 +312,7 @@ func main() {
 	}
 
 	// Under platform linux/arm64, containerd/compression prioritizes using `unpigz`
-	// to decompress tar.giz, which will be corruppted somehow. By disabling it,
+	// to decompress tar.giz, which will be corrupted somehow. By disabling it,
 	// keep nydusify behavior the same with x86_64 platform.
 	os.Setenv("CONTAINERD_DISABLE_PIGZ", "1")
 

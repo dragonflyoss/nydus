@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/containerd/containerd/mount"
 	"github.com/opencontainers/go-digest"
@@ -146,9 +147,40 @@ func (sl *defaultSourceLayer) ParentChainID() *digest.Digest {
 	return sl.parentChainID
 }
 
+// Input platform string should be formated like os/arch.
+func ExtractOsArch(platform string) (string, string, error) {
+
+	if !strings.Contains(platform, "/") {
+		return "", "", fmt.Errorf("invalid platform format, %s", platform)
+	}
+
+	p := strings.Split(platform, "/")
+	os := p[0]
+	arch := p[1]
+
+	if os != "linux" {
+		return "", "", fmt.Errorf("not support os %s", os)
+	}
+
+	if arch != "amd64" && arch != "arm64" {
+		return "", "", fmt.Errorf("not support architecture %s", arch)
+	}
+
+	return os, arch, nil
+}
+
 // DefaultSource pulls image layers from specify image reference
-func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) ([]SourceProvider, error) {
-	parser := parser.New(remote)
+func DefaultSource(ctx context.Context, remote *remote.Remote, workDir, platform string) ([]SourceProvider, error) {
+
+	_, arch, err := extractOsArch(platform)
+	if err != nil {
+		return nil, err
+	}
+
+	parser, err := parser.New(remote, arch)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create parser")
+	}
 	parsed, err := parser.Parse(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "Parse source image")
@@ -156,9 +188,9 @@ func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (
 
 	if parsed.OCIImage == nil {
 		if parsed.NydusImage != nil {
-			return nil, fmt.Errorf("The source is an image that only included Nydus manifest")
+			return nil, fmt.Errorf("the source is an image that only included Nydus manifest")
 		}
-		return nil, fmt.Errorf("Not found OCI %s manifest in source image", utils.SupportedOS+"/"+utils.SupportedArch)
+		return nil, fmt.Errorf("not found OCI %s manifest in source image", utils.SupportedOS+"/"+utils.SupportedArch)
 	}
 
 	sp := []SourceProvider{
