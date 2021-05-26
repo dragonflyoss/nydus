@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/containerd/containerd/reference/docker"
@@ -138,7 +139,7 @@ func main() {
 				&cli.StringFlag{Name: "prefetch-dir", Value: "/", Usage: "Prefetch directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Merge OCI & Nydus manifest to manifest index for target image, please ensure that OCI manifest already exists in target image", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.StringFlag{Name: "platform", Value: "amd64", Usage: "Specified coverted image platform"},
+				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform/architecture from manifest index. Possible value is `amd64` or `arm64`"},
 				&cli.BoolFlag{Name: "docker-v2-format", Value: false, Usage: "Use docker image manifest v2, schema 2 format", EnvVars: []string{"DOCKER_V2_FORMAT"}},
 				&cli.StringFlag{Name: "backend-type", Value: "registry", Usage: "Specify Nydus blob storage backend type", EnvVars: []string{"BACKEND_TYPE"}},
 				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
@@ -268,7 +269,7 @@ func main() {
 				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
 
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Ensure the target image represents a manifest list, and it should consist of OCI and Nydus manifest", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.StringFlag{Name: "platform", Value: "amd64", Usage: "Specified coverted image platform"},
+				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform/architecture from manifest index. Possible value is `amd64` or `arm64`"},
 				&cli.StringFlag{Name: "work-dir", Value: "./output", Usage: "Work directory path for image check, will be cleaned before checking", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "./nydus-image", Usage: "The nydus-image binary path", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.StringFlag{Name: "nydusd", Value: "./nydusd", Usage: "The nydusd binary path", EnvVars: []string{"NYDUSD"}},
@@ -290,17 +291,17 @@ func main() {
 				}
 
 				checker, err := checker.New(checker.Opt{
-					WorkDir:        c.String("work-dir"),
-					Source:         c.String("source"),
-					Target:         c.String("target"),
-					MultiPlatform:  c.Bool("multi-platform"),
-					SourceInsecure: c.Bool("source-insecure"),
-					TargetInsecure: c.Bool("target-insecure"),
-					NydusImagePath: c.String("nydus-image"),
-					NydusdPath:     c.String("nydusd"),
-					BackendType:    backendType,
-					BackendConfig:  backendConfig,
-					TargetArch:     c.String("platform"),
+					WorkDir:          c.String("work-dir"),
+					Source:           c.String("source"),
+					Target:           c.String("target"),
+					MultiPlatform:    c.Bool("multi-platform"),
+					SourceInsecure:   c.Bool("source-insecure"),
+					TargetInsecure:   c.Bool("target-insecure"),
+					NydusImagePath:   c.String("nydus-image"),
+					NydusdPath:       c.String("nydusd"),
+					BackendType:      backendType,
+					BackendConfig:    backendConfig,
+					ExpectedPlatform: c.String("platform"),
 				})
 				if err != nil {
 					return err

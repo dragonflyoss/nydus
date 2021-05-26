@@ -131,16 +131,16 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 	host := nydusify.Registry.Host()
 
 	checker, err := checker.New(checker.Opt{
-		WorkDir:        filepath.Join("./tmp", nydusify.Target),
-		Source:         host + "/" + nydusify.Source,
-		Target:         host + "/" + nydusify.Target,
-		SourceInsecure: true,
-		TargetInsecure: true,
-		NydusImagePath: nydusImagePath,
-		NydusdPath:     nydusdPath,
-		BackendType:    nydusify.backendType,
-		BackendConfig:  nydusify.backendConfig,
-		TargetArch:     "amd64",
+		WorkDir:          filepath.Join("./tmp", nydusify.Target),
+		Source:           host + "/" + nydusify.Source,
+		Target:           host + "/" + nydusify.Target,
+		SourceInsecure:   true,
+		TargetInsecure:   true,
+		NydusImagePath:   nydusImagePath,
+		NydusdPath:       nydusdPath,
+		BackendType:      nydusify.backendType,
+		BackendConfig:    nydusify.backendConfig,
+		ExpectedPlatform: "amd64",
 	})
 	assert.Nil(t, err)
 

@@ -6,7 +6,6 @@ package converter
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,19 +126,6 @@ func New(opt Opt) (*Converter, error) {
 	}, nil
 }
 
-func findSupportedSource(ctx context.Context, sources []provider.SourceProvider) (provider.SourceProvider, error) {
-	for _, source := range sources {
-		config, err := source.Config(ctx)
-		if err != nil {
-			return nil, errors.Wrap(err, "Failed to get image config from source provider")
-		}
-		if utils.IsSupportedPlatform(config.OS, config.Architecture) {
-			return source, nil
-		}
-	}
-	return nil, fmt.Errorf("not found supported platform in source image")
-}
-
 func (cvt *Converter) convert(ctx context.Context) error {
 	logger = cvt.Logger
 
@@ -173,11 +159,13 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	if cvt.SourceProviders == nil || len(cvt.SourceProviders) == 0 {
 		return errors.New("Invalid source provider")
 	}
-	sourceProvider, err := findSupportedSource(ctx, cvt.SourceProviders)
-	if err != nil {
-		return errors.Wrap(err, "Find supported platform")
+
+	// In fact, during parsing image manifest, only one interested tag is inserted.
+	if len(cvt.SourceProviders) != 1 {
+		panic("More than one source provider")
 	}
 
+	sourceProvider := cvt.SourceProviders[0]
 	sourceLayers, err := sourceProvider.Layers(ctx)
 	if err != nil {
 		return errors.Wrap(err, "Get source layers")
