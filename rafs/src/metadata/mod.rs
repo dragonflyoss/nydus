@@ -85,7 +85,8 @@ pub struct RafsSuperMeta {
     pub inode_table_offset: u64,
     pub blob_table_size: u32,
     pub blob_table_offset: u64,
-    pub extended_blob_table_offset: u32,
+    pub extended_blob_table_offset: u64,
+    pub extended_blob_table_entries: u32,
     pub blob_readahead_offset: u32,
     pub blob_readahead_size: u32,
     pub prefetch_table_offset: u64,
@@ -162,6 +163,7 @@ impl Default for RafsSuper {
                 blob_table_size: 0,
                 blob_table_offset: 0,
                 extended_blob_table_offset: 0,
+                extended_blob_table_entries: 0,
                 blob_readahead_offset: 0,
                 blob_readahead_size: 0,
                 prefetch_table_offset: 0,
@@ -239,6 +241,7 @@ impl RafsSuper {
                 self.meta.blob_table_offset = sb.blob_table_offset();
                 self.meta.blob_table_size = sb.blob_table_size();
                 self.meta.extended_blob_table_offset = sb.extended_blob_table_offset();
+                self.meta.extended_blob_table_entries = sb.extended_blob_table_entries();
             }
             _ => return Err(ebadf!("invalid superblock version number")),
         }

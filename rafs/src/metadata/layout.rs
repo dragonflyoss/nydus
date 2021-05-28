@@ -50,7 +50,7 @@ use storage::device::RafsBlobEntry;
 use super::*;
 
 pub const RAFS_SUPERBLOCK_SIZE: usize = 8192;
-pub const RAFS_SUPERBLOCK_RESERVED_SIZE: usize = RAFS_SUPERBLOCK_SIZE - 72;
+pub const RAFS_SUPERBLOCK_RESERVED_SIZE: usize = RAFS_SUPERBLOCK_SIZE - 80;
 pub const RAFS_SUPER_MAGIC: u32 = 0x5241_4653;
 pub const RAFS_SUPER_VERSION_V4: u32 = 0x400;
 pub const RAFS_SUPER_VERSION_V5: u32 = 0x500;
@@ -149,13 +149,14 @@ pub struct OndiskSuperBlock {
     s_blob_table_offset: u64,
     /// V5: Size of inode table
     s_inode_table_entries: u32,
-    s_prefetch_table_entries: u32,
+    s_prefetch_table_entries: u32, // 64 bytes
     /// V5: Entries of blob table
     s_blob_table_size: u32,
+    s_extended_blob_table_entries: u32, // 72 bytes
     /// Extended Blob Table
-    s_extended_blob_table_offset: u32,
+    s_extended_blob_table_offset: u64, // 80 bytes --- reduce me from `RAFS_SUPERBLOCK_RESERVED_SIZE`
     /// Unused area
-    s_reserved2: [u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
+    s_reserved: [u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
 }
 
 bitflags! {
@@ -250,8 +251,9 @@ impl Default for OndiskSuperBlock {
             s_prefetch_table_entries: u32::to_le(0),
             s_blob_table_size: u32::to_le(0),
             s_blob_table_offset: u64::to_le(0),
-            s_extended_blob_table_offset: u32::to_le(0),
-            s_reserved2: [0u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
+            s_extended_blob_table_offset: u64::to_le(0),
+            s_extended_blob_table_entries: u32::to_le(0),
+            s_reserved: [0u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
         }
     }
 }
@@ -356,6 +358,12 @@ impl OndiskSuperBlock {
         extended_blob_table_offset,
         set_extended_blob_table_offset,
         s_extended_blob_table_offset,
+        u64
+    );
+    impl_pub_getter_setter!(
+        extended_blob_table_entries,
+        set_extended_blob_table_entries,
+        s_extended_blob_table_entries,
         u32
     );
 
@@ -638,7 +646,8 @@ impl OndiskBlobTable {
         // extended blob table data.
         if meta.extended_blob_table_offset > 0 {
             r.seek(SeekFrom::Start(meta.extended_blob_table_offset as u64))?;
-            self.extended.load(r, entries.len() as u32)?;
+            self.extended
+                .load(r, meta.extended_blob_table_entries as usize)?;
         }
 
         self.entries = entries

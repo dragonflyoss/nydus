@@ -11,7 +11,7 @@ use sha2::digest::Digest;
 use sha2::Sha256;
 
 use rafs::metadata::layout::*;
-use rafs::metadata::{extended::blob_table::ExtendedBlobTable, RafsMode, RafsStore, RafsSuper};
+use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
 use nydus_utils::digest::RafsDigest;
 
@@ -285,9 +285,9 @@ impl Bootstrap {
         let prefetch_table_offset = super_block_size + inode_table_size;
         let blob_table_offset = prefetch_table_offset + prefetch_table_size;
         let blob_table_size = ctx.blob_table.size();
-        let extended_blob_table_offset = u32::try_from(blob_table_offset + blob_table_size)?;
-        let extended_blob_table_size =
-            ExtendedBlobTable::size(u32::try_from(ctx.blob_table.entries.len())?);
+        let extended_blob_table_offset = blob_table_offset + blob_table_size;
+        let extended_blob_table_size = ctx.blob_table.extended.size();
+        let extended_blob_table_entries = ctx.blob_table.extended.entries();
 
         // Set super block
         let mut super_block = OndiskSuperBlock::new();
@@ -297,7 +297,8 @@ impl Bootstrap {
         super_block.set_inode_table_entries(inode_table_entries);
         super_block.set_blob_table_offset(blob_table_offset as u64);
         super_block.set_blob_table_size(blob_table_size as u32);
-        super_block.set_extended_blob_table_offset(extended_blob_table_offset);
+        super_block.set_extended_blob_table_offset(extended_blob_table_offset as u64);
+        super_block.set_extended_blob_table_entries(u32::try_from(extended_blob_table_entries)?);
         super_block.set_prefetch_table_offset(prefetch_table_offset as u64);
         super_block.set_compressor(ctx.compressor);
         super_block.set_digester(ctx.digester);

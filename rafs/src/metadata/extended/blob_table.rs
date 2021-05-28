@@ -13,6 +13,7 @@ pub const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 32;
 
 /// ExtendedDBlobTableEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
+// This disk structure is wll defined and rafs aligned.
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
 pub struct ExtendedBlobTableEntry {
@@ -49,8 +50,14 @@ impl ExtendedBlobTable {
         }
     }
 
-    pub fn size(entries_count: u32) -> usize {
-        align_to_rafs(size_of::<ExtendedBlobTableEntry>() * entries_count as usize)
+    pub fn size(&self) -> usize {
+        // `ExtendedBlobTableEntry` is already a well defined disk structure and rafs-aligned
+        // So directly use its `size_of()` is reliable.
+        align_to_rafs(size_of::<ExtendedBlobTableEntry>() * self.entries.len())
+    }
+
+    pub fn entries(&self) -> usize {
+        self.entries.len()
     }
 
     pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64) {
@@ -68,19 +75,14 @@ impl ExtendedBlobTable {
         Some(self.entries[blob_index as usize].clone())
     }
 
-    pub fn load(&mut self, r: &mut RafsIoReader, entries_count: u32) -> Result<()> {
-        let mut entries_data = vec![0u8; ExtendedBlobTable::size(entries_count)];
-        r.read_exact(&mut entries_data)?;
-        self.load_from_slice(&entries_data, entries_count)
-    }
-
-    fn load_from_slice(&mut self, entries_data: &[u8], entries_count: u32) -> Result<()> {
-        let entries = unsafe {
-            std::slice::from_raw_parts(
-                entries_data as *const [u8] as *const u8 as *const ExtendedBlobTableEntry,
-                entries_count as usize,
-            )
-        };
+    pub fn load(&mut self, r: &mut RafsIoReader, count: usize) -> Result<()> {
+        let mut entries = Vec::<ExtendedBlobTableEntry>::with_capacity(count);
+        // Safe because it is already reserved enough space
+        unsafe {
+            entries.set_len(count);
+        }
+        let (_, mut data, _) = unsafe { (&mut entries).align_to_mut::<u8>() };
+        r.read_exact(&mut data)?;
         self.entries = entries.to_vec().into_iter().map(Arc::new).collect();
         Ok(())
     }
