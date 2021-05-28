@@ -276,7 +276,15 @@ impl DirectMapping {
 
         // Load blob table. Safe because we have validated the blob table layout.
         let mut blob_table = OndiskBlobTable::new();
-        blob_table.load(r, &old_state.meta)?;
+        let meta = &old_state.meta;
+        // TODO: Move loading extended logic out from below `load()`
+        blob_table.load(
+            r,
+            meta.blob_table_offset,
+            meta.blob_table_size,
+            meta.extended_blob_table_offset,
+            meta.extended_blob_table_entries,
+        )?;
 
         // Load(Map) inode table. Safe because we have validated the inode table layout.
         // Though we have passed *mut u32 to Vec::from_raw_parts(), it will trigger invalid memory

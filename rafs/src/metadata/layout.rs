@@ -531,6 +531,7 @@ impl PrefetchTable {
     }
 }
 
+// TODO: FIXME: This is not a well defined disk structure
 #[derive(Clone, Debug, Default)]
 pub struct OndiskBlobTable {
     pub entries: Vec<Arc<RafsBlobEntry>>,
@@ -588,12 +589,19 @@ impl OndiskBlobTable {
         Ok(self.entries[blob_index as usize].clone())
     }
 
-    pub fn load(&mut self, r: &mut RafsIoReader, meta: &RafsSuperMeta) -> Result<()> {
+    pub fn load(
+        &mut self,
+        r: &mut RafsIoReader,
+        blob_table_offset: u64,
+        blob_table_size: u32,
+        extended_blob_table_offset: u64,
+        extended_blob_table_entries: u32,
+    ) -> Result<()> {
         // FIXME: Better to mmap ondisk data for direct mode.
 
         // Load blob table
-        r.seek(SeekFrom::Start(meta.blob_table_offset))?;
-        let mut data = vec![0u8; meta.blob_table_size as usize];
+        r.seek(SeekFrom::Start(blob_table_offset))?;
+        let mut data = vec![0u8; blob_table_size as usize];
         r.read_exact(&mut data)?;
 
         let mut input_rest = data.as_slice();
@@ -642,12 +650,12 @@ impl OndiskBlobTable {
             input_rest = &rest.as_bytes()[1..];
         }
 
-        // Load extended blob table, only for the bootstrap included
-        // extended blob table data.
-        if meta.extended_blob_table_offset > 0 {
-            r.seek(SeekFrom::Start(meta.extended_blob_table_offset as u64))?;
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        if extended_blob_table_offset > 0 {
+            r.seek(SeekFrom::Start(extended_blob_table_offset as u64))?;
             self.extended
-                .load(r, meta.extended_blob_table_entries as usize)?;
+                .load(r, extended_blob_table_entries as usize)?;
         }
 
         self.entries = entries
