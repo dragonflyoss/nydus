@@ -677,7 +677,7 @@ impl RafsInode for OndiskInodeWrapper {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize> {
         if !self.is_dir() {
-            return Err(enotdir!(""));
+            return Err(enotdir!());
         }
 
         let state = self.state();

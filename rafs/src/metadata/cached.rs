@@ -431,7 +431,7 @@ impl RafsInode for CachedInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize> {
         if !self.is_dir() {
-            return Err(enotdir!(""));
+            return Err(enotdir!());
         }
 
         let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
