@@ -121,8 +121,7 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 		return err
 	}
 	d.Pid = cmd.Process.Pid
-	// make sure to wait after start
-	go cmd.Wait()
+	// process wait when destroy daemon and kill process
 	return nil
 
 }
@@ -182,7 +181,7 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 		if err != nil {
 			return err
 		}
-		err = p.Kill()
+		err = p.Signal(syscall.SIGTERM)
 		if err != nil {
 			return err
 		}
