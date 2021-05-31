@@ -127,6 +127,34 @@ func (mm *manifestManager) makeManifestIndex(
 	return &index, nil
 }
 
+func (mm *manifestManager) CloneSourcePlatform(ctx context.Context, additionalOSFeatures string) (*ocispec.Platform, error) {
+	sourceConfig, err := mm.sourceProvider.Config(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "can't take in source image configuration")
+	}
+
+	var features []string
+	if additionalOSFeatures != "" {
+		features = append(features, additionalOSFeatures)
+	}
+
+	// Generally, image configuration should include os and arch.
+	// But we still try to give a default os/arch when none is ever provided.
+	if sourceConfig.OS == "" && sourceConfig.Architecture == "" {
+		return &ocispec.Platform{
+			OS:           "linux",
+			Architecture: "amd64",
+			OSFeatures:   features,
+		}, nil
+	} else {
+		return &ocispec.Platform{
+			OS:           sourceConfig.OS,
+			Architecture: sourceConfig.Architecture,
+			OSFeatures:   features,
+		}, nil
+	}
+}
+
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
 	layers := []ocispec.Descriptor{}
 	blobListInAnnotation := []string{}
@@ -223,11 +251,13 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	if err != nil {
 		return errors.Wrap(err, "Marshal Nydus image manifest")
 	}
-	nydusManifestDesc.Platform = &ocispec.Platform{
-		OS:           utils.SupportedOS,
-		Architecture: utils.SupportedArch,
-		OSFeatures:   []string{utils.ManifestOSFeatureNydus},
+
+	p, err := mm.CloneSourcePlatform(ctx, utils.ManifestOSFeatureNydus)
+	if err != nil {
+		return errors.Wrap(err, "clone source platform")
 	}
+
+	nydusManifestDesc.Platform = p
 
 	if !mm.multiPlatform {
 		if err := mm.remote.Push(ctx, *nydusManifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
@@ -245,11 +275,13 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	if err != nil {
 		return errors.Wrap(err, "Get source image manifest")
 	}
+
 	if ociManifestDesc != nil {
-		ociManifestDesc.Platform = &ocispec.Platform{
-			OS:           utils.SupportedOS,
-			Architecture: utils.SupportedArch,
+		p, err := mm.CloneSourcePlatform(ctx, utils.ManifestOSFeatureNydus)
+		if err != nil {
+			return errors.Wrap(err, "clone source platform")
 		}
+		ociManifestDesc.Platform = p
 	}
 
 	existManifests, err := mm.getExistsManifests(ctx)
