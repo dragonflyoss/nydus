@@ -87,7 +87,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
 	assert.Nil(t, err)
 
-	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir, "amd64")
+	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir, "linux/amd64")
 	assert.Nil(t, err)
 
 	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
@@ -131,16 +131,16 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 	host := nydusify.Registry.Host()
 
 	checker, err := checker.New(checker.Opt{
-		WorkDir:          filepath.Join("./tmp", nydusify.Target),
-		Source:           host + "/" + nydusify.Source,
-		Target:           host + "/" + nydusify.Target,
-		SourceInsecure:   true,
-		TargetInsecure:   true,
-		NydusImagePath:   nydusImagePath,
-		NydusdPath:       nydusdPath,
-		BackendType:      nydusify.backendType,
-		BackendConfig:    nydusify.backendConfig,
-		ExpectedPlatform: "amd64",
+		WorkDir:        filepath.Join("./tmp", nydusify.Target),
+		Source:         host + "/" + nydusify.Source,
+		Target:         host + "/" + nydusify.Target,
+		SourceInsecure: true,
+		TargetInsecure: true,
+		NydusImagePath: nydusImagePath,
+		NydusdPath:     nydusdPath,
+		BackendType:    nydusify.backendType,
+		BackendConfig:  nydusify.backendConfig,
+		ExpectedArch:   "amd64",
 	})
 	assert.Nil(t, err)
 

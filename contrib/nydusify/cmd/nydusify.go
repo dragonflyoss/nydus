@@ -290,18 +290,20 @@ func main() {
 					backendConfig = _backendConfig
 				}
 
+				_, arch, err := provider.ExtractOsArch(c.String("platform"))
+
 				checker, err := checker.New(checker.Opt{
-					WorkDir:          c.String("work-dir"),
-					Source:           c.String("source"),
-					Target:           c.String("target"),
-					MultiPlatform:    c.Bool("multi-platform"),
-					SourceInsecure:   c.Bool("source-insecure"),
-					TargetInsecure:   c.Bool("target-insecure"),
-					NydusImagePath:   c.String("nydus-image"),
-					NydusdPath:       c.String("nydusd"),
-					BackendType:      backendType,
-					BackendConfig:    backendConfig,
-					ExpectedPlatform: c.String("platform"),
+					WorkDir:        c.String("work-dir"),
+					Source:         c.String("source"),
+					Target:         c.String("target"),
+					MultiPlatform:  c.Bool("multi-platform"),
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
+					NydusImagePath: c.String("nydus-image"),
+					NydusdPath:     c.String("nydusd"),
+					BackendType:    backendType,
+					BackendConfig:  backendConfig,
+					ExpectedArch:   arch,
 				})
 				if err != nil {
 					return err

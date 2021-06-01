@@ -172,7 +172,7 @@ func ExtractOsArch(platform string) (string, string, error) {
 // DefaultSource pulls image layers from specify image reference
 func DefaultSource(ctx context.Context, remote *remote.Remote, workDir, platform string) ([]SourceProvider, error) {
 
-	_, arch, err := extractOsArch(platform)
+	_, arch, err := ExtractOsArch(platform)
 	if err != nil {
 		return nil, err
 	}

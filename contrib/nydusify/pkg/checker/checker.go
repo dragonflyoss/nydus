@@ -21,17 +21,17 @@ import (
 // Opt defines Checker options.
 // Note: target is the Nydus image reference.
 type Opt struct {
-	WorkDir          string
-	Source           string
-	Target           string
-	SourceInsecure   bool
-	TargetInsecure   bool
-	MultiPlatform    bool
-	NydusImagePath   string
-	NydusdPath       string
-	BackendType      string
-	BackendConfig    string
-	ExpectedPlatform string
+	WorkDir        string
+	Source         string
+	Target         string
+	SourceInsecure bool
+	TargetInsecure bool
+	MultiPlatform  bool
+	NydusImagePath string
+	NydusdPath     string
+	BackendType    string
+	BackendConfig  string
+	ExpectedArch   string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
@@ -49,7 +49,7 @@ func New(opt Opt) (*Checker, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "Init target image parser")
 	}
-	targetParser, err := parser.New(targetRemote, opt.ExpectedPlatform)
+	targetParser, err := parser.New(targetRemote, opt.ExpectedArch)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create parser")
 	}
@@ -60,7 +60,7 @@ func New(opt Opt) (*Checker, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "Init source image parser")
 		}
-		sourceParser, err = parser.New(sourceRemote, opt.ExpectedPlatform)
+		sourceParser, err = parser.New(sourceRemote, opt.ExpectedArch)
 		if sourceParser == nil {
 			return nil, errors.Wrap(err, "failed to create parser")
 		}
@@ -111,6 +111,7 @@ func (checker *Checker) Check(ctx context.Context) error {
 			TargetParsed:  targetParsed,
 			MultiPlatform: checker.MultiPlatform,
 			BackendType:   checker.BackendType,
+			ExpectedArch:  checker.ExpectedArch,
 		},
 		&rule.BootstrapRule{
 			Parsed:          targetParsed,
