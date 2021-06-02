@@ -538,6 +538,9 @@ pub struct OndiskBlobTable {
     pub extended: ExtendedBlobTable,
 }
 
+// A helper to extract blob table entries from disk.
+struct BlobEntryFrontPart(u32, u32);
+
 impl OndiskBlobTable {
     pub fn new() -> Self {
         OndiskBlobTable {
@@ -604,50 +607,50 @@ impl OndiskBlobTable {
         let mut data = vec![0u8; blob_table_size as usize];
         r.read_exact(&mut data)?;
 
-        let mut input_rest = data.as_slice();
+        let begin_ptr = data.as_slice().as_ptr() as *const u8;
+        let mut frame = begin_ptr;
         let mut entries = Vec::new();
+        info!("blob table size {}", blob_table_size);
         loop {
-            let split_at_64 = std::mem::size_of::<u64>();
-            let split_at_32 = std::mem::size_of::<u32>();
+            // Each entry frame looks like:
+            // u32 | u32 | string | trailing '\0' , except that the last entry has no trailing '\0'
+            let front = unsafe { &*(frame as *const BlobEntryFrontPart) };
+            let readahead_offset = front.0;
+            let readahead_size = front.1;
 
-            if input_rest.len() < split_at_64 + 1 {
-                break;
-            }
-            let (readahead, rest) = input_rest.split_at(split_at_64);
+            // Safe because we never tried to take ownership.
+            let id_offset = unsafe { (frame as *const BlobEntryFrontPart).add(1) as *mut u8 };
+            // id_end points to the byte before splitter 'b\0'
+            let id_end = Self::blob_id_tail_ptr(id_offset, begin_ptr, blob_table_size as usize);
 
-            if readahead.len() < split_at_32 + 1 {
-                break;
-            }
-            let (readahead_offset, readahead_size) = readahead.split_at(split_at_32);
+            // Excluding trailing '\0'.
+            // Note: we can't use string.len() to move pointer.
+            let bytes_len = (unsafe { id_end.offset_from(id_offset) } + 1) as usize;
 
-            let readahead_offset =
-                u32::from_le_bytes(readahead_offset.try_into().map_err(|e| einval!(e))?);
-            let readahead_size =
-                u32::from_le_bytes(readahead_size.try_into().map_err(|e| einval!(e))?);
+            let id_bytes = unsafe { std::slice::from_raw_parts(id_offset, bytes_len) };
 
-            let (blob_id, rest) = parse_string(rest)?;
+            let blob_id = std::str::from_utf8(id_bytes).map_err(|e| einval!(e))?;
+            info!("blob {:?} lies on", blob_id);
+            // Move to next entry frame, including splitter 0
+            frame = unsafe { frame.add(size_of::<BlobEntryFrontPart>() + bytes_len + 1) };
 
             let blob_index = entries.len() as u32;
 
             entries.push(RafsBlobEntry {
-                blob_id: blob_id.to_string(),
+                // Safe because only ASCII blob id is persisted.
+                blob_id: blob_id.to_owned(),
                 blob_index,
                 chunk_count: 0,
                 readahead_offset,
                 readahead_size,
                 blob_cache_size: 0,
             });
-            // Break blob id search loop, when rest bytes length is zero,
-            // or not split with '\0', or not have enough data to read (ending with padding data).
-            if rest.is_empty()
-                || rest.as_bytes()[0] != b'\0'
-                || rest.as_bytes().len() <= (size_of::<u32>() * 2 + 1)
+
+            if unsafe { align_to_rafs(frame.offset_from(begin_ptr) as usize) } as u32
+                >= blob_table_size
             {
                 break;
             }
-
-            // Skip '\0' splitter for next search
-            input_rest = &rest.as_bytes()[1..];
         }
 
         // Load extended blob table if the bootstrap including
@@ -679,6 +682,21 @@ impl OndiskBlobTable {
 
     pub fn store_extended(&self, w: &mut RafsIoWriter) -> Result<usize> {
         self.extended.store(w)
+    }
+
+    fn blob_id_tail_ptr(cur: *const u8, begin_ptr: *const u8, total_size: usize) -> *mut u8 {
+        let mut id_end = cur as *mut u8;
+        loop {
+            let next_byte = unsafe { id_end.add(1) };
+            // b'\0' is the splitter
+            if unsafe { *next_byte } == 0
+                || unsafe { next_byte.offset_from(begin_ptr) } >= total_size as isize
+            {
+                return id_end;
+            }
+
+            id_end = unsafe { id_end.add(1) };
+        }
     }
 }
 
