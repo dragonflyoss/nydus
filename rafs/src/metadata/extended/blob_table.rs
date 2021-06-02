@@ -13,7 +13,7 @@ pub const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 32;
 
 /// ExtendedDBlobTableEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
-// This disk structure is wll defined and rafs aligned.
+// This disk structure is well defined and rafs aligned.
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
 pub struct ExtendedBlobTableEntry {

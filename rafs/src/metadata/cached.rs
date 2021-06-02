@@ -136,13 +136,19 @@ impl RafsSuperInodes for CachedInodes {
         r.seek(SeekFrom::Start(self.s_meta.blob_table_offset))?;
         let mut blob_table = OndiskBlobTable::new();
         let meta = &self.s_meta;
-        blob_table.load(
-            r,
-            meta.blob_table_offset,
-            meta.blob_table_size,
-            meta.extended_blob_table_offset,
-            meta.extended_blob_table_entries,
-        )?;
+
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        if meta.extended_blob_table_offset > 0 {
+            r.seek(SeekFrom::Start(meta.extended_blob_table_offset))?;
+            blob_table
+                .extended
+                .load(r, meta.extended_blob_table_entries as usize)?;
+        }
+
+        r.seek(SeekFrom::Start(meta.blob_table_offset))?;
+        blob_table.load(r, meta.blob_table_size)?;
+
         self.s_blob = Arc::new(blob_table);
 
         // Load all inodes started from first inode offset.

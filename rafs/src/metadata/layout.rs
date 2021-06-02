@@ -592,29 +592,24 @@ impl OndiskBlobTable {
         Ok(self.entries[blob_index as usize].clone())
     }
 
-    pub fn load(
-        &mut self,
-        r: &mut RafsIoReader,
-        blob_table_offset: u64,
-        blob_table_size: u32,
-        extended_blob_table_offset: u64,
-        extended_blob_table_entries: u32,
-    ) -> Result<()> {
-        // FIXME: Better to mmap ondisk data for direct mode.
+    // The goal is to fill `entries` according to blob table. If it is zero-sized,
+    // just return Ok.
+    pub fn load(&mut self, r: &mut RafsIoReader, blob_table_size: u32) -> Result<()> {
+        if blob_table_size == 0 {
+            return Ok(());
+        }
 
-        // Load blob table
-        r.seek(SeekFrom::Start(blob_table_offset))?;
         let mut data = vec![0u8; blob_table_size as usize];
         r.read_exact(&mut data)?;
 
         let begin_ptr = data.as_slice().as_ptr() as *const u8;
         let mut frame = begin_ptr;
-        let mut entries = Vec::new();
         info!("blob table size {}", blob_table_size);
         loop {
             // Each entry frame looks like:
             // u32 | u32 | string | trailing '\0' , except that the last entry has no trailing '\0'
             let front = unsafe { &*(frame as *const BlobEntryFrontPart) };
+            // `blob_table_size` has to be greater than zero, otherwise it access a invalid page.
             let readahead_offset = front.0;
             let readahead_size = front.1;
 
@@ -634,17 +629,35 @@ impl OndiskBlobTable {
             // Move to next entry frame, including splitter 0
             frame = unsafe { frame.add(size_of::<BlobEntryFrontPart>() + bytes_len + 1) };
 
-            let blob_index = entries.len() as u32;
+            let index = self.entries.len();
 
-            entries.push(RafsBlobEntry {
-                // Safe because only ASCII blob id is persisted.
+            // For compatibility concern, blob table might not associate with extended blob table.
+            let (chunk_count, blob_cache_size) = if !self.extended.entries.is_empty() {
+                // chge: Though below can hardly happen and we can do nothing meeting
+                // this possibly due to bootstrap corruption, someone like this kind of check, make them happy.
+                if index > self.extended.entries.len() - 1 {
+                    error!(
+                        "Extended blob table({}) is shorter than blob table",
+                        self.extended.entries.len()
+                    );
+                    return Err(einval!());
+                }
+                (
+                    self.extended.entries[index].chunk_count,
+                    self.extended.entries[index].blob_cache_size,
+                )
+            } else {
+                (0, 0)
+            };
+
+            self.entries.push(Arc::new(RafsBlobEntry {
                 blob_id: blob_id.to_owned(),
-                blob_index,
-                chunk_count: 0,
+                blob_index: index as u32,
+                chunk_count,
                 readahead_offset,
                 readahead_size,
-                blob_cache_size: 0,
-            });
+                blob_cache_size,
+            }));
 
             if unsafe { align_to_rafs(frame.offset_from(begin_ptr) as usize) } as u32
                 >= blob_table_size
@@ -652,26 +665,6 @@ impl OndiskBlobTable {
                 break;
             }
         }
-
-        // Load extended blob table if the bootstrap including
-        // extended blob table.
-        if extended_blob_table_offset > 0 {
-            r.seek(SeekFrom::Start(extended_blob_table_offset as u64))?;
-            self.extended
-                .load(r, extended_blob_table_entries as usize)?;
-        }
-
-        self.entries = entries
-            .into_iter()
-            .map(|mut entry| {
-                let extended_entry = self.extended.get(entry.blob_index).unwrap_or_default();
-                // These extended fields should be non-zero if the bootstrap included
-                // extended blob table data.
-                entry.chunk_count = extended_entry.chunk_count;
-                entry.blob_cache_size = extended_entry.blob_cache_size;
-                Arc::new(entry)
-            })
-            .collect();
 
         Ok(())
     }
