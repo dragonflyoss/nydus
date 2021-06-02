@@ -53,10 +53,10 @@ func (rule *ManifestRule) Validate() error {
 			}
 		}
 		if !foundNydusDesc {
-			return errors.New("not found nydus image in manifest list")
+			return errors.Errorf("not found nydus image of specified platform linux/%s", rule.ExpectedArch)
 		}
 		if !foundOCIDesc {
-			return errors.New("not found oci image in manifest list")
+			return errors.Errorf("not found OCI image of specified platform linux/%s", rule.ExpectedArch)
 		}
 	}
 

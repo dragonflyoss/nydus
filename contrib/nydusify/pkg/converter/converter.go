@@ -162,7 +162,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 
 	// In fact, during parsing image manifest, only one interested tag is inserted.
 	if len(cvt.SourceProviders) != 1 {
-		panic("More than one source provider")
+		return errors.New("Should have only one source image")
 	}
 
 	sourceProvider := cvt.SourceProviders[0]

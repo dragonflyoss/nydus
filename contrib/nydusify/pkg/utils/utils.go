@@ -25,6 +25,11 @@ const SupportedArch = runtime.GOARCH
 const defaultRetryAttempts = 3
 const defaultRetryInterval = time.Second * 2
 
+const (
+	PlatformArchAMD64 string = "amd64"
+	PlatformArchARM64 string = "arm64"
+)
+
 func WithRetry(op func() error) error {
 	var err error
 	attempts := defaultRetryAttempts
@@ -57,26 +62,6 @@ func MarshalToDesc(data interface{}, mediaType string) (*ocispec.Descriptor, []b
 	return &desc, bytes, nil
 }
 
-func IsSupportedPlatform(os, arch string) bool {
-	// Default we assume that empty OS/Arch should be
-	// a supported platform likes linux/amd64
-	if os == "" && arch == "" {
-		logrus.Warnln("Found empty OS/Arch platform manifest")
-		return true
-	}
-	if os == SupportedOS && arch == SupportedArch {
-		return true
-	}
-	return false
-}
-
-func CheckRuntimePlatform() bool {
-	if SupportedArch != "amd64" && SupportedArch != "arm64" {
-		return false
-	}
-	return true
-}
-
 func IsNydusPlatform(platform *ocispec.Platform) bool {
 	if platform != nil && platform.OSFeatures != nil {
 		for _, key := range platform.OSFeatures {
@@ -85,6 +70,33 @@ func IsNydusPlatform(platform *ocispec.Platform) bool {
 			}
 		}
 	}
+	return false
+}
+
+func IsSupportedArch(arch string) bool {
+	if arch != PlatformArchAMD64 && arch != PlatformArchARM64 {
+		return false
+	}
+	return true
+}
+
+// A matched nydus image should match os/arch
+func MatchNydusPlatform(dst *ocispec.Descriptor, os, arch string) bool {
+
+	if dst.Platform.Architecture != arch || dst.Platform.OS != os {
+		return false
+	}
+
+	if dst.Platform.OSFeatures == nil {
+		return false
+	}
+
+	for _, feature := range dst.Platform.OSFeatures {
+		if feature == ManifestOSFeatureNydus {
+			return true
+		}
+	}
+
 	return false
 }
 

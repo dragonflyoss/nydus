@@ -27,7 +27,7 @@ type Parser struct {
 	Remote *remote.Remote
 	// Principle to select platform arch/os is that nydus only works on top of linux
 	// and interestedArch has to be specified in case of manifest list. So nydusify
-	// knowns how to choose the source image. In case of single manifest, `interestedArch`
+	// knows how to choose the source image. In case of single manifest, `interestedArch`
 	// is the same with origin.
 	interestedArch string
 }
@@ -50,7 +50,7 @@ type Parsed struct {
 
 // New creates Nydus image parser instance.
 func New(remote *remote.Remote, interestedArch string) (*Parser, error) {
-	if interestedArch != "arm64" && interestedArch != "amd64" {
+	if !utils.IsSupportedArch(interestedArch) {
 		return nil, fmt.Errorf("invalid arch %s", interestedArch)
 	}
 	return &Parser{
@@ -135,9 +135,13 @@ func (parser *Parser) parseImage(
 		return nil, errors.Wrap(err, "pull image config")
 	}
 
+	if config.OS == "" || config.Architecture == "" {
+		return nil, errors.New("Source image configuration does not have os or architecture")
+	}
+
 	// Just give user a simple hint telling option was ignored.
 	if config.Architecture != parser.interestedArch {
-		logrus.Warnf("Specified %s architecture was ignored", parser.interestedArch)
+		return nil, errors.Errorf("Specified %s architecture was not found", parser.interestedArch)
 	}
 
 	return &Image{
@@ -186,7 +190,7 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 	// Handle image manifest
 	case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
 		// Because there is only one manifest, the source is determined,
-		//`interestedArch` does not have effect.
+		// `interestedArch` does not have effect.
 		onlyManifest, err = parser.pullManifest(ctx, imageDesc)
 		if err != nil {
 			return nil, err
@@ -210,7 +214,7 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 		for idx := range index.Manifests {
 			desc := index.Manifests[idx]
 			if desc.Platform != nil {
-				// Currently, parser only find one interest image.
+				// Currently, parser only finds one interested image.
 				if parser.matchImagePlatform(&desc) {
 					if utils.IsNydusPlatform(desc.Platform) {
 						nydusDesc = &desc
@@ -223,6 +227,7 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 				// FIXME: Returning the first image without platform specified is subtle.
 				// It might not violate Image spec.
 				ociDesc = &desc
+				logrus.Warn("Will cook a image without platform, %s", ociDesc.Digest)
 				break
 			}
 		}

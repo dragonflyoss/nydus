@@ -150,7 +150,7 @@ func (sl *defaultSourceLayer) ParentChainID() *digest.Digest {
 // Input platform string should be formated like os/arch.
 func ExtractOsArch(platform string) (string, string, error) {
 
-	if !strings.Contains(platform, "/") {
+	if len(strings.Split(platform, "/")) != 2 {
 		return "", "", fmt.Errorf("invalid platform format, %s", platform)
 	}
 
@@ -162,7 +162,7 @@ func ExtractOsArch(platform string) (string, string, error) {
 		return "", "", fmt.Errorf("not support os %s", os)
 	}
 
-	if arch != "amd64" && arch != "arm64" {
+	if !utils.IsSupportedArch(arch) {
 		return "", "", fmt.Errorf("not support architecture %s", arch)
 	}
 
