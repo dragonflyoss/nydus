@@ -22,7 +22,9 @@ import (
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/containerd/continuity/fs"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/cache"
 	metrics "github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/metric"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
@@ -71,19 +73,35 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	}
 
 	cfg.DaemonMode = strings.ToLower(cfg.DaemonMode)
+
+	db, err := store.NewDatabase(cfg.RootDir)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to new database")
+	}
+
 	pm, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: cfg.NydusdBinaryPath,
-		RootDir:          cfg.RootDir,
+		Database:         db,
 		DaemonMode:       cfg.DaemonMode,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new process manager")
 	}
+	cacheMgr, err := cache.NewManager(cache.Opt{
+		Database: db,
+		Period:   cfg.GCPeriod,
+		CacheDir: cfg.CacheDir,
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to new cache manager")
+	}
+
 	hasDaemon := cfg.DaemonMode != config.DaemonModeNone
 
 	nydusFs, err := nydus.NewFileSystem(
 		ctx,
 		nydus.WithProcessManager(pm),
+		nydus.WithCacheManager(cacheMgr),
 		nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 		nydus.WithMeta(cfg.RootDir),
 		nydus.WithDaemonConfig(cfg.DaemonCfg),

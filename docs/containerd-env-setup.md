@@ -52,9 +52,10 @@ Then start `containerd-nydus-grpc` remote snapshotter:
     --config-path /etc/nydusd-config.json \
     --log-level debug \
     --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
+    --cache-dir /var/lib/nydus/cache \
     --address /run/containerd/containerd-nydus-grpc.sock
 ```
-
+`cache-dir` argument represent the blob cache root dir, if unset, it will be set `root` + "/cache". It overrides the `work_dir` option in nydusd-config.json.`
 ## Configure and Start containerd
 
 Nydus uses two features of containerd:

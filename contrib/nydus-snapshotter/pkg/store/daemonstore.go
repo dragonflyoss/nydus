@@ -10,15 +10,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/daemon"
-	"github.com/pkg/errors"
-)
-
-const (
-	databaseFileName = "nydus.db"
 )
 
 type DaemonStore struct {
@@ -29,14 +23,7 @@ type DaemonStore struct {
 	db              *Database                 // save daemons in database
 }
 
-func NewDaemonStore(rootDir string) (*DaemonStore, error) {
-	dbfile := filepath.Join(rootDir, databaseFileName)
-
-	db, err := NewDatabase(dbfile)
-	if err != nil {
-		return &DaemonStore{}, errors.Wrapf(err, "failed to new database")
-	}
-
+func NewDaemonStore(db *Database) (*DaemonStore, error) {
 	return &DaemonStore{
 		idxBySnapshotID: make(map[string]*daemon.Daemon),
 		idxByID:         make(map[string]*daemon.Daemon),
