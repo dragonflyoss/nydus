@@ -1126,3 +1126,92 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
 
     Ok(value)
 }
+
+#[cfg(test)]
+pub mod tests {
+    use super::OndiskBlobTable;
+    use crate::RafsIoReader;
+    use nydus_utils::setup_logging;
+    use std::fs::OpenOptions;
+    use std::io::{SeekFrom, Write};
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[allow(dead_code)]
+    struct Entry {
+        foo: u32,
+        bar: u32,
+    }
+
+    unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+        ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
+    }
+
+    #[test]
+    fn test_load_blob_table() {
+        setup_logging(None, log::LevelFilter::Trace).unwrap();
+
+        let mut buffer = Vec::new();
+        let first = Entry { foo: 1, bar: 2 };
+        let second = Entry { foo: 3, bar: 4 };
+        let third = Entry { foo: 5, bar: 6 };
+
+        let first_id = "355d403e35d7120cbd6a145874a2705e6842ce9974985013ebdc1fa5199a0184";
+        let second_id = "19ebb6e9bdcbbce3f24d694fe20e0e552ae705ce079e26023ad0ecd61d4b130019ebb6e9bdcbbce3f24d694fe20e0e552ae705ce079e26023ad0ecd61d4";
+        let third_id = "19ebb6e9bdcbbce3f24d694fe20e0e552ae705ce079e";
+
+        let first_slice = unsafe { any_as_u8_slice(&first) };
+        let second_slice = unsafe { any_as_u8_slice(&second) };
+        let third_slice = unsafe { any_as_u8_slice(&third) };
+
+        buffer.extend_from_slice(first_slice);
+        buffer.extend_from_slice(first_id.as_bytes());
+        buffer.push(b'\0');
+        buffer.extend_from_slice(second_slice);
+        buffer.extend_from_slice(second_id.as_bytes());
+        buffer.push(b'\0');
+        buffer.extend_from_slice(third_slice);
+        buffer.extend_from_slice(third_id.as_bytes());
+        // buffer.push(b'\0');
+
+        let tmp_file = TempFile::new().unwrap();
+
+        // Store extended blob table
+        let mut tmp_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_file.as_path())
+            .unwrap();
+
+        tmp_file.write_all(&buffer).unwrap();
+        tmp_file.flush().unwrap();
+
+        let mut file: RafsIoReader = Box::new(tmp_file);
+        let mut blob_table = OndiskBlobTable::new();
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        blob_table.load(&mut file, buffer.len() as u32).unwrap();
+
+        for b in &blob_table.entries {
+            let _c = b.clone();
+            trace!("{:?}", _c);
+        }
+
+        assert_eq!(blob_table.entries[0].blob_id, first_id);
+        assert_eq!(blob_table.entries[1].blob_id, second_id);
+        assert_eq!(blob_table.entries[2].blob_id, third_id);
+
+        blob_table.entries.truncate(0);
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        blob_table.load(&mut file, 0).unwrap();
+
+        blob_table.entries.truncate(0);
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        blob_table
+            .load(&mut file, (buffer.len() - 100) as u32)
+            .unwrap();
+
+        assert_eq!(blob_table.entries[0].blob_id, first_id);
+    }
+}
