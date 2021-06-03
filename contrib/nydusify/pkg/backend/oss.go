@@ -68,7 +68,7 @@ func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
 // Upload blob as image layer to oss backend. Depending on blob's size, upload it
 // by multiparts method or the normal method
 func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64) (*ocispec.Descriptor, error) {
-	blobID = b.objectPrefix + blobID
+	blobObjectKey := b.objectPrefix + blobID
 
 	desc := blobDesc(size, blobID)
 
@@ -94,13 +94,13 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	start := time.Now()
 
 	if needMultiparts {
-		logrus.Debugf("Upload %s using multiparts method", blobID)
+		logrus.Debugf("Upload %s using multiparts method", blobObjectKey)
 		chunks, err := oss.SplitFileByPartNum(blobPath, splitPartsCount)
 		if err != nil {
 			return nil, err
 		}
 
-		imur, err := b.bucket.InitiateMultipartUpload(blobID)
+		imur, err := b.bucket.InitiateMultipartUpload(blobObjectKey)
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +136,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 			return nil, err
 		}
 		defer reader.Close()
-		err = b.bucket.PutObject(blobID, reader)
+		err = b.bucket.PutObject(blobObjectKey, reader)
 		if err != nil {
 			return nil, err
 		}
