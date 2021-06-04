@@ -132,7 +132,7 @@ func (d *Database) WalkDaemons(ctx context.Context, cb func(info *daemon.Daemon)
 }
 
 // Cleanup deletes all daemon records
-func (d *Database) Cleanup(ctx context.Context) error {
+func (d *Database) CleanupDaemons(ctx context.Context) error {
 	return d.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(daemonsBucketName)
 
