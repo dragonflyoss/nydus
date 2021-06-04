@@ -250,7 +250,7 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 
 	// cleanup database so that we'll have a clean database for this snapshotter process lifetime
 	log.L.Infof("found %d daemons running", len(daemons))
-	if err := m.store.CleanupDatabase(ctx); err != nil {
+	if err := m.store.CleanupDaemons(ctx); err != nil {
 		return errors.Wrapf(err, "failed to cleanup database")
 	}
 

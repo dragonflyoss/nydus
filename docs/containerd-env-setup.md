@@ -55,7 +55,7 @@ Then start `containerd-nydus-grpc` remote snapshotter:
     --cache-dir /var/lib/nydus/cache \
     --address /run/containerd/containerd-nydus-grpc.sock
 ```
-`cache-dir` argument represent the blob cache root dir, if unset, it will be set `root` + "/cache". It overrides the `work_dir` option in nydusd-config.json.`
+`cache-dir` argument represent the blob cache root dir, if unset, it will be set `root` + "/cache". It overrides the `work_dir` option in nydusd-config.json.
 ## Configure and Start containerd
 
 Nydus uses two features of containerd:
