@@ -109,6 +109,6 @@ func (s *DaemonStore) WalkDaemons(ctx context.Context, cb func(d *daemon.Daemon)
 	return s.db.WalkDaemons(ctx, cb)
 }
 
-func (s *DaemonStore) CleanupDatabase(ctx context.Context) error {
-	return s.db.Cleanup(ctx)
+func (s *DaemonStore) CleanupDaemons(ctx context.Context) error {
+	return s.db.CleanupDaemons(ctx)
 }

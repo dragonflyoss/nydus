@@ -249,7 +249,8 @@ func (fs *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonCo
 	if err != nil {
 		return config.DaemonConfig{}, err
 	}
-	// Overriding work_dir option of nyudsd config as we want to set it via snapshotter config option to let snapshotter handle blob cache GC.
+	// Overriding work_dir option of nyudsd config as we want to set it
+	// via snapshotter config option to let snapshotter handle blob cache GC.
 	cfg.Device.Cache.Config.WorkDir = fs.cacheMgr.CacheDir()
 	return cfg, nil
 }
@@ -347,7 +348,8 @@ func (fs *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]s
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
 	}
-	// Overriding work_dir option of nyudsd config as we want to set it via snapshotter config option to let snapshotter handle blob cache GC.
+	// Overriding work_dir option of nyudsd config as we want to set it
+	// via snapshotter config option to let snapshotter handle blob cache GC.
 	cfg.Device.Cache.Config.WorkDir = fs.cacheMgr.CacheDir()
 	return config.SaveConfig(cfg, d.ConfigFile())
 }
