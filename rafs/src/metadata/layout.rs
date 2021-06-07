@@ -1148,7 +1148,7 @@ pub mod tests {
 
     #[test]
     fn test_load_blob_table() {
-        setup_logging(None, log::LevelFilter::Trace).unwrap();
+        setup_logging(None, log::LevelFilter::Info).unwrap();
 
         let mut buffer = Vec::new();
         let first = Entry { foo: 1, bar: 2 };
