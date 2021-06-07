@@ -72,7 +72,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 
 	desc := blobDesc(size, blobID)
 
-	if exist, err := b.bucket.IsObjectExist(blobID); err != nil {
+	if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
 		return nil, err
 	} else if exist {
 		return &desc, nil
@@ -146,7 +146,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 
 	end := time.Now()
 	elapsed := end.Sub(start)
-	logrus.Debugf("Uploading blob %s costs %s", blobID, elapsed)
+	logrus.Debugf("Uploading blob %s costs %s", blobObjectKey, elapsed)
 
 	return &desc, nil
 }
