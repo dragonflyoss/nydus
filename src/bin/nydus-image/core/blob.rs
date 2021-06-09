@@ -152,7 +152,7 @@ impl Blob {
         // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
         // belonging to the same directory arranged in adjacent in blob file. Together with
         // BFS style collecting descendants inodes, it will have a higher merging possibility.
-        let readahead_files = ctx.prefetch.get_file_indexs();
+        let readahead_files = ctx.prefetch.get_file_indexes();
 
         let blob_index = ctx.blob_table.entries.len() as u32;
 

@@ -225,8 +225,10 @@ impl Bootstrap {
             Result<bool>
         )?;
 
+        // Clear all cached states for next upper layer build.
         ctx.lower_inode_map.clear();
         ctx.upper_inode_map.clear();
+        ctx.prefetch.clear();
 
         Ok(tree)
     }
