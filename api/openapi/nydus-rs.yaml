@@ -193,12 +193,21 @@ paths:
           required: false
           schema:
             type: string
+        - name: latest
+          desciption: "The returned list represents all files that are ever read ignoring the frequency. The metics of each file will be cleared after this request."
+          in: query
+          required: false
+          schema:
+            type: bool
       responses:
         "200":
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RafsFilesMetrics"
+                latest:
+                  $ref: "#/components/schemas/RafsLatestReadFiles"
+                other:
+                  $ref: "#/components/schemas/RafsFilesMetrics"
           description: Rafs all opened files metrics export
         "500":
           content:
@@ -414,6 +423,13 @@ components:
           type: array
           items:
             type: integer
+    RafsLatestReadFiles:
+      type: array
+      description: File ino array, [start,end] -- include inode from start to end, [ino] -- include inode ino
+      items:
+        type: array
+        items:
+          type: integer
     RafsFilesAccessPatterns:
       properties:
         ino:

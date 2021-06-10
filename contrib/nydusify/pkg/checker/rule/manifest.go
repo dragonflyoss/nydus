@@ -6,6 +6,7 @@ package rule
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	"github.com/pkg/errors"
@@ -20,6 +21,7 @@ type ManifestRule struct {
 	SourceParsed  *parser.Parsed
 	TargetParsed  *parser.Parsed
 	MultiPlatform bool
+	BackendType   string
 }
 
 func (rule *ManifestRule) Name() string {
@@ -63,17 +65,37 @@ func (rule *ManifestRule) Validate() error {
 	}
 
 	layers := rule.TargetParsed.NydusImage.Manifest.Layers
+	blobListInAnnotation := []string{}
+	blobListInLayer := []string{}
 	for i, layer := range layers {
 		if i == len(layers)-1 {
 			if layer.Annotations[utils.LayerAnnotationNydusBootstrap] != "true" {
 				return errors.New("invalid bootstrap layer in nydus image manifest")
+			}
+			// Check blob list in annotation
+			blobListStr, ok := layer.Annotations[utils.LayerAnnotationNydusBlobIDs]
+			if !ok {
+				return errors.New("invalid blob list in annotation of nydus image manifest")
+			}
+			if err := json.Unmarshal([]byte(blobListStr), &blobListInAnnotation); err != nil {
+				return errors.Wrap(err, "failed to unmarshal blob list in annotation of nydus image manifest")
 			}
 		} else {
 			if layer.MediaType != utils.MediaTypeNydusBlob ||
 				layer.Annotations[utils.LayerAnnotationNydusBlob] != "true" {
 				return errors.New("invalid blob layer in nydus image manifest")
 			}
+			blobListInLayer = append(blobListInLayer, layer.Digest.Hex())
 		}
+	}
+
+	// Compare the blob list differences between bootstrap layer annotation
+	// and manifest layers.
+	if rule.BackendType == "registry" && !reflect.DeepEqual(blobListInAnnotation, blobListInLayer) {
+		return fmt.Errorf(
+			"unmatched blob list between in annotation and layers: %v != %v",
+			blobListInAnnotation, blobListInLayer,
+		)
 	}
 
 	// Check Nydus image config with OCI image

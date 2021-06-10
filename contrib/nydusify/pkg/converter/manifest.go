@@ -76,58 +76,52 @@ func (mm *manifestManager) getExistsManifests(ctx context.Context) ([]ocispec.De
 // Merge OCI and Nydus manifest into a manifest index, the OCI
 // manifest of source image is not required to be provided
 func (mm *manifestManager) makeManifestIndex(
-	ctx context.Context, nydusManifest, ociManifest *ocispec.Descriptor,
+	ctx context.Context, existDescs []ocispec.Descriptor, nydusManifest, ociManifest *ocispec.Descriptor,
 ) (*ocispec.Index, error) {
-	manifestDescs, err := mm.getExistsManifests(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "Get image manifest index")
-	}
-
 	foundOCI := false
-	foundNydus := false
-	for idx, desc := range manifestDescs {
+	descs := make([]ocispec.Descriptor, 0)
+	for _, desc := range existDescs {
+		isNydus := false
 		if desc.Platform != nil {
 			if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
 				if utils.IsNydusPlatform(desc.Platform) {
-					manifestDescs[idx] = *nydusManifest
-					foundNydus = true
+					isNydus = true
 				} else {
-					if ociManifest != nil {
-						manifestDescs[idx] = *ociManifest
-					} else {
-						manifestDescs[idx].Platform.OS = utils.SupportedOS
-						manifestDescs[idx].Platform.Architecture = utils.SupportedArch
-					}
+					desc.Platform.OS = utils.SupportedOS
+					desc.Platform.Architecture = utils.SupportedArch
 					foundOCI = true
 				}
 			}
 		} else {
-			if ociManifest != nil {
-				manifestDescs[idx] = *ociManifest
-			} else {
-				manifestDescs[idx].Platform = &ocispec.Platform{
-					OS:           utils.SupportedOS,
-					Architecture: utils.SupportedArch,
-				}
+			desc.Platform = &ocispec.Platform{
+				OS:           utils.SupportedOS,
+				Architecture: utils.SupportedArch,
 			}
 			foundOCI = true
 		}
+		if !isNydus {
+			descs = append(descs, desc)
+		}
 	}
 
+	// Append the OCI manifest provided by source to manifest list
 	if !foundOCI && ociManifest != nil {
-		manifestDescs = append(manifestDescs, *ociManifest)
+		ociManifest.Platform = &ocispec.Platform{
+			OS:           utils.SupportedOS,
+			Architecture: utils.SupportedArch,
+		}
+		descs = append(descs, *ociManifest)
 	}
 
-	if !foundNydus {
-		manifestDescs = append(manifestDescs, *nydusManifest)
-	}
+	// Always put the nydus manifest to the last position of manifest list
+	descs = append(descs, *nydusManifest)
 
 	// Merge exists OCI manifests and Nydus manifest to manifest index
 	index := ocispec.Index{
 		Versioned: specs.Versioned{
 			SchemaVersion: 2,
 		},
-		Manifests: manifestDescs,
+		Manifests: descs,
 	}
 
 	return &index, nil
@@ -135,27 +129,28 @@ func (mm *manifestManager) makeManifestIndex(
 
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
 	layers := []ocispec.Descriptor{}
-	blobIDs := []string{}
+	blobListInAnnotation := []string{}
+
 	for idx, _layer := range buildLayers {
 		record := _layer.GetCacheRecord()
 
-		// Maybe no blob file be outputted in this building,
-		// so just ignore it in target layers
-		if mm.backend == nil && record.NydusBlobDesc != nil {
-			layers = append(layers, *record.NydusBlobDesc)
-		}
-
 		if record.NydusBlobDesc != nil {
-			blobIDs = append(blobIDs, record.NydusBlobDesc.Digest.Hex())
+			// Write blob digest list in JSON format to layer annotation of bootstrap.
+			blobListInAnnotation = append(blobListInAnnotation, record.NydusBlobDesc.Digest.Hex())
+			// For registry backend, we need to write the blob layer to
+			// manifest to prevent them from being deleted by registry GC.
+			if mm.backend.Type() == backend.RegistryBackend {
+				layers = append(layers, *record.NydusBlobDesc)
+			}
 		}
 
 		// Only need to write lastest bootstrap layer in nydus manifest
 		if idx == len(buildLayers)-1 {
-			blobIDsBytes, err := json.Marshal(blobIDs)
+			blobListBytes, err := json.Marshal(blobListInAnnotation)
 			if err != nil {
 				return errors.Wrap(err, "Marshal blob list")
 			}
-			record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobIDs] = string(blobIDsBytes)
+			record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobIDs] = string(blobListBytes)
 			layers = append(layers, *record.NydusBootstrapDesc)
 		}
 	}
@@ -256,9 +251,15 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 			Architecture: utils.SupportedArch,
 		}
 	}
-	_index, err := mm.makeManifestIndex(ctx, nydusManifestDesc, ociManifestDesc)
+
+	existManifests, err := mm.getExistsManifests(ctx)
 	if err != nil {
-		return errors.Wrap(err, "Make manifest index")
+		return errors.Wrap(err, "Get remote existing manifest index")
+	}
+
+	_index, err := mm.makeManifestIndex(ctx, existManifests, nydusManifestDesc, ociManifestDesc)
+	if err != nil {
+		return errors.Wrap(err, "Make manifest index for target")
 	}
 
 	indexMediaType := ocispec.MediaTypeImageIndex

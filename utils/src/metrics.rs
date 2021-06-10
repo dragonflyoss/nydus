@@ -14,6 +14,7 @@ use std::time::SystemTime;
 use serde_json::Error as SerdeError;
 
 use crate::logger::ErrorHolder;
+use crate::InodeBitmap;
 
 pub type Inode = u64;
 
@@ -108,6 +109,7 @@ pub struct GlobalIOStats {
     // But global fop accounting is always working within each Rafs.
     files_account_enabled: AtomicBool,
     access_pattern_enabled: AtomicBool,
+    record_latest_read_files_enabled: AtomicBool,
     // Given the fact that we don't have to measure latency all the time,
     // use this to turn it off.
     measure_latency: AtomicBool,
@@ -139,6 +141,9 @@ pub struct GlobalIOStats {
     file_counters: RwLock<HashMap<Inode, Arc<InodeIOStats>>>,
     #[serde(skip_serializing, skip_deserializing)]
     access_patterns: RwLock<HashMap<Inode, Arc<AccessPattern>>>,
+    // record regular file read
+    #[serde(skip_serializing, skip_deserializing)]
+    recent_read_files: InodeBitmap,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -234,27 +239,37 @@ fn latency_range_index(elapsed: usize) -> usize {
     }
 }
 
+macro_rules! impl_iostat_option {
+    ($get:ident, $set:ident, $opt:ident) => {
+        #[inline]
+        fn $get(&self) -> bool {
+            self.$opt.load(Ordering::Relaxed)
+        }
+
+        #[inline]
+        pub fn $set(&self, switch: bool) {
+            self.$opt.store(switch, Ordering::Relaxed)
+        }
+    };
+}
+
 impl GlobalIOStats {
     pub fn init(&self) {
         self.files_account_enabled.store(false, Ordering::Relaxed);
         self.measure_latency.store(true, Ordering::Relaxed);
     }
 
-    fn files_enabled(&self) -> bool {
-        self.files_account_enabled.load(Ordering::Relaxed)
-    }
-
-    fn access_pattern_enabled(&self) -> bool {
-        self.access_pattern_enabled.load(Ordering::Relaxed)
-    }
-
-    pub fn toggle_files_recording(&self, switch: bool) {
-        self.files_account_enabled.store(switch, Ordering::Relaxed)
-    }
-
-    pub fn toggle_access_pattern(&self, switch: bool) {
-        self.access_pattern_enabled.store(switch, Ordering::Relaxed)
-    }
+    impl_iostat_option!(files_enabled, toggle_files_recording, files_account_enabled);
+    impl_iostat_option!(
+        access_pattern_enabled,
+        toggle_access_pattern,
+        access_pattern_enabled
+    );
+    impl_iostat_option!(
+        record_latest_read_files_enabled,
+        toggle_latest_read_files_recording,
+        record_latest_read_files_enabled
+    );
 
     /// For now, each inode has its iostats counter regardless whether it is
     /// enabled per rafs.
@@ -316,6 +331,10 @@ impl GlobalIOStats {
                 }
                 None => warn!("No pattern record for file {}", ino),
             }
+        }
+
+        if self.record_latest_read_files_enabled() && fop == StatsFop::Read && success {
+            self.recent_read_files.set(ino);
         }
     }
 
@@ -389,6 +408,10 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
+    fn export_latest_read_files(&self) -> Result<String, IoStatsError> {
+        Ok(serde_json::json!(self.recent_read_files.bitmap_to_array_and_clear()).to_string())
+    }
+
     fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(
             &self
@@ -450,18 +473,28 @@ impl<'a> FopRecorder<'a> {
     }
 }
 
-pub fn export_files_stats(name: &Option<String>) -> Result<String, IoStatsError> {
+pub fn export_files_stats(
+    name: &Option<String>,
+    latest_read_files: bool,
+) -> Result<String, IoStatsError> {
     let ios_set = IOS_SET.read().unwrap();
 
     match name {
-        Some(k) => ios_set
-            .get(k)
-            .ok_or(IoStatsError::NoCounter)
-            .map(|v| v.export_files_stats())?,
+        Some(k) => ios_set.get(k).ok_or(IoStatsError::NoCounter).map(|v| {
+            if !latest_read_files {
+                v.export_files_stats()
+            } else {
+                v.export_latest_read_files()
+            }
+        })?,
         None => {
             if ios_set.len() == 1 {
                 if let Some(ios) = ios_set.values().next() {
-                    return ios.export_files_stats();
+                    return if !latest_read_files {
+                        ios.export_files_stats()
+                    } else {
+                        ios.export_latest_read_files()
+                    };
                 }
             }
             Err(IoStatsError::NoCounter)

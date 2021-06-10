@@ -69,10 +69,13 @@ func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
 // by multiparts method or the normal method
 func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64) (*ocispec.Descriptor, error) {
 	blobID = b.objectPrefix + blobID
+
+	desc := blobDesc(size, blobID)
+
 	if exist, err := b.bucket.IsObjectExist(blobID); err != nil {
 		return nil, err
 	} else if exist {
-		return nil, nil
+		return &desc, nil
 	}
 
 	var stat os.FileInfo
@@ -144,8 +147,6 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	end := time.Now()
 	elapsed := end.Sub(start)
 	logrus.Debugf("Uploading blob %s costs %s", blobID, elapsed)
-
-	desc := blobDesc(size, blobID)
 
 	return &desc, nil
 }

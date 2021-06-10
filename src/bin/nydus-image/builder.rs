@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::{remove_file, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
@@ -183,34 +183,39 @@ impl BlobBufferWriter {
         self.file.write_all(buf).map_err(|e| anyhow!(e))
     }
 
-    fn release(self, new_name: &str) -> Result<()> {
+    fn release(self, new_name: Option<&str>) -> Result<()> {
         let mut f = self.file.into_inner()?;
-        let empty = CString::default();
-        let name = CString::new(new_name)?;
-
         f.flush()?;
 
-        if let BlobStorage::BlobsDir(_s) = &self.blob_stor {
-            // Safe because this doesn't modify any memory and we check the return value.
-            // Being used fd never be closed before.
-            let res = unsafe {
-                libc::linkat(
-                    f.as_raw_fd(),
-                    empty.as_ptr(),
-                    // Safe because it is using BlobsDir storage.
-                    self.parent_dir.unwrap().as_raw_fd(),
-                    name.as_ptr(),
-                    libc::AT_EMPTY_PATH,
-                )
-            };
+        if let Some(name) = new_name {
+            if let BlobStorage::BlobsDir(_s) = &self.blob_stor {
+                let empty = CString::default();
+                // Safe because this doesn't modify any memory and we check the return value.
+                // Being used fd never be closed before.
+                let res = unsafe {
+                    libc::linkat(
+                        f.as_raw_fd(),
+                        empty.as_ptr(),
+                        // Safe because it is using BlobsDir storage.
+                        self.parent_dir.unwrap().as_raw_fd(),
+                        CString::new(name)?.as_ptr(),
+                        libc::AT_EMPTY_PATH,
+                    )
+                };
 
-            if res < 0 {
-                bail!(
-                    "Rename blob to {} failed. error: {:?} ",
-                    &new_name,
-                    last_error!()
-                );
+                if res < 0 {
+                    bail!(
+                        "Rename blob to {} failed. error: {:?} ",
+                        &name,
+                        last_error!()
+                    );
+                }
             }
+        } else if let BlobStorage::SingleFile(s) = &self.blob_stor {
+            // `new_name` is None means no blob is really built, perhaps due to dedup.
+            // We don't want to puzzle user, so delete it from here.
+            // In the future, FIFO could be leveraged, don't remove it then.
+            remove_file(s)?;
         }
 
         Ok(())
@@ -794,9 +799,7 @@ impl Builder {
         // Flush remaining data in BufWriter to file
         self.f_bootstrap.flush()?;
         if let Some(bw) = self.blob_writer.lock().unwrap().take() {
-            if let Some(id) = self.this_blob_id() {
-                bw.release(id)?;
-            }
+            bw.release(self.this_blob_id())?;
         }
 
         Ok((blob_ids, blob_size))

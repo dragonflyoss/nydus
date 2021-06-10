@@ -6,6 +6,7 @@ package rule
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"reflect"
 
@@ -55,29 +56,24 @@ func (rule *BootstrapRule) Validate() error {
 		return errors.Wrap(err, "unmarshal bootstrap output JSON")
 	}
 
-	var blobIDs []string
-	// Parse blob list from layers in Nydus manifest
+	var blobListInAnnotation []string
 	layers := rule.Parsed.NydusImage.Manifest.Layers
-	if len(layers) > 1 {
-		for _, layer := range layers[:len(layers)-1] {
-			blobIDs = append(blobIDs, layer.Digest.Hex())
-		}
-	}
+
 	// Parse blob list from bootstrap layer annotation in Nydus manifest
-	if len(blobIDs) == 0 {
-		blobIDStr := rule.Parsed.NydusImage.Manifest.Layers[len(layers)-1].Annotations[utils.LayerAnnotationNydusBlobIDs]
-		if blobIDStr != "" {
-			if err := json.Unmarshal([]byte(blobIDStr), &blobIDs); err != nil {
-				return errors.Wrap(err, "unmarshal blob ids from layer annotation")
-			}
+	blobListStr := rule.Parsed.NydusImage.Manifest.Layers[len(layers)-1].Annotations[utils.LayerAnnotationNydusBlobIDs]
+	if blobListStr != "" {
+		if err := json.Unmarshal([]byte(blobListStr), &blobListInAnnotation); err != nil {
+			return errors.Wrap(err, "unmarshal blob list from layer annotation")
 		}
 	}
-	// Blob list recorded in manifest should be equal with the blob table of bootstrap
-	if !reflect.DeepEqual(bootstrap.Blobs, blobIDs) {
-		logrus.Warnf(
-			"nydus blob list in bootstrap(%d) is not match with manifest(%d)",
+
+	// Blob list recorded in manifest annotation should be equal with
+	// the blob list recorded in blob table of bootstrap
+	if !reflect.DeepEqual(bootstrap.Blobs, blobListInAnnotation) {
+		return fmt.Errorf(
+			"nydus blob list in bootstrap(%d) does not match with manifest(%d)'s",
 			len(bootstrap.Blobs),
-			len(blobIDs),
+			len(blobListInAnnotation),
 		)
 	}
 
