@@ -80,6 +80,9 @@ pub trait RafsCache {
 
     /// Read a chunk data through cache
     /// offset is relative to chunk start
+    // TODO: Cache is indexed by each chunk's block id. When this read request can't
+    // hit local cache and it spans two chunks, group more than one requests to backend
+    // storage could benefit the performance.
     fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize>;
 
     /// Write a chunk data through cache
@@ -113,7 +116,7 @@ pub trait RafsCache {
         cacher: F,
     ) -> Result<usize>
     where
-        F: FnOnce(&[u8], &[u8]) -> Result<()>,
+        F: FnOnce(&[u8]) -> Result<()>,
         Self: Sized,
     {
         let offset = cki.compress_offset();
@@ -193,7 +196,7 @@ pub trait RafsCache {
             self.need_validate(),
         )
         .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
-        cacher(raw_chunk, chunk)?;
+        cacher(chunk)?;
         Ok(chunk.len())
     }
 

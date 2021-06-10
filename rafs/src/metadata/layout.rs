@@ -405,6 +405,8 @@ impl OndiskInodeTable {
             return Err(einval!("invalid inode number"));
         }
 
+        // The offset is aligned with 8 bytes to make it easier to
+        // validate OndiskInode.
         let offset = inode_offset >> 3;
         self.data[(ino - 1) as usize] = offset as u32;
 

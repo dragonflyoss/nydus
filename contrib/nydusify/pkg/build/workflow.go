@@ -114,7 +114,7 @@ func (workflow *Workflow) Build(
 		OutputJSONPath:      workflow.buildOutputJSONPath(),
 		BlobPath:            blobPath,
 	}); err != nil {
-		return "", errors.Wrap(err, fmt.Sprintf("build layer %s", layerDir))
+		return "", errors.Wrapf(err, "build layer %s", layerDir)
 	}
 
 	workflow.parentBootstrapPath = workflow.bootstrapPath
@@ -143,8 +143,15 @@ func (workflow *Workflow) Build(
 	// When `digestedBlobPath` is void, this layer's bootsrap can be pushed meanwhile not for blob
 	if digestedBlobPath != "" {
 		err = os.Rename(blobPath, digestedBlobPath)
-		if err != nil {
+		// It's possible that two blobs that are built with the same digest.
+		// It's not fatal during image creation since rafs can access exactly
+		// what it wants since the two are the same, though registry only have
+		// one blob corresponding to two layers.
+		if err != nil && err != os.ErrExist {
 			return "", err
+		} else if err == os.ErrExist {
+			logrus.Warnf("Same blob %s are generated", digestedBlobPath)
+			return "", nil
 		}
 	}
 

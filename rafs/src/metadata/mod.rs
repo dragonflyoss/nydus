@@ -251,11 +251,7 @@ impl RafsSuper {
                     self.inodes = Arc::new(inodes);
                 }
                 RafsMode::Cached => {
-                    r.seek(SeekFrom::Start(sb.blob_table_offset()))?;
-                    let mut blob_table = OndiskBlobTable::new();
-                    blob_table.load(r, sb.blob_table_size() as usize)?;
-
-                    let mut inodes = CachedInodes::new(self.meta, blob_table, self.digest_validate);
+                    let mut inodes = CachedInodes::new(self.meta, self.digest_validate);
                     inodes.load(r)?;
                     self.inodes = Arc::new(inodes);
                 }

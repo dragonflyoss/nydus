@@ -90,6 +90,10 @@ impl RafsDevice {
         digester: digest::Algorithm,
         id: &str,
     ) -> io::Result<()> {
+        // Stop prefetch if it is running before swapping backend since prefetch
+        // threads cloned Arc<Cache>, the swap operation can't drop inner object completely.
+        // Otherwise prefetch threads will be leaked.
+        self.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
         self.rw_layer.store(Arc::new(factory::new_rw_layer(
             config, compressor, digester, id,
         )?));

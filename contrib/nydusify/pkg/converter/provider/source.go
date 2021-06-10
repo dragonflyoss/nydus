@@ -155,7 +155,10 @@ func DefaultSource(ctx context.Context, remote *remote.Remote, workDir string) (
 	}
 
 	if parsed.OCIImage == nil {
-		return nil, errors.Wrap(err, "Not found linux/amd64 manifest in source image")
+		if parsed.NydusImage != nil {
+			return nil, fmt.Errorf("The source is an image that only included Nydus manifest")
+		}
+		return nil, fmt.Errorf("Not found OCI %s manifest in source image", utils.SupportedOS+"/"+utils.SupportedArch)
 	}
 
 	sp := []SourceProvider{

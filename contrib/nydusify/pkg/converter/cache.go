@@ -29,22 +29,23 @@ type cacheGlue struct {
 }
 
 func newCacheGlue(
-	ctx context.Context, maxRecords uint, dockerV2Format bool, remote *remote.Remote, cacheRemote *remote.Remote, backend backend.Backend,
+	ctx context.Context, maxRecords uint, version string, dockerV2Format bool, remote *remote.Remote, cacheRemote *remote.Remote, backend backend.Backend,
 ) (*cacheGlue, error) {
 	if cacheRemote == nil {
 		return &cacheGlue{}, nil
 	}
 
-	pullDone := logger.Log(ctx, fmt.Sprintf("[CACH] Import from %s", cacheRemote.Ref), nil)
+	logrus.Infof("[CACH] Import from %s, required version %s", cacheRemote.Ref, version)
 
 	// Pull Nydus cache image from remote registry
 	cache, err := cache.New(cacheRemote, cache.Opt{
 		MaxRecords:     maxRecords,
+		Version:        version,
 		DockerV2Format: dockerV2Format,
 		Backend:        backend,
 	})
 	if err != nil {
-		return nil, pullDone(errors.Wrap(err, "Init nydus cache"))
+		return nil, errors.Wrap(err, "Import cache image")
 	}
 
 	// Ingore the error of importing cache image, it doesn't affect
@@ -57,7 +58,7 @@ func newCacheGlue(
 		cache:       cache,
 		cacheRemote: cacheRemote,
 		remote:      remote,
-	}, pullDone(nil)
+	}, nil
 }
 
 func (cg *cacheGlue) Pull(

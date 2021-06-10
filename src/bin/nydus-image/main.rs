@@ -13,9 +13,7 @@ extern crate nydus_utils;
 mod trace;
 
 mod builder;
-mod node;
-mod stargz;
-mod tree;
+mod core;
 mod validator;
 
 #[macro_use]
@@ -29,18 +27,30 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs::metadata;
 use std::fs::OpenOptions;
-use std::io;
+use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
-use builder::{BlobStorage, SourceType};
-use node::WhiteoutSpec;
+use crate::builder::directory::DirectoryBuilder;
+use crate::builder::stargz::StargzBuilder;
+use crate::builder::Builder;
+
+use crate::core::blob::BlobStorage;
+use crate::core::context::BuildContext;
+use crate::core::context::SourceType;
+use crate::core::context::BUF_WRITER_CAPACITY;
+use crate::core::node::{self, WhiteoutSpec};
+use crate::core::prefetch::Prefetch;
+use crate::core::tree;
+
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
+use rafs::metadata::layout::OndiskBlobTable;
+use rafs::RafsIoRead;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use validator::Validator;
@@ -83,46 +93,6 @@ fn dump_result_output(matches: &clap::ArgMatches, blob_ids: Vec<String>) -> Resu
     }
 
     Ok(())
-}
-
-/// Gather readahead file paths line by line from stdin
-/// Input format:
-///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/1"
-/// This routine does not guarantee that specified file must exist in local filesystem,
-/// this is because we can't guarantee that source rootfs directory of parent bootstrap
-/// is located in local file system.
-fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
-    let stdin = io::stdin();
-    let mut files = BTreeMap::new();
-
-    loop {
-        let mut file = String::new();
-
-        let size = stdin
-            .read_line(&mut file)
-            .context("failed to parse readahead files")?;
-        if size == 0 {
-            break;
-        }
-        let file_trimmed: PathBuf = file.trim().into();
-        // Sanity check for the list format.
-        if !file_trimmed.starts_with(Path::new("/")) {
-            warn!(
-                "Illegal file path specified. It {:?} must start with '/'",
-                file
-            );
-            continue;
-        }
-
-        debug!(
-            "readahead file: {}, trimmed file name {:?}",
-            file, file_trimmed
-        );
-        // The inode index is not decided yet, but will do during fs-walk.
-        files.insert(file_trimmed, None);
-    }
-
-    Ok(files)
 }
 
 fn main() -> Result<()> {
@@ -296,10 +266,10 @@ fn main() -> Result<()> {
     register_tracer!(TraceClass::Event, EventTracerClass);
 
     if let Some(matches) = cmd.subcommand_matches("create") {
-        let source_path = Path::new(matches.value_of("SOURCE").unwrap());
+        let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
 
-        let source_file = metadata(source_path)
+        let source_file = metadata(&source_path)
             .context(format!("failed to get source path {:?}", source_path))?;
 
         let mut blob_id = String::new();
@@ -378,53 +348,87 @@ fn main() -> Result<()> {
             None
         };
 
-        let mut parent_bootstrap = Path::new("");
-        if let Some(_parent_bootstrap) = matches.value_of("parent-bootstrap") {
-            parent_bootstrap = Path::new(_parent_bootstrap);
+        let mut parent_bootstrap_path = Path::new("");
+        if let Some(_parent_bootstrap_path) = matches.value_of("parent-bootstrap") {
+            parent_bootstrap_path = Path::new(_parent_bootstrap_path);
         }
-
-        let prefetch_policy = matches
-            .value_of("prefetch-policy")
-            .unwrap_or_default()
-            .parse()?;
-
-        let hint_readahead_files = if prefetch_policy != builder::PrefetchPolicy::None {
-            gather_readahead_files().context("failed to get readahead files")?
-        } else {
-            BTreeMap::new()
-        };
 
         let whiteout_spec: WhiteoutSpec = matches
             .value_of("whiteout-spec")
             .unwrap_or_default()
             .parse()?;
 
+        let prefetch_policy = matches
+            .value_of("prefetch-policy")
+            .unwrap_or_default()
+            .parse()?;
+        let prefetch = Prefetch::new(prefetch_policy)?;
+
         let aligned_chunk = matches.is_present("aligned-chunk");
 
-        // External tool like `nydusify` might rename the blob to a OCI distribution compatible one.
-        let mut ib = builder::Builder::new(
+        let f_bootstrap = Box::new(BufWriter::with_capacity(
+            BUF_WRITER_CAPACITY,
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(bootstrap_path)
+                .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
+        ));
+
+        let f_parent_bootstrap: Option<Box<dyn RafsIoRead>> =
+            if parent_bootstrap_path != Path::new("") {
+                Some(Box::new(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(false)
+                        .open(parent_bootstrap_path)
+                        .with_context(|| {
+                            format!(
+                                "failed to open parent bootstrap file {:?}",
+                                parent_bootstrap_path
+                            )
+                        })?,
+                ))
+            } else {
+                None
+            };
+
+        let mut ctx = BuildContext {
             source_type,
             source_path,
-            blob_stor,
-            bootstrap_path,
-            parent_bootstrap,
             blob_id,
+            f_bootstrap,
+            f_parent_bootstrap,
             compressor,
             digester,
-            hint_readahead_files,
-            prefetch_policy,
-            !repeatable,
+            explicit_uidgid: !repeatable,
             whiteout_spec,
             aligned_chunk,
+            prefetch,
+
+            lower_inode_map: HashMap::new(),
+            upper_inode_map: HashMap::new(),
+            chunk_cache: HashMap::new(),
+            blob_table: OndiskBlobTable::new(),
+            nodes: Vec::new(),
+        };
+
+        let mut builder: Box<dyn Builder> = match source_type {
+            SourceType::Directory => {
+                Box::new(DirectoryBuilder::new(blob_stor.as_ref().unwrap().clone()))
+            }
+            SourceType::StargzIndex => Box::new(StargzBuilder::new()),
+        };
+        let (blob_ids, blob_size) = timing_tracer!(
+            { builder.build(&mut ctx).context("build failed") },
+            "total_build"
         )?;
 
         // Some operations like listing xattr pairs of certain namespace need the process
         // to be privileged. Therefore, trace what euid and egid are
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
-
-        let (blob_ids, blob_size) =
-            timing_tracer!({ ib.build().context("build failed") }, "total_build")?;
 
         // Validate output bootstrap file
         if !matches.is_present("disable-check") {

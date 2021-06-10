@@ -69,6 +69,7 @@ type Opt struct {
 
 	CacheRemote     *remote.Remote
 	CacheMaxRecords uint
+	CacheVersion    string
 
 	NydusImagePath string
 	WorkDir        string
@@ -89,6 +90,7 @@ type Converter struct {
 
 	CacheRemote     *remote.Remote
 	CacheMaxRecords uint
+	CacheVersion    string
 
 	NydusImagePath string
 	WorkDir        string
@@ -114,6 +116,7 @@ func New(opt Opt) (*Converter, error) {
 		TargetRemote:    opt.TargetRemote,
 		CacheRemote:     opt.CacheRemote,
 		CacheMaxRecords: opt.CacheMaxRecords,
+		CacheVersion:    opt.CacheVersion,
 		NydusImagePath:  opt.NydusImagePath,
 		WorkDir:         opt.WorkDir,
 		PrefetchDir:     opt.PrefetchDir,
@@ -140,11 +143,11 @@ func findSupportedSource(ctx context.Context, sources []provider.SourceProvider)
 func (cvt *Converter) convert(ctx context.Context) error {
 	logger = cvt.Logger
 
-	logrus.Infoln(fmt.Sprintf("Converting to %s", cvt.TargetRemote.Ref))
+	logrus.Infof("Converting to %s", cvt.TargetRemote.Ref)
 
 	// Try to pull Nydus cache image from remote registry
 	cg, err := newCacheGlue(
-		ctx, cvt.CacheMaxRecords, cvt.DockerV2Format, cvt.TargetRemote, cvt.CacheRemote, cvt.storageBackend,
+		ctx, cvt.CacheMaxRecords, cvt.CacheVersion, cvt.DockerV2Format, cvt.TargetRemote, cvt.CacheRemote, cvt.storageBackend,
 	)
 	if err != nil {
 		return errors.Wrap(err, "Pull cache image")
@@ -285,7 +288,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		return errors.Wrap(err, "Get cache record")
 	}
 
-	logrus.Infoln(fmt.Sprintf("Converted to %s", cvt.TargetRemote.Ref))
+	logrus.Infof("Converted to %s", cvt.TargetRemote.Ref)
 
 	return nil
 }
