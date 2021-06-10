@@ -140,7 +140,7 @@ impl Prefetch {
         self.readahead_files.get(&node.rootfs()).is_some()
     }
 
-    pub fn get_file_indexs(&self) -> Vec<&u64> {
+    pub fn get_file_indexes(&self) -> Vec<&u64> {
         self.readahead_files
             .values()
             .filter_map(|index| index.as_ref())
@@ -161,5 +161,9 @@ impl Prefetch {
         } else {
             None
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.readahead_files.clear();
     }
 }

@@ -82,7 +82,7 @@ macro_rules! impl_chunkinfo_getter {
 struct DirectMappingState {
     meta: RafsSuperMeta,
     inode_table: ManuallyDrop<OndiskInodeTable>,
-    blob_table: OndiskBlobTable,
+    blob_table: Arc<OndiskBlobTable>,
     base: *const u8,
     end: *const u8,
     size: usize,
@@ -96,7 +96,7 @@ impl DirectMappingState {
         DirectMappingState {
             meta: *meta,
             inode_table: ManuallyDrop::new(OndiskInodeTable::default()),
-            blob_table: OndiskBlobTable::default(),
+            blob_table: Arc::new(OndiskBlobTable::default()),
             fd: -1,
             base: std::ptr::null(),
             end: std::ptr::null(),
@@ -242,6 +242,15 @@ impl DirectMapping {
             return Err(ebadf!("invalid blob table"));
         }
 
+        // Validate extended blob table layout
+        let extended_blob_table_offset = old_state.meta.extended_blob_table_offset;
+        if extended_blob_table_offset > 0
+            && ((extended_blob_table_offset as u64) < blob_table_start
+                || extended_blob_table_offset as u64 >= len)
+        {
+            return Err(ebadf!("invalid extended blob table"));
+        }
+
         // Prefetch the bootstrap file
         readahead(fd, 0, len);
 
@@ -265,18 +274,21 @@ impl DirectMapping {
         // Safe because the mmap area should covered the range [start, end)
         let end = unsafe { base.add(size) };
 
-        // Load blob table. Safe because we have validated the inode table layout.
-        let blob_slice = unsafe {
-            slice::from_raw_parts(
-                base.add(blob_table_start as usize),
-                blob_table_size as usize,
-            )
-        };
+        // Load blob table. Safe because we have validated the blob table layout.
         let mut blob_table = OndiskBlobTable::new();
-        blob_table.load_from_slice(blob_slice).map_err(|e| {
-            unsafe { libc::munmap(base as *mut u8 as *mut libc::c_void, size) };
-            e
-        })?;
+        let meta = &old_state.meta;
+
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        if meta.extended_blob_table_offset > 0 {
+            r.seek(SeekFrom::Start(meta.extended_blob_table_offset))?;
+            blob_table
+                .extended
+                .load(r, meta.extended_blob_table_entries as usize)?;
+        }
+
+        r.seek(SeekFrom::Start(meta.blob_table_offset))?;
+        blob_table.load(r, meta.blob_table_size)?;
 
         // Load(Map) inode table. Safe because we have validated the inode table layout.
         // Though we have passed *mut u32 to Vec::from_raw_parts(), it will trigger invalid memory
@@ -296,7 +308,7 @@ impl DirectMapping {
         let state = DirectMappingState {
             meta: old_state.meta,
             inode_table: ManuallyDrop::new(inode_table),
-            blob_table,
+            blob_table: Arc::new(blob_table),
             fd: file.into_raw_fd(),
             base,
             end,
@@ -347,7 +359,7 @@ impl RafsSuperInodes for DirectMapping {
 
     fn get_blob_table(&self) -> Arc<OndiskBlobTable> {
         let state = self.state.load();
-        Arc::new(state.blob_table.clone())
+        state.blob_table.clone()
     }
 
     fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
@@ -599,8 +611,8 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     #[inline]
-    fn get_chunk_blob_id(&self, idx: u32) -> Result<String> {
-        Ok(self.state().blob_table.get(idx)?.blob_id)
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+        Ok(self.state().blob_table.get(idx)?)
     }
 
     fn get_entry(&self) -> Entry {
@@ -677,7 +689,7 @@ impl RafsInode for OndiskInodeWrapper {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize> {
         if !self.is_dir() {
-            return Err(enotdir!(""));
+            return Err(enotdir!());
         }
 
         let state = self.state();
@@ -782,6 +794,7 @@ impl RafsChunkInfo for OndiskChunkInfoWrapper {
     }
 
     impl_chunkinfo_getter!(blob_index, u32);
+    impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(compress_offset, u64);
     impl_chunkinfo_getter!(compress_size, u32);
     impl_chunkinfo_getter!(decompress_offset, u64);

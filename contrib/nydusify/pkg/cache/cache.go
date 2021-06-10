@@ -227,12 +227,12 @@ func mergeRecord(old, new *CacheRecord) *CacheRecord {
 	return old
 }
 
-func (cache *Cache) importLayersToRecords(layers []ocispec.Descriptor) {
+func (cache *Cache) importRecordsFromLayers(layers []ocispec.Descriptor) {
 	pulledRecords := make(map[digest.Digest]*CacheRecord)
 	pushedRecords := []*CacheRecord{}
 
-	for idx := range layers {
-		record := cache.layerToRecord(&layers[idx])
+	for _, layer := range layers {
+		record := cache.layerToRecord(&layer)
 		if record != nil {
 			// Merge bootstrap and related blob layer to record
 			newRecord := mergeRecord(
@@ -241,6 +241,8 @@ func (cache *Cache) importLayersToRecords(layers []ocispec.Descriptor) {
 			)
 			pulledRecords[record.SourceChainID] = newRecord
 			pushedRecords = append(pushedRecords, newRecord)
+		} else {
+			logrus.Warnf("Strange! Build cache layer can't produce a valid record. %s", layer.Digest)
 		}
 	}
 
@@ -361,12 +363,12 @@ func (cache *Cache) Import(ctx context.Context) error {
 	// Discard the cache mismatched version
 	if manifest.Annotations[utils.ManifestNydusCache] != cache.opt.Version {
 		return fmt.Errorf(
-			"Unmatched cache image version %s, required to be %s",
+			"unmatched cache image version %s, required to be %s",
 			manifest.Annotations[utils.ManifestNydusCache], cache.opt.Version,
 		)
 	}
 
-	cache.importLayersToRecords(manifest.Layers)
+	cache.importRecordsFromLayers(manifest.Layers)
 
 	return nil
 }

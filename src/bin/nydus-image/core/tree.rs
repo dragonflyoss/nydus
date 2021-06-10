@@ -45,7 +45,8 @@ fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> OndiskChunkInfo {
         compress_offset: cki.compress_offset(),
         decompress_offset: cki.decompress_offset(),
         file_offset: cki.file_offset(),
-        reserved: 0u64,
+        index: cki.index(),
+        reserved: 0u32,
     }
 }
 

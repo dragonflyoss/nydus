@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
 	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/pkg/errors"
@@ -46,34 +47,31 @@ type withCredentialFunc = func(string) (string, string, error)
 // withRemote creates an remote instance, it uses the implemention of containerd
 // docker remote to access image from remote registry.
 func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote.Remote, error) {
-	registryHosts := docker.ConfigureDefaultRegistries(
-		docker.WithAuthorizer(docker.NewAuthorizer(
-			newDefaultClient(),
-			credFunc,
-		)),
-		docker.WithClient(newDefaultClient()),
-		docker.WithPlainHTTP(func(host string) (bool, error) {
-			_insecure, err := docker.MatchLocalhost(host)
-			if err != nil {
-				return false, err
-			}
-			if _insecure {
-				return true, nil
-			}
-			return insecure, nil
-		}),
-	)
+	resolverFunc := func() remotes.Resolver {
+		registryHosts := docker.ConfigureDefaultRegistries(
+			docker.WithAuthorizer(docker.NewAuthorizer(
+				newDefaultClient(),
+				credFunc,
+			)),
+			docker.WithClient(newDefaultClient()),
+			docker.WithPlainHTTP(func(host string) (bool, error) {
+				_insecure, err := docker.MatchLocalhost(host)
+				if err != nil {
+					return false, err
+				}
+				if _insecure {
+					return true, nil
+				}
+				return insecure, nil
+			}),
+		)
 
-	resolver := docker.NewResolver(docker.ResolverOptions{
-		Hosts: registryHosts,
-	})
-
-	remote, err := remote.New(ref, resolver)
-	if err != nil {
-		return nil, err
+		return docker.NewResolver(docker.ResolverOptions{
+			Hosts: registryHosts,
+		})
 	}
 
-	return remote, nil
+	return remote.New(ref, resolverFunc)
 }
 
 // DefaultRemote creates an remote instance, it attempts to read docker auth config

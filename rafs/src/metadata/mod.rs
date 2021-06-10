@@ -40,9 +40,10 @@ use nydus_utils::digest::{self, RafsDigest};
 
 pub mod cached;
 pub mod direct;
+pub mod extended;
 pub mod layout;
 
-pub use storage::device::{RafsChunkFlags, RafsChunkInfo};
+pub use storage::device::{RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
 
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
@@ -84,6 +85,8 @@ pub struct RafsSuperMeta {
     pub inode_table_offset: u64,
     pub blob_table_size: u32,
     pub blob_table_offset: u64,
+    pub extended_blob_table_offset: u64,
+    pub extended_blob_table_entries: u32,
     pub blob_readahead_offset: u32,
     pub blob_readahead_size: u32,
     pub prefetch_table_offset: u64,
@@ -159,6 +162,8 @@ impl Default for RafsSuper {
                 inode_table_offset: 0,
                 blob_table_size: 0,
                 blob_table_offset: 0,
+                extended_blob_table_offset: 0,
+                extended_blob_table_entries: 0,
                 blob_readahead_offset: 0,
                 blob_readahead_size: 0,
                 prefetch_table_offset: 0,
@@ -235,6 +240,8 @@ impl RafsSuper {
                 self.meta.inode_table_offset = sb.inode_table_offset();
                 self.meta.blob_table_offset = sb.blob_table_offset();
                 self.meta.blob_table_size = sb.blob_table_size();
+                self.meta.extended_blob_table_offset = sb.extended_blob_table_offset();
+                self.meta.extended_blob_table_entries = sb.extended_blob_table_entries();
             }
             _ => return Err(ebadf!("invalid superblock version number")),
         }
@@ -520,7 +527,7 @@ pub trait RafsSuperInodes {
 
     fn get_max_ino(&self) -> Inode;
 
-    fn get_blobs(&self) -> Vec<OndiskBlobTableEntry> {
+    fn get_blobs(&self) -> Vec<Arc<RafsBlobEntry>> {
         self.get_blob_table().get_all()
     }
 
@@ -594,7 +601,7 @@ pub trait RafsInode {
     fn get_child_index(&self) -> Result<u32>;
     fn get_child_count(&self) -> u32;
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>>;
-    fn get_chunk_blob_id(&self, idx: u32) -> Result<String>;
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>>;
     fn get_entry(&self) -> Entry;
     fn get_attr(&self) -> Attr;
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;
@@ -650,8 +657,8 @@ pub trait RafsInode {
 
         for idx in index_start..index_end {
             let chunk = self.get_chunk_info(idx)?;
-            let blob_id = self.get_chunk_blob_id(chunk.blob_index())?;
-            if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob_id) {
+            let blob = self.get_blob_by_index(chunk.blob_index())?;
+            if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob) {
                 break;
             }
         }
@@ -675,7 +682,7 @@ pub(crate) fn add_chunk_to_bio_desc(
     chunk: Arc<dyn RafsChunkInfo>,
     desc: &mut RafsBioDesc,
     blksize: u32,
-    blob_id: String,
+    blob: Arc<RafsBlobEntry>,
 ) -> bool {
     if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
         return true;
@@ -697,7 +704,7 @@ pub(crate) fn add_chunk_to_bio_desc(
 
     let bio = RafsBio::new(
         chunk,
-        blob_id,
+        blob,
         chunk_start as u32,
         (chunk_end - chunk_start) as usize,
         blksize,
@@ -756,7 +763,7 @@ mod tests {
     use nydus_utils::digest::RafsDigest;
     use std::sync::Arc;
     use storage::device::RafsBioDesc;
-    use storage::device::{RafsChunkFlags, RafsChunkInfo};
+    use storage::device::{RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
     use storage::impl_getter;
 
     #[derive(Default, Copy, Clone)]
@@ -769,7 +776,8 @@ mod tests {
         pub compress_offset: u64,
         pub decompress_offset: u64,
         pub file_offset: u64,
-        pub reserved: u64,
+        pub index: u32,
+        pub reserved: u32,
     }
 
     impl MockChunkInfo {
@@ -789,6 +797,7 @@ mod tests {
             self.flags.contains(RafsChunkFlags::HOLECHUNK)
         }
         impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(index, index, u32);
         impl_getter!(compress_offset, compress_offset, u64);
         impl_getter!(compress_size, compress_size, u32);
         impl_getter!(decompress_offset, decompress_offset, u64);
@@ -836,7 +845,14 @@ mod tests {
                 Arc::new(chunk),
                 &mut desc,
                 100,
-                "blobid".to_string(),
+                Arc::new(RafsBlobEntry {
+                    chunk_count: 0,
+                    readahead_offset: 0,
+                    readahead_size: 0,
+                    blob_id: String::from("blobid"),
+                    blob_index: 0,
+                    blob_cache_size: 0,
+                }),
             );
             assert_eq!(*result, res);
             if !desc.bi_vec.is_empty() {

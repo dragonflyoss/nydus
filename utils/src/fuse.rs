@@ -45,7 +45,7 @@ impl FuseSession {
     pub fn new(mountpoint: &Path, fsname: &str, subtype: &str) -> io::Result<FuseSession> {
         let dest = mountpoint.canonicalize()?;
         if !dest.is_dir() {
-            return Err(enotdir!(format!("{:?} is not a directory", dest)));
+            return Err(enotdir!());
         }
 
         Ok(FuseSession {

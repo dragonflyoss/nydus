@@ -114,6 +114,8 @@ func (layer *buildLayer) pushBlob(ctx context.Context) error {
 		return errors.Wrap(err, "Stat blob file")
 	}
 
+	defer os.Remove(blobPath)
+
 	if err := utils.WithRetry(func() error {
 		size := info.Size()
 		desc, err := layer.backend.Upload(ctx, blobID, blobPath, size)
@@ -298,6 +300,8 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 	if err != nil {
 		return buildDone(errors.Wrapf(err, "Build source layer %s", layer.source.Digest()))
 	}
+
+	// The built blob will be removed after `upload` phrase.
 	layer.blobPath = blobPath
 
 	return buildDone(nil)

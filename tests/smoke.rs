@@ -18,14 +18,20 @@ const COMPAT_BOOTSTRAPS: [&str; 2] = [
     "sha256-nocompress-repeatable",
 ];
 
-fn check_compact<'a>(work_dir: &'a PathBuf, bootstrap_name: &str, rafs_mode: &str) {
+fn check_compact<'a>(
+    work_dir: &'a PathBuf,
+    enable_cache: bool,
+    bootstrap_name: &str,
+    rafs_mode: &str,
+    digest_validate: bool,
+) {
     let nydusd = nydusd::new(
         work_dir,
-        false,
+        enable_cache,
         false,
         rafs_mode.parse().unwrap(),
         "api.sock".into(),
-        true,
+        digest_validate,
     );
 
     nydusd.start(Some(bootstrap_name), "mnt");
@@ -186,7 +192,10 @@ fn integration_test_compact() {
 
     for mode in vec!["direct", "cached"].iter() {
         for bs in COMPAT_BOOTSTRAPS.iter() {
-            check_compact(&work_dir, bs, mode);
+            check_compact(&work_dir, false, bs, mode, false);
+            check_compact(&work_dir, false, bs, mode, true);
+            check_compact(&work_dir, true, bs, mode, false);
+            check_compact(&work_dir, true, bs, mode, true);
         }
     }
 }

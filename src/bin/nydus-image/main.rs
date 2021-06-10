@@ -44,7 +44,7 @@ use crate::core::blob::BlobStorage;
 use crate::core::context::BuildContext;
 use crate::core::context::SourceType;
 use crate::core::context::BUF_WRITER_CAPACITY;
-use crate::core::node::{self, WhiteoutSpec};
+use crate::core::node::{self, ChunkCountMap, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
@@ -410,6 +410,7 @@ fn main() -> Result<()> {
             lower_inode_map: HashMap::new(),
             upper_inode_map: HashMap::new(),
             chunk_cache: HashMap::new(),
+            chunk_count_map: ChunkCountMap::default(),
             blob_table: OndiskBlobTable::new(),
             nodes: Vec::new(),
         };

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::convert::TryFrom;
 use std::ffi::OsString;
 use std::mem::size_of;
 
@@ -224,8 +225,10 @@ impl Bootstrap {
             Result<bool>
         )?;
 
+        // Clear all cached states for next upper layer build.
         ctx.lower_inode_map.clear();
         ctx.upper_inode_map.clear();
+        ctx.prefetch.clear();
 
         Ok(tree)
     }
@@ -237,6 +240,7 @@ impl Bootstrap {
         blob_hash: Sha256,
         blob_size: usize,
         mut blob_readahead_size: usize,
+        blob_cache_size: u64,
     ) -> Result<(Vec<String>, usize)> {
         // Set blob hash as blob id if not specified.
         if ctx.blob_id.is_empty() {
@@ -249,8 +253,14 @@ impl Bootstrap {
                 blob_readahead_size = 0;
             }
             // Add new blob to blob table
-            ctx.blob_table
-                .add(ctx.blob_id.clone(), 0, blob_readahead_size as u32);
+            let blob_index = u32::try_from(ctx.blob_table.entries.len())?;
+            ctx.blob_table.add(
+                ctx.blob_id.clone(),
+                0,
+                u32::try_from(blob_readahead_size)?,
+                *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
+                blob_cache_size,
+            );
         }
 
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
@@ -274,9 +284,12 @@ impl Bootstrap {
             };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
-        let blob_table_size = ctx.blob_table.size();
         let prefetch_table_offset = super_block_size + inode_table_size;
-        let blob_table_offset = (prefetch_table_offset + prefetch_table_size) as u64;
+        let blob_table_offset = prefetch_table_offset + prefetch_table_size;
+        let blob_table_size = ctx.blob_table.size();
+        let extended_blob_table_offset = blob_table_offset + blob_table_size;
+        let extended_blob_table_size = ctx.blob_table.extended.size();
+        let extended_blob_table_entries = ctx.blob_table.extended.entries();
 
         // Set super block
         let mut super_block = OndiskSuperBlock::new();
@@ -284,8 +297,10 @@ impl Bootstrap {
         super_block.set_inodes_count(inodes_count);
         super_block.set_inode_table_offset(super_block_size as u64);
         super_block.set_inode_table_entries(inode_table_entries);
-        super_block.set_blob_table_offset(blob_table_offset);
+        super_block.set_blob_table_offset(blob_table_offset as u64);
         super_block.set_blob_table_size(blob_table_size as u32);
+        super_block.set_extended_blob_table_offset(extended_blob_table_offset as u64);
+        super_block.set_extended_blob_table_entries(u32::try_from(extended_blob_table_entries)?);
         super_block.set_prefetch_table_offset(prefetch_table_offset as u64);
         super_block.set_compressor(ctx.compressor);
         super_block.set_digester(ctx.digester);
@@ -298,8 +313,11 @@ impl Bootstrap {
         super_block.set_prefetch_table_entries(prefetch_table_entries);
 
         // Set inodes and chunks
-        let mut inode_offset =
-            (super_block_size + inode_table_size + prefetch_table_size + blob_table_size) as u32;
+        let mut inode_offset = (super_block_size
+            + inode_table_size
+            + prefetch_table_size
+            + blob_table_size
+            + extended_blob_table_size) as u32;
 
         let mut has_xattr = false;
         for node in &mut ctx.nodes {
@@ -334,13 +352,20 @@ impl Bootstrap {
 
         // Dump prefetch table
         if let Some(mut prefetch_table) = ctx.prefetch.get_prefetch_table() {
-            prefetch_table.store(&mut ctx.f_bootstrap)?;
+            prefetch_table
+                .store(&mut ctx.f_bootstrap)
+                .context("failed to store prefetch table")?;
         }
 
         // Dump blob table
         ctx.blob_table
             .store(&mut ctx.f_bootstrap)
             .context("failed to store blob table")?;
+
+        // Dump extended blob table
+        ctx.blob_table
+            .store_extended(&mut ctx.f_bootstrap)
+            .context("failed to store extended blob table")?;
 
         // Dump inodes and chunks
         timing_tracer!(

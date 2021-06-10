@@ -135,7 +135,20 @@ impl RafsSuperInodes for CachedInodes {
         // Load blob table.
         r.seek(SeekFrom::Start(self.s_meta.blob_table_offset))?;
         let mut blob_table = OndiskBlobTable::new();
-        blob_table.load(r, self.s_meta.blob_table_size as usize)?;
+        let meta = &self.s_meta;
+
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        if meta.extended_blob_table_offset > 0 {
+            r.seek(SeekFrom::Start(meta.extended_blob_table_offset))?;
+            blob_table
+                .extended
+                .load(r, meta.extended_blob_table_entries as usize)?;
+        }
+
+        r.seek(SeekFrom::Start(meta.blob_table_offset))?;
+        blob_table.load(r, meta.blob_table_size)?;
+
         self.s_blob = Arc::new(blob_table);
 
         // Load all inodes started from first inode offset.
@@ -356,8 +369,8 @@ impl RafsInode for CachedInode {
     }
 
     #[inline]
-    fn get_chunk_blob_id(&self, idx: u32) -> Result<String> {
-        Ok(self.i_blob_table.get(idx)?.blob_id)
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+        Ok(self.i_blob_table.get(idx)?)
     }
 
     #[inline]
@@ -431,7 +444,7 @@ impl RafsInode for CachedInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize> {
         if !self.is_dir() {
-            return Err(enotdir!(""));
+            return Err(enotdir!());
         }
 
         let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
@@ -495,6 +508,8 @@ pub struct CachedChunkInfo {
     c_block_id: Arc<RafsDigest>,
     // blob containing the block
     c_blob_index: u32,
+    // chunk index in blob
+    c_index: u32,
     // position of the block within the file
     c_file_offset: u64,
     // offset of the block within the blob
@@ -525,6 +540,7 @@ impl CachedChunkInfo {
     fn copy_from_ondisk(&mut self, chunk: &OndiskChunkInfo) {
         self.c_block_id = Arc::new(chunk.block_id);
         self.c_blob_index = chunk.blob_index;
+        self.c_index = chunk.index;
         self.c_compress_offset = chunk.compress_offset;
         self.c_decompress_offset = chunk.decompress_offset;
         self.c_decompress_size = chunk.decompress_size;
@@ -548,6 +564,7 @@ impl RafsChunkInfo for CachedChunkInfo {
     }
 
     impl_getter!(blob_index, c_blob_index, u32);
+    impl_getter!(index, c_index, u32);
     impl_getter!(compress_offset, c_compress_offset, u64);
     impl_getter!(compress_size, c_compr_size, u32);
     impl_getter!(decompress_offset, c_decompress_offset, u64);
@@ -724,14 +741,14 @@ mod cached_tests {
         let mut blob_table = Arc::new(OndiskBlobTable::new());
         Arc::get_mut(&mut blob_table)
             .unwrap()
-            .add(String::from("123333"), 0, 0);
+            .add(String::from("123333"), 0, 0, 0, 0);
         let mut cached_inode = CachedInode::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         let desc1 = cached_inode.alloc_bio_desc(0, 100).unwrap();
         assert_eq!(desc1.bi_size, 100);
         assert_eq!(desc1.bi_vec.len(), 1);
         assert_eq!(desc1.bi_vec[0].offset, 0);
-        assert_eq!(desc1.bi_vec[0].blob_id, "123333");
+        assert_eq!(desc1.bi_vec[0].blob.blob_id, "123333");
 
         let desc2 = cached_inode.alloc_bio_desc(1024 * 1024 - 100, 200).unwrap();
         assert_eq!(desc2.bi_size, 200);

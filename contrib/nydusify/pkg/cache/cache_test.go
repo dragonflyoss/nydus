@@ -104,7 +104,7 @@ func testWithBackend(t *testing.T, _backend backend.Backend) {
 		})
 	}
 
-	cache.importLayersToRecords(layers)
+	cache.importRecordsFromLayers(layers)
 	cache.Record([]*CacheRecord{
 		makeRecord(4, true),
 		makeRecord(5, true),
