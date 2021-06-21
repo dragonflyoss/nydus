@@ -116,9 +116,9 @@ impl Prefetch {
             .cloned()
             .collect::<Vec<_>>();
 
-        for f in keys {
+        for f in &keys {
             // As path is canonicalized, it should be reliable.
-            if path.as_os_str() == f.as_os_str() {
+            if path == f {
                 if self.policy == PrefetchPolicy::Fs {
                     if let Some(i) = self.hint_readahead_files.get_mut(path) {
                         *i = Some(inode);
