@@ -29,7 +29,6 @@
 //! Giving above definition, we could get the inode object for an inode number or child index as:
 //!    inode_ptr = sb_base_ptr + inode_offset_from_sb(inode_number)
 //!    inode_ptr = sb_base_ptr + inode_offset_from_sb(child_index)
-
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::{OsStr, OsString};
@@ -531,6 +530,12 @@ impl PrefetchTable {
     }
 }
 
+fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
+    // Rust provides unsafe method `offset_from` from 1.47.0
+    // Hopefully, we can adopt it someday. For now, for compatibility, use blow trick.
+    later_ptr as usize - former_ptr as usize
+}
+
 // TODO: FIXME: This is not a well defined disk structure
 #[derive(Clone, Debug, Default)]
 pub struct OndiskBlobTable {
@@ -614,13 +619,13 @@ impl OndiskBlobTable {
             let readahead_size = front.1;
 
             // Safe because we never tried to take ownership.
-            let id_offset = unsafe { (frame as *const BlobEntryFrontPart).add(1) as *mut u8 };
+            let id_offset = unsafe { (frame as *const BlobEntryFrontPart).add(1) as *const u8 };
             // id_end points to the byte before splitter 'b\0'
             let id_end = Self::blob_id_tail_ptr(id_offset, begin_ptr, blob_table_size as usize);
 
             // Excluding trailing '\0'.
             // Note: we can't use string.len() to move pointer.
-            let bytes_len = (unsafe { id_end.offset_from(id_offset) } + 1) as usize;
+            let bytes_len = pointer_offset(id_offset, id_end) + 1;
 
             let id_bytes = unsafe { std::slice::from_raw_parts(id_offset, bytes_len) };
 
@@ -659,9 +664,7 @@ impl OndiskBlobTable {
                 blob_cache_size,
             }));
 
-            if unsafe { align_to_rafs(frame.offset_from(begin_ptr) as usize) } as u32
-                >= blob_table_size
-            {
+            if align_to_rafs(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
                 break;
             }
         }
@@ -677,14 +680,12 @@ impl OndiskBlobTable {
         self.extended.store(w)
     }
 
-    fn blob_id_tail_ptr(cur: *const u8, begin_ptr: *const u8, total_size: usize) -> *mut u8 {
+    fn blob_id_tail_ptr(cur: *const u8, begin_ptr: *const u8, total_size: usize) -> *const u8 {
         let mut id_end = cur as *mut u8;
         loop {
             let next_byte = unsafe { id_end.add(1) };
             // b'\0' is the splitter
-            if unsafe { *next_byte } == 0
-                || unsafe { next_byte.offset_from(begin_ptr) } >= total_size as isize
-            {
+            if unsafe { *next_byte } == 0 || pointer_offset(begin_ptr, next_byte) >= total_size {
                 return id_end;
             }
 
