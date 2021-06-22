@@ -304,7 +304,7 @@ impl Registry {
             paras.insert(key, value);
         }
 
-        let auth = match scheme {
+        match scheme {
             "Basic" => {
                 let realm = if let Some(realm) = paras.get("realm") {
                     (*realm).to_string()
@@ -327,9 +327,7 @@ impl Registry {
                 }))
             }
             _ => None,
-        };
-
-        auth
+        }
     }
 
     /// Request registry server with `authorization` header
