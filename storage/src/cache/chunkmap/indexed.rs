@@ -97,7 +97,9 @@ impl IndexedChunkMap {
             return Err(ebadf!("failed to mmap blob chunk_map"));
         }
 
-        let mut header = unsafe { &mut *(base as *mut Header) };
+        // Make clippy of 1.45 happy. Higher version of clippy won't complain about this
+        #[allow(clippy::cast_ptr_alignment)]
+        let header = unsafe { &mut *(base as *mut Header) };
         if file_size == 0 {
             header.magic = MAGIC
         } else if header.magic != MAGIC {

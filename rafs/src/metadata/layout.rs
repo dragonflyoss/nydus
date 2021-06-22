@@ -613,12 +613,16 @@ impl OndiskBlobTable {
         loop {
             // Each entry frame looks like:
             // u32 | u32 | string | trailing '\0' , except that the last entry has no trailing '\0'
+            // Make clippy of 1.45 happy. Higher version of clippy won't complain about this
+            #[allow(clippy::cast_ptr_alignment)]
             let front = unsafe { &*(frame as *const BlobEntryFrontPart) };
             // `blob_table_size` has to be greater than zero, otherwise it access a invalid page.
             let readahead_offset = front.0;
             let readahead_size = front.1;
 
             // Safe because we never tried to take ownership.
+            // Make clippy of 1.45 happy. Higher version of clippy won't complain about this
+            #[allow(clippy::cast_ptr_alignment)]
             let id_offset = unsafe { (frame as *const BlobEntryFrontPart).add(1) as *const u8 };
             // id_end points to the byte before splitter 'b\0'
             let id_end = Self::blob_id_tail_ptr(id_offset, begin_ptr, blob_table_size as usize);
