@@ -7,6 +7,8 @@
 package config
 
 import (
+	"fmt"
+
 	"encoding/json"
 	"io/ioutil"
 
@@ -14,6 +16,12 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/auth"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/registry"
+)
+
+const (
+	backendTypeLocalfs  = "localfs"
+	backendTypeOss      = "oss"
+	backendTypeRegistry = "registry"
 )
 
 type DaemonConfig struct {
@@ -33,12 +41,30 @@ type DeviceConfig struct {
 	Backend struct {
 		BackendType string `json:"type"`
 		Config      struct {
-			Scheme        string `json:"scheme,omitempty"`
+			// Localfs backend configs
+			BlobFile      string `json:"blob_file,omitempty"`
+			Dir           string `json:"dir,omitempty"`
+			ReadAhead     bool   `json:"readahead"`
+			ReadAheadSec  int    `json:"readahead_sec,omitempty"`
+
+			// Registry backend configs
 			Host          string `json:"host,omitempty"`
 			Repo          string `json:"repo,omitempty"`
 			Auth          string `json:"auth,omitempty"`
 			RegistryToken string `json:"registry_token,omitempty"`
 			BlobUrlScheme string `json:"blob_url_scheme,omitempty"`
+
+			// OSS backend configs
+			EndPoint        string `json:"endpoint,omitempty"`
+			AccessKeyId     string `json:"access_key_id,omitempty"`
+			AccessKeySecret string `json:"access_key_secret,omitempty"`
+			BucketName      string `json:"bucket_name,omitempty"`
+			ObjectPrefix    string `json:"object_prefix,omitempty"`
+
+			// Shared by registry and oss backend
+			Scheme        string `json:"scheme,omitempty"`
+
+			// Below configs are common configs shared by all backends
 			Proxy         struct {
 				URL           string `json:"url,omitempty"`
 				Fallback      bool   `json:"fallback"`
@@ -83,17 +109,27 @@ func NewDaemonConfig(cfg DaemonConfig, imageID string, vpcRegistry bool, labels 
 	if err != nil {
 		return DaemonConfig{}, errors.Wrapf(err, "failed to parse image %s", imageID)
 	}
-	registryHost := image.Host
-	if vpcRegistry {
-		registryHost = registry.ConvertToVPCHost(registryHost)
+
+	switch backend := cfg.Device.Backend.BackendType; backend {
+	case backendTypeRegistry:
+		registryHost := image.Host
+		if vpcRegistry {
+			registryHost = registry.ConvertToVPCHost(registryHost)
+		}
+		keyChain := auth.FromLabels(labels)
+		if keyChain.TokenBase() {
+			cfg.Device.Backend.Config.RegistryToken = keyChain.Password
+		} else {
+			cfg.Device.Backend.Config.Auth = keyChain.ToBase64()
+		}
+		cfg.Device.Backend.Config.Host = registryHost
+		cfg.Device.Backend.Config.Repo = image.Repo
+	// Localfs and OSS backends don't need any update, just use the provided config in template
+	case backendTypeLocalfs:
+	case backendTypeOss:
+	default:
+		return DaemonConfig{}, errors.New(fmt.Sprintf("unknown backend type %s", backend))
 	}
-	keyChain := auth.FromLabels(labels)
-	if keyChain.TokenBase() {
-		cfg.Device.Backend.Config.RegistryToken = keyChain.Password
-	} else {
-		cfg.Device.Backend.Config.Auth = keyChain.ToBase64()
-	}
-	cfg.Device.Backend.Config.Host = registryHost
-	cfg.Device.Backend.Config.Repo = image.Repo
+
 	return cfg, nil
 }
