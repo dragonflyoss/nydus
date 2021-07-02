@@ -28,24 +28,25 @@ const (
 )
 
 type Config struct {
-	Address              string        `toml:"-"`
-	ConvertVpcRegistry   bool          `toml:"-"`
-	DaemonCfgPath        string        `toml:"daemon_cfg_path"`
-	DaemonCfg            DaemonConfig  `toml:"-"`
-	PublicKeyFile        string        `toml:"-"`
-	RootDir              string        `toml:"-"`
-	CacheDir             string        `toml:"cache_dir"`
-	GCPeriod             time.Duration `toml:"gc_period"`
-	ValidateSignature    bool          `toml:"validate_signature"`
-	NydusdBinaryPath     string        `toml:"nydusd_binary_path"`
-	NydusImageBinaryPath string        `toml:"nydus_image_binary"`
-	DaemonMode           string        `toml:"daemon_mode"`
-	AsyncRemove          bool          `toml:"async_remove"`
-	EnableMetrics        bool          `toml:"enable_metrics"`
-	MetricsFile          string        `toml:"metrics_file"`
-	EnableStargz         bool          `toml:"enable_stargz"`
-	LogLevel             string        `toml:"-"`
-	DisableCacheManager  bool          `toml:"disable_cache_manager"`
+	Address               string        `toml:"-"`
+	ConvertVpcRegistry    bool          `toml:"-"`
+	DaemonCfgPath         string        `toml:"daemon_cfg_path"`
+	DaemonCfg             DaemonConfig  `toml:"-"`
+	PublicKeyFile         string        `toml:"-"`
+	RootDir               string        `toml:"-"`
+	CacheDir              string        `toml:"cache_dir"`
+	GCPeriod              time.Duration `toml:"gc_period"`
+	ValidateSignature     bool          `toml:"validate_signature"`
+	NydusdBinaryPath      string        `toml:"nydusd_binary_path"`
+	NydusImageBinaryPath  string        `toml:"nydus_image_binary"`
+	DaemonMode            string        `toml:"daemon_mode"`
+	AsyncRemove           bool          `toml:"async_remove"`
+	EnableMetrics         bool          `toml:"enable_metrics"`
+	MetricsFile           string        `toml:"metrics_file"`
+	EnableStargz          bool          `toml:"enable_stargz"`
+	LogLevel              string        `toml:"-"`
+	DisableCacheManager   bool          `toml:"disable_cache_manager"`
+	DisableNydusOverlayFS bool          `toml:"enable_nydus_overlayfs"`
 }
 
 func (c *Config) FillupWithDefaults() error {

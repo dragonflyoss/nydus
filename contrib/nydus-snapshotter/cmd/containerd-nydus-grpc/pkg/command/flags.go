@@ -28,24 +28,25 @@ const (
 )
 
 type Args struct {
-	Address              string
-	LogLevel             string
-	ConfigPath           string
-	RootDir              string
-	CacheDir             string
-	GCPeriod             string
-	ValidateSignature    bool
-	PublicKeyFile        string
-	ConvertVpcRegistry   bool
-	NydusdBinaryPath     string
-	NydusImageBinaryPath string
-	SharedDaemon         bool
-	DaemonMode           string
-	AsyncRemove          bool
-	EnableMetrics        bool
-	MetricsFile          string
-	EnableStargz         bool
-	DisableCacheManager  bool
+	Address               string
+	LogLevel              string
+	ConfigPath            string
+	RootDir               string
+	CacheDir              string
+	GCPeriod              string
+	ValidateSignature     bool
+	PublicKeyFile         string
+	ConvertVpcRegistry    bool
+	NydusdBinaryPath      string
+	NydusImageBinaryPath  string
+	SharedDaemon          bool
+	DaemonMode            string
+	AsyncRemove           bool
+	EnableMetrics         bool
+	MetricsFile           string
+	EnableStargz          bool
+	DisableCacheManager   bool
+	DisableNydusOverlayFS bool
 }
 
 type Flags struct {
@@ -161,6 +162,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether to disable blob cache manager",
 			Destination: &args.DisableCacheManager,
 		},
+		&cli.BoolFlag{
+			Name:        "disable-nydus-overlayfs",
+			Value:       false,
+			Usage:       "whether to disable nydus-overlayfs to mount",
+			Destination: &args.DisableNydusOverlayFS,
+		},
 	}
 }
 
@@ -207,6 +214,7 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.MetricsFile = args.MetricsFile
 	cfg.EnableStargz = args.EnableStargz
 	cfg.DisableCacheManager = args.DisableCacheManager
+	cfg.DisableNydusOverlayFS = args.DisableNydusOverlayFS
 
 	d, err := time.ParseDuration(args.GCPeriod)
 	if err != nil {

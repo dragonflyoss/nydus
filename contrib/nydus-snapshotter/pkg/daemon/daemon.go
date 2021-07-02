@@ -11,11 +11,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pkg/errors"
-
+	"github.com/containerd/containerd/log"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -48,6 +48,14 @@ func (d *Daemon) MountPoint() string {
 	if d.RootMountPoint != nil {
 		return filepath.Join("/", d.SnapshotID, "fs")
 	}
+	mp := filepath.Join(d.SnapshotDir, d.SnapshotID, "mnt")
+	if err := os.MkdirAll(mp, 0755); err != nil {
+		log.L.Errorf("mkdir mountpoint err, %v", err)
+	}
+	return mp
+}
+
+func (d *Daemon) OldMountPoint() string {
 	return filepath.Join(d.SnapshotDir, d.SnapshotID, "fs")
 }
 
