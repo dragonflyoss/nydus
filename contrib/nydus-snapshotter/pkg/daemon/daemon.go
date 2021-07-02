@@ -11,11 +11,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pkg/errors"
-
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/nydussdk/model"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -26,19 +25,20 @@ const (
 type NewDaemonOpt func(d *Daemon) error
 
 type Daemon struct {
-	ID             string
-	SnapshotID     string
-	ConfigDir      string
-	SocketDir      string
-	LogDir         string
-	LogLevel       string
-	LogToStdout    bool
-	SnapshotDir    string
-	Pid            int
-	ImageID        string
-	DaemonMode     string
-	ApiSock        *string
-	RootMountPoint *string
+	ID               string
+	SnapshotID       string
+	ConfigDir        string
+	SocketDir        string
+	LogDir           string
+	LogLevel         string
+	LogToStdout      bool
+	SnapshotDir      string
+	Pid              int
+	ImageID          string
+	DaemonMode       string
+	ApiSock          *string
+	RootMountPoint   *string
+	CustomMountPoint *string
 }
 
 func (d *Daemon) SharedMountPoint() string {
@@ -49,6 +49,13 @@ func (d *Daemon) MountPoint() string {
 	if d.RootMountPoint != nil {
 		return filepath.Join("/", d.SnapshotID, "fs")
 	}
+	if d.CustomMountPoint != nil {
+		return *d.CustomMountPoint
+	}
+	return filepath.Join(d.SnapshotDir, d.SnapshotID, "fs")
+}
+
+func (d *Daemon) OldMountPoint() string {
 	return filepath.Join(d.SnapshotDir, d.SnapshotID, "fs")
 }
 

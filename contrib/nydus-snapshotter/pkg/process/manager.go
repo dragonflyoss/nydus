@@ -208,8 +208,13 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 			log.L.Errorf("failed to process wait, %v", err)
 		}
 	}
-	if err := m.mounter.Umount(d.MountPoint()); err != nil && err != syscall.EINVAL {
-		return errors.Wrap(err, fmt.Sprintf("failed to umount mountpoint %s", d.MountPoint()))
+	// for backward compatible, here umount <snapshotdir>/<id>/fs and <snapshotdir>/<id>/mnt
+	// if mountpoint not exist, Umount will return nil
+	mps := []string{d.MountPoint(), d.OldMountPoint()}
+	for _, mp := range mps {
+		if err := m.mounter.Umount(mp); err != nil && err != syscall.EINVAL {
+			return errors.Wrap(err, fmt.Sprintf("failed to umount mountpoint %s", mp))
+		}
 	}
 	return nil
 }

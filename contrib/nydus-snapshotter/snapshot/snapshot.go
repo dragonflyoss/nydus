@@ -8,6 +8,7 @@ package snapshot
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -40,15 +41,16 @@ import (
 var _ snapshots.Snapshotter = &snapshotter{}
 
 type snapshotter struct {
-	context     context.Context
-	root        string
-	nydusdPath  string
-	ms          *storage.MetaStore
-	asyncRemove bool
-	fs          fspkg.FileSystem
-	stargzFs    fspkg.FileSystem
-	manager     *process.Manager
-	hasDaemon   bool
+	context              context.Context
+	root                 string
+	nydusdPath           string
+	ms                   *storage.MetaStore
+	asyncRemove          bool
+	fs                   fspkg.FileSystem
+	stargzFs             fspkg.FileSystem
+	manager              *process.Manager
+	hasDaemon            bool
+	enableNydusOverlayFS bool
 }
 
 func (o *snapshotter) Cleanup(ctx context.Context) error {
@@ -121,7 +123,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	// container rootfs doesn't need daemon
 	hasDaemon := cfg.DaemonMode != config.DaemonModeNone && cfg.DaemonMode != config.DaemonModePrefetch
 
-	nydusFs, err := nydus.NewFileSystem(ctx, opts ...)
+	nydusFs, err := nydus.NewFileSystem(ctx, opts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
 	}
@@ -188,15 +190,16 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	}
 
 	return &snapshotter{
-		context:     ctx,
-		root:        cfg.RootDir,
-		nydusdPath:  cfg.NydusdBinaryPath,
-		ms:          ms,
-		asyncRemove: cfg.AsyncRemove,
-		fs:          nydusFs,
-		stargzFs:    stargzFs,
-		manager:     pm,
-		hasDaemon:   hasDaemon,
+		context:              ctx,
+		root:                 cfg.RootDir,
+		nydusdPath:           cfg.NydusdBinaryPath,
+		ms:                   ms,
+		asyncRemove:          cfg.AsyncRemove,
+		fs:                   nydusFs,
+		stargzFs:             stargzFs,
+		manager:              pm,
+		hasDaemon:            hasDaemon,
+		enableNydusOverlayFS: cfg.EnableNydusOverlayFS,
 	}, nil
 }
 
@@ -571,60 +574,90 @@ func overlayMount(options []string) []mount.Mount {
 	}
 }
 
+type ExtraOption struct {
+	Source      string `json:"source"`
+	Config      string `json:"config"`
+	Snapshotdir string `json:"snapshotdir"`
+}
+
 func (o *snapshotter) remoteMounts(ctx context.Context, s storage.Snapshot, id string, labels map[string]string) ([]mount.Mount, error) {
-	var options []string
-	if o.hasDaemon {
-		if s.Kind == snapshots.KindActive {
-			options = append(options,
-				fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
-				fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
-			)
-		} else if len(s.ParentIDs) == 1 {
-			return bindMount(o.upperPath(s.ParentIDs[0])), nil
-		}
-		lowerDirOption := fmt.Sprintf("lowerdir=%s", o.upperPath(id))
-		options = append(options, lowerDirOption)
-		log.G(ctx).Infof("mount options %v", options)
-		return overlayMount(options), nil
-	} else {
-		// Only nydus can work without daemon
-		source, err := o.fs.BootstrapFile(id)
-		if err != nil {
-			return nil, err
-		}
+	var overlayOptions []string
+	if s.Kind == snapshots.KindActive {
+		overlayOptions = append(overlayOptions,
+			fmt.Sprintf("workdir=%s", o.workPath(s.ID)),
+			fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)),
+		)
+	} else if len(s.ParentIDs) == 1 {
+		return bindMount(o.upperPath(s.ParentIDs[0])), nil
+	}
+	lowerDirOption := fmt.Sprintf("lowerdir=%s", o.upperPath(id))
+	overlayOptions = append(overlayOptions, lowerDirOption)
 
-		cfg, err := o.fs.NewDaemonConfig(labels)
-		if err != nil {
-			return nil, errors.Wrapf(err, fmt.Sprintf("remoteMounts: failed to generate nydus config for snapshot %s, label: %v", id, labels))
-		}
+	// when hasDaemon and not enableNydusOverlayFS, return overlayfs mount slice
+	if !o.enableNydusOverlayFS && o.hasDaemon {
+		log.G(ctx).Infof("mount options %v", overlayOptions)
+		return overlayMount(overlayOptions), nil
+	}
 
-		b, err := json.Marshal(cfg)
-		if err != nil {
-			return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
-		}
+	source, err := o.fs.BootstrapFile(id)
+	if err != nil {
+		return nil, err
+	}
 
-		configContent := string(b)
+	cfg, err := o.fs.NewDaemonConfig(labels)
+	if err != nil {
+		return nil, errors.Wrapf(err, fmt.Sprintf("remoteMounts: failed to generate nydus config for snapshot %s, label: %v", id, labels))
+	}
+
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
+	}
+	configContent := string(b)
+	// We already Marshal config and save it in configContent, reset Auth and
+	// RegistryToken so it could be printed and to make debug easier
+	cfg.Device.Backend.Config.Auth = ""
+	cfg.Device.Backend.Config.RegistryToken = ""
+	b, err = json.Marshal(cfg)
+	if err != nil {
+		return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
+	}
+	log.G(ctx).Infof("Bootstrap file for snapshotID %s: %s, config %s", id, source, string(b))
+
+	// for backward compatibility if hasDaemon == false
+	if !o.enableNydusOverlayFS && !o.hasDaemon {
 		configOption := fmt.Sprintf("config=%s", configContent)
-		options = append(options, configOption)
-
-		// We already Marshal config and save it in configContent, reset Auth and
-		// RegistryToken so it could be printed and to make debug easier
-		cfg.Device.Backend.Config.Auth = ""
-		cfg.Device.Backend.Config.RegistryToken = ""
-		b, err = json.Marshal(cfg)
-		if err != nil {
-			return nil, errors.Wrapf(err, "remoteMounts: failed to marshal config")
-		}
-		log.G(ctx).Infof("Bootstrap file for snapshotID %s: %s, config %s", id, source, string(b))
-
+		noDaemonOptions := append([]string{}, configOption)
 		return []mount.Mount{
 			{
 				Type:    "nydus",
 				Source:  source,
-				Options: options,
+				Options: noDaemonOptions,
 			},
 		}, nil
 	}
+
+	// when enable nydus-overlayfs, return unified mount slice for runc and kata
+	extraOption := &ExtraOption{
+		Source:      source,
+		Config:      configContent,
+		Snapshotdir: o.snapshotDir(s.ID),
+	}
+	no, err := json.Marshal(extraOption)
+	if err != nil {
+		return nil, errors.Wrapf(err, "remoteMounts: failed to marshal NydusOption")
+	}
+	// base64 to filter easily in `nydus-overlayfs`
+	opt := fmt.Sprintf("extraoption=%s", base64.StdEncoding.EncodeToString(no))
+	options := append(overlayOptions, opt)
+	log.G(ctx).Infof("mount options %v", options)
+	return []mount.Mount{
+		{
+			Type:    "fuse.nydus-overlayfs",
+			Source:  "overlay",
+			Options: options,
+		},
+	}, nil
 }
 
 func (o *snapshotter) mounts(ctx context.Context, s storage.Snapshot) ([]mount.Mount, error) {
