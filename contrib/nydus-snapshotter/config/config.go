@@ -62,6 +62,10 @@ func (c *Config) FillupWithDefaults() error {
 		c.DaemonMode = DefaultDaemonMode
 	}
 
+	if c.GCPeriod == 0 {
+		c.GCPeriod = defaultGCPeriod
+	}
+
 	if len(c.CacheDir) == 0 {
 		c.CacheDir = filepath.Join(c.RootDir, "cache")
 	}
