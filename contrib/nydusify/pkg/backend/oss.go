@@ -105,7 +105,8 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 			return nil, err
 		}
 
-		var parts []oss.UploadPart
+		// It always splits the blob into splitPartsCount=4 parts
+		partsChan := make(chan oss.UploadPart, splitPartsCount)
 
 		g := new(errgroup.Group)
 		for _, chunk := range chunks {
@@ -117,14 +118,22 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 				}
 				// TODO: We don't verify data part MD5 from ETag right now.
 				// But we can do it if we have to.
-				parts = append(parts, p)
+				partsChan <- p
 				return nil
 			})
 		}
 
 		if err := g.Wait(); err != nil {
 			b.bucket.AbortMultipartUpload(imur)
+			close(partsChan)
 			return nil, errors.Wrap(err, "Uploading parts failed")
+		}
+
+		close(partsChan)
+
+		var parts []oss.UploadPart
+		for p := range partsChan {
+			parts = append(parts, p)
 		}
 
 		_, err = b.bucket.CompleteMultipartUpload(imur, parts)
