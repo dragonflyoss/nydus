@@ -343,6 +343,17 @@ impl BlobCache {
         Ok(())
     }
 
+    fn convert_to_merge_request(seq: u64, continuous_bios: &[&RafsBio]) -> MergedBackendRequest {
+        let first = continuous_bios[0];
+        let mut mr = MergedBackendRequest::new(seq, first.chunkinfo.clone(), first.blob.clone());
+
+        for c in &continuous_bios[1..] {
+            mr.merge_one_chunk(Arc::clone(&c.chunkinfo));
+        }
+
+        mr
+    }
+
     fn is_chunk_continuous(prior: &RafsBio, cur: &RafsBio) -> bool {
         let prior_cki = &prior.chunkinfo;
         let cur_cki = &cur.chunkinfo;
@@ -376,42 +387,48 @@ impl BlobCache {
         };
 
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
-        let mut index: usize = 1;
         if bios.is_empty() {
             return;
         }
-        let first_cki = &bios[0].chunkinfo;
-        let mut mr = MergedBackendRequest::new(seq);
-        mr.merge_begin(Arc::clone(first_cki), bios[0].blob.clone());
 
-        if bios.len() == 1 {
-            limiter(mr.blob_size);
-            tx.send(mr).unwrap();
-            return;
-        }
+        let mut continuous_bios = Vec::new();
+        continuous_bios.push(&bios[0]);
+        let mut accumulated_size = bios[0].chunkinfo.compress_size();
 
-        loop {
-            let cki = &bios[index].chunkinfo;
+        let mut index = 1;
+
+        for _ in &bios[1..] {
             let prior_bio = &bios[index - 1];
             let cur_bio = &bios[index];
-            // Even more chunks are continuous, still split them as per certain size.
-            // So that to achieve an appropriate request size to backend.
-            if Self::is_chunk_continuous(prior_bio, cur_bio) && mr.blob_size <= merging_size as u32
+
+            if Self::is_chunk_continuous(prior_bio, cur_bio)
+                && accumulated_size <= merging_size as u32
             {
-                mr.merge_one_chunk(Arc::clone(&cki));
+                continuous_bios.push(&cur_bio);
+                accumulated_size += cur_bio.chunkinfo.compress_size();
             } else {
                 // New a MR if a non-continuous chunk is met.
-                limiter(mr.blob_size);
-                tx.send(mr.clone()).unwrap();
-                mr.reset();
-                mr.merge_begin(Arc::clone(&cki), cur_bio.blob.clone());
-            }
-            index += 1;
-            if index >= bios.len() {
+                if continuous_bios.is_empty() {
+                    continue;
+                }
+                let mr = Self::convert_to_merge_request(seq, &continuous_bios);
                 limiter(mr.blob_size);
                 tx.send(mr).unwrap();
-                break;
+                continuous_bios.truncate(0);
+
+                // current bio is not continuous with prior one,
+                // so it is the first bio of next merged request.
+                continuous_bios.push(&cur_bio);
+                accumulated_size = cur_bio.chunkinfo.compress_size();
             }
+            index += 1
+        }
+
+        // No more bio left, convert the collected bios to merged request and sent it.
+        if !continuous_bios.is_empty() {
+            let mr = Self::convert_to_merge_request(seq, &continuous_bios);
+            limiter(mr.blob_size);
+            tx.send(mr).unwrap();
         }
     }
 }
