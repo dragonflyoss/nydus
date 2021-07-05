@@ -123,6 +123,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 		}
 
 		if err := g.Wait(); err != nil {
+			b.bucket.AbortMultipartUpload(imur)
 			return nil, errors.Wrap(err, "Uploading parts failed")
 		}
 
