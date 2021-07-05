@@ -21,7 +21,7 @@ import (
 type Backend interface {
 	// TODO: Hopefully, we can pass `Layer` struct in, thus to be able to cook both
 	// file handle and file path.
-	Upload(ctx context.Context, blobID, blobPath string, blobSize int64) (*ocispec.Descriptor, error)
+	Upload(ctx context.Context, blobID, blobPath string, blobSize int64, forcePush bool) (*ocispec.Descriptor, error)
 	Check(blobID string) (bool, error)
 	Type() BackendType
 }

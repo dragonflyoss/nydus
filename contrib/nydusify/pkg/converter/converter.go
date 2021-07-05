@@ -77,8 +77,9 @@ type Opt struct {
 	MultiPlatform  bool
 	DockerV2Format bool
 
-	BackendType   string
-	BackendConfig string
+	BackendType      string
+	BackendConfig    string
+	BackendForcePush bool
 }
 
 type Converter struct {
@@ -98,6 +99,8 @@ type Converter struct {
 	MultiPlatform  bool
 	DockerV2Format bool
 
+	BackendForcePush bool
+
 	storageBackend backend.Backend
 }
 
@@ -110,17 +113,18 @@ func New(opt Opt) (*Converter, error) {
 	}
 
 	return &Converter{
-		Logger:          opt.Logger,
-		SourceProviders: opt.SourceProviders,
-		TargetRemote:    opt.TargetRemote,
-		CacheRemote:     opt.CacheRemote,
-		CacheMaxRecords: opt.CacheMaxRecords,
-		CacheVersion:    opt.CacheVersion,
-		NydusImagePath:  opt.NydusImagePath,
-		WorkDir:         opt.WorkDir,
-		PrefetchDir:     opt.PrefetchDir,
-		MultiPlatform:   opt.MultiPlatform,
-		DockerV2Format:  opt.DockerV2Format,
+		Logger:           opt.Logger,
+		SourceProviders:  opt.SourceProviders,
+		TargetRemote:     opt.TargetRemote,
+		CacheRemote:      opt.CacheRemote,
+		CacheMaxRecords:  opt.CacheMaxRecords,
+		CacheVersion:     opt.CacheVersion,
+		NydusImagePath:   opt.NydusImagePath,
+		WorkDir:          opt.WorkDir,
+		PrefetchDir:      opt.PrefetchDir,
+		MultiPlatform:    opt.MultiPlatform,
+		DockerV2Format:   opt.DockerV2Format,
+		BackendForcePush: opt.BackendForcePush,
 
 		storageBackend: backend,
 	}, nil
@@ -187,6 +191,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 			parent:         parentBuildLayer,
 			dockerV2Format: cvt.DockerV2Format,
 			backend:        cvt.storageBackend,
+			forcePush:      cvt.BackendForcePush,
 		}
 		parentBuildLayer = buildLayer
 		buildLayers = append(buildLayers, buildLayer)

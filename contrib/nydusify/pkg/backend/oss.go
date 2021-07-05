@@ -67,15 +67,18 @@ func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
 
 // Upload blob as image layer to oss backend. Depending on blob's size, upload it
 // by multiparts method or the normal method
-func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64) (*ocispec.Descriptor, error) {
+func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64, forcePush bool) (*ocispec.Descriptor, error) {
 	blobObjectKey := b.objectPrefix + blobID
 
 	desc := blobDesc(size, blobID)
 
-	if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
-		return nil, err
-	} else if exist {
-		return &desc, nil
+	if !forcePush {
+		if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
+			return nil, err
+		} else if exist {
+			logrus.Infof("Skip upload because blob exists: %s", blobID)
+			return &desc, nil
+		}
 	}
 
 	var stat os.FileInfo

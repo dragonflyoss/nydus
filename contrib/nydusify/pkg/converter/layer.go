@@ -53,6 +53,7 @@ type buildLayer struct {
 	blobPath        string
 	bootstrapPath   string
 	backend         backend.Backend
+	forcePush       bool
 }
 
 // parseSourceMount parses mounts object returned by the Mount method in
@@ -110,7 +111,7 @@ func (layer *buildLayer) pushBlob(ctx context.Context, blobSize int64) error {
 	blobID := filepath.Base(blobPath)
 
 	if err := utils.WithRetry(func() error {
-		desc, err := layer.backend.Upload(ctx, blobID, blobPath, blobSize)
+		desc, err := layer.backend.Upload(ctx, blobID, blobPath, blobSize, layer.forcePush)
 		if err != nil {
 			return err
 		}
