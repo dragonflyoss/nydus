@@ -2,21 +2,25 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
+use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use anyhow::Result;
+
 use rafs::metadata::layout::{
-    OndiskBlobTable, OndiskInode, OndiskInodeTable, OndiskSuperBlock, PrefetchTable,
+    OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeTable, OndiskSuperBlock,
+    OndiskXAttrs, PrefetchTable,
 };
 use rafs::{RafsIoRead, RafsIoReader};
 
 pub(crate) struct RafsInspector {
     request_mode: bool,
-    bootstrap: RafsIoReader,
+    bootstrap: Arc<Mutex<RafsIoReader>>,
     layout_profile: RafsLayoutV5,
     rafs_meta: RafsMeta,
     cur_dir_index: u32,
@@ -24,7 +28,7 @@ pub(crate) struct RafsInspector {
     inodes_table: OndiskInodeTable,
 }
 
-/// | Superblock | inode table | prefetch table |inode + name +symlink pointer + xattr pairs + chunk info
+/// | Superblock | inode table | prefetch table |inode + name + symlink pointer + xattr size + xattr pairs + chunk info
 #[allow(dead_code)]
 pub(crate) struct RafsLayoutV5 {
     super_block_offset: u32,
@@ -85,7 +89,7 @@ impl RafsInspector {
 
         Ok(RafsInspector {
             request_mode,
-            bootstrap: f,
+            bootstrap: Arc::new(Mutex::new(f)),
             layout_profile,
             rafs_meta,
             // Root inode has index of 0
@@ -108,15 +112,17 @@ impl RafsInspector {
         Ok(sb)
     }
 
-    fn load_ondisk_inode(&mut self, offset: u32) -> Result<(OndiskInode, OsString)> {
+    fn load_ondisk_inode(&self, offset: u32) -> Result<(OndiskInode, OsString)> {
         let mut ondisk_inode = OndiskInode::new();
-        self.bootstrap.seek_to_offset(offset as u64)?;
+        let mut guard = self.bootstrap.lock().unwrap();
+        let bootstrap = guard.deref_mut();
+        bootstrap.seek_to_offset(offset as u64)?;
         ondisk_inode
-            .load(&mut self.bootstrap)
+            .load(bootstrap)
             .map_err(|e| anyhow!("failed to jump to inode offset={}, {:?}", offset, e))?;
 
         // No need to move offset forward
-        let file_name = ondisk_inode.file_name(&mut self.bootstrap)?;
+        let file_name = ondisk_inode.file_name(bootstrap)?;
 
         Ok((ondisk_inode, file_name))
     }
@@ -128,9 +134,46 @@ impl RafsInspector {
         self.load_ondisk_inode(inode_offset)
     }
 
+    fn list_chunks(
+        r: &mut RafsIoReader,
+        inode: &OndiskInode,
+        inode_offset: u32,
+    ) -> Result<Option<Vec<OndiskChunkInfo>>> {
+        if !inode.is_reg() {
+            return Ok(None);
+        }
+
+        let mut xattr_pairs_aligned_size = 0u32;
+        let mut chunks = None;
+
+        if inode.has_xattr() {
+            let xattr_header_offset = inode_offset + inode.size() as u32;
+            r.seek_to_offset(xattr_header_offset as u64)?;
+            // TODO: implement `load()` for `OndiskXattr`
+            let mut xattrs_header = OndiskXAttrs::new();
+            r.read_exact(xattrs_header.as_mut())?;
+            xattr_pairs_aligned_size = xattrs_header.aligned_size() as u32 + 8;
+        }
+
+        let chunks_offset = inode_offset + inode.size() as u32 + xattr_pairs_aligned_size;
+
+        r.seek_to_offset(chunks_offset as u64)?;
+
+        if inode.i_child_count > 0 {
+            chunks = Some(Vec::<OndiskChunkInfo>::new());
+            for _ in 0..inode.i_child_count {
+                let mut chunk = OndiskChunkInfo::new();
+                chunk.load(r)?;
+                chunks.as_mut().unwrap().push(chunk);
+            }
+        }
+
+        Ok(chunks)
+    }
+
     pub fn iter_dir(
         &mut self,
-        mut op: impl FnMut(&OsStr, &OndiskInode, u32) -> Action,
+        mut op: impl FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
     ) -> Result<()> {
         let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
         let parent_ino = dir_inode.i_ino;
@@ -149,7 +192,8 @@ impl RafsInspector {
             }
 
             trace!("inode: {:?}; name: {:?}", child_inode, name);
-            match op(name.as_os_str(), &child_inode, idx) {
+            let inode_offset = self.inodes_table.data[idx as usize] << 3;
+            match op(name.as_os_str(), &child_inode, idx, inode_offset) {
                 Action::Break => break,
                 Action::Continue => continue,
             }
@@ -158,7 +202,7 @@ impl RafsInspector {
         Ok(())
     }
 
-    fn path_from_ino(&mut self, mut ino: u64) -> Result<PathBuf> {
+    fn path_from_ino(&self, mut ino: u64) -> Result<PathBuf> {
         let mut path = PathBuf::new();
         let mut entries = Vec::<PathBuf>::new();
 
@@ -180,7 +224,7 @@ impl RafsInspector {
     }
 
     pub fn cmd_list_dir(&mut self) -> Result<Option<Value>> {
-        self.iter_dir(|f, inode, _idx| {
+        self.iter_dir(|f, inode, _idx, _offset| {
             trace!("inode {:?}, name: {:?}", inode, f);
 
             println!(
@@ -197,11 +241,15 @@ impl RafsInspector {
 
     fn cmd_list_prefetch(&mut self) -> Result<Option<Value>> {
         let mut pt = PrefetchTable::new();
+        let mut guard = self.bootstrap.lock().unwrap();
+        let bootstrap = guard.deref_mut();
         pt.load_prefetch_table_from(
-            &mut self.bootstrap,
+            bootstrap,
             self.rafs_meta.prefetch_table_offset,
             self.rafs_meta.prefetch_table_entries as usize,
         )?;
+
+        drop(guard);
 
         let o = if self.request_mode {
             let mut value = json!([]);
@@ -231,8 +279,12 @@ impl RafsInspector {
     }
 
     pub fn cmd_stat_file(&mut self, name: &str) -> Result<Option<Value>> {
-        self.iter_dir(|f, inode, idx| {
+        let b = self.bootstrap.clone();
+        self.iter_dir(|f, inode, idx, offset| {
             if f == name {
+                let mut guard = b.lock().unwrap();
+                let bootstrap = guard.deref_mut();
+                let chunks = Self::list_chunks(bootstrap, inode, offset);
                 println!(
                     r#"
     Inode Number:       {inode_number}
@@ -254,6 +306,18 @@ impl RafsInspector {
                     gid = inode.i_gid,
                     blocks = inode.i_blocks,
                 );
+
+                if let Ok(Some(cks)) = chunks {
+                    println!("    Chunks list:");
+                    for (i, c) in cks.iter().enumerate() {
+                        println!(r#"        {}  compressed size: {compressed_size}, decompressed size: {decompressed_size}, compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset}"#,
+                        i,
+                        compressed_size=c.compress_size, decompressed_size=c.decompress_size,
+                        decompressed_offset = c.decompress_offset,
+                        compressed_offset=c.compress_offset);
+                    }
+                }
+
                 return Action::Break;
             }
             Action::Continue
@@ -277,7 +341,7 @@ impl RafsInspector {
         let mut new_dir_index = None;
         let mut err = "File does not exist";
 
-        self.iter_dir(|f, i, idx| {
+        self.iter_dir(|f, i, idx, _offset| {
             if f == name {
                 if i.is_dir() {
                     new_dir_index = Some(idx);
@@ -301,7 +365,9 @@ impl RafsInspector {
     }
 
     pub fn cmd_stats(&mut self) -> Result<Option<Value>> {
-        let sb = Self::super_block(&mut self.bootstrap, &self.layout_profile)?;
+        let mut guard = self.bootstrap.lock().unwrap();
+        let bootstrap = guard.deref_mut();
+        let sb = Self::super_block(bootstrap, &self.layout_profile)?;
 
         let o = if self.request_mode {
             Some(json!({"inodes_count": sb.inodes_count()}))
@@ -323,21 +389,23 @@ impl RafsInspector {
     }
 
     pub fn cmd_list_blobs(&mut self) -> Result<Option<Value>> {
-        self.bootstrap
-            .seek_to_offset(self.rafs_meta.blob_table_offset)?;
+        let mut guard = self.bootstrap.lock().unwrap();
+        let bootstrap = guard.deref_mut();
+        bootstrap.seek_to_offset(self.rafs_meta.blob_table_offset)?;
 
         let mut blobs = OndiskBlobTable::new();
-        blobs.load(&mut self.bootstrap, self.rafs_meta.blob_table_size)?;
+        blobs.load(bootstrap, self.rafs_meta.blob_table_size)?;
 
         let o = if self.request_mode {
             let mut value = json!([]);
-            for b in blobs.entries {
-                let v = json!({"blob_id": b.blob_id, "readahead_offset": b.readahead_offset, "readahead_size":b.readahead_size});
+            for b in &blobs.entries {
+                let v = json!({"blob_id": b.blob_id, "readahead_offset": b.readahead_offset,
+                "readahead_size":b.readahead_size});
                 value.as_array_mut().unwrap().push(v);
             }
             Some(value)
         } else {
-            for b in blobs.entries {
+            for b in &blobs.entries {
                 println!(
                     r#"
     Blob ID:            {blob_id}
