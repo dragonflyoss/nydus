@@ -766,13 +766,6 @@ pub fn new(
         prefetch_threads: Mutex::new(Vec::<_>::new()),
     });
 
-    cache
-        .metrics
-        .prefetch_policy
-        .lock()
-        .unwrap()
-        .insert("hinted".to_string());
-
     if enabled {
         kick_prefetch_workers(cache.clone());
     }
