@@ -131,7 +131,7 @@ impl IndexedChunkMap {
     fn read_u8(&self, idx: u32) -> Result<(u8, u8)> {
         self.check_index(idx)?;
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let current = unsafe { self.base.add(start) as *mut u8 as *const AtomicU8 };
+        let current = unsafe { self.base.add(start) as *const AtomicU8 };
         let pos = 8 - ((idx & 0b111) + 1);
         let mask = 1 << pos;
         Ok((unsafe { (*current).load(Ordering::Acquire) }, mask))
@@ -140,7 +140,7 @@ impl IndexedChunkMap {
     fn write_u8(&self, idx: u32, current: u8, expected: u8) -> Result<bool> {
         self.check_index(idx)?;
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let atomic_value = unsafe { &*{ self.base.add(start) as *mut u8 as *const AtomicU8 } };
+        let atomic_value = unsafe { &*{ self.base.add(start) as *const AtomicU8 } };
         Ok(atomic_value
             .compare_exchange(current, expected, Ordering::Acquire, Ordering::Relaxed)
             .is_ok())
@@ -150,7 +150,7 @@ impl IndexedChunkMap {
 impl Drop for IndexedChunkMap {
     fn drop(&mut self) {
         if !self.base.is_null() {
-            unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, self.size) };
+            unsafe { libc::munmap(self.base as *mut libc::c_void, self.size) };
             self.base = std::ptr::null();
         }
     }
