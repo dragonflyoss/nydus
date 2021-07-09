@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use anyhow::Result;
 
+use rafs::metadata::extended::blob_table::ExtendedBlobTable;
 use rafs::metadata::layout::{
     OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeTable, OndiskSuperBlock,
     OndiskXAttrs, PrefetchTable,
@@ -44,6 +45,8 @@ pub(crate) struct RafsMeta {
     prefetch_table_entries: u32,
     blob_table_offset: u64,
     blob_table_size: u32,
+    extended_blob_table_offset: u64,
+    extended_blob_table_entries: u32,
 }
 
 impl From<&OndiskSuperBlock> for RafsMeta {
@@ -55,6 +58,8 @@ impl From<&OndiskSuperBlock> for RafsMeta {
             blob_table_offset: sb.blob_table_offset(),
             blob_table_size: sb.blob_table_size(),
             prefetch_table_entries: sb.prefetch_table_entries(),
+            extended_blob_table_offset: sb.extended_blob_table_offset(),
+            extended_blob_table_entries: sb.extended_blob_table_entries(),
         }
     }
 }
@@ -396,6 +401,20 @@ impl RafsInspector {
         let mut blobs = OndiskBlobTable::new();
         blobs.load(bootstrap, self.rafs_meta.blob_table_size)?;
 
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        let extended = if self.rafs_meta.extended_blob_table_offset > 0 {
+            bootstrap.seek_to_offset(self.rafs_meta.extended_blob_table_offset)?;
+            let mut et = ExtendedBlobTable::new();
+            et.load(
+                bootstrap,
+                self.rafs_meta.extended_blob_table_entries as usize,
+            )?;
+            Some(et)
+        } else {
+            None
+        };
+
         let o = if self.request_mode {
             let mut value = json!([]);
             for b in &blobs.entries {
@@ -405,16 +424,27 @@ impl RafsInspector {
             }
             Some(value)
         } else {
-            for b in &blobs.entries {
-                println!(
+            for (i, b) in blobs.entries.iter().enumerate() {
+                print!(
                     r#"
     Blob ID:            {blob_id}
     Readahead Offset:   {readahead_offset}
-    Readahead Size:     {readahead_size}"#,
+    Readahead Size:     {readahead_size}
+    "#,
                     blob_id = b.blob_id,
                     readahead_offset = b.readahead_offset,
                     readahead_size = b.readahead_size,
-                )
+                );
+
+                if let Some(et) = &extended {
+                    print!(
+                        r#"Cache Size:         {cache_size}
+    Compressed Size:    {compressed_size}
+    "#,
+                        cache_size = et.entries[i].blob_cache_size,
+                        compressed_size = et.entries[i].compressed_blob_size
+                    )
+                }
             }
             None
         };
