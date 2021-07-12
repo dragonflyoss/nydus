@@ -66,7 +66,7 @@ impl DigestHasher for Sha256 {
     }
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, Default)]
 pub struct RafsDigest {
     pub data: DigestData,
 }
@@ -88,14 +88,6 @@ impl RafsDigest {
         match algorithm {
             Algorithm::Blake3 => Box::new(blake3::Hasher::new()) as Box<dyn DigestHasher>,
             Algorithm::Sha256 => Box::new(Sha256::new()) as Box<dyn DigestHasher>,
-        }
-    }
-}
-
-impl Default for RafsDigest {
-    fn default() -> Self {
-        Self {
-            data: [0u8; RAFS_DIGEST_LENGTH],
         }
     }
 }
