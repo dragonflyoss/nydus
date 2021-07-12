@@ -800,9 +800,7 @@ mod blob_cache_tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use crate::backend::{BackendResult, BlobBackend};
-    use crate::cache::blobcache;
-    use crate::cache::PrefetchWorker;
-    use crate::cache::RafsCache;
+    use crate::cache::{blobcache, MergedBackendRequest, PrefetchWorker, RafsCache};
     use crate::compress;
     use crate::device::{RafsBio, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
     use crate::factory::CacheConfig;
@@ -975,5 +973,312 @@ mod blob_cache_tests {
 
         assert_eq!(r1, &expect[50..]);
         assert_eq!(r2, &expect[50..]);
+    }
+
+    #[test]
+    fn test_merge_bio() {
+        let tmp_dir = TempDir::new().unwrap();
+        let s = format!(
+            r###"
+        {{
+            "work_dir": {:?}
+        }}
+        "###,
+            tmp_dir.as_path().to_path_buf().join("cache"),
+        );
+
+        let cache_config = CacheConfig {
+            cache_validate: true,
+            cache_compressed: false,
+            cache_type: String::from("blobcache"),
+            cache_config: serde_json::from_str(&s).unwrap(),
+            prefetch_worker: PrefetchWorker::default(),
+        };
+
+        let blob_cache = blobcache::new(
+            cache_config,
+            Arc::new(MockBackend {
+                metrics: BackendMetrics::new("id", "mock"),
+            }) as Arc<dyn BlobBackend + Send + Sync>,
+            compress::Algorithm::Lz4Block,
+            digest::Algorithm::Blake3,
+            "id",
+        )
+        .unwrap();
+
+        let merging_size: u64 = 128 * 1024 * 1024;
+
+        let single_chunk = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 1,
+            ..Default::default()
+        };
+
+        let bio = RafsBio::new(
+            Arc::new(single_chunk.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        let mut bios = vec![bio];
+
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+        let mr = recv.recv().unwrap();
+
+        assert_eq!(mr.blob_offset, single_chunk.compress_offset());
+        assert_eq!(mr.blob_size, single_chunk.compress_size());
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+        let mr = recv.recv().unwrap();
+
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(
+            mr.blob_size,
+            chunk1.compress_size() + chunk2.compress_size()
+        );
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000 + 1,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(mr.blob_size, chunk1.compress_size());
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk2.compress_offset());
+        assert_eq!(mr.blob_size, chunk2.compress_size());
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "2".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(mr.blob_size, chunk1.compress_size());
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk2.compress_offset());
+        assert_eq!(mr.blob_size, chunk2.compress_size());
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk3 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio3 = RafsBio::new(
+            Arc::new(chunk3.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "2".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2, bio3];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(
+            mr.blob_size,
+            chunk1.compress_size() + chunk2.compress_size()
+        );
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk3.compress_offset());
+        assert_eq!(mr.blob_size, chunk3.compress_size());
     }
 }

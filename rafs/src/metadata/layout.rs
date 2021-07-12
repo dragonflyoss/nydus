@@ -634,7 +634,7 @@ impl OndiskBlobTable {
             let id_bytes = unsafe { std::slice::from_raw_parts(id_offset, bytes_len) };
 
             let blob_id = std::str::from_utf8(id_bytes).map_err(|e| einval!(e))?;
-            info!("blob {:?} lies on", blob_id);
+            debug!("blob {:?} lies on", blob_id);
             // Move to next entry frame, including splitter 0
             frame = unsafe { frame.add(size_of::<BlobEntryFrontPart>() + bytes_len + 1) };
 
