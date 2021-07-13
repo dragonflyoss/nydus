@@ -35,9 +35,6 @@ impl ChunkMap for DigestedChunkMap {
     }
 
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
-        if self.has_ready(chunk)? {
-            return Ok(());
-        }
         self.cache.write().unwrap().insert(*chunk.block_id(), true);
         Ok(())
     }

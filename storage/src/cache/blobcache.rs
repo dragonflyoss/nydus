@@ -498,7 +498,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         .set(&mr.blob_entry);
                     if let Ok((fd, _, chunk_map)) = entry {
                         for c in continuous_chunks {
-                            if chunk_map.has_ready(c.as_ref()).ok().unwrap_or_default() {
+                            if chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
                                 continue;
                             }
                             // Always validate if chunk's hash is equal to `block_id` by which
