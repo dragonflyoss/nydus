@@ -8,7 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/crc64"
+	"io"
+	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -65,8 +69,36 @@ func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
 	}, nil
 }
 
-// Upload blob as image layer to oss backend. Depending on blob's size, upload it
-// by multiparts method or the normal method
+func calcCrc64ECMA(path string) (uint64, error) {
+	buf := make([]byte, 4*1024)
+	table := crc64.MakeTable(crc64.ECMA)
+
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, errors.Wrapf(err, "calc md5sum")
+	}
+	defer f.Close()
+
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	blobCrc64 := crc64.Checksum(buf[:n], table)
+
+	for {
+		n, err := f.Read(buf)
+		blobCrc64 = crc64.Update(blobCrc64, table, buf[:n])
+		if err == io.EOF || n == 0 {
+			break
+		}
+	}
+
+	return blobCrc64, nil
+}
+
+// Upload blob as image layer to oss backend.
+// Depending on blob's size, upload it by multiparts method or the normal method.
+// Verify integrity by calculate  CRC64.
 func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64, forcePush bool) (*ocispec.Descriptor, error) {
 	blobObjectKey := b.objectPrefix + blobID
 
@@ -95,6 +127,15 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	}
 
 	start := time.Now()
+	var crc64 uint64 = 0
+	crc64ErrChan := make(chan error, 1)
+	go func() {
+		var e error
+		crc64, e = calcCrc64ECMA(blobPath)
+		crc64ErrChan <- e
+	}()
+
+	defer close(crc64ErrChan)
 
 	if needMultiparts {
 		logrus.Debugf("Upload %s using multiparts method", blobObjectKey)
@@ -119,8 +160,6 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 				if err != nil {
 					return err
 				}
-				// TODO: We don't verify data part MD5 from ETag right now.
-				// But we can do it if we have to.
 				partsChan <- p
 				return nil
 			})
@@ -153,6 +192,35 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	props, err := b.bucket.GetObjectDetailedMeta(blobObjectKey)
+	if err != nil {
+		return nil, errors.Wrapf(err, "get object meta")
+	}
+
+	// Try to validate blob object integrity if any crc64 value is returned.
+	if value, ok := props[http.CanonicalHeaderKey("x-oss-hash-crc64ecma")]; ok {
+		if len(value) == 1 {
+			uploadedCrc, err := strconv.ParseUint(value[0], 10, 64)
+			if err != nil {
+				return nil, errors.Wrapf(err, "parse uploaded crc64")
+			}
+
+			err = <-crc64ErrChan
+			if err != nil {
+				return nil, errors.Wrapf(err, "calculate crc64")
+			}
+
+			if uploadedCrc != crc64 {
+				return nil, errors.Errorf("CRC64 mismatch. Uploaded=%d, expected=%d", uploadedCrc, crc64)
+			}
+
+		} else {
+			logrus.Warnf("Too many values, skip crc64 integrity check.")
+		}
+	} else {
+		logrus.Warnf("No CRC64 in header, skip crc64 integrity check.")
 	}
 
 	// With OSS backend, no blob has to be pushed to registry, but have to push to build cache.
