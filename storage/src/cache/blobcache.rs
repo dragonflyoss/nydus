@@ -81,7 +81,7 @@ impl BlobCacheState {
         // The builder now records the number of chunks in the blob table, so we can
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
-        let chunk_map = if blob.chunk_count != 0 {
+        let chunk_map = if blob.with_extended_blob_table() {
             Arc::new(IndexedChunkMap::new(&blob_file_path, blob.chunk_count)?)
                 as Arc<dyn ChunkMap + Sync + Send>
         } else {
