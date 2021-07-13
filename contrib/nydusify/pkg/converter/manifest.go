@@ -32,6 +32,7 @@ type manifestManager struct {
 	remote         *remote.Remote
 	multiPlatform  bool
 	dockerV2Format bool
+	buildInfo      *BuildInfo
 }
 
 // Try to get manifests from exists target image
@@ -247,8 +248,9 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 			Versioned: specs.Versioned{
 				SchemaVersion: 2,
 			},
-			Config: *configDesc,
-			Layers: layers,
+			Config:      *configDesc,
+			Layers:      layers,
+			Annotations: mm.buildInfo.Dump(),
 		},
 	}
 
