@@ -2,11 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::CString;
-use std::fs::{remove_file, File, OpenOptions};
+use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -19,19 +17,18 @@ use super::context::{BuildContext, SourceType, BUF_WRITER_CAPACITY};
 use super::node::*;
 
 pub struct BlobBufferWriter {
-    parent_dir: Option<File>,
     file: BufWriter<File>,
     blob_stor: BlobStorage,
     // Keep this because tmp file will be removed automatically when it is dropped.
     // But we will rename/link the tmp file before it is removed.
-    _tmp_file: Option<TempFile>,
+    tmp_file: Option<TempFile>,
 }
 
 #[derive(Debug, Clone)]
 pub enum BlobStorage {
     // Won't rename user's specification
     SingleFile(PathBuf),
-    // Will rename it from tmp file as user didn't specify a
+    // Will rename it from tmp file as user didn't specify a name.
     BlobsDir(PathBuf),
 }
 
@@ -49,9 +46,8 @@ impl BlobBufferWriter {
                 );
                 Ok(Self {
                     file: b,
-                    parent_dir: None,
                     blob_stor,
-                    _tmp_file: None,
+                    tmp_file: None,
                 })
             }
             BlobStorage::BlobsDir(ref p) => {
@@ -64,9 +60,8 @@ impl BlobBufferWriter {
                         // Safe to unwrap because it should not be a bad fd.
                         tmp.as_file().try_clone().unwrap(),
                     ),
-                    parent_dir: Some(File::open(p)?),
                     blob_stor,
-                    _tmp_file: Some(tmp),
+                    tmp_file: Some(tmp),
                 })
             }
         }
@@ -76,41 +71,22 @@ impl BlobBufferWriter {
         self.file.write_all(buf).map_err(|e| anyhow!(e))
     }
 
-    fn release(self, new_name: Option<&str>) -> Result<()> {
+    fn release(self, name: Option<&str>) -> Result<()> {
         let mut f = self.file.into_inner()?;
         f.flush()?;
 
-        if let Some(name) = new_name {
+        if let Some(n) = name {
             if let BlobStorage::BlobsDir(s) = &self.blob_stor {
-                let empty = CString::default();
-
                 // NOTE: File with same name will be deleted ahead of time.
                 // So each newly generated blob can be stored.
-                let might_exist_path = Path::new(s).join(name);
+                let might_exist_path = Path::new(s).join(n);
                 if might_exist_path.exists() {
-                    remove_file(might_exist_path)?;
+                    remove_file(&might_exist_path)?;
                 }
 
-                // Safe because this doesn't modify any memory and we check the
-                // return value. Being used fd never be closed before.
-                let res = unsafe {
-                    libc::linkat(
-                        f.as_raw_fd(),
-                        empty.as_ptr(),
-                        // Safe because it is using BlobsDir storage.
-                        self.parent_dir.unwrap().as_raw_fd(),
-                        CString::new(name)?.as_ptr(),
-                        libc::AT_EMPTY_PATH,
-                    )
-                };
-
-                if res < 0 {
-                    bail!(
-                        "Rename blob to {} failed. error: {:?} ",
-                        &name,
-                        last_error!()
-                    );
-                }
+                // Safe to unwrap as `BlobsDir` must have `tmp_file` created.
+                rename(self.tmp_file.unwrap().as_path(), might_exist_path)
+                    .map_err(|e| anyhow!("Rename blob to {} failed. error: {:?} ", n, e))?;
             }
         } else if let BlobStorage::SingleFile(s) = &self.blob_stor {
             // `new_name` is None means no blob is really built, perhaps due to dedup.
