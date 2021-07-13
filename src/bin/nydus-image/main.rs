@@ -99,7 +99,7 @@ fn main() -> Result<()> {
     let (bti_string, _) = BuildTimeInfo::dump(crate_version!());
 
     // TODO: Try to use yaml to define below options
-    let cmd = App::new("nydus image builder")
+    let cmd = App::new("")
         .version(bti_string.as_str())
         .author(crate_authors!())
         .about("Build image using nydus format.")

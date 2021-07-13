@@ -1024,7 +1024,7 @@ mod blob_cache_tests {
             Arc::new(MockBackend {
                 metrics: BackendMetrics::new("id", "mock"),
             }) as Arc<dyn BlobBackend + Send + Sync>,
-            compress::Algorithm::Lz4Block,
+            compress::Algorithm::LZ4Block,
             digest::Algorithm::Blake3,
             "id",
         )
