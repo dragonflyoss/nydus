@@ -501,26 +501,31 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             if chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
                                 continue;
                             }
-                            // Always validate if chunk's hash is equal to `block_id` by which
-                            // blobcache judges if the data is up-to-date.
-                            let d_size = c.decompress_size() as usize;
-                            if blobcache
-                                .read_blobcache_chunk(
-                                    fd,
-                                    c.as_ref(),
-                                    alloc_buf(d_size).as_mut_slice(),
-                                    true,
-                                )
-                                .is_err()
-                            {
-                                // Aha, we have a not integrated chunk here. Issue the entire
-                                // merged request from backend to boost.
-                                issue_batch = true;
-                                break;
+
+                            if !&mr.blob_entry.with_extended_blob_table() {
+                                // Always validate if chunk's hash is equal to `block_id` by which
+                                // blobcache judges if the data is up-to-date.
+                                let d_size = c.decompress_size() as usize;
+                                if blobcache
+                                    .read_blobcache_chunk(
+                                        fd,
+                                        c.as_ref(),
+                                        alloc_buf(d_size).as_mut_slice(),
+                                        true,
+                                    )
+                                    .is_err()
+                                {
+                                    // Aha, we have a not integrated chunk here. Issue the entire
+                                    // merged request from backend to boost.
+                                    issue_batch = true;
+                                    break;
+                                } else {
+                                    let _ = chunk_map
+                                        .set_ready(c.as_ref())
+                                        .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
+                                }
                             } else {
-                                let _ = chunk_map
-                                    .set_ready(c.as_ref())
-                                    .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
+                                issue_batch = true;
                             }
                         }
                     }
