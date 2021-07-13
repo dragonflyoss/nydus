@@ -89,8 +89,8 @@ impl IndexedChunkMap {
                 fd,
                 0,
             )
-        } as *const u8;
-        if base as *mut core::ffi::c_void == libc::MAP_FAILED {
+        };
+        if base == libc::MAP_FAILED {
             return Err(last_error!("failed to mmap blob chunk_map"));
         }
         if base.is_null() {
@@ -114,7 +114,7 @@ impl IndexedChunkMap {
         Ok(Self {
             chunk_count,
             size: expected_size as usize,
-            base,
+            base: base as *const u8,
         })
     }
 

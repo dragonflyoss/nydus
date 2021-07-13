@@ -491,42 +491,58 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     // way in the future. Principe is that if all chunks are Ready,
                     // abort this Merged Request. It might involve extra stress
                     // to local file system.
-                    let entry = blobcache
+                    let ee = blobcache
                         .cache
-                        .write()
+                        .read()
                         .expect("Expect cache lock not poisoned")
-                        .set(&mr.blob_entry);
-                    if let Ok((fd, _, chunk_map)) = entry {
-                        for c in continuous_chunks {
-                            if chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
+                        .get(&mr.blob_entry);
+
+                    let (fd, _, chunk_map) = if let Some(be) = ee {
+                        be
+                    } else {
+                        match blobcache
+                            .cache
+                            .write()
+                            .expect("Expect cache lock not poisoned")
+                            .set(&mr.blob_entry)
+                        {
+                            Err(err) => {
+                                error!("{}", err);
                                 continue;
                             }
+                            Ok(be) => be,
+                        }
+                    };
 
-                            if !&mr.blob_entry.with_extended_blob_table() {
-                                // Always validate if chunk's hash is equal to `block_id` by which
-                                // blobcache judges if the data is up-to-date.
-                                let d_size = c.decompress_size() as usize;
-                                if blobcache
-                                    .read_blobcache_chunk(
-                                        fd,
-                                        c.as_ref(),
-                                        alloc_buf(d_size).as_mut_slice(),
-                                        true,
-                                    )
-                                    .is_err()
-                                {
-                                    // Aha, we have a not integrated chunk here. Issue the entire
-                                    // merged request from backend to boost.
-                                    issue_batch = true;
-                                    break;
-                                } else {
-                                    let _ = chunk_map
-                                        .set_ready(c.as_ref())
-                                        .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
-                                }
-                            } else {
+                    for c in continuous_chunks {
+                        if chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
+                            continue;
+                        }
+
+                        if !&mr.blob_entry.with_extended_blob_table() {
+                            // Always validate if chunk's hash is equal to `block_id` by which
+                            // blobcache judges if the data is up-to-date.
+                            let d_size = c.decompress_size() as usize;
+                            if blobcache
+                                .read_blobcache_chunk(
+                                    fd,
+                                    c.as_ref(),
+                                    alloc_buf(d_size).as_mut_slice(),
+                                    true,
+                                )
+                                .is_err()
+                            {
+                                // Aha, we have a not integrated chunk here. Issue the entire
+                                // merged request from backend to boost.
                                 issue_batch = true;
+                                break;
+                            } else {
+                                let _ = chunk_map
+                                    .set_ready(c.as_ref())
+                                    .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
                             }
+                        } else {
+                            issue_batch = true;
                         }
                     }
 
@@ -540,6 +556,9 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         blob_size as usize,
                         &continuous_chunks,
                     ) {
+                        // TODO: The locking granularity below is a little big. We
+                        // don't have to hold blobcache mutex when writing files.
+                        // But prefetch io is usually limited. So it is low priority.
                         let mut cache_guard = blobcache
                             .cache
                             .write()
@@ -549,7 +568,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .map_err(|_| error!("Set cache index error!"))
                         {
                             for (i, c) in continuous_chunks.iter().enumerate() {
-                                if !chunk_map.has_ready(c.as_ref()).ok().unwrap_or_default() {
+                                if !chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
                                     let offset = if blobcache.is_compressed {
                                         c.compress_offset()
                                     } else {
