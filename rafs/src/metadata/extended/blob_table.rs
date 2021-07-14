@@ -9,20 +9,32 @@ use std::sync::Arc;
 use crate::metadata::RafsStore;
 use crate::{align_to_rafs, RafsIoReader, RafsIoWriter};
 
-pub const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 32;
+pub const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 64;
+const RESERVED_SIZE: usize = EXTENDED_BLOB_TABLE_ENTRY_SIZE - 16;
 
 /// ExtendedDBlobTableEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
 // This disk structure is well defined and rafs aligned.
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ExtendedBlobTableEntry {
     /// Number of chunks in a blob file.
     pub chunk_count: u32,
-    pub reserved1: [u8; 4],
+    pub reserved1: [u8; 4], //   --  8 Bytes
     /// The expected decompress size of blob cache file.
-    pub blob_cache_size: u64,
-    pub reserved2: [u8; EXTENDED_BLOB_TABLE_ENTRY_SIZE - 16],
+    pub blob_cache_size: u64, // -- 16 Bytes
+    pub reserved2: [u8; RESERVED_SIZE],
+}
+
+impl Default for ExtendedBlobTableEntry {
+    fn default() -> Self {
+        ExtendedBlobTableEntry {
+            chunk_count: 0,
+            reserved1: [0; 4],
+            blob_cache_size: 0,
+            reserved2: [0; RESERVED_SIZE],
+        }
+    }
 }
 
 impl ExtendedBlobTableEntry {
@@ -31,7 +43,7 @@ impl ExtendedBlobTableEntry {
             chunk_count,
             reserved1: [0; 4],
             blob_cache_size,
-            reserved2: [0; EXTENDED_BLOB_TABLE_ENTRY_SIZE - 16],
+            reserved2: [0; RESERVED_SIZE],
         }
     }
 }
@@ -124,6 +136,7 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::ExtendedBlobTable;
+    use super::RESERVED_SIZE;
     use crate::metadata::RafsStore;
     use crate::{RafsIoRead, RafsIoWrite};
 
@@ -161,7 +174,10 @@ mod tests {
             assert_eq!(table.get(i).unwrap().chunk_count, i * 3);
             assert_eq!(table.get(i).unwrap().reserved1, [0u8; 4]);
             assert_eq!(table.get(i).unwrap().blob_cache_size, 100);
-            assert_eq!(table.get(i).unwrap().reserved2, [0u8; 16]);
+            assert_eq!(
+                table.get(i).unwrap().reserved2,
+                [0u8; RESERVED_SIZE]
+            );
         }
     }
 }
