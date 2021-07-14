@@ -10,7 +10,7 @@ use crate::metadata::RafsStore;
 use crate::{align_to_rafs, RafsIoReader, RafsIoWriter};
 
 pub const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 64;
-const RESERVED_SIZE: usize = EXTENDED_BLOB_TABLE_ENTRY_SIZE - 16;
+const RESERVED_SIZE: usize = EXTENDED_BLOB_TABLE_ENTRY_SIZE - 24;
 
 /// ExtendedDBlobTableEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
@@ -23,6 +23,7 @@ pub struct ExtendedBlobTableEntry {
     pub reserved1: [u8; 4], //   --  8 Bytes
     /// The expected decompress size of blob cache file.
     pub blob_cache_size: u64, // -- 16 Bytes
+    pub compressed_blob_size: u64, // -- 24 Bytes
     pub reserved2: [u8; RESERVED_SIZE],
 }
 
@@ -32,17 +33,19 @@ impl Default for ExtendedBlobTableEntry {
             chunk_count: 0,
             reserved1: [0; 4],
             blob_cache_size: 0,
+            compressed_blob_size: 0,
             reserved2: [0; RESERVED_SIZE],
         }
     }
 }
 
 impl ExtendedBlobTableEntry {
-    pub fn new(chunk_count: u32, blob_cache_size: u64) -> Self {
+    pub fn new(chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) -> Self {
         Self {
             chunk_count,
             reserved1: [0; 4],
             blob_cache_size,
+            compressed_blob_size,
             reserved2: [0; RESERVED_SIZE],
         }
     }
@@ -72,10 +75,11 @@ impl ExtendedBlobTable {
         self.entries.len()
     }
 
-    pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64) {
+    pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) {
         self.entries.push(Arc::new(ExtendedBlobTableEntry::new(
             chunk_count,
             blob_cache_size,
+            compressed_blob_size,
         )));
     }
 
@@ -112,6 +116,7 @@ impl RafsStore for ExtendedBlobTable {
                 w.write_all(&u32::to_le_bytes(entry.chunk_count))?;
                 w.write_all(&entry.reserved1)?;
                 w.write_all(&u64::to_le_bytes(entry.blob_cache_size))?;
+                w.write_all(&u64::to_le_bytes(entry.compressed_blob_size))?;
                 w.write_all(&entry.reserved2)?;
                 size += size_of::<u32>()
                     + entry.reserved1.len()
@@ -147,7 +152,7 @@ mod tests {
         // Create extended blob table
         let mut table = ExtendedBlobTable::new();
         for i in 0..5 {
-            table.add(i * 3, 100);
+            table.add(i * 3, 100, 100);
         }
 
         // Store extended blob table
@@ -174,10 +179,7 @@ mod tests {
             assert_eq!(table.get(i).unwrap().chunk_count, i * 3);
             assert_eq!(table.get(i).unwrap().reserved1, [0u8; 4]);
             assert_eq!(table.get(i).unwrap().blob_cache_size, 100);
-            assert_eq!(
-                table.get(i).unwrap().reserved2,
-                [0u8; RESERVED_SIZE]
-            );
+            assert_eq!(table.get(i).unwrap().reserved2, [0u8; RESERVED_SIZE]);
         }
     }
 }

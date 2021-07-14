@@ -575,6 +575,7 @@ impl OndiskBlobTable {
         readahead_size: u32,
         chunk_count: u32,
         blob_cache_size: u64,
+        compressed_blob_size: u64,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         self.entries.push(Arc::new(RafsBlobEntry {
@@ -585,7 +586,8 @@ impl OndiskBlobTable {
             chunk_count,
             blob_cache_size,
         }));
-        self.extended.add(chunk_count, blob_cache_size);
+        self.extended
+            .add(chunk_count, blob_cache_size, compressed_blob_size);
         blob_index
     }
 

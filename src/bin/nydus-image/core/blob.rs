@@ -124,7 +124,7 @@ impl Blob {
     }
 
     /// Dump blob file and generate chunks
-    pub fn dump(&mut self, ctx: &mut BuildContext) -> Result<(Sha256, usize, usize, u64)> {
+    pub fn dump(&mut self, ctx: &mut BuildContext) -> Result<(Sha256, usize, usize, u64, u64)> {
         // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
         // belonging to the same directory arranged in adjacent in blob file. Together with
         // BFS style collecting descendants inodes, it will have a higher merging possibility.
@@ -135,6 +135,7 @@ impl Blob {
         let mut blob_readahead_size = 0usize;
         let mut blob_size = 0usize;
         let mut blob_cache_size = 0u64;
+        let mut compressed_blob_size = 0u64;
         let mut compress_offset = 0u64;
         let mut decompress_offset = 0u64;
         let mut blob_hash = Sha256::new();
@@ -156,6 +157,7 @@ impl Blob {
                                 &mut compress_offset,
                                 &mut decompress_offset,
                                 &mut blob_cache_size,
+                                &mut compressed_blob_size,
                                 &mut ctx.chunk_cache,
                                 &mut ctx.chunk_count_map,
                                 ctx.compressor,
@@ -190,6 +192,7 @@ impl Blob {
                                 &mut compress_offset,
                                 &mut decompress_offset,
                                 &mut blob_cache_size,
+                                &mut compressed_blob_size,
                                 &mut ctx.chunk_cache,
                                 &mut ctx.chunk_count_map,
                                 ctx.compressor,
@@ -229,7 +232,13 @@ impl Blob {
 
         self.blob_size = blob_size;
 
-        Ok((blob_hash, blob_size, blob_readahead_size, blob_cache_size))
+        Ok((
+            blob_hash,
+            blob_size,
+            blob_readahead_size,
+            blob_cache_size,
+            compressed_blob_size,
+        ))
     }
 
     pub fn flush(self, ctx: &BuildContext) -> Result<()> {
