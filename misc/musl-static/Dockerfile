@@ -1,4 +1,4 @@
-FROM clux/muslrust:1.49.0
+FROM clux/muslrust:1.50.0
 
 WORKDIR /nydus-rs
 

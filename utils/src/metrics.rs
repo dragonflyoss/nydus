@@ -408,8 +408,8 @@ impl GlobalIOStats {
         .map_err(IoStatsError::Serialize)
     }
 
-    fn export_latest_read_files(&self) -> Result<String, IoStatsError> {
-        Ok(serde_json::json!(self.recent_read_files.bitmap_to_array_and_clear()).to_string())
+    fn export_latest_read_files(&self) -> String {
+        serde_json::json!(self.recent_read_files.bitmap_to_array_and_clear()).to_string()
     }
 
     fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
@@ -484,7 +484,7 @@ pub fn export_files_stats(
             if !latest_read_files {
                 v.export_files_stats()
             } else {
-                v.export_latest_read_files()
+                Ok(v.export_latest_read_files())
             }
         })?,
         None => {
@@ -493,7 +493,7 @@ pub fn export_files_stats(
                     return if !latest_read_files {
                         ios.export_files_stats()
                     } else {
-                        ios.export_latest_read_files()
+                        Ok(ios.export_latest_read_files())
                     };
                 }
             }
