@@ -27,6 +27,8 @@ pub(crate) struct RafsInspector {
     cur_dir_index: u32,
     parent_indexes: Vec<u32>,
     inodes_table: OndiskInodeTable,
+    blobs_table: OndiskBlobTable,
+    extended_blobs_table: Option<ExtendedBlobTable>,
 }
 
 /// | Superblock | inode table | prefetch table |inode + name + symlink pointer + xattr size + xattr pairs + chunk info
@@ -92,6 +94,21 @@ impl RafsInspector {
         f.seek_to_offset(rafs_meta.inode_table_offset)?;
         inodes_table.load(&mut f)?;
 
+        f.seek_to_offset(rafs_meta.blob_table_offset)?;
+        let mut blobs_table = OndiskBlobTable::new();
+        blobs_table.load(&mut f, rafs_meta.blob_table_size)?;
+
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        let extended_blobs_table = if rafs_meta.extended_blob_table_offset > 0 {
+            f.seek_to_offset(rafs_meta.extended_blob_table_offset)?;
+            let mut et = ExtendedBlobTable::new();
+            et.load(&mut f, rafs_meta.extended_blob_table_entries as usize)?;
+            Some(et)
+        } else {
+            None
+        };
+
         Ok(RafsInspector {
             request_mode,
             bootstrap: Arc::new(Mutex::new(f)),
@@ -101,6 +118,8 @@ impl RafsInspector {
             cur_dir_index: 0,
             parent_indexes: Vec::new(),
             inodes_table,
+            blobs_table,
+            extended_blobs_table,
         })
     }
 
@@ -133,7 +152,7 @@ impl RafsInspector {
     }
 
     /// Index is u32, by which the inode can be found.
-    fn load_inode_by_index(&mut self, index: usize) -> Result<(OndiskInode, OsString)> {
+    fn load_inode_by_index(&self, index: usize) -> Result<(OndiskInode, OsString)> {
         // Safe to truncate `inode_table_offset` now.
         let inode_offset = self.inodes_table.data[index] << 3;
         self.load_ondisk_inode(inode_offset)
@@ -177,7 +196,7 @@ impl RafsInspector {
     }
 
     pub fn iter_dir(
-        &mut self,
+        &self,
         mut op: impl FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
     ) -> Result<()> {
         let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
@@ -294,7 +313,7 @@ impl RafsInspector {
         Ok(o)
     }
 
-    pub fn cmd_stat_file(&mut self, name: &str) -> Result<Option<Value>> {
+    pub fn cmd_stat_file(&self, name: &str) -> Result<Option<Value>> {
         let b = self.bootstrap.clone();
         self.iter_dir(|f, inode, idx, offset| {
             if f == name {
@@ -326,11 +345,18 @@ impl RafsInspector {
                 if let Ok(Some(cks)) = chunks {
                     println!("    Chunks list:");
                     for (i, c) in cks.iter().enumerate() {
-                        println!(r#"        {}  compressed size: {compressed_size}, decompressed size: {decompressed_size}, compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset}"#,
+                        let blob_id = if let Ok(entry) =  self.blobs_table.get(c.blob_index) {
+                            entry.blob_id.clone()
+                        } else {
+                            error!("Blob index is {} . But no blob entry associate with it", c.blob_index);
+                            return Action::Break;
+                        };
+
+                        println!(r#"        {}  compressed size: {compressed_size}, decompressed size: {decompressed_size}, compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset}, blob id: {blob_id}, chunk id: {chunk_id}"#,
                         i,
                         compressed_size=c.compress_size, decompressed_size=c.decompress_size,
                         decompressed_offset = c.decompress_offset,
-                        compressed_offset=c.compress_offset);
+                        compressed_offset=c.compress_offset, blob_id=blob_id, chunk_id=c.block_id);
                     }
                 }
 
@@ -409,22 +435,8 @@ impl RafsInspector {
         let bootstrap = guard.deref_mut();
         bootstrap.seek_to_offset(self.rafs_meta.blob_table_offset)?;
 
-        let mut blobs = OndiskBlobTable::new();
-        blobs.load(bootstrap, self.rafs_meta.blob_table_size)?;
-
-        // Load extended blob table if the bootstrap including
-        // extended blob table.
-        let extended = if self.rafs_meta.extended_blob_table_offset > 0 {
-            bootstrap.seek_to_offset(self.rafs_meta.extended_blob_table_offset)?;
-            let mut et = ExtendedBlobTable::new();
-            et.load(
-                bootstrap,
-                self.rafs_meta.extended_blob_table_entries as usize,
-            )?;
-            Some(et)
-        } else {
-            None
-        };
+        let blobs = &mut self.blobs_table;
+        let extended = &mut self.extended_blobs_table;
 
         let o = if self.request_mode {
             let mut value = json!([]);
@@ -447,7 +459,7 @@ impl RafsInspector {
                     readahead_size = b.readahead_size,
                 );
 
-                if let Some(et) = &extended {
+                if let Some(et) = extended {
                     print!(
                         r#"Cache Size:         {cache_size}
     Compressed Size:    {compressed_size}
