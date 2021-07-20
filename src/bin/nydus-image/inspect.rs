@@ -440,9 +440,19 @@ impl RafsInspector {
 
         let o = if self.request_mode {
             let mut value = json!([]);
-            for b in &blobs.entries {
+
+            for (i, b) in blobs.entries.iter().enumerate() {
+                let (decompressed_size, compressed_size) = if let Some(et) = extended {
+                    (
+                        Some(et.entries[i].blob_cache_size),
+                        Some(et.entries[i].compressed_blob_size),
+                    )
+                } else {
+                    (None, None)
+                };
+
                 let v = json!({"blob_id": b.blob_id, "readahead_offset": b.readahead_offset,
-                "readahead_size":b.readahead_size});
+                "readahead_size":b.readahead_size, "decompressed_size": decompressed_size, "compressed_size": compressed_size});
                 value.as_array_mut().unwrap().push(v);
             }
             Some(value)
