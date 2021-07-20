@@ -608,7 +608,7 @@ impl OndiskBlobTable {
 
         let begin_ptr = data.as_slice().as_ptr() as *const u8;
         let mut frame = begin_ptr;
-        info!("blob table size {}", blob_table_size);
+        debug!("blob table size {}", blob_table_size);
         loop {
             // Each entry frame looks like:
             // u32 | u32 | string | trailing '\0' , except that the last entry has no trailing '\0'
