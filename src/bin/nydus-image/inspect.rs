@@ -232,8 +232,19 @@ impl RafsInspector {
         self.iter_dir(|f, inode, _idx, _offset| {
             trace!("inode {:?}, name: {:?}", inode, f);
 
+            let sign = if inode.is_reg() {
+                "-"
+            } else if inode.is_dir() {
+                "d"
+            } else if inode.is_symlink() {
+                "l"
+            } else {
+                " "
+            };
+
             println!(
-                r#"     {inode_number}            {name:?}"#,
+                r#"{}    {inode_number:<8} {name:?}"#,
+                sign,
                 name = f,
                 inode_number = inode.i_ino,
             );
