@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Debug;
 use std::io::Result;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ const RESERVED_SIZE: usize = EXTENDED_BLOB_TABLE_ENTRY_SIZE - 24;
 /// can be used as an extended table for the original blob table.
 // This disk structure is well defined and rafs aligned.
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ExtendedBlobTableEntry {
     /// Number of chunks in a blob file.
     pub chunk_count: u32,
@@ -25,6 +26,18 @@ pub struct ExtendedBlobTableEntry {
     pub blob_cache_size: u64, // -- 16 Bytes
     pub compressed_blob_size: u64, // -- 24 Bytes
     pub reserved2: [u8; RESERVED_SIZE],
+}
+
+// Implement Debug trait ourselves, as rust prior to 1.47 doesn't impl Debug for array with size
+// larger than 32
+impl Debug for ExtendedBlobTableEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("ExtendedBlobTableEntry")
+            .field("chunk_count", &self.chunk_count)
+            .field("blob_cache_size", &self.blob_cache_size)
+            .field("compressed_blob_size", &self.compressed_blob_size)
+            .finish()
+    }
 }
 
 impl Default for ExtendedBlobTableEntry {
