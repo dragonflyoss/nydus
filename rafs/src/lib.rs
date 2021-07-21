@@ -85,18 +85,29 @@ impl dyn RafsIoWrite {
 impl dyn RafsIoRead {
     pub fn seek_to_next_aligned(&mut self, last_read_len: usize) -> Result<u64> {
         // Seek should not fail otherwise rafs goes insane.
-        self.seek(SeekFrom::Current(
-            (align_to_rafs(last_read_len) - last_read_len) as i64,
-        ))
+        let offset = (align_to_rafs(last_read_len) - last_read_len) as i64;
+        self.seek(SeekFrom::Current(offset)).map_err(|e| {
+            error!("Seeking to offset {} from current fails, {}", offset, e);
+            e
+        })
     }
 
     pub fn seek_plus_offset(&mut self, plus_offset: i64) -> Result<u64> {
         // Seek should not fail otherwise rafs goes insane.
-        self.seek(SeekFrom::Current(plus_offset))
+        self.seek(SeekFrom::Current(plus_offset)).map_err(|e| {
+            error!(
+                "Seeking to offset {} from current fails, {}",
+                plus_offset, e
+            );
+            e
+        })
     }
 
     pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
-        self.seek(SeekFrom::Start(offset))
+        self.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!("Seeking to offset {} from start fails, {}", offset, e);
+            e
+        })
     }
 
     pub fn from_file(path: impl AsRef<Path>) -> RafsResult<RafsIoReader> {
