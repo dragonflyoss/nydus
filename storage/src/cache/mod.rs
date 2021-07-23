@@ -32,24 +32,19 @@ struct MergedBackendRequest {
 }
 
 impl MergedBackendRequest {
-    fn new(seq: u64) -> Self {
+    fn new(seq: u64, first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
+        let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
+        let blob_size = first_cki.compress_size();
+        let blob_offset = first_cki.compress_offset();
+        chunks.push(first_cki);
+
         MergedBackendRequest {
             seq,
-            ..Default::default()
+            blob_offset,
+            blob_size,
+            chunks,
+            blob_entry: blob,
         }
-    }
-
-    fn reset(&mut self) {
-        self.blob_offset = 0;
-        self.blob_size = 0;
-        self.chunks.clear();
-    }
-
-    fn merge_begin(&mut self, first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) {
-        self.blob_offset = first_cki.compress_offset();
-        self.blob_size = first_cki.compress_size();
-        self.chunks.push(first_cki);
-        self.blob_entry = blob;
     }
 
     fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>) {

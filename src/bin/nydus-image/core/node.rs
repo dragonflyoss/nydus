@@ -251,6 +251,7 @@ impl Node {
         compress_offset: &mut u64,
         decompress_offset: &mut u64,
         blob_cache_size: &mut u64,
+        compressed_blob_size: &mut u64,
         chunk_cache: &mut HashMap<RafsDigest, OndiskChunkInfo>,
         chunk_count_map: &mut ChunkCountMap,
         compressor: compress::Algorithm,
@@ -356,6 +357,7 @@ impl Node {
                 chunk_size
             };
             *blob_cache_size = *decompress_offset + chunk_size;
+            *compressed_blob_size += compressed_size as u64;
             *decompress_offset += aligned_chunk_size;
 
             // Calculate blob hash

@@ -575,6 +575,7 @@ impl OndiskBlobTable {
         readahead_size: u32,
         chunk_count: u32,
         blob_cache_size: u64,
+        compressed_blob_size: u64,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         self.entries.push(Arc::new(RafsBlobEntry {
@@ -585,7 +586,8 @@ impl OndiskBlobTable {
             chunk_count,
             blob_cache_size,
         }));
-        self.extended.add(chunk_count, blob_cache_size);
+        self.extended
+            .add(chunk_count, blob_cache_size, compressed_blob_size);
         blob_index
     }
 
@@ -634,7 +636,7 @@ impl OndiskBlobTable {
             let id_bytes = unsafe { std::slice::from_raw_parts(id_offset, bytes_len) };
 
             let blob_id = std::str::from_utf8(id_bytes).map_err(|e| einval!(e))?;
-            info!("blob {:?} lies on", blob_id);
+            debug!("blob {:?} lies on", blob_id);
             // Move to next entry frame, including splitter 0
             frame = unsafe { frame.add(size_of::<BlobEntryFrontPart>() + bytes_len + 1) };
 

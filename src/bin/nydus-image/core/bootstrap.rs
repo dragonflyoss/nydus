@@ -241,8 +241,9 @@ impl Bootstrap {
         blob_size: usize,
         mut blob_readahead_size: usize,
         blob_cache_size: u64,
+        compressed_blob_size: u64,
     ) -> Result<(Vec<String>, usize)> {
-        // Set blob hash as blob id if not specified.
+        // Name blob id by blob hash if not specified.
         if ctx.blob_id.is_empty() {
             ctx.blob_id = format!("{:x}", blob_hash.finalize());
         }
@@ -260,6 +261,7 @@ impl Bootstrap {
                 u32::try_from(blob_readahead_size)?,
                 *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
                 blob_cache_size,
+                compressed_blob_size,
             );
         }
 

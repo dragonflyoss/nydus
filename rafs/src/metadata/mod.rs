@@ -477,10 +477,18 @@ impl RafsSuper {
             bi_vec: Vec::new(),
         };
 
-        // First, try to prefetch according to on-disk prefetch table. If an error happens,
-        // abort prefetch even if a prefetch files list is specified when nydusd starts since
-        // something ugly may stand on the disk.
-        if hint_entries != 0 {
+        // Prefer to use the file list specified by daemon for prefetching, then
+        // use the file list specified by builder for prefetching.
+        if let Some(files) = files {
+            // Try to prefetch according to the list of files specified by the
+            // daemon's `--prefetch-files` option.
+            for f_ino in files {
+                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks, fetcher)
+                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
+            }
+        } else if hint_entries != 0 {
+            // Try to prefetch according to the list of files specified by the
+            // builder's `--prefetch-policy fs` option.
             prefetch_table
                 .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
                 .map_err(|e| {
@@ -503,13 +511,6 @@ impl RafsSuper {
                     fetcher,
                 )
                 .map_err(|e| RafsError::Prefetch(e.to_string()))?;
-            }
-        }
-
-        if let Some(files) = files {
-            for f_ino in files {
-                self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks, fetcher)
-                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
         }
 

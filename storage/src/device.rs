@@ -219,6 +219,8 @@ impl RafsBioDevice<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct RafsBlobEntry {
     /// Number of chunks in blob file.
+    /// A helper to distinguish bootstrap with extended blob table or not:
+    ///     Bootstrap with extended blob table always has non-zero `chunk_count`
     pub chunk_count: u32,
     /// The data range to be prefetched in blob file.
     pub readahead_offset: u32,
@@ -229,6 +231,12 @@ pub struct RafsBlobEntry {
     pub blob_index: u32,
     /// The expected decompress size of blob cache file.
     pub blob_cache_size: u64,
+}
+
+impl RafsBlobEntry {
+    pub fn with_extended_blob_table(&self) -> bool {
+        self.chunk_count != 0
+    }
 }
 
 // Rafs device blob IO descriptor

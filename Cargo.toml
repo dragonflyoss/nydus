@@ -33,6 +33,7 @@ nydus-api = { path = "api" }
 vm-memory = { version = ">=0.2.0", optional = true }
 chrono = "0.4.19"
 storage = { path = "storage" }
+openssl = { version = "0.10.35", features = ["vendored"] }
 
 event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "v0.2.0" }
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca" }

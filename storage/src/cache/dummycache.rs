@@ -12,7 +12,7 @@ use crate::cache::*;
 use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
-use crate::{compress, StorageError, StorageResult};
+use crate::{compress, StorageResult};
 
 use nydus_utils::{digest, eother};
 
@@ -80,11 +80,11 @@ impl RafsCache for DummyCache {
 
     /// Prefetch works when blobcache is enabled
     fn prefetch(&self, _bios: &mut [RafsBio]) -> StorageResult<usize> {
-        Err(StorageError::Unsupported)
+        Ok(0)
     }
 
     fn stop_prefetch(&self) -> StorageResult<()> {
-        Err(StorageError::Unsupported)
+        Ok(())
     }
 
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize> {

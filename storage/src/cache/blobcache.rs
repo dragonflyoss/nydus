@@ -81,7 +81,7 @@ impl BlobCacheState {
         // The builder now records the number of chunks in the blob table, so we can
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
-        let chunk_map = if blob.chunk_count != 0 {
+        let chunk_map = if blob.with_extended_blob_table() {
             Arc::new(IndexedChunkMap::new(&blob_file_path, blob.chunk_count)?)
                 as Arc<dyn ChunkMap + Sync + Send>
         } else {
@@ -343,6 +343,17 @@ impl BlobCache {
         Ok(())
     }
 
+    fn convert_to_merge_request(seq: u64, continuous_bios: &[&RafsBio]) -> MergedBackendRequest {
+        let first = continuous_bios[0];
+        let mut mr = MergedBackendRequest::new(seq, first.chunkinfo.clone(), first.blob.clone());
+
+        for c in &continuous_bios[1..] {
+            mr.merge_one_chunk(Arc::clone(&c.chunkinfo));
+        }
+
+        mr
+    }
+
     fn is_chunk_continuous(prior: &RafsBio, cur: &RafsBio) -> bool {
         let prior_cki = &prior.chunkinfo;
         let cur_cki = &cur.chunkinfo;
@@ -376,42 +387,48 @@ impl BlobCache {
         };
 
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
-        let mut index: usize = 1;
         if bios.is_empty() {
             return;
         }
-        let first_cki = &bios[0].chunkinfo;
-        let mut mr = MergedBackendRequest::new(seq);
-        mr.merge_begin(Arc::clone(first_cki), bios[0].blob.clone());
 
-        if bios.len() == 1 {
-            limiter(mr.blob_size);
-            tx.send(mr).unwrap();
-            return;
-        }
+        let mut continuous_bios = Vec::new();
+        continuous_bios.push(&bios[0]);
+        let mut accumulated_size = bios[0].chunkinfo.compress_size();
 
-        loop {
-            let cki = &bios[index].chunkinfo;
+        let mut index = 1;
+
+        for _ in &bios[1..] {
             let prior_bio = &bios[index - 1];
             let cur_bio = &bios[index];
-            // Even more chunks are continuous, still split them as per certain size.
-            // So that to achieve an appropriate request size to backend.
-            if Self::is_chunk_continuous(prior_bio, cur_bio) && mr.blob_size <= merging_size as u32
+
+            if Self::is_chunk_continuous(prior_bio, cur_bio)
+                && accumulated_size <= merging_size as u32
             {
-                mr.merge_one_chunk(Arc::clone(&cki));
+                continuous_bios.push(&cur_bio);
+                accumulated_size += cur_bio.chunkinfo.compress_size();
             } else {
                 // New a MR if a non-continuous chunk is met.
-                limiter(mr.blob_size);
-                tx.send(mr.clone()).unwrap();
-                mr.reset();
-                mr.merge_begin(Arc::clone(&cki), cur_bio.blob.clone());
-            }
-            index += 1;
-            if index >= bios.len() {
+                if continuous_bios.is_empty() {
+                    continue;
+                }
+                let mr = Self::convert_to_merge_request(seq, &continuous_bios);
                 limiter(mr.blob_size);
                 tx.send(mr).unwrap();
-                break;
+                continuous_bios.truncate(0);
+
+                // current bio is not continuous with prior one,
+                // so it is the first bio of next merged request.
+                continuous_bios.push(&cur_bio);
+                accumulated_size = cur_bio.chunkinfo.compress_size();
             }
+            index += 1
+        }
+
+        // No more bio left, convert the collected bios to merged request and sent it.
+        if !continuous_bios.is_empty() {
+            let mr = Self::convert_to_merge_request(seq, &continuous_bios);
+            limiter(mr.blob_size);
+            tx.send(mr).unwrap();
         }
     }
 }
@@ -474,16 +491,35 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     // way in the future. Principe is that if all chunks are Ready,
                     // abort this Merged Request. It might involve extra stress
                     // to local file system.
-                    let entry = blobcache
+                    let ee = blobcache
                         .cache
-                        .write()
+                        .read()
                         .expect("Expect cache lock not poisoned")
-                        .set(&mr.blob_entry);
-                    if let Ok((fd, _, chunk_map)) = entry {
-                        for c in continuous_chunks {
-                            if chunk_map.has_ready(c.as_ref()).ok().unwrap_or_default() {
+                        .get(&mr.blob_entry);
+
+                    let (fd, _, chunk_map) = if let Some(be) = ee {
+                        be
+                    } else {
+                        match blobcache
+                            .cache
+                            .write()
+                            .expect("Expect cache lock not poisoned")
+                            .set(&mr.blob_entry)
+                        {
+                            Err(err) => {
+                                error!("{}", err);
                                 continue;
                             }
+                            Ok(be) => be,
+                        }
+                    };
+
+                    for c in continuous_chunks {
+                        if chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
+                            continue;
+                        }
+
+                        if !&mr.blob_entry.with_extended_blob_table() {
                             // Always validate if chunk's hash is equal to `block_id` by which
                             // blobcache judges if the data is up-to-date.
                             let d_size = c.decompress_size() as usize;
@@ -505,6 +541,8 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                                     .set_ready(c.as_ref())
                                     .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
                             }
+                        } else {
+                            issue_batch = true;
                         }
                     }
 
@@ -518,6 +556,9 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         blob_size as usize,
                         &continuous_chunks,
                     ) {
+                        // TODO: The locking granularity below is a little big. We
+                        // don't have to hold blobcache mutex when writing files.
+                        // But prefetch io is usually limited. So it is low priority.
                         let mut cache_guard = blobcache
                             .cache
                             .write()
@@ -527,7 +568,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .map_err(|_| error!("Set cache index error!"))
                         {
                             for (i, c) in continuous_chunks.iter().enumerate() {
-                                if !chunk_map.has_ready(c.as_ref()).ok().unwrap_or_default() {
+                                if !chunk_map.has_ready(c.as_ref()).unwrap_or_default() {
                                     let offset = if blobcache.is_compressed {
                                         c.compress_offset()
                                     } else {
@@ -766,13 +807,6 @@ pub fn new(
         prefetch_threads: Mutex::new(Vec::<_>::new()),
     });
 
-    cache
-        .metrics
-        .prefetch_policy
-        .lock()
-        .unwrap()
-        .insert("hinted".to_string());
-
     if enabled {
         kick_prefetch_workers(cache.clone());
     }
@@ -790,9 +824,7 @@ mod blob_cache_tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use crate::backend::{BackendResult, BlobBackend};
-    use crate::cache::blobcache;
-    use crate::cache::PrefetchWorker;
-    use crate::cache::RafsCache;
+    use crate::cache::{blobcache, MergedBackendRequest, PrefetchWorker, RafsCache};
     use crate::compress;
     use crate::device::{RafsBio, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
     use crate::factory::CacheConfig;
@@ -965,5 +997,312 @@ mod blob_cache_tests {
 
         assert_eq!(r1, &expect[50..]);
         assert_eq!(r2, &expect[50..]);
+    }
+
+    #[test]
+    fn test_merge_bio() {
+        let tmp_dir = TempDir::new().unwrap();
+        let s = format!(
+            r###"
+        {{
+            "work_dir": {:?}
+        }}
+        "###,
+            tmp_dir.as_path().to_path_buf().join("cache"),
+        );
+
+        let cache_config = CacheConfig {
+            cache_validate: true,
+            cache_compressed: false,
+            cache_type: String::from("blobcache"),
+            cache_config: serde_json::from_str(&s).unwrap(),
+            prefetch_worker: PrefetchWorker::default(),
+        };
+
+        let blob_cache = blobcache::new(
+            cache_config,
+            Arc::new(MockBackend {
+                metrics: BackendMetrics::new("id", "mock"),
+            }) as Arc<dyn BlobBackend + Send + Sync>,
+            compress::Algorithm::LZ4Block,
+            digest::Algorithm::Blake3,
+            "id",
+        )
+        .unwrap();
+
+        let merging_size: u64 = 128 * 1024 * 1024;
+
+        let single_chunk = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 1,
+            ..Default::default()
+        };
+
+        let bio = RafsBio::new(
+            Arc::new(single_chunk.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        let mut bios = vec![bio];
+
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+        let mr = recv.recv().unwrap();
+
+        assert_eq!(mr.blob_offset, single_chunk.compress_offset());
+        assert_eq!(mr.blob_size, single_chunk.compress_size());
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+        let mr = recv.recv().unwrap();
+
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(
+            mr.blob_size,
+            chunk1.compress_size() + chunk2.compress_size()
+        );
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000 + 1,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(mr.blob_size, chunk1.compress_size());
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk2.compress_offset());
+        assert_eq!(mr.blob_size, chunk2.compress_size());
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "2".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(mr.blob_size, chunk1.compress_size());
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk2.compress_offset());
+        assert_eq!(mr.blob_size, chunk2.compress_size());
+
+        // ---
+        let chunk1 = MockChunkInfo {
+            compress_offset: 1000,
+            compress_size: merging_size as u32 - 2000,
+            ..Default::default()
+        };
+
+        let bio1 = RafsBio::new(
+            Arc::new(chunk1.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk2 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio2 = RafsBio::new(
+            Arc::new(chunk2.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "1".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let chunk3 = MockChunkInfo {
+            compress_offset: 1000 + merging_size - 2000,
+            compress_size: 200,
+            ..Default::default()
+        };
+
+        let bio3 = RafsBio::new(
+            Arc::new(chunk3.clone()),
+            Arc::new(RafsBlobEntry {
+                chunk_count: 0,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: "2".to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+        );
+
+        let mut bios = vec![bio1, bio2, bio3];
+        let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
+        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize, 1);
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk1.compress_offset());
+        assert_eq!(
+            mr.blob_size,
+            chunk1.compress_size() + chunk2.compress_size()
+        );
+
+        let mr = recv.recv().unwrap();
+        assert_eq!(mr.blob_offset, chunk3.compress_offset());
+        assert_eq!(mr.blob_size, chunk3.compress_size());
     }
 }

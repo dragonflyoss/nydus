@@ -114,7 +114,7 @@ impl Builder for DirectoryBuilder {
         }
 
         // Dump blob file
-        let (blob_hash, blob_size, blob_readahead_size, blob_cache_size) =
+        let (blob_hash, blob_size, blob_readahead_size, blob_cache_size, compressed_blob_size) =
             timing_tracer!({ blob.dump(&mut ctx) }, "dump_blob")?;
 
         // Dump bootstrap file
@@ -124,6 +124,7 @@ impl Builder for DirectoryBuilder {
             blob_size,
             blob_readahead_size,
             blob_cache_size,
+            compressed_blob_size,
         )?;
         blob.flush(&ctx)?;
 
