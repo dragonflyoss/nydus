@@ -22,6 +22,7 @@ type ManifestRule struct {
 	TargetParsed  *parser.Parsed
 	MultiPlatform bool
 	BackendType   string
+	ExpectedArch  string
 }
 
 func (rule *ManifestRule) Name() string {
@@ -43,7 +44,7 @@ func (rule *ManifestRule) Validate() error {
 			if desc.Platform == nil {
 				continue
 			}
-			if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
+			if desc.Platform.Architecture == rule.ExpectedArch && desc.Platform.OS == "linux" {
 				if utils.IsNydusPlatform(desc.Platform) {
 					foundNydusDesc = true
 				} else {
@@ -52,10 +53,10 @@ func (rule *ManifestRule) Validate() error {
 			}
 		}
 		if !foundNydusDesc {
-			return errors.New("not found nydus image in manifest list")
+			return errors.Errorf("not found nydus image of specified platform linux/%s", rule.ExpectedArch)
 		}
 		if !foundOCIDesc {
-			return errors.New("not found oci image in manifest list")
+			return errors.Errorf("not found OCI image of specified platform linux/%s", rule.ExpectedArch)
 		}
 	}
 

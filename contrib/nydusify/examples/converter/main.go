@@ -40,7 +40,7 @@ func main() {
 	}
 
 	// Source provider gets source image manifest, config, and layer
-	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir)
+	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir, "linux/amd64")
 	if err != nil {
 		panic(err)
 	}

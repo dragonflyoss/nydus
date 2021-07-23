@@ -16,6 +16,7 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
@@ -75,33 +76,45 @@ func (mm *manifestManager) getExistsManifests(ctx context.Context) ([]ocispec.De
 
 // Merge OCI and Nydus manifest into a manifest index, the OCI
 // manifest of source image is not required to be provided
+// `ociManifest`: The source image single manifest, which will be added to new manifest index.
 func (mm *manifestManager) makeManifestIndex(
 	ctx context.Context, existDescs []ocispec.Descriptor, nydusManifest, ociManifest *ocispec.Descriptor,
 ) (*ocispec.Index, error) {
 	foundOCI := false
 	descs := make([]ocispec.Descriptor, 0)
+	// Traverse the entire manifest index to see if nydus image(same os/arch) already therein.
+	// Possibly find image whose descriptor has no os/arch filled, then revise
+	// the provided descriptor a little by giving it one os/arch pair `linux/amd64`.
 	for _, desc := range existDescs {
-		isNydus := false
 		if desc.Platform != nil {
-			if utils.IsSupportedPlatform(desc.Platform.OS, desc.Platform.Architecture) {
-				if utils.IsNydusPlatform(desc.Platform) {
-					isNydus = true
-				} else {
-					desc.Platform.OS = utils.SupportedOS
-					desc.Platform.Architecture = utils.SupportedArch
-					foundOCI = true
-				}
+			// Input nydus image manifest must have platform filled before making this manifest index.
+			if matched := utils.MatchNydusPlatform(&desc, nydusManifest.Platform.OS, nydusManifest.Platform.Architecture); matched {
+				continue
+			}
+
+			if (desc.Platform.OS == nydusManifest.Platform.OS) &&
+				(desc.Platform.Architecture == nydusManifest.Platform.Architecture) &&
+				!utils.IsNydusPlatform(desc.Platform) {
+				foundOCI = true
+			}
+
+			if desc.Platform.Architecture == "" {
+				desc.Platform.Architecture = utils.SupportedArch
+				logrus.Warnf("Image %s descriptor has no architecture", desc.Digest)
+			}
+			if desc.Platform.OS == "" {
+				desc.Platform.OS = utils.SupportedOS
+				logrus.Warnf("Image %s descriptor has no OS", desc.Digest)
 			}
 		} else {
+			// TODO: Use image configuration's os/arch to fill descriptor.
 			desc.Platform = &ocispec.Platform{
 				OS:           utils.SupportedOS,
 				Architecture: utils.SupportedArch,
 			}
-			foundOCI = true
 		}
-		if !isNydus {
-			descs = append(descs, desc)
-		}
+
+		descs = append(descs, desc)
 	}
 
 	// Append the OCI manifest provided by source to manifest list
@@ -113,7 +126,8 @@ func (mm *manifestManager) makeManifestIndex(
 		descs = append(descs, *ociManifest)
 	}
 
-	// Always put the nydus manifest to the last position of manifest list
+	// Always put the nydus manifest to the last position of manifest list,
+	// because client usually take the first image that matches os/arch.
 	descs = append(descs, *nydusManifest)
 
 	// Merge exists OCI manifests and Nydus manifest to manifest index
@@ -125,6 +139,25 @@ func (mm *manifestManager) makeManifestIndex(
 	}
 
 	return &index, nil
+}
+
+func (mm *manifestManager) CloneSourcePlatform(ctx context.Context, additionalOSFeatures string) (*ocispec.Platform, error) {
+	sourceConfig, err := mm.sourceProvider.Config(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "can't take in source image configuration")
+	}
+
+	var features []string
+	if additionalOSFeatures != "" {
+		features = append(features, additionalOSFeatures)
+	}
+
+	// Source image configuration must exist according to OCI image spec.
+	return &ocispec.Platform{
+		OS:           sourceConfig.OS,
+		Architecture: sourceConfig.Architecture,
+		OSFeatures:   features,
+	}, nil
 }
 
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
@@ -223,11 +256,13 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	if err != nil {
 		return errors.Wrap(err, "Marshal Nydus image manifest")
 	}
-	nydusManifestDesc.Platform = &ocispec.Platform{
-		OS:           utils.SupportedOS,
-		Architecture: utils.SupportedArch,
-		OSFeatures:   []string{utils.ManifestOSFeatureNydus},
+
+	p, err := mm.CloneSourcePlatform(ctx, utils.ManifestOSFeatureNydus)
+	if err != nil {
+		return errors.Wrap(err, "clone source platform")
 	}
+
+	nydusManifestDesc.Platform = p
 
 	if !mm.multiPlatform {
 		if err := mm.remote.Push(ctx, *nydusManifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
@@ -245,11 +280,13 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	if err != nil {
 		return errors.Wrap(err, "Get source image manifest")
 	}
+
 	if ociManifestDesc != nil {
-		ociManifestDesc.Platform = &ocispec.Platform{
-			OS:           utils.SupportedOS,
-			Architecture: utils.SupportedArch,
+		p, err := mm.CloneSourcePlatform(ctx, "")
+		if err != nil {
+			return errors.Wrap(err, "clone source platform")
 		}
+		ociManifestDesc.Platform = p
 	}
 
 	existManifests, err := mm.getExistsManifests(ctx)
