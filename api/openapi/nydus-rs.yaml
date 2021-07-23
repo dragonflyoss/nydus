@@ -194,20 +194,19 @@ paths:
           schema:
             type: string
         - name: latest
-          desciption: "The returned list represents all files that are ever read ignoring the frequency. The metics of each file will be cleared after this request."
+          description: "The returned list represents all files that are ever read ignoring the frequency. The metics of each file will be cleared after this request."
           in: query
           required: false
           schema:
-            type: bool
+            type: boolean
       responses:
         "200":
           content:
             application/json:
               schema:
-                latest:
-                  $ref: "#/components/schemas/RafsLatestReadFiles"
-                other:
-                  $ref: "#/components/schemas/RafsFilesMetrics"
+                oneOf:
+                  - $ref: "#/components/schemas/RafsLatestReadFiles"
+                  - $ref: "#/components/schemas/RafsFilesMetrics"
           description: Rafs all opened files metrics export
         "500":
           content:
