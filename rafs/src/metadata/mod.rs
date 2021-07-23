@@ -208,7 +208,8 @@ impl RafsSuper {
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
         let mut sb = OndiskSuperBlock::new();
 
-        r.read_exact(sb.as_mut()).map_err(RafsError::ReadMetadata)?;
+        r.read_exact(sb.as_mut())
+            .map_err(|e| RafsError::ReadMetadata(e, "Updating meta".to_string()))?;
         self.inodes.update(r)
     }
 
@@ -498,19 +499,15 @@ impl RafsSuper {
                     ))
                 })?;
 
-            for inode_idx in prefetch_table.inode_indexes.iter() {
-                // index 0 is invalid, it was added because prefetch table has to be aligned.
-                if *inode_idx == 0 {
+            for ino in prefetch_table.inodes {
+                // Inode number 0 is invalid,
+                // it was added because prefetch table has to be aligned.
+                if ino == 0 {
                     break;
                 }
-                debug!("hint prefetch inode {}", inode_idx);
-                self.build_prefetch_desc(
-                    *inode_idx as u64,
-                    &mut head_desc,
-                    &mut hardlinks,
-                    fetcher,
-                )
-                .map_err(|e| RafsError::Prefetch(e.to_string()))?;
+                debug!("hint prefetch inode {}", ino);
+                self.build_prefetch_desc(ino as u64, &mut head_desc, &mut hardlinks, fetcher)
+                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
         }
 

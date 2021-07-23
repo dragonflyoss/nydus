@@ -12,7 +12,7 @@ use anyhow::{Error, Result};
 
 use rafs::metadata::layout::*;
 use rafs::metadata::Inode;
-use rafs::{RafsIoRead, RafsIoWrite};
+use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?
 use storage::compress;
 
@@ -51,9 +51,9 @@ pub struct BuildContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,
     /// Bootstrap file writer.
-    pub f_bootstrap: Box<dyn RafsIoWrite>,
+    pub f_bootstrap: RafsIoWriter,
     /// Parent bootstrap file reader.
-    pub f_parent_bootstrap: Option<Box<dyn RafsIoRead>>,
+    pub f_parent_bootstrap: Option<RafsIoReader>,
     /// Blob chunk compress flag.
     pub compressor: compress::Algorithm,
     /// Inode and chunk digest algorithm flag.

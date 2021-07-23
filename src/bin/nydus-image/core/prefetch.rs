@@ -81,8 +81,9 @@ pub struct Prefetch {
     /// Readahead file list, use BTreeMap to keep stable iteration order, HashMap<path, Option<index>>.
     /// Files from this collection are all regular files and will be persisted to blob following a certain scheme.
     readahead_files: BTreeMap<PathBuf, Option<u64>>,
-    /// Specify files or directories which need to prefetch. Their inode indexes will
-    /// be persist to prefetch table. They could be directory's or regular file's index
+    /// Specify files or directories which need to prefetch. Their inode numbers will
+    /// be persist to prefetch table. They could be directory's or regular file's inode number, by which
+    /// its inode index of inode table can be calculated.
     hint_readahead_files: BTreeMap<PathBuf, Option<u64>>,
 }
 
@@ -115,9 +116,9 @@ impl Prefetch {
             .cloned()
             .collect::<Vec<_>>();
 
-        for f in keys {
+        for f in &keys {
             // As path is canonicalized, it should be reliable.
-            if path.as_os_str() == f.as_os_str() {
+            if path == f {
                 if self.policy == PrefetchPolicy::Fs {
                     if let Some(i) = self.hint_readahead_files.get_mut(path) {
                         *i = Some(inode);

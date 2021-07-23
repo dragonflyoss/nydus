@@ -15,6 +15,7 @@ use std::any::Any;
 use std::fs::File;
 use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::Path;
 
 use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
 
@@ -28,7 +29,7 @@ pub enum RafsError {
     Unsupported,
     Uninitialized,
     AlreadyMounted,
-    ReadMetadata(Error),
+    ReadMetadata(Error, String),
     LoadConfig(Error),
     ParseConfig(serde_json::Error),
     SwapBackend(Error),
@@ -55,7 +56,13 @@ impl RafsIoWrite for File {
     }
 }
 
-// Rust file I/O is unbuffered by default. If we have many small write calls
+/// Handler to read file system bootstrap.
+pub type RafsIoReader = Box<dyn RafsIoRead>;
+
+/// Handler to write file system bootstrap.
+pub type RafsIoWriter = Box<dyn RafsIoWrite>;
+
+// Rust file I/O is un-buffered by default. If we have many small write calls
 // to a file, should use BufWriter. BufWriter maintains an in-memory buffer
 // for writing, minimizing the number of system calls required.
 impl RafsIoWrite for BufWriter<File> {
@@ -76,24 +83,38 @@ impl dyn RafsIoWrite {
 }
 
 impl dyn RafsIoRead {
-    pub fn try_seek_aligned(&mut self, last_read_len: usize) {
+    pub fn seek_to_next_aligned(&mut self, last_read_len: usize) -> Result<u64> {
         // Seek should not fail otherwise rafs goes insane.
-        self.seek(SeekFrom::Current(
-            (align_to_rafs(last_read_len) - last_read_len) as i64,
-        ))
-        .unwrap();
+        let offset = (align_to_rafs(last_read_len) - last_read_len) as i64;
+        self.seek(SeekFrom::Current(offset)).map_err(|e| {
+            error!("Seeking to offset {} from current fails, {}", offset, e);
+            e
+        })
     }
 
-    pub fn from_file(path: &str) -> RafsResult<Box<dyn RafsIoRead>> {
-        Ok(Box::new(File::open(path).map_err(|err| {
-            last_error!(format!("Failed to open file {:?}: {:?}", path, err));
-            RafsError::ReadMetadata(err)
-        })?))
+    pub fn seek_plus_offset(&mut self, plus_offset: i64) -> Result<u64> {
+        // Seek should not fail otherwise rafs goes insane.
+        self.seek(SeekFrom::Current(plus_offset)).map_err(|e| {
+            error!(
+                "Seeking to offset {} from current fails, {}",
+                plus_offset, e
+            );
+            e
+        })
+    }
+
+    pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
+        self.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!("Seeking to offset {} from start fails, {}", offset, e);
+            e
+        })
+    }
+
+    pub fn from_file(path: impl AsRef<Path>) -> RafsResult<RafsIoReader> {
+        let f = File::open(&path).map_err(|e| {
+            RafsError::ReadMetadata(e, path.as_ref().to_string_lossy().into_owned())
+        })?;
+
+        Ok(Box::new(f))
     }
 }
-
-/// Handler to read file system bootstrap.
-pub type RafsIoReader = Box<dyn RafsIoRead>;
-
-/// Handler to write file system bootstrap.
-pub type RafsIoWriter = Box<dyn RafsIoWrite>;

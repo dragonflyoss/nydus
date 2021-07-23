@@ -14,11 +14,14 @@ mod trace;
 
 mod builder;
 mod core;
+mod inspect;
 mod validator;
 
 #[macro_use]
 extern crate log;
 extern crate serde;
+#[macro_use]
+extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
 
@@ -50,7 +53,7 @@ use crate::core::tree;
 
 use nydus_utils::{digest, setup_logging, BuildTimeInfo};
 use rafs::metadata::layout::OndiskBlobTable;
-use rafs::RafsIoRead;
+use rafs::RafsIoReader;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use validator::Validator;
@@ -105,7 +108,7 @@ fn main() -> Result<()> {
         .about("Build image using nydus format.")
         .subcommand(
             SubCommand::with_name("create")
-                .about("dump image bootstrap and upload blob to storage backend")
+                .about("Create a nydus format accelerated container image")
                 .arg(
                     Arg::with_name("SOURCE")
                         .help("source path")
@@ -245,6 +248,30 @@ fn main() -> Result<()> {
                         .takes_value(true)
                 )
         )
+        .subcommand(
+            SubCommand::with_name("inspect")
+                .about("Inspect nydus format")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .help("bootstrap path")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("request")
+                        .long("request")
+                        .short("R")
+                        .help("Inspect image in request mode")
+                        .required(false)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("blob-dir").help("A directory holding all layers related to a single image")
+                        .long("blob-dir").required(false)
+                        .takes_value(true)
+                )
+        )
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
@@ -376,23 +403,22 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
         ));
 
-        let f_parent_bootstrap: Option<Box<dyn RafsIoRead>> =
-            if parent_bootstrap_path != Path::new("") {
-                Some(Box::new(
-                    OpenOptions::new()
-                        .read(true)
-                        .write(false)
-                        .open(parent_bootstrap_path)
-                        .with_context(|| {
-                            format!(
-                                "failed to open parent bootstrap file {:?}",
-                                parent_bootstrap_path
-                            )
-                        })?,
-                ))
-            } else {
-                None
-            };
+        let f_parent_bootstrap: Option<RafsIoReader> = if parent_bootstrap_path != Path::new("") {
+            Some(Box::new(
+                OpenOptions::new()
+                    .read(true)
+                    .write(false)
+                    .open(parent_bootstrap_path)
+                    .with_context(|| {
+                        format!(
+                            "failed to open parent bootstrap file {:?}",
+                            parent_bootstrap_path
+                        )
+                    })?,
+            ))
+        } else {
+            None
+        };
 
         let mut ctx = BuildContext {
             source_type,
@@ -462,6 +488,26 @@ fn main() -> Result<()> {
         info!("bootstrap is valid, blobs: {:?}", blob_ids);
 
         ResultOutput::dump(matches, &build_info, blob_ids)?;
+    }
+
+    if let Some(matches) = cmd.subcommand_matches("inspect") {
+        // Safe to unwrap since `bootstrap` has default value.
+        let bootstrap_path = Path::new(matches.value_of("bootstrap").unwrap());
+        let cmd = matches.value_of("request");
+
+        let mut inspector =
+            inspect::RafsInspector::new(bootstrap_path, cmd.is_some()).map_err(|e| {
+                error!("Failed to instantiate inspector, {:?}", e);
+                e
+            })?;
+
+        if let Some(c) = cmd {
+            let o = inspect::Executor::execute(&mut inspector, c.to_string()).unwrap();
+            serde_json::to_writer(std::io::stdout(), &o)
+                .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
+        } else {
+            inspect::Prompt::run(inspector);
+        }
     }
 
     Ok(())
