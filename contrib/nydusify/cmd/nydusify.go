@@ -250,6 +250,9 @@ func main() {
 					BackendType:      backendType,
 					BackendConfig:    backendConfig,
 					BackendForcePush: c.Bool("backend-force-push"),
+
+					NydusifyVersion: version,
+					Source:          c.String("source"),
 				}
 
 				cvt, err := converter.New(opt)

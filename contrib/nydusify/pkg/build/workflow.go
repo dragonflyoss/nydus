@@ -24,6 +24,7 @@ type WorkflowOption struct {
 
 type Workflow struct {
 	WorkflowOption
+	BuilderVersion      string
 	bootstrapPath       string
 	blobsDir            string
 	backendConfig       string
@@ -33,7 +34,8 @@ type Workflow struct {
 }
 
 type debugJSON struct {
-	Blobs []string
+	Version string
+	Blobs   []string
 }
 
 // Dump output json file of every layer to $workdir/bootstraps directory
@@ -53,6 +55,10 @@ func (workflow *Workflow) getLatestBlobPath() (string, error) {
 		return "", err
 	}
 	blobIDs := data.Blobs
+
+	// Record builder version of current build environment for easy
+	// debugging and troubleshooting afterwards.
+	workflow.BuilderVersion = data.Version
 
 	if len(blobIDs) == 0 {
 		return "", nil

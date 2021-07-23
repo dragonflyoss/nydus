@@ -80,6 +80,9 @@ type Opt struct {
 	BackendType      string
 	BackendConfig    string
 	BackendForcePush bool
+
+	NydusifyVersion string
+	Source          string
 }
 
 type Converter struct {
@@ -100,6 +103,9 @@ type Converter struct {
 	DockerV2Format bool
 
 	BackendForcePush bool
+
+	NydusifyVersion string
+	Source          string
 
 	storageBackend backend.Backend
 }
@@ -125,6 +131,8 @@ func New(opt Opt) (*Converter, error) {
 		MultiPlatform:    opt.MultiPlatform,
 		DockerV2Format:   opt.DockerV2Format,
 		BackendForcePush: opt.BackendForcePush,
+		NydusifyVersion:  opt.NydusifyVersion,
+		Source:           opt.Source,
 
 		storageBackend: backend,
 	}, nil
@@ -254,6 +262,21 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		return errors.Wrap(err, "Push Nydus layer in wait")
 	}
 
+	// Collect all meta information of current build environment, it will be
+	// written to manifest annotations of Nydus image for easy debugging and
+	// troubleshooting afterwards.
+	buildInfo := NewBuildInfo()
+	buildInfo.SetBuilderVersion(buildWorkflow.BuilderVersion)
+	buildInfo.SetNydusifyVersion(cvt.NydusifyVersion)
+	sourceManifest, err := sourceProvider.Manifest(ctx)
+	if err != nil {
+		return errors.Wrap(err, "Get source manifest")
+	}
+	buildInfo.SetSourceReference(SourceReference{
+		Reference: cvt.Source,
+		Digest:    sourceManifest.Digest.String(),
+	})
+
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{
 		sourceProvider: sourceProvider,
@@ -261,6 +284,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		backend:        cvt.storageBackend,
 		multiPlatform:  cvt.MultiPlatform,
 		dockerV2Format: cvt.DockerV2Format,
+		buildInfo:      buildInfo,
 	}
 	pushDone := logger.Log(ctx, "[MANI] Push manifest", nil)
 	if err := mm.Push(ctx, buildLayers); err != nil {

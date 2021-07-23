@@ -101,8 +101,8 @@ pub fn dump_program_info(prog_version: &str) {
 
 #[derive(Serialize, Clone)]
 pub struct BuildTimeInfo {
-    package_ver: String,
-    git_commit: String,
+    pub package_ver: String,
+    pub git_commit: String,
     build_time: String,
     profile: String,
     rustc: String,

@@ -30,7 +30,7 @@ use clap::{App, Arg, SubCommand};
 use std::collections::HashMap;
 use std::fs::metadata;
 use std::fs::OpenOptions;
-use std::io::{self, BufWriter};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{getegid, geteuid};
@@ -57,46 +57,46 @@ use validator::Validator;
 
 #[derive(Serialize, Default)]
 pub struct ResultOutput {
+    version: String,
     blobs: Vec<String>,
     trace: serde_json::Map<String, serde_json::Value>,
 }
 
 impl ResultOutput {
-    fn dump<W>(&self, writer: W) -> Result<()>
-    where
-        W: io::Write,
-    {
-        serde_json::to_writer(writer, &self).context("Write output file failed")
-    }
-}
+    fn dump(
+        matches: &clap::ArgMatches,
+        build_info: &BuildTimeInfo,
+        blob_ids: Vec<String>,
+    ) -> Result<()> {
+        let output_json: Option<PathBuf> = matches
+            .value_of("output-json")
+            .map(|o| o.to_string().into());
 
-fn dump_result_output(matches: &clap::ArgMatches, blob_ids: Vec<String>) -> Result<()> {
-    let output_json: Option<PathBuf> = matches
-        .value_of("output-json")
-        .map(|o| o.to_string().into());
+        if let Some(ref f) = output_json {
+            let w = OpenOptions::new()
+                .truncate(true)
+                .create(true)
+                .write(true)
+                .open(f)
+                .with_context(|| format!("Output file {:?} can't be opened", f))?;
 
-    if let Some(ref f) = output_json {
-        let w = OpenOptions::new()
-            .truncate(true)
-            .create(true)
-            .write(true)
-            .open(f)
-            .with_context(|| format!("{:?} can't be opened", f))?;
+            let trace = root_tracer!().dump_summary_map().unwrap_or_default();
+            let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
+            let output = Self {
+                version,
+                trace,
+                blobs: blob_ids,
+            };
 
-        let trace = root_tracer!().dump_summary_map().unwrap_or_default();
-
-        ResultOutput {
-            trace,
-            blobs: blob_ids,
+            serde_json::to_writer(w, &output).context("Write output file failed")?;
         }
-        .dump(w)?;
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
-    let (bti_string, _) = BuildTimeInfo::dump(crate_version!());
+    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
 
     // TODO: Try to use yaml to define below options
     let cmd = App::new("")
@@ -444,7 +444,7 @@ fn main() -> Result<()> {
             )?;
         }
 
-        dump_result_output(matches, blob_ids.clone())?;
+        ResultOutput::dump(matches, &build_info, blob_ids.clone())?;
 
         info!(
             "Image build(size={}Bytes) successfully. Blobs table: {:?}",
@@ -461,7 +461,7 @@ fn main() -> Result<()> {
 
         info!("bootstrap is valid, blobs: {:?}", blob_ids);
 
-        dump_result_output(matches, blob_ids)?;
+        ResultOutput::dump(matches, &build_info, blob_ids)?;
     }
 
     Ok(())
