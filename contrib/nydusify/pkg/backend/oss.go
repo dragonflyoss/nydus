@@ -67,15 +67,18 @@ func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
 
 // Upload blob as image layer to oss backend. Depending on blob's size, upload it
 // by multiparts method or the normal method
-func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64) (*ocispec.Descriptor, error) {
+func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64, forcePush bool) (*ocispec.Descriptor, error) {
 	blobObjectKey := b.objectPrefix + blobID
 
 	desc := blobDesc(size, blobID)
 
-	if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
-		return nil, err
-	} else if exist {
-		return &desc, nil
+	if !forcePush {
+		if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
+			return nil, err
+		} else if exist {
+			logrus.Infof("Skip upload because blob exists: %s", blobID)
+			return &desc, nil
+		}
 	}
 
 	var stat os.FileInfo
@@ -105,7 +108,8 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 			return nil, err
 		}
 
-		var parts []oss.UploadPart
+		// It always splits the blob into splitPartsCount=4 parts
+		partsChan := make(chan oss.UploadPart, splitPartsCount)
 
 		g := new(errgroup.Group)
 		for _, chunk := range chunks {
@@ -117,13 +121,22 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 				}
 				// TODO: We don't verify data part MD5 from ETag right now.
 				// But we can do it if we have to.
-				parts = append(parts, p)
+				partsChan <- p
 				return nil
 			})
 		}
 
 		if err := g.Wait(); err != nil {
+			b.bucket.AbortMultipartUpload(imur)
+			close(partsChan)
 			return nil, errors.Wrap(err, "Uploading parts failed")
+		}
+
+		close(partsChan)
+
+		var parts []oss.UploadPart
+		for p := range partsChan {
+			parts = append(parts, p)
 		}
 
 		_, err = b.bucket.CompleteMultipartUpload(imur, parts)

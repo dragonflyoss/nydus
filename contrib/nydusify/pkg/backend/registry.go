@@ -13,8 +13,11 @@ type Registry struct {
 	remote *remote.Remote
 }
 
-func (r *Registry) Upload(ctx context.Context, blobID, blobPath string,
-	size int64) (*ocispec.Descriptor, error) {
+func (r *Registry) Upload(
+	ctx context.Context, blobID, blobPath string, size int64, forcePush bool,
+) (*ocispec.Descriptor, error) {
+	// The `forcePush` option is useless for registry backend, because
+	// the blob existed in registry can't be pushed again.
 
 	desc := blobDesc(size, blobID)
 
