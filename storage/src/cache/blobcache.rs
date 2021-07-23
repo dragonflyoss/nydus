@@ -952,10 +952,7 @@ mod blob_cache_tests {
             let ptr = alloc(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
-            let data = Vec::from(from_raw_parts(ptr, 50));
-            // Don't dealloc as `data` already gets the ownership
-            // dealloc(ptr, layout);
-            data
+            Vec::from(from_raw_parts(ptr, 50))
         };
 
         let r2 = unsafe {
@@ -963,10 +960,7 @@ mod blob_cache_tests {
             let ptr = alloc(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
-            let data = Vec::from(from_raw_parts(ptr, 50));
-            // Don't dealloc as `data` already gets the ownership
-            // dealloc(ptr, layout);
-            data
+            Vec::from(from_raw_parts(ptr, 50))
         };
 
         assert_eq!(r1, &expect[50..]);
