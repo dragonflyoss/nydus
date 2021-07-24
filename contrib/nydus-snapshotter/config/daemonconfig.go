@@ -32,6 +32,7 @@ type DaemonConfig struct {
 	EnableXattr    bool         `json:"enable_xattr,omitempty"`
 	FSPrefetch     struct {
 		Enable       bool `json:"enable"`
+		PrefetchAll  bool `json:"prefetch_all"`
 		ThreadsCount int  `json:"threads_count"`
 		MergingSize  int  `json:"merging_size"`
 	} `json:"fs_prefetch,omitempty"`
