@@ -49,11 +49,12 @@ type DeviceConfig struct {
 			ReadAheadSec  int    `json:"readahead_sec,omitempty"`
 
 			// Registry backend configs
-			Host          string `json:"host,omitempty"`
-			Repo          string `json:"repo,omitempty"`
-			Auth          string `json:"auth,omitempty"`
-			RegistryToken string `json:"registry_token,omitempty"`
-			BlobUrlScheme string `json:"blob_url_scheme,omitempty"`
+			Host               string `json:"host,omitempty"`
+			Repo               string `json:"repo,omitempty"`
+			Auth               string `json:"auth,omitempty"`
+			RegistryToken      string `json:"registry_token,omitempty"`
+			BlobUrlScheme      string `json:"blob_url_scheme,omitempty"`
+			BlobRedirectedHost string `json:"blob_redirected_host,omitempty"`
 
 			// OSS backend configs
 			EndPoint        string `json:"endpoint,omitempty"`
