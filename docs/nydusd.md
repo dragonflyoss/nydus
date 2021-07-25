@@ -196,6 +196,8 @@ We are working on enabling cloud-hypervisor support for nydus.
         "auth": "<base64_encoded_auth>",
         // Bearer token for auth, optional
         "registry_token": "<bearer_token>"
+        // Redirected blob download host, optional
+        "blob_redirected_host": "<blob_redirected_host>"
       }
     },
     ...

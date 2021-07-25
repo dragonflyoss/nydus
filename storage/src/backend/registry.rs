@@ -98,6 +98,8 @@ pub struct Registry {
     retry_limit: u8,
     // Scheme specified for blob server
     blob_url_scheme: String,
+    // Replace registry redirected url host with the given host
+    blob_redirected_host: String,
     // Cache bearer token (get from registry authentication server) or basic authentication auth string.
     // We need use it to reduce the pressure on token authentication server or reduce the base64 compute workload for every request.
     // Use RwLock here to avoid using mut backend trait object.
@@ -126,6 +128,8 @@ struct RegistryConfig {
     registry_token: Option<String>,
     #[serde(default)]
     blob_url_scheme: String,
+    #[serde(default)]
+    blob_redirected_host: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -219,6 +223,7 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registr
         password,
         retry_limit,
         blob_url_scheme: config.blob_url_scheme,
+        blob_redirected_host: config.blob_redirected_host,
         cached_redirect: HashCache::new(),
         metrics: id.map(|i| BackendMetrics::new(i, "registry")),
     })
@@ -495,6 +500,19 @@ impl Registry {
                         location
                             .set_scheme(&self.blob_url_scheme)
                             .map_err(|_| RegistryError::Scheme(self.blob_url_scheme.clone()))?;
+                    }
+                    if !self.blob_redirected_host.is_empty() {
+                        location
+                            .set_host(Some(self.blob_redirected_host.as_str()))
+                            .map_err(|e| {
+                                error!(
+                                    "Failed to set blob redirected host to {}: {:?}",
+                                    self.blob_redirected_host.as_str(),
+                                    e
+                                );
+                                RegistryError::Url(e)
+                            })?;
+                        debug!("New redirected location {:?}", location.host_str());
                     }
                     let resp_ret = self
                         .request
