@@ -4,18 +4,17 @@
 //
 // Stargz support.
 
-use anyhow::{anyhow, bail, Context, Result};
-
-use nix::sys::stat::makedev;
-use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 
+use anyhow::{anyhow, bail, Context, Result};
+use nix::sys::stat::makedev;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use nydus_utils::digest::{self, Algorithm, RafsDigest};
@@ -284,7 +283,7 @@ pub struct TocIndex {
     pub entries: Vec<TocEntry>,
 }
 
-fn parse_index(path: &PathBuf) -> Result<TocIndex> {
+fn parse_index(path: &Path) -> Result<TocIndex> {
     let index_file =
         File::open(path).with_context(|| format!("failed to open stargz index file {:?}", path))?;
     let toc_index: TocIndex = serde_json::from_reader(index_file)
