@@ -370,7 +370,7 @@ impl RafsInode for CachedInode {
 
     #[inline]
     fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
-        Ok(self.i_blob_table.get(idx)?)
+        self.i_blob_table.get(idx)
     }
 
     #[inline]

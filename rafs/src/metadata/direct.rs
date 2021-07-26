@@ -612,7 +612,7 @@ impl RafsInode for OndiskInodeWrapper {
 
     #[inline]
     fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
-        Ok(self.state().blob_table.get(idx)?)
+        self.state().blob_table.get(idx)
     }
 
     fn get_entry(&self) -> Entry {
