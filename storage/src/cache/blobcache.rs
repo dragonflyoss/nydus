@@ -391,8 +391,7 @@ impl BlobCache {
             return;
         }
 
-        let mut continuous_bios = Vec::new();
-        continuous_bios.push(&bios[0]);
+        let mut continuous_bios = vec![&bios[0]];
         let mut accumulated_size = bios[0].chunkinfo.compress_size();
 
         let mut index = 1;
