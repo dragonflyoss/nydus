@@ -208,7 +208,7 @@ impl Tree {
         if handle_whiteout {
             if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
                 event_tracer!("whiteout_files", +1);
-                if whiteout_type == WhiteoutType::OverlayFSOpaque {
+                if whiteout_type == WhiteoutType::OverlayFsOpaque {
                     self.remove(target, whiteout_spec)?;
                     return self.apply(target, false, whiteout_spec);
                 }
@@ -287,8 +287,8 @@ impl Tree {
 
         // Handle Opaques for root path (/)
         if depth == 1
-            && (whiteout_type == WhiteoutType::OCIOpaque && target_paths_len == 2
-                || whiteout_type == WhiteoutType::OverlayFSOpaque && target_paths_len == 1)
+            && (whiteout_type == WhiteoutType::OciOpaque && target_paths_len == 2
+                || whiteout_type == WhiteoutType::OverlayFsOpaque && target_paths_len == 1)
         {
             self.node.overlay = Overlay::UpperOpaque;
             self.children.clear();
@@ -318,7 +318,7 @@ impl Tree {
             }
 
             // Handle Opaques
-            if whiteout_type == WhiteoutType::OCIOpaque
+            if whiteout_type == WhiteoutType::OciOpaque
                 && target_paths_len >= 2
                 && depth == target_paths_len - 2
             {
@@ -330,7 +330,7 @@ impl Tree {
                         return Ok(true);
                     }
                 }
-            } else if whiteout_type == WhiteoutType::OverlayFSOpaque
+            } else if whiteout_type == WhiteoutType::OverlayFsOpaque
                 && depth == target_paths_len - 1
                 && target.name() == child.node.name()
             {

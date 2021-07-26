@@ -620,8 +620,8 @@ pub struct BackendMetrics {
     read_count: BasicMetric,
     // Cumulative count of read failure to backend
     read_errors: BasicMetric,
-    // Cumulative amount of data from to backend in unit of Bytes. External tools
-    // is responsible for calculating BPS from this field.
+    // Cumulative amount of data from to backend in unit of Byte. External tools
+    // are responsible for calculating BPS from this field.
     read_amount_total: BasicMetric,
     read_cumulative_latency_total: BasicMetric,
     // Categorize metrics as per their latency and request size
