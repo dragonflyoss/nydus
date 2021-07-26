@@ -12,8 +12,9 @@ pub mod indexed;
 /// The chunk map checks whether a chunk data has been cached in
 /// blob cache based on the chunk info.
 pub trait ChunkMap {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<bool>;
+    fn has_ready(&self, chunk: &dyn RafsChunkInfo, wait: bool) -> Result<bool>;
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()>;
+    fn finish(&self, _chunk: &dyn RafsChunkInfo) {}
 }
 
 #[cfg(test)]
@@ -125,8 +126,18 @@ mod tests {
             }
         });
 
-        h1.join().unwrap();
-        h2.join().unwrap();
+        h1.join()
+            .map_err(|e| {
+                error!("Join error {:?}", e);
+                e
+            })
+            .unwrap();
+        h2.join()
+            .map_err(|e| {
+                error!("Join error {:?}", e);
+                e
+            })
+            .unwrap();
 
         println!(
             "IndexedChunkMap Concurrency: {}ms",
@@ -136,7 +147,7 @@ mod tests {
         for idx in 0..chunk_count {
             let chunk = Chunk::new(idx);
 
-            let has_ready = indexed_chunk_map3.has_ready(chunk.as_ref()).unwrap();
+            let has_ready = indexed_chunk_map3.has_ready(chunk.as_ref(), false).unwrap();
             if idx % skip_index == 0 {
                 if has_ready {
                     panic!("indexed chunk map: index {} shouldn't be ready", idx);
@@ -153,7 +164,9 @@ mod tests {
         }
         for idx in 0..chunk_count {
             assert_eq!(
-                chunk_map.has_ready(chunks[idx as usize].as_ref()).unwrap(),
+                chunk_map
+                    .has_ready(chunks[idx as usize].as_ref(), false)
+                    .unwrap(),
                 true
             );
         }

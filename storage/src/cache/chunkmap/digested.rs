@@ -30,7 +30,7 @@ impl DigestedChunkMap {
 }
 
 impl ChunkMap for DigestedChunkMap {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
+    fn has_ready(&self, chunk: &dyn RafsChunkInfo, _wait: bool) -> Result<bool> {
         Ok(self.cache.read().unwrap().get(chunk.block_id()).is_some())
     }
 

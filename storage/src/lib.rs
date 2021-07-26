@@ -34,6 +34,7 @@ pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
 #[derive(Debug)]
 pub enum StorageError {
     Unsupported,
+    Timeout,
 }
 
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
