@@ -430,6 +430,8 @@ impl Node {
             self.inode.i_uid = meta.st_uid();
             self.inode.i_gid = meta.st_gid();
         }
+        self.inode.i_ctime = meta.st_ctime() as u64;
+        self.inode.i_ctime_nsec = meta.st_ctime_nsec() as u32;
         self.inode.i_projid = 0;
         self.inode.i_size = meta.st_size();
         // Ignore actual nlink value and calculate from rootfs directory instead
