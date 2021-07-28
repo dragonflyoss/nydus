@@ -221,14 +221,12 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 					} else {
 						ociDesc = &desc
 					}
-					break
 				}
 			} else {
 				// FIXME: Returning the first image without platform specified is subtle.
 				// It might not violate Image spec.
 				ociDesc = &desc
 				logrus.Warn("Will cook a image without platform, %s", ociDesc.Digest)
-				break
 			}
 		}
 	}
