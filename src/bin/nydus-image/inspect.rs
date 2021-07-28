@@ -226,6 +226,47 @@ impl RafsInspector {
         Ok(())
     }
 
+    fn walk_fs(
+        &self,
+        top_index: u32,
+        op: &mut dyn FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
+    ) -> Result<()> {
+        let (top, _) = self.load_inode_by_index(top_index as usize)?;
+        let parent_ino = top.i_ino;
+        let mut dir_indexes = vec![];
+
+        let children_count = top.i_child_count;
+        // FIXME: In fact, `i_child_index` is the first inode number rather than index
+        // Fix naming and logics in `nydus-image` building progress.
+        let first_index = top.i_child_index - 1;
+        let last_index = first_index + children_count - 1;
+
+        for idx in first_index..=last_index {
+            let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
+
+            if child_inode.i_parent != parent_ino {
+                bail!("File {:?} is not a child of CWD", name);
+            }
+
+            if child_inode.is_dir() {
+                dir_indexes.push(idx);
+            }
+
+            trace!("inode: {:?}; name: {:?}", child_inode, name);
+            let inode_offset = self.inodes_table.data[idx as usize] << 3;
+            match op(name.as_os_str(), &child_inode, idx, inode_offset) {
+                Action::Break => break,
+                Action::Continue => continue,
+            }
+        }
+
+        for i in dir_indexes {
+            self.walk_fs(i, op)?;
+        }
+
+        Ok(())
+    }
+
     fn path_from_ino(&self, mut ino: u64) -> Result<PathBuf> {
         let mut path = PathBuf::new();
         let mut entries = Vec::<PathBuf>::new();
@@ -245,6 +286,50 @@ impl RafsInspector {
         }
 
         Ok(path)
+    }
+
+    pub fn cmd_show_chunk(&self, offset_in_blob: u64) -> Result<Option<Value>> {
+        let b = self.bootstrap.clone();
+        self.walk_fs(0, &mut |name, inode, _index, offset| {
+            // Not expect poisoned lock
+            let mut guard = b.lock().unwrap();
+            let bootstrap = &mut *guard;
+
+            // Only regular file has data chunks.
+            if !inode.is_reg() {
+                return Action::Continue;
+            }
+
+            if let Ok(Some(chunks)) = Self::list_chunks(bootstrap, inode, offset) {
+                drop(guard);
+                for c in chunks {
+                    if c.compress_offset == offset_in_blob {
+                        let path = self.path_from_ino(inode.i_parent).unwrap();
+                        println!(
+                            r#"
+    {:width$} Parent Path {:width$}
+    Chunk ID: {:50}, Blob ID: {}
+"#,
+                            name.to_string_lossy(),
+                            path.to_string_lossy(),
+                            c.block_id,
+                            if let Ok(ref blob) = self.blobs_table.get(c.blob_index) {
+                                &blob.blob_id
+                            } else {
+                                error!("Can't find blob by its index, index={:?}", c.blob_index);
+                                return Action::Break;
+                            },
+                            width = 32
+                        );
+                    }
+                }
+            } else {
+                return Action::Break;
+            }
+            Action::Continue
+        })?;
+
+        Ok(None)
     }
 
     pub fn cmd_list_dir(&mut self) -> Result<Option<Value>> {
@@ -525,6 +610,10 @@ impl Executor {
             ("stat", Some(file_name)) => inspector.cmd_stat_file(file_name),
             ("blobs", None) => inspector.cmd_list_blobs(),
             ("prefetch", None) => inspector.cmd_list_prefetch(),
+            ("chunk", Some(argument)) => {
+                let offset: u64 = argument.parse().unwrap();
+                inspector.cmd_show_chunk(offset)
+            }
             _ => {
                 println!("Unsupported command!");
                 {
@@ -547,6 +636,7 @@ impl Executor {
     stat FILE_NAME:     Show particular information of rafs inode
     blobs:              Show blobs table
     prefetch:           Show prefetch table
+    chunk OFFSET:       List basic info of a single chunk together with a list of files that share it
         "#
         );
     }
