@@ -272,10 +272,15 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "Get source manifest")
 	}
-	buildInfo.SetSourceReference(SourceReference{
-		Reference: cvt.Source,
-		Digest:    sourceManifest.Digest.String(),
-	})
+
+	// In the buildkit environment, the source manifest may be empty because
+	// the source image is built from a Dockerfile.
+	if sourceManifest != nil {
+		buildInfo.SetSourceReference(SourceReference{
+			Reference: cvt.Source,
+			Digest:    sourceManifest.Digest.String(),
+		})
+	}
 
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{
