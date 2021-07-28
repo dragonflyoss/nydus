@@ -9,6 +9,7 @@ use std::sync::RwLock;
 use nydus_utils::digest::RafsDigest;
 
 use super::ChunkMap;
+use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
 use crate::device::RafsChunkInfo;
 
 /// The DigestedChunkMap is an implementation that uses a hash map
@@ -20,6 +21,8 @@ pub struct DigestedChunkMap {
     /// HashMap<chunk_digest, has_ready>
     cache: RwLock<HashMap<RafsDigest, bool>>,
 }
+
+impl NoWaitSupport for DigestedChunkMap {}
 
 impl DigestedChunkMap {
     pub fn new() -> Self {
@@ -37,5 +40,13 @@ impl ChunkMap for DigestedChunkMap {
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
         self.cache.write().unwrap().insert(*chunk.block_id(), true);
         Ok(())
+    }
+}
+
+impl ChunkIndexGetter for DigestedChunkMap {
+    type Index = RafsDigest;
+
+    fn get_index(chunk: &dyn RafsChunkInfo) -> Self::Index {
+        *chunk.block_id()
     }
 }

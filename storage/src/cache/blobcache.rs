@@ -25,7 +25,9 @@ use governor::{
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
-use crate::cache::chunkmap::{digested::DigestedChunkMap, indexed::IndexedChunkMap, ChunkMap};
+use crate::cache::chunkmap::{
+    digested::DigestedChunkMap, indexed::IndexedChunkMap, BlobChunkMap, ChunkMap,
+};
 use crate::cache::RafsCache;
 use crate::cache::*;
 use crate::device::{BlobPrefetchControl, RafsBio, RafsBlobEntry};
@@ -81,10 +83,12 @@ impl BlobCacheState {
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
         let chunk_map = if blob.with_extended_blob_table() {
-            Arc::new(IndexedChunkMap::new(&blob_file_path, blob.chunk_count)?)
-                as Arc<dyn ChunkMap + Sync + Send>
+            Arc::new(BlobChunkMap::from(IndexedChunkMap::new(
+                &blob_file_path,
+                blob.chunk_count,
+            )?)) as Arc<dyn ChunkMap + Sync + Send>
         } else {
-            Arc::new(DigestedChunkMap::new()) as Arc<dyn ChunkMap + Sync + Send>
+            Arc::new(BlobChunkMap::from(DigestedChunkMap::new())) as Arc<dyn ChunkMap + Sync + Send>
         };
 
         self.blob_map
