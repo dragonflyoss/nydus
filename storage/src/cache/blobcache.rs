@@ -483,10 +483,10 @@ impl BlobCache {
 
     fn convert_to_merge_request(continuous_bios: &[&RafsBio]) -> MergedBackendRequest {
         let first = continuous_bios[0];
-        let mut mr = MergedBackendRequest::new(first.chunkinfo.clone(), first.blob.clone());
+        let mut mr = MergedBackendRequest::new(first.chunkinfo.clone(), first.blob.clone(), first);
 
         for c in &continuous_bios[1..] {
-            mr.merge_one_chunk(Arc::clone(&c.chunkinfo));
+            mr.merge_one_chunk(Arc::clone(&c.chunkinfo), c);
         }
 
         mr
@@ -503,7 +503,7 @@ impl BlobCache {
         false
     }
 
-    fn generate_merged_requests(
+    fn generate_merged_requests_for_prefetch(
         &self,
         bios: &mut [RafsBio],
         tx: &mut spmc::Sender<MergedBackendRequest>,
@@ -523,6 +523,38 @@ impl BlobCache {
             }
         };
 
+        self.generate_merged_requests(bios, merging_size, &mut |mr: MergedBackendRequest| {
+            limiter(mr.blob_size);
+            // Safe to unwrap because channel won't be closed.
+            tx.send(mr).unwrap();
+        })
+    }
+
+    #[allow(dead_code)]
+    fn generate_merged_requests_for_user(
+        &self,
+        bios: &mut [RafsBio],
+        merging_size: usize,
+    ) -> Option<Vec<MergedBackendRequest>> {
+        let mut merged_requests: Vec<MergedBackendRequest> = Vec::new();
+
+        self.generate_merged_requests(bios, merging_size, &mut |mr: MergedBackendRequest| {
+            merged_requests.push(mr);
+        });
+
+        if merged_requests.is_empty() {
+            None
+        } else {
+            Some(merged_requests)
+        }
+    }
+
+    fn generate_merged_requests(
+        &self,
+        bios: &mut [RafsBio],
+        merging_size: usize,
+        op: &mut dyn FnMut(MergedBackendRequest),
+    ) {
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
         if bios.is_empty() {
             return;
@@ -548,8 +580,7 @@ impl BlobCache {
                     continue;
                 }
                 let mr = Self::convert_to_merge_request(&continuous_bios);
-                limiter(mr.blob_size);
-                tx.send(mr).unwrap();
+                (*op)(mr);
                 continuous_bios.truncate(0);
 
                 // current bio is not continuous with prior one,
@@ -563,8 +594,7 @@ impl BlobCache {
         // No more bio left, convert the collected bios to merged request and sent it.
         if !continuous_bios.is_empty() {
             let mr = Self::convert_to_merge_request(&continuous_bios);
-            limiter(mr.blob_size);
-            tx.send(mr).unwrap();
+            (*op)(mr);
         }
     }
 }
@@ -819,7 +849,7 @@ impl RafsCache for BlobCache {
         self.metrics.prefetch_unmerged_chunks.add(bios.len());
 
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
-            self.generate_merged_requests(bios, mr_sender, merging_size);
+            self.generate_merged_requests_for_prefetch(bios, mr_sender, merging_size);
         }
 
         Ok(0)
@@ -1202,7 +1232,11 @@ pub mod blob_cache_tests {
         let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
         let mut bios = vec![bio];
 
-        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize);
+        blob_cache.generate_merged_requests_for_prefetch(
+            &mut bios,
+            &mut send,
+            merging_size as usize,
+        );
         let mr = recv.recv().unwrap();
 
         assert_eq!(mr.blob_offset, single_chunk.compress_offset());
@@ -1255,7 +1289,11 @@ pub mod blob_cache_tests {
 
         let mut bios = vec![bio1, bio2];
         let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
-        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize);
+        blob_cache.generate_merged_requests_for_prefetch(
+            &mut bios,
+            &mut send,
+            merging_size as usize,
+        );
         let mr = recv.recv().unwrap();
 
         assert_eq!(mr.blob_offset, chunk1.compress_offset());
@@ -1311,7 +1349,11 @@ pub mod blob_cache_tests {
 
         let mut bios = vec![bio1, bio2];
         let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
-        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize);
+        blob_cache.generate_merged_requests_for_prefetch(
+            &mut bios,
+            &mut send,
+            merging_size as usize,
+        );
 
         let mr = recv.recv().unwrap();
         assert_eq!(mr.blob_offset, chunk1.compress_offset());
@@ -1368,7 +1410,11 @@ pub mod blob_cache_tests {
 
         let mut bios = vec![bio1, bio2];
         let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
-        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize);
+        blob_cache.generate_merged_requests_for_prefetch(
+            &mut bios,
+            &mut send,
+            merging_size as usize,
+        );
 
         let mr = recv.recv().unwrap();
         assert_eq!(mr.blob_offset, chunk1.compress_offset());
@@ -1447,7 +1493,11 @@ pub mod blob_cache_tests {
 
         let mut bios = vec![bio1, bio2, bio3];
         let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
-        blob_cache.generate_merged_requests(&mut bios, &mut send, merging_size as usize);
+        blob_cache.generate_merged_requests_for_prefetch(
+            &mut bios,
+            &mut send,
+            merging_size as usize,
+        );
 
         let mr = recv.recv().unwrap();
         assert_eq!(mr.blob_offset, chunk1.compress_offset());
