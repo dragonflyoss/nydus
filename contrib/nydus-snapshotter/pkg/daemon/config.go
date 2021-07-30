@@ -102,6 +102,13 @@ func WithSharedDaemon() NewDaemonOpt {
 	}
 }
 
+func WithPrefetchDaemon() NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.DaemonMode = config.DaemonModePrefetch
+		return nil
+	}
+}
+
 func WithAPISock(apiSock string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		d.ApiSock = &apiSock

@@ -56,7 +56,10 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 		return nil, errors.Wrap(err, "failed to reconnect daemons")
 	}
 
-	if fs.mode == fspkg.SingleInstance {
+	// Both SingleInstance and PrefetchInstance use shared daemon
+	if fs.mode == fspkg.SingleInstance || fs.mode == fspkg.PrefetchInstance {
+		isPrefetch := fs.mode == fspkg.PrefetchInstance
+
 		// Check if daemon is already running
 		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
 		if err == nil && d != nil {
@@ -77,8 +80,15 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 		if err := fs.manager.StartDaemon(d); err != nil {
 			return nil, errors.Wrap(err, "failed to start shared daemon")
 		}
-		if err := fs.WaitUntilReady(ctx, daemon.SharedNydusDaemonID); err != nil {
-			return nil, errors.Wrap(err, "failed to wait shared daemon")
+
+		// We don't need to wait instance to be ready in
+		// PrefetchInstance mode, as we want to return snapshot to
+		// containerd as soon as possible, and prefetch instance is
+		// only for prefetch.
+		if !isPrefetch {
+			if err := fs.WaitUntilReady(ctx, daemon.SharedNydusDaemonID); err != nil {
+				return nil, errors.Wrap(err, "failed to wait shared daemon")
+			}
 		}
 	}
 
@@ -86,6 +96,11 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 }
 
 func (fs *filesystem) newSharedDaemon() (*daemon.Daemon, error) {
+	modeOpt := daemon.WithSharedDaemon()
+	if fs.mode == fspkg.PrefetchInstance {
+		modeOpt = daemon.WithPrefetchDaemon()
+	}
+
 	d, err := daemon.NewDaemon(
 		daemon.WithID(daemon.SharedNydusDaemonID),
 		daemon.WithSnapshotID(daemon.SharedNydusDaemonID),
@@ -93,7 +108,7 @@ func (fs *filesystem) newSharedDaemon() (*daemon.Daemon, error) {
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
 		daemon.WithLogDir(fs.LogRoot()),
 		daemon.WithRootMountPoint(filepath.Join(fs.RootDir, "mnt")),
-		daemon.WithSharedDaemon(),
+		modeOpt,
 	)
 	if err != nil {
 		return nil, err
@@ -117,7 +132,7 @@ func (fs *filesystem) PrepareLayer(context.Context, storage.Snapshot, map[string
 // this method will fork nydus daemon and manage it in the internal store, and indexed by snapshotID
 func (fs *filesystem) Mount(ctx context.Context, snapshotID string, labels map[string]string) (err error) {
 	// If NoneDaemon mode, we don't mount nydus on host
-	if !fs.hasDaemon() {
+	if fs.mode == fspkg.NoneInstance {
 		return nil
 	}
 
@@ -185,7 +200,7 @@ func (fs *filesystem) WaitUntilReady(ctx context.Context, snapshotID string) err
 }
 
 func (fs *filesystem) Umount(ctx context.Context, mountPoint string) error {
-	if !fs.hasDaemon() {
+	if fs.mode == fspkg.NoneInstance {
 		return nil
 	}
 
@@ -260,7 +275,7 @@ func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if fs.mode == fspkg.SingleInstance {
+	if fs.mode == fspkg.SingleInstance || fs.mode == fspkg.PrefetchInstance {
 		err = d.SharedMount()
 		if err != nil {
 			return errors.Wrapf(err, "failed to shared mount")
@@ -283,7 +298,7 @@ func (fs *filesystem) addSnapshot(imageID string, labels map[string]string) erro
 }
 
 func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
-	if fs.mode == fspkg.SingleInstance {
+	if fs.mode == fspkg.SingleInstance || fs.mode == fspkg.PrefetchInstance {
 		return fs.createSharedDaemon(snapshotID, imageID)
 	}
 	return fs.createNewDaemon(snapshotID, imageID)
@@ -355,7 +370,7 @@ func (fs *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]s
 }
 
 func (fs *filesystem) hasDaemon() bool {
-	return fs.mode != fspkg.NoneInstance
+	return fs.mode != fspkg.NoneInstance && fs.mode != fspkg.PrefetchInstance
 }
 
 func (fs *filesystem) getBlobIDs(labels map[string]string) ([]string, error) {

@@ -106,6 +106,10 @@ func (d *Daemon) IsSharedDaemon() bool {
 	return d.DaemonMode == config.DaemonModeShared || d.DaemonMode == config.DaemonModeSingle
 }
 
+func (d *Daemon) IsPrefetchDaemon() bool {
+	return d.DaemonMode == config.DaemonModePrefetch
+}
+
 func NewDaemon(opt ...NewDaemonOpt) (*Daemon, error) {
 	d := &Daemon{Pid: 0}
 	d.ID = newID()

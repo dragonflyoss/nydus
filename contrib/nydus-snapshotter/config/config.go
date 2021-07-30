@@ -19,6 +19,7 @@ const (
 	DaemonModeShared   string = "shared"
 	DaemonModeSingle   string = "single"
 	DaemonModeNone     string = "none"
+	DaemonModePrefetch string = "prefetch"
 	defaultGCPeriod           = 24 * time.Hour
 
 	defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"

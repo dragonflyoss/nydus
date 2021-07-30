@@ -18,6 +18,7 @@ const (
 	SingleInstance FSMode = iota
 	MultiInstance
 	NoneInstance
+	PrefetchInstance
 )
 
 type FileSystem interface {
