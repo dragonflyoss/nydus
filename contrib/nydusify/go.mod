@@ -7,7 +7,7 @@ require (
 	github.com/aliyun/aliyun-oss-go-sdk v2.1.5+incompatible
 	github.com/baiyubin/aliyun-sts-go-sdk v0.0.0-20180326062324-cfa1a18b161f // indirect
 	github.com/containerd/cgroups v0.0.0-20200710171044-318312a37340 // indirect
-	github.com/containerd/containerd v1.4.3
+	github.com/containerd/containerd v1.4.8
 	github.com/containerd/continuity v0.0.0-20200928162600-f2cc35102c2a // indirect
 	github.com/containerd/ttrpc v1.0.1 // indirect
 	github.com/containerd/typeurl v1.0.1 // indirect
@@ -17,6 +17,7 @@ require (
 	github.com/docker/docker-credential-helpers v0.6.3 // indirect
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
 	github.com/dustin/go-humanize v1.0.0
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
 	github.com/golang/protobuf v1.4.2 // indirect
 	github.com/google/go-cmp v0.4.1 // indirect
@@ -35,12 +36,8 @@ require (
 	github.com/urfave/cli/v2 v2.3.0
 	go.etcd.io/bbolt v1.3.5 // indirect
 	go.opencensus.io v0.22.3 // indirect
-	golang.org/x/net v0.0.0-20200822124328-c89045814202 // indirect
-	golang.org/x/sync v0.0.0-20200625203802-6e8e738ad208
-	golang.org/x/text v0.3.3 // indirect
+	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
 	golang.org/x/time v0.0.0-20200416051211-89c76fbcd5d1 // indirect
-	golang.org/x/tools v0.0.0-20190624222133-a101b041ded4
-	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/genproto v0.0.0-20200527145253-8367513e4ece // indirect
 	google.golang.org/grpc v1.29.1 // indirect
 	gopkg.in/check.v1 v1.0.0-20200227125254-8fa46927fb4f // indirect
