@@ -205,6 +205,10 @@ func (m *Manager) isOneDaemon() bool {
 		m.DaemonMode == config.DaemonModePrefetch
 }
 
+func (m *Manager) isNoneDaemon() bool {
+	return m.DaemonMode == config.DaemonModeNone
+}
+
 func (m *Manager) IsSharedDaemon() bool {
 	return m.DaemonMode == config.DaemonModeShared || m.DaemonMode == config.DaemonModeSingle
 }
@@ -219,6 +223,10 @@ func (m *Manager) Reconnect(ctx context.Context) error {
 		daemons      []*daemon.Daemon
 		sharedDaemon *daemon.Daemon = nil
 	)
+
+	if m.isNoneDaemon() {
+		return nil
+	}
 
 	if err := m.store.WalkDaemons(ctx, func(d *daemon.Daemon) error {
 		log.L.WithField("daemon", d.ID).
