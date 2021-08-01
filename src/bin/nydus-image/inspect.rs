@@ -203,8 +203,7 @@ impl RafsInspector {
         let parent_ino = dir_inode.i_ino;
 
         let children_count = dir_inode.i_child_count;
-        // FIXME: In fact, `i_child_index` is the first inode number rather than index
-        // Fix naming and logics in `nydus-image` building progress.
+        // Somehow, the it has subtract 1 to identify the first child file's index in inode table.
         let first_index = dir_inode.i_child_index - 1;
         let last_index = first_index + children_count - 1;
 
@@ -236,8 +235,7 @@ impl RafsInspector {
         let mut dir_indexes = vec![];
 
         let children_count = top.i_child_count;
-        // FIXME: In fact, `i_child_index` is the first inode number rather than index
-        // Fix naming and logics in `nydus-image` building progress.
+        // Somehow, the it has subtract 1 to identify the first child file's index in inode table.
         let first_index = top.i_child_index - 1;
         let last_index = first_index + children_count - 1;
 
@@ -434,18 +432,33 @@ impl RafsInspector {
                 if let Ok(Some(cks)) = chunks {
                     println!("    Chunks list:");
                     for (i, c) in cks.iter().enumerate() {
-                        let blob_id = if let Ok(entry) =  self.blobs_table.get(c.blob_index) {
+                        let blob_id = if let Ok(entry) = self.blobs_table.get(c.blob_index) {
                             entry.blob_id.clone()
                         } else {
-                            error!("Blob index is {} . But no blob entry associate with it", c.blob_index);
+                            error!(
+                                "Blob index is {} . But no blob entry associate with it",
+                                c.blob_index
+                            );
                             return Action::Break;
                         };
 
-                        println!(r#"        {}  compressed size: {compressed_size}, decompressed size: {decompressed_size}, compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset}, blob id: {blob_id}, chunk id: {chunk_id}"#,
-                        i,
-                        compressed_size=c.compress_size, decompressed_size=c.decompress_size,
-                        decompressed_offset = c.decompress_offset,
-                        compressed_offset=c.compress_offset, blob_id=blob_id, chunk_id=c.block_id);
+                        println!(
+                            r#"        {} ->
+            file offset: {file_offset}, chunk index: {chunk_index}
+            compressed size: {compressed_size}, decompressed size: {decompressed_size}
+            compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset},
+            blob id: {blob_id}, chunk id: {chunk_id}
+        "#,
+                            i,
+                            chunk_index = c.index,
+                            file_offset = c.file_offset,
+                            compressed_size = c.compress_size,
+                            decompressed_size = c.decompress_size,
+                            decompressed_offset = c.decompress_offset,
+                            compressed_offset = c.compress_offset,
+                            blob_id = blob_id,
+                            chunk_id = c.block_id
+                        );
                     }
                 }
 
@@ -468,6 +481,9 @@ impl RafsInspector {
             }
             return Ok(None);
         }
+
+        // let path: PathBuf = name.to_string().into();
+        // let entries = path.components();
 
         let mut new_dir_index = None;
         let mut err = "File does not exist";

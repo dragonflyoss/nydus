@@ -33,7 +33,7 @@ pub struct Tree {
 // TODO: To decouple from storage backend from Rafs/metadata, use this function to
 // digest status from trait object. Is it possible also to do this for `RafsInode`?
 // Right now, it is hard. Perhaps someday we can get rid of the rafs import procedure,
-//  which involve the whole nydusd rafs/mount. It is hard to optimize a process that
+// which involve the whole nydusd rafs/mount. It is hard to optimize a process that
 // serves another goal. Luckily, `RafsInode` won't affect the work of decouple.
 fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> OndiskChunkInfo {
     OndiskChunkInfo {
