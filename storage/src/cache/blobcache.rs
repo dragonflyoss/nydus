@@ -193,6 +193,86 @@ impl DataBuffer {
     }
 }
 
+#[derive(PartialEq, Debug)]
+enum RequestRegionStatus {
+    Init,
+    Open,
+    Committed,
+}
+
+struct RequestRegion {
+    status: RequestRegionStatus,
+    pub start: u64,
+    pub continuous_len: usize,
+    pub concatenated: usize,
+    pub seg_offset: u32,
+    pub total_seg_len: usize,
+    pub cki_set: Vec<Arc<dyn RafsChunkInfo>>,
+}
+
+impl RequestRegion {
+    fn new() -> Self {
+        RequestRegion {
+            start: 0,
+            continuous_len: 0,
+            status: RequestRegionStatus::Init,
+            cki_set: Vec::new(),
+            concatenated: 0,
+            seg_offset: 0,
+            total_seg_len: 0,
+        }
+    }
+
+    fn append(
+        &mut self,
+        start: u64,
+        len: usize,
+        seg_offset: u32,
+        seg_len: u32,
+        cki: Option<Arc<dyn RafsChunkInfo>>,
+    ) -> StorageResult<()> {
+        use RequestRegionStatus::*;
+        if self.status == Init {
+            self.status = Open;
+            self.start = start;
+            self.continuous_len = len;
+            self.concatenated = 1;
+            self.seg_offset = seg_offset;
+            self.total_seg_len = seg_len as usize;
+            if let Some(c) = cki {
+                self.cki_set.push(c);
+            }
+            return Ok(());
+        }
+
+        if self.status == Open && self.start + self.continuous_len as u64 != start {
+            return Err(StorageError::NotContinuous);
+        }
+
+        assert_eq!(self.status, Open);
+        self.continuous_len += len;
+        self.concatenated += 1;
+        self.total_seg_len += seg_len as usize;
+        if let Some(c) = cki {
+            self.cki_set.push(c);
+        }
+
+        Ok(())
+    }
+
+    fn commit(&mut self, reader: &mut dyn FnMut(&Self) -> Result<usize>) -> Result<usize> {
+        self.status = RequestRegionStatus::Committed;
+        if self.is_empty() {
+            return Ok(0);
+        }
+        reader(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total_seg_len == 0
+    }
+}
+
 impl BlobCache {
     #[inline]
     fn might_reuse_user_buffer(
