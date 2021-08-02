@@ -21,33 +21,56 @@ pub mod blobcache;
 pub mod chunkmap;
 pub mod dummycache;
 
+#[derive(Clone)]
+struct ChunkSegment {
+    seg_offset: u32,
+    seg_len: u32,
+}
+
+impl ChunkSegment {
+    fn new(offset: u32, len: u32) -> Self {
+        Self {
+            seg_offset: offset,
+            seg_len: len,
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
     // Chunks that are continuous to each other.
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
+    pub segments: Vec<ChunkSegment>,
     pub blob_offset: u64,
     pub blob_size: u32,
     pub blob_entry: Arc<RafsBlobEntry>,
 }
 
 impl MergedBackendRequest {
-    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
+    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>, bio: &RafsBio) -> Self {
         let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
+        let mut segments: Vec<ChunkSegment> = Vec::new();
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
         chunks.push(first_cki);
+
+        let seg = ChunkSegment::new(bio.offset, bio.size as u32);
+        segments.push(seg);
 
         MergedBackendRequest {
             blob_offset,
             blob_size,
             chunks,
+            segments,
             blob_entry: blob,
         }
     }
 
-    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>) {
+    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
         self.blob_size += cki.compress_size();
         self.chunks.push(cki);
+        let seg = ChunkSegment::new(bio.offset, bio.size as u32);
+        self.segments.push(seg);
     }
 }
 
