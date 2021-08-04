@@ -208,6 +208,8 @@ pub struct CachedInode {
     // extra info need cache
     i_blksize: u32,
     i_rdev: u32,
+    i_ctime_nsec: u32,
+    i_ctime: u64,
     i_target: OsString, // for symbol link
     i_xattr: HashMap<OsString, Vec<u8>>,
     i_data: Vec<Arc<CachedChunkInfo>>,
@@ -303,6 +305,8 @@ impl CachedInode {
         self.i_child_idx = inode.i_child_index;
         self.i_child_cnt = inode.i_child_count;
         self.i_rdev = inode.i_rdev;
+        self.i_ctime = inode.i_ctime;
+        self.i_ctime_nsec = inode.i_ctime_nsec;
     }
 
     fn add_child(&mut self, child: Arc<CachedInode>) {
@@ -491,7 +495,9 @@ impl RafsInode for CachedInode {
             i_name_size: self.i_name.len() as u16,
             i_symlink_size,
             i_rdev: self.i_rdev,
-            i_reserved: [0; 20],
+            i_ctime: self.i_ctime,
+            i_ctime_nsec: self.i_ctime_nsec,
+            i_reserved: [0; 8],
         })
     }
 

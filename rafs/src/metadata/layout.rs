@@ -752,9 +752,12 @@ pub struct OndiskInode {
     pub i_name_size: u16,
     /// symlink path size, [char; i_symlink_size]
     pub i_symlink_size: u16, // 104
-    //// inode device block number, ignored for non-special files
-    pub i_rdev: u32,          // 108
-    pub i_reserved: [u8; 20], // 128
+    // inode device block number, ignored for non-special files
+    pub i_rdev: u32,
+    // for alignment reason, we put nsec first
+    pub i_ctime_nsec: u32,
+    pub i_ctime: u64,        // 120
+    pub i_reserved: [u8; 8], // 128
 }
 
 bitflags! {

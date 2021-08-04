@@ -370,8 +370,6 @@ impl RafsSuper {
             }
         }
 
-        fetcher(head_desc);
-
         Ok(())
     }
 
@@ -487,6 +485,8 @@ impl RafsSuper {
                 self.build_prefetch_desc(f_ino, &mut head_desc, &mut hardlinks, fetcher)
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
+            // The left chunks whose size is smaller than 4MB will be fetched here.
+            fetcher(&mut head_desc);
         } else if hint_entries != 0 {
             // Try to prefetch according to the list of files specified by the
             // builder's `--prefetch-policy fs` option.
@@ -509,6 +509,8 @@ impl RafsSuper {
                 self.build_prefetch_desc(ino as u64, &mut head_desc, &mut hardlinks, fetcher)
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
+            // The left chunks whose size is smaller than 4MB will be fetched here.
+            fetcher(&mut head_desc);
         }
 
         Ok(())

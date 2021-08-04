@@ -640,6 +640,8 @@ impl RafsInode for OndiskInodeWrapper {
             nlink: inode.i_nlink as u32,
             uid: inode.i_uid,
             gid: inode.i_gid,
+            ctime: inode.i_ctime,
+            ctimensec: inode.i_ctime_nsec,
             blksize: RAFS_INODE_BLOCKSIZE,
             rdev: inode.i_rdev,
             ..Default::default()

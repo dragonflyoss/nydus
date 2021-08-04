@@ -495,7 +495,10 @@ impl StargzIndexTreeBuilder {
             i_name_size: name_size,
             i_symlink_size: symlink_size,
             i_rdev: entry.rdev(),
-            i_reserved: [0; 20],
+            // TODO: add ctime from entry.ModTime()
+            i_ctime: 0,
+            i_ctime_nsec: 0,
+            i_reserved: [0; 8],
         };
 
         Ok(Node {
