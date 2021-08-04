@@ -42,15 +42,15 @@ pub const OVERLAYFS_WHITEOUT_OPAQUE: &str = "trusted.overlay.opaque";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WhiteoutType {
-    OCIOpaque,
-    OCIRemoval,
-    OverlayFSOpaque,
-    OverlayFSRemoval,
+    OciOpaque,
+    OciRemoval,
+    OverlayFsOpaque,
+    OverlayFsRemoval,
 }
 
 impl WhiteoutType {
     pub fn is_removal(&self) -> bool {
-        *self == WhiteoutType::OCIRemoval || *self == WhiteoutType::OverlayFSRemoval
+        *self == WhiteoutType::OciRemoval || *self == WhiteoutType::OverlayFsRemoval
     }
 }
 
@@ -552,12 +552,12 @@ impl Node {
 
     pub fn origin_name(&self, t: &WhiteoutType) -> Option<&OsStr> {
         if let Some(name) = self.name().to_str() {
-            if *t == WhiteoutType::OCIRemoval {
+            if *t == WhiteoutType::OciRemoval {
                 // the whiteout filename prefixes the basename of the path to be deleted with ".wh.".
                 return Some(OsStr::from_bytes(
                     name[OCISPEC_WHITEOUT_PREFIX.len()..].as_bytes(),
                 ));
-            } else if *t == WhiteoutType::OverlayFSRemoval {
+            } else if *t == WhiteoutType::OverlayFsRemoval {
                 // the whiteout file has the same name as the file to be deleted.
                 return Some(name.as_ref());
             }
@@ -612,17 +612,17 @@ impl Node {
             WhiteoutSpec::Oci => {
                 if let Some(name) = self.name().to_str() {
                     if name == OCISPEC_WHITEOUT_OPAQUE {
-                        return Some(WhiteoutType::OCIOpaque);
+                        return Some(WhiteoutType::OciOpaque);
                     } else if name.starts_with(OCISPEC_WHITEOUT_PREFIX) {
-                        return Some(WhiteoutType::OCIRemoval);
+                        return Some(WhiteoutType::OciRemoval);
                     }
                 }
             }
             WhiteoutSpec::Overlayfs => {
                 if self.is_overlayfs_whiteout(spec) {
-                    return Some(WhiteoutType::OverlayFSRemoval);
+                    return Some(WhiteoutType::OverlayFsRemoval);
                 } else if self.is_overlayfs_opaque(spec) {
-                    return Some(WhiteoutType::OverlayFSOpaque);
+                    return Some(WhiteoutType::OverlayFsOpaque);
                 }
             }
         }

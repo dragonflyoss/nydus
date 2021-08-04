@@ -39,7 +39,7 @@ impl From<OssError> for BackendError {
 }
 
 #[derive(Debug)]
-pub struct OSS {
+pub struct Oss {
     request: Arc<Request>,
     access_key_id: String,
     access_key_secret: String,
@@ -68,7 +68,7 @@ struct OssConfig {
     object_prefix: String,
 }
 
-impl OSS {
+impl Oss {
     /// generate oss request signature
     fn sign(
         &self,
@@ -142,7 +142,7 @@ impl OSS {
     }
 }
 
-pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
+pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Oss> {
     let common_config: CommonConfig =
         serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
     let retry_limit = common_config.retry_limit;
@@ -150,7 +150,7 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
 
     let config: OssConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
 
-    Ok(OSS {
+    Ok(Oss {
         scheme: config.scheme,
         object_prefix: config.object_prefix,
         endpoint: config.endpoint,
@@ -164,7 +164,7 @@ pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<OSS> {
     })
 }
 
-impl BlobBackend for OSS {
+impl BlobBackend for Oss {
     #[inline]
     fn retry_limit(&self) -> u8 {
         self.retry_limit

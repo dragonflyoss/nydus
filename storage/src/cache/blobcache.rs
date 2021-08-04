@@ -391,8 +391,7 @@ impl BlobCache {
             return;
         }
 
-        let mut continuous_bios = Vec::new();
-        continuous_bios.push(&bios[0]);
+        let mut continuous_bios = vec![&bios[0]];
         let mut accumulated_size = bios[0].chunkinfo.compress_size();
 
         let mut index = 1;
@@ -941,7 +940,7 @@ mod blob_cache_tests {
             Arc::new(MockBackend {
                 metrics: BackendMetrics::new("id", "mock"),
             }) as Arc<dyn BlobBackend + Send + Sync>,
-            compress::Algorithm::LZ4Block,
+            compress::Algorithm::Lz4Block,
             digest::Algorithm::Blake3,
             "id",
         )
@@ -1024,7 +1023,7 @@ mod blob_cache_tests {
             Arc::new(MockBackend {
                 metrics: BackendMetrics::new("id", "mock"),
             }) as Arc<dyn BlobBackend + Send + Sync>,
-            compress::Algorithm::LZ4Block,
+            compress::Algorithm::Lz4Block,
             digest::Algorithm::Blake3,
             "id",
         )

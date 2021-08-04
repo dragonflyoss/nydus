@@ -85,7 +85,7 @@ const READ_LATENCY_RANGE_MAX: usize = 8;
 // be found as per the rafs backend mountpoint/id. Remind that nydusd can have
 // multiple backends mounted.
 lazy_static! {
-    static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIOStats>>> = Default::default();
+    static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIoStats>>> = Default::default();
 }
 
 lazy_static! {
@@ -103,7 +103,7 @@ lazy_static! {
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-pub struct GlobalIOStats {
+pub struct GlobalIoStats {
     // Whether to enable each file accounting switch.
     // As fop accounting might consume much memory space, it is disabled by default.
     // But global fop accounting is always working within each Rafs.
@@ -138,7 +138,7 @@ pub struct GlobalIOStats {
     last_fop_tp: AtomicUsize,
     // Rwlock closes the race that more than one threads are creating counters concurrently.
     #[serde(skip_serializing, skip_deserializing)]
-    file_counters: RwLock<HashMap<Inode, Arc<InodeIOStats>>>,
+    file_counters: RwLock<HashMap<Inode, Arc<InodeIoStats>>>,
     #[serde(skip_serializing, skip_deserializing)]
     access_patterns: RwLock<HashMap<Inode, Arc<AccessPattern>>>,
     // record regular file read
@@ -147,7 +147,7 @@ pub struct GlobalIOStats {
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-pub struct InodeIOStats {
+pub struct InodeIoStats {
     // Total open number of this file.
     nr_open: AtomicUsize,
     nr_max_open: AtomicUsize,
@@ -185,7 +185,7 @@ pub trait InodeStatsCounter {
     fn stats_cumulative(&self, fop: StatsFop, value: usize);
 }
 
-impl InodeStatsCounter for InodeIOStats {
+impl InodeStatsCounter for InodeIoStats {
     fn stats_fop_inc(&self, fop: StatsFop) {
         self.fop_hits[fop as usize].fetch_add(1, Ordering::Relaxed);
         self.total_fops.fetch_add(1, Ordering::Relaxed);
@@ -215,8 +215,8 @@ impl InodeStatsCounter for InodeIOStats {
     }
 }
 
-pub fn new(id: &str) -> Arc<GlobalIOStats> {
-    let c = Arc::new(GlobalIOStats {
+pub fn new(id: &str) -> Arc<GlobalIoStats> {
+    let c = Arc::new(GlobalIoStats {
         id: id.to_string(),
         ..Default::default()
     });
@@ -253,7 +253,7 @@ macro_rules! impl_iostat_option {
     };
 }
 
-impl GlobalIOStats {
+impl GlobalIoStats {
     pub fn init(&self) {
         self.files_account_enabled.store(false, Ordering::Relaxed);
         self.measure_latency.store(true, Ordering::Relaxed);
@@ -280,7 +280,7 @@ impl GlobalIOStats {
         if self.files_enabled() {
             let mut counters = self.file_counters.write().unwrap();
             if counters.get(&ino).is_none() {
-                counters.insert(ino, Arc::new(InodeIOStats::default()));
+                counters.insert(ino, Arc::new(InodeIoStats::default()));
             }
         }
 
@@ -442,7 +442,7 @@ pub struct FopRecorder<'a> {
     success: bool,
     // Now, the size only makes sense for `Read` FOP.
     size: usize,
-    ios: &'a GlobalIOStats,
+    ios: &'a GlobalIoStats,
 }
 
 impl<'a> Drop for FopRecorder<'a> {
@@ -455,7 +455,7 @@ impl<'a> Drop for FopRecorder<'a> {
 impl<'a> FopRecorder<'a> {
     pub fn settle<'b, T>(fop: StatsFop, inode: u64, ios: &'b T) -> Self
     where
-        T: AsRef<GlobalIOStats>,
+        T: AsRef<GlobalIoStats>,
         'b: 'a,
     {
         FopRecorder {
@@ -620,8 +620,8 @@ pub struct BackendMetrics {
     read_count: BasicMetric,
     // Cumulative count of read failure to backend
     read_errors: BasicMetric,
-    // Cumulative amount of data from to backend in unit of Bytes. External tools
-    // is responsible for calculating BPS from this field.
+    // Cumulative amount of data from to backend in unit of Byte. External tools
+    // are responsible for calculating BPS from this field.
     read_amount_total: BasicMetric,
     read_cumulative_latency_total: BasicMetric,
     // Categorize metrics as per their latency and request size
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_block_read_count() {
-        let g = GlobalIOStats::default();
+        let g = GlobalIoStats::default();
         g.init();
         g.global_update(StatsFop::Read, 4000, true);
         assert_eq!(g.block_count_read[1].load(Ordering::Relaxed), 1);

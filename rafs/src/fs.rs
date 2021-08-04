@@ -150,7 +150,7 @@ pub struct Rafs {
     prefetch_all: bool,
     initialized: bool,
     xattr_enabled: bool,
-    ios: Arc<metrics::GlobalIOStats>,
+    ios: Arc<metrics::GlobalIoStats>,
     // static inode attributes
     i_uid: u32,
     i_gid: u32,
@@ -315,8 +315,7 @@ impl Rafs {
                 });
 
                 if prefetch_all {
-                    let mut root = Vec::new();
-                    root.push(RAFS_ROOT_INODE);
+                    let root = vec![RAFS_ROOT_INODE];
                     // Sleeping for 2 seconds is indeed a trick to prefetch the entire rootfs.
                     // FIXME: As nydus can't give different policies different priorities, this is a
                     // workaround. Remove the sleeping when IO priority mechanism is ready.

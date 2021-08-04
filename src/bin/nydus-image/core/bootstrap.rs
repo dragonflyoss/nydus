@@ -106,7 +106,7 @@ impl Bootstrap {
                     // For the overlayfs opaque, we need to remove the lower node that has the same name
                     // first, then apply upper node to the node tree of lower layer.
                     nodes.insert(0, child.node.clone());
-                    if whiteout_type == WhiteoutType::OverlayFSOpaque {
+                    if whiteout_type == WhiteoutType::OverlayFsOpaque {
                         child
                             .node
                             .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
@@ -115,7 +115,7 @@ impl Bootstrap {
                 }
                 (None, Some(whiteout_type)) => {
                     // Remove overlayfs opaque xattr for single layer build
-                    if whiteout_type == WhiteoutType::OverlayFSOpaque {
+                    if whiteout_type == WhiteoutType::OverlayFsOpaque {
                         child
                             .node
                             .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));

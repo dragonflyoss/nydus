@@ -4,7 +4,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::*;
 use std::time;
 
@@ -18,7 +18,7 @@ pub struct Nydusd {
 }
 
 pub fn new(
-    work_dir: &PathBuf,
+    work_dir: &Path,
     enable_cache: bool,
     cache_compressed: bool,
     rafs_mode: RafsMode,

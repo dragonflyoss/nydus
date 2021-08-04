@@ -113,8 +113,8 @@ impl fmt::Display for RafsDigest {
     }
 }
 
-impl Into<String> for RafsDigest {
-    fn into(self) -> String {
-        format!("{}", self)
+impl From<RafsDigest> for String {
+    fn from(d: RafsDigest) -> Self {
+        format!("{}", d)
     }
 }

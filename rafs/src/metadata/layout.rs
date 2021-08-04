@@ -195,9 +195,9 @@ impl fmt::Display for RafsSuperFlags {
     }
 }
 
-impl Into<digest::Algorithm> for RafsSuperFlags {
-    fn into(self) -> digest::Algorithm {
-        match self {
+impl From<RafsSuperFlags> for digest::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
             x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
             x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
             _ => digest::Algorithm::Blake3,
@@ -214,13 +214,13 @@ impl From<digest::Algorithm> for RafsSuperFlags {
     }
 }
 
-impl Into<compress::Algorithm> for RafsSuperFlags {
-    fn into(self) -> compress::Algorithm {
-        match self {
+impl From<RafsSuperFlags> for compress::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
             x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::LZ4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
             x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
-            _ => compress::Algorithm::LZ4Block,
+            _ => compress::Algorithm::Lz4Block,
         }
     }
 }
@@ -229,7 +229,7 @@ impl From<compress::Algorithm> for RafsSuperFlags {
     fn from(c: compress::Algorithm) -> RafsSuperFlags {
         match c {
             compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
-            compress::Algorithm::LZ4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
             compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
         }
     }

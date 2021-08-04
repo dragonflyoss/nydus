@@ -139,7 +139,7 @@ impl Request {
             cb = cb.proxy(reqwest::Proxy::all(proxy).map_err(|e| einval!(e))?)
         }
 
-        Ok(cb.build().map_err(|e| einval!(e))?)
+        cb.build().map_err(|e| einval!(e))
     }
 
     pub fn new(config: CommonConfig) -> Result<Arc<Request>> {
