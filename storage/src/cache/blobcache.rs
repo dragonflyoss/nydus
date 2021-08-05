@@ -202,7 +202,10 @@ impl BlobCache {
         // Try to recover cache from blobcache first
         // For gzip, we can only trust ready blobcache because we cannot validate chunks due to
         // stargz format limitations (missing chunk level digest)
-        if (self.compressor() != compress::Algorithm::GZip || has_ready)
+        // With shared chunk bitmap applied, we don't have try to recover blobcache
+        // as principle is that chunk bitmap is trusted. The chunk must not be downloaded before.
+        if (self.compressor() != compress::Algorithm::GZip && !blob.with_extended_blob_table()
+            || has_ready)
             && self
                 .read_blobcache_chunk(fd, chunk, one_chunk_buf, !has_ready || self.need_validate())
                 .is_ok()
