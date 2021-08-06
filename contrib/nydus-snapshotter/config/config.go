@@ -17,7 +17,6 @@ const (
 	DefaultDaemonMode  string = "multiple"
 	DaemonModeMultiple string = "multiple"
 	DaemonModeShared   string = "shared"
-	DaemonModeSingle   string = "single"
 	DaemonModeNone     string = "none"
 	DaemonModePrefetch string = "prefetch"
 	defaultGCPeriod           = 24 * time.Hour

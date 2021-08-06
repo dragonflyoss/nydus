@@ -15,7 +15,7 @@ import (
 type FSMode int
 
 const (
-	SingleInstance FSMode = iota
+	SharedInstance FSMode = iota
 	MultiInstance
 	NoneInstance
 	PrefetchInstance

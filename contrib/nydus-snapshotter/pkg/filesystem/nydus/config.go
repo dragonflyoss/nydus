@@ -94,8 +94,8 @@ func WithDaemonMode(daemonMode string) NewFSOpt {
 		switch mode {
 		case config.DaemonModeNone:
 			d.mode = fs.NoneInstance
-		case config.DaemonModeShared, config.DaemonModeSingle:
-			d.mode = fs.SingleInstance
+		case config.DaemonModeShared:
+			d.mode = fs.SharedInstance
 		case config.DaemonModePrefetch:
 			d.mode = fs.PrefetchInstance
 		case config.DaemonModeMultiple:

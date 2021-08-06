@@ -103,7 +103,7 @@ func (d *Daemon) IsMultipleDaemon() bool {
 }
 
 func (d *Daemon) IsSharedDaemon() bool {
-	return d.DaemonMode == config.DaemonModeShared || d.DaemonMode == config.DaemonModeSingle
+	return d.DaemonMode == config.DaemonModeShared
 }
 
 func (d *Daemon) IsPrefetchDaemon() bool {

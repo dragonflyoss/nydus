@@ -201,7 +201,6 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 
 func (m *Manager) isOneDaemon() bool {
 	return m.DaemonMode == config.DaemonModeShared ||
-		m.DaemonMode == config.DaemonModeSingle  ||
 		m.DaemonMode == config.DaemonModePrefetch
 }
 
@@ -210,7 +209,7 @@ func (m *Manager) isNoneDaemon() bool {
 }
 
 func (m *Manager) IsSharedDaemon() bool {
-	return m.DaemonMode == config.DaemonModeShared || m.DaemonMode == config.DaemonModeSingle
+	return m.DaemonMode == config.DaemonModeShared
 }
 
 func (m *Manager) IsPrefetchDaemon() bool {

@@ -56,8 +56,8 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 		return nil, errors.Wrap(err, "failed to reconnect daemons")
 	}
 
-	// Both SingleInstance and PrefetchInstance use shared daemon
-	if fs.mode == fspkg.SingleInstance || fs.mode == fspkg.PrefetchInstance {
+	// Both SharedInstance and PrefetchInstance use shared daemon
+	if fs.mode == fspkg.SharedInstance || fs.mode == fspkg.PrefetchInstance {
 		isPrefetch := fs.mode == fspkg.PrefetchInstance
 
 		// Check if daemon is already running
@@ -241,7 +241,7 @@ func (fs *filesystem) MountPoint(snapshotID string) (string, error) {
 		return "", fmt.Errorf("don't need nydus daemon of snapshot %s", snapshotID)
 	} else {
 		if d, err := fs.manager.GetBySnapshotID(snapshotID); err == nil {
-			if fs.mode == fspkg.SingleInstance {
+			if fs.mode == fspkg.SharedInstance {
 				return d.SharedMountPoint(), nil
 			}
 			return d.MountPoint(), nil
@@ -275,7 +275,7 @@ func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if fs.mode == fspkg.SingleInstance || fs.mode == fspkg.PrefetchInstance {
+	if fs.mode == fspkg.SharedInstance || fs.mode == fspkg.PrefetchInstance {
 		err = d.SharedMount()
 		if err != nil {
 			return errors.Wrapf(err, "failed to shared mount")
@@ -298,7 +298,7 @@ func (fs *filesystem) addSnapshot(imageID string, labels map[string]string) erro
 }
 
 func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
-	if fs.mode == fspkg.SingleInstance || fs.mode == fspkg.PrefetchInstance {
+	if fs.mode == fspkg.SharedInstance || fs.mode == fspkg.PrefetchInstance {
 		return fs.createSharedDaemon(snapshotID, imageID)
 	}
 	return fs.createNewDaemon(snapshotID, imageID)
