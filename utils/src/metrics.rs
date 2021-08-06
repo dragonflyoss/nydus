@@ -1,8 +1,8 @@
 // Copyright 2020 Ant Group. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
-//
-// Rafs fop stats accounting and exporting.
+
+//! Rafs fop stats accounting and exporting.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Drop};
@@ -18,7 +18,7 @@ use crate::InodeBitmap;
 
 pub type Inode = u64;
 
-#[derive(PartialEq, Copy)]
+#[derive(PartialEq, Copy, Clone)]
 pub enum StatsFop {
     Getattr,
     Readlink,
@@ -46,36 +46,15 @@ pub enum IoStatsError {
 
 type IoStatsResult<T> = Result<T, IoStatsError>;
 
-impl Clone for StatsFop {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
 /// Block size separated counters.
 /// 1K; 4K; 16K; 64K, 128K, 512K, 1M
 const BLOCK_READ_COUNT_MAX: usize = 8;
 
 fn request_size_index(size: usize) -> usize {
-    match size {
-        // <=1K
-        _ if size >> 10 == 0 => 0,
-        // <=4K
-        _ if size >> 12 == 0 => 1,
-        // <=16K
-        _ if size >> 14 == 0 => 2,
-        // <=64K
-        _ if size >> 16 == 0 => 3,
-        // <=128K
-        _ if size >> 17 == 0 => 4,
-        // <=512K
-        _ if size >> 19 == 0 => 5,
-        // <=1M
-        _ if size >> 20 == 0 => 6,
-        // > 1M
-        // Match `BLOCK_READ_COUNT_MAX = 8`
-        _ => 7,
-    }
+    let ceil = (size >> 10).leading_zeros();
+    let shift = (std::cmp::max(ceil, 53) - 53) << 2;
+
+    (0x0112_2334_5567u64 >> shift) as usize & 0xf
 }
 
 /// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
@@ -753,6 +732,27 @@ impl BlobcacheMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_request_size_index() {
+        /// 1K; 4K; 16K; 64K, 128K, 512K, 1M
+        assert_eq!(request_size_index(0x0), 0);
+        assert_eq!(request_size_index(0x3ff), 0);
+        assert_eq!(request_size_index(0x400), 1);
+        assert_eq!(request_size_index(0xfff), 1);
+        assert_eq!(request_size_index(0x1000), 2);
+        assert_eq!(request_size_index(0x3fff), 2);
+        assert_eq!(request_size_index(0x4000), 3);
+        assert_eq!(request_size_index(0xffff), 3);
+        assert_eq!(request_size_index(0x1_0000), 4);
+        assert_eq!(request_size_index(0x1_ffff), 4);
+        assert_eq!(request_size_index(0x2_0000), 5);
+        assert_eq!(request_size_index(0x7_ffff), 5);
+        assert_eq!(request_size_index(0x8_0000), 6);
+        assert_eq!(request_size_index(0xf_ffff), 6);
+        assert_eq!(request_size_index(0x10_0000), 7);
+        assert_eq!(request_size_index(usize::MAX), 7);
+    }
 
     #[test]
     fn test_block_read_count() {
