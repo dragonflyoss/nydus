@@ -10,17 +10,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
+use epoll::{ControlOptions, Event, Events};
 use libc::{c_int, sysconf, _SC_PAGESIZE};
 use nix::errno::Errno;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{close, dup, getgid, getuid, read};
 use nix::Error as nixError;
 
-use epoll::{ControlOptions, Event, Events};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-
-use fuse_rs::transport::{FuseBuf, Reader, Writer};
+use fuse_backend_rs::transport::{FuseBuf, Reader, Writer};
 use vmm_sys_util::eventfd::EventFd;
 
 /// These follows definition from libfuse
@@ -29,6 +28,7 @@ const FUSE_HEADER_SIZE: usize = 0x1000;
 
 const FUSE_DEVICE: &str = "/dev/fuse";
 const FUSE_FSTYPE: &str = "fuse";
+const EXIT_FUSE_SERVICE: u64 = 1;
 
 /// A fuse session representation
 pub struct FuseSession {
@@ -38,8 +38,6 @@ pub struct FuseSession {
     file: Option<File>,
     bufsize: usize,
 }
-
-const EXIT_FUSE_SERVICE: u64 = 1;
 
 impl FuseSession {
     pub fn new(mountpoint: &Path, fsname: &str, subtype: &str) -> io::Result<FuseSession> {
@@ -78,11 +76,11 @@ impl FuseSession {
 
     /// destroy a fuse session
     pub fn umount(&mut self) -> io::Result<()> {
-        if self.file.is_none() {
-            return Ok(());
+        if let Some(file) = self.file.take() {
+            fuse_kern_umount(self.mountpoint.to_str().unwrap(), file)
+        } else {
+            Ok(())
         }
-
-        fuse_kern_umount(self.mountpoint.to_str().unwrap(), self.file.take().unwrap())
     }
 
     /// return the mountpoint

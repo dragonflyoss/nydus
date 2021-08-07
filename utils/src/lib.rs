@@ -2,6 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate serde;
+#[macro_use]
+extern crate lazy_static;
+
 use std::collections::BTreeMap;
 use std::convert::{From, Infallible, Into, TryInto};
 use std::env::current_dir;
@@ -16,13 +23,6 @@ use flexi_logger::{self, colored_opt_format, opt_format, Logger};
 use log::LevelFilter;
 use num_traits::CheckedAdd;
 use serde::Serialize;
-
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde;
-#[macro_use]
-extern crate lazy_static;
 
 #[macro_use]
 pub mod error;
@@ -108,8 +108,8 @@ pub struct BuildTimeInfo {
     rustc: String,
 }
 
-impl<'a> BuildTimeInfo {
-    pub fn dump(package_ver: &'a str) -> (String, Self) {
+impl BuildTimeInfo {
+    pub fn dump(package_ver: &str) -> (String, Self) {
         let info_string = format!(
             "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}\nProfile: \t{}\nRustc: \t\t{}\n",
             package_ver,
@@ -131,7 +131,7 @@ impl<'a> BuildTimeInfo {
     }
 }
 
-/// `log_file_path` absolute path to logging files or relative path from current working
+/// `log_file_path` is an absolute path to logging files or relative path from current working
 /// directory to logging file.
 /// Flexi logger always appends a suffix to file name whose default value is ".log"
 /// unless we set it intentionally. I don't like this passion. When the basename of `log_file_path`
