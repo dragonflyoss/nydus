@@ -14,7 +14,7 @@ use std::convert::{From, Infallible, Into, TryInto};
 use std::env::current_dir;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Result;
-use std::ops::{Add, BitAnd, Mul, Not, Sub};
+use std::ops::{Add, BitAnd, Not, Sub};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -204,16 +204,9 @@ pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Resu
     Ok(())
 }
 
+#[derive(Default)]
 pub struct InodeBitmap {
     map: RwLock<BTreeMap<u64, AtomicU64>>,
-}
-
-impl Default for InodeBitmap {
-    fn default() -> Self {
-        Self {
-            map: Default::default(),
-        }
-    }
 }
 
 impl Debug for InodeBitmap {
@@ -234,13 +227,11 @@ impl Display for InodeBitmap {
 
 impl InodeBitmap {
     pub fn new() -> Self {
-        Self {
-            map: Default::default(),
-        }
+        Self::default()
     }
 
     #[inline(always)]
-    fn get_base_and_value(ino: u64) -> (u64, u64) {
+    fn get_index_and_mask(ino: u64) -> (u64, u64) {
         (ino >> 6, 1_u64 << (ino & 0x3f_u64))
     }
 
@@ -254,48 +245,44 @@ impl InodeBitmap {
     }
 
     pub fn set(&self, ino: u64) {
-        let (base, value) = InodeBitmap::get_base_and_value(ino);
-        let ok = {
-            let m = self.map.read().unwrap();
-            m.get(&base).map_or(false, |v| {
-                v.fetch_or(value, Ordering::Relaxed);
-                true
-            })
-        };
-        if !ok {
-            let mut m = self.map.write().unwrap();
-            if m.get(&base).is_none() {
-                m.insert(base, AtomicU64::new(0));
-            }
-            if let Some(v) = m.get(&base) {
-                v.fetch_or(value, Ordering::Relaxed);
-            }
+        let (index, mask) = Self::get_index_and_mask(ino);
+
+        let m = self.map.read().unwrap();
+        if let Some(v) = m.get(&index) {
+            v.fetch_or(mask, Ordering::Relaxed);
+            return;
         }
+        drop(m);
+
+        let mut m = self.map.write().unwrap();
+        m.entry(index)
+            .or_insert(AtomicU64::new(0))
+            .fetch_or(mask, Ordering::Relaxed);
     }
 
     pub fn is_set(&self, ino: u64) -> bool {
-        let (base, value) = InodeBitmap::get_base_and_value(ino);
+        let (index, mask) = InodeBitmap::get_index_and_mask(ino);
         self.map
             .read()
             .unwrap()
-            .get(&base)
-            .map_or(false, |v| v.load(Ordering::Relaxed) & value != 0)
+            .get(&index)
+            .map_or(false, |v| v.load(Ordering::Relaxed) & mask != 0)
     }
 
     pub fn clear(&self, ino: u64) {
-        let (base, value) = InodeBitmap::get_base_and_value(ino);
+        let (index, mask) = InodeBitmap::get_index_and_mask(ino);
         let m = self.map.read().unwrap();
 
-        if let Some(v) = m.get(&base) {
-            v.fetch_and(!value, Ordering::Relaxed);
+        if let Some(v) = m.get(&index) {
+            v.fetch_and(!mask, Ordering::Relaxed);
         }
     }
 
     pub fn clear_all(&self) {
         let m = self.map.read().unwrap();
 
-        for it in m.iter() {
-            it.1.fetch_and(0_u64, Ordering::Relaxed);
+        for it in m.values() {
+            it.store(0_u64, Ordering::Relaxed);
         }
     }
 
@@ -304,11 +291,13 @@ impl InodeBitmap {
         let m = self.map.read().unwrap();
         let mut ret: Vec<Vec<u64>> = Vec::new();
         let mut start: Option<u64> = None;
+        // 0 is an invalid inode number
         let mut last: u64 = 0;
 
         for it in m.iter() {
-            let base = it.0.mul(64);
+            let base = it.0 << 6;
             let mut v = load(it.1);
+
             while v != 0 {
                 // trailing_zeros need rustup version >= 1.46
                 let ino = base + v.trailing_zeros() as u64;
@@ -330,6 +319,7 @@ impl InodeBitmap {
         if let Some(s) = start {
             ret.push(InodeBitmap::range_to_vec(s, last));
         }
+
         ret
     }
 
