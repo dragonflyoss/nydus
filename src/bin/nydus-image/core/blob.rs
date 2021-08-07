@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use vmm_sys_util::tempfile::TempFile;
 
-use nydus_utils::digest::{self, RafsDigest};
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 
 use super::context::{BuildContext, SourceType, BUF_WRITER_CAPACITY};
 use super::node::*;

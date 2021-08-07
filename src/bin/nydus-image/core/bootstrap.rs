@@ -13,7 +13,7 @@ use sha2::Sha256;
 use rafs::metadata::layout::*;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
-use nydus_utils::digest::RafsDigest;
+use nydus_utils::digest::{DigestHasher, RafsDigest};
 
 use crate::core::context::BuildContext;
 use crate::core::context::SourceType;

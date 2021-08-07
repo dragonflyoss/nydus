@@ -17,7 +17,7 @@ use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use nydus_utils::digest::{self, Algorithm, RafsDigest};
+use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use rafs::metadata::layout::*;
 use rafs::metadata::{Inode, RafsChunkFlags};
