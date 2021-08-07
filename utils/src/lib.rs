@@ -9,15 +9,13 @@ extern crate serde;
 #[macro_use]
 extern crate lazy_static;
 
-use std::convert::{From, Infallible, Into, TryInto};
+use std::convert::{Into, TryFrom, TryInto};
 use std::env::current_dir;
 use std::io::Result;
-use std::ops::{Add, BitAnd, Not, Sub};
 use std::path::PathBuf;
 
 use flexi_logger::{self, colored_opt_format, opt_format, Logger};
 use log::LevelFilter;
-use num_traits::CheckedAdd;
 use serde::Serialize;
 
 #[macro_use]
@@ -51,23 +49,9 @@ pub fn div_round_up(n: u64, d: u64) -> u64 {
 }
 
 /// Overflow can fail this rounder if the base value is large enough with 4095 added.
-pub fn try_round_up_4k<
-    U,
-    E: From<Infallible>,
-    T: BitAnd<Output = T>
-        + Not<Output = T>
-        + Add<Output = T>
-        + Sub<Output = T>
-        + TryInto<U, Error = E>
-        + From<u16>
-        + PartialOrd
-        + CheckedAdd
-        + Copy,
->(
-    x: T,
-) -> Option<U> {
-    let t: T = 4095u16.into();
-    if let Some(v) = x.checked_add(&t) {
+pub fn try_round_up_4k<U: TryFrom<u64>, T: Into<u64>>(x: T) -> Option<U> {
+    let t = 4095u64;
+    if let Some(v) = x.into().checked_add(t) {
         let z = v & (!t);
         z.try_into().ok()
     } else {
@@ -214,27 +198,27 @@ mod tests {
         assert_eq!(round_down_4k(u64::MAX - 1), u64::MAX - 4095);
         assert_eq!(round_down_4k(u64::MAX - 4095), u64::MAX - 4095);
         // zero is rounded up to zero
-        assert_eq!(try_round_up_4k::<i32, _, _>(0u32), Some(0i32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(0u32), Some(0u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(1u32), Some(4096u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(100u32), Some(4096u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(4100u32), Some(8192u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(4096u32), Some(4096u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(4095u32), Some(4096u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(4097u32), Some(8192u32));
-        assert_eq!(try_round_up_4k::<u32, _, _>(u32::MAX), None);
-        assert_eq!(try_round_up_4k::<u64, _, _>(u32::MAX), None);
-        assert_eq!(try_round_up_4k::<u32, _, _>(u64::MAX - 1), None);
-        assert_eq!(try_round_up_4k::<u32, _, _>(u64::MAX), None);
-        assert_eq!(try_round_up_4k::<u32, _, _>(u64::MAX - 4097), None);
+        assert_eq!(try_round_up_4k::<i32, _>(0u32), Some(0i32));
+        assert_eq!(try_round_up_4k::<u32, _>(0u32), Some(0u32));
+        assert_eq!(try_round_up_4k::<u32, _>(1u32), Some(4096u32));
+        assert_eq!(try_round_up_4k::<u32, _>(100u32), Some(4096u32));
+        assert_eq!(try_round_up_4k::<u32, _>(4100u32), Some(8192u32));
+        assert_eq!(try_round_up_4k::<u32, _>(4096u32), Some(4096u32));
+        assert_eq!(try_round_up_4k::<u32, _>(4095u32), Some(4096u32));
+        assert_eq!(try_round_up_4k::<u32, _>(4097u32), Some(8192u32));
+        assert_eq!(try_round_up_4k::<u32, _>(u32::MAX), None);
+        assert_eq!(try_round_up_4k::<u64, _>(u32::MAX), Some(0x1_0000_0000u64));
+        assert_eq!(try_round_up_4k::<u32, _>(u64::MAX - 1), None);
+        assert_eq!(try_round_up_4k::<u32, _>(u64::MAX), None);
+        assert_eq!(try_round_up_4k::<u32, _>(u64::MAX - 4097), None);
         // success
         assert_eq!(
-            try_round_up_4k::<u64, _, _>(u64::MAX - 4096),
+            try_round_up_4k::<u64, _>(u64::MAX - 4096),
             Some(u64::MAX - 4095)
         );
         // overflow
-        assert_eq!(try_round_up_4k::<u64, _, _>(u64::MAX - 1), None);
+        assert_eq!(try_round_up_4k::<u64, _>(u64::MAX - 1), None);
         // fail to convert u64 to u32
-        assert_eq!(try_round_up_4k::<u32, _, _>(u64::MAX - 4096), None);
+        assert_eq!(try_round_up_4k::<u32, _>(u64::MAX - 4096), None);
     }
 }

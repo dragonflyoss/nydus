@@ -21,6 +21,6 @@ fn main() {
     );
 
     built_file
-        .write(datatime.as_bytes())
+        .write_all(datatime.as_bytes())
         .expect("Failed to write data to `built.rs");
 }

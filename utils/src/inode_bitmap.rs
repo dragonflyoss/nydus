@@ -60,7 +60,7 @@ impl InodeBitmap {
 
         let mut m = self.map.write().unwrap();
         m.entry(index)
-            .or_insert(AtomicU64::new(0))
+            .or_insert_with(|| AtomicU64::new(0))
             .fetch_or(mask, Ordering::Relaxed);
     }
 

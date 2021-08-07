@@ -1146,8 +1146,8 @@ pub mod tests {
     //use nydus_app::setup_logging;
     use vmm_sys_util::tempfile::TempFile;
 
-    use crate::RafsIoReader;
     use super::OndiskBlobTable;
+    use crate::RafsIoReader;
 
     #[allow(dead_code)]
     struct Entry {

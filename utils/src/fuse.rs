@@ -19,7 +19,7 @@ use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{close, dup, getgid, getuid, read};
 use nix::Error as nixError;
 
-use fuse_backend_rs::transport::{FuseBuf, Reader, Writer};
+use fuse_rs::transport::{FuseBuf, Reader, Writer};
 use vmm_sys_util::eventfd::EventFd;
 
 /// These follows definition from libfuse

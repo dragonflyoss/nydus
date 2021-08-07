@@ -209,7 +209,7 @@ impl LocalFsAccessLog {
     fn do_readahead(&self) -> Result<()> {
         info!("starting localfs blob readahead");
         // Convert from `usize` to `u64` is safe to unwrap and it's hard to overflow here.
-        let blob_end: u64 = try_round_up_4k(self.blob_size).unwrap();
+        let blob_end: u64 = try_round_up_4k(self.blob_size as u64).unwrap();
         for &(offset, len, zero) in self.records.lock().unwrap().iter() {
             let end: u64 = offset
                 .checked_add(len as u64)
