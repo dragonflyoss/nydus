@@ -1140,12 +1140,14 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
 
 #[cfg(test)]
 pub mod tests {
-    use super::OndiskBlobTable;
-    use crate::RafsIoReader;
-    use nydus_utils::setup_logging;
     use std::fs::OpenOptions;
     use std::io::{SeekFrom, Write};
+
+    //use nydus_app::setup_logging;
     use vmm_sys_util::tempfile::TempFile;
+
+    use crate::RafsIoReader;
+    use super::OndiskBlobTable;
 
     #[allow(dead_code)]
     struct Entry {
@@ -1159,7 +1161,7 @@ pub mod tests {
 
     #[test]
     fn test_load_blob_table() {
-        setup_logging(None, log::LevelFilter::Info).unwrap();
+        //setup_logging(None, log::LevelFilter::Info).unwrap();
 
         let mut buffer = Vec::new();
         let first = Entry { foo: 1, bar: 2 };
