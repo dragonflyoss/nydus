@@ -9,6 +9,10 @@ panic = "abort"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "nydusd"
+path = "src/bin/nydusd/main.rs"
+
 [dependencies]
 rlimit = "0.3.0"
 log = "0.4.8"
@@ -35,6 +39,9 @@ event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca" }
 vhost-rs = { git = "https://github.com/cloud-hypervisor/vhost.git", branch = "dragonball", package = "vhost", optional = true }
 vhost-user-backend = { git = "https://github.com/cloud-hypervisor/vhost-user-backend.git", package = "vhost_user_backend", rev = "78757bfa", optional = true }
+hyperlocal = "0.8.0"
+tokio = { version = "1.9.0", features = ["macros"] }
+hyper = "0.14.11"
 
 nydus-api = { path = "api" }
 nydus-app = "0.1"
