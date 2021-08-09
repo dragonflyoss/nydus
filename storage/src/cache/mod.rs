@@ -23,7 +23,6 @@ pub mod dummycache;
 
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
-    seq: u64,
     // Chunks that are continuous to each other.
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
     pub blob_offset: u64,
@@ -32,14 +31,13 @@ struct MergedBackendRequest {
 }
 
 impl MergedBackendRequest {
-    fn new(seq: u64, first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
+    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
         let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
         chunks.push(first_cki);
 
         MergedBackendRequest {
-            seq,
             blob_offset,
             blob_size,
             chunks,
