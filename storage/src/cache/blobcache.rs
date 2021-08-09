@@ -232,22 +232,16 @@ impl BlobCache {
                 size,
             );
         } else {
-            self.read_backend_chunk(blob, chunk, one_chunk_buf, |buf| {
-                let offset = if self.is_compressed {
-                    chunk.compress_offset()
-                } else {
-                    chunk.decompress_offset()
-                };
-                // TODO: Try to make this as a following asynchronous step writing cache
-                // This should help to reduce read latency.
-                self.cache(fd, buf, offset)?;
-                chunk_map.set_ready(chunk)?;
-                Ok(())
-            })
-            .map_err(|e| {
-                chunk_map.finish(chunk);
-                e
-            })?;
+            {
+                self.read_backend_chunk(blob, chunk, one_chunk_buf)?;
+                use std::borrow::Cow;
+                let t: Cow<BlobCache> = Cow::Borrowed(self);
+                t.persist_chunk(fd, chunk, one_chunk_buf)?;
+                chunk_map.set_ready(chunk)
+            }
+            .unwrap_or_else(|_|
+                // Thanks to above curly bracket, we can clean tracer up if any of the steps fails.
+                chunk_map.finish(chunk))
         }
 
         if reuse {
@@ -337,14 +331,26 @@ impl BlobCache {
 
     /// Persist a single chunk into local blob cache file. We have to write to the cache
     /// file in unit of chunk size
-    fn cache(&self, fd: RawFd, buf: &[u8], offset: u64) -> Result<()> {
-        loop {
-            let ret = uio::pwrite(fd, buf, offset as i64).map_err(|_| last_error!());
+    fn persist_chunk(
+        &self,
+        fd: RawFd,
+        cki: &dyn RafsChunkInfo,
+        chunk_buffer: &[u8],
+    ) -> Result<usize> {
+        let offset = if self.is_compressed {
+            cki.compress_offset()
+        } else {
+            cki.decompress_offset()
+        };
+        // TODO: Try to make this as a following asynchronous step writing cache
+        // This should be help to reduce read latency.
 
+        let n = loop {
+            let ret = uio::pwrite(fd, chunk_buffer, offset as i64).map_err(|_| last_error!());
             match ret {
                 Ok(nr_write) => {
                     trace!("write {}(offset={}) bytes to cache file", nr_write, offset);
-                    break;
+                    break nr_write;
                 }
                 Err(err) => {
                     // Retry if the IO is interrupted by signal.
@@ -353,9 +359,9 @@ impl BlobCache {
                     }
                 }
             }
-        }
+        };
 
-        Ok(())
+        Ok(n)
     }
 
     fn convert_to_merge_request(continuous_bios: &[&RafsBio]) -> MergedBackendRequest {
@@ -578,22 +584,23 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .set(&mr.blob_entry)
                             .map_err(|_| error!("Set cache index error!"))
                         {
-                            for (i, c) in continuous_chunks.iter().map(|i| i.as_ref()).enumerate() {
-                                if !chunk_map.has_ready(c, false).unwrap_or_default() {
-                                    let offset = if blobcache.is_compressed {
-                                        c.compress_offset()
-                                    } else {
-                                        c.decompress_offset()
-                                    };
-                                    if let Err(err) =
-                                        blobcache.cache(fd, chunks[i].as_slice(), offset)
-                                    {
-                                        chunk_map.finish(c);
-                                        error!("Failed to cache chunk: {}", err);
-                                    } else {
-                                        let _ = chunk_map.set_ready(c).map_err(|e| {
-                                            error!("Failed to set chunk ready: {:?}", e)
-                                        });
+                            for (i, c) in continuous_chunks.iter().enumerate() {
+                                if !chunk_map.has_ready(c.as_ref(), false).unwrap_or_default() {
+                                    // Write multiple chunks once
+                                    match blobcache.persist_chunk(
+                                        fd,
+                                        c.as_ref(),
+                                        chunks[i].as_slice(),
+                                    ) {
+                                        Err(e) => {
+                                            error!("Failed to cache chunk: {}", e);
+                                            chunk_map.finish(c.as_ref())
+                                        }
+                                        Ok(_) => {
+                                            chunk_map.set_ready(c.as_ref()).unwrap_or_else(|e| {
+                                                error!("Failed to set chunk ready: {:?}", e)
+                                            })
+                                        }
                                     }
                                 }
                             }

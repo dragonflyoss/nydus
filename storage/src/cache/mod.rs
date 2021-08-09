@@ -94,17 +94,12 @@ pub trait RafsCache {
     /// It depends on `cki` how to describe the chunk data.
     /// Moreover, chunk data from backend can be validated as per nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
-    fn read_backend_chunk<F>(
+    fn read_backend_chunk(
         &self,
         blob: &RafsBlobEntry,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
-        cacher: F,
-    ) -> Result<usize>
-    where
-        F: FnOnce(&[u8]) -> Result<()>,
-        Self: Sized,
-    {
+    ) -> Result<usize> {
         let offset = cki.compress_offset();
         let mut d;
 
@@ -179,7 +174,6 @@ pub trait RafsCache {
             self.need_validate(),
         )
         .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
-        cacher(chunk)?;
         Ok(chunk.len())
     }
 
