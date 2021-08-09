@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
+use std::mem::ManuallyDrop;
 use std::num::NonZeroU32;
 use std::ops::DerefMut;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -16,6 +17,8 @@ use std::thread::{self, JoinHandle};
 
 use nix::sys::uio;
 use nix::unistd::dup;
+
+use tokio::{self, runtime::Runtime};
 
 use futures::executor::block_on;
 use governor::{
@@ -157,13 +160,43 @@ pub struct BlobCache {
     mr_sender: Arc<Mutex<Option<spmc::Sender<MergedBackendRequest>>>>,
     mr_receiver: Option<spmc::Receiver<MergedBackendRequest>>,
     metrics: Arc<BlobcacheMetrics>,
+    runtime: Arc<Runtime>,
+}
+
+enum DataBuffer {
+    Reuse(ManuallyDrop<Vec<u8>>),
+    Allocated(Vec<u8>),
+}
+
+impl DataBuffer {
+    fn mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Reuse(ref mut data) => data.as_mut_slice(),
+            Self::Allocated(ref mut data) => data.as_mut_slice(),
+        }
+    }
+
+    fn slice(&self) -> &[u8] {
+        match self {
+            Self::Reuse(data) => data.as_slice(),
+            Self::Allocated(data) => data.as_slice(),
+        }
+    }
+
+    fn try_to_own(self) -> Self {
+        if let DataBuffer::Reuse(data) = self {
+            DataBuffer::Allocated((*data).to_vec())
+        } else {
+            self
+        }
+    }
 }
 
 impl BlobCache {
     fn entry_read(
         &self,
         blob: &RafsBlobEntry,
-        chunk: &dyn RafsChunkInfo,
+        chunk: &Arc<dyn RafsChunkInfo>,
         bufs: &[VolatileSlice],
         offset: u64,
         size: usize,
@@ -179,8 +212,7 @@ impl BlobCache {
                 self.cache.write().unwrap().set(blob)?
             }
         };
-
-        let has_ready = chunk_map.has_ready(chunk, true)?;
+        let has_ready = chunk_map.has_ready(chunk.as_ref(), true)?;
         let mut reuse = false;
 
         // Hit cache if cache ready
@@ -197,32 +229,40 @@ impl BlobCache {
         }
 
         let d_size = chunk.decompress_size() as usize;
-        let mut d;
         // one_chunk_buf is the decompressed data buffer
-        let one_chunk_buf =
+        let mut d =
             if !self.is_compressed && bufs.len() == 1 && bufs[0].len() >= d_size && offset == 0 {
                 // Optimize for the case where the first VolatileSlice covers the whole chunk.
                 // Reuse the destination data buffer.
                 reuse = true;
-                unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) }
+                let m = ManuallyDrop::new(unsafe {
+                    Vec::from_raw_parts(bufs[0].as_ptr(), d_size, d_size)
+                });
+                DataBuffer::Reuse(m)
             } else {
-                d = alloc_buf(d_size);
-                d.as_mut_slice()
+                DataBuffer::Allocated(alloc_buf(d_size))
             };
 
         // Try to recover cache from blobcache first
         // For gzip, we can only trust ready blobcache because we cannot validate chunks due to
         // stargz format limitations (missing chunk level digest)
-        // With shared chunk bitmap applied, we don't have try to recover blobcache
+        // With shared chunk bitmap applied, we don't have to try to recover blobcache
         // as principle is that chunk bitmap is trusted. The chunk must not be downloaded before.
-        if (self.compressor() != compress::Algorithm::GZip && !blob.with_extended_blob_table()
+        let buffer_holder;
+        let owned_buffer = if (self.compressor() != compress::Algorithm::GZip
+            && !blob.with_extended_blob_table()
             || has_ready)
             && self
-                .read_blobcache_chunk(fd, chunk, one_chunk_buf, !has_ready || self.need_validate())
+                .read_blobcache_chunk(
+                    fd,
+                    chunk.as_ref(),
+                    d.mut_slice(),
+                    !has_ready || self.need_validate(),
+                )
                 .is_ok()
         {
             self.metrics.whole_hits.inc();
-            chunk_map.set_ready(chunk)?;
+            chunk_map.set_ready(chunk.as_ref())?;
             trace!(
                 "recover blob cache {} {} reuse {} offset {} size {}",
                 chunk.block_id(),
@@ -231,23 +271,54 @@ impl BlobCache {
                 offset,
                 size,
             );
+            &d
         } else {
             {
-                self.read_backend_chunk(blob, chunk, one_chunk_buf)?;
-                use std::borrow::Cow;
-                let t: Cow<BlobCache> = Cow::Borrowed(self);
-                t.persist_chunk(fd, chunk, one_chunk_buf)?;
-                chunk_map.set_ready(chunk)
+                self.read_backend_chunk(blob, chunk.as_ref(), d.mut_slice())?;
+                d = d.try_to_own();
+                buffer_holder = Arc::new(d);
+                let delayed_buffer = buffer_holder.clone();
+                let delayed_chunk = chunk.clone();
+                let delayed_chunk_map = chunk_map.clone();
+                let compressed = self.is_compressed;
+                self.runtime.spawn(async move {
+                    match Self::persist_chunk(
+                        compressed,
+                        fd,
+                        delayed_chunk.as_ref(),
+                        delayed_buffer.slice(),
+                    ) {
+                        Err(e) => {
+                            error!(
+                                "Persist chunk of offset {} failed, {:?}",
+                                delayed_chunk.compress_offset(),
+                                e
+                            );
+                            delayed_chunk_map.finish(delayed_chunk.as_ref())
+                        }
+                        Ok(_) => delayed_chunk_map
+                            .as_ref()
+                            .set_ready(delayed_chunk.as_ref())
+                            .unwrap_or_else(|e| {
+                                error!(
+                                    "Failed change caching state for chunk of offset {}, {:?}",
+                                    delayed_chunk.compress_offset(),
+                                    e
+                                )
+                            }),
+                    }
+                });
+                Ok(buffer_holder.as_ref())
             }
-            .unwrap_or_else(|_|
+            .map_err(|e: std::io::Error|
                 // Thanks to above curly bracket, we can clean tracer up if any of the steps fails.
-                chunk_map.finish(chunk))
-        }
+                {chunk_map.finish(chunk.as_ref());e})?
+        };
 
         if reuse {
-            Ok((one_chunk_buf.len(), has_ready))
+            Ok((owned_buffer.slice().len(), has_ready))
         } else {
-            let read_size = copyv(one_chunk_buf, bufs, offset, size).map_err(|e| {
+            let read_size = copyv(owned_buffer.slice(), bufs, offset, size).map_err(|e| {
                 error!("failed to copy from chunk buf to buf: {:?}", e);
                 e
             })?;
@@ -332,12 +403,12 @@ impl BlobCache {
     /// Persist a single chunk into local blob cache file. We have to write to the cache
     /// file in unit of chunk size
     fn persist_chunk(
-        &self,
+        compressed: bool,
         fd: RawFd,
         cki: &dyn RafsChunkInfo,
         chunk_buffer: &[u8],
     ) -> Result<usize> {
-        let offset = if self.is_compressed {
+        let offset = if compressed {
             cki.compress_offset()
         } else {
             cki.decompress_offset()
@@ -587,7 +658,8 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             for (i, c) in continuous_chunks.iter().enumerate() {
                                 if !chunk_map.has_ready(c.as_ref(), false).unwrap_or_default() {
                                     // Write multiple chunks once
-                                    match blobcache.persist_chunk(
+                                    match BlobCache::persist_chunk(
+                                        blobcache.is_compressed,
                                         fd,
                                         c.as_ref(),
                                         chunks[i].as_slice(),
@@ -661,7 +733,7 @@ impl RafsCache for BlobCache {
         }
 
         let (size, before_ready) =
-            self.entry_read(&bio.blob, bio.chunkinfo.as_ref(), bufs, offset, bio.size)?;
+            self.entry_read(&bio.blob, &bio.chunkinfo, bufs, offset, bio.size)?;
 
         // The flag means the chunk is not ready before, but now ready,
         // so increase the entries_count metric.
@@ -829,6 +901,7 @@ pub fn new(
         mr_sender: Arc::new(Mutex::new(tx)),
         mr_receiver: rx,
         metrics,
+        runtime: Arc::new(Runtime::new().unwrap()),
     });
 
     if enabled {

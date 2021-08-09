@@ -1844,6 +1844,7 @@ dependencies = [
  "sha-1",
  "sha2",
  "spmc",
+ "tokio",
  "url",
  "vm-memory",
  "vmm-sys-util 0.6.0",
