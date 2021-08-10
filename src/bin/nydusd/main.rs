@@ -324,12 +324,9 @@ fn main() -> Result<()> {
             DaemonError::InvalidArguments("config file is not provided".to_string())
         })?;
 
-        let prefetch_files: Option<Vec<String>> =
-            if let Some(files) = cmd_arguments_parsed.values_of("prefetch-files") {
-                Some(files.map(|s| s.to_string()).collect())
-            } else {
-                None
-            };
+        let prefetch_files: Option<Vec<String>> = cmd_arguments_parsed
+            .values_of("prefetch-files")
+            .map(|files| files.map(|s| s.to_string()).collect());
 
         let cmd = FsBackendMountCmd {
             fs_type: FsBackendType::Rafs,

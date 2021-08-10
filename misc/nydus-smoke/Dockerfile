@@ -1,4 +1,4 @@
-FROM clux/muslrust:1.50.0
+FROM clux/muslrust:1.52.1
 
 RUN apt update && apt install -y tree
 

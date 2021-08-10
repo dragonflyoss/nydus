@@ -85,7 +85,7 @@ pub enum Action {
 impl RafsInspector {
     pub fn new(b: &Path, request_mode: bool) -> Result<Self> {
         let layout_profile = RafsLayoutV5::new();
-        let mut f = RafsIoRead::from_file(b)
+        let mut f = <dyn RafsIoRead>::from_file(b)
             .map_err(|e| anyhow!("Can't find bootstrap, path={:?}, {:?}", b, e))?;
         let sb = Self::super_block(&mut f, &layout_profile)?;
         let rafs_meta: RafsMeta = (&sb).into();
