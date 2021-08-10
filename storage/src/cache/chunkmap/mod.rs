@@ -185,6 +185,7 @@ mod tests {
     use super::*;
     use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
     use crate::device::{RafsChunkFlags, RafsChunkInfo};
+    use nydus_utils::digest::Algorithm::Blake3;
     use nydus_utils::digest::{Algorithm, RafsDigest};
     use vmm_sys_util::tempfile::TempFile;
 
@@ -355,6 +356,62 @@ mod tests {
             "IndexedChunkMap vs DigestedChunkMap: {}ms vs {}ms",
             elapsed1, elapsed2
         );
+    }
+
+    #[test]
+    fn test_inflight_tracer() {
+        let chunk_1: Arc<dyn RafsChunkInfo> = Arc::new({
+            let mut c = MockChunkInfo::new();
+            c.index = 1;
+            c.block_id = RafsDigest::from_buf("hello world".as_bytes(), Blake3);
+            c
+        });
+        let chunk_2: Arc<dyn RafsChunkInfo> = Arc::new({
+            let mut c = MockChunkInfo::new();
+            c.index = 2;
+            c.block_id = RafsDigest::from_buf("hello world 2".as_bytes(), Blake3);
+            c
+        });
+        // indexed ChunkMap
+        let tmp_file = TempFile::new().unwrap();
+        let index_map = Arc::new(BlobChunkMap::from(
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+        ));
+        index_map.has_ready(chunk_1.as_ref(), false).unwrap();
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
+        index_map.has_ready(chunk_2.as_ref(), false).unwrap();
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 2);
+        assert_eq!(index_map.has_ready(chunk_1.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.has_ready(chunk_2.as_ref(), false).unwrap(), false);
+        index_map.set_ready(chunk_1.as_ref()).unwrap();
+        assert_eq!(index_map.has_ready(chunk_1.as_ref(), false).unwrap(), true);
+        index_map.finish(chunk_2.as_ref());
+        assert_eq!(index_map.has_ready(chunk_2.as_ref(), false).unwrap(), false);
+        index_map.finish(chunk_2.as_ref());
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
+        // digested ChunkMap
+        let digest_map = Arc::new(BlobChunkMap::from(DigestedChunkMap::new()));
+        digest_map.has_ready(chunk_1.as_ref(), false).unwrap();
+        assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 1);
+        digest_map.has_ready(chunk_2.as_ref(), false).unwrap();
+        assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 2);
+        assert_eq!(
+            digest_map.has_ready(chunk_1.as_ref(), false).unwrap(),
+            false
+        );
+        assert_eq!(
+            digest_map.has_ready(chunk_2.as_ref(), false).unwrap(),
+            false
+        );
+        digest_map.set_ready(chunk_1.as_ref()).unwrap();
+        assert_eq!(digest_map.has_ready(chunk_1.as_ref(), false).unwrap(), true);
+        digest_map.finish(chunk_2.as_ref());
+        assert_eq!(
+            digest_map.has_ready(chunk_2.as_ref(), false).unwrap(),
+            false
+        );
+        digest_map.finish(chunk_2.as_ref());
+        assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 0);
     }
 
     #[test]
