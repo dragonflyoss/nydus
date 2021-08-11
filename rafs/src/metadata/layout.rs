@@ -755,8 +755,8 @@ pub struct OndiskInode {
     // inode device block number, ignored for non-special files
     pub i_rdev: u32,
     // for alignment reason, we put nsec first
-    pub i_ctime_nsec: u32,
-    pub i_ctime: u64,        // 120
+    pub i_mtime_nsec: u32,
+    pub i_mtime: u64,        // 120
     pub i_reserved: [u8; 8], // 128
 }
 

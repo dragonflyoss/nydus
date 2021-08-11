@@ -452,9 +452,9 @@ impl Rafs {
             attr.gid = self.i_gid;
         }
 
-        // Older rafs image doesn't include ctime, in such case we use
+        // Older rafs image doesn't include mtime, in such case we use
         // runtime timestamp.
-        if attr.ctime == 0 {
+        if attr.mtime == 0 {
             attr.atime = self.i_time;
             attr.ctime = self.i_time;
             attr.mtime = self.i_time;
@@ -471,9 +471,9 @@ impl Rafs {
             entry.attr.st_gid = self.i_gid;
         }
 
-        // Older rafs image doesn't include ctime, in such case we use
+        // Older rafs image doesn't include mtime, in such case we use
         // runtime timestamp.
-        if entry.attr.st_ctime == 0 {
+        if entry.attr.st_mtime == 0 {
             entry.attr.st_atime = self.i_time as i64;
             entry.attr.st_ctime = self.i_time as i64;
             entry.attr.st_mtime = self.i_time as i64;
