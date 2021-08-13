@@ -1,3 +1,8 @@
+// Copyright 2020 Ant Group. All rights reserved.
+// Copyright (C) 2020 Alibaba Cloud. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use nix::sys::signal;
 
 pub fn register_signal_handler(sig: signal::Signal, handler: extern "C" fn(libc::c_int)) {

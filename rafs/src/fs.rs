@@ -821,7 +821,7 @@ mod tests {
         let mountpoint = "/mnt";
         let rafs_config = RafsConfig::from_str(config).unwrap();
         let bootstrapfile = source_path.to_str().unwrap();
-        let mut bootstrap = RafsIoRead::from_file(bootstrapfile).unwrap();
+        let mut bootstrap = <dyn RafsIoRead>::from_file(bootstrapfile).unwrap();
         let mut rafs = Rafs::new(rafs_config, mountpoint, &mut bootstrap).unwrap();
         rafs.import(bootstrap, Some(vec![std::path::PathBuf::new()]))
             .unwrap();

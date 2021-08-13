@@ -1,7 +1,13 @@
-use serde::Serialize;
-use serde_json::Error as SerdeError;
+// Copyright 2020 Ant Group. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::SystemTime;
+
+use serde::Serialize;
+use serde_json::Error as SerdeError;
 
 #[derive(Debug)]
 pub enum ErrorHolderError {
@@ -36,7 +42,7 @@ impl ErrorHolder {
 
     pub fn push(&mut self, error: &str) -> Result<()> {
         let mut guard = self.errors.lock().unwrap();
-        let formatted_error = format!("{:?} - {}", chrono::Local::now(), error);
+        let formatted_error = format!("{} - {}", httpdate::fmt_http_date(SystemTime::now()), error);
 
         loop {
             if formatted_error.len() + self.total_size > self.max_size

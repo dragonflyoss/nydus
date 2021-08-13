@@ -39,3 +39,17 @@ pub fn exec(cmd: &str, output: bool) -> Result<String> {
 
     Ok(String::from(""))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exec() {
+        let val = exec("echo hello", true).unwrap();
+        assert_eq!(val, "hello\n");
+
+        let val = exec("echo hello", false).unwrap();
+        assert_eq!(val, "");
+    }
+}

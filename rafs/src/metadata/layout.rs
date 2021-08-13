@@ -576,11 +576,11 @@ impl OndiskBlobTable {
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         self.entries.push(Arc::new(RafsBlobEntry {
-            blob_id,
-            blob_index,
+            chunk_count,
             readahead_offset,
             readahead_size,
-            chunk_count,
+            blob_id,
+            blob_index,
             blob_cache_size,
         }));
         self.extended
@@ -1140,12 +1140,14 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
 
 #[cfg(test)]
 pub mod tests {
-    use super::OndiskBlobTable;
-    use crate::RafsIoReader;
-    use nydus_utils::setup_logging;
     use std::fs::OpenOptions;
     use std::io::{SeekFrom, Write};
+
+    //use nydus_app::setup_logging;
     use vmm_sys_util::tempfile::TempFile;
+
+    use super::OndiskBlobTable;
+    use crate::RafsIoReader;
 
     #[allow(dead_code)]
     struct Entry {
@@ -1159,7 +1161,7 @@ pub mod tests {
 
     #[test]
     fn test_load_blob_table() {
-        setup_logging(None, log::LevelFilter::Info).unwrap();
+        //setup_logging(None, log::LevelFilter::Info).unwrap();
 
         let mut buffer = Vec::new();
         let first = Entry { foo: 1, bar: 2 };

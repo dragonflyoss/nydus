@@ -24,7 +24,7 @@ use sha2::digest::Digest;
 use sha2::Sha256;
 
 use nydus_utils::{
-    digest::{self, RafsDigest},
+    digest::{self, DigestHasher, RafsDigest},
     div_round_up, try_round_up_4k, ByteSize,
 };
 
