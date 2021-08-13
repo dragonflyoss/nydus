@@ -920,9 +920,10 @@ checksum = "3728d817d99e5ac407411fa471ff9800a778d88a24685968b36824eaf4bee400"
 [[package]]
 name = "micro_http"
 version = "0.2.0"
-source = "git+https://github.com/cloud-hypervisor/micro-http.git#af72318b755620f9c1b99b319bc2e4e942b91b2f"
+source = "git+https://github.com/cloud-hypervisor/micro-http.git?branch=master#f4405cb5afb092e86204c26d589e8c9448721bf0"
 dependencies = [
- "epoll",
+ "libc",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -2139,6 +2140,16 @@ name = "vmm-sys-util"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c40b8c9abb58cec48e0e39dfbe83ff1cfed17d89df28f0fa74f5e88021ae56b"
+dependencies = [
+ "bitflags",
+ "libc",
+]
+
+[[package]]
+name = "vmm-sys-util"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "733537bded03aaa93543f785ae997727b30d1d9f4a03b7861d23290474242e11"
 dependencies = [
  "bitflags",
  "libc",
