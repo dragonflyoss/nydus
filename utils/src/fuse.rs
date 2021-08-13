@@ -56,8 +56,7 @@ impl FuseSession {
     }
 
     pub fn mount(&mut self) -> io::Result<()> {
-        let flags =
-            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME | MsFlags::MS_RDONLY;
+        let flags = MsFlags::MS_NODEV | MsFlags::MS_NOATIME | MsFlags::MS_RDONLY;
 
         let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, flags)?;
         fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| einval!(e))?;
