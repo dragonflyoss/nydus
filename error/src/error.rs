@@ -64,3 +64,22 @@ define_libc_error_macro!(eio, EIO);
 // Add more custom error macro here if necessary
 define_error_macro!(last_error, std::io::Error::last_os_error());
 define_error_macro!(eother, std::io::Error::new(std::io::ErrorKind::Other, ""));
+
+#[cfg(test)]
+mod tests {
+    fn check_size(size: usize) -> std::io::Result<()> {
+        if size > 0x1000 {
+            return Err(einval!());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_evinva() {
+        assert_eq!(
+            check_size(0x2000).unwrap_err().kind(),
+            std::io::Error::from_raw_os_error(libc::EINVAL).kind()
+        );
+    }
+}
