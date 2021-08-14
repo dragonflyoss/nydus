@@ -7,7 +7,7 @@ use std::fmt::Debug;
 
 use backtrace::Backtrace;
 
-/// Display line number, file path and backtrace when an error occurs
+/// Display error messages with line number, file path and optional backtrace.
 pub fn make_error(err: std::io::Error, raw: impl Debug, file: &str, line: u32) -> std::io::Error {
     if cfg!(debug_assertions) {
         if let Ok(val) = env::var("RUST_BACKTRACE") {

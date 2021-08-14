@@ -37,7 +37,8 @@ use daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
-use nydus_utils::{BuildTimeInfo, FuseChannel, FuseSession};
+use nydus_app::BuildTimeInfo;
+use nydus_utils::{FuseChannel, FuseSession};
 
 #[derive(Serialize)]
 struct FuseOp {

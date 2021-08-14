@@ -6,10 +6,6 @@ use std::io::Result;
 use libc::c_char;
 use lz4_sys::{LZ4_compressBound, LZ4_compress_default, LZ4_decompress_safe};
 
-// FIXME: Basically, with `macro_use` declared before crate, we don't have to import
-// those macros.
-use nydus_utils::{einval, eio};
-
 pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
     // 0 iff src too large
     let compress_bound: i32 = unsafe { LZ4_compressBound(src.len() as i32) };

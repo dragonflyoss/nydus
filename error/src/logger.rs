@@ -9,17 +9,17 @@ use std::time::SystemTime;
 use serde::Serialize;
 use serde_json::Error as SerdeError;
 
+/// Error codes for `ErrorHolder`.
 #[derive(Debug)]
 pub enum ErrorHolderError {
     TooLarge(usize),
     Serde(SerdeError),
 }
 
-type Result<T> = std::result::Result<T, ErrorHolderError>;
+/// `Result` specialized for `ErrorHolder`.
+pub type Result<T> = std::result::Result<T, ErrorHolderError>;
 
-// TODO: evolve this into an event holder.
-// Record import or critical events or errors in this Holder so they can be collected.
-/// It's not necessary to make this lock-less now
+/// Struct to record important or critical events or errors in circular buffer mode.
 #[derive(Serialize, Default, Debug)]
 pub struct ErrorHolder {
     max_errors: usize,
@@ -30,7 +30,8 @@ pub struct ErrorHolder {
 }
 
 impl ErrorHolder {
-    pub fn init(max_errors: usize, max_size: usize) -> Self {
+    /// Create a `ErrorHolder` object.
+    pub fn new(max_errors: usize, max_size: usize) -> Self {
         Self {
             max_errors,
             max_size,
@@ -40,6 +41,7 @@ impl ErrorHolder {
         }
     }
 
+    /// Push an error into the circular buffer.
     pub fn push(&mut self, error: &str) -> Result<()> {
         let mut guard = self.errors.lock().unwrap();
         let formatted_error = format!("{} - {}", httpdate::fmt_http_date(SystemTime::now()), error);
@@ -67,6 +69,7 @@ impl ErrorHolder {
         Ok(())
     }
 
+    /// Export all errors in the circular buffer as an `JSON` string.
     pub fn export(&self) -> Result<String> {
         let _guard = self.errors.lock().unwrap();
         serde_json::to_string(self).map_err(ErrorHolderError::Serde)
@@ -79,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_overflow() {
-        let mut holder = ErrorHolder::init(10, 80);
+        let mut holder = ErrorHolder::new(10, 80);
         let error_msg = "123456789";
         let mut left = 16;
         while left >= 0 {

@@ -700,9 +700,9 @@ checksum = "cd179ae861f0c2e53da70d892f5f3029f9594be0c41dc5269cd371691b1dc2f9"
 
 [[package]]
 name = "httpdate"
-version = "0.3.2"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "494b4d60369511e7dea41cf646832512a94e542f68bb9c49e54518e0f468eb47"
+checksum = "6456b8a6c8f33fee7d958fcd1b60d55b11940a79e63ae87013e6d22e26034440"
 
 [[package]]
 name = "humantime"
@@ -1085,6 +1085,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "nydus-app"
+version = "0.1.0"
+dependencies = [
+ "built",
+ "flexi_logger",
+ "libc",
+ "log",
+ "nix",
+ "nydus-error",
+ "serde",
+]
+
+[[package]]
+name = "nydus-error"
+version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "httpdate",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nydus-rs"
 version = "1.0.0"
 dependencies = [
@@ -1102,6 +1126,8 @@ dependencies = [
  "log",
  "nix",
  "nydus-api",
+ "nydus-app",
+ "nydus-error",
  "nydus-utils",
  "openssl",
  "rafs",
@@ -1124,18 +1150,14 @@ dependencies = [
 name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
- "backtrace",
  "blake3",
- "built",
- "chrono",
  "epoll",
- "flexi_logger",
  "fuse-rs",
  "lazy_static",
  "libc",
  "log",
  "nix",
- "num-traits",
+ "nydus-error",
  "serde",
  "serde_json",
  "sha2",
@@ -1354,6 +1376,7 @@ dependencies = [
  "log",
  "lz4-sys",
  "nix",
+ "nydus-error",
  "nydus-utils",
  "serde",
  "serde_json",
@@ -1769,6 +1792,7 @@ dependencies = [
  "log",
  "lz4-sys",
  "nix",
+ "nydus-error",
  "nydus-utils",
  "reqwest",
  "serde",
@@ -1779,7 +1803,7 @@ dependencies = [
  "spmc",
  "url",
  "vm-memory",
- "vmm-sys-util 0.4.0",
+ "vmm-sys-util 0.6.0",
 ]
 
 [[package]]
@@ -2061,7 +2085,7 @@ dependencies = [
 [[package]]
 name = "vhost_user_backend"
 version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/vhost-user-backend.git#78757bfad67c84f83dd383a10b1788a137e5478f"
+source = "git+https://github.com/cloud-hypervisor/vhost-user-backend.git?rev=78757bfa#78757bfad67c84f83dd383a10b1788a137e5478f"
 dependencies = [
  "epoll",
  "libc",

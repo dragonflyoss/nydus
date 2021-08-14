@@ -6,8 +6,6 @@
 extern crate clap;
 #[macro_use]
 extern crate anyhow;
-#[macro_use]
-extern crate nydus_utils;
 
 #[macro_use]
 mod trace;
@@ -51,7 +49,8 @@ use crate::core::node::{self, ChunkCountMap, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
-use nydus_utils::{digest, setup_logging, BuildTimeInfo};
+use nydus_app::{setup_logging, BuildTimeInfo};
+use nydus_utils::digest;
 use rafs::metadata::layout::OndiskBlobTable;
 use rafs::RafsIoReader;
 use storage::compress;

@@ -22,13 +22,13 @@ use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring};
 use vm_memory::GuestMemoryMmap;
 use vmm_sys_util::eventfd::EventFd;
 
-use crate::upgrade::UpgradeManager;
-use nydus_utils::{eother, BuildTimeInfo};
+use nydus_app::BuildTimeInfo;
 
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
+use crate::upgrade::UpgradeManager;
 
 const VIRTIO_F_VERSION_1: u32 = 32;
 const QUEUE_SIZE: usize = 1024;
