@@ -11,6 +11,29 @@
 //! - Logging helpers: [`fn setup_logging()`](fn.set_logging.html) and
 //!   [`fn log_level_to_verbosity()`](fn.log_level_to_verbosity.html).
 //! - Signal handling: [`fn register_signal_handler()`](signal/fn.register_signal_handler.html).
+//!
+//! ```rust,ignore
+//! #[macro_use(crate_authors, crate_version)]
+//! extern crate clap;
+//!
+//! use clap::App;
+//! use nydus_app::{BuildTimeInfo, setup_logging};
+//! # use std::io::Result;
+//!
+//! fn main() -> Result<()> {
+//!     let level = cmd.value_of("log-level").unwrap().parse().unwrap();
+//!     let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
+//!     let _cmd = App::new("")
+//!                 .version(bti_string.as_str())
+//!                 .author(crate_authors!())
+//!                 .get_matches();
+//!
+//!     setup_logging(None, level)?;
+//!     print!("{}", build_info);
+//!
+//!     Ok(())
+//! }
+//! ```
 
 #[macro_use]
 extern crate log;
@@ -40,6 +63,7 @@ pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
+/// Dump program build and version information.
 pub fn dump_program_info(prog_version: &str) {
     info!(
         "Program Version: {}, Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
@@ -51,6 +75,7 @@ pub fn dump_program_info(prog_version: &str) {
     );
 }
 
+/// Application build and version information.
 #[derive(Serialize, Clone)]
 pub struct BuildTimeInfo {
     pub package_ver: String,
@@ -83,6 +108,8 @@ impl BuildTimeInfo {
     }
 }
 
+/// Setup logging infrastructure for application.
+///
 /// `log_file_path` is an absolute path to logging files or relative path from current working
 /// directory to logging file.
 /// Flexi logger always appends a suffix to file name whose default value is ".log"
