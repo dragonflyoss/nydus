@@ -9,7 +9,7 @@ extern crate log;
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
-extern crate nydus_utils;
+extern crate nydus_error;
 
 use std::any::Any;
 use std::fs::File;

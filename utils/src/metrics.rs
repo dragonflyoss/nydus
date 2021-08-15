@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
+use nydus_error::logger::ErrorHolder;
 use serde_json::Error as SerdeError;
 
-use crate::logger::ErrorHolder;
 use crate::InodeBitmap;
 
 pub type Inode = u64;
@@ -78,7 +78,7 @@ lazy_static! {
 
 lazy_static! {
     pub static ref ERROR_HOLDER: Arc<Mutex<ErrorHolder>> =
-        Arc::new(Mutex::new(ErrorHolder::init(500, 50 * 1024)));
+        Arc::new(Mutex::new(ErrorHolder::new(500, 50 * 1024)));
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -735,7 +735,6 @@ mod tests {
 
     #[test]
     fn test_request_size_index() {
-        /// 1K; 4K; 16K; 64K, 128K, 512K, 1M
         assert_eq!(request_size_index(0x0), 0);
         assert_eq!(request_size_index(0x3ff), 0);
         assert_eq!(request_size_index(0x400), 1);

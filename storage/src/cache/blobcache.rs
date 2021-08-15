@@ -33,10 +33,7 @@ use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv, readv};
 use crate::RAFS_DEFAULT_BLOCK_SIZE;
 
-use nydus_utils::{
-    einval, enoent, enosys, last_error,
-    metrics::{BlobcacheMetrics, Metric},
-};
+use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 
 struct BlobCacheState {
     /// Index blob info by blob index, HashMap<blob_index, (blob_file, blob_size, Arc<ChunkMap>)>.

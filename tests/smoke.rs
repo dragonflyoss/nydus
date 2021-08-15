@@ -4,14 +4,14 @@
 #[macro_use]
 extern crate log;
 
-mod builder;
-mod nydusd;
-
 use std::path::Path;
 
+use nydus_app::setup_logging;
+use nydus_utils::exec;
 use vmm_sys_util::tempdir::TempDir;
 
-use nydus_utils::{exec, setup_logging};
+mod builder;
+mod nydusd;
 
 const COMPAT_BOOTSTRAPS: [&str; 2] = [
     "blake3-lz4_block-non_repeatable",

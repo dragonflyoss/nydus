@@ -31,11 +31,12 @@ sha-1 = { version = "0.9.1", optional = true }
 hmac = { version = "0.8.1", optional = true }
 url = { version = "2.1.1", optional = true }
 vm-memory = ">=0.2.0"
-nydus-utils = { path = "../utils" }
-storage = { path = "../storage", features = ["backend-localfs"] }
 
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "cfd2cca" }
 
+nydus-utils = { path = "../utils" }
+nydus-error = { path = "../error" }
+storage = { path = "../storage", features = ["backend-localfs"] }
 
 [dev-dependencies]
 vmm-sys-util = "0.6.0"

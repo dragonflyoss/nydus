@@ -5,6 +5,7 @@
 
 use nix::sys::signal;
 
+/// Register signal handler for a signal.
 pub fn register_signal_handler(sig: signal::Signal, handler: extern "C" fn(libc::c_int)) {
     let sa = signal::SigAction::new(
         signal::SigHandler::Handler(handler),

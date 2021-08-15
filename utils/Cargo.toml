@@ -1,30 +1,27 @@
 [package]
 name = "nydus-utils"
 version = "0.1.0"
+description = "Utilities for Nydus and Rafs"
 authors = ["The Nydus Developers"]
+repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
-build = "build.rs"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-[build-dependencies]
-built = { version = "=0.4.3", features = ["git2"] }
-httpdate = "1.0"
 
 [dependencies]
 log = "0.4.8"
-flexi_logger = { version = "0.17" }
-lazy_static = "1.4.0"
+lazy_static = "1.4"
 libc = "0.2"
-nix = "0.17"
-sha2 = { version = "0.9.1" }
+sha2 = "0.9.1"
 blake3 = "0.3.6"
-epoll = ">=4.0.1"
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"
-backtrace = "0.3"
-httpdate = "1.0"
-vmm-sys-util = "0.6.0"
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca" }
+
+# used by fuse.rs, should be moved into fuse-backend-rs
+nix = "0.17"
+epoll = "4.0"
+vmm-sys-util = "0.6"
+
+nydus-error = { path = "../error" }
 
 [features]
 fusedev = ["fuse-rs/fusedev"]

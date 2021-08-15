@@ -13,7 +13,7 @@ extern crate rafs;
 extern crate serde_json;
 
 #[macro_use]
-extern crate nydus_utils;
+extern crate nydus_error;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
@@ -38,7 +38,7 @@ use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use vmm_sys_util::eventfd::EventFd;
 
 use nydus_api::http::start_http_thread;
-use nydus_utils::{dump_program_info, setup_logging, BuildTimeInfo};
+use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 mod daemon;
 use daemon::{DaemonError, FsBackendMountCmd, FsBackendType, NydusDaemonSubscriber};
@@ -426,8 +426,8 @@ fn main() -> Result<()> {
     }
 
     *EXIT_EVTFD.lock().unwrap().deref_mut() = Some(exit_evtfd);
-    nydus_utils::signal::register_signal_handler(signal::SIGINT, sig_exit);
-    nydus_utils::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
+    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
 
     while EVENT_MANAGER_RUN.load(Ordering::Relaxed) {
         // If event manager dies, so does nydusd

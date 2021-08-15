@@ -14,7 +14,7 @@ use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageResult};
 
-use nydus_utils::{digest, eother};
+use nydus_utils::digest;
 
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,

@@ -17,7 +17,6 @@ log = "0.4.8"
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"
 serde_with = { version = "1.6.0", features = ["macros"] }
-nydus-utils = { path = "../utils" }
 futures = "0.3"
 flate2 = { version = "1.0", features = ["miniz-sys"], default-features = false }
 lz4-sys = "1.9.2"
@@ -28,12 +27,14 @@ sha2 = { version = "0.9.1", optional = true }
 sha-1 = { version = "0.9.1", optional = true }
 hmac = { version = "0.8.1", optional = true }
 url = { version = "2.1.1", optional = true }
-httpdate = { version = "0.3.2", optional = true }
+httpdate = { version = "1.0", optional = true }
 reqwest = { version = "0.10.4", features = ["blocking", "json"], optional = true }
 
 
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "cfd2cca" }
 
+nydus-utils = { path = "../utils" }
+nydus-error = { path = "../error" }
 
 [dev-dependencies]
 vmm-sys-util = ">=0.3.1"

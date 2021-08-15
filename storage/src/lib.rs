@@ -9,7 +9,7 @@ extern crate serde;
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
-extern crate nydus_utils;
+extern crate nydus_error;
 
 pub mod backend;
 pub mod cache;
