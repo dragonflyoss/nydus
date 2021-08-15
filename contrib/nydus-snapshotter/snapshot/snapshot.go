@@ -73,6 +73,10 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	}
 
 	cfg.DaemonMode = strings.ToLower(cfg.DaemonMode)
+	if cfg.DaemonMode == config.DaemonModePrefetch && !cfg.DaemonCfg.FSPrefetch.Enable {
+		log.G(ctx).Warnf("Daemon mode is %s but fs_prefetch is not enabled, change to %s mode", cfg.DaemonMode, config.DaemonModeNone)
+		cfg.DaemonMode = config.DaemonModeNone
+	}
 
 	db, err := store.NewDatabase(cfg.RootDir)
 	if err != nil {
@@ -96,7 +100,9 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to new cache manager")
 	}
 
-	hasDaemon := cfg.DaemonMode != config.DaemonModeNone
+	// Prefetch mode counts as no daemon, as daemon is only for prefetch,
+	// container rootfs doesn't need daemon
+	hasDaemon := cfg.DaemonMode != config.DaemonModeNone && cfg.DaemonMode != config.DaemonModePrefetch
 
 	nydusFs, err := nydus.NewFileSystem(
 		ctx,
@@ -179,6 +185,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		asyncRemove: cfg.AsyncRemove,
 		fs:          nydusFs,
 		stargzFs:    stargzFs,
+		manager:     pm,
 		hasDaemon:   hasDaemon,
 	}, nil
 }
@@ -292,7 +299,18 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		logCtx.Infof("prepare for container layer %s", key)
 		if id, info, err := o.findNydusMetaLayer(ctx, key); err == nil {
 			logCtx.Infof("found nydus meta layer id %s, parpare remote snapshot", id)
-			if err := o.prepareRemoteSnapshot(ctx, id, info.Labels); err != nil {
+			if o.manager.IsPrefetchDaemon() {
+				// Prepare prefetch mount in background, so we could return Mounts
+				// info to containerd as soon as possible.
+				go func() {
+					logCtx.Infof("Prepare prefetch daemon for id %s", id)
+					err := o.prepareRemoteSnapshot(ctx, id, info.Labels)
+					// failure of prefetch mount is not fatal, just print a warning
+					if err != nil {
+						logCtx.WithError(err).Warnf("Prepare prefetch mount failed for id %s", id)
+					}
+				}()
+			} else if err := o.prepareRemoteSnapshot(ctx, id, info.Labels); err != nil {
 				return nil, err
 			}
 			return o.remoteMounts(ctx, s, id, info.Labels)
