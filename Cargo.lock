@@ -1100,13 +1100,42 @@ dependencies = [
  "libc",
  "log",
  "nix",
- "nydus-error",
+ "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde",
+]
+
+[[package]]
+name = "nydus-app"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91166e11340319bb872baba7546649218eb2454db54cb9c1b9f9ec922c66e390"
+dependencies = [
+ "built",
+ "flexi_logger",
+ "libc",
+ "log",
+ "nix",
+ "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
 [[package]]
 name = "nydus-error"
 version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "httpdate",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nydus-error"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c75f391a670e94e64594ff3e58178eb2be60ba0abd5e5b1b1e93a6ab2d9a844"
 dependencies = [
  "backtrace",
  "httpdate",
@@ -1134,8 +1163,8 @@ dependencies = [
  "log",
  "nix",
  "nydus-api",
- "nydus-app",
- "nydus-error",
+ "nydus-app 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "openssl",
  "rafs",
@@ -1165,7 +1194,7 @@ dependencies = [
  "libc",
  "log",
  "nix",
- "nydus-error",
+ "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sha2",
@@ -1390,7 +1419,7 @@ dependencies = [
  "log",
  "lz4-sys",
  "nix",
- "nydus-error",
+ "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "serde",
  "serde_json",
@@ -1806,7 +1835,7 @@ dependencies = [
  "log",
  "lz4-sys",
  "nix",
- "nydus-error",
+ "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "reqwest",
  "serde",

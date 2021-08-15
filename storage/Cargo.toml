@@ -34,7 +34,7 @@ reqwest = { version = "0.10.4", features = ["blocking", "json"], optional = true
 fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "cfd2cca" }
 
 nydus-utils = { path = "../utils" }
-nydus-error = { path = "../error" }
+nydus-error = "0.1"
 
 [dev-dependencies]
 vmm-sys-util = ">=0.3.1"
