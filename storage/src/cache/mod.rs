@@ -69,7 +69,7 @@ pub trait RafsCache {
     // TODO: Cache is indexed by each chunk's block id. When this read request can't
     // hit local cache and it spans two chunks, group more than one requests to backend
     // storage could benefit the performance.
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize>;
+    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: usize) -> Result<usize>;
 
     /// Write a chunk data through cache
     fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize>;
