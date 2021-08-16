@@ -193,6 +193,19 @@ impl DataBuffer {
 }
 
 impl BlobCache {
+    #[inline]
+    fn might_reuse_user_buffer(
+        &self,
+        read_offset: usize,
+        chunk_decompressed_size: usize,
+        user_bufs: &[VolatileSlice],
+    ) -> bool {
+        !self.is_compressed
+            && read_offset == 0
+            && user_bufs.len() == 1
+            && user_bufs[0].len() >= chunk_decompressed_size
+    }
+
     fn entry_read(
         &self,
         blob: &RafsBlobEntry,
@@ -229,19 +242,16 @@ impl BlobCache {
         }
 
         let d_size = chunk.decompress_size() as usize;
-        // one_chunk_buf is the decompressed data buffer
-        let mut d =
-            if !self.is_compressed && bufs.len() == 1 && bufs[0].len() >= d_size && offset == 0 {
-                // Optimize for the case where the first VolatileSlice covers the whole chunk.
-                // Reuse the destination data buffer.
-                reuse = true;
-                let m = ManuallyDrop::new(unsafe {
-                    Vec::from_raw_parts(bufs[0].as_ptr(), d_size, d_size)
-                });
-                DataBuffer::Reuse(m)
-            } else {
-                DataBuffer::Allocated(alloc_buf(d_size))
-            };
+        let mut d = if self.might_reuse_user_buffer(offset, d_size, bufs) {
+            // Optimize the case where the first VolatileSlice covers the whole chunk.
+            // Reuse the destination data buffer.
+            reuse = true;
+            let m =
+                ManuallyDrop::new(unsafe { Vec::from_raw_parts(bufs[0].as_ptr(), d_size, d_size) });
+            DataBuffer::Reuse(m)
+        } else {
+            DataBuffer::Allocated(alloc_buf(d_size))
+        };
 
         // Try to recover cache from blobcache first
         // For gzip, we can only trust ready blobcache because we cannot validate chunks due to
