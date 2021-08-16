@@ -108,7 +108,7 @@ pub fn copyv(
 }
 
 pub struct MemSliceCursor<'a> {
-    mem_slice: &'a [VolatileSlice<'a>],
+    pub mem_slice: &'a [VolatileSlice<'a>],
     pub index: usize,
     pub offset: usize,
 }
@@ -151,6 +151,7 @@ impl<'a, 'b> MemSliceCursor<'b> {
     }
 
     pub fn consume(&mut self, mut size: usize) -> Vec<IoVec<&mut [u8]>> {
+        // FIXME: What if `size` is 0?
         let mut vectors: Vec<IoVec<&mut [u8]>> = Vec::new();
         loop {
             let slice = self.mem_slice[self.index];
@@ -176,6 +177,10 @@ impl<'a, 'b> MemSliceCursor<'b> {
             }
         }
         vectors
+    }
+
+    pub fn inner_slice(&self) -> &[VolatileSlice] {
+        self.mem_slice
     }
 }
 

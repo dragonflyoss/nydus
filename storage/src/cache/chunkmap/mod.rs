@@ -123,7 +123,14 @@ where
                             let mut t = self.inflight_tracer.lock().unwrap();
                             t.remove(&index);
                             i.notify();
-                            warn!("Waiting for another backend IO expires. chunk index {}, tracer scale {}", index, t.len());
+                            warn!(
+                                "Waiting for another backend IO expires. chunk index {}, \
+                            compressed offset {}, tracer scale {}",
+                                index,
+                                chunk.compress_offset(),
+                                t.len()
+                            );
+                            // TODO: Take argument `true` or `false` is strange since it is not used.
                             self.c.has_ready(chunk, false)
                         }
                         _ => self.c.has_ready(chunk, false),

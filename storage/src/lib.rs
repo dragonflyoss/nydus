@@ -38,6 +38,7 @@ pub enum StorageError {
     Timeout,
     VolatileSlice(vm_memory::VolatileMemoryError),
     MemOverflow,
+    NotContinuous,
 }
 
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
