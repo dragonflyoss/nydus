@@ -15,7 +15,7 @@ use nix::sys::uio;
 use vm_memory::VolatileSlice;
 
 use crate::backend::{BackendError, BackendResult, BlobBackend};
-use crate::utils::{readahead, readv};
+use crate::utils::{readahead, readv, MemSliceCursor};
 
 use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
 
@@ -520,7 +520,9 @@ impl BlobBackend for LocalFs {
         max_size: usize,
     ) -> BackendResult<usize> {
         let fd = self.get_blob_fd(blob_id, offset, max_size)?;
-        Ok(readv(fd, bufs, offset, max_size).map_err(LocalFsError::ReadVecBlob)?)
+        let mut c = MemSliceCursor::new(bufs);
+        let iovec = c.consume(max_size);
+        Ok(readv(fd, &iovec, offset).map_err(LocalFsError::ReadVecBlob)?)
     }
 
     fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
