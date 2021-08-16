@@ -35,7 +35,7 @@ impl RafsCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: usize) -> Result<usize> {
         let chunk = &bio.chunkinfo;
         let mut reuse = false;
 
@@ -56,7 +56,9 @@ impl RafsCache for DummyCache {
         if reuse {
             Ok(one_chunk_buf.len())
         } else {
-            copyv(one_chunk_buf, bufs, offset, bio.size)
+            copyv(&[one_chunk_buf], bufs, offset, bio.size, 0, 0)
+                .map(|r| r.0)
+                .map_err(|e| eother!(e))
         }
     }
 

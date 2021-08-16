@@ -245,7 +245,7 @@ impl BlobCache {
         blob: &RafsBlobEntry,
         chunk: &Arc<dyn RafsChunkInfo>,
         bufs: &[VolatileSlice],
-        offset: u64,
+        offset: usize,
         size: usize,
     ) -> Result<(usize, bool)> {
         let cache_guard = self.cache.read().unwrap();
@@ -271,7 +271,7 @@ impl BlobCache {
             );
             self.metrics.partial_hits.inc();
             let read_size =
-                self.read_partial_chunk(fd, bufs, offset + chunk.decompress_offset(), size)?;
+                self.read_partial_chunk(fd, bufs, offset as u64 + chunk.decompress_offset(), size)?;
             return Ok((read_size, has_ready));
         }
 
@@ -355,10 +355,12 @@ impl BlobCache {
         if reuse {
             Ok((owned_buffer.slice().len(), has_ready))
         } else {
-            let read_size = copyv(owned_buffer.slice(), bufs, offset, size).map_err(|e| {
-                error!("failed to copy from chunk buf to buf: {:?}", e);
-                e
-            })?;
+            let read_size = copyv(&[owned_buffer.slice()], bufs, offset, size, 0, 0)
+                .map(|r| r.0)
+                .map_err(|e| {
+                    error!("failed to copy from chunk buf to buf: {:?}", e);
+                    eother!(e)
+                })?;
             Ok((read_size, has_ready))
         }
     }
@@ -756,7 +758,8 @@ impl RafsCache for BlobCache {
         self.backend.as_ref()
     }
 
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+    /// `offset` indicates the start position within a chunk to start copy. So `usize` type is suitable.
+    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: usize) -> Result<usize> {
         self.metrics.total.inc();
 
         // Try to get rid of effect from prefetch.

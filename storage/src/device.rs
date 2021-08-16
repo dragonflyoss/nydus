@@ -179,7 +179,10 @@ impl FileReadWriteVolatile for RafsBioDevice<'_> {
             return self.fill_hole(bufs);
         }
 
-        self.dev.rw_layer.load().read(&self.bio, bufs, offset)
+        self.dev
+            .rw_layer
+            .load()
+            .read(&self.bio, bufs, offset as usize)
     }
 
     fn write_at_volatile(&mut self, slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
