@@ -206,6 +206,40 @@ impl BlobCache {
             && user_bufs[0].len() >= chunk_decompressed_size
     }
 
+    fn delay_persist(
+        &self,
+        fd: RawFd,
+        chunk_map: &Arc<dyn ChunkMap + Send + Sync>,
+        chunk_info: &Arc<dyn RafsChunkInfo>,
+        buffer: Arc<DataBuffer>,
+    ) {
+        let delayed_chunk = chunk_info.clone();
+        let delayed_chunk_map = chunk_map.clone();
+        let compressed = self.is_compressed;
+        self.runtime.spawn(async move {
+            match Self::persist_chunk(compressed, fd, delayed_chunk.as_ref(), buffer.slice()) {
+                Err(e) => {
+                    error!(
+                        "Persist chunk of offset {} failed, {:?}",
+                        delayed_chunk.compress_offset(),
+                        e
+                    );
+                    delayed_chunk_map.finish(delayed_chunk.as_ref())
+                }
+                Ok(_) => delayed_chunk_map
+                    .as_ref()
+                    .set_ready(delayed_chunk.as_ref())
+                    .unwrap_or_else(|e| {
+                        error!(
+                            "Failed change caching state for chunk of offset {}, {:?}",
+                            delayed_chunk.compress_offset(),
+                            e
+                        )
+                    }),
+            }
+        });
+    }
+
     fn entry_read(
         &self,
         blob: &RafsBlobEntry,
@@ -242,7 +276,7 @@ impl BlobCache {
         }
 
         let d_size = chunk.decompress_size() as usize;
-        let mut d = if self.might_reuse_user_buffer(offset, d_size, bufs) {
+        let mut d = if self.might_reuse_user_buffer(offset as usize, d_size, bufs) {
             // Optimize the case where the first VolatileSlice covers the whole chunk.
             // Reuse the destination data buffer.
             reuse = true;
@@ -288,36 +322,7 @@ impl BlobCache {
                 d = d.try_to_own();
                 buffer_holder = Arc::new(d);
                 let delayed_buffer = buffer_holder.clone();
-                let delayed_chunk = chunk.clone();
-                let delayed_chunk_map = chunk_map.clone();
-                let compressed = self.is_compressed;
-                self.runtime.spawn(async move {
-                    match Self::persist_chunk(
-                        compressed,
-                        fd,
-                        delayed_chunk.as_ref(),
-                        delayed_buffer.slice(),
-                    ) {
-                        Err(e) => {
-                            error!(
-                                "Persist chunk of offset {} failed, {:?}",
-                                delayed_chunk.compress_offset(),
-                                e
-                            );
-                            delayed_chunk_map.finish(delayed_chunk.as_ref())
-                        }
-                        Ok(_) => delayed_chunk_map
-                            .as_ref()
-                            .set_ready(delayed_chunk.as_ref())
-                            .unwrap_or_else(|e| {
-                                error!(
-                                    "Failed change caching state for chunk of offset {}, {:?}",
-                                    delayed_chunk.compress_offset(),
-                                    e
-                                )
-                            }),
-                    }
-                });
+                self.delay_persist(fd, &chunk_map, chunk, delayed_buffer);
                 Ok(buffer_holder.as_ref())
             }
             .map_err(|e: std::io::Error|
