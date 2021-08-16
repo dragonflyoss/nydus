@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
@@ -37,11 +36,11 @@ use crate::cache::*;
 use crate::device::{BlobPrefetchControl, RafsBio, RafsBlobEntry};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::RAFS_DEFAULT_BLOCK_SIZE;
+use crate::{StorageError, RAFS_DEFAULT_BLOCK_SIZE};
 
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 
-pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
+pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 8000;
 
 struct BlobCacheState {
     /// Index blob info by blob index, HashMap<blob_index, (blob_file, blob_size, Arc<ChunkMap>)>.
@@ -164,6 +163,7 @@ pub struct BlobCache {
     runtime: Arc<Runtime>,
 }
 
+#[allow(dead_code)]
 enum DataBuffer {
     Reuse(ManuallyDrop<Vec<u8>>),
     Allocated(Vec<u8>),
@@ -193,6 +193,7 @@ impl DataBuffer {
     }
 }
 
+#[allow(dead_code)]
 #[derive(PartialEq, Debug)]
 enum RequestRegionStatus {
     Init,
@@ -200,26 +201,49 @@ enum RequestRegionStatus {
     Committed,
 }
 
+#[derive(PartialEq, Copy, Clone)]
+enum RegionType {
+    Init,
+    CachePartialChunks,
+    CacheWholeChunks,
+    Backend,
+}
+
+impl RegionType {
+    fn joinable(previous: Self, current: Self) -> bool {
+        current == previous
+    }
+}
+
+/// A continuous region in cache file or backend storage/blob.
 struct RequestRegion {
+    region_type: RegionType,
     status: RequestRegionStatus,
     pub start: u64,
     pub continuous_len: usize,
     pub concatenated: usize,
     pub seg_offset: u32,
-    pub total_seg_len: usize,
+    pub total_seg_len: u32,
     pub cki_set: Vec<Arc<dyn RafsChunkInfo>>,
+    pub cki_tags: Vec<bool>,
+    user_appended: bool,
+    blob_entry: Arc<RafsBlobEntry>,
 }
 
 impl RequestRegion {
-    fn new() -> Self {
+    fn new(region_type: RegionType, blob_entry: Arc<RafsBlobEntry>) -> Self {
         RequestRegion {
+            region_type,
             start: 0,
             continuous_len: 0,
             status: RequestRegionStatus::Init,
             cki_set: Vec::new(),
+            cki_tags: Vec::new(),
             concatenated: 0,
             seg_offset: 0,
             total_seg_len: 0,
+            user_appended: false,
+            blob_entry,
         }
     }
 
@@ -227,39 +251,60 @@ impl RequestRegion {
         &mut self,
         start: u64,
         len: usize,
-        seg_offset: u32,
-        seg_len: u32,
+        segment: IoInitiator,
         cki: Option<Arc<dyn RafsChunkInfo>>,
     ) -> StorageResult<()> {
         use RequestRegionStatus::*;
+
+        if self.status == Open && self.start + self.continuous_len as u64 != start {
+            // FIXME: Rollback segment part
+            return Err(StorageError::NotContinuous);
+        }
+
+        if !self.user_appended {
+            if let IoInitiator::User(ref s) = segment {
+                self.seg_offset = s.seg_offset;
+                self.total_seg_len = s.seg_len;
+                self.user_appended = true;
+            }
+        } else if let IoInitiator::User(ref s) = segment {
+            self.total_seg_len += s.seg_len;
+        }
+
         if self.status == Init {
             self.status = Open;
             self.start = start;
             self.continuous_len = len;
             self.concatenated = 1;
-            self.seg_offset = seg_offset;
-            self.total_seg_len = seg_len as usize;
+
             if let Some(c) = cki {
                 self.cki_set.push(c);
+                if let IoInitiator::User(_) = segment {
+                    self.cki_tags.push(true);
+                } else {
+                    self.cki_tags.push(false);
+                }
             }
             return Ok(());
-        }
-
-        if self.status == Open && self.start + self.continuous_len as u64 != start {
-            return Err(StorageError::NotContinuous);
         }
 
         assert_eq!(self.status, Open);
         self.continuous_len += len;
         self.concatenated += 1;
-        self.total_seg_len += seg_len as usize;
+
         if let Some(c) = cki {
             self.cki_set.push(c);
+            if let IoInitiator::User(_) = segment {
+                self.cki_tags.push(true);
+            } else {
+                self.cki_tags.push(false);
+            }
         }
 
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn commit(&mut self, reader: &mut dyn FnMut(&Self) -> Result<usize>) -> Result<usize> {
         self.status = RequestRegionStatus::Committed;
         if self.is_empty() {
@@ -274,19 +319,6 @@ impl RequestRegion {
 }
 
 impl BlobCache {
-    #[inline]
-    fn might_reuse_user_buffer(
-        &self,
-        read_offset: usize,
-        chunk_decompressed_size: usize,
-        user_bufs: &[VolatileSlice],
-    ) -> bool {
-        !self.is_compressed
-            && read_offset == 0
-            && user_bufs.len() == 1
-            && user_bufs[0].len() >= chunk_decompressed_size
-    }
-
     fn delay_persist(
         &self,
         fd: RawFd,
@@ -321,65 +353,157 @@ impl BlobCache {
         });
     }
 
-    fn entry_read(
+    fn dispatch_region_cache(
         &self,
-        blob: &RafsBlobEntry,
-        chunk: &Arc<dyn RafsChunkInfo>,
-        bufs: &[VolatileSlice],
-        offset: usize,
-        size: usize,
-    ) -> Result<(usize, bool)> {
-        let cursor = RefCell::new(MemSliceCursor::new(bufs));
+        fd: RawFd,
+        cursor: &mut MemSliceCursor,
+        region: &RequestRegion,
+    ) -> Result<usize> {
+        self.metrics.partial_hits.inc();
+        let read_size = self.read_partial_chunk(
+            fd,
+            cursor,
+            region.start + region.seg_offset as u64,
+            region.total_seg_len as usize,
+        )?;
+        Ok(read_size)
+    }
 
-        let cache_guard = self.cache.read().unwrap();
-        let (fd, _, chunk_map) = match cache_guard.get(blob) {
-            Some(entry) => {
-                drop(cache_guard);
-                entry
-            }
-            None => {
-                drop(cache_guard);
-                self.cache.write().unwrap().set(blob)?
-            }
-        };
-        let has_ready = chunk_map.has_ready(chunk.as_ref(), true)?;
-        let mut reuse = false;
+    fn dispatch_region_cache_slow(
+        &self,
+        cursor: &mut MemSliceCursor,
+        region: &RequestRegion,
+    ) -> Result<usize> {
+        let continuous_chunks = &region.cki_set;
+        let blob_entry = &region.blob_entry;
+        let mut total_read = 0;
 
-        // Hit cache if cache ready
-        if !self.is_compressed && !self.need_validate() && has_ready {
-            trace!(
-                "hit blob cache {} {}",
-                chunk.block_id().to_string(),
-                chunk.compress_size()
+        for (i, c) in continuous_chunks.iter().enumerate() {
+            let user_offset = if i == 0 { region.seg_offset } else { 0 };
+            let size = std::cmp::min(
+                c.decompress_size() - user_offset,
+                region.total_seg_len - total_read as u32,
             );
-            self.metrics.partial_hits.inc();
-            let read_size = self.read_partial_chunk(
-                fd,
-                &mut *(cursor.borrow_mut()),
-                offset as u64 + chunk.decompress_offset(),
-                size,
-            )?;
-            return Ok((read_size, has_ready));
+            total_read += self.read_single_chunk(c, blob_entry, user_offset, size, cursor)?;
         }
 
-        let d_size = chunk.decompress_size() as usize;
-        let mut d = if self.might_reuse_user_buffer(offset, d_size, bufs) {
-            // Optimize the case where the first VolatileSlice covers the whole chunk.
-            // Reuse the destination data buffer.
-            reuse = true;
-            let m =
-                ManuallyDrop::new(unsafe { Vec::from_raw_parts(bufs[0].as_ptr(), d_size, d_size) });
-            DataBuffer::Reuse(m)
-        } else {
-            DataBuffer::Allocated(alloc_buf(d_size))
-        };
+        Ok(total_read)
+    }
 
+    fn dispatch_region_backend(
+        &self,
+        mem_cursor: &mut MemSliceCursor,
+        region: &RequestRegion,
+    ) -> Result<usize> {
+        if region.is_empty() {
+            warn!("No user data");
+            // FIXME: Must be write lock?
+            let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
+            if let Ok((_, _, chunk_map)) = cache_guard
+                .set(&region.blob_entry)
+                .map_err(|_| error!("Set cache index error!"))
+            {
+                for c in &region.cki_set {
+                    chunk_map.finish(c.as_ref());
+                }
+            }
+
+            return Ok(0);
+        }
+        let mut buffer_holder: Vec<Vec<u8>> = Vec::new();
+        let mut total_read = 0;
+
+        let blob_offset = region.start;
+        let blob_id = &region.blob_entry.blob_id;
+        let blob_size = region.continuous_len;
+        let continuous_chunks = &region.cki_set;
+        let chunk_tags = &region.cki_tags;
+        let blob_entry = &region.blob_entry;
+
+        if !continuous_chunks.is_empty() {
+            let mut chunks =
+                self.read_chunks(blob_id, blob_offset, blob_size as usize, &continuous_chunks)?;
+            assert_eq!(continuous_chunks.len(), chunks.len());
+            debug!("total backend io size {}", blob_size);
+            // TODO: The locking granularity below is a little big. We
+            // don't have to hold blobcache mutex when writing files.
+            // But prefetch io is usually limited. So it is low priority.
+            let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
+            let mut needed = vec![];
+            if let Ok((fd, _, chunk_map)) = cache_guard
+                .set(blob_entry)
+                .map_err(|_| error!("Set cache index error!"))
+            {
+                for (i, c) in continuous_chunks.iter().enumerate() {
+                    // FIXME: What if ready after backend IO completion?
+                    // FIXME: Share the memory buffer rather than copying it.
+                    self.delay_persist(
+                        fd,
+                        &chunk_map,
+                        c,
+                        Arc::new(DataBuffer::Allocated(chunks[i].clone())),
+                    );
+
+                    if chunk_tags[i] {
+                        needed.push(i);
+                    }
+                }
+
+                needed.reverse();
+                for n in needed {
+                    buffer_holder.push(chunks.remove(n));
+                }
+                buffer_holder.reverse();
+            }
+
+            let chunk_buffers: Vec<&[u8]> = buffer_holder.iter().map(|b| b.as_slice()).collect();
+
+            total_read = copyv(
+                &chunk_buffers,
+                mem_cursor.mem_slice,
+                region.seg_offset as usize,
+                region.total_seg_len as usize,
+                mem_cursor.index,
+                mem_cursor.offset,
+            )
+            .map(|(n, _)| n)
+            .map_err(|e| {
+                error!("failed to copy from chunk buf to buf: {:?}", e);
+                eio!(e)
+            })?;
+            mem_cursor.move_cursor(total_read);
+        }
+
+        Ok(total_read)
+    }
+
+    // TODO: explain why no reused buffer anymore.
+    fn read_single_chunk(
+        &self,
+        chunk: &Arc<dyn RafsChunkInfo>,
+        blob: &RafsBlobEntry,
+        user_offset: u32,
+        size: u32,
+        mem_cursor: &mut MemSliceCursor,
+    ) -> Result<usize> {
         // Try to recover cache from blobcache first
         // For gzip, we can only trust ready blobcache because we cannot validate chunks due to
         // stargz format limitations (missing chunk level digest)
         // With shared chunk bitmap applied, we don't have to try to recover blobcache
         // as principle is that chunk bitmap is trusted. The chunk must not be downloaded before.
+
+        let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
+        let (fd, _, ref chunk_map) = cache_guard.set(blob)?;
+
+        let ck = chunk.as_ref();
+        let bufs = mem_cursor.inner_slice();
+
+        let has_ready = chunk_map.has_ready(ck, false)?;
         let buffer_holder;
+
+        let d_size = chunk.decompress_size() as usize;
+        let mut d = DataBuffer::Allocated(alloc_buf(d_size));
+
         let owned_buffer = if (self.compressor() != compress::Algorithm::GZip
             && !blob.with_extended_blob_table()
             || has_ready)
@@ -395,11 +519,10 @@ impl BlobCache {
             self.metrics.whole_hits.inc();
             chunk_map.set_ready(chunk.as_ref())?;
             trace!(
-                "recover blob cache {} {} reuse {} offset {} size {}",
+                "recover blob cache {} {} offset {} size {}",
                 chunk.block_id(),
                 d_size,
-                reuse,
-                offset,
+                user_offset,
                 size,
             );
             &d
@@ -421,6 +544,9 @@ impl BlobCache {
                                     0
                                 },
                             );
+                            chunk_map
+                                .set_ready(chunk.as_ref())
+                                .unwrap_or_else(|e| error!("set ready failed, {}", e));
                         }
                     }),
                 )?;
@@ -439,18 +565,200 @@ impl BlobCache {
                 {chunk_map.finish(chunk.as_ref());e})?
         };
 
-        if reuse {
-            Ok((owned_buffer.slice().len(), has_ready))
-        } else {
-            let read_size = copyv(&[owned_buffer.slice()], bufs, offset, size, 0, 0)
-                .map(|r| r.0)
-                .map_err(|e| {
-                    error!("failed to copy from chunk buf to buf: {:?}", e);
-                    eother!(e)
-                })?;
+        let read_size = copyv(
+            &[owned_buffer.slice()],
+            bufs,
+            user_offset as usize,
+            size as usize,
+            mem_cursor.index,
+            mem_cursor.offset,
+        )
+        .map(|r| r.0)
+        .map_err(|e| {
+            error!("failed to copy from chunk buf to buf: {:?}", e);
+            eother!(e)
+        })?;
 
-            Ok((read_size, has_ready))
+        mem_cursor.move_cursor(read_size);
+        Ok(read_size)
+    }
+
+    fn read_iter(&self, bios: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize> {
+        let mut cursor = MemSliceCursor::new(bufs);
+        let sorted_bios = bios;
+
+        let cache_guard = self.cache.read().unwrap();
+        let (fd, _, chunk_map) = match cache_guard.get(blob) {
+            Some(entry) => {
+                drop(cache_guard);
+                entry
+            }
+            None => {
+                drop(cache_guard);
+                self.cache.write().unwrap().set(blob)?
+            }
+        };
+
+        let mut region: Option<RequestRegion> = None;
+        let mut regions: Vec<RequestRegion> = Vec::new();
+        let mut region_type: RegionType;
+        let mut previous_region_type = RegionType::Init;
+
+        // Bios list might cover multiple layers of blobs, so split them into
+        // several merged requests. But a single request may read blobcache and
+        // backend at the same time. Some let `RequestRegion` to manage each batched
+        // request.
+        let merged_requests = self
+            .generate_merged_requests_for_user(sorted_bios, RAFS_DEFAULT_BLOCK_SIZE as usize * 2)
+            .ok_or_else(|| einval!("Empty bios list"))?;
+
+        let mut total_read: usize = 0;
+
+        // Chunks are concatenated.
+        for req in merged_requests {
+            for (i, chunk) in req.chunks.iter().enumerate() {
+                let has_ready = chunk_map.has_ready(chunk.as_ref(), true)?;
+                // Hit cache if cache ready
+                // Bios that can directly read from blobcache, no need to validate data integrity.
+                // Move them to a merged request.
+                if !self.is_compressed && !self.need_validate() && has_ready {
+                    // Don't handle internal IO for this region type, skip this chunk.
+                    // This should always happens at tailing chunks of the bio list.
+                    region_type = RegionType::CachePartialChunks;
+                    if let IoInitiator::User(ref s) = req.chunk_tags[i] {
+                        if !RegionType::joinable(previous_region_type, region_type) {
+                            // Region type changes, gather currently OPEN region and make up a new one.
+                            if let Some(r) = region {
+                                regions.push(r);
+                            }
+                            region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
+                        }
+                        // Encounter the same type of item, just enlarge this region.
+                        // A sanity check, rafs layer should always passes continuous region.
+                        if i != 0 {
+                            let prior_cki = &req.chunks[i - 1];
+                            assert!(
+                                chunk.decompress_offset()
+                                    == prior_cki.decompress_offset()
+                                        + prior_cki.decompress_size() as u64
+                            )
+                        }
+                        region
+                            .as_mut()
+                            .unwrap()
+                            .append(
+                                chunk.decompress_offset(),
+                                chunk.decompress_size() as usize,
+                                IoInitiator::User(s.clone()),
+                                None,
+                            )
+                            .unwrap();
+                    }
+                    previous_region_type = region_type;
+                } else if (self.compressor() != compress::Algorithm::GZip
+                    && !blob.with_extended_blob_table()
+                    && !has_ready)
+                    || (self.compressor() == compress::Algorithm::GZip && has_ready)
+                {
+                    // NOTE: Handle this branch very carefully since it has also to
+                    // take care of the case that blobcache has no chunk bitmap.
+                    // Gzip compressed format -> Has no knowledge to validate data, only hit cache here.
+                    // Other format including compressed and uncompressed
+
+                    if blob.with_extended_blob_table() && !self.need_validate() {
+                        warn!("Should not go into slow path");
+                    }
+
+                    region_type = RegionType::CacheWholeChunks;
+                    if let IoInitiator::User(ref s) = req.chunk_tags[i] {
+                        if !RegionType::joinable(previous_region_type, region_type) {
+                            if let Some(r) = region {
+                                regions.push(r);
+                            } else {
+                                assert!(previous_region_type == RegionType::Init);
+                            }
+                            region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
+                        }
+
+                        region
+                            .as_mut()
+                            .unwrap()
+                            .append(
+                                chunk.decompress_offset(),
+                                chunk.decompress_size() as usize,
+                                IoInitiator::User(s.clone()),
+                                Some(chunk.clone()),
+                            )
+                            .unwrap();
+                    } else {
+                        // On slow path, don't try to handle internal IO.
+                        chunk_map.finish(chunk.as_ref());
+                    }
+                    // Only user io is accounted.
+                    // TODO: If all user IO is satisfied, just return.
+                    previous_region_type = region_type;
+                } else {
+                    // NOTE: Only this request region can steak more chunks from backend with user io.
+                    region_type = RegionType::Backend;
+                    if !RegionType::joinable(previous_region_type, region_type) {
+                        if let Some(r) = region {
+                            regions.push(r);
+                        }
+                        region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
+                    }
+                    // A sanity check, rafs layer should always pass continuos region.
+                    if i != 0 {
+                        let prior_cki = &req.chunks[i - 1];
+                        assert!(
+                            chunk.decompress_offset()
+                                == prior_cki.decompress_offset()
+                                    + prior_cki.decompress_size() as u64
+                        )
+                    }
+
+                    let rgn = region.as_mut().unwrap();
+                    let initiator = if let IoInitiator::User(ref s) = req.chunk_tags[i] {
+                        IoInitiator::User(s.clone())
+                    } else {
+                        IoInitiator::Internal
+                    };
+
+                    rgn.append(
+                        chunk.compress_offset(),
+                        chunk.compress_size() as usize,
+                        initiator,
+                        Some(chunk.clone()),
+                    )
+                    .unwrap();
+
+                    previous_region_type = region_type;
+                }
+            }
+
+            // Any region is left to committed? Commit it from here.
+            if let Some(r) = region {
+                regions.push(r);
+            }
+
+            for r in &regions {
+                total_read += match r.region_type {
+                    RegionType::CachePartialChunks => {
+                        self.dispatch_region_cache(fd, &mut cursor, r)?
+                    }
+                    RegionType::CacheWholeChunks => {
+                        self.dispatch_region_cache_slow(&mut cursor, r)?
+                    }
+                    RegionType::Backend => self.dispatch_region_backend(&mut cursor, r)?,
+                    _ => panic!(),
+                }
+            }
+            // Prepare for next merged request
+            regions.truncate(0);
+            previous_region_type = RegionType::Init;
+            region = None;
         }
+
+        Ok(total_read)
     }
 
     fn read_blobcache_chunk(
@@ -603,14 +911,13 @@ impl BlobCache {
             }
         };
 
-        self.generate_merged_requests(bios, merging_size, &mut |mr: MergedBackendRequest| {
+        self.generate_merged_requests(bios, merging_size, true, &mut |mr: MergedBackendRequest| {
             limiter(mr.blob_size);
             // Safe to unwrap because channel won't be closed.
             tx.send(mr).unwrap();
         })
     }
 
-    #[allow(dead_code)]
     fn generate_merged_requests_for_user(
         &self,
         bios: &mut [RafsBio],
@@ -618,9 +925,14 @@ impl BlobCache {
     ) -> Option<Vec<MergedBackendRequest>> {
         let mut merged_requests: Vec<MergedBackendRequest> = Vec::new();
 
-        self.generate_merged_requests(bios, merging_size, &mut |mr: MergedBackendRequest| {
-            merged_requests.push(mr);
-        });
+        self.generate_merged_requests(
+            bios,
+            merging_size,
+            false,
+            &mut |mr: MergedBackendRequest| {
+                merged_requests.push(mr);
+            },
+        );
 
         if merged_requests.is_empty() {
             None
@@ -633,11 +945,15 @@ impl BlobCache {
         &self,
         bios: &mut [RafsBio],
         merging_size: usize,
+        sort: bool,
         op: &mut dyn FnMut(MergedBackendRequest),
     ) {
-        bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
         if bios.is_empty() {
             return;
+        }
+
+        if sort {
+            bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
         }
 
         let mut continuous_bios = vec![&bios[0]];
@@ -876,7 +1192,7 @@ impl RafsCache for BlobCache {
     }
 
     /// `offset` indicates the start position within a chunk to start copy. So `usize` type is suitable.
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: usize) -> Result<usize> {
+    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], _offset: usize) -> Result<usize> {
         self.metrics.total.inc();
 
         // Try to get rid of effect from prefetch.
@@ -889,15 +1205,7 @@ impl RafsCache for BlobCache {
             }
         }
 
-        let (size, before_ready) =
-            self.entry_read(&bio.blob, &bio.chunkinfo, bufs, offset, bio.size)?;
-
-        // The flag means the chunk is not ready before, but now ready,
-        // so increase the entries_count metric.
-        if !before_ready {
-            self.metrics.entries_count.inc();
-        }
-
+        let size = self.read_iter(&bio.blob, &mut [bio.clone()], bufs)?;
         Ok(size)
     }
 
@@ -1231,6 +1539,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         // read from cache
@@ -1238,7 +1547,7 @@ pub mod blob_cache_tests {
             let layout = Layout::from_size_align(50, 1).unwrap();
             let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
-            blob_cache.read(&bio, &[vs], 50).unwrap();
+            blob_cache.read(&mut [bio.clone()], &[vs]).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
         };
 
@@ -1246,7 +1555,7 @@ pub mod blob_cache_tests {
             let layout = Layout::from_size_align(50, 1).unwrap();
             let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
-            blob_cache.read(&bio, &[vs], 50).unwrap();
+            blob_cache.read(&mut [bio], &[vs]).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
         };
 
@@ -1307,6 +1616,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let (mut send, recv) = spmc::channel::<MergedBackendRequest>();
@@ -1343,6 +1653,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let chunk2 = MockChunkInfo {
@@ -1365,6 +1676,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let mut bios = vec![bio1, bio2];
@@ -1403,6 +1715,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let chunk2 = MockChunkInfo {
@@ -1425,6 +1738,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let mut bios = vec![bio1, bio2];
@@ -1464,6 +1778,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let chunk2 = MockChunkInfo {
@@ -1486,6 +1801,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let mut bios = vec![bio1, bio2];
@@ -1525,6 +1841,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let chunk2 = MockChunkInfo {
@@ -1547,6 +1864,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let chunk3 = MockChunkInfo {
@@ -1569,6 +1887,7 @@ pub mod blob_cache_tests {
             50,
             50,
             RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
         );
 
         let mut bios = vec![bio1, bio2, bio3];

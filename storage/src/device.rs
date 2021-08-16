@@ -4,6 +4,7 @@
 
 use arc_swap::ArcSwap;
 use std::cmp;
+use std::fmt::Debug;
 use std::io;
 use std::io::Error;
 use std::sync::Arc;
@@ -276,6 +277,20 @@ pub struct RafsBio {
     pub size: usize,
     /// block size to read in one shot
     pub blksize: u32,
+    pub is_user: bool,
+}
+
+impl Debug for RafsBio {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("RafsBio")
+            .field("blob index", &self.blob.blob_index)
+            .field("blob compress offset", &self.chunkinfo.compress_offset())
+            .field("chunk index", &self.chunkinfo.index())
+            .field("file offset", &self.offset)
+            .field("size", &self.size)
+            .field("user", &self.is_user)
+            .finish()
+    }
 }
 
 impl RafsBio {
@@ -292,6 +307,7 @@ impl RafsBio {
             offset,
             size,
             blksize,
+            is_user: true,
         }
     }
 }
