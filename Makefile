@@ -75,9 +75,6 @@ docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 nydusify:
 	make -C contrib/nydusify
 
-ctr-remote:
-	make -C contrib/ctr-remote
-
 nydusify-static:
 	make -C contrib/nydusify static-release
 
@@ -87,7 +84,13 @@ nydus-snapshotter:
 nydus-snapshotter-static:
 	make -C contrib/nydus-snapshotter static-release
 
-all-static-release: static-release nydusify-static nydus-snapshotter-static
+ctr-remote:
+	make -C contrib/ctr-remote
+
+ctr-remote-static:
+	make -C contrib/ctr-remote static-release
+
+all-static-release: static-release nydusify-static nydus-snapshotter-static ctr-remote-static
 
 docker-example: all-static-release
 	cp target-fusedev/x86_64-unknown-linux-musl/release/nydusd misc/example
