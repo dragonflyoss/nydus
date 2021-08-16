@@ -8,3 +8,6 @@ build:
 clear:
 	rm -f bin/*
 
+.PHONY: static-release
+static-release:
+	GOOS=linux go build -ldflags '-s -w -extldflags "-static"' -v -o bin/ctr-remote ./cmd/main.go
