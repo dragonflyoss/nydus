@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
@@ -35,7 +36,7 @@ use crate::cache::RafsCache;
 use crate::cache::*;
 use crate::device::{BlobPrefetchControl, RafsBio, RafsBlobEntry};
 use crate::factory::CacheConfig;
-use crate::utils::{alloc_buf, copyv, readv};
+use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::RAFS_DEFAULT_BLOCK_SIZE;
 
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
@@ -248,6 +249,8 @@ impl BlobCache {
         offset: usize,
         size: usize,
     ) -> Result<(usize, bool)> {
+        let cursor = RefCell::new(MemSliceCursor::new(bufs));
+
         let cache_guard = self.cache.read().unwrap();
         let (fd, _, chunk_map) = match cache_guard.get(blob) {
             Some(entry) => {
@@ -270,13 +273,17 @@ impl BlobCache {
                 chunk.compress_size()
             );
             self.metrics.partial_hits.inc();
-            let read_size =
-                self.read_partial_chunk(fd, bufs, offset as u64 + chunk.decompress_offset(), size)?;
+            let read_size = self.read_partial_chunk(
+                fd,
+                &mut *(cursor.borrow_mut()),
+                offset as u64 + chunk.decompress_offset(),
+                size,
+            )?;
             return Ok((read_size, has_ready));
         }
 
         let d_size = chunk.decompress_size() as usize;
-        let mut d = if self.might_reuse_user_buffer(offset as usize, d_size, bufs) {
+        let mut d = if self.might_reuse_user_buffer(offset, d_size, bufs) {
             // Optimize the case where the first VolatileSlice covers the whole chunk.
             // Reuse the destination data buffer.
             reuse = true;
@@ -361,6 +368,7 @@ impl BlobCache {
                     error!("failed to copy from chunk buf to buf: {:?}", e);
                     eother!(e)
                 })?;
+
             Ok((read_size, has_ready))
         }
     }
@@ -432,11 +440,12 @@ impl BlobCache {
     fn read_partial_chunk(
         &self,
         fd: RawFd,
-        bufs: &[VolatileSlice],
+        mem_cursor: &mut MemSliceCursor,
         offset: u64,
         max_size: usize,
     ) -> Result<usize> {
-        readv(fd, bufs, offset, max_size)
+        let iovec = mem_cursor.consume(max_size);
+        readv(fd, &iovec, offset)
     }
 
     /// Persist a single chunk into local blob cache file. We have to write to the cache
@@ -452,8 +461,6 @@ impl BlobCache {
         } else {
             cki.decompress_offset()
         };
-        // TODO: Try to make this as a following asynchronous step writing cache
-        // This should be help to reduce read latency.
 
         let n = loop {
             let ret = uio::pwrite(fd, chunk_buffer, offset as i64).map_err(|_| last_error!());

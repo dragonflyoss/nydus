@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cmp::{min, Ordering};
+use std::cmp::{self, min, Ordering};
 use std::io::{ErrorKind, Result};
 use std::os::unix::io::RawFd;
 use std::slice::from_raw_parts_mut;
@@ -18,32 +18,10 @@ use nydus_utils::{
 
 use crate::{StorageError, StorageResult};
 
-pub fn readv(fd: RawFd, bufs: &[VolatileSlice], offset: u64, max_size: usize) -> Result<usize> {
-    if bufs.is_empty() {
-        return Ok(0);
-    }
-
-    let mut size: usize = 0;
-    let mut iovecs: Vec<IoVec<&mut [u8]>> = Vec::new();
-
-    for buf in bufs {
-        let mut exceed = false;
-        let len = if size + buf.len() > max_size {
-            exceed = true;
-            max_size - size
-        } else {
-            buf.len()
-        };
-        size += len;
-        let iov = IoVec::from_mut_slice(unsafe { from_raw_parts_mut(buf.as_ptr(), len) });
-        iovecs.push(iov);
-        if exceed {
-            break;
-        }
-    }
-
+/// Just a simple wrapper for posix `preadv`. Provide a slice of `IoVec` as input.
+pub fn readv(fd: RawFd, iovec: &[IoVec<&mut [u8]>], offset: u64) -> Result<usize> {
     loop {
-        let ret = preadv(fd, &iovecs, offset as off64_t).map_err(|_| last_error!());
+        let ret = preadv(fd, iovec, offset as off64_t).map_err(|_| last_error!());
         match ret {
             Ok(ret) => {
                 return Ok(ret);
@@ -127,6 +105,78 @@ pub fn copyv(
     }
 
     Ok((copied, (dst_index, dst_offset)))
+}
+
+pub struct MemSliceCursor<'a> {
+    mem_slice: &'a [VolatileSlice<'a>],
+    pub index: usize,
+    pub offset: usize,
+}
+
+impl<'a, 'b> MemSliceCursor<'b> {
+    pub fn new(slice: &'a [VolatileSlice]) -> Self
+    where
+        'a: 'b,
+    {
+        Self {
+            mem_slice: slice,
+            index: 0,
+            offset: 0,
+        }
+    }
+
+    pub fn move_cursor(&mut self, mut size: usize) {
+        loop {
+            let slice = self.mem_slice[self.index];
+            let this_left = slice.len() - self.offset;
+
+            match this_left.cmp(&size) {
+                cmp::Ordering::Equal => {
+                    self.index += 1;
+                    self.offset = 0;
+                    break;
+                }
+                cmp::Ordering::Greater => {
+                    self.offset += size;
+                    break;
+                }
+                cmp::Ordering::Less => {
+                    self.index += 1;
+                    self.offset = 0;
+                    size -= this_left;
+                    continue;
+                }
+            }
+        }
+    }
+
+    pub fn consume(&mut self, mut size: usize) -> Vec<IoVec<&mut [u8]>> {
+        let mut vectors: Vec<IoVec<&mut [u8]>> = Vec::new();
+        loop {
+            let slice = self.mem_slice[self.index];
+            let this_left = slice.len() - self.offset;
+            match this_left.cmp(&size) {
+                cmp::Ordering::Greater | cmp::Ordering::Equal => {
+                    let p = unsafe { slice.as_ptr().add(self.offset) };
+                    let s = unsafe { from_raw_parts_mut(p, size) };
+                    let iov = IoVec::from_mut_slice(s);
+                    self.offset += size;
+                    vectors.push(iov);
+                    break;
+                }
+                cmp::Ordering::Less => {
+                    let p = unsafe { slice.as_ptr().add(self.offset) };
+                    let s = unsafe { from_raw_parts_mut(p, this_left) };
+                    let iov = IoVec::from_mut_slice(s);
+                    self.offset = 0;
+                    self.index += 1;
+                    size -= this_left;
+                    vectors.push(iov);
+                }
+            }
+        }
+        vectors
+    }
 }
 
 /// A customized readahead function to ask kernel to fault in all pages from offset to end.
