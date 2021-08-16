@@ -132,3 +132,24 @@ $ crictl ps
 CONTAINER           IMAGE                                 CREATED             STATE               NAME                ATTEMPT             POD ID
 77f5a5c87d37d       localhost:5000/ubuntu-nydus:latest   8 seconds ago       Running             nydus-container     0                   0f3aefac561b3
 ```
+
+## Test Nydus with ctr-remote
+
+You can also use ctr-remote to run container with converted nydus image, pull image: 
+
+```
+$ ctr-remote image rpull --plain-http localhost:5000/ubuntu-nydus:latest
+fetching sha256:1a406a70... application/vnd.oci.image.manifest.v1+json
+fetching sha256:206058bb... application/vnd.oci.image.config.v1+json
+fetching sha256:6eb834fa... application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+Next run container:
+
+```
+$ ctr-remote run --rm -t --snapshotter=nydus localhost:5000/ubuntu-nydus:latest test /bin/bash
+/# ps -ef 
+UID          PID    PPID  C STIME TTY          TIME CMD
+root           1       0  0 13:45 pts/0    00:00:00 /bin/bash
+root          10       1  0 13:46 pts/0    00:00:00 ps -ef
+```

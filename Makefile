@@ -75,6 +75,9 @@ docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 nydusify:
 	make -C contrib/nydusify
 
+ctr-remote:
+	make -C contrib/ctr-remote
+
 nydusify-static:
 	make -C contrib/nydusify static-release
 
