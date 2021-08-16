@@ -37,8 +37,8 @@ vhost-rs = { git = "https://github.com/cloud-hypervisor/vhost.git", branch = "dr
 vhost-user-backend = { git = "https://github.com/cloud-hypervisor/vhost-user-backend.git", package = "vhost_user_backend", rev = "78757bfa", optional = true }
 
 nydus-api = { path = "api" }
-nydus-app = { path = "app" }
-nydus-error = { path = "error" }
+nydus-app = "0.1"
+nydus-error = "0.1"
 nydus-utils = { path = "utils" }
 rafs = { path = "rafs", features = ["backend-registry", "backend-oss"] }
 storage = { path = "storage" }
