@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ffi::{OsStr, OsString};
+use std::fs::Permissions;
 use std::io::Write;
 use std::ops::DerefMut;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -204,6 +206,7 @@ Name:               {name:?}
 Size:               {size}
 Parent:             {parent}
 Mode:               0x{mode:X}
+Permissions:        {permissions:o}
 Nlink:              {nlink}
 UID:                {uid}
 GID:                {gid}
@@ -216,6 +219,7 @@ Blocks:             {blocks}"#,
             size = inode.i_size,
             parent = inode.i_parent,
             mode = inode.i_mode,
+            permissions = Permissions::from_mode(inode.i_mode).mode(),
             nlink = inode.i_nlink,
             uid = inode.i_uid,
             gid = inode.i_gid,
@@ -451,6 +455,17 @@ Blocks:             {blocks}"#,
 
     pub fn cmd_stat_file(&self, name: &str) -> Result<Option<Value>> {
         let b = self.bootstrap.clone();
+
+        if name == "." {
+            let (dir_inode, name) = self.load_inode_by_index(self.cur_dir_index as usize)?;
+            Self::stat_single_file(
+                &dir_inode,
+                &name.to_string_lossy(),
+                self.cur_dir_index as usize,
+            );
+            return Ok(None);
+        }
+
         self.iter_dir(|f, inode, idx, offset| {
             if f == name {
                 let mut guard = b.lock().unwrap();
