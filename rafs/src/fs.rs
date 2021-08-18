@@ -612,7 +612,15 @@ impl FileSystem for Rafs {
             recorder.mark_success(0);
             return Ok(0);
         }
-        let mut desc = inode.alloc_bio_desc(offset, size as usize)?;
+        let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
+
+        // TODO: Introduce Up-call mechanism to close neighbor prefetch
+        // when cache is almost filled.
+        let ra_desc = self
+            .sb
+            .carry_more_until(inode.as_ref(), offset + size as u64, 1024 * 128)?;
+
+        desc.bi_vec.extend_from_slice(&ra_desc.bi_vec);
         let start = self.ios.latency_start();
         // Avoid copying `desc`
         let r = self.device.read_to(w, &mut desc).map(|r| {

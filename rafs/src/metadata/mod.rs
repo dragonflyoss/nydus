@@ -633,6 +633,119 @@ impl RafsSuper {
 
         Ok(())
     }
+
+    fn steal_chunks(desc: &mut RafsBioDesc, expected_size: u32) -> Option<&mut RafsBioDesc> {
+        enum State {
+            All,
+            None,
+            Partial(usize),
+        }
+
+        let mut total = 0;
+        let mut final_index = State::All;
+        let len = desc.bi_vec.len();
+
+        for (i, b) in desc.bi_vec.iter().enumerate() {
+            let compressed_size = b.chunkinfo.compress_size();
+
+            if compressed_size + total <= expected_size {
+                total += compressed_size;
+                continue;
+            } else {
+                if i != 0 {
+                    final_index = State::Partial(i - 1);
+                } else {
+                    final_index = State::None;
+                }
+                break;
+            }
+        }
+
+        match final_index {
+            State::None => None,
+            State::All => Some(desc),
+            State::Partial(fi) => {
+                for i in (fi..len).rev() {
+                    desc.bi_size -= desc.bi_vec[i].chunkinfo.decompress_size() as usize;
+                    desc.bi_vec.remove(i as usize);
+                }
+                Some(desc)
+            }
+        }
+    }
+
+    pub fn carry_more_until(
+        &self,
+        inode: &dyn RafsInode,
+        bound: u64,
+        expected_size: u64,
+    ) -> Result<RafsBioDesc> {
+        let mut left = expected_size;
+        let inode_size = inode.size();
+        let mut ra_desc = RafsBioDesc::new();
+
+        let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
+            if delta >= expected_size {
+                let mut d = inode.alloc_bio_desc(bound, expected_size as usize, false)?;
+
+                // Stolen chunk bigger than expected size will involve more backend IO, thus
+                // to slow down current user IO.
+                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
+                    ra_desc.bi_vec.append(&mut cks.bi_vec);
+                    ra_desc.bi_size += cks.bi_size;
+                }
+                false
+            } else {
+                let mut d = inode.alloc_bio_desc(bound, delta as usize, false)?;
+
+                // Stolen chunk bigger than expected size will involve more backend IO, thus
+                // to slow down current user IO.
+                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
+                    ra_desc.bi_vec.append(&mut cks.bi_vec);
+                    ra_desc.bi_size += cks.bi_size;
+                }
+                true
+            }
+        } else {
+            true
+        };
+
+        if extra_file_needed {
+            let mut next_ino = inode.ino() + 1;
+            loop {
+                let next_inode = self.get_inode(next_ino, false);
+                if let Ok(ni) = next_inode {
+                    if !ni.is_reg() {
+                        next_ino = ni.ino() + 1;
+                        continue;
+                    }
+                    let next_size = ni.size();
+                    let sz = std::cmp::min(left, next_size);
+                    let mut d = ni.alloc_bio_desc(0, sz as usize, false)?;
+
+                    // Stolen chunk bigger than expected size will involve more backend IO, thus
+                    // to slow down current user IO.
+                    if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
+                        ra_desc.bi_vec.append(&mut cks.bi_vec);
+                        ra_desc.bi_size += cks.bi_size;
+                    } else {
+                        break;
+                    }
+
+                    // Even stolen chunks are truncated, still consume expected size.
+                    left -= sz;
+                    if left == 0 {
+                        break;
+                    }
+                    next_ino = ni.ino() + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(ra_desc)
+    }
 }
 
 pub trait RafsSuperInodes {

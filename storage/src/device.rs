@@ -281,6 +281,7 @@ impl RafsBio {
         offset: u32,
         size: usize,
         blksize: u32,
+        is_user: bool,
     ) -> Self {
         RafsBio {
             chunkinfo,
@@ -288,7 +289,7 @@ impl RafsBio {
             offset,
             size,
             blksize,
-            is_user: true,
+            is_user,
         }
     }
 }
