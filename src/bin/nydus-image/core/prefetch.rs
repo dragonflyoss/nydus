@@ -141,11 +141,16 @@ impl Prefetch {
         self.readahead_files.get(&node.rootfs()).is_some()
     }
 
-    pub fn get_file_indexes(&self) -> Vec<&u64> {
-        self.readahead_files
+    pub fn get_file_indexes(&self) -> Vec<u64> {
+        let mut indexes: Vec<u64> = self
+            .readahead_files
             .values()
-            .filter_map(|index| index.as_ref())
-            .collect()
+            .filter_map(|index| *index)
+            .collect();
+
+        // Later, we might write chunks of data one by one according to inode number order.
+        indexes.sort_unstable();
+        indexes
     }
 
     pub fn get_prefetch_table(&mut self) -> Option<PrefetchTable> {
