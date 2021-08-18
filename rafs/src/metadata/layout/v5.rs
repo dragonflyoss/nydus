@@ -316,7 +316,7 @@ impl RafsV5InodeTable {
 
     pub fn get(&self, ino: Inode) -> Result<u32> {
         if ino == 0 || ino > self.data.len() as u64 {
-            return Err(enoent!("inode not found"));
+            return Err(enoent!());
         }
 
         let offset = u32::from_le(self.data[(ino - 1) as usize]) as usize;

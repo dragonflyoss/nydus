@@ -492,6 +492,7 @@ impl BlobCache {
         // With shared chunk bitmap applied, we don't have to try to recover blobcache
         // as principle is that chunk bitmap is trusted. The chunk must not be downloaded before.
 
+        // FIXME: get read lock from here
         let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
         let (fd, _, ref chunk_map) = cache_guard.set(blob)?;
 
@@ -500,6 +501,8 @@ impl BlobCache {
 
         let has_ready = chunk_map.has_ready(ck, false)?;
         let buffer_holder;
+
+        drop(cache_guard);
 
         let d_size = chunk.decompress_size() as usize;
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
@@ -606,6 +609,7 @@ impl BlobCache {
         for req in merged_requests {
             let blob = &req.blob_entry;
             let cache_guard = self.cache.read().unwrap();
+            // FIXME: Don't open code below snippet.
             let (fd, _, chunk_map) = match cache_guard.get(blob) {
                 Some(entry) => {
                     drop(cache_guard);
@@ -635,7 +639,7 @@ impl BlobCache {
                         }
                         // Encounter the same type of item, just enlarge this region.
                         // A sanity check, rafs layer should always passes continuous region.
-                        if i != 0 {
+                        if i != 0 && self.compressor() != compress::Algorithm::GZip {
                             let prior_cki = &req.chunks[i - 1];
                             assert!(
                                 chunk.decompress_offset()
@@ -658,7 +662,7 @@ impl BlobCache {
                 } else if (self.compressor() != compress::Algorithm::GZip
                     && !blob.with_extended_blob_table()
                     && !has_ready)
-                    || (self.compressor() == compress::Algorithm::GZip && has_ready)
+                    || (self.compressor() == compress::Algorithm::GZip)
                 {
                     // NOTE: Handle this branch very carefully since it has also to
                     // take care of the case that blobcache has no chunk bitmap.
@@ -709,8 +713,8 @@ impl BlobCache {
                         }
                         region = Some(RequestRegion::new(region_type, req.blob_entry.clone()));
                     }
-                    // A sanity check, rafs layer should always pass continuos region.
-                    if i != 0 {
+                    // A sanity check, rafs layer should always pass continuous region.
+                    if i != 0 && self.compressor() != compress::Algorithm::GZip {
                         let prior_cki = &req.chunks[i - 1];
                         assert!(
                             chunk.decompress_offset()

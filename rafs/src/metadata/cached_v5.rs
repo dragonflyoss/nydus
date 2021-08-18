@@ -797,13 +797,15 @@ mod cached_tests {
             .add(String::from("123333"), 0, 0, 0, 0, 0);
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
-        let desc1 = cached_inode.alloc_bio_desc(0, 100).unwrap();
+        let desc1 = cached_inode.alloc_bio_desc(0, 100, true).unwrap();
         assert_eq!(desc1.bi_size, 100);
         assert_eq!(desc1.bi_vec.len(), 1);
         assert_eq!(desc1.bi_vec[0].offset, 0);
         assert_eq!(desc1.bi_vec[0].blob.blob_id, "123333");
 
-        let desc2 = cached_inode.alloc_bio_desc(1024 * 1024 - 100, 200).unwrap();
+        let desc2 = cached_inode
+            .alloc_bio_desc(1024 * 1024 - 100, 200, true)
+            .unwrap();
         assert_eq!(desc2.bi_size, 200);
         assert_eq!(desc2.bi_vec.len(), 2);
         assert_eq!(desc2.bi_vec[0].offset, 1024 * 1024 - 100);
@@ -812,7 +814,7 @@ mod cached_tests {
         assert_eq!(desc2.bi_vec[1].size, 100);
 
         let desc3 = cached_inode
-            .alloc_bio_desc(1024 * 1024 + 8192, 1024 * 1024 * 4)
+            .alloc_bio_desc(1024 * 1024 + 8192, 1024 * 1024 * 4, true)
             .unwrap();
         assert_eq!(desc3.bi_size, 1024 * 1024 * 2);
         assert_eq!(desc3.bi_vec.len(), 3);
