@@ -396,7 +396,7 @@ impl BlobCache {
         region: &RequestRegion,
     ) -> Result<usize> {
         if region.is_empty() {
-            warn!("No user data");
+            debug!("No user data");
             // FIXME: Must be write lock?
             let mut cache_guard = self.cache.write().expect("Expect cache lock not poisoned");
             if let Ok((_, _, chunk_map)) = cache_guard
@@ -587,18 +587,6 @@ impl BlobCache {
         let mut cursor = MemSliceCursor::new(bufs);
         let sorted_bios = bios;
 
-        let cache_guard = self.cache.read().unwrap();
-        let (fd, _, chunk_map) = match cache_guard.get(blob) {
-            Some(entry) => {
-                drop(cache_guard);
-                entry
-            }
-            None => {
-                drop(cache_guard);
-                self.cache.write().unwrap().set(blob)?
-            }
-        };
-
         let mut region: Option<RequestRegion> = None;
         let mut regions: Vec<RequestRegion> = Vec::new();
         let mut region_type: RegionType;
@@ -616,6 +604,18 @@ impl BlobCache {
 
         // Chunks are concatenated.
         for req in merged_requests {
+            let blob = &req.blob_entry;
+            let cache_guard = self.cache.read().unwrap();
+            let (fd, _, chunk_map) = match cache_guard.get(blob) {
+                Some(entry) => {
+                    drop(cache_guard);
+                    entry
+                }
+                None => {
+                    drop(cache_guard);
+                    self.cache.write().unwrap().set(blob)?
+                }
+            };
             for (i, chunk) in req.chunks.iter().enumerate() {
                 let has_ready = chunk_map.has_ready(chunk.as_ref(), true)?;
                 // Hit cache if cache ready
@@ -665,7 +665,10 @@ impl BlobCache {
                     // Gzip compressed format -> Has no knowledge to validate data, only hit cache here.
                     // Other format including compressed and uncompressed
 
-                    if blob.with_extended_blob_table() && !self.need_validate() {
+                    if blob.with_extended_blob_table()
+                        && !self.need_validate()
+                        && self.compressor() != compress::Algorithm::GZip
+                    {
                         warn!("Should not go into slow path");
                     }
 
@@ -1192,7 +1195,7 @@ impl RafsCache for BlobCache {
     }
 
     /// `offset` indicates the start position within a chunk to start copy. So `usize` type is suitable.
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], _offset: usize) -> Result<usize> {
+    fn read(&self, bios: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize> {
         self.metrics.total.inc();
 
         // Try to get rid of effect from prefetch.
@@ -1205,12 +1208,8 @@ impl RafsCache for BlobCache {
             }
         }
 
-        let size = self.read_iter(&bio.blob, &mut [bio.clone()], bufs)?;
+        let size = self.read_iter(bios, bufs)?;
         Ok(size)
-    }
-
-    fn write(&self, _blob_id: &str, _blk: &dyn RafsChunkInfo, _buf: &[u8]) -> Result<usize> {
-        Err(enosys!())
     }
 
     fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64> {

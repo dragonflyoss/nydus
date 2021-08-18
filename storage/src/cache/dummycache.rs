@@ -9,7 +9,7 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
 use crate::cache::*;
-use crate::device::{BlobPrefetchControl, RafsBio, RafsChunkInfo};
+use crate::device::{BlobPrefetchControl, RafsBio};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageResult};
@@ -35,31 +35,50 @@ impl RafsCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: usize) -> Result<usize> {
-        let chunk = &bio.chunkinfo;
-        let mut reuse = false;
+    fn read(&self, bios: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize> {
+        let mut buffer_holder: Vec<Vec<u8>> = Vec::new();
+        let offset = bios[0].offset;
+        let mut user_size = 0;
 
-        let d_size = chunk.decompress_size() as usize;
+        let bios_len = bios.len();
 
-        let mut d;
-        let one_chunk_buf = if bufs.len() == 1 && offset == 0 && bufs[0].len() >= d_size {
-            // Use the destination buffer to received the decompressed data.
-            reuse = true;
-            unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) }
-        } else {
-            d = alloc_buf(d_size);
-            d.as_mut_slice()
-        };
+        for bio in bios {
+            if !bio.is_user {
+                continue;
+            }
 
-        self.read_backend_chunk(&bio.blob, chunk.as_ref(), one_chunk_buf, None)?;
-
-        if reuse {
-            Ok(one_chunk_buf.len())
-        } else {
-            copyv(&[one_chunk_buf], bufs, offset, bio.size, 0, 0)
-                .map(|r| r.0)
-                .map_err(|e| eother!(e))
+            user_size += bio.size;
+            let chunk = &bio.chunkinfo;
+            let mut reuse = false;
+            let d_size = chunk.decompress_size() as usize;
+            let one_chunk_buf =
+                if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
+                    // Use the destination buffer to received the decompressed data.
+                    reuse = true;
+                    unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) }
+                } else {
+                    let d = alloc_buf(d_size);
+                    buffer_holder.push(d);
+                    buffer_holder.last_mut().unwrap().as_mut_slice()
+                };
+            self.read_backend_chunk(&bio.blob, chunk.as_ref(), one_chunk_buf, None)?;
+            if reuse {
+                return Ok(one_chunk_buf.len());
+            }
         }
+
+        let chunk_buffers: Vec<&[u8]> = buffer_holder.iter().map(|b| b.as_slice()).collect();
+
+        copyv(
+            chunk_buffers.as_slice(),
+            bufs,
+            offset as usize,
+            user_size,
+            0,
+            0,
+        )
+        .map(|(n, _)| n)
+        .map_err(|e| eother!(e))
     }
 
     fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64> {
@@ -87,20 +106,6 @@ impl RafsCache for DummyCache {
 
     fn stop_prefetch(&self) -> StorageResult<()> {
         Ok(())
-    }
-
-    fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize> {
-        let out;
-        let wbuf = if blk.is_compressed() {
-            out = compress::compress(buf, self.compressor())?;
-            out.0.as_ref()
-        } else {
-            unsafe { slice::from_raw_parts(buf.as_ptr(), buf.len()) }
-        };
-
-        self.backend
-            .write(blob_id, wbuf, blk.compress_offset())
-            .map_err(|e| eother!(e))
     }
 
     fn release(&self) {
