@@ -612,9 +612,10 @@ impl FileSystem for Rafs {
             recorder.mark_success(0);
             return Ok(0);
         }
-        let desc = inode.alloc_bio_desc(offset, size as usize)?;
+        let mut desc = inode.alloc_bio_desc(offset, size as usize)?;
         let start = self.ios.latency_start();
-        let r = self.device.read_to(w, desc).map(|r| {
+        // Avoid copying `desc`
+        let r = self.device.read_to(w, &mut desc).map(|r| {
             recorder.mark_success(r);
             r
         });
