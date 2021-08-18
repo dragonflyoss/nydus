@@ -319,10 +319,6 @@ impl Rafs {
 
                 if prefetch_all {
                     let root = vec![RAFS_ROOT_INODE];
-                    // Sleeping for 2 seconds is indeed a trick to prefetch the entire rootfs.
-                    // FIXME: As nydus can't give different policies different priorities, this is a
-                    // workaround. Remove the sleeping when IO priority mechanism is ready.
-                    sleep(Duration::from_secs(2));
                     sb.prefetch_hint_files(&mut reader, Some(root), &|mut desc| {
                         device.prefetch(&mut desc).unwrap_or_else(|e| {
                             warn!("Prefetch error, {:?}", e);
