@@ -1113,7 +1113,7 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
 /// desc: the targeting bio desc.
 /// blksize: chunk size.
 /// blob_id: chunk data blob id.
-pub(crate) fn add_chunk_to_bio_desc(
+fn add_chunk_to_bio_desc(
     offset: u64,
     end: u64,
     chunk: Arc<dyn RafsChunkInfo>,
@@ -1158,7 +1158,7 @@ pub(crate) fn add_chunk_to_bio_desc(
 /// end: IO end to the file start, exclusive.
 /// blksize: chunk block size.
 /// has_hole: whether a file has holes in it.
-pub(crate) fn calculate_bio_chunk_index(
+fn calculate_bio_chunk_index(
     offset: u64,
     end: u64,
     blksize: u64,
@@ -1250,13 +1250,14 @@ fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
 #[cfg(test)]
 pub mod tests {
     use std::fs::OpenOptions;
+    use std::io::BufWriter;
     use std::io::{SeekFrom, Write};
 
-    //use nydus_app::setup_logging;
     use vmm_sys_util::tempfile::TempFile;
 
-    use super::RafsV5BlobTable;
-    use crate::RafsIoReader;
+    use super::*;
+    use crate::metadata::RafsStore;
+    use crate::{RafsIoRead, RafsIoReader, RafsIoWrite};
 
     struct Entry {
         foo: u32,
@@ -1269,8 +1270,6 @@ pub mod tests {
 
     #[test]
     fn test_load_blob_table() {
-        //setup_logging(None, log::LevelFilter::Info).unwrap();
-
         let mut buffer = Vec::new();
         let first = Entry { foo: 1, bar: 2 };
         let second = Entry { foo: 3, bar: 4 };
@@ -1317,6 +1316,7 @@ pub mod tests {
             trace!("{:?}", _c);
         }
 
+        assert_eq!(first.bar, first.foo + 1);
         assert_eq!(blob_table.entries[0].blob_id, first_id);
         assert_eq!(blob_table.entries[1].blob_id, second_id);
         assert_eq!(blob_table.entries[2].blob_id, third_id);
@@ -1336,23 +1336,12 @@ pub mod tests {
         assert_eq!(blob_table.entries[0].blob_id, first_id);
     }
 
-    /*
-    use std::fs::OpenOptions;
-    use std::io::BufWriter;
-    use vmm_sys_util::tempfile::TempFile;
-
-    use super::ExtendedBlobTable;
-    use super::RESERVED_SIZE;
-    use crate::metadata::RafsStore;
-    use crate::{RafsIoRead, RafsIoWrite};
-     */
-
     #[test]
     fn test_extended_blob_table() {
         let tmp_file = TempFile::new().unwrap();
 
         // Create extended blob table
-        let mut table = ExtendedBlobTable::new();
+        let mut table = RafsV5ExtBlobTable::new();
         for i in 0..5 {
             table.add(i * 3, 100, 100);
         }
@@ -1373,7 +1362,7 @@ pub mod tests {
             .open(tmp_file.as_path())
             .unwrap();
         let mut reader = Box::new(file) as Box<dyn RafsIoRead>;
-        let mut table = ExtendedBlobTable::new();
+        let mut table = RafsV5ExtBlobTable::new();
         table.load(&mut reader, 5).unwrap();
 
         // Check expected blob table
@@ -1381,7 +1370,154 @@ pub mod tests {
             assert_eq!(table.get(i).unwrap().chunk_count, i * 3);
             assert_eq!(table.get(i).unwrap().reserved1, [0u8; 4]);
             assert_eq!(table.get(i).unwrap().blob_cache_size, 100);
-            assert_eq!(table.get(i).unwrap().reserved2, [0u8; RESERVED_SIZE]);
+            assert_eq!(
+                table.get(i).unwrap().reserved2,
+                [0u8; RAFSV5_EXT_BLOB_RESERVED_SIZE]
+            );
+        }
+    }
+
+    #[derive(Default, Copy, Clone)]
+    struct MockChunkInfo {
+        pub block_id: RafsDigest,
+        pub blob_index: u32,
+        pub flags: RafsChunkFlags,
+        pub compress_size: u32,
+        pub decompress_size: u32,
+        pub compress_offset: u64,
+        pub decompress_offset: u64,
+        pub file_offset: u64,
+        pub index: u32,
+        pub reserved: u32,
+    }
+
+    impl MockChunkInfo {
+        fn new() -> Self {
+            MockChunkInfo::default()
+        }
+    }
+
+    impl RafsChunkInfo for MockChunkInfo {
+        fn block_id(&self) -> &RafsDigest {
+            &self.block_id
+        }
+        fn is_compressed(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::COMPRESSED)
+        }
+        fn is_hole(&self) -> bool {
+            self.flags.contains(RafsChunkFlags::HOLECHUNK)
+        }
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(index, index, u32);
+        impl_getter!(compress_offset, compress_offset, u64);
+        impl_getter!(compress_size, compress_size, u32);
+        impl_getter!(decompress_offset, decompress_offset, u64);
+        impl_getter!(decompress_size, decompress_size, u32);
+        impl_getter!(file_offset, file_offset, u64);
+        impl_getter!(flags, flags, RafsChunkFlags);
+    }
+
+    #[test]
+    fn test_add_chunk_to_bio_desc() {
+        let mut chunk = MockChunkInfo::new();
+        let offset = 4096;
+        let size: u64 = 1024;
+        // [offset, offset + size)
+        chunk.file_offset = offset;
+        chunk.decompress_size = size as u32;
+
+        // (offset, end, expected_chunk_start, expected_size)
+        let data = vec![
+            // Non-overlapping IO
+            (0, 0, 0, 0, false),
+            (0, offset, 0, 0, false),
+            (offset + size, 0, 0, 0, true),
+            (offset + size + 1, 0, 0, 0, true),
+            // Overlapping IO
+            (0, offset + 1, 0, 1, true),
+            (0, offset + size, 0, size, true),
+            (0, offset + size + 1, 0, size, true),
+            (0, offset + size - 1, 0, size - 1, true),
+            (offset, offset + 1, 0, 1, true),
+            (offset, offset + size, 0, size, true),
+            (offset, offset + size - 1, 0, size - 1, true),
+            (offset, offset + size + 1, 0, size, true),
+            (offset + 1, offset + 2, 1, 1, true),
+            (offset + 1, offset + size, 1, size - 1, true),
+            (offset + 1, offset + size - 1, 1, size - 2, true),
+            (offset + 1, offset + size + 1, 1, size - 1, true),
+        ];
+
+        for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
+            let mut desc = RafsBioDesc::new();
+            let res = add_chunk_to_bio_desc(
+                *offset,
+                *end,
+                Arc::new(chunk),
+                &mut desc,
+                100,
+                Arc::new(RafsBlobEntry {
+                    chunk_count: 0,
+                    readahead_offset: 0,
+                    readahead_size: 0,
+                    blob_id: String::from("blobid"),
+                    blob_index: 0,
+                    blob_cache_size: 0,
+                }),
+            );
+            assert_eq!(*result, res);
+            if !desc.bi_vec.is_empty() {
+                assert_eq!(desc.bi_vec.len(), 1);
+                let bio = &desc.bi_vec[0];
+                assert_eq!(*expected_chunk_start, bio.offset);
+                assert_eq!(*expected_size as usize, bio.size);
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_bio_chunk_index() {
+        let (blksize, chunk_cnt) = (1024, 4);
+
+        let io_range: Vec<(u64, u64, u32, u64)> = vec![
+            (0, 1, 0, 1),
+            (0, blksize - 1, 0, 1),
+            (0, blksize, 0, 1),
+            (0, blksize + 1, 0, 2),
+            (0, blksize * chunk_cnt, 0, chunk_cnt),
+            (0, blksize * chunk_cnt + 1, 0, chunk_cnt),
+            (0, blksize * chunk_cnt - 1, 0, chunk_cnt),
+            (blksize - 1, 1, 0, 1),
+            (blksize - 1, 2, 0, 2),
+            (blksize - 1, 3, 0, 2),
+            (blksize - 1, blksize - 1, 0, 2),
+            (blksize - 1, blksize, 0, 2),
+            (blksize - 1, blksize + 1, 0, 2),
+            (blksize - 1, blksize * chunk_cnt, 0, chunk_cnt),
+            (blksize, 1, 1, 2),
+            (blksize, 2, 1, 2),
+            (blksize, blksize - 1, 1, 2),
+            (blksize, blksize + 1, 1, 3),
+            (blksize, blksize + 2, 1, 3),
+            (blksize, blksize * chunk_cnt, 1, chunk_cnt),
+            (blksize + 1, 1, 1, 2),
+            (blksize + 1, blksize - 2, 1, 2),
+            (blksize + 1, blksize - 1, 1, 2),
+            (blksize + 1, blksize, 1, 3),
+            (blksize + 1, blksize * chunk_cnt, 1, chunk_cnt),
+        ];
+
+        for (io_start, io_size, expected_start, expected_end) in io_range.iter() {
+            let (start, end) = calculate_bio_chunk_index(
+                *io_start,
+                *io_start + *io_size,
+                blksize,
+                chunk_cnt as u32,
+                false,
+            );
+
+            assert_eq!(start, *expected_start);
+            assert_eq!(end, *expected_end as u32);
         }
     }
 }

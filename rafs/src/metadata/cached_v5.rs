@@ -167,7 +167,7 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
         let mut offset = [0u8; size_of::<u32>()];
         r.read_exact(&mut offset)?;
         // The offset is aligned with 8 bytes to make it easier to
-        // validate OndiskInode.
+        // validate RafsV5Inode.
         let inode_offset = u32::from_le_bytes(offset) << 3;
 
         // Load blob table.
@@ -297,11 +297,11 @@ impl CachedInodeV5 {
     }
 
     pub fn load(&mut self, sb: &RafsSuperMeta, r: &mut RafsIoReader) -> Result<()> {
-        // OndiskInode...name...symbol link...chunks
+        // RafsV5Inode...name...symbol link...chunks
         let mut inode = RafsV5Inode::new();
 
         // parse ondisk inode
-        // OndiskInode|name|symbol|xattr|chunks
+        // RafsV5Inode|name|symbol|xattr|chunks
         r.read_exact(inode.as_mut())?;
         self.copy_from_ondisk(&inode);
         self.load_name(inode.i_name_size as usize, r)?;
@@ -631,15 +631,8 @@ impl From<&RafsV5ChunkInfo> for CachedChunkInfoV5 {
     }
 }
 
-#[cfg(test1)]
+#[cfg(test)]
 mod cached_tests {
-    use crate::metadata::cached_v5::CachedInodeV5;
-    use crate::metadata::layout::{
-        OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeWrapper, XAttrs,
-    };
-    use crate::metadata::{align_to_rafs, RafsInode, RafsStore, RafsSuperMeta};
-    use crate::{RafsIoReader, RafsIoWriter};
-    use nydus_utils::ByteSize;
     use std::cmp;
     use std::ffi::{OsStr, OsString};
     use std::fs::OpenOptions;
@@ -647,6 +640,16 @@ mod cached_tests {
     use std::io::SeekFrom::Start;
     use std::os::unix::ffi::OsStrExt;
     use std::sync::Arc;
+
+    use nydus_utils::ByteSize;
+
+    use crate::metadata::cached_v5::CachedInodeV5;
+    use crate::metadata::layout::v5::{
+        rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper,
+        RafsV5XAttrs,
+    };
+    use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
+    use crate::{RafsIoReader, RafsIoWriter};
 
     #[test]
     fn test_load_inode() {
@@ -659,9 +662,9 @@ mod cached_tests {
             .unwrap();
         let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
-        let mut ondisk_inode = OndiskInode::new();
+        let mut ondisk_inode = RafsV5Inode::new();
         let file_name = OsString::from("c_inode_1");
-        let mut xattr = XAttrs::default();
+        let mut xattr = RafsV5XAttrs::default();
         xattr.add(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
         xattr.add(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
@@ -669,12 +672,12 @@ mod cached_tests {
         ondisk_inode.i_ino = 3;
         ondisk_inode.i_size = 8192;
         ondisk_inode.i_mode = libc::S_IFREG;
-        let mut chunk = OndiskChunkInfo::new();
+        let mut chunk = RafsV5ChunkInfo::new();
         chunk.decompress_size = 8192;
         chunk.decompress_offset = 0;
         chunk.compress_offset = 0;
         chunk.compress_size = 4096;
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: None,
             inode: &ondisk_inode,
@@ -685,7 +688,7 @@ mod cached_tests {
 
         f.seek(Start(0)).unwrap();
         let meta = Arc::new(RafsSuperMeta::default());
-        let blob_table = Arc::new(OndiskBlobTable::new());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         // check data
@@ -724,12 +727,12 @@ mod cached_tests {
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
         let file_name = OsString::from("c_inode_2");
         let symlink_name = OsString::from("c_inode_1");
-        let mut ondisk_inode = OndiskInode::new();
+        let mut ondisk_inode = RafsV5Inode::new();
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
         ondisk_inode.i_symlink_size = symlink_name.byte_size() as u16;
         ondisk_inode.i_mode = libc::S_IFLNK;
 
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: Some(symlink_name.as_os_str()),
             inode: &ondisk_inode,
@@ -738,7 +741,7 @@ mod cached_tests {
 
         f.seek(Start(0)).unwrap();
         let meta = Arc::new(RafsSuperMeta::default());
-        let blob_table = Arc::new(OndiskBlobTable::new());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
 
@@ -761,13 +764,13 @@ mod cached_tests {
         let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
         let file_name = OsString::from("c_inode_3");
-        let mut ondisk_inode = OndiskInode::new();
-        ondisk_inode.i_name_size = align_to_rafs(file_name.len()) as u16;
+        let mut ondisk_inode = RafsV5Inode::new();
+        ondisk_inode.i_name_size = rafsv5_align(file_name.len()) as u16;
         ondisk_inode.i_child_count = 4;
         ondisk_inode.i_mode = libc::S_IFREG;
         ondisk_inode.i_size = 1024 * 1024 * 3 + 8192;
 
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: None,
             inode: &ondisk_inode,
@@ -776,7 +779,7 @@ mod cached_tests {
 
         let mut size = ondisk_inode.i_size;
         for i in 0..ondisk_inode.i_child_count {
-            let mut chunk = OndiskChunkInfo::new();
+            let mut chunk = RafsV5ChunkInfo::new();
             chunk.decompress_size = cmp::min(1024 * 1024, size as u32);
             chunk.decompress_offset = (i * 1024 * 1024) as u64;
             chunk.compress_size = chunk.decompress_size / 2;
@@ -788,7 +791,7 @@ mod cached_tests {
         f.seek(Start(0)).unwrap();
         let mut meta = Arc::new(RafsSuperMeta::default());
         Arc::get_mut(&mut meta).unwrap().block_size = 1024 * 1024;
-        let mut blob_table = Arc::new(OndiskBlobTable::new());
+        let mut blob_table = Arc::new(RafsV5BlobTable::new());
         Arc::get_mut(&mut blob_table)
             .unwrap()
             .add(String::from("123333"), 0, 0, 0, 0, 0);
