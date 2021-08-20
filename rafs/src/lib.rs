@@ -2,7 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! A readonly filesystem with separated bootstrap and data, to support on-demand loading.
+//! RAFS: an on-demand loading, chunk dedup, readonly fuse filesystem.
+//!
+//! A RAFS filesystem image includes two types of components:
+//! - metadata blob: containing filesystem, directory and file metadata. There's only one metadata
+//!   blob for an RAFS filesystem.
+//! - data blob: containing actual file data. There may be 0, 1 or multiple data blobs for an RAFS
+//!   filesystem. And several RAFS filesystems may share one data blob.
+//!
+//! The metadata blob are pre-loaded when mounting the filesystem, and data blobs may be loaded
+//! on demand when the data is actually accessed.
 
 #[macro_use]
 extern crate log;
@@ -10,6 +19,8 @@ extern crate log;
 extern crate bitflags;
 #[macro_use]
 extern crate nydus_error;
+#[macro_use]
+extern crate storage;
 
 use std::any::Any;
 use std::fs::File;
@@ -21,8 +32,6 @@ use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
 
 pub mod fs;
 pub mod metadata;
-#[macro_use]
-extern crate storage;
 
 #[derive(Debug)]
 pub enum RafsError {
@@ -41,26 +50,27 @@ pub enum RafsError {
 
 pub type RafsResult<T> = std::result::Result<T, RafsError>;
 
+/// Handler to read file system bootstrap.
+pub type RafsIoReader = Box<dyn RafsIoRead>;
+
 /// A helper trait for RafsIoReader.
 pub trait RafsIoRead: Read + AsRawFd + Seek + Send {}
+
+impl RafsIoRead for File {}
+
+/// Handler to write file system bootstrap.
+pub type RafsIoWriter = Box<dyn RafsIoWrite>;
 
 /// A helper trait for RafsIoWriter.
 pub trait RafsIoWrite: Write + Seek {
     fn as_any(&self) -> &dyn Any;
 }
 
-impl RafsIoRead for File {}
 impl RafsIoWrite for File {
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
-
-/// Handler to read file system bootstrap.
-pub type RafsIoReader = Box<dyn RafsIoRead>;
-
-/// Handler to write file system bootstrap.
-pub type RafsIoWriter = Box<dyn RafsIoWrite>;
 
 // Rust file I/O is un-buffered by default. If we have many small write calls
 // to a file, should use BufWriter. BufWriter maintains an in-memory buffer

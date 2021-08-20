@@ -70,7 +70,7 @@ macro_rules! impl_getter_setter {
 
 /// Cached Rafs super block bootstrap.
 #[serde_as]
-#[derive(Clone, Copy, Default, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
     pub magic: u32,
     pub version: u32,
@@ -99,14 +99,43 @@ impl RafsSuperMeta {
     pub fn get_compressor(&self) -> compress::Algorithm {
         self.flags.into()
     }
+
     pub fn get_digester(&self) -> digest::Algorithm {
         self.flags.into()
     }
+
     pub fn explicit_uidgid(&self) -> bool {
         self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
     }
+
     pub fn has_xattr(&self) -> bool {
         self.flags.contains(RafsSuperFlags::HAS_XATTR)
+    }
+}
+
+impl Default for RafsSuperMeta {
+    fn default() -> Self {
+        RafsSuperMeta {
+            magic: 0,
+            version: 0,
+            sb_size: 0,
+            inodes_count: 0,
+            root_inode: 0,
+            block_size: 0,
+            flags: RafsSuperFlags::empty(),
+            inode_table_entries: 0,
+            inode_table_offset: 0,
+            blob_table_size: 0,
+            blob_table_offset: 0,
+            extended_blob_table_offset: 0,
+            extended_blob_table_entries: 0,
+            blob_readahead_offset: 0,
+            blob_readahead_size: 0,
+            prefetch_table_offset: 0,
+            prefetch_table_entries: 0,
+            attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
+            entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
+        }
     }
 }
 
@@ -150,27 +179,7 @@ impl Default for RafsSuper {
         Self {
             mode: RafsMode::Direct,
             digest_validate: false,
-            meta: RafsSuperMeta {
-                magic: 0,
-                version: 0,
-                sb_size: 0,
-                inodes_count: 0,
-                root_inode: 0,
-                block_size: 0,
-                flags: RafsSuperFlags::empty(),
-                inode_table_entries: 0,
-                inode_table_offset: 0,
-                blob_table_size: 0,
-                blob_table_offset: 0,
-                extended_blob_table_offset: 0,
-                extended_blob_table_entries: 0,
-                blob_readahead_offset: 0,
-                blob_readahead_size: 0,
-                prefetch_table_offset: 0,
-                prefetch_table_entries: 0,
-                attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
-                entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
-            },
+            meta: RafsSuperMeta::default(),
             inodes: Arc::new(NoopInodes::new()),
         }
     }
@@ -586,11 +595,15 @@ pub trait RafsSuperInodes {
     }
 }
 
-/// Trait to access Rafs Inode Information.
+/// Readonly accessors for RAFS filesystem inodes.
+///
+/// The RAFS filesystem is a readonly filesystem, so does its inodes. The `RafsInode` trait acts
+/// as field accessors for those readonly inodes, to hide implementation details.
 pub trait RafsInode {
-    /// Validate the object for safety.
-    /// The object may be transmuted from a raw buffer read from an external file, so the caller
-    /// must validate it before accessing any fields of the object.
+    /// Validate the node for data integrity.
+    ///
+    /// The inode object may be transmuted from a raw buffer, read from an external file, so the
+    /// caller must validate it before accessing any fields.
     fn validate(&self) -> Result<()>;
 
     fn name(&self) -> OsString;
