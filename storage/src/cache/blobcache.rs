@@ -318,12 +318,34 @@ impl BlobCache {
             &d
         } else {
             {
-                self.read_backend_chunk(blob, chunk.as_ref(), d.mut_slice())?;
-                d = d.try_to_own();
-                buffer_holder = Arc::new(d);
-                let delayed_buffer = buffer_holder.clone();
-                self.delay_persist(fd, &chunk_map, chunk, delayed_buffer);
-                Ok(buffer_holder.as_ref())
+                self.read_backend_chunk(
+                    blob,
+                    chunk.as_ref(),
+                    d.mut_slice(),
+                    Some(&|raw| {
+                        if self.is_compressed {
+                            Self::persist_chunk(true, fd, chunk.as_ref(), raw).unwrap_or_else(
+                                |e| {
+                                    error!(
+                                        "Failed in writing compressed blob cache, {},index {}",
+                                        e,
+                                        chunk.index()
+                                    );
+                                    0
+                                },
+                            );
+                        }
+                    }),
+                )?;
+                if !self.is_compressed {
+                    d = d.try_to_own();
+                    buffer_holder = Arc::new(d);
+                    let delayed_buffer = buffer_holder.clone();
+                    self.delay_persist(fd, &chunk_map, chunk, delayed_buffer);
+                    Ok(buffer_holder.as_ref())
+                } else {
+                    Ok(&d)
+                }
             }
             .map_err(|e: std::io::Error|
                 // Thanks to above curly bracket, we can clean tracer up if any of the steps fails.
