@@ -67,4 +67,15 @@ func WithDaemonConfig(cfg config.DaemonConfig) NewFSOpt {
 	}
 }
 
+func WithLogLevel(logLevel string) NewFSOpt {
+	return func(d *filesystem) error {
+		if logLevel == "" {
+			d.logLevel = config.DefaultLogLevel
+		} else {
+			d.logLevel = logLevel
+		}
+		return nil
+	}
+}
+
 type NewFSOpt func(d *filesystem) error

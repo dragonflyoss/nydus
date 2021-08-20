@@ -129,7 +129,7 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 	args := []string{
 		"--apisock", d.APISock(),
-		"--log-level", "info",
+		"--log-level", d.LogLevel,
 		"--log-file", d.LogFile(),
 		"--thread-num", "10",
 	}

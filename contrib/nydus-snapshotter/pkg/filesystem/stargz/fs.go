@@ -38,6 +38,7 @@ type filesystem struct {
 	vpcRegistry           bool
 	nydusdBinaryPath      string
 	nydusdImageBinaryPath string
+	logLevel              string
 }
 
 func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (fs.FileSystem, error) {
@@ -145,6 +146,7 @@ func (f *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon
 		daemon.WithLogDir(f.LogRoot()),
 		daemon.WithCacheDir(f.CacheRoot()),
 		daemon.WithImageID(imageID),
+		daemon.WithLogLevel(f.logLevel),
 	)
 	if err != nil {
 		return nil, err
