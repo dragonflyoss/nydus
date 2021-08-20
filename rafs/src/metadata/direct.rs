@@ -1,7 +1,7 @@
 // Copyright (C) 2020 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
-//
+
 /// A bootstrap driver to directly use on disk bootstrap as runtime in-memory bootstrap.
 ///
 /// To reduce memory footprint and speed up filesystem initialization, the V5 on disk bootstrap
@@ -17,9 +17,10 @@
 /// The bootstrap file may be provided by untrusted parties, so we must ensure strong validations
 /// before making use of any bootstrap, especially we are using them in memory-mapped mode. The
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Result;
+use std::io::SeekFrom;
 use std::mem::{size_of, ManuallyDrop};
 use std::ops::Deref;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
@@ -28,11 +29,23 @@ use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
 
-use crate::metadata::layout::*;
-use crate::metadata::*;
+use nydus_utils::digest::RafsDigest;
+use storage::device::RafsBioDesc;
 use storage::utils::readahead;
 
-use nydus_utils::digest::RafsDigest;
+use crate::metadata::layout::v5::{
+    align_to_rafs, rafsv5_alloc_bio_desc, OndiskBlobTable, OndiskChunkInfo, OndiskInode,
+    OndiskInodeTable, OndiskXAttrs, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo, RAFS_ALIGNMENT,
+    RAFS_SUPERBLOCK_SIZE,
+};
+use crate::metadata::layout::{
+    bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
+};
+use crate::metadata::{
+    Attr, Entry, Inode, RafsInode, RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
+    RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
+};
+use crate::{RafsError, RafsIoReader, RafsResult};
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {
@@ -735,6 +748,10 @@ impl RafsInode for OndiskInodeWrapper {
     impl_inode_getter!(parent, i_parent, u64);
     impl_inode_getter!(size, i_size, u64);
     impl_inode_getter!(rdev, i_rdev, u32);
+
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc(self, offset, size)
+    }
 }
 
 pub struct OndiskChunkInfoWrapper {

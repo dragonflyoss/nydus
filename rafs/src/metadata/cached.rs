@@ -17,7 +17,11 @@ use std::sync::Arc;
 use fuse_rs::abi::linux_abi;
 use fuse_rs::api::filesystem::Entry;
 
-use crate::metadata::layout::*;
+use crate::metadata::layout::v5::{
+    rafsv5_alloc_bio_desc, OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskXAttrs,
+    RafsInodeFlags,
+};
+use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::*;
 use crate::RafsIoReader;
 
@@ -505,6 +509,10 @@ impl RafsInode for CachedInode {
     impl_getter!(parent, i_parent, u64);
     impl_getter!(size, i_size, u64);
     impl_getter!(rdev, i_rdev, u32);
+
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc(self, offset, size)
+    }
 }
 
 /// Cached information about an Rafs Data Chunk.

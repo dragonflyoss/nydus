@@ -17,7 +17,6 @@ use std::str;
 use std::str::FromStr;
 
 use nix::sys::stat;
-use rafs::RafsIoWriter;
 
 use anyhow::{Context, Error, Result};
 use sha2::digest::Digest;
@@ -30,8 +29,11 @@ use nydus_utils::{
 
 use super::blob::BlobBufferWriter;
 
-use rafs::metadata::layout::*;
-use rafs::metadata::*;
+use rafs::metadata::layout::v5::{
+    OndiskChunkInfo, OndiskInode, OndiskInodeWrapper, RafsChunkFlags, RafsInodeFlags, XAttrs,
+};
+use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
+use rafs::RafsIoWriter;
 use storage::compress;
 
 const ROOT_PATH_NAME: &[u8] = &[b'/'];

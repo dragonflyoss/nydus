@@ -14,10 +14,9 @@ use serde_json::Value;
 
 use anyhow::Result;
 
-use rafs::metadata::extended::blob_table::ExtendedBlobTable;
-use rafs::metadata::layout::{
-    OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeTable, OndiskSuperBlock,
-    OndiskXAttrs, PrefetchTable,
+use rafs::metadata::layout::v5::{
+    ExtendedBlobTable, OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeTable,
+    OndiskSuperBlock, OndiskXAttrs, PrefetchTable,
 };
 use rafs::{RafsIoRead, RafsIoReader};
 

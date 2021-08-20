@@ -28,7 +28,7 @@ use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
-use crate::metadata::layout::{align_to_rafs, RAFS_ALIGNMENT};
+use crate::metadata::layout::v5::{align_to_rafs, RAFS_ALIGNMENT};
 
 pub mod fs;
 pub mod metadata;

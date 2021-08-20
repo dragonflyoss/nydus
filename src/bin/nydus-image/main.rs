@@ -51,7 +51,7 @@ use crate::core::tree;
 
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
-use rafs::metadata::layout::OndiskBlobTable;
+use rafs::metadata::layout::v5::OndiskBlobTable;
 use rafs::RafsIoReader;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};

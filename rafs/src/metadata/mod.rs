@@ -5,8 +5,7 @@
 
 //! Structs and Traits for RAFS file system meta data management.
 
-use std::cmp;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Error, Result, Seek, SeekFrom};
@@ -20,30 +19,31 @@ use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 
 use fuse_rs::abi::linux_abi::Attr;
-use fuse_rs::api::filesystem::Entry;
-use fuse_rs::api::filesystem::ROOT_ID;
+use fuse_rs::api::filesystem::{Entry, ROOT_ID};
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
+use storage::compress;
+use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
 
 use self::direct::DirectMapping;
-use self::layout::*;
+//use self::layout::*;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::metadata::cached::CachedInodes;
-use storage::compress;
-use storage::device::{RafsBio, RafsBioDesc};
-// FIXME: Move this definition to metadata crate if we have it some day.
-pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
-use crate::*;
-
-mod noop;
-use noop::NoopInodes;
-
-use nydus_utils::digest::{self, DigestHasher, RafsDigest};
+//use crate::*;
+use self::layout::v5::{
+    OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable, RafsSuperFlags, RAFS_ALIGNMENT,
+};
+use self::layout::{XattrName, XattrValue};
+use self::noop::NoopInodes;
+use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
 pub mod cached;
 pub mod direct;
-pub mod extended;
 pub mod layout;
+mod noop;
 
-pub use storage::device::{RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
+// FIXME: Move this definition to metadata crate if we have it some day.
+use crate::metadata::layout::{RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
+pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
 
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
@@ -55,20 +55,7 @@ const DOTDOT: &str = "..";
 /// Type of RAFS inode.
 pub type Inode = u64;
 
-#[macro_export]
-macro_rules! impl_getter_setter {
-    ($G: ident, $S: ident, $F: ident, $U: ty) => {
-        fn $G(&self) -> $U {
-            self.$F
-        }
-
-        fn $S(&mut self, $F: $U) {
-            self.$F = $F;
-        }
-    };
-}
-
-/// Cached Rafs super block bootstrap.
+/// Rafs filesystem meta-data cached from RAFS super block on disk.
 #[serde_as]
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
@@ -96,20 +83,40 @@ pub struct RafsSuperMeta {
 }
 
 impl RafsSuperMeta {
+    pub fn is_v4_v5(&self) -> bool {
+        self.version == RAFS_SUPER_VERSION_V4 || self.version == RAFS_SUPER_VERSION_V5
+    }
+
     pub fn get_compressor(&self) -> compress::Algorithm {
-        self.flags.into()
+        if self.is_v4_v5() {
+            self.flags.into()
+        } else {
+            compress::Algorithm::None
+        }
     }
 
     pub fn get_digester(&self) -> digest::Algorithm {
-        self.flags.into()
+        if self.is_v4_v5() {
+            self.flags.into()
+        } else {
+            digest::Algorithm::Sha256
+        }
     }
 
     pub fn explicit_uidgid(&self) -> bool {
-        self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
+        if self.is_v4_v5() {
+            self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
+        } else {
+            false
+        }
     }
 
     pub fn has_xattr(&self) -> bool {
-        self.flags.contains(RafsSuperFlags::HAS_XATTR)
+        if self.is_v4_v5() {
+            self.flags.contains(RafsSuperFlags::HAS_XATTR)
+        } else {
+            false
+        }
     }
 }
 
@@ -530,6 +537,8 @@ impl RafsSuper {
 pub trait RafsSuperInodes {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
+
     fn destroy(&mut self);
 
     fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>>;
@@ -542,10 +551,9 @@ pub trait RafsSuperInodes {
 
     fn get_blob_table(&self) -> Arc<OndiskBlobTable>;
 
-    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
-
-    /// Validate child, chunk and symlink digest on inode tree.
-    /// The chunk data digest for regular file will only validate on fs read.
+    /// Validate inode metadata, include children, chunks and symblink etc.
+    ///
+    /// The chunk data is not validated here, which will be validate on fs read.
     fn digest_validate(
         &self,
         inode: Arc<dyn RafsInode>,
@@ -643,118 +651,7 @@ pub trait RafsInode {
 
     fn cast_ondisk(&self) -> Result<OndiskInode>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
-        // Do not process zero size bio
-        let mut desc = RafsBioDesc::new();
-        if size == 0 {
-            return Ok(desc);
-        }
-
-        let end = offset
-            .checked_add(size as u64)
-            .ok_or_else(|| einval!("invalid read size"))?;
-
-        let blksize = self.get_blocksize() as u64;
-        let (index_start, index_end) = calculate_bio_chunk_index(
-            offset,
-            end,
-            blksize,
-            self.get_child_count(),
-            self.has_hole(),
-        );
-
-        trace!(
-            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
-            offset, size, self.size(), blksize, index_start, index_end, self.get_child_count()
-        );
-
-        for idx in index_start..index_end {
-            let chunk = self.get_chunk_info(idx)?;
-            let blob = self.get_blob_by_index(chunk.blob_index())?;
-            if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob) {
-                break;
-            }
-        }
-
-        Ok(desc)
-    }
-}
-
-/// Add a new bio covering the IO range into the provided bio desc. Returns
-/// true if caller should continue checking more chunks.
-///
-/// offset: IO offset to the file start, inclusive.
-/// end: IO end to the file start, exclusive.
-/// chunk: a data chunk overlapping with the IO range.
-/// desc: the targeting bio desc.
-/// blksize: chunk size.
-/// blob_id: chunk data blob id.
-pub(crate) fn add_chunk_to_bio_desc(
-    offset: u64,
-    end: u64,
-    chunk: Arc<dyn RafsChunkInfo>,
-    desc: &mut RafsBioDesc,
-    blksize: u32,
-    blob: Arc<RafsBlobEntry>,
-) -> bool {
-    if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
-        return true;
-    }
-    if end <= chunk.file_offset() {
-        return false;
-    }
-
-    let chunk_start = if offset > chunk.file_offset() {
-        offset - chunk.file_offset()
-    } else {
-        0
-    };
-    let chunk_end = if end < (chunk.file_offset() + chunk.decompress_size() as u64) {
-        end - chunk.file_offset()
-    } else {
-        chunk.decompress_size() as u64
-    };
-
-    let bio = RafsBio::new(
-        chunk,
-        blob,
-        chunk_start as u32,
-        (chunk_end - chunk_start) as usize,
-        blksize,
-    );
-
-    desc.bi_size += bio.size;
-    desc.bi_vec.push(bio);
-    true
-}
-
-/// Calculate bio chunk indices that overlaps with the provided IO range.
-///
-/// offset: IO offset to the file start, inclusive.
-/// end: IO end to the file start, exclusive.
-/// blksize: chunk block size.
-/// has_hole: whether a file has holes in it.
-pub(crate) fn calculate_bio_chunk_index(
-    offset: u64,
-    end: u64,
-    blksize: u64,
-    chunk_cnt: u32,
-    has_hole: bool,
-) -> (u32, u32) {
-    debug_assert!(offset < end);
-
-    let index_start = if !has_hole {
-        (offset / blksize) as u32
-    } else {
-        0
-    };
-    let index_end = if !has_hole {
-        cmp::min(((end - 1) / blksize) as u32 + 1, chunk_cnt)
-    } else {
-        chunk_cnt
-    };
-
-    (index_start, index_end)
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

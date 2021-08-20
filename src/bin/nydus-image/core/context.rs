@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use anyhow::{Error, Result};
 
-use rafs::metadata::layout::*;
+use rafs::metadata::layout::v5::{OndiskBlobTable, OndiskChunkInfo};
 use rafs::metadata::Inode;
 use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?

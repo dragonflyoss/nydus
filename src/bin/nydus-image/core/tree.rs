@@ -17,8 +17,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use rafs::metadata::layout::*;
-use rafs::metadata::{Inode, RafsChunkInfo, RafsInode, RafsSuper};
+use rafs::metadata::layout::v5::{OndiskChunkInfo, RafsChunkInfo, XAttrs};
+use rafs::metadata::layout::{bytes_to_os_str, RAFS_ROOT_INODE};
+use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use crate::node::*;
 

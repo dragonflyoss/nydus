@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
-use rafs::metadata::layout::*;
+use rafs::metadata::layout::v5::{
+    OndiskChunkInfo, OndiskInodeTable, OndiskSuperBlock, OndiskXAttrs,
+};
+use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
 use nydus_utils::digest::{DigestHasher, RafsDigest};

@@ -19,8 +19,10 @@ use sha2::{Digest, Sha256};
 
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
-use rafs::metadata::layout::*;
-use rafs::metadata::{Inode, RafsChunkFlags};
+use rafs::metadata::layout::v5::{
+    OndiskChunkInfo, OndiskInode, RafsChunkFlags, RafsInodeFlags, XAttrs,
+};
+use rafs::metadata::Inode;
 
 use crate::builder::Builder;
 use crate::core::bootstrap::Bootstrap;

@@ -7,9 +7,9 @@
 use std::io::Result;
 use std::sync::Arc;
 
-use super::*;
-use crate::metadata::RafsInode;
-use crate::RafsIoReader;
+use crate::metadata::layout::v5::OndiskBlobTable;
+use crate::metadata::{Inode, RafsInode, RafsSuperInodes};
+use crate::{RafsIoReader, RafsResult};
 
 pub struct NoopInodes {}
 

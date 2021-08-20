@@ -9,7 +9,7 @@ use std::str::FromStr;
 use anyhow::{Context, Error, Result};
 
 use crate::node::*;
-use rafs::metadata::layout::PrefetchTable;
+use rafs::metadata::layout::v5::PrefetchTable;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
