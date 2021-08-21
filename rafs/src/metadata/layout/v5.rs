@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
-use std::io::{Error, Result};
+use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
@@ -802,7 +802,6 @@ impl RafsStore for ExtendedBlobTable {
         Ok(size)
     }
 }
-
 
 /// Rafs v5 inode on disk layout.
 #[repr(C)]
