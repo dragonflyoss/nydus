@@ -6,12 +6,12 @@ PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 #GOPROXY ?= https://goproxy.io
 
 ifdef GOPROXY
-PROXY := GOPROXY=${GOPROXY}
+PROXY := GOPROXY="${GOPROXY}"
 endif
 
 .PHONY: build
 build:
-	GOOS=linux ${PROXY} build -ldflags="-s -w -X 'main.Version=${VERSION}'" -v -o bin/containerd-nydus-grpc ./cmd/containerd-nydus-grpc
+	GOOS=linux ${PROXY} go build -ldflags="-s -w -X 'main.Version=${VERSION}'" -v -o bin/containerd-nydus-grpc ./cmd/containerd-nydus-grpc
 
 static-release:
 	CGO_ENABLED=0 ${PROXY} GOOS=linux go build -ldflags '-s -w -X "main.Version=${VERSION}" -extldflags "-static"' -v -o bin/containerd-nydus-grpc ./cmd/containerd-nydus-grpc
