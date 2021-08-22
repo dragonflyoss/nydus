@@ -28,8 +28,6 @@ use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
-use crate::metadata::layout::v5::align_to_rafs;
-
 pub mod fs;
 pub mod metadata;
 
@@ -106,10 +104,11 @@ impl dyn RafsIoWrite {
 }
 
 impl dyn RafsIoRead {
-    pub fn seek_to_next_aligned(&mut self, last_read_len: usize) -> Result<u64> {
-        // Seek should not fail otherwise rafs goes insane.
-        let offset = (align_to_rafs(last_read_len) - last_read_len) as i64;
-        self.seek(SeekFrom::Current(offset)).map_err(|e| {
+    pub fn seek_to_next_aligned(&mut self, last_read_len: usize, alignment: usize) -> Result<u64> {
+        let suffix = last_read_len & (alignment - 1);
+        let offset = if suffix == 0 { 0 } else { alignment - suffix };
+
+        self.seek(SeekFrom::Current(offset as i64)).map_err(|e| {
             error!("Seeking to offset {} from current fails, {}", offset, e);
             e
         })
