@@ -34,9 +34,9 @@ use storage::device::RafsBioDesc;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    align_to_rafs, rafsv5_alloc_bio_desc, OndiskBlobTable, OndiskChunkInfo, OndiskInode,
-    OndiskInodeTable, OndiskXAttrs, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo, RAFS_ALIGNMENT,
-    RAFS_SUPERBLOCK_SIZE,
+    rafsv5_align, rafsv5_alloc_bio_desc, OndiskBlobTable, OndiskChunkInfo, OndiskInode,
+    OndiskInodeTable, OndiskXAttrs, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo, RAFSV5_ALIGNMENT,
+    RAFSV5_SUPERBLOCK_SIZE,
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
@@ -220,9 +220,9 @@ impl DirectSuperBlockV5 {
         let md = file.metadata()?;
         let len = md.len();
         let size = len as usize;
-        if len < RAFS_SUPERBLOCK_SIZE as u64
+        if len < RAFSV5_SUPERBLOCK_SIZE as u64
             || len > RAFS_MAX_METADATA_SIZE as u64
-            || len & (RAFS_ALIGNMENT as u64 - 1) != 0
+            || len & (RAFSV5_ALIGNMENT as u64 - 1) != 0
         {
             return Err(ebadf!("invalid bootstrap file"));
         }
@@ -233,7 +233,7 @@ impl DirectSuperBlockV5 {
         let inode_table_end = inode_table_start
             .checked_add(inode_table_size)
             .ok_or_else(|| ebadf!("invalid inode table size"))?;
-        if inode_table_start < RAFS_SUPERBLOCK_SIZE as u64
+        if inode_table_start < RAFSV5_SUPERBLOCK_SIZE as u64
             || inode_table_start >= len
             || inode_table_start > inode_table_end
             || inode_table_end > len
@@ -247,7 +247,7 @@ impl DirectSuperBlockV5 {
         let blob_table_end = blob_table_start
             .checked_add(blob_table_size)
             .ok_or_else(|| ebadf!("invalid blob table size"))?;
-        if blob_table_start < RAFS_SUPERBLOCK_SIZE as u64
+        if blob_table_start < RAFSV5_SUPERBLOCK_SIZE as u64
             || blob_table_start >= len
             || blob_table_start > blob_table_end
             || blob_table_end > len
@@ -521,7 +521,7 @@ impl RafsInode for OndiskInodeWrapper {
         let state = self.state();
         let inode = self.inode(state.deref());
         let offset =
-            self.offset + size_of::<OndiskInode>() + align_to_rafs(inode.i_name_size as usize);
+            self.offset + size_of::<OndiskInode>() + rafsv5_align(inode.i_name_size as usize);
         // TODO: the symlink is aligned, should we store raw size?
         let symlink = unsafe {
             let start = state.base.add(offset);

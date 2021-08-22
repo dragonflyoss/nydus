@@ -19,7 +19,7 @@ use fuse_rs::api::filesystem::Entry;
 
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_desc, OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskXAttrs,
-    RafsInodeFlags, RAFS_ALIGNMENT,
+    RafsInodeFlags, RAFSV5_ALIGNMENT,
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::*;
@@ -237,7 +237,7 @@ impl CachedInodeV5 {
             r.read_exact(name_buf.as_mut_slice())?;
             self.i_name = bytes_to_os_str(&name_buf).to_os_string();
         }
-        r.seek_to_next_aligned(name_size, RAFS_ALIGNMENT)?;
+        r.seek_to_next_aligned(name_size, RAFSV5_ALIGNMENT)?;
         Ok(())
     }
 
@@ -247,7 +247,7 @@ impl CachedInodeV5 {
             r.read_exact(symbol_buf.as_mut_slice())?;
             self.i_target = bytes_to_os_str(&symbol_buf).to_os_string();
         }
-        r.seek_to_next_aligned(symlink_size, RAFS_ALIGNMENT)?;
+        r.seek_to_next_aligned(symlink_size, RAFSV5_ALIGNMENT)?;
         Ok(())
     }
 

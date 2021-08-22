@@ -62,13 +62,13 @@ use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, Rafs
 // have been moved into the storage manager.
 pub use storage::device::{RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
 
-pub const RAFS_ALIGNMENT: usize = 8;
-pub const RAFS_SUPERBLOCK_SIZE: usize = 8192;
+pub(crate) const RAFSV5_ALIGNMENT: usize = 8;
+pub(crate) const RAFSV5_SUPERBLOCK_SIZE: usize = 8192;
 
-const RAFS_SUPER_MAGIC: u32 = 0x5241_4653;
-const RAFS_SUPERBLOCK_RESERVED_SIZE: usize = RAFS_SUPERBLOCK_SIZE - 80;
-const EXTENDED_BLOB_TABLE_ENTRY_SIZE: usize = 64;
-const RESERVED_SIZE: usize = EXTENDED_BLOB_TABLE_ENTRY_SIZE - 24;
+const RAFSV5_SUPER_MAGIC: u32 = 0x5241_4653;
+const RAFSV5_SUPERBLOCK_RESERVED_SIZE: usize = RAFSV5_SUPERBLOCK_SIZE - 80;
+const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
+const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
 
 bitflags! {
     #[derive(Serialize)]
@@ -180,7 +180,7 @@ pub struct OndiskSuperBlock {
     /// Extended Blob Table
     s_extended_blob_table_offset: u64, // 80 bytes --- reduce me from `RAFS_SUPERBLOCK_RESERVED_SIZE`
     /// Unused area
-    s_reserved: [u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
+    s_reserved: [u8; RAFSV5_SUPERBLOCK_RESERVED_SIZE],
 }
 
 impl OndiskSuperBlock {
@@ -189,10 +189,10 @@ impl OndiskSuperBlock {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.magic() != RAFS_SUPER_MAGIC
+        if self.magic() != RAFSV5_SUPER_MAGIC
             || self.version() < RAFS_SUPER_MIN_VERSION as u32
             || self.version() > RAFS_SUPER_VERSION_V5 as u32
-            || self.sb_size() != RAFS_SUPERBLOCK_SIZE as u32
+            || self.sb_size() != RAFSV5_SUPERBLOCK_SIZE as u32
         {
             return Err(einval!("invalid superblock"));
         }
@@ -208,7 +208,7 @@ impl OndiskSuperBlock {
             }
             RAFS_SUPER_VERSION_V5 => {
                 if self.inodes_count() == 0
-                    || self.inode_table_offset() < RAFS_SUPERBLOCK_SIZE as u64
+                    || self.inode_table_offset() < RAFSV5_SUPERBLOCK_SIZE as u64
                     || self.inode_table_offset() & 0x7 != 0
                 {
                     return Err(einval!("invalid super block"));
@@ -300,7 +300,7 @@ impl OndiskSuperBlock {
 impl RafsStore for OndiskSuperBlock {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        w.validate_alignment(self.as_ref().len(), RAFS_ALIGNMENT)
+        w.validate_alignment(self.as_ref().len(), RAFSV5_ALIGNMENT)
     }
 }
 
@@ -309,9 +309,9 @@ impl_bootstrap_converter!(OndiskSuperBlock);
 impl Default for OndiskSuperBlock {
     fn default() -> Self {
         Self {
-            s_magic: u32::to_le(RAFS_SUPER_MAGIC as u32),
+            s_magic: u32::to_le(RAFSV5_SUPER_MAGIC as u32),
             s_fs_version: u32::to_le(RAFS_SUPER_VERSION_V5),
-            s_sb_size: u32::to_le(RAFS_SUPERBLOCK_SIZE as u32),
+            s_sb_size: u32::to_le(RAFSV5_SUPERBLOCK_SIZE as u32),
             s_block_size: u32::to_le(RAFS_DEFAULT_BLOCK_SIZE as u32),
             s_flags: u64::to_le(0),
             s_inodes_count: u64::to_le(0),
@@ -323,7 +323,7 @@ impl Default for OndiskSuperBlock {
             s_blob_table_offset: u64::to_le(0),
             s_extended_blob_table_offset: u64::to_le(0),
             s_extended_blob_table_entries: u32::to_le(0),
-            s_reserved: [0u8; RAFS_SUPERBLOCK_RESERVED_SIZE],
+            s_reserved: [0u8; RAFSV5_SUPERBLOCK_RESERVED_SIZE],
         }
     }
 }
@@ -343,7 +343,7 @@ pub struct OndiskInodeTable {
 
 impl OndiskInodeTable {
     pub fn new(entries: usize) -> Self {
-        let table_size = align_to_rafs(entries * size_of::<u32>()) / size_of::<u32>();
+        let table_size = rafsv5_align(entries * size_of::<u32>()) / size_of::<u32>();
         OndiskInodeTable {
             data: vec![0; table_size],
         }
@@ -351,7 +351,7 @@ impl OndiskInodeTable {
 
     #[inline]
     pub fn size(&self) -> usize {
-        align_to_rafs(self.data.len() * size_of::<u32>())
+        rafsv5_align(self.data.len() * size_of::<u32>())
     }
 
     #[inline]
@@ -383,7 +383,7 @@ impl OndiskInodeTable {
         }
 
         let offset = u32::from_le(self.data[(ino - 1) as usize]) as usize;
-        if offset <= (RAFS_SUPERBLOCK_SIZE >> 3) || offset >= (1usize << 29) {
+        if offset <= (RAFSV5_SUPERBLOCK_SIZE >> 3) || offset >= (1usize << 29) {
             return Err(einval!("invalid inode offset"));
         }
 
@@ -402,7 +402,7 @@ impl RafsStore for OndiskInodeTable {
         let (_, data, _) = unsafe { self.data.align_to::<u8>() };
 
         w.write_all(data)?;
-        w.validate_alignment(data.len(), RAFS_ALIGNMENT)
+        w.validate_alignment(data.len(), RAFSV5_ALIGNMENT)
     }
 }
 
@@ -441,7 +441,7 @@ impl PrefetchTable {
     }
 
     pub fn size(&self) -> usize {
-        align_to_rafs(self.len() * size_of::<u32>())
+        rafsv5_align(self.len() * size_of::<u32>())
     }
 
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
@@ -455,7 +455,7 @@ impl PrefetchTable {
 
         // OK. Let's see if we have to align... :-(
         let cur_len = self.inodes.len() * size_of::<u32>();
-        let padding_bytes = align_to_rafs(cur_len) - cur_len;
+        let padding_bytes = rafsv5_align(cur_len) - cur_len;
         w.write_padding(padding_bytes)?;
 
         Ok(data.len() + padding_bytes)
@@ -500,7 +500,7 @@ impl OndiskBlobTable {
             return 0;
         }
         // Blob entry split with '\0'
-        align_to_rafs(
+        rafsv5_align(
             self.entries.iter().fold(0usize, |size, entry| {
                 let entry_size = size_of::<u32>() * 2 + entry.blob_id.len();
                 size + entry_size + 1
@@ -610,7 +610,7 @@ impl OndiskBlobTable {
                 blob_cache_size,
             }));
 
-            if align_to_rafs(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
+            if rafsv5_align(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
                 break;
             }
         }
@@ -659,11 +659,11 @@ impl RafsStore for OndiskBlobTable {
                 Ok(())
             })?;
 
-        let padding = align_to_rafs(size) - size;
+        let padding = rafsv5_align(size) - size;
         w.write_padding(padding)?;
         size += padding;
 
-        w.validate_alignment(size, RAFS_ALIGNMENT)
+        w.validate_alignment(size, RAFSV5_ALIGNMENT)
     }
 }
 
@@ -680,7 +680,7 @@ pub struct ExtendedBlobTableEntry {
     /// The expected decompress size of blob cache file.
     pub blob_cache_size: u64, // -- 16 Bytes
     pub compressed_blob_size: u64, // -- 24 Bytes
-    pub reserved2: [u8; RESERVED_SIZE],
+    pub reserved2: [u8; RAFSV5_EXT_BLOB_RESERVED_SIZE],
 }
 
 // Implement Debug trait ourselves, as rust prior to 1.47 doesn't impl Debug for array with size
@@ -702,7 +702,7 @@ impl Default for ExtendedBlobTableEntry {
             reserved1: [0; 4],
             blob_cache_size: 0,
             compressed_blob_size: 0,
-            reserved2: [0; RESERVED_SIZE],
+            reserved2: [0; RAFSV5_EXT_BLOB_RESERVED_SIZE],
         }
     }
 }
@@ -714,7 +714,7 @@ impl ExtendedBlobTableEntry {
             reserved1: [0; 4],
             blob_cache_size,
             compressed_blob_size,
-            reserved2: [0; RESERVED_SIZE],
+            reserved2: [0; RAFSV5_EXT_BLOB_RESERVED_SIZE],
         }
     }
 }
@@ -736,7 +736,7 @@ impl ExtendedBlobTable {
     pub fn size(&self) -> usize {
         // `ExtendedBlobTableEntry` is already a well defined disk structure and rafs-aligned
         // So directly use its `size_of()` is reliable.
-        align_to_rafs(size_of::<ExtendedBlobTableEntry>() * self.entries.len())
+        rafsv5_align(size_of::<ExtendedBlobTableEntry>() * self.entries.len())
     }
 
     pub fn entries(&self) -> usize {
@@ -794,11 +794,11 @@ impl RafsStore for ExtendedBlobTable {
             })?;
 
         // Append padding for RAFS alignment
-        let padding = align_to_rafs(size) - size;
+        let padding = rafsv5_align(size) - size;
         w.write_padding(padding)?;
         size += padding;
 
-        w.validate_alignment(size, RAFS_ALIGNMENT)
+        w.validate_alignment(size, RAFSV5_ALIGNMENT)
     }
 }
 
@@ -874,8 +874,8 @@ impl OndiskInode {
     #[inline]
     pub fn size(&self) -> usize {
         size_of::<Self>()
-            + (align_to_rafs(self.i_name_size as usize)
-                + align_to_rafs(self.i_symlink_size as usize)) as usize
+            + (rafsv5_align(self.i_name_size as usize) + rafsv5_align(self.i_symlink_size as usize))
+                as usize
     }
 
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
@@ -937,7 +937,7 @@ impl<'a> RafsStore for OndiskInodeWrapper<'a> {
         w.write_all(name)?;
         size += name.len();
 
-        let padding = align_to_rafs(self.inode.i_name_size as usize) - name.len();
+        let padding = rafsv5_align(self.inode.i_name_size as usize) - name.len();
         w.write_padding(padding)?;
         size += padding;
 
@@ -945,12 +945,12 @@ impl<'a> RafsStore for OndiskInodeWrapper<'a> {
             let symlink_path = symlink.as_bytes();
             w.write_all(symlink_path)?;
             size += symlink_path.len();
-            let padding = align_to_rafs(self.inode.i_symlink_size as usize) - symlink_path.len();
+            let padding = rafsv5_align(self.inode.i_symlink_size as usize) - symlink_path.len();
             w.write_padding(padding)?;
             size += padding;
         }
 
-        w.validate_alignment(size, RAFS_ALIGNMENT)
+        w.validate_alignment(size, RAFSV5_ALIGNMENT)
     }
 }
 
@@ -996,7 +996,7 @@ impl OndiskChunkInfo {
 impl RafsStore for OndiskChunkInfo {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        w.validate_alignment(self.as_ref().len(), RAFS_ALIGNMENT)
+        w.validate_alignment(self.as_ref().len(), RAFSV5_ALIGNMENT)
     }
 }
 
@@ -1043,7 +1043,7 @@ impl OndiskXAttrs {
 
     #[inline]
     pub fn aligned_size(self) -> usize {
-        align_to_rafs(self.size())
+        rafsv5_align(self.size())
     }
 }
 
@@ -1072,7 +1072,7 @@ impl XAttrs {
 
     #[inline]
     pub fn aligned_size(&self) -> usize {
-        align_to_rafs(self.size())
+        rafsv5_align(self.size())
     }
 
     pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
@@ -1117,11 +1117,11 @@ impl RafsStore for XAttrs {
             }
         }
 
-        let padding = align_to_rafs(size) - size;
+        let padding = rafsv5_align(size) - size;
         w.write_padding(padding)?;
         size += padding;
 
-        w.validate_alignment(size, RAFS_ALIGNMENT)
+        w.validate_alignment(size, RAFSV5_ALIGNMENT)
     }
 }
 
@@ -1242,11 +1242,11 @@ pub(crate) fn calculate_bio_chunk_index(
     (index_start, index_end)
 }
 
-pub fn align_to_rafs(size: usize) -> usize {
-    if size & (RAFS_ALIGNMENT - 1) == 0 {
+pub(crate) fn rafsv5_align(size: usize) -> usize {
+    if size & (RAFSV5_ALIGNMENT - 1) == 0 {
         return size;
     }
-    size + (RAFS_ALIGNMENT - (size & (RAFS_ALIGNMENT - 1)))
+    size + (RAFSV5_ALIGNMENT - (size & (RAFSV5_ALIGNMENT - 1)))
 }
 
 fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
