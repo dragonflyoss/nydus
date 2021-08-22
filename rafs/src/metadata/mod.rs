@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
-use std::io::{Error, Result, Seek, SeekFrom};
+use std::io::{Error, Result};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -22,11 +22,11 @@ use fuse_rs::abi::linux_abi::Attr;
 use fuse_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use storage::compress;
-use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
+use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-use self::layout::v5::{OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable};
+use self::layout::v5::{RafsV5BlobTable, RafsV5Inode, RafsV5PrefetchTable, RafsV5SuperBlock};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopInodes;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
@@ -292,7 +292,7 @@ impl RafsSuper {
     }
 
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
-        let mut sb = OndiskSuperBlock::new();
+        let mut sb = RafsV5SuperBlock::new();
 
         r.read_exact(sb.as_mut())
             .map_err(|e| RafsError::ReadMetadata(e, "Updating meta".to_string()))?;
@@ -301,7 +301,7 @@ impl RafsSuper {
 
     /// Load RAFS super block and optionally cache inodes.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        let mut sb = OndiskSuperBlock::new();
+        let mut sb = RafsV5SuperBlock::new();
 
         r.read_exact(sb.as_mut())?;
         sb.validate()?;
@@ -358,7 +358,7 @@ impl RafsSuper {
 
     /// Store RAFS bootstrap to backend storage.
     pub fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        let mut sb = OndiskSuperBlock::new();
+        let mut sb = RafsV5SuperBlock::new();
 
         sb.set_magic(self.meta.magic);
         sb.set_version(self.meta.version);
@@ -381,7 +381,7 @@ impl RafsSuper {
 
         trace!("written superblock: {}", &sb);
 
-        Ok(std::mem::size_of::<OndiskSuperBlock>())
+        Ok(std::mem::size_of::<RafsV5SuperBlock>())
     }
 
     pub fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
@@ -555,7 +555,7 @@ impl RafsSuper {
         // No need to prefetch blob data for each alias as they share the same range,
         // we do it once.
         let mut hardlinks: HashSet<u64> = HashSet::new();
-        let mut prefetch_table = PrefetchTable::new();
+        let mut prefetch_table = RafsV5PrefetchTable::new();
         let mut head_desc = RafsBioDesc {
             bi_size: 0,
             bi_flags: 0,
@@ -619,7 +619,7 @@ pub trait RafsSuperInodes {
         self.get_blob_table().get_all()
     }
 
-    fn get_blob_table(&self) -> Arc<OndiskBlobTable>;
+    fn get_blob_table(&self) -> Arc<RafsV5BlobTable>;
 
     /// Validate inode metadata, include children, chunks and symblink etc.
     ///
@@ -719,7 +719,7 @@ pub trait RafsInode {
         self.size() == 0
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskInode>;
+    fn cast_ondisk(&self) -> Result<RafsV5Inode>;
 
     fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc>;
 }

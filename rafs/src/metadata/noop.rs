@@ -7,7 +7,7 @@
 use std::io::Result;
 use std::sync::Arc;
 
-use crate::metadata::layout::v5::OndiskBlobTable;
+use crate::metadata::layout::v5::RafsV5BlobTable;
 use crate::metadata::{Inode, RafsInode, RafsSuperInodes};
 use crate::{RafsIoReader, RafsResult};
 
@@ -40,7 +40,7 @@ impl RafsSuperInodes for NoopInodes {
         unimplemented!()
     }
 
-    fn get_blob_table(&self) -> Arc<OndiskBlobTable> {
+    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
         unimplemented!()
     }
 

@@ -11,7 +11,7 @@ use sha2::digest::Digest;
 use sha2::Sha256;
 
 use rafs::metadata::layout::v5::{
-    OndiskChunkInfo, OndiskInodeTable, OndiskSuperBlock, OndiskXAttrs,
+    RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
@@ -275,9 +275,9 @@ impl Bootstrap {
         }
 
         // Set inode table
-        let super_block_size = size_of::<OndiskSuperBlock>();
+        let super_block_size = size_of::<RafsV5SuperBlock>();
         let inode_table_entries = ctx.nodes.len() as u32;
-        let mut inode_table = OndiskInodeTable::new(inode_table_entries as usize);
+        let mut inode_table = RafsV5InodeTable::new(inode_table_entries as usize);
         let inode_table_size = inode_table.size();
 
         // Set prefetch table
@@ -297,7 +297,7 @@ impl Bootstrap {
         let extended_blob_table_entries = ctx.blob_table.extended.entries();
 
         // Set super block
-        let mut super_block = OndiskSuperBlock::new();
+        let mut super_block = RafsV5SuperBlock::new();
         let inodes_count = (ctx.lower_inode_map.len() + ctx.upper_inode_map.len()) as u64;
         super_block.set_inodes_count(inodes_count);
         super_block.set_inode_table_offset(super_block_size as u64);
@@ -332,13 +332,14 @@ impl Bootstrap {
             if node.inode.has_xattr() {
                 has_xattr = true;
                 if !node.xattrs.is_empty() {
-                    inode_offset += (size_of::<OndiskXAttrs>() + node.xattrs.aligned_size()) as u32;
+                    inode_offset +=
+                        (size_of::<RafsV5XAttrsTable>() + node.xattrs.aligned_size()) as u32;
                 }
             }
             // Add chunks size
             if node.is_reg() {
                 inode_offset +=
-                    (node.inode.i_child_count as usize * size_of::<OndiskChunkInfo>()) as u32;
+                    (node.inode.i_child_count as usize * size_of::<RafsV5ChunkInfo>()) as u32;
             }
         }
         if has_xattr {

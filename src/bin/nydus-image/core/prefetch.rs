@@ -9,7 +9,7 @@ use std::str::FromStr;
 use anyhow::{Context, Error, Result};
 
 use crate::node::*;
-use rafs::metadata::layout::v5::PrefetchTable;
+use rafs::metadata::layout::v5::RafsV5PrefetchTable;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
@@ -153,9 +153,9 @@ impl Prefetch {
         indexes
     }
 
-    pub fn get_prefetch_table(&mut self) -> Option<PrefetchTable> {
+    pub fn get_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
-            let mut prefetch_table = PrefetchTable::new();
+            let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self
                 .hint_readahead_files
                 .iter()

@@ -71,7 +71,7 @@ const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
 /// RAFS SuperBlock on disk data format, 8192 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct OndiskSuperBlock {
+pub struct RafsV5SuperBlock {
     /// RAFS super magic
     s_magic: u32,
     /// RAFS version
@@ -105,7 +105,7 @@ pub struct OndiskSuperBlock {
     s_reserved: [u8; RAFSV5_SUPERBLOCK_RESERVED_SIZE],
 }
 
-impl OndiskSuperBlock {
+impl RafsV5SuperBlock {
     pub fn new() -> Self {
         Self::default()
     }
@@ -219,16 +219,16 @@ impl OndiskSuperBlock {
     }
 }
 
-impl RafsStore for OndiskSuperBlock {
+impl RafsStore for RafsV5SuperBlock {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.write_all(self.as_ref())?;
         w.validate_alignment(self.as_ref().len(), RAFSV5_ALIGNMENT)
     }
 }
 
-impl_bootstrap_converter!(OndiskSuperBlock);
+impl_bootstrap_converter!(RafsV5SuperBlock);
 
-impl Default for OndiskSuperBlock {
+impl Default for RafsV5SuperBlock {
     fn default() -> Self {
         Self {
             s_magic: u32::to_le(RAFSV5_SUPER_MAGIC as u32),
@@ -250,7 +250,7 @@ impl Default for OndiskSuperBlock {
     }
 }
 
-impl Display for OndiskSuperBlock {
+impl Display for RafsV5SuperBlock {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "superblock: magic {:x}, version {:x}, sb_size {:x}, block_size {:x}, flags {:x}, inode_count {}",
                self.magic(), self.version(), self.sb_size(), self.block_size(),
@@ -259,14 +259,14 @@ impl Display for OndiskSuperBlock {
 }
 
 #[derive(Clone, Default)]
-pub struct OndiskInodeTable {
+pub struct RafsV5InodeTable {
     pub data: Vec<u32>,
 }
 
-impl OndiskInodeTable {
+impl RafsV5InodeTable {
     pub fn new(entries: usize) -> Self {
         let table_size = rafsv5_align(entries * size_of::<u32>()) / size_of::<u32>();
-        OndiskInodeTable {
+        RafsV5InodeTable {
             data: vec![0; table_size],
         }
     }
@@ -319,7 +319,7 @@ impl OndiskInodeTable {
     }
 }
 
-impl RafsStore for OndiskInodeTable {
+impl RafsStore for RafsV5InodeTable {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let (_, data, _) = unsafe { self.data.align_to::<u8>() };
 
@@ -329,7 +329,7 @@ impl RafsStore for OndiskInodeTable {
 }
 
 #[derive(Clone, Default)]
-pub struct PrefetchTable {
+pub struct RafsV5PrefetchTable {
     /// List of inode numbers for prefetch.
     /// Note: It's not inode index of inodes table being stored here.
     pub inodes: Vec<u32>,
@@ -345,9 +345,13 @@ pub struct PrefetchTable {
 /// For a single directory, only its inode index will be put into the table.
 /// But all of its descendants files(recursively) will be prefetch(by hint)
 /// when rafs is mounted at the very beginning.
-impl PrefetchTable {
-    pub fn new() -> PrefetchTable {
-        PrefetchTable { inodes: vec![] }
+impl RafsV5PrefetchTable {
+    pub fn new() -> RafsV5PrefetchTable {
+        RafsV5PrefetchTable { inodes: vec![] }
+    }
+
+    pub fn size(&self) -> usize {
+        rafsv5_align(self.len() * size_of::<u32>())
     }
 
     pub fn len(&self) -> usize {
@@ -360,10 +364,6 @@ impl PrefetchTable {
 
     pub fn add_entry(&mut self, ino: u32) {
         self.inodes.push(ino);
-    }
-
-    pub fn size(&self) -> usize {
-        rafsv5_align(self.len() * size_of::<u32>())
     }
 
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
@@ -400,19 +400,19 @@ impl PrefetchTable {
 
 // TODO: FIXME: This is not a well defined disk structure
 #[derive(Clone, Debug, Default)]
-pub struct OndiskBlobTable {
+pub struct RafsV5BlobTable {
     pub entries: Vec<Arc<RafsBlobEntry>>,
-    pub extended: ExtendedBlobTable,
+    pub extended: RafsV5ExtBlobTable,
 }
 
 // A helper to extract blob table entries from disk.
 struct BlobEntryFrontPart(u32, u32);
 
-impl OndiskBlobTable {
+impl RafsV5BlobTable {
     pub fn new() -> Self {
-        OndiskBlobTable {
+        RafsV5BlobTable {
             entries: Vec::new(),
-            extended: ExtendedBlobTable::new(),
+            extended: RafsV5ExtBlobTable::new(),
         }
     }
 
@@ -562,7 +562,7 @@ impl OndiskBlobTable {
     }
 }
 
-impl RafsStore for OndiskBlobTable {
+impl RafsStore for RafsV5BlobTable {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
         self.entries
@@ -589,13 +589,12 @@ impl RafsStore for OndiskBlobTable {
     }
 }
 
-///
-/// ExtendedDBlobTableEntry is appended to the tail of bootstrap,
+/// RafsV5ExtDBlobEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
 // This disk structure is well defined and rafs aligned.
 #[repr(C)]
 #[derive(Clone)]
-pub struct ExtendedBlobTableEntry {
+pub struct RafsV5ExtBlobEntry {
     /// Number of chunks in a blob file.
     pub chunk_count: u32,
     pub reserved1: [u8; 4], //   --  8 Bytes
@@ -607,7 +606,7 @@ pub struct ExtendedBlobTableEntry {
 
 // Implement Debug trait ourselves, as rust prior to 1.47 doesn't impl Debug for array with size
 // larger than 32
-impl Debug for ExtendedBlobTableEntry {
+impl Debug for RafsV5ExtBlobEntry {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         f.debug_struct("ExtendedBlobTableEntry")
             .field("chunk_count", &self.chunk_count)
@@ -617,9 +616,9 @@ impl Debug for ExtendedBlobTableEntry {
     }
 }
 
-impl Default for ExtendedBlobTableEntry {
+impl Default for RafsV5ExtBlobEntry {
     fn default() -> Self {
-        ExtendedBlobTableEntry {
+        RafsV5ExtBlobEntry {
             chunk_count: 0,
             reserved1: [0; 4],
             blob_cache_size: 0,
@@ -629,26 +628,25 @@ impl Default for ExtendedBlobTableEntry {
     }
 }
 
-impl ExtendedBlobTableEntry {
+impl RafsV5ExtBlobEntry {
     pub fn new(chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) -> Self {
         Self {
             chunk_count,
-            reserved1: [0; 4],
             blob_cache_size,
             compressed_blob_size,
-            reserved2: [0; RAFSV5_EXT_BLOB_RESERVED_SIZE],
+            ..Default::default()
         }
     }
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ExtendedBlobTable {
+pub struct RafsV5ExtBlobTable {
     /// The vector index means blob index, every entry represents
     /// extended information of a blob.
-    pub entries: Vec<Arc<ExtendedBlobTableEntry>>,
+    pub entries: Vec<Arc<RafsV5ExtBlobEntry>>,
 }
 
-impl ExtendedBlobTable {
+impl RafsV5ExtBlobTable {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -658,7 +656,7 @@ impl ExtendedBlobTable {
     pub fn size(&self) -> usize {
         // `ExtendedBlobTableEntry` is already a well defined disk structure and rafs-aligned
         // So directly use its `size_of()` is reliable.
-        rafsv5_align(size_of::<ExtendedBlobTableEntry>() * self.entries.len())
+        rafsv5_align(size_of::<RafsV5ExtBlobEntry>() * self.entries.len())
     }
 
     pub fn entries(&self) -> usize {
@@ -666,35 +664,39 @@ impl ExtendedBlobTable {
     }
 
     pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) {
-        self.entries.push(Arc::new(ExtendedBlobTableEntry::new(
+        self.entries.push(Arc::new(RafsV5ExtBlobEntry::new(
             chunk_count,
             blob_cache_size,
             compressed_blob_size,
         )));
     }
 
-    pub fn get(&self, blob_index: u32) -> Option<Arc<ExtendedBlobTableEntry>> {
+    pub fn get(&self, blob_index: u32) -> Option<Arc<RafsV5ExtBlobEntry>> {
         let len = self.entries.len();
-        if len == 0 || blob_index > (len - 1) as u32 {
-            return None;
+
+        if len == 0 || blob_index >= len as u32 {
+            None
+        } else {
+            Some(self.entries[blob_index as usize].clone())
         }
-        Some(self.entries[blob_index as usize].clone())
     }
 
     pub fn load(&mut self, r: &mut RafsIoReader, count: usize) -> Result<()> {
-        let mut entries = Vec::<ExtendedBlobTableEntry>::with_capacity(count);
+        let mut entries = Vec::<RafsV5ExtBlobEntry>::with_capacity(count);
         // Safe because it is already reserved enough space
         unsafe {
             entries.set_len(count);
         }
         let (_, mut data, _) = unsafe { (&mut entries).align_to_mut::<u8>() };
+
         r.read_exact(&mut data)?;
         self.entries = entries.to_vec().into_iter().map(Arc::new).collect();
+
         Ok(())
     }
 }
 
-impl RafsStore for ExtendedBlobTable {
+impl RafsStore for RafsV5ExtBlobTable {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
 
@@ -724,10 +726,29 @@ impl RafsStore for ExtendedBlobTable {
     }
 }
 
+bitflags! {
+    pub struct RafsV5InodeFlags: u64 {
+        /// Inode is a symlink.
+        const SYMLINK = 0x0000_0001;
+        /// Inode has hardlinks.
+        const HARDLINK = 0x0000_0002;
+        /// Inode has extended attributes.
+        const XATTR = 0x0000_0004;
+        /// Inode chunks has holes.
+        const HAS_HOLE = 0x0000_0008;
+   }
+}
+
+impl Default for RafsV5InodeFlags {
+    fn default() -> Self {
+        RafsV5InodeFlags::empty()
+    }
+}
+
 /// Rafs v5 inode on disk layout.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
-pub struct OndiskInode {
+pub struct RafsV5Inode {
     /// sha256(sha256(chunk) + ...), [char; RAFS_SHA256_LENGTH]
     pub i_digest: RafsDigest, // 32
     /// parent inode number
@@ -740,7 +761,7 @@ pub struct OndiskInode {
     pub i_mode: u32, // 64
     pub i_size: u64,
     pub i_blocks: u64,
-    pub i_flags: RafsInodeFlags,
+    pub i_flags: RafsV5InodeFlags,
     pub i_nlink: u32,
     /// for dir, child start index
     pub i_child_index: u32, // 96
@@ -759,26 +780,7 @@ pub struct OndiskInode {
     pub i_reserved: [u8; 8], // 128
 }
 
-bitflags! {
-    pub struct RafsInodeFlags: u64 {
-        /// Inode is a symlink.
-        const SYMLINK = 0x0000_0001;
-        /// Inode has hardlinks.
-        const HARDLINK = 0x0000_0002;
-        /// Inode has extended attributes.
-        const XATTR = 0x0000_0004;
-        /// Inode chunks has holes.
-        const HAS_HOLE = 0x0000_0008;
-   }
-}
-
-impl Default for RafsInodeFlags {
-    fn default() -> Self {
-        RafsInodeFlags::empty()
-    }
-}
-
-impl OndiskInode {
+impl RafsV5Inode {
     pub fn new() -> Self {
         Self::default()
     }
@@ -826,12 +828,12 @@ impl OndiskInode {
 
     #[inline]
     pub fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsInodeFlags::XATTR)
+        self.i_flags.contains(RafsV5InodeFlags::XATTR)
     }
 
     #[inline]
     pub fn has_hole(&self) -> bool {
-        self.i_flags.contains(RafsInodeFlags::HAS_HOLE)
+        self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
     }
 
     pub fn file_name(&self, r: &mut RafsIoReader) -> Result<OsString> {
@@ -841,13 +843,15 @@ impl OndiskInode {
     }
 }
 
-pub struct OndiskInodeWrapper<'a> {
+impl_bootstrap_converter!(RafsV5Inode);
+
+pub struct RafsV5InodeWrapper<'a> {
     pub name: &'a OsStr,
     pub symlink: Option<&'a OsStr>,
-    pub inode: &'a OndiskInode,
+    pub inode: &'a RafsV5Inode,
 }
 
-impl<'a> RafsStore for OndiskInodeWrapper<'a> {
+impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size: usize = 0;
 
@@ -876,12 +880,10 @@ impl<'a> RafsStore for OndiskInodeWrapper<'a> {
     }
 }
 
-impl_bootstrap_converter!(OndiskInode);
-
 /// On disk Rafs data chunk information.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
-pub struct OndiskChunkInfo {
+pub struct RafsV5ChunkInfo {
     /// sha256(chunk), [char; RAFS_SHA256_LENGTH]
     pub block_id: RafsDigest, // 32
     /// blob index (blob_id = blob_table[blob_index])
@@ -905,9 +907,9 @@ pub struct OndiskChunkInfo {
     pub reserved: u32, //80
 }
 
-impl OndiskChunkInfo {
+impl RafsV5ChunkInfo {
     pub fn new() -> Self {
-        OndiskChunkInfo::default()
+        RafsV5ChunkInfo::default()
     }
 
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
@@ -915,16 +917,16 @@ impl OndiskChunkInfo {
     }
 }
 
-impl RafsStore for OndiskChunkInfo {
+impl RafsStore for RafsV5ChunkInfo {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.write_all(self.as_ref())?;
         w.validate_alignment(self.as_ref().len(), RAFSV5_ALIGNMENT)
     }
 }
 
-impl_bootstrap_converter!(OndiskChunkInfo);
+impl_bootstrap_converter!(RafsV5ChunkInfo);
 
-impl Display for OndiskChunkInfo {
+impl Display for RafsV5ChunkInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(
             f,
@@ -945,15 +947,13 @@ impl Display for OndiskChunkInfo {
 /// On disk xattr data.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
-pub struct OndiskXAttrs {
+pub struct RafsV5XAttrsTable {
     pub size: u64,
 }
 
-impl_bootstrap_converter!(OndiskXAttrs);
-
-impl OndiskXAttrs {
+impl RafsV5XAttrsTable {
     pub fn new() -> Self {
-        OndiskXAttrs {
+        RafsV5XAttrsTable {
             ..Default::default()
         }
     }
@@ -969,12 +969,14 @@ impl OndiskXAttrs {
     }
 }
 
+impl_bootstrap_converter!(RafsV5XAttrsTable);
+
 #[derive(Clone, Default)]
-pub struct XAttrs {
+pub struct RafsV5XAttrs {
     pairs: HashMap<OsString, XattrValue>,
 }
 
-impl XAttrs {
+impl RafsV5XAttrs {
     pub fn new() -> Self {
         Self {
             pairs: HashMap::new(),
@@ -1014,7 +1016,7 @@ impl XAttrs {
     }
 }
 
-impl RafsStore for XAttrs {
+impl RafsStore for RafsV5XAttrs {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
 
@@ -1047,7 +1049,7 @@ impl RafsStore for XAttrs {
     }
 }
 
-pub fn rafsv5_alloc_bio_desc<I: RafsInode>(
+pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode>(
     inode: &I,
     offset: u64,
     size: usize,
@@ -1166,9 +1168,10 @@ pub(crate) fn calculate_bio_chunk_index(
 
 pub(crate) fn rafsv5_align(size: usize) -> usize {
     if size & (RAFSV5_ALIGNMENT - 1) == 0 {
-        return size;
+        size
+    } else {
+        size + (RAFSV5_ALIGNMENT - (size & (RAFSV5_ALIGNMENT - 1)))
     }
-    size + (RAFSV5_ALIGNMENT - (size & (RAFSV5_ALIGNMENT - 1)))
 }
 
 fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
@@ -1185,7 +1188,7 @@ pub mod tests {
     //use nydus_app::setup_logging;
     use vmm_sys_util::tempfile::TempFile;
 
-    use super::OndiskBlobTable;
+    use super::RafsV5BlobTable;
     use crate::RafsIoReader;
 
     struct Entry {
@@ -1237,7 +1240,7 @@ pub mod tests {
         tmp_file.flush().unwrap();
 
         let mut file: RafsIoReader = Box::new(tmp_file);
-        let mut blob_table = OndiskBlobTable::new();
+        let mut blob_table = RafsV5BlobTable::new();
 
         file.seek(SeekFrom::Start(0)).unwrap();
         blob_table.load(&mut file, buffer.len() as u32).unwrap();

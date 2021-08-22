@@ -51,7 +51,7 @@ use crate::core::tree;
 
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
-use rafs::metadata::layout::v5::OndiskBlobTable;
+use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::RafsIoReader;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
@@ -437,7 +437,7 @@ fn main() -> Result<()> {
             upper_inode_map: HashMap::new(),
             chunk_cache: HashMap::new(),
             chunk_count_map: ChunkCountMap::default(),
-            blob_table: OndiskBlobTable::new(),
+            blob_table: RafsV5BlobTable::new(),
             nodes: Vec::new(),
         };
 

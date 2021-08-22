@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use rafs::metadata::layout::v5::{OndiskChunkInfo, RafsChunkInfo, XAttrs};
+use rafs::metadata::layout::v5::{RafsChunkInfo, RafsV5ChunkInfo, RafsV5XAttrs};
 use rafs::metadata::layout::{bytes_to_os_str, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
@@ -36,8 +36,8 @@ pub struct Tree {
 // Right now, it is hard. Perhaps someday we can get rid of the rafs import procedure,
 // which involve the whole nydusd rafs/mount. It is hard to optimize a process that
 // serves another goal. Luckily, `RafsInode` won't affect the work of decouple.
-fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> OndiskChunkInfo {
-    OndiskChunkInfo {
+fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
+    RafsV5ChunkInfo {
         block_id: *cki.block_id(),
         blob_index: cki.blob_index(),
         flags: cki.flags(),
@@ -65,7 +65,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         &self,
         ino: Inode,
         parent: Option<&PathBuf>,
-        chunk_cache: &mut Option<&mut HashMap<RafsDigest, OndiskChunkInfo>>,
+        chunk_cache: &mut Option<&mut HashMap<RafsDigest, RafsV5ChunkInfo>>,
     ) -> Result<Vec<Tree>> {
         let inode = self.rs.get_inode(ino, true)?;
         let mut children = Vec::new();
@@ -127,7 +127,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         };
 
         // Parse xattrs
-        let mut xattrs = XAttrs::new();
+        let mut xattrs = RafsV5XAttrs::new();
         for name in inode.get_xattrs()? {
             let name = bytes_to_os_str(&name);
             let value = inode.get_xattr(name)?;
@@ -180,7 +180,7 @@ impl Tree {
     /// Build node tree from a bootstrap file
     pub fn from_bootstrap(
         rs: &RafsSuper,
-        mut chunk_cache: Option<&mut HashMap<RafsDigest, OndiskChunkInfo>>,
+        mut chunk_cache: Option<&mut HashMap<RafsDigest, RafsV5ChunkInfo>>,
     ) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(&rs);
 

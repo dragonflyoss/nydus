@@ -30,7 +30,8 @@ use nydus_utils::{
 use super::blob::BlobBufferWriter;
 
 use rafs::metadata::layout::v5::{
-    OndiskChunkInfo, OndiskInode, OndiskInodeWrapper, RafsChunkFlags, RafsInodeFlags, XAttrs,
+    RafsChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
+    RafsV5XAttrs,
 };
 use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
 use rafs::RafsIoWriter;
@@ -178,13 +179,13 @@ pub struct Node {
     /// For example: /home/source/foo/bar
     pub path: PathBuf,
     /// Define a disk inode structure to persist to disk.
-    pub inode: OndiskInode,
+    pub inode: RafsV5Inode,
     /// Chunks info list of regular file
-    pub chunks: Vec<OndiskChunkInfo>,
+    pub chunks: Vec<RafsV5ChunkInfo>,
     /// Symlink info of symlink file
     pub symlink: Option<OsString>,
     /// Xattr list of file
-    pub xattrs: XAttrs,
+    pub xattrs: RafsV5XAttrs,
     pub explicit_uidgid: bool,
 }
 
@@ -203,10 +204,10 @@ impl Node {
             source,
             path,
             overlay,
-            inode: OndiskInode::new(),
+            inode: RafsV5Inode::new(),
             chunks: Vec::new(),
             symlink: None,
-            xattrs: XAttrs::default(),
+            xattrs: RafsV5XAttrs::default(),
             explicit_uidgid,
         };
         node.build_inode().context("failed to build inode")?;
@@ -232,7 +233,7 @@ impl Node {
         }
 
         if !self.xattrs.is_empty() {
-            self.inode.i_flags |= RafsInodeFlags::XATTR;
+            self.inode.i_flags |= RafsV5InodeFlags::XATTR;
         }
 
         Ok(())
@@ -241,7 +242,7 @@ impl Node {
     pub fn remove_xattr(&mut self, key: &OsStr) {
         self.xattrs.remove(key);
         if self.xattrs.is_empty() {
-            self.inode.i_flags.remove(RafsInodeFlags::XATTR);
+            self.inode.i_flags.remove(RafsV5InodeFlags::XATTR);
         }
     }
 
@@ -254,7 +255,7 @@ impl Node {
         decompress_offset: &mut u64,
         blob_cache_size: &mut u64,
         compressed_blob_size: &mut u64,
-        chunk_cache: &mut HashMap<RafsDigest, OndiskChunkInfo>,
+        chunk_cache: &mut HashMap<RafsDigest, RafsV5ChunkInfo>,
         chunk_count_map: &mut ChunkCountMap,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
@@ -282,7 +283,7 @@ impl Node {
 
         for i in 0..self.inode.i_child_count {
             // Init chunk info
-            let mut chunk = OndiskChunkInfo::new();
+            let mut chunk = RafsV5ChunkInfo::new();
             // FIXME: Should not assume that block size must be the default one.
             // Use the configured value instead!
             let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
@@ -390,7 +391,7 @@ impl Node {
 
         // Dump inode info
         let name = self.name();
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name,
             symlink: self.symlink.as_deref(),
             inode: &self.inode,
@@ -470,7 +471,7 @@ impl Node {
         if self.is_reg() {
             self.inode.i_child_count = self.chunk_count() as u32;
         } else if self.is_symlink() {
-            self.inode.i_flags |= RafsInodeFlags::SYMLINK;
+            self.inode.i_flags |= RafsV5InodeFlags::SYMLINK;
             let target_path = fs::read_link(&self.path)?;
             self.symlink = Some(target_path.into());
             self.inode

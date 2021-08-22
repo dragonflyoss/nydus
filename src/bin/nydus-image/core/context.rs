@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use anyhow::{Error, Result};
 
-use rafs::metadata::layout::v5::{OndiskBlobTable, OndiskChunkInfo};
+use rafs::metadata::layout::v5::{RafsV5BlobTable, RafsV5ChunkInfo};
 use rafs::metadata::Inode;
 use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?
@@ -66,10 +66,10 @@ pub struct BuildContext {
     pub lower_inode_map: HashMap<(Inode, u64), Vec<u64>>,
     pub upper_inode_map: HashMap<(Inode, u64), Vec<u64>>,
     /// Store all chunk digest for chunk deduplicate during build.
-    pub chunk_cache: HashMap<RafsDigest, OndiskChunkInfo>,
+    pub chunk_cache: HashMap<RafsDigest, RafsV5ChunkInfo>,
     pub chunk_count_map: ChunkCountMap,
     /// Store all blob id entry during build.
-    pub blob_table: OndiskBlobTable,
+    pub blob_table: RafsV5BlobTable,
     /// Store all nodes during build, node index of root starting from 1,
     /// so the collection index equal to (node.index - 1).
     pub nodes: Vec<Node>,

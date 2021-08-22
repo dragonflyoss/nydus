@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use rafs::metadata::layout::v5::{
-    OndiskChunkInfo, OndiskInode, RafsChunkFlags, RafsInodeFlags, XAttrs,
+    RafsChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
 };
 use rafs::metadata::Inode;
 
@@ -335,7 +335,7 @@ impl StargzIndexTreeBuilder {
         let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
 
         // Map regular file path to chunks: HashMap<<file_path>, <(file_size, chunks)>>
-        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<OndiskChunkInfo>)> = HashMap::new();
+        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<RafsV5ChunkInfo>)> = HashMap::new();
         let mut nodes = Vec::new();
 
         let mut last_reg_entry: Option<&TocEntry> = None;
@@ -358,7 +358,7 @@ impl StargzIndexTreeBuilder {
 
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
                 let block_id = entry.block_id(&ctx.blob_id)?;
-                let chunk = OndiskChunkInfo {
+                let chunk = RafsV5ChunkInfo {
                     block_id,
                     // Will be set later
                     blob_index: 0,
@@ -430,13 +430,13 @@ impl StargzIndexTreeBuilder {
         let entry_path = entry.path()?;
         let symlink_link_path = entry.symlink_link_path();
 
-        let mut flags = RafsInodeFlags::default();
+        let mut flags = RafsV5InodeFlags::default();
 
         // Parse symlink
         let mut file_size = entry.size;
         let mut symlink_size = 0;
         let symlink = if entry.is_symlink() {
-            flags |= RafsInodeFlags::SYMLINK;
+            flags |= RafsV5InodeFlags::SYMLINK;
             symlink_size = symlink_link_path.byte_size() as u16;
             file_size = symlink_size.into();
             Some(symlink_link_path.as_os_str().to_owned())
@@ -445,10 +445,10 @@ impl StargzIndexTreeBuilder {
         };
 
         // Parse xattrs
-        let mut xattrs = XAttrs::new();
+        let mut xattrs = RafsV5XAttrs::new();
         if entry.has_xattr() {
             for (name, value) in entry.xattrs.iter() {
-                flags |= RafsInodeFlags::XATTR;
+                flags |= RafsV5InodeFlags::XATTR;
                 let value = base64::decode(value).with_context(|| {
                     format!(
                         "parse xattr name {:?} of file {:?} failed",
@@ -462,7 +462,7 @@ impl StargzIndexTreeBuilder {
         // Handle hardlink ino
         let mut ino = (self.path_inode_map.len() + 1) as Inode;
         if entry.is_hardlink() {
-            flags |= RafsInodeFlags::HARDLINK;
+            flags |= RafsV5InodeFlags::HARDLINK;
             if let Some(_ino) = self.path_inode_map.get(&entry.hardlink_link_path()) {
                 ino = *_ino;
             } else {
@@ -479,7 +479,7 @@ impl StargzIndexTreeBuilder {
         let gid = if explicit_uidgid { entry.gid } else { 0 };
 
         // Parse inode info
-        let inode = OndiskInode {
+        let inode = RafsV5Inode {
             i_digest: RafsDigest::default(),
             i_parent: 0,
             i_ino: ino,
