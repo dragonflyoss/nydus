@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::fmt;
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::{Error, Result, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -26,9 +26,7 @@ use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo}
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-use self::layout::v5::{
-    OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable, RafsSuperFlags,
-};
+use self::layout::v5::{OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopInodes;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
@@ -50,6 +48,82 @@ pub const DOTDOT: &str = "..";
 
 /// Type of RAFS inode.
 pub type Inode = u64;
+
+bitflags! {
+    #[derive(Serialize)]
+    pub struct RafsSuperFlags: u64 {
+        /// Data chunks are not compressed.
+        const COMPRESS_NONE = 0x0000_0001;
+        /// Data chunks are compressed with lz4_block.
+        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
+        /// Use blake3 hash algorithm to calculate digest.
+        const DIGESTER_BLAKE3 = 0x0000_0004;
+        /// Use sha256 hash algorithm to calculate digest.
+        const DIGESTER_SHA256 = 0x0000_0008;
+        /// Inode has explicit uid gid fields.
+        /// If unset, use nydusd process euid/egid for all
+        /// inodes at runtime.
+        const EXPLICIT_UID_GID = 0x0000_0010;
+        /// Some inode has xattr.
+        /// Rafs may return ENOSYS for getxattr/listxattr calls if unset.
+        const HAS_XATTR = 0x0000_0020;
+        // Data chunks are compressed with gzip
+        const COMPRESS_GZIP = 0x0000_0040;
+    }
+}
+
+impl Default for RafsSuperFlags {
+    fn default() -> Self {
+        RafsSuperFlags::empty()
+    }
+}
+
+impl Display for RafsSuperFlags {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        write!(f, "{}", format!("{:?}", self))?;
+        Ok(())
+    }
+}
+
+impl From<RafsSuperFlags> for digest::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
+            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
+            _ => digest::Algorithm::Blake3,
+        }
+    }
+}
+
+impl From<digest::Algorithm> for RafsSuperFlags {
+    fn from(d: digest::Algorithm) -> RafsSuperFlags {
+        match d {
+            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
+            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
+        }
+    }
+}
+
+impl From<RafsSuperFlags> for compress::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
+            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
+            _ => compress::Algorithm::Lz4Block,
+        }
+    }
+}
+
+impl From<compress::Algorithm> for RafsSuperFlags {
+    fn from(c: compress::Algorithm) -> RafsSuperFlags {
+        match c {
+            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
+            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
+        }
+    }
+}
 
 /// Rafs filesystem meta-data cached from RAFS super block on disk.
 #[serde_as]
@@ -160,8 +234,8 @@ impl FromStr for RafsMode {
     }
 }
 
-impl fmt::Display for RafsMode {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl Display for RafsMode {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
             Self::Direct => write!(f, "direct"),
             Self::Cached => write!(f, "cached"),

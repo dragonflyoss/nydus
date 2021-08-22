@@ -43,8 +43,6 @@ use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use serde::Serialize;
-
 use nydus_utils::digest::{self, RafsDigest};
 use nydus_utils::ByteSize;
 use storage::compress;
@@ -54,7 +52,7 @@ use crate::metadata::layout::{
     bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
     RAFS_SUPER_VERSION_V5,
 };
-use crate::metadata::{Inode, RafsInode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::metadata::{Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
@@ -69,82 +67,6 @@ const RAFSV5_SUPER_MAGIC: u32 = 0x5241_4653;
 const RAFSV5_SUPERBLOCK_RESERVED_SIZE: usize = RAFSV5_SUPERBLOCK_SIZE - 80;
 const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
 const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
-
-bitflags! {
-    #[derive(Serialize)]
-    pub struct RafsSuperFlags: u64 {
-        /// Data chunks are not compressed.
-        const COMPRESS_NONE = 0x0000_0001;
-        /// Data chunks are compressed with lz4_block.
-        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
-        /// Use blake3 hash algorithm to calculate digest.
-        const DIGESTER_BLAKE3 = 0x0000_0004;
-        /// Use sha256 hash algorithm to calculate digest.
-        const DIGESTER_SHA256 = 0x0000_0008;
-        /// Inode has explicit uid gid fields.
-        /// If unset, use nydusd process euid/egid for all
-        /// inodes at runtime.
-        const EXPLICIT_UID_GID = 0x0000_0010;
-        /// Some inode has xattr.
-        /// Rafs may return ENOSYS for getxattr/listxattr calls if unset.
-        const HAS_XATTR = 0x0000_0020;
-        // Data chunks are compressed with gzip
-        const COMPRESS_GZIP = 0x0000_0040;
-    }
-}
-
-impl Default for RafsSuperFlags {
-    fn default() -> Self {
-        RafsSuperFlags::empty()
-    }
-}
-
-impl Display for RafsSuperFlags {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        write!(f, "{}", format!("{:?}", self))?;
-        Ok(())
-    }
-}
-
-impl From<RafsSuperFlags> for digest::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
-            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
-            _ => digest::Algorithm::Blake3,
-        }
-    }
-}
-
-impl From<digest::Algorithm> for RafsSuperFlags {
-    fn from(d: digest::Algorithm) -> RafsSuperFlags {
-        match d {
-            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
-            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
-        }
-    }
-}
-
-impl From<RafsSuperFlags> for compress::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
-            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
-            _ => compress::Algorithm::Lz4Block,
-        }
-    }
-}
-
-impl From<compress::Algorithm> for RafsSuperFlags {
-    fn from(c: compress::Algorithm) -> RafsSuperFlags {
-        match c {
-            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
-            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
-            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
-        }
-    }
-}
 
 /// RAFS SuperBlock on disk data format, 8192 bytes.
 #[repr(C)]
