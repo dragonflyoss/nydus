@@ -286,21 +286,22 @@ impl RafsV5InodeTable {
         self.data.is_empty()
     }
 
-    pub fn set(&mut self, ino: Inode, inode_offset: u32) -> Result<()> {
-        if ino > self.data.len() as u64 {
+    pub fn set(&mut self, ino: Inode, offset: u32) -> Result<()> {
+        if ino == 0 || ino > self.data.len() as u64 {
             return Err(einval!("invalid inode number"));
+        } else if offset as usize <= RAFSV5_SUPERBLOCK_SIZE || offset & 0x7 != 0 {
+            return Err(einval!("invalid inode offset"));
         }
 
-        // The offset is aligned with 8 bytes to make it easier to
-        // validate OndiskInode.
-        let offset = inode_offset >> 3;
-        self.data[(ino - 1) as usize] = offset as u32;
+        // The offset is aligned with 8 bytes to make it easier to validate RafsV5Inode.
+        let offset = offset >> 3;
+        self.data[(ino - 1) as usize] = u32::to_le(offset as u32);
 
         Ok(())
     }
 
     pub fn get(&self, ino: Inode) -> Result<u32> {
-        if ino > self.data.len() as u64 {
+        if ino == 0 || ino > self.data.len() as u64 {
             return Err(enoent!("inode not found"));
         }
 
@@ -455,7 +456,7 @@ impl RafsV5BlobTable {
 
     #[inline]
     pub fn get(&self, blob_index: u32) -> Result<Arc<RafsBlobEntry>> {
-        if blob_index > (self.entries.len() - 1) as u32 {
+        if blob_index >= self.entries.len() as u32 {
             return Err(enoent!("blob not found"));
         }
         Ok(self.entries[blob_index as usize].clone())
