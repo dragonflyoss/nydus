@@ -101,11 +101,11 @@ struct DirectMappingState {
     size: usize,
     fd: RawFd,
     mmapped_inode_table: bool,
-    digest_validate: bool,
+    validate_digest: bool,
 }
 
 impl DirectMappingState {
-    fn new(meta: &RafsSuperMeta, digest_validate: bool) -> Self {
+    fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
         DirectMappingState {
             meta: *meta,
             inode_table: ManuallyDrop::new(OndiskInodeTable::default()),
@@ -115,12 +115,12 @@ impl DirectMappingState {
             end: std::ptr::null(),
             size: 0,
             mmapped_inode_table: false,
-            digest_validate,
+            validate_digest,
         }
     }
 
     /// Mmap to bootstrap ondisk data directly.
-    fn cast_to_ref<'a, 'b, T>(&'a self, base: *const u8, offset: usize) -> Result<&'b T> {
+    fn cast_to_ref<T>(&self, base: *const u8, offset: usize) -> Result<&T> {
         let start = base.wrapping_add(offset);
         let end = start.wrapping_add(size_of::<T>());
 
@@ -171,17 +171,17 @@ impl Drop for DirectMappingState {
 }
 
 #[derive(Clone)]
-pub struct DirectMapping {
+pub struct DirectSuperBlockV5 {
     state: ArcSwap<DirectMappingState>,
 }
 
 // Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for DirectMapping {}
-unsafe impl Sync for DirectMapping {}
+unsafe impl Send for DirectSuperBlockV5 {}
+unsafe impl Sync for DirectSuperBlockV5 {}
 
-impl DirectMapping {
-    pub fn new(meta: &RafsSuperMeta, digest_validate: bool) -> Self {
-        let state = DirectMappingState::new(meta, digest_validate);
+impl DirectSuperBlockV5 {
+    pub fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
+        let state = DirectMappingState::new(meta, validate_digest);
 
         Self {
             state: ArcSwap::new(Arc::new(state)),
@@ -316,7 +316,7 @@ impl DirectMapping {
             }
         };
 
-        let digest_validate = old_state.digest_validate;
+        let validate_digest = old_state.validate_digest;
 
         let state = DirectMappingState {
             meta: old_state.meta,
@@ -327,7 +327,7 @@ impl DirectMapping {
             end,
             size,
             mmapped_inode_table: true,
-            digest_validate,
+            validate_digest,
         };
 
         // Swap new and old DirectMappingState object, the old object will be destroyed when the
@@ -338,9 +338,13 @@ impl DirectMapping {
     }
 }
 
-impl RafsSuperInodes for DirectMapping {
+impl RafsSuperInodes for DirectSuperBlockV5 {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         self.update_state(r)
+    }
+
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
+        self.update_state(r).map_err(RafsError::SwapBackend)
     }
 
     fn destroy(&mut self) {
@@ -349,16 +353,16 @@ impl RafsSuperInodes for DirectMapping {
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
-    #[inline]
-    fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
+    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
         let state = self.state.load();
         let wrapper = self.get_inode_wrapper(ino, state.deref())?;
         let inode = Arc::new(wrapper) as Arc<dyn RafsInode>;
 
-        // Validate inode digest tree
-        let digester = state.meta.get_digester();
-        if digest_validate && !self.digest_validate(inode.clone(), false, digester)? {
-            return Err(einval!("invalid inode digest"));
+        if validate_digest {
+            let digester = state.meta.get_digester();
+            if !self.digest_validate(inode.clone(), false, digester)? {
+                return Err(einval!("invalid inode digest"));
+            }
         }
 
         Ok(inode)
@@ -374,14 +378,10 @@ impl RafsSuperInodes for DirectMapping {
         let state = self.state.load();
         state.blob_table.clone()
     }
-
-    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
-        self.update_state(r).map_err(RafsError::SwapBackend)
-    }
 }
 
 pub struct OndiskInodeWrapper {
-    pub mapping: DirectMapping,
+    pub mapping: DirectSuperBlockV5,
     pub offset: usize,
 }
 
@@ -531,6 +531,13 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(bytes_to_os_str(symlink).to_os_string())
     }
 
+    #[inline]
+    fn get_digest(&self) -> RafsDigest {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+        inode.i_digest
+    }
+
     /// Get the child with the specified name.
     ///
     /// # Safety
@@ -595,6 +602,21 @@ impl RafsInode for OndiskInodeWrapper {
         self.mapping.get_inode(idx + child_index, false)
     }
 
+    #[inline]
+    fn get_child_index(&self) -> Result<u32> {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+
+        Ok(inode.i_child_index)
+    }
+
+    #[inline]
+    fn get_child_count(&self) -> u32 {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+        inode.i_child_count
+    }
+
     /// Get chunk information with index `idx`
     ///
     /// # Safety
@@ -618,7 +640,7 @@ impl RafsInode for OndiskInodeWrapper {
         offset += size_of::<OndiskChunkInfo>() * idx as usize;
 
         let chunk = state.cast_to_ref::<OndiskChunkInfo>(state.base, offset)?;
-        let wrapper = OndiskChunkInfoWrapper::new(chunk, self.mapping.clone(), offset);
+        let wrapper = DirectChunkInfoV5::new(chunk, self.mapping.clone(), offset);
 
         Ok(Arc::new(wrapper))
     }
@@ -669,28 +691,6 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_xattrs(&self) -> Result<Vec<XattrName>> {
         let (xattr_data, xattr_size) = self.get_xattr_data()?;
         parse_xattr_names(xattr_data, xattr_size)
-    }
-
-    #[inline]
-    fn get_digest(&self) -> RafsDigest {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-        inode.i_digest
-    }
-
-    #[inline]
-    fn get_child_index(&self) -> Result<u32> {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-
-        Ok(inode.i_child_index)
-    }
-
-    #[inline]
-    fn get_child_count(&self) -> u32 {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-        inode.i_child_count
     }
 
     #[inline]
@@ -754,19 +754,19 @@ impl RafsInode for OndiskInodeWrapper {
     }
 }
 
-pub struct OndiskChunkInfoWrapper {
-    mapping: DirectMapping,
+pub struct DirectChunkInfoV5 {
+    mapping: DirectSuperBlockV5,
     offset: usize,
     digest: RafsDigest,
 }
 
-unsafe impl Send for OndiskChunkInfoWrapper {}
-unsafe impl Sync for OndiskChunkInfoWrapper {}
+unsafe impl Send for DirectChunkInfoV5 {}
+unsafe impl Sync for DirectChunkInfoV5 {}
 
 // This is *direct* metadata mode in-memory chunk info object.
-impl OndiskChunkInfoWrapper {
+impl DirectChunkInfoV5 {
     #[inline]
-    fn new(chunk: &OndiskChunkInfo, mapping: DirectMapping, offset: usize) -> Self {
+    fn new(chunk: &OndiskChunkInfo, mapping: DirectSuperBlockV5, offset: usize) -> Self {
         Self {
             mapping,
             offset,
@@ -785,7 +785,6 @@ impl OndiskChunkInfoWrapper {
     /// The OndiskChunkInfoWrapper could only be constructed from a valid OndiskChunkInfo pointer,
     /// so it's safe to dereference the underlying OndiskChunkInfo object.
     #[allow(clippy::cast_ptr_alignment)]
-    #[inline]
     fn chunk<'a>(&self, state: &'a DirectMappingState) -> &'a OndiskChunkInfo {
         unsafe {
             let ptr = state.base.add(self.offset);
@@ -794,8 +793,7 @@ impl OndiskChunkInfoWrapper {
     }
 }
 
-impl RafsChunkInfo for OndiskChunkInfoWrapper {
-    #[inline]
+impl RafsChunkInfo for DirectChunkInfoV5 {
     fn block_id(&self) -> &RafsDigest {
         &self.digest
     }

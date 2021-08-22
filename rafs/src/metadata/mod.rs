@@ -24,7 +24,7 @@ use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use storage::compress;
 use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
 
-use self::direct::DirectMapping;
+use self::direct_v5::DirectSuperBlockV5;
 //use self::layout::*;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::metadata::cached::CachedInodes;
@@ -37,7 +37,7 @@ use self::noop::NoopInodes;
 use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
 pub mod cached;
-pub mod direct;
+pub mod direct_v5;
 pub mod layout;
 mod noop;
 
@@ -270,7 +270,7 @@ impl RafsSuper {
             }
             RAFS_SUPER_VERSION_V5 => match self.mode {
                 RafsMode::Direct => {
-                    let mut inodes = DirectMapping::new(&self.meta, self.digest_validate);
+                    let mut inodes = DirectSuperBlockV5::new(&self.meta, self.digest_validate);
                     inodes.load(r)?;
                     self.inodes = Arc::new(inodes);
                 }
