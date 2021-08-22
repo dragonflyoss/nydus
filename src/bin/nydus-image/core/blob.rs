@@ -110,6 +110,7 @@ impl Write for BlobBufferWriter {
 
 pub struct BlobInfoEntry {
     chunk_count: u32,
+    chunk_ref_count: u64,
 }
 
 #[derive(Default)]
@@ -131,8 +132,27 @@ impl BlobInfoMap {
                 Ok(index)
             }
             Entry::Vacant(entry) => {
-                entry.insert(BlobInfoEntry { chunk_count: 1 });
+                entry.insert(BlobInfoEntry {
+                    chunk_count: 1,
+                    chunk_ref_count: 0,
+                });
                 Ok(0)
+            }
+        }
+    }
+
+    /// Increase the chunk reference count of blob.
+    pub fn inc_ref_count(&mut self, blob_index: u32) {
+        match self.map.entry(blob_index) {
+            Entry::Occupied(entry) => {
+                let info = entry.into_mut();
+                info.chunk_ref_count = info.chunk_ref_count.saturating_add(1);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(BlobInfoEntry {
+                    chunk_count: 0,
+                    chunk_ref_count: 1,
+                });
             }
         }
     }

@@ -244,27 +244,22 @@ impl Node {
             return Ok(0);
         }
 
-        let file_size = node.inode.i_size;
         let mut blob_size = 0u64;
         let mut inode_hasher = RafsDigest::hasher(ctx.digester);
         let mut file = File::open(&node.path)
             .with_context(|| format!("failed to open node file {:?}", node.path))?;
 
         for i in 0..node.inode.i_child_count {
-            // Init chunk info
-            let mut chunk = RafsV5ChunkInfo::new();
             // FIXME: Should not assume that block size must be the default one.
             // Use the configured value instead!
             let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
             let chunk_size = if i == node.inode.i_child_count - 1 {
-                file_size - (RAFS_DEFAULT_BLOCK_SIZE * i as u64)
+                node.inode.i_size - (RAFS_DEFAULT_BLOCK_SIZE * i as u64)
             } else {
                 RAFS_DEFAULT_BLOCK_SIZE
             };
+            let mut chunk = RafsV5ChunkInfo::new();
 
-            // Read chunk data
-            // TODO: Hopefully, we don't have to allocate memory from heap each time.
-            // and the `usize` type restriction won't bother us anymore.
             let mut chunk_data = &mut ctx.chunk_data_buf[0..chunk_size as usize];
             file.read_exact(&mut chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", node.path))?;
@@ -276,8 +271,9 @@ impl Node {
             // Calculate inode digest
             inode_hasher.digest_update(chunk.block_id.as_ref());
 
-            // Deduplicate chunk if we found a same one from chunk cache
+            // Check whether we already have the same chunk data by matching chunk digest.
             if let Some(cached_chunk) = ctx.chunk_cache.get(&chunk.block_id) {
+                // TODO: we should also compare the actual data to avoid chunk digest confliction.
                 // hole cached_chunk can have zero decompress size
                 if cached_chunk.decompress_size == 0
                     || cached_chunk.decompress_size == chunk_size as u32
@@ -297,6 +293,8 @@ impl Node {
                         event_tracer!("dedup_decompressed_size", +chunk_size);
                         event_tracer!("dedup_chunks", +1);
                     }
+
+                    ctx.blob_info_map.inc_ref_count(chunk.blob_index);
 
                     continue;
                 }
