@@ -25,8 +25,8 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    Inode, RafsBioDesc, RafsError, RafsInode, RafsResult, RafsSuperInodes, RafsSuperMeta,
-    XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
+    Inode, RafsBioDesc, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
+    RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
 };
 use crate::RafsIoReader;
 
@@ -129,6 +129,24 @@ impl CachedSuperBlockV5 {
 }
 
 impl RafsSuperInodes for CachedSuperBlockV5 {
+    fn get_max_ino(&self) -> u64 {
+        self.s_inodes.len() as u64
+    }
+
+    fn get_inode(&self, ino: Inode, _digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
+        self.s_inodes
+            .get(&ino)
+            .map_or(Err(enoent!()), |i| Ok(i.clone()))
+    }
+}
+
+impl RafsSuperBlobs for CachedSuperBlockV5 {
+    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
+        self.s_blob.clone()
+    }
+}
+
+impl RafsSuperBlock for CachedSuperBlockV5 {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         // FIXME: add validator for all load operations.
 
@@ -167,7 +185,7 @@ impl RafsSuperInodes for CachedSuperBlockV5 {
         // Validate inode digest tree
         let digester = self.s_meta.get_digester();
         if self.digest_validate
-            && !self.digest_validate(self.get_inode(RAFS_ROOT_INODE, false)?, true, digester)?
+            && !self.validate_digest(self.get_inode(RAFS_ROOT_INODE, false)?, true, digester)?
         {
             return Err(einval!("invalid inode digest"));
         }
@@ -175,26 +193,12 @@ impl RafsSuperInodes for CachedSuperBlockV5 {
         Ok(())
     }
 
-    fn destroy(&mut self) {
-        self.s_inodes.clear();
-    }
-
-    fn get_inode(&self, ino: Inode, _digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
-        self.s_inodes
-            .get(&ino)
-            .map_or(Err(enoent!()), |i| Ok(i.clone()))
-    }
-
-    fn get_max_ino(&self) -> u64 {
-        self.s_inodes.len() as u64
-    }
-
-    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
-        self.s_blob.clone()
-    }
-
     fn update(&self, _r: &mut RafsIoReader) -> RafsResult<()> {
         Err(RafsError::Unsupported)
+    }
+
+    fn destroy(&mut self) {
+        self.s_inodes.clear();
     }
 }
 

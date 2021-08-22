@@ -42,8 +42,8 @@ use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
 };
 use crate::metadata::{
-    Attr, Entry, Inode, RafsInode, RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
-    RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
+    Attr, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
+    RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -339,6 +339,37 @@ impl DirectSuperBlockV5 {
 }
 
 impl RafsSuperInodes for DirectSuperBlockV5 {
+    fn get_max_ino(&self) -> Inode {
+        let state = self.state.load();
+
+        state.inode_table.len() as u64
+    }
+
+    /// Find inode offset by ino from inode table and mmap to OndiskInode.
+    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
+        let state = self.state.load();
+        let wrapper = self.get_inode_wrapper(ino, state.deref())?;
+        let inode = Arc::new(wrapper) as Arc<dyn RafsInode>;
+
+        if validate_digest {
+            let digester = state.meta.get_digester();
+            if !self.validate_digest(inode.clone(), false, digester)? {
+                return Err(einval!("invalid inode digest"));
+            }
+        }
+
+        Ok(inode)
+    }
+}
+
+impl RafsSuperBlobs for DirectSuperBlockV5 {
+    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
+        let state = self.state.load();
+        state.blob_table.clone()
+    }
+}
+
+impl RafsSuperBlock for DirectSuperBlockV5 {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         self.update_state(r)
     }
@@ -350,33 +381,6 @@ impl RafsSuperInodes for DirectSuperBlockV5 {
     fn destroy(&mut self) {
         let state = DirectMappingState::new(&RafsSuperMeta::default(), false);
         self.state.store(Arc::new(state));
-    }
-
-    /// Find inode offset by ino from inode table and mmap to OndiskInode.
-    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
-        let state = self.state.load();
-        let wrapper = self.get_inode_wrapper(ino, state.deref())?;
-        let inode = Arc::new(wrapper) as Arc<dyn RafsInode>;
-
-        if validate_digest {
-            let digester = state.meta.get_digester();
-            if !self.digest_validate(inode.clone(), false, digester)? {
-                return Err(einval!("invalid inode digest"));
-            }
-        }
-
-        Ok(inode)
-    }
-
-    fn get_max_ino(&self) -> Inode {
-        let state = self.state.load();
-
-        state.inode_table.len() as u64
-    }
-
-    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
-        let state = self.state.load();
-        state.blob_table.clone()
     }
 }
 

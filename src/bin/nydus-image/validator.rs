@@ -54,7 +54,7 @@ impl Validator {
         })?;
 
         let blob_ids = rs
-            .inodes
+            .superblock
             .get_blob_table()
             .entries
             .iter()

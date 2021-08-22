@@ -28,7 +28,7 @@ use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
 use self::layout::v5::{RafsV5BlobTable, RafsV5Inode, RafsV5PrefetchTable, RafsV5SuperBlock};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
-use self::noop::NoopInodes;
+use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
@@ -248,7 +248,7 @@ pub struct RafsSuper {
     pub mode: RafsMode,
     pub digest_validate: bool,
     pub meta: RafsSuperMeta,
-    pub inodes: Arc<dyn RafsSuperInodes + Sync + Send>,
+    pub superblock: Arc<dyn RafsSuperBlock + Sync + Send>,
 }
 
 impl Default for RafsSuper {
@@ -257,7 +257,7 @@ impl Default for RafsSuper {
             mode: RafsMode::Direct,
             digest_validate: false,
             meta: RafsSuperMeta::default(),
-            inodes: Arc::new(NoopInodes::new()),
+            superblock: Arc::new(NoopSuperBlock::new()),
         }
     }
 }
@@ -286,7 +286,7 @@ impl RafsSuper {
     }
 
     pub fn destroy(&mut self) {
-        Arc::get_mut(&mut self.inodes)
+        Arc::get_mut(&mut self.superblock)
             .expect("Inodes are no longer used.")
             .destroy();
     }
@@ -296,7 +296,7 @@ impl RafsSuper {
 
         r.read_exact(sb.as_mut())
             .map_err(|e| RafsError::ReadMetadata(e, "Updating meta".to_string()))?;
-        self.inodes.update(r)
+        self.superblock.update(r)
     }
 
     /// Load RAFS super block and optionally cache inodes.
@@ -342,12 +342,12 @@ impl RafsSuper {
                 RafsMode::Direct => {
                     let mut inodes = DirectSuperBlockV5::new(&self.meta, self.digest_validate);
                     inodes.load(r)?;
-                    self.inodes = Arc::new(inodes);
+                    self.superblock = Arc::new(inodes);
                 }
                 RafsMode::Cached => {
                     let mut inodes = CachedSuperBlockV5::new(self.meta, self.digest_validate);
                     inodes.load(r)?;
-                    self.inodes = Arc::new(inodes);
+                    self.superblock = Arc::new(inodes);
                 }
             },
             _ => return Err(einval!("invalid superblock version number")),
@@ -385,11 +385,11 @@ impl RafsSuper {
     }
 
     pub fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
-        self.inodes.get_inode(ino, digest_validate)
+        self.superblock.get_inode(ino, digest_validate)
     }
 
     pub fn get_max_ino(&self) -> Inode {
-        self.inodes.get_max_ino()
+        self.superblock.get_max_ino()
     }
 
     fn build_prefetch_desc(
@@ -411,7 +411,7 @@ impl RafsSuper {
             }
         };
 
-        match self.inodes.get_inode(ino, self.digest_validate) {
+        match self.superblock.get_inode(ino, self.digest_validate) {
             Ok(inode) => {
                 if inode.is_dir() {
                     let mut descendants = Vec::new();
@@ -603,57 +603,46 @@ impl RafsSuper {
     }
 }
 
-/// Trait to manage all inodes of a file system.
 pub trait RafsSuperInodes {
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
-
-    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
-
-    fn destroy(&mut self);
+    fn get_max_ino(&self) -> Inode;
 
     fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>>;
 
-    fn get_max_ino(&self) -> Inode;
-
-    fn get_blobs(&self) -> Vec<Arc<RafsBlobEntry>> {
-        self.get_blob_table().get_all()
-    }
-
-    fn get_blob_table(&self) -> Arc<RafsV5BlobTable>;
-
     /// Validate inode metadata, include children, chunks and symblink etc.
     ///
-    /// The chunk data is not validated here, which will be validate on fs read.
-    fn digest_validate(
+    /// The default implementation is for rafs v5. The chunk data is not validated here, which will
+    /// be validate on fs read.
+    fn validate_digest(
         &self,
         inode: Arc<dyn RafsInode>,
         recursive: bool,
         digester: digest::Algorithm,
     ) -> Result<bool> {
         let child_count = inode.get_child_count();
-
         let expected_digest = inode.get_digest();
         let mut hasher = RafsDigest::hasher(digester);
 
         if inode.is_symlink() {
             hasher.digest_update(inode.get_symlink()?.as_bytes());
-        } else if inode.is_reg() || inode.is_dir() {
+        } else if inode.is_reg() {
             for idx in 0..child_count {
-                if inode.is_dir() {
-                    let child = inode.get_child_by_index(idx as u64)?;
-                    if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
-                        && !self.digest_validate(child.clone(), recursive, digester)?
-                    {
-                        return Ok(false);
-                    }
-                    let child_digest = child.get_digest();
-                    let child_digest = child_digest.as_ref().as_ref();
-                    hasher.digest_update(child_digest);
-                } else {
-                    let chunk = inode.get_chunk_info(idx)?;
-                    let chunk_digest = chunk.block_id();
-                    hasher.digest_update(chunk_digest.as_ref());
+                let chunk = inode.get_chunk_info(idx)?;
+                let chunk_digest = chunk.block_id();
+
+                hasher.digest_update(chunk_digest.as_ref());
+            }
+        } else if inode.is_dir() {
+            for idx in 0..child_count {
+                let child = inode.get_child_by_index(idx as u64)?;
+                if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
+                    && !self.validate_digest(child.clone(), recursive, digester)?
+                {
+                    return Ok(false);
                 }
+                let child_digest = child.get_digest();
+                let child_digest = child_digest.as_ref().as_ref();
+
+                hasher.digest_update(child_digest);
             }
         }
 
@@ -671,6 +660,22 @@ pub trait RafsSuperInodes {
 
         Ok(result)
     }
+}
+
+pub trait RafsSuperBlobs {
+    fn get_blobs(&self) -> Vec<Arc<RafsBlobEntry>> {
+        self.get_blob_table().get_all()
+    }
+
+    fn get_blob_table(&self) -> Arc<RafsV5BlobTable>;
+}
+
+pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes {
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
+
+    fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
+
+    fn destroy(&mut self);
 }
 
 /// Readonly accessors for RAFS filesystem inodes.
