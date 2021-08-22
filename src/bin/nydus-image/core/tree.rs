@@ -17,7 +17,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use rafs::metadata::layout::v5::{RafsChunkInfo, RafsV5ChunkInfo, RafsV5XAttrs};
+use rafs::metadata::layout::v5::{
+    RafsChunkInfo, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
+};
 use rafs::metadata::layout::{bytes_to_os_str, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
@@ -36,7 +38,7 @@ pub struct Tree {
 // Right now, it is hard. Perhaps someday we can get rid of the rafs import procedure,
 // which involve the whole nydusd rafs/mount. It is hard to optimize a process that
 // serves another goal. Luckily, `RafsInode` won't affect the work of decouple.
-fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
+fn cast_rafsv5_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
     RafsV5ChunkInfo {
         block_id: *cki.block_id(),
         blob_index: cki.blob_index(),
@@ -48,6 +50,32 @@ fn cast_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
         file_offset: cki.file_offset(),
         index: cki.index(),
         reserved: 0u32,
+    }
+}
+
+fn cast_rafsv5_inode(inode: &Arc<dyn RafsInode>) -> RafsV5Inode {
+    let attr = inode.get_attr();
+
+    RafsV5Inode {
+        i_digest: inode.get_digest(),
+        i_parent: inode.parent(),
+        i_ino: attr.ino,
+        i_uid: attr.uid,
+        i_gid: attr.gid,
+        i_projid: inode.projid(),
+        i_mode: attr.mode,
+        i_size: attr.size,
+        i_blocks: attr.blocks,
+        i_flags: RafsV5InodeFlags::from_bits_truncate(inode.flags()),
+        i_nlink: attr.nlink,
+        i_child_index: inode.get_child_index().unwrap_or(0),
+        i_child_count: inode.get_child_count(),
+        i_name_size: inode.get_name_size(),
+        i_symlink_size: inode.get_symlink_size(),
+        i_rdev: attr.rdev,
+        i_mtime_nsec: attr.mtimensec,
+        i_mtime: attr.mtime,
+        i_reserved: [0u8; 8],
     }
 }
 
@@ -114,7 +142,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             let chunk_count = child_count;
             for i in 0..chunk_count {
                 let cki = inode.get_chunk_info(i as u32)?;
-                let chunk = cast_chunk_info(cki.as_ref());
+                let chunk = cast_rafsv5_chunk_info(cki.as_ref());
                 chunks.push(chunk);
             }
         }
@@ -135,7 +163,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         }
 
         // Get OndiskInode
-        let ondisk_inode = inode.cast_ondisk()?;
+        let ondisk_inode = cast_rafsv5_inode(&inode);
 
         // Inodes from parent bootstrap can't have nodes with unique inode number.
         // So we assign an invalid dev here.

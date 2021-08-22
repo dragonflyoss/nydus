@@ -21,8 +21,8 @@ use fuse_rs::api::filesystem::Entry;
 
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo,
-    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrsTable,
-    RAFSV5_ALIGNMENT,
+    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeOps,
+    RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
@@ -351,56 +351,6 @@ impl RafsInode for CachedInodeV5 {
         Ok(())
     }
 
-    fn name(&self) -> OsString {
-        self.i_name.clone()
-    }
-
-    fn get_symlink(&self) -> Result<OsString> {
-        if !self.is_symlink() {
-            Err(einval!("inode is not a symlink"))
-        } else {
-            Ok(self.i_target.clone())
-        }
-    }
-
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
-        let idx = self
-            .i_child
-            .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
-            .map_err(|_| enoent!())?;
-        Ok(self.i_child[idx].clone())
-    }
-
-    #[inline]
-    fn get_child_by_index(&self, index: Inode) -> Result<Arc<dyn RafsInode>> {
-        Ok(self.i_child[index as usize].clone())
-    }
-
-    #[inline]
-    fn get_digest(&self) -> RafsDigest {
-        self.i_digest
-    }
-
-    #[inline]
-    fn get_child_index(&self) -> Result<u32> {
-        Ok(self.i_child_idx)
-    }
-
-    #[inline]
-    fn get_child_count(&self) -> u32 {
-        self.i_child_cnt
-    }
-
-    #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
-        Ok(self.i_data[idx as usize].clone())
-    }
-
-    #[inline]
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
-        self.i_blob_table.get(idx)
-    }
-
     #[inline]
     fn get_entry(&self) -> Entry {
         Entry {
@@ -426,6 +376,45 @@ impl RafsInode for CachedInodeV5 {
         }
     }
 
+    fn get_symlink(&self) -> Result<OsString> {
+        if !self.is_symlink() {
+            Err(einval!("inode is not a symlink"))
+        } else {
+            Ok(self.i_target.clone())
+        }
+    }
+
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+        let idx = self
+            .i_child
+            .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
+            .map_err(|_| enoent!())?;
+        Ok(self.i_child[idx].clone())
+    }
+
+    #[inline]
+    fn get_child_by_index(&self, index: Inode) -> Result<Arc<dyn RafsInode>> {
+        Ok(self.i_child[index as usize].clone())
+    }
+
+    fn get_child_index(&self) -> Result<u32> {
+        Ok(self.i_child_idx)
+    }
+
+    #[inline]
+    fn get_child_count(&self) -> u32 {
+        self.i_child_cnt
+    }
+
+    #[inline]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
+        Ok(self.i_data[idx as usize].clone())
+    }
+
+    fn has_xattr(&self) -> bool {
+        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+    }
+
     #[inline]
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
         Ok(self.i_xattr.get(name).cloned())
@@ -437,10 +426,6 @@ impl RafsInode for CachedInodeV5 {
             .keys()
             .map(|k| k.as_bytes().to_vec())
             .collect::<Vec<XattrName>>())
-    }
-
-    fn get_blocksize(&self) -> u32 {
-        self.i_blksize
     }
 
     fn is_dir(&self) -> bool {
@@ -459,12 +444,16 @@ impl RafsInode for CachedInodeV5 {
         !self.is_dir() && self.i_nlink > 1
     }
 
-    fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+    fn name(&self) -> OsString {
+        self.i_name.clone()
     }
 
-    fn has_hole(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
+    fn flags(&self) -> u64 {
+        self.i_flags.bits()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        self.i_digest
     }
 
     fn collect_descendants_inodes(
@@ -496,6 +485,42 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc(self, offset, size)
+    }
+
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
+    fn get_symlink_size(&self) -> u16 {
+        if self.is_symlink() {
+            self.i_target.byte_size() as u16
+        } else {
+            0
+        }
+    }
+
+    impl_getter!(ino, i_ino, u64);
+    impl_getter!(parent, i_parent, u64);
+    impl_getter!(size, i_size, u64);
+    impl_getter!(rdev, i_rdev, u32);
+    impl_getter!(projid, i_projid, u32);
+}
+
+impl RafsV5InodeOps for CachedInodeV5 {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+        self.i_blob_table.get(idx)
+    }
+
+    fn get_blocksize(&self) -> u32 {
+        self.i_blksize
+    }
+
+    fn has_hole(&self) -> bool {
+        self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
+    }
+
     fn cast_ondisk(&self) -> Result<RafsV5Inode> {
         let i_symlink_size = if self.is_symlink() {
             self.get_symlink()?.byte_size() as u16
@@ -523,15 +548,6 @@ impl RafsInode for CachedInodeV5 {
             i_mtime_nsec: self.i_mtime_nsec,
             i_reserved: [0; 8],
         })
-    }
-
-    impl_getter!(ino, i_ino, u64);
-    impl_getter!(parent, i_parent, u64);
-    impl_getter!(size, i_size, u64);
-    impl_getter!(rdev, i_rdev, u32);
-
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
-        rafsv5_alloc_bio_desc(self, offset, size)
     }
 }
 

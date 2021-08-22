@@ -26,7 +26,7 @@ use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-use self::layout::v5::{RafsV5BlobTable, RafsV5Inode, RafsV5PrefetchTable, RafsV5SuperBlock};
+use self::layout::v5::{RafsV5BlobTable, RafsV5PrefetchTable, RafsV5SuperBlock};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
@@ -643,42 +643,41 @@ pub trait RafsInode {
     /// caller must validate it before accessing any fields.
     fn validate(&self) -> Result<()>;
 
-    fn name(&self) -> OsString;
+    fn get_entry(&self) -> Entry;
+    fn get_attr(&self) -> Attr;
+    fn get_name_size(&self) -> u16;
     fn get_symlink(&self) -> Result<OsString>;
-    fn get_digest(&self) -> RafsDigest;
+    fn get_symlink_size(&self) -> u16;
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;
     fn get_child_by_index(&self, idx: Inode) -> Result<Arc<dyn RafsInode>>;
     fn get_child_index(&self) -> Result<u32>;
     fn get_child_count(&self) -> u32;
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>>;
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>>;
-    fn get_entry(&self) -> Entry;
-    fn get_attr(&self) -> Attr;
+    fn has_xattr(&self) -> bool;
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;
     fn get_xattrs(&self) -> Result<Vec<XattrName>>;
-    fn get_blocksize(&self) -> u32;
-
-    fn collect_descendants_inodes(
-        &self,
-        descendants: &mut Vec<Arc<dyn RafsInode>>,
-    ) -> Result<usize>;
 
     fn is_dir(&self) -> bool;
     fn is_symlink(&self) -> bool;
     fn is_reg(&self) -> bool;
     fn is_hardlink(&self) -> bool;
-    fn has_xattr(&self) -> bool;
-    fn has_hole(&self) -> bool;
 
-    fn rdev(&self) -> u32;
     fn ino(&self) -> u64;
+    fn name(&self) -> OsString;
     fn parent(&self) -> u64;
+    fn rdev(&self) -> u32;
+    fn flags(&self) -> u64;
+    fn projid(&self) -> u32;
     fn size(&self) -> u64;
     fn is_empty_size(&self) -> bool {
         self.size() == 0
     }
 
-    fn cast_ondisk(&self) -> Result<RafsV5Inode>;
+    fn get_digest(&self) -> RafsDigest;
+    fn collect_descendants_inodes(
+        &self,
+        descendants: &mut Vec<Arc<dyn RafsInode>>,
+    ) -> Result<usize>;
 
     fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc>;
 }

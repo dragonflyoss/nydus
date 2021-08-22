@@ -35,7 +35,7 @@ use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
     rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags,
-    RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeTable,
+    RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable,
     RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
 };
 use crate::metadata::layout::{
@@ -520,13 +520,37 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(())
     }
 
-    /// Get name of the inode.
-    ///
-    /// # Safety
-    /// It depends on Self::validate() to ensure valid memory layout.
-    fn name(&self) -> OsString {
+    fn get_entry(&self) -> Entry {
         let state = self.state();
-        self.name_ref(state.deref()).to_owned()
+        let inode = self.inode(state.deref());
+
+        Entry {
+            attr: self.get_attr().into(),
+            inode: inode.i_ino,
+            generation: 0,
+            attr_timeout: state.meta.attr_timeout,
+            entry_timeout: state.meta.entry_timeout,
+        }
+    }
+
+    fn get_attr(&self) -> Attr {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+
+        Attr {
+            ino: inode.i_ino,
+            size: inode.i_size,
+            blocks: inode.i_blocks,
+            mode: inode.i_mode,
+            nlink: inode.i_nlink as u32,
+            uid: inode.i_uid,
+            gid: inode.i_gid,
+            mtime: inode.i_mtime,
+            mtimensec: inode.i_mtime_nsec,
+            blksize: RAFS_INODE_BLOCKSIZE,
+            rdev: inode.i_rdev,
+            ..Default::default()
+        }
     }
 
     /// Get symlink target of the inode.
@@ -545,13 +569,6 @@ impl RafsInode for OndiskInodeWrapper {
         };
 
         Ok(bytes_to_os_str(symlink).to_os_string())
-    }
-
-    #[inline]
-    fn get_digest(&self) -> RafsDigest {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-        inode.i_digest
     }
 
     /// Get the child with the specified name.
@@ -618,7 +635,6 @@ impl RafsInode for OndiskInodeWrapper {
         self.mapping.get_inode(idx + child_index, false)
     }
 
-    #[inline]
     fn get_child_index(&self) -> Result<u32> {
         let state = self.state();
         let inode = self.inode(state.deref());
@@ -661,44 +677,6 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(Arc::new(wrapper))
     }
 
-    #[inline]
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
-        self.state().blob_table.get(idx)
-    }
-
-    fn get_entry(&self) -> Entry {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-
-        Entry {
-            attr: self.get_attr().into(),
-            inode: inode.i_ino,
-            generation: 0,
-            attr_timeout: state.meta.attr_timeout,
-            entry_timeout: state.meta.entry_timeout,
-        }
-    }
-
-    fn get_attr(&self) -> Attr {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-
-        Attr {
-            ino: inode.i_ino,
-            size: inode.i_size,
-            blocks: inode.i_blocks,
-            mode: inode.i_mode,
-            nlink: inode.i_nlink as u32,
-            uid: inode.i_uid,
-            gid: inode.i_gid,
-            mtime: inode.i_mtime,
-            mtimensec: inode.i_mtime_nsec,
-            blksize: RAFS_INODE_BLOCKSIZE,
-            rdev: inode.i_rdev,
-            ..Default::default()
-        }
-    }
-
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
         let (xattr_data, xattr_size) = self.get_xattr_data()?;
         parse_xattr_value(xattr_data, xattr_size, name)
@@ -709,9 +687,26 @@ impl RafsInode for OndiskInodeWrapper {
         parse_xattr_names(xattr_data, xattr_size)
     }
 
-    #[inline]
-    fn get_blocksize(&self) -> u32 {
-        self.mapping.state.load().meta.block_size
+    /// Get name of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn name(&self) -> OsString {
+        let state = self.state();
+        self.name_ref(state.deref()).to_owned()
+    }
+
+    fn flags(&self) -> u64 {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+
+        inode.i_flags.bits()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+        inode.i_digest
     }
 
     // TODO: Do prefetch insides this while walking the entire file system
@@ -749,9 +744,8 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
-        let state = self.state();
-        Ok(*self.inode(state.deref()))
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc(self, offset, size)
     }
 
     impl_inode_wrapper!(is_dir, bool);
@@ -759,15 +753,30 @@ impl RafsInode for OndiskInodeWrapper {
     impl_inode_wrapper!(is_symlink, bool);
     impl_inode_wrapper!(is_hardlink, bool);
     impl_inode_wrapper!(has_xattr, bool);
-    impl_inode_wrapper!(has_hole, bool);
     impl_inode_getter!(ino, i_ino, u64);
     impl_inode_getter!(parent, i_parent, u64);
     impl_inode_getter!(size, i_size, u64);
     impl_inode_getter!(rdev, i_rdev, u32);
+    impl_inode_getter!(projid, i_projid, u32);
+    impl_inode_getter!(get_name_size, i_name_size, u16);
+    impl_inode_getter!(get_symlink_size, i_symlink_size, u16);
+}
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
-        rafsv5_alloc_bio_desc(self, offset, size)
+impl RafsV5InodeOps for OndiskInodeWrapper {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+        self.state().blob_table.get(idx)
     }
+
+    fn get_blocksize(&self) -> u32 {
+        self.mapping.state.load().meta.block_size
+    }
+
+    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
+        let state = self.state();
+        Ok(*self.inode(state.deref()))
+    }
+
+    impl_inode_wrapper!(has_hole, bool);
 }
 
 pub struct DirectChunkInfoV5 {

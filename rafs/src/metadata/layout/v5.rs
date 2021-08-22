@@ -68,6 +68,13 @@ const RAFSV5_SUPERBLOCK_RESERVED_SIZE: usize = RAFSV5_SUPERBLOCK_SIZE - 80;
 const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
 const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
 
+pub(crate) trait RafsV5InodeOps {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>>;
+    fn get_blocksize(&self) -> u32;
+    fn has_hole(&self) -> bool;
+    fn cast_ondisk(&self) -> Result<RafsV5Inode>;
+}
+
 /// RAFS SuperBlock on disk data format, 8192 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -108,6 +115,13 @@ pub struct RafsV5SuperBlock {
 impl RafsV5SuperBlock {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn detect(&self) -> bool {
+        self.magic() == RAFSV5_SUPER_MAGIC
+            && self.version() >= RAFS_SUPER_VERSION_V4 as u32
+            && self.version() <= RAFS_SUPER_VERSION_V5 as u32
+            && self.sb_size() == RAFSV5_SUPERBLOCK_SIZE as u32
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1050,7 +1064,7 @@ impl RafsStore for RafsV5XAttrs {
     }
 }
 
-pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode>(
+pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     inode: &I,
     offset: u64,
     size: usize,
