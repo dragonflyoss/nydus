@@ -29,14 +29,14 @@ use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
 
-use nydus_utils::digest::RafsDigest;
+use nydus_utils::digest::{Algorithm, RafsDigest};
 use storage::device::RafsBioDesc;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_desc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo,
-    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeTable, RafsV5XAttrsTable,
-    RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
+    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags,
+    RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeTable,
+    RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
@@ -359,6 +359,15 @@ impl RafsSuperInodes for DirectSuperBlockV5 {
         }
 
         Ok(inode)
+    }
+
+    fn validate_digest(
+        &self,
+        inode: Arc<dyn RafsInode>,
+        recursive: bool,
+        digester: Algorithm,
+    ) -> Result<bool> {
+        rafsv5_validate_digest(inode, recursive, digester)
     }
 }
 

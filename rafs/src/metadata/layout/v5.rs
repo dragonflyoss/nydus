@@ -43,7 +43,7 @@ use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use nydus_utils::digest::{self, RafsDigest};
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use storage::compress;
 use storage::device::{RafsBio, RafsBioDesc};
@@ -1173,6 +1173,58 @@ pub(crate) fn rafsv5_align(size: usize) -> usize {
     } else {
         size + (RAFSV5_ALIGNMENT - (size & (RAFSV5_ALIGNMENT - 1)))
     }
+}
+
+/// Validate inode metadata, include children, chunks and symblink etc.
+///
+/// The default implementation is for rafs v5. The chunk data is not validated here, which will
+/// be validate on fs read.
+pub(crate) fn rafsv5_validate_digest(
+    inode: Arc<dyn RafsInode>,
+    recursive: bool,
+    digester: digest::Algorithm,
+) -> Result<bool> {
+    let child_count = inode.get_child_count();
+    let expected_digest = inode.get_digest();
+    let mut hasher = RafsDigest::hasher(digester);
+
+    if inode.is_symlink() {
+        hasher.digest_update(inode.get_symlink()?.as_bytes());
+    } else if inode.is_reg() {
+        for idx in 0..child_count {
+            let chunk = inode.get_chunk_info(idx)?;
+            let chunk_digest = chunk.block_id();
+
+            hasher.digest_update(chunk_digest.as_ref());
+        }
+    } else if inode.is_dir() {
+        for idx in 0..child_count {
+            let child = inode.get_child_by_index(idx as u64)?;
+            if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
+                && !rafsv5_validate_digest(child.clone(), recursive, digester)?
+            {
+                return Ok(false);
+            }
+            let child_digest = child.get_digest();
+            let child_digest = child_digest.as_ref().as_ref();
+
+            hasher.digest_update(child_digest);
+        }
+    }
+
+    let digest = hasher.digest_finalize();
+    let result = expected_digest == digest;
+    if !result {
+        error!(
+            "invalid inode digest {}, expected {}, ino: {} name: {:?}",
+            digest,
+            expected_digest,
+            inode.ino(),
+            inode.name()
+        );
+    }
+
+    Ok(result)
 }
 
 fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
