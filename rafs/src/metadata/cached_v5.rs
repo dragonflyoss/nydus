@@ -714,7 +714,7 @@ impl From<&RafsV5ChunkInfo> for CachedChunkInfoV5 {
     }
 }
 
-#[cfg(test)]
+#[cfg(test1)]
 mod cached_tests {
     use std::cmp;
     use std::ffi::{OsStr, OsString};
