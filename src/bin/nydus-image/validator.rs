@@ -37,7 +37,7 @@ impl Validator {
         let err = "failed to load bootstrap for validator";
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
-            digest_validate: true,
+            validate_digest: true,
             ..Default::default()
         };
         rs.load(&mut self.f_bootstrap).context(err)?;

@@ -190,7 +190,7 @@ impl Bootstrap {
     pub fn apply(&mut self, mut ctx: &mut BuildContext) -> Result<Tree> {
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
-            digest_validate: true,
+            validate_digest: true,
             ..Default::default()
         };
 
