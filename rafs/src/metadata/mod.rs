@@ -24,16 +24,14 @@ use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use storage::compress;
 use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
 
+use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-//use self::layout::*;
-use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
-use crate::metadata::cached_v5::CachedSuperBlockV5;
-//use crate::*;
 use self::layout::v5::{
-    OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable, RafsSuperFlags, RAFS_ALIGNMENT,
+    OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable, RafsSuperFlags,
 };
-use self::layout::{XattrName, XattrValue};
+use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopInodes;
+use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
 pub mod cached_v5;
@@ -41,16 +39,14 @@ pub mod direct_v5;
 pub mod layout;
 mod noop;
 
-// FIXME: Move this definition to metadata crate if we have it some day.
-use crate::metadata::layout::{RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
 
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
 pub const RAFS_MAX_NAME: usize = 255;
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
-const DOT: &str = ".";
-const DOTDOT: &str = "..";
+pub const DOT: &str = ".";
+pub const DOTDOT: &str = "..";
 
 /// Type of RAFS inode.
 pub type Inode = u64;
@@ -99,7 +95,7 @@ impl RafsSuperMeta {
         if self.is_v4_v5() {
             self.flags.into()
         } else {
-            digest::Algorithm::Sha256
+            digest::Algorithm::Blake3
         }
     }
 
@@ -656,15 +652,7 @@ pub trait RafsInode {
 
 /// Trait to store Rafs meta block and validate alignment.
 pub trait RafsStore {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize>;
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        let size = self.store_inner(w)?;
-        let cur = w.seek(SeekFrom::Current(0))?;
-        if (size & (RAFS_ALIGNMENT - 1) != 0) || (cur & (RAFS_ALIGNMENT as u64 - 1) != 0) {
-            return Err(einval!("unaligned data"));
-        }
-        Ok(size)
-    }
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize>;
 }
 
 #[cfg(test)]

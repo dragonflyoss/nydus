@@ -28,7 +28,7 @@ use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
-use crate::metadata::layout::v5::{align_to_rafs, RAFS_ALIGNMENT};
+use crate::metadata::layout::v5::align_to_rafs;
 
 pub mod fs;
 pub mod metadata;
@@ -64,6 +64,18 @@ pub type RafsIoWriter = Box<dyn RafsIoWrite>;
 /// A helper trait for RafsIoWriter.
 pub trait RafsIoWrite: Write + Seek {
     fn as_any(&self) -> &dyn Any;
+
+    fn validate_alignment(&mut self, size: usize, alignment: usize) -> Result<usize> {
+        if alignment != 0 {
+            let cur = self.seek(SeekFrom::Current(0))?;
+
+            if (size & (alignment - 1) != 0) || (cur & (alignment as u64 - 1) != 0) {
+                return Err(einval!("unaligned data"));
+            }
+        }
+
+        Ok(size)
+    }
 }
 
 impl RafsIoWrite for File {
@@ -81,14 +93,15 @@ impl RafsIoWrite for BufWriter<File> {
     }
 }
 
+const WRITE_PADDING_DATA: [u8; 64] = [0u8; 64];
+
 impl dyn RafsIoWrite {
     /// write padding to align to RAFS_ALIGNMENT.
     pub fn write_padding(&mut self, size: usize) -> Result<()> {
-        if size > RAFS_ALIGNMENT {
+        if size > WRITE_PADDING_DATA.len() {
             return Err(einval!("invalid padding size"));
         }
-        let padding = [0u8; RAFS_ALIGNMENT];
-        self.write_all(&padding[0..size])
+        self.write_all(&WRITE_PADDING_DATA[0..size])
     }
 }
 

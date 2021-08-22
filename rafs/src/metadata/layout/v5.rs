@@ -298,9 +298,9 @@ impl OndiskSuperBlock {
 }
 
 impl RafsStore for OndiskSuperBlock {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        Ok(self.as_ref().len())
+        w.validate_alignment(self.as_ref().len(), RAFS_ALIGNMENT)
     }
 }
 
@@ -398,11 +398,11 @@ impl OndiskInodeTable {
 }
 
 impl RafsStore for OndiskInodeTable {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let (_, data, _) = unsafe { self.data.align_to::<u8>() };
-        w.write_all(data)?;
 
-        Ok(data.len())
+        w.write_all(data)?;
+        w.validate_alignment(data.len(), RAFS_ALIGNMENT)
     }
 }
 
@@ -641,7 +641,7 @@ impl OndiskBlobTable {
 }
 
 impl RafsStore for OndiskBlobTable {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
         self.entries
             .iter()
@@ -661,10 +661,9 @@ impl RafsStore for OndiskBlobTable {
 
         let padding = align_to_rafs(size) - size;
         w.write_padding(padding)?;
-
         size += padding;
 
-        Ok(size)
+        w.validate_alignment(size, RAFS_ALIGNMENT)
     }
 }
 
@@ -774,7 +773,7 @@ impl ExtendedBlobTable {
 }
 
 impl RafsStore for ExtendedBlobTable {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
 
         // Store the list of entries
@@ -799,7 +798,7 @@ impl RafsStore for ExtendedBlobTable {
         w.write_padding(padding)?;
         size += padding;
 
-        Ok(size)
+        w.validate_alignment(size, RAFS_ALIGNMENT)
     }
 }
 
@@ -927,7 +926,7 @@ pub struct OndiskInodeWrapper<'a> {
 }
 
 impl<'a> RafsStore for OndiskInodeWrapper<'a> {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size: usize = 0;
 
         let inode_data = self.inode.as_ref();
@@ -951,7 +950,7 @@ impl<'a> RafsStore for OndiskInodeWrapper<'a> {
             size += padding;
         }
 
-        Ok(size)
+        w.validate_alignment(size, RAFS_ALIGNMENT)
     }
 }
 
@@ -995,9 +994,9 @@ impl OndiskChunkInfo {
 }
 
 impl RafsStore for OndiskChunkInfo {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        Ok(self.as_ref().len())
+        w.validate_alignment(self.as_ref().len(), RAFS_ALIGNMENT)
     }
 }
 
@@ -1094,7 +1093,7 @@ impl XAttrs {
 }
 
 impl RafsStore for XAttrs {
-    fn store_inner(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
 
         if !self.pairs.is_empty() {
@@ -1122,7 +1121,7 @@ impl RafsStore for XAttrs {
         w.write_padding(padding)?;
         size += padding;
 
-        Ok(size)
+        w.validate_alignment(size, RAFS_ALIGNMENT)
     }
 }
 
