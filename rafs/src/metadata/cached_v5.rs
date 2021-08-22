@@ -27,16 +27,16 @@ use crate::RafsIoReader;
 
 use nydus_utils::{digest::RafsDigest, ByteSize};
 
-pub struct CachedInodes {
+pub struct CachedSuperBlockV5 {
     s_blob: Arc<OndiskBlobTable>,
     s_meta: Arc<RafsSuperMeta>,
-    s_inodes: BTreeMap<Inode, Arc<CachedInode>>,
+    s_inodes: BTreeMap<Inode, Arc<CachedInodeV5>>,
     digest_validate: bool,
 }
 
-impl CachedInodes {
+impl CachedSuperBlockV5 {
     pub fn new(meta: RafsSuperMeta, digest_validate: bool) -> Self {
-        CachedInodes {
+        CachedSuperBlockV5 {
             s_blob: Arc::new(OndiskBlobTable::new()),
             s_inodes: BTreeMap::new(),
             s_meta: Arc::new(meta),
@@ -54,7 +54,7 @@ impl CachedInodes {
             if entries >= self.s_meta.inode_table_entries {
                 break;
             }
-            let mut inode = CachedInode::new(self.s_blob.clone(), self.s_meta.clone());
+            let mut inode = CachedInodeV5::new(self.s_blob.clone(), self.s_meta.clone());
             match inode.load(&self.s_meta, r) {
                 Ok(_) => {
                     entries += 1;
@@ -93,15 +93,15 @@ impl CachedInodes {
         Ok(())
     }
 
-    fn get_node(&self, ino: Inode) -> Result<Arc<CachedInode>> {
+    fn get_node(&self, ino: Inode) -> Result<Arc<CachedInodeV5>> {
         Ok(self.s_inodes.get(&ino).ok_or_else(|| enoent!())?.clone())
     }
 
-    fn get_node_mut(&mut self, ino: Inode) -> Result<&mut Arc<CachedInode>> {
+    fn get_node_mut(&mut self, ino: Inode) -> Result<&mut Arc<CachedInodeV5>> {
         self.s_inodes.get_mut(&ino).ok_or_else(|| enoent!())
     }
 
-    fn hash_inode(&mut self, inode: Arc<CachedInode>) -> Result<Arc<CachedInode>> {
+    fn hash_inode(&mut self, inode: Arc<CachedInodeV5>) -> Result<Arc<CachedInodeV5>> {
         if inode.is_hardlink() {
             if let Some(i) = self.s_inodes.get(&inode.i_ino) {
                 if !i.i_data.is_empty() {
@@ -114,7 +114,7 @@ impl CachedInodes {
         self.get_node(ino)
     }
 
-    fn add_into_parent(&mut self, child_inode: Arc<CachedInode>) {
+    fn add_into_parent(&mut self, child_inode: Arc<CachedInodeV5>) {
         if let Ok(parent_inode) = self.get_node_mut(child_inode.parent()) {
             Arc::get_mut(parent_inode)
                 .unwrap()
@@ -123,7 +123,7 @@ impl CachedInodes {
     }
 }
 
-impl RafsSuperInodes for CachedInodes {
+impl RafsSuperInodes for CachedSuperBlockV5 {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         // FIXME: add validator for all load operations.
 
@@ -194,7 +194,7 @@ impl RafsSuperInodes for CachedInodes {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CachedInode {
+pub struct CachedInodeV5 {
     i_ino: Inode,
     i_name: OsString,
     i_digest: RafsDigest,
@@ -216,15 +216,15 @@ pub struct CachedInode {
     i_mtime: u64,
     i_target: OsString, // for symbol link
     i_xattr: HashMap<OsString, Vec<u8>>,
-    i_data: Vec<Arc<CachedChunkInfo>>,
-    i_child: Vec<Arc<CachedInode>>,
+    i_data: Vec<Arc<CachedChunkInfoV5>>,
+    i_child: Vec<Arc<CachedInodeV5>>,
     i_blob_table: Arc<OndiskBlobTable>,
     i_meta: Arc<RafsSuperMeta>,
 }
 
-impl CachedInode {
+impl CachedInodeV5 {
     pub fn new(blob_table: Arc<OndiskBlobTable>, meta: Arc<RafsSuperMeta>) -> Self {
-        CachedInode {
+        CachedInodeV5 {
             i_blob_table: blob_table,
             i_meta: meta,
             ..Default::default()
@@ -270,7 +270,7 @@ impl CachedInode {
             let mut chunk = OndiskChunkInfo::new();
             for _i in 0..self.i_child_cnt {
                 chunk.load(r)?;
-                self.i_data.push(Arc::new(CachedChunkInfo::from(&chunk)));
+                self.i_data.push(Arc::new(CachedChunkInfoV5::from(&chunk)));
             }
         }
         Ok(())
@@ -313,7 +313,7 @@ impl CachedInode {
         self.i_mtime_nsec = inode.i_mtime_nsec;
     }
 
-    fn add_child(&mut self, child: Arc<CachedInode>) {
+    fn add_child(&mut self, child: Arc<CachedInodeV5>) {
         self.i_child.push(child);
         if self.i_child.len() == (self.i_child_cnt as usize) {
             // all children are ready, do sort
@@ -322,7 +322,7 @@ impl CachedInode {
     }
 }
 
-impl RafsInode for CachedInode {
+impl RafsInode for CachedInodeV5 {
     fn validate(&self) -> Result<()> {
         // TODO: validate
         if self.is_symlink() && self.i_target.is_empty() {
@@ -517,7 +517,7 @@ impl RafsInode for CachedInode {
 
 /// Cached information about an Rafs Data Chunk.
 #[derive(Clone, Default, Debug)]
-pub struct CachedChunkInfo {
+pub struct CachedChunkInfoV5 {
     // block hash
     c_block_id: Arc<RafsDigest>,
     // blob containing the block
@@ -535,9 +535,9 @@ pub struct CachedChunkInfo {
     c_flags: RafsChunkFlags,
 }
 
-impl CachedChunkInfo {
+impl CachedChunkInfoV5 {
     pub fn new() -> Self {
-        CachedChunkInfo {
+        CachedChunkInfoV5 {
             ..Default::default()
         }
     }
@@ -564,7 +564,7 @@ impl CachedChunkInfo {
     }
 }
 
-impl RafsChunkInfo for CachedChunkInfo {
+impl RafsChunkInfo for CachedChunkInfoV5 {
     fn block_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
@@ -587,17 +587,17 @@ impl RafsChunkInfo for CachedChunkInfo {
     impl_getter!(flags, c_flags, RafsChunkFlags);
 }
 
-impl From<&OndiskChunkInfo> for CachedChunkInfo {
+impl From<&OndiskChunkInfo> for CachedChunkInfoV5 {
     fn from(info: &OndiskChunkInfo) -> Self {
-        let mut chunk = CachedChunkInfo::new();
+        let mut chunk = CachedChunkInfoV5::new();
         chunk.copy_from_ondisk(info);
         chunk
     }
 }
 
-#[cfg(test)]
+#[cfg(test1)]
 mod cached_tests {
-    use crate::metadata::cached::CachedInode;
+    use crate::metadata::cached_v5::CachedInodeV5;
     use crate::metadata::layout::{
         OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeWrapper, XAttrs,
     };
@@ -650,7 +650,7 @@ mod cached_tests {
         f.seek(Start(0)).unwrap();
         let meta = Arc::new(RafsSuperMeta::default());
         let blob_table = Arc::new(OndiskBlobTable::new());
-        let mut cached_inode = CachedInode::new(blob_table, meta.clone());
+        let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         // check data
         assert_eq!(cached_inode.i_name, file_name.to_str().unwrap());
@@ -703,7 +703,7 @@ mod cached_tests {
         f.seek(Start(0)).unwrap();
         let meta = Arc::new(RafsSuperMeta::default());
         let blob_table = Arc::new(OndiskBlobTable::new());
-        let mut cached_inode = CachedInode::new(blob_table, meta.clone());
+        let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
 
         assert_eq!(cached_inode.i_name, "c_inode_2");
@@ -756,7 +756,7 @@ mod cached_tests {
         Arc::get_mut(&mut blob_table)
             .unwrap()
             .add(String::from("123333"), 0, 0, 0, 0, 0);
-        let mut cached_inode = CachedInode::new(blob_table, meta.clone());
+        let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         let desc1 = cached_inode.alloc_bio_desc(0, 100).unwrap();
         assert_eq!(desc1.bi_size, 100);

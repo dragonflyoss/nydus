@@ -27,7 +27,7 @@ use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo}
 use self::direct_v5::DirectSuperBlockV5;
 //use self::layout::*;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
-use crate::metadata::cached::CachedInodes;
+use crate::metadata::cached_v5::CachedSuperBlockV5;
 //use crate::*;
 use self::layout::v5::{
     OndiskBlobTable, OndiskInode, OndiskSuperBlock, PrefetchTable, RafsSuperFlags, RAFS_ALIGNMENT,
@@ -36,7 +36,7 @@ use self::layout::{XattrName, XattrValue};
 use self::noop::NoopInodes;
 use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
-pub mod cached;
+pub mod cached_v5;
 pub mod direct_v5;
 pub mod layout;
 mod noop;
@@ -275,7 +275,7 @@ impl RafsSuper {
                     self.inodes = Arc::new(inodes);
                 }
                 RafsMode::Cached => {
-                    let mut inodes = CachedInodes::new(self.meta, self.digest_validate);
+                    let mut inodes = CachedSuperBlockV5::new(self.meta, self.digest_validate);
                     inodes.load(r)?;
                     self.inodes = Arc::new(inodes);
                 }
