@@ -31,6 +31,7 @@ type Daemon struct {
 	ConfigDir      string
 	SocketDir      string
 	LogDir         string
+	LogLevel       string
 	CacheDir       string
 	SnapshotDir    string
 	Pid            int

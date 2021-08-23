@@ -59,6 +59,17 @@ func WithLogDir(dir string) NewDaemonOpt {
 	}
 }
 
+func WithLogLevel(logLevel string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		if logLevel == "" {
+			d.LogLevel = config.DefaultLogLevel
+		} else {
+			d.LogLevel = logLevel
+		}
+		return nil
+	}
+}
+
 func WithCacheDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		// this may be failed, should handle that
@@ -79,7 +90,6 @@ func WithRootMountPoint(rootMountPoint string) NewDaemonOpt {
 		return nil
 	}
 }
-
 
 func WithSnapshotDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {

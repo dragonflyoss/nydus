@@ -114,6 +114,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		nydus.WithVPCRegistry(cfg.ConvertVpcRegistry),
 		nydus.WithVerifier(verifier),
 		nydus.WithDaemonMode(cfg.DaemonMode),
+		nydus.WithLogLevel(cfg.LogLevel),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
@@ -129,6 +130,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 				stargz.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 				stargz.WithNydusImageBinaryPath(cfg.NydusImageBinaryPath),
 				stargz.WithDaemonConfig(cfg.DaemonCfg),
+				stargz.WithLogLevel(cfg.LogLevel),
 			)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to initialize stargz filesystem")

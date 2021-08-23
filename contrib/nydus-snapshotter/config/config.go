@@ -19,6 +19,7 @@ const (
 	DaemonModeShared   string = "shared"
 	DaemonModeNone     string = "none"
 	DaemonModePrefetch string = "prefetch"
+	DefaultLogLevel    string = "info"
 	defaultGCPeriod           = 24 * time.Hour
 
 	defaultNydusDaemonConfigPath string = "/etc/nydus/config.json"
@@ -43,9 +44,13 @@ type Config struct {
 	EnableMetrics        bool          `toml:"enable_metrics"`
 	MetricsFile          string        `toml:"metrics_file"`
 	EnableStargz         bool          `toml:"enable_stargz"`
+	LogLevel             string        `toml:"-"`
 }
 
 func (c *Config) FillupWithDefaults() error {
+	if c.LogLevel == "" {
+		c.LogLevel = DefaultLogLevel
+	}
 	if c.DaemonCfgPath == "" {
 		c.DaemonCfgPath = defaultNydusDaemonConfigPath
 	}

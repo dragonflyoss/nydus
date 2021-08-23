@@ -176,6 +176,7 @@ func Validate(args *Args, cfg *config.Config) error {
 			return errors.Wrapf(err, "failed to find publicKey file %q", args.PublicKeyFile)
 		}
 	}
+	cfg.LogLevel = args.LogLevel
 	cfg.DaemonCfg = daemonCfg
 	cfg.RootDir = args.RootDir
 
