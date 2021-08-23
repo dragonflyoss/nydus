@@ -84,6 +84,19 @@ func (s *DaemonStore) Add(d *daemon.Daemon) error {
 	return s.db.SaveDaemon(context.TODO(), d)
 }
 
+func (s *DaemonStore) Update(d *daemon.Daemon) error {
+	s.Lock()
+	defer s.Unlock()
+
+	if _, ok := s.idxBySnapshotID[d.SnapshotID]; !ok {
+		return fmt.Errorf("daemon of snapshotID %s not found", d.SnapshotID)
+	}
+
+	// update daemon info in case snapshotter restarts so that we can restore the
+	// daemon structs and reconnect the daemons.
+	return s.db.UpdateDaemon(context.TODO(), d)
+}
+
 func (s *DaemonStore) Delete(d *daemon.Daemon) error {
 	s.Lock()
 	defer s.Unlock()

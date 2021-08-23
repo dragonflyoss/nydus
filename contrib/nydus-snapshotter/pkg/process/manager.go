@@ -121,6 +121,11 @@ func (m *Manager) StartDaemon(d *daemon.Daemon) error {
 		return err
 	}
 	d.Pid = cmd.Process.Pid
+	err = m.store.Update(d)
+	if err != nil {
+		// Nothing we can do, just ignore it for now
+		log.L.Errorf("fail to update daemon info (%+v) to db: %v", d, err)
+	}
 	// process wait when destroy daemon and kill process
 	return nil
 
