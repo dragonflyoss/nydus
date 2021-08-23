@@ -17,6 +17,7 @@ type Store interface {
 	Get(id string) (*daemon.Daemon, error)
 	GetBySnapshot(snapshotID string) (*daemon.Daemon, error)
 	Add(*daemon.Daemon) error
+	Update(d *daemon.Daemon) error
 	Delete(*daemon.Daemon) error
 	List() []*daemon.Daemon
 	Size() int

@@ -103,6 +103,20 @@ func (d *Database) SaveDaemon(ctx context.Context, dmn *daemon.Daemon) error {
 	})
 }
 
+// UpdateDaemon updates daemon record in the database
+func (d *Database) UpdateDaemon(ctx context.Context, dmn *daemon.Daemon) error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(daemonsBucketName)
+
+		var existing daemon.Daemon
+		if err := getObject(bucket, dmn.ID, &existing); err != nil {
+			return err
+		}
+
+		return putObject(bucket, dmn.ID, dmn)
+	})
+}
+
 // DeleteDaemon deletes daemon record from database
 func (d *Database) DeleteDaemon(ctx context.Context, id string) error {
 	return d.db.Update(func(tx *bolt.Tx) error {
