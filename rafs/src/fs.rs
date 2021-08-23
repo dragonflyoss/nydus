@@ -614,13 +614,20 @@ impl FileSystem for Rafs {
         }
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
 
-        // TODO: Introduce Up-call mechanism to close neighbor prefetch
-        // when cache is almost filled.
-        let ra_desc = self
-            .sb
-            .carry_more_until(inode.as_ref(), offset + size as u64, 1024 * 128)?;
+        let mut all_cached = true;
 
-        desc.bi_vec.extend_from_slice(&ra_desc.bi_vec);
+        for b in &desc.bi_vec {
+            let c = b.chunkinfo.as_ref();
+            let blob = b.blob.as_ref();
+            all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
+        }
+
+        if !all_cached {
+            let ra_desc =
+                self.sb
+                    .carry_more_until(inode.as_ref(), offset + size as u64, 1024 * 128)?;
+            desc.bi_vec.extend_from_slice(&ra_desc.bi_vec)
+        };
         let start = self.ios.latency_start();
         // Avoid copying `desc`
         let r = self.device.read_to(w, &mut desc).map(|r| {

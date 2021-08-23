@@ -25,6 +25,9 @@ pub trait ChunkMap {
     fn has_ready(&self, chunk: &dyn RafsChunkInfo, wait: bool) -> Result<bool>;
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()>;
     fn finish(&self, _chunk: &dyn RafsChunkInfo) {}
+    fn has_ready_lite(&self, _chunk: &dyn RafsChunkInfo) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// convert RafsChunkInfo to ChunkMap inner index
@@ -160,6 +163,10 @@ where
         if let Some(i) = guard.remove(&index) {
             i.done();
         }
+    }
+
+    fn has_ready_lite(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
+        self.c.has_ready(chunk, false)
     }
 }
 

@@ -111,6 +111,10 @@ impl RafsCache for DummyCache {
     fn release(&self) {
         self.backend().release()
     }
+
+    fn is_chunk_cached(&self, _chunk: &dyn RafsChunkInfo, _blob: &RafsBlobEntry) -> bool {
+        false
+    }
 }
 
 pub fn new(
