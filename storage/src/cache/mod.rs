@@ -313,4 +313,6 @@ pub trait RafsCache {
 
         Ok(chunks)
     }
+
+    fn is_chunk_cached(&self, chunk: &dyn RafsChunkInfo, blob: &RafsBlobEntry) -> bool;
 }

@@ -1266,6 +1266,15 @@ impl RafsCache for BlobCache {
         Ok(())
     }
 
+    fn is_chunk_cached(&self, chunk: &dyn RafsChunkInfo, blob: &RafsBlobEntry) -> bool {
+        let cache_guard = self.cache.read().unwrap();
+        if let Some((_, _, chunk_map)) = cache_guard.get(blob) {
+            chunk_map.has_ready_lite(chunk).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
     #[inline]
     fn digester(&self) -> digest::Algorithm {
         self.digester
