@@ -113,7 +113,7 @@ func (d *Database) UpdateDaemon(ctx context.Context, dmn *daemon.Daemon) error {
 			return err
 		}
 
-		return putObject(bucket, dmn.ID, dmn)
+		return updateObject(bucket, dmn.ID, dmn)
 	})
 }
 
