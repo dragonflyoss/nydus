@@ -18,6 +18,7 @@ use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobTable, RafsV5Inode, RafsV5InodeTable,
     RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
+use rafs::metadata::RafsSuperFlags;
 use rafs::{RafsIoRead, RafsIoReader};
 
 pub(crate) struct RafsInspector {
@@ -569,7 +570,7 @@ Blocks:             {blocks}"#,
     Flags:              {flags}"#,
                 version = sb.version(),
                 inodes_count = sb.inodes_count(),
-                flags = sb.flags()
+                flags = RafsSuperFlags::from_bits(sb.flags()).unwrap()
             );
 
             None
