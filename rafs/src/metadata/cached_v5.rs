@@ -485,8 +485,8 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
-        rafsv5_alloc_bio_desc(self, offset, size)
+    fn alloc_bio_desc(&self, offset: u64, size: usize, is_user: bool) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc(self, offset, size, is_user)
     }
 
     fn get_name_size(&self) -> u16 {
