@@ -40,7 +40,7 @@ impl ChunkSegment {
 #[derive(Clone, Debug)]
 pub enum IoInitiator {
     User(ChunkSegment),
-    Internal,
+    Internal(u32, u64),
 }
 
 #[derive(Default, Clone)]
@@ -70,13 +70,14 @@ impl MergedBackendRequest {
         let mut tags: Vec<IoInitiator> = Vec::new();
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
-        chunks.push(first_cki);
 
         let tag = if bio.is_user {
             IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
         } else {
-            IoInitiator::Internal
+            IoInitiator::Internal(first_cki.index(), first_cki.compress_offset())
         };
+
+        chunks.push(first_cki);
 
         tags.push(tag);
 
@@ -91,13 +92,14 @@ impl MergedBackendRequest {
 
     fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
         self.blob_size += cki.compress_size();
-        self.chunks.push(cki);
 
         let tag = if bio.is_user {
             IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
         } else {
-            IoInitiator::Internal
+            IoInitiator::Internal(cki.index(), cki.compress_offset())
         };
+
+        self.chunks.push(cki);
 
         self.chunk_tags.push(tag);
     }
