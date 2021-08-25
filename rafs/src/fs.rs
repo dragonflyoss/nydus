@@ -636,6 +636,7 @@ impl FileSystem for Rafs {
                 desc.bi_vec.extend_from_slice(&ra_desc.bi_vec)
             }
         };
+
         let start = self.ios.latency_start();
         // Avoid copying `desc`
         let r = self.device.read_to(w, &mut desc).map(|r| {
