@@ -555,7 +555,7 @@ impl RafsSuper {
                                 hardlinks.insert(i.ino());
                             }
                         }
-                        let mut desc = i.alloc_bio_desc(0, i.size() as usize)?;
+                        let mut desc = i.alloc_bio_desc(0, i.size() as usize, false)?;
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
 
@@ -572,7 +572,7 @@ impl RafsSuper {
                             hardlinks.insert(inode.ino());
                         }
                     }
-                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize)?;
+                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false)?;
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
 
@@ -704,6 +704,7 @@ impl RafsSuper {
                     ra_desc.bi_vec.append(&mut cks.bi_vec);
                     ra_desc.bi_size += cks.bi_size;
                 }
+                left -= delta;
                 true
             }
         } else {
@@ -824,7 +825,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, is_user: bool) -> Result<RafsBioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

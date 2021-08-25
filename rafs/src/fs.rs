@@ -613,7 +613,6 @@ impl FileSystem for Rafs {
             return Ok(0);
         }
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
-
         let mut all_cached = true;
 
         for b in &desc.bi_vec {
@@ -623,10 +622,19 @@ impl FileSystem for Rafs {
         }
 
         if !all_cached {
-            let ra_desc =
-                self.sb
-                    .carry_more_until(inode.as_ref(), offset + size as u64, 1024 * 128)?;
-            desc.bi_vec.extend_from_slice(&ra_desc.bi_vec)
+            let ra_desc = self.sb.carry_more_until(
+                inode.as_ref(),
+                offset + size as u64,
+                1024 * 128 - size as u64,
+            )?;
+
+            if ra_desc.bi_vec[0].chunkinfo.compress_offset()
+                == desc.bi_vec[0].chunkinfo.compress_offset()
+            {
+                desc.bi_vec.extend_from_slice(&ra_desc.bi_vec[1..])
+            } else {
+                desc.bi_vec.extend_from_slice(&ra_desc.bi_vec)
+            }
         };
         let start = self.ios.latency_start();
         // Avoid copying `desc`
