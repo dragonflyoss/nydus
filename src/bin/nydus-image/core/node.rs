@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! File node for RAFS format
+//! Node structure to store information for RAFS file system inode.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -16,9 +16,8 @@ use std::path::{Component, Path, PathBuf};
 use std::str;
 use std::str::FromStr;
 
-use nix::sys::stat;
-
 use anyhow::{Context, Error, Result};
+use nix::sys::stat;
 use sha2::digest::Digest;
 use sha2::Sha256;
 
@@ -26,9 +25,6 @@ use nydus_utils::{
     digest::{self, DigestHasher, RafsDigest},
     div_round_up, try_round_up_4k, ByteSize,
 };
-
-use super::blob::BlobBufferWriter;
-
 use rafs::metadata::layout::v5::{
     RafsChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
     RafsV5XAttrs,
@@ -37,13 +33,42 @@ use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
 use rafs::RafsIoWriter;
 use storage::compress;
 
+use super::blob::BlobBufferWriter;
+
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
 pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
 pub const OVERLAYFS_WHITEOUT_OPAQUE: &str = "trusted.overlay.opaque";
 
-#[derive(Clone, Debug, PartialEq)]
+// # Overlayfs Whiteout
+// In order to support rm and rmdir without changing the lower filesystem, an overlay filesystem
+// needs to record in the upper filesystem that files have been removed. This is done using
+// whiteouts and opaque directories (non-directories are always opaque).
+//
+// A whiteout is created as a character device with 0/0 device number. When a whiteout is found
+// in the upper level of a merged directory, any matching name in the lower level is ignored,
+// and the whiteout itself is also hidden.
+//
+// A directory is made opaque by setting the xattr “trusted.overlay.opaque” to “y”. Where the upper
+// filesystem contains an opaque directory, any directory in the lower filesystem with the same
+// name is ignored.
+//
+// # OCI Image Whiteout
+// - A whiteout file is an empty file with a special filename that signifies a path should be
+//   deleted.
+// - A whiteout filename consists of the prefix .wh. plus the basename of the path to be deleted.
+// - As files prefixed with .wh. are special whiteout markers, it is not possible to create a
+//   filesystem which has a file or directory with a name beginning with .wh..
+// - Once a whiteout is applied, the whiteout itself MUST also be hidden.
+// - Whiteout files MUST only apply to resources in lower/parent layers.
+// - Files that are present in the same layer as a whiteout file can only be hidden by whiteout
+//   files in subsequent layers.
+// - In addition to expressing that a single entry should be removed from a lower layer, layers
+//   may remove all of the children using an opaque whiteout entry.
+// - An opaque whiteout entry is a file with the name .wh..wh..opq indicating that all siblings
+//   are hidden in the lower layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WhiteoutType {
     OciOpaque,
     OciRemoval,
@@ -88,7 +113,7 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    pub fn lower_layer(&self) -> bool {
+    pub fn is_lower_layer(&self) -> bool {
         self == &Overlay::Lower
     }
 }
@@ -136,6 +161,37 @@ impl ChunkCountMap {
     }
 }
 
+#[derive(Clone)]
+pub struct Node {
+    /// Allocated RAFS inode number.
+    pub index: u64,
+    /// Inode number in local filesystem
+    pub real_ino: Inode,
+    /// dev number is required because a source root directory can have multiple
+    /// partitions mounted. Files from different partition can have unique inode number.
+    pub dev: u64,
+    /// device ID (if special file), describes the device that this file (inode) represents.
+    pub rdev: u64,
+    /// Overlay type for layered build
+    pub overlay: Overlay,
+    /// Absolute path to root directory where start to build image.
+    /// For example: /home/source
+    pub source: PathBuf,
+    /// Absolute path to each file within build context directory.
+    /// Together with `source`, we can easily get relative path to `source`.
+    /// For example: /home/source/foo/bar
+    pub path: PathBuf,
+    /// Define a disk inode structure to persist to disk.
+    pub inode: RafsV5Inode,
+    /// Chunks info list of regular file
+    pub chunks: Vec<RafsV5ChunkInfo>,
+    /// Xattr list of file
+    pub xattrs: RafsV5XAttrs,
+    /// Symlink info of symlink file
+    pub symlink: Option<OsString>,
+    pub explicit_uidgid: bool,
+}
+
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -159,36 +215,6 @@ impl fmt::Display for Node {
     }
 }
 
-#[derive(Clone)]
-pub struct Node {
-    pub index: u64,
-    /// Inode number in local filesystem
-    pub real_ino: Inode,
-    /// dev number is required because a source root directory can have multiple
-    /// partitions mounted. Files from different partition can have unique inode number.
-    pub dev: u64,
-    /// device ID (if special file), describes the device that this file (inode) represents.
-    pub rdev: u64,
-    /// Overlay type for layered build
-    pub overlay: Overlay,
-    /// Absolute path to root directory where start to build image.
-    /// For example: /home/source
-    pub source: PathBuf,
-    /// Absolute path to each file within build context directory.
-    /// Together with `source`, we can easily get relative path to `source`.
-    /// For example: /home/source/foo/bar
-    pub path: PathBuf,
-    /// Define a disk inode structure to persist to disk.
-    pub inode: RafsV5Inode,
-    /// Chunks info list of regular file
-    pub chunks: Vec<RafsV5ChunkInfo>,
-    /// Symlink info of symlink file
-    pub symlink: Option<OsString>,
-    /// Xattr list of file
-    pub xattrs: RafsV5XAttrs,
-    pub explicit_uidgid: bool,
-}
-
 impl Node {
     pub fn new(
         source: PathBuf,
@@ -210,33 +236,10 @@ impl Node {
             xattrs: RafsV5XAttrs::default(),
             explicit_uidgid,
         };
+
         node.build_inode().context("failed to build inode")?;
+
         Ok(node)
-    }
-
-    fn build_inode_xattr(&mut self) -> Result<()> {
-        let file_xattrs = match xattr::list(&self.path) {
-            Ok(x) => x,
-            Err(e) => {
-                if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
-                    return Ok(());
-                } else {
-                    return Err(anyhow!("failed to list xattr of {:?}", self.path));
-                }
-            }
-        };
-
-        for key in file_xattrs {
-            let value = xattr::get(&self.path, &key)
-                .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
-            self.xattrs.add(key, value.unwrap_or_default());
-        }
-
-        if !self.xattrs.is_empty() {
-            self.inode.i_flags |= RafsV5InodeFlags::XATTR;
-        }
-
-        Ok(())
     }
 
     pub fn remove_xattr(&mut self, key: &OsStr) {
@@ -386,7 +389,7 @@ impl Node {
         Ok(blob_size)
     }
 
-    pub fn dump_bootstrap(&mut self, f_bootstrap: &mut RafsIoWriter) -> Result<usize> {
+    pub fn dump_bootstrap_v5(&mut self, f_bootstrap: &mut RafsIoWriter) -> Result<usize> {
         let mut node_size = 0;
 
         // Dump inode info
@@ -423,6 +426,31 @@ impl Node {
         }
 
         Ok(node_size)
+    }
+
+    fn build_inode_xattr(&mut self) -> Result<()> {
+        let file_xattrs = match xattr::list(&self.path) {
+            Ok(x) => x,
+            Err(e) => {
+                if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                    return Ok(());
+                } else {
+                    return Err(anyhow!("failed to list xattr of {:?}", self.path));
+                }
+            }
+        };
+
+        for key in file_xattrs {
+            let value = xattr::get(&self.path, &key)
+                .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
+            self.xattrs.add(key, value.unwrap_or_default());
+        }
+
+        if !self.xattrs.is_empty() {
+            self.inode.i_flags |= RafsV5InodeFlags::XATTR;
+        }
+
+        Ok(())
     }
 
     fn build_inode_stat(&mut self) -> Result<()> {
@@ -473,30 +501,19 @@ impl Node {
         } else if self.is_symlink() {
             self.inode.i_flags |= RafsV5InodeFlags::SYMLINK;
             let target_path = fs::read_link(&self.path)?;
-            self.symlink = Some(target_path.into());
-            self.inode
-                .set_symlink_size(self.symlink.as_ref().unwrap().byte_size());
+            let symlink: OsString = target_path.into();
+            let size = symlink.byte_size();
+            self.symlink = Some(symlink);
+            self.inode.set_symlink_size(size);
         }
 
         Ok(())
     }
 
-    pub fn meta(&self) -> Result<impl MetadataExt> {
+    fn meta(&self) -> Result<impl MetadataExt> {
         self.path
             .symlink_metadata()
             .with_context(|| format!("failed to get metadata from {:?}", self.path))
-    }
-
-    /// Generate the path relative to original rootfs.
-    /// For example:
-    /// `/absolute/path/to/rootfs/file` after converting `/file`
-    pub fn rootfs(&self) -> PathBuf {
-        if let Ok(rootfs) = self.path.strip_prefix(&self.source) {
-            Path::new("/").join(rootfs)
-        } else {
-            // Compatible with path `/`
-            self.path.clone()
-        }
     }
 
     pub fn is_dir(&self) -> bool {
@@ -544,6 +561,18 @@ impl Node {
         file_type
     }
 
+    /// Generate the path relative to original rootfs.
+    /// For example:
+    /// `/absolute/path/to/rootfs/file` after converting `/file`
+    pub fn rootfs(&self) -> PathBuf {
+        if let Ok(rootfs) = self.path.strip_prefix(&self.source) {
+            Path::new("/").join(rootfs)
+        } else {
+            // Compatible with path `/`
+            self.path.clone()
+        }
+    }
+
     pub fn name(&self) -> &OsStr {
         if self.path == self.source {
             OsStr::from_bytes(ROOT_PATH_NAME)
@@ -553,14 +582,14 @@ impl Node {
         }
     }
 
-    pub fn origin_name(&self, t: &WhiteoutType) -> Option<&OsStr> {
+    pub fn origin_name(&self, t: WhiteoutType) -> Option<&OsStr> {
         if let Some(name) = self.name().to_str() {
-            if *t == WhiteoutType::OciRemoval {
+            if t == WhiteoutType::OciRemoval {
                 // the whiteout filename prefixes the basename of the path to be deleted with ".wh.".
                 return Some(OsStr::from_bytes(
                     name[OCISPEC_WHITEOUT_PREFIX.len()..].as_bytes(),
                 ));
-            } else if *t == WhiteoutType::OverlayFsRemoval {
+            } else if t == WhiteoutType::OverlayFsRemoval {
                 // the whiteout file has the same name as the file to be deleted.
                 return Some(name.as_ref());
             }

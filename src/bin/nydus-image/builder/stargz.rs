@@ -532,7 +532,7 @@ impl StargzBuilder {
 
         // Set blob index and inode digest for upper nodes
         for node in &mut ctx.nodes {
-            if node.overlay.lower_layer() {
+            if node.overlay.is_lower_layer() {
                 continue;
             }
 

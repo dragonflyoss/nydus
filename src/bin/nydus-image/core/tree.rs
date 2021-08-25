@@ -2,21 +2,26 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! File node tree for RAFS format
+//! A tree structure to maintain information for filesystem directories and files in memory.
 //!
-//! Build a node tree from filesystem directory named FilesystemTree.
-//! Build a node tree from metadata file named MetadataTree.
-//! Layered build steps:
-//! 1. Apply FilesystemTree (from upper layer) to MetadataTree (from lower layer) as overlay node tree;
-//! 2. Traverse overlay node tree then dump to bootstrap and blob file according to RAFS format.
-
-use anyhow::Result;
+//! Steps to build RAFS image for the first layer:
+//! - Build the upper tree (FileSystemTree) from filesystem directory.
+//! - Traverse the upper tree (FileSystemTree) to dump bootstrap and blob file.
+//!
+//! Steps to build RAFS image for second and following on layers:
+//! - Build the upper tree (FileSystemTree) from filesystem directory.
+//! - Build the lower tree (MetadataTree) from metadata file.
+//! - Generate the merged tree (OverlayTree) by applying the upper tree (FileSystemTree) to the
+//!   lower tree (MetadataTree).
+//! - Traverse the merged tree (OverlayTree) to dump bootstrap and blob file.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
+use anyhow::Result;
+
+use nydus_utils::digest::RafsDigest;
 use rafs::metadata::layout::v5::{
     RafsChunkInfo, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
 };
@@ -25,19 +30,7 @@ use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use crate::node::*;
 
-use nydus_utils::digest::RafsDigest;
-
-#[derive(Clone)]
-pub struct Tree {
-    pub node: Node,
-    pub children: Vec<Tree>,
-}
-
-// TODO: To decouple from storage backend from Rafs/metadata, use this function to
-// digest status from trait object. Is it possible also to do this for `RafsInode`?
-// Right now, it is hard. Perhaps someday we can get rid of the rafs import procedure,
-// which involve the whole nydusd rafs/mount. It is hard to optimize a process that
-// serves another goal. Luckily, `RafsInode` won't affect the work of decouple.
+/// Construct a `RafsV5ChunkInfo` object from a `dyn RafsChunkInfo` object.
 fn cast_rafsv5_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
     RafsV5ChunkInfo {
         block_id: *cki.block_id(),
@@ -53,6 +46,7 @@ fn cast_rafsv5_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
     }
 }
 
+/// Construct a `RafsV5Inode` object from a `Arc<dyn RafsInode>` object.
 fn cast_rafsv5_inode(inode: &Arc<dyn RafsInode>) -> RafsV5Inode {
     let attr = inode.get_attr();
 
@@ -79,109 +73,11 @@ fn cast_rafsv5_inode(inode: &Arc<dyn RafsInode>) -> RafsV5Inode {
     }
 }
 
-struct MetadataTreeBuilder<'a> {
-    rs: &'a RafsSuper,
-}
-
-impl<'a> MetadataTreeBuilder<'a> {
-    fn new(rs: &'a RafsSuper) -> Self {
-        Self { rs }
-    }
-
-    /// Build node tree by loading bootstrap file
-    fn load_children(
-        &self,
-        ino: Inode,
-        parent: Option<&PathBuf>,
-        chunk_cache: &mut Option<&mut HashMap<RafsDigest, RafsV5ChunkInfo>>,
-    ) -> Result<Vec<Tree>> {
-        let inode = self.rs.get_inode(ino, true)?;
-        let mut children = Vec::new();
-
-        if !inode.is_dir() {
-            return Ok(children);
-        }
-
-        let child_count = inode.get_child_count();
-        event_tracer!("load_from_parent_bootstrap", +child_count);
-
-        let parent_path = if let Some(parent) = parent {
-            parent.join(inode.name())
-        } else {
-            PathBuf::from_str("/").unwrap()
-        };
-
-        for idx in 0..child_count {
-            let child = inode.get_child_by_index(idx as Inode)?;
-            let child_ino = child.ino();
-            let child_path = parent_path.join(child.name());
-            let child = self.parse_node(child, child_path.clone())?;
-            if let Some(chunk_cache) = chunk_cache {
-                if child.is_reg() {
-                    for chunk in &child.chunks {
-                        chunk_cache.insert(chunk.block_id, *chunk);
-                    }
-                }
-            }
-            let mut child = Tree::new(child);
-            if child.node.is_dir() {
-                child.children = self.load_children(child_ino, Some(&parent_path), chunk_cache)?;
-            }
-            children.push(child);
-        }
-
-        Ok(children)
-    }
-
-    /// Parse ondisk inode in RAFS to Node in builder
-    fn parse_node(&self, inode: Arc<dyn RafsInode>, path: PathBuf) -> Result<Node> {
-        // Parse chunks info
-        let child_count = inode.get_child_count();
-        let mut chunks = Vec::new();
-        if inode.is_reg() {
-            let chunk_count = child_count;
-            for i in 0..chunk_count {
-                let cki = inode.get_chunk_info(i as u32)?;
-                let chunk = cast_rafsv5_chunk_info(cki.as_ref());
-                chunks.push(chunk);
-            }
-        }
-
-        // Parse symlink
-        let symlink = if inode.is_symlink() {
-            Some(inode.get_symlink()?)
-        } else {
-            None
-        };
-
-        // Parse xattrs
-        let mut xattrs = RafsV5XAttrs::new();
-        for name in inode.get_xattrs()? {
-            let name = bytes_to_os_str(&name);
-            let value = inode.get_xattr(name)?;
-            xattrs.add(name.to_os_string(), value.unwrap_or_else(Vec::new));
-        }
-
-        // Get OndiskInode
-        let ondisk_inode = cast_rafsv5_inode(&inode);
-
-        // Inodes from parent bootstrap can't have nodes with unique inode number.
-        // So we assign an invalid dev here.
-        Ok(Node {
-            index: 0,
-            real_ino: ondisk_inode.i_ino,
-            dev: u64::MAX,
-            rdev: inode.rdev() as u64,
-            overlay: Overlay::Lower,
-            explicit_uidgid: self.rs.meta.explicit_uidgid(),
-            source: PathBuf::from_str("/").unwrap(),
-            path,
-            inode: ondisk_inode,
-            chunks,
-            symlink,
-            xattrs,
-        })
-    }
+/// A simple tree structure to maintain information for filesystem directories and files in memory.
+#[derive(Clone)]
+pub struct Tree {
+    pub node: Node,
+    pub children: Vec<Tree>,
 }
 
 impl Tree {
@@ -211,21 +107,22 @@ impl Tree {
         mut chunk_cache: Option<&mut HashMap<RafsDigest, RafsV5ChunkInfo>>,
     ) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(&rs);
-
         let root_inode = rs.get_inode(RAFS_ROOT_INODE, true)?;
-        let root_node = tree_builder.parse_node(root_inode, PathBuf::from_str("/").unwrap())?;
+        let root_node = tree_builder.parse_node(root_inode, PathBuf::from("/"))?;
         let mut tree = Tree::new(root_node);
 
         tree.children = timing_tracer!(
-            { tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache) },
+            { tree_builder.load_children(RAFS_ROOT_INODE, None, &mut chunk_cache, true) },
             "load_from_parent_bootstrap"
         )?;
 
         Ok(tree)
     }
 
-    /// Apply new node (upper layer) to node tree (lower layer),
-    /// support overlay defined in OCI image layer spec (https://github.com/opencontainers/image-spec/blob/master/layer.md),
+    /// Apply new node (upper layer) to node tree (lower layer).
+    ///
+    /// Support overlay defined in OCI image layer spec
+    /// (https://github.com/opencontainers/image-spec/blob/master/layer.md),
     /// include change types Additions, Modifications, Removals and Opaques, return true if applied
     pub fn apply(
         &mut self,
@@ -330,7 +227,7 @@ impl Tree {
                 parent_name = Some(file_name);
             }
         }
-        let origin_name = target.origin_name(&whiteout_type);
+        let origin_name = target.origin_name(whiteout_type);
 
         // TODO: Search child by binary search
         for idx in 0..self.children.len() {
@@ -379,5 +276,118 @@ impl Tree {
         }
 
         Ok(false)
+    }
+}
+
+struct MetadataTreeBuilder<'a> {
+    rs: &'a RafsSuper,
+}
+
+impl<'a> MetadataTreeBuilder<'a> {
+    fn new(rs: &'a RafsSuper) -> Self {
+        Self { rs }
+    }
+
+    /// Build node tree by loading bootstrap file
+    fn load_children(
+        &self,
+        ino: Inode,
+        parent: Option<&PathBuf>,
+        chunk_cache: &mut Option<&mut HashMap<RafsDigest, RafsV5ChunkInfo>>,
+        validate_digest: bool,
+    ) -> Result<Vec<Tree>> {
+        let mut children = Vec::new();
+        let inode = self.rs.get_inode(ino, validate_digest)?;
+
+        if !inode.is_dir() {
+            return Ok(children);
+        }
+
+        let child_count = inode.get_child_count();
+        event_tracer!("load_from_parent_bootstrap", +child_count);
+
+        let parent_path = if let Some(parent) = parent {
+            parent.join(inode.name())
+        } else {
+            PathBuf::from("/")
+        };
+
+        for idx in 0..child_count {
+            let child = inode.get_child_by_index(idx as Inode)?;
+            let child_ino = child.ino();
+            let child_path = parent_path.join(child.name());
+            let child = self.parse_node(child, child_path)?;
+
+            if let Some(chunk_cache) = chunk_cache {
+                if child.is_reg() {
+                    for chunk in &child.chunks {
+                        chunk_cache.insert(chunk.block_id, *chunk);
+                    }
+                }
+            }
+
+            let mut child = Tree::new(child);
+            if child.node.is_dir() {
+                child.children = self.load_children(
+                    child_ino,
+                    Some(&parent_path),
+                    chunk_cache,
+                    validate_digest,
+                )?;
+            }
+            children.push(child);
+        }
+
+        Ok(children)
+    }
+
+    /// Parse ondisk inode in RAFS to Node in builder
+    fn parse_node(&self, inode: Arc<dyn RafsInode>, path: PathBuf) -> Result<Node> {
+        // Parse chunks info
+        let child_count = inode.get_child_count();
+        let mut chunks = Vec::new();
+        if inode.is_reg() {
+            let chunk_count = child_count;
+            for i in 0..chunk_count {
+                let cki = inode.get_chunk_info(i)?;
+                let chunk = cast_rafsv5_chunk_info(cki.as_ref());
+                chunks.push(chunk);
+            }
+        }
+
+        // Parse symlink
+        let symlink = if inode.is_symlink() {
+            Some(inode.get_symlink()?)
+        } else {
+            None
+        };
+
+        // Parse xattrs
+        let mut xattrs = RafsV5XAttrs::new();
+        for name in inode.get_xattrs()? {
+            let name = bytes_to_os_str(&name);
+            let value = inode.get_xattr(name)?;
+            xattrs.add(name.to_os_string(), value.unwrap_or_else(Vec::new));
+        }
+
+        // Get OndiskInode
+        let ondisk_inode = cast_rafsv5_inode(&inode);
+
+        // Inodes from parent bootstrap can't have nodes with unique inode number.
+        // So we assign an invalid dev here.
+        Ok(Node {
+            index: 0,
+            real_ino: ondisk_inode.i_ino,
+            dev: u64::MAX,
+            rdev: inode.rdev() as u64,
+            overlay: Overlay::Lower,
+            explicit_uidgid: self.rs.meta.explicit_uidgid(),
+            source: PathBuf::from("/"),
+            path,
+            inode: ondisk_inode,
+            chunks,
+            symlink,
+            xattrs,
+        })
     }
 }

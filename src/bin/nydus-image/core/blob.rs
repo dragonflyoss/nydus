@@ -16,20 +16,20 @@ use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use super::context::{BuildContext, SourceType, BUF_WRITER_CAPACITY};
 use super::node::*;
 
-pub struct BlobBufferWriter {
-    file: BufWriter<File>,
-    blob_stor: BlobStorage,
-    // Keep this because tmp file will be removed automatically when it is dropped.
-    // But we will rename/link the tmp file before it is removed.
-    tmp_file: Option<TempFile>,
-}
-
 #[derive(Debug, Clone)]
 pub enum BlobStorage {
     // Won't rename user's specification
     SingleFile(PathBuf),
     // Will rename it from tmp file as user didn't specify a name.
     BlobsDir(PathBuf),
+}
+
+pub struct BlobBufferWriter {
+    file: BufWriter<File>,
+    blob_stor: BlobStorage,
+    // Keep this because tmp file will be removed automatically when it is dropped.
+    // But we will rename/link the tmp file before it is removed.
+    tmp_file: Option<TempFile>,
 }
 
 impl BlobBufferWriter {
@@ -54,12 +54,9 @@ impl BlobBufferWriter {
                 // Better we can use open(2) O_TMPFILE, but for compatibility sake, we delay this job.
                 // TODO: Blob dir existence?
                 let tmp = TempFile::new_in(&p)?;
+                let tmp2 = tmp.as_file().try_clone()?;
                 Ok(Self {
-                    file: BufWriter::with_capacity(
-                        BUF_WRITER_CAPACITY,
-                        // Safe to unwrap because it should not be a bad fd.
-                        tmp.as_file().try_clone().unwrap(),
-                    ),
+                    file: BufWriter::with_capacity(BUF_WRITER_CAPACITY, tmp2),
                     blob_stor,
                     tmp_file: Some(tmp),
                 })
@@ -125,11 +122,6 @@ impl Blob {
 
     /// Dump blob file and generate chunks
     pub fn dump(&mut self, ctx: &mut BuildContext) -> Result<(Sha256, usize, usize, u64, u64)> {
-        // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
-        // belonging to the same directory arranged in adjacent in blob file. Together with
-        // BFS style collecting descendants inodes, it will have a higher merging possibility.
-        let readahead_files = ctx.prefetch.get_file_indexes();
-
         let blob_index = ctx.blob_table.entries.len() as u32;
 
         let mut blob_readahead_size = 0usize;
@@ -142,6 +134,11 @@ impl Blob {
 
         match ctx.source_type {
             SourceType::Directory => {
+                // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
+                // belonging to the same directory arranged in adjacent in blob file. Together with
+                // BFS style collecting descendants inodes, it will have a higher merging possibility.
+                let readahead_files = ctx.prefetch.get_file_indexes();
+
                 // Dump readahead nodes
                 for index in &readahead_files {
                     let node = ctx.nodes.get_mut(*index as usize - 1).unwrap();
@@ -207,7 +204,7 @@ impl Blob {
             SourceType::StargzIndex => {
                 // Set blob index and inode digest for upper nodes
                 for node in &mut ctx.nodes {
-                    if node.overlay.lower_layer() {
+                    if node.overlay.is_lower_layer() {
                         continue;
                     }
 

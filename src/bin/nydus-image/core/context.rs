@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bootstrap and blob file builder for RAFS format
+//! Struct to maintain context information for the image builder.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,9 +14,8 @@ use rafs::metadata::layout::v5::{RafsV5BlobTable, RafsV5ChunkInfo};
 use rafs::metadata::Inode;
 use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?
-use storage::compress;
-
 use nydus_utils::digest::{self, RafsDigest};
+use storage::compress;
 
 use super::node::*;
 use super::prefetch::Prefetch;

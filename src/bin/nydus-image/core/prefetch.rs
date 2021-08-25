@@ -8,8 +8,9 @@ use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
 
-use crate::node::*;
 use rafs::metadata::layout::v5::RafsV5PrefetchTable;
+
+use crate::node::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
@@ -36,9 +37,10 @@ impl FromStr for PrefetchPolicy {
     }
 }
 
-/// Gather readahead file paths line by line from stdin
+/// Gather readahead file paths line by line from stdin.
+///
 /// Input format:
-///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/1"
+///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/2"
 /// This routine does not guarantee that specified file must exist in local filesystem,
 /// this is because we can't guarantee that source rootfs directory of parent bootstrap
 /// is located in local file system.
@@ -48,13 +50,13 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
 
     loop {
         let mut file = String::new();
-
         let size = stdin
             .read_line(&mut file)
             .context("failed to parse readahead files")?;
         if size == 0 {
             break;
         }
+
         let file_trimmed: PathBuf = file.trim().into();
         // Sanity check for the list format.
         if !file_trimmed.starts_with(Path::new("/")) {

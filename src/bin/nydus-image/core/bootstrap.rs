@@ -10,13 +10,12 @@ use anyhow::{Context, Result};
 use sha2::digest::Digest;
 use sha2::Sha256;
 
+use nydus_utils::digest::{DigestHasher, RafsDigest};
 use rafs::metadata::layout::v5::{
     RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
-
-use nydus_utils::digest::{DigestHasher, RafsDigest};
 
 use crate::core::context::BuildContext;
 use crate::core::context::SourceType;
@@ -29,6 +28,7 @@ pub const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
 pub struct Bootstrap {}
 
 impl Bootstrap {
+    /// Create a new instance of `BootStrap`.
     pub fn new() -> Result<Self> {
         Ok(Self {})
     }
@@ -37,18 +37,17 @@ impl Bootstrap {
     /// child_count etc according to RAFS format, then store to nodes collection.
     fn build_rafs(&mut self, ctx: &mut BuildContext, tree: &mut Tree, nodes: &mut Vec<Node>) {
         // FIX: Insert parent inode to inode map to keep correct inodes count in superblock.
-        let inode_map = if tree.node.overlay.lower_layer() {
+        let inode_map = if tree.node.overlay.is_lower_layer() {
             &mut ctx.lower_inode_map
         } else {
             &mut ctx.upper_inode_map
         };
         inode_map.insert((tree.node.real_ino, tree.node.dev), vec![tree.node.index]);
 
-        let index = nodes.len() as u64;
+        let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
-
         if parent.is_dir() {
-            parent.inode.i_child_index = index as u32 + 1;
+            parent.inode.i_child_index = index;
             parent.inode.i_child_count = tree.children.len() as u32;
         }
 
@@ -70,7 +69,7 @@ impl Bootstrap {
             // Hardlink handle, all hardlink nodes' ino, nlink should be the same,
             // because the real_ino may be conflicted between different layers,
             // so we need to find hardlink node index list in the layer where the node is located.
-            let inode_map = if child.node.overlay.lower_layer() {
+            let inode_map = if child.node.overlay.is_lower_layer() {
                 &mut ctx.lower_inode_map
             } else {
                 &mut ctx.upper_inode_map
@@ -171,23 +170,24 @@ impl Bootstrap {
         inode_hasher.digest_finalize()
     }
 
-    pub fn build(&mut self, mut ctx: &mut BuildContext, mut tree: &mut Tree) {
+    /// Build an in-memory tree, representing the source file system.
+    pub fn build(&mut self, ctx: &mut BuildContext, tree: &mut Tree) {
         let index = RAFS_ROOT_INODE;
+
         tree.node.index = index;
         tree.node.inode.i_ino = index;
-
         // Filesystem walking skips root inode within subsequent while loop, however, we allow
         // user to pass the source root as prefetch hint. Check it here.
         ctx.prefetch.insert_if_need(&tree.node);
 
         let mut nodes = vec![tree.node.clone()];
-        self.build_rafs(&mut ctx, &mut tree, &mut nodes);
+        self.build_rafs(ctx, tree, &mut nodes);
         ctx.nodes = nodes;
     }
 
     /// Apply new node (upper layer from filesystem directory) to
     /// bootstrap node tree (lower layer from bootstrap file)
-    pub fn apply(&mut self, mut ctx: &mut BuildContext) -> Result<Tree> {
+    pub fn apply(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
             validate_digest: true,
@@ -385,7 +385,7 @@ impl Bootstrap {
                             }
                         }
                     }
-                    node.dump_bootstrap(&mut ctx.f_bootstrap)
+                    node.dump_bootstrap_v5(&mut ctx.f_bootstrap)
                         .context("failed to dump bootstrap")?;
                 }
 
