@@ -674,37 +674,48 @@ impl RafsSuper {
         }
     }
 
+    // TODO: Add a UT for me.
     pub fn carry_more_until(
         &self,
         inode: &dyn RafsInode,
         bound: u64,
+        tail_chunk: &dyn RafsChunkInfo,
         expected_size: u64,
-    ) -> Result<RafsBioDesc> {
+    ) -> Result<Option<RafsBioDesc>> {
         let mut left = expected_size;
         let inode_size = inode.size();
         let mut ra_desc = RafsBioDesc::new();
 
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
-            if delta >= expected_size {
-                let mut d = inode.alloc_bio_desc(bound, expected_size as usize, false)?;
+            let sz = std::cmp::min(delta, expected_size);
+            let mut d = inode.alloc_bio_desc(bound, sz as usize, false)?;
 
+            // It is possible that read size is beyond file size, so chunks vector is zero length.
+            if !d.bi_vec.is_empty() {
+                let ck = d.bi_vec[0].chunkinfo.clone();
+                // Might be smaller than decompress size. It is user part.
+                let trimming_size = d.bi_vec[0].size;
+                let head_chunk = ck.as_ref();
+                let trimming = tail_chunk.compress_offset() == head_chunk.compress_offset();
                 // Stolen chunk bigger than expected size will involve more backend IO, thus
                 // to slow down current user IO.
                 if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
-                    ra_desc.bi_vec.append(&mut cks.bi_vec);
-                    ra_desc.bi_size += cks.bi_size;
+                    if trimming {
+                        ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
+                        ra_desc.bi_size += cks.bi_size;
+                        ra_desc.bi_size -= trimming_size;
+                    } else {
+                        ra_desc.bi_vec.append(&mut cks.bi_vec);
+                        ra_desc.bi_size += cks.bi_size;
+                    }
                 }
-                false
+                if delta >= expected_size {
+                    false
+                } else {
+                    left -= delta;
+                    true
+                }
             } else {
-                let mut d = inode.alloc_bio_desc(bound, delta as usize, false)?;
-
-                // Stolen chunk bigger than expected size will involve more backend IO, thus
-                // to slow down current user IO.
-                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
-                    ra_desc.bi_vec.append(&mut cks.bi_vec);
-                    ra_desc.bi_size += cks.bi_size;
-                }
-                left -= delta;
                 true
             }
         } else {
@@ -745,7 +756,12 @@ impl RafsSuper {
             }
         }
 
-        Ok(ra_desc)
+        if ra_desc.bi_size > 0 {
+            assert!(!ra_desc.bi_vec.is_empty());
+            Ok(Some(ra_desc))
+        } else {
+            Ok(None)
+        }
     }
 }
 

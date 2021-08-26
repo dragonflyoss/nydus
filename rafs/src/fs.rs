@@ -621,21 +621,19 @@ impl FileSystem for Rafs {
             all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
         }
 
+        // Try to amplify user io from here, aim at better performance.
         if !all_cached {
             let ra_desc = self.sb.carry_more_until(
                 inode.as_ref(),
                 offset + size as u64,
+                desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
                 1024 * 128 - size as u64,
             )?;
 
-            if ra_desc.bi_vec[0].chunkinfo.compress_offset()
-                == desc.bi_vec[0].chunkinfo.compress_offset()
-            {
-                desc.bi_vec.extend_from_slice(&ra_desc.bi_vec[1..])
-            } else {
-                desc.bi_vec.extend_from_slice(&ra_desc.bi_vec)
-            }
-        };
+            if let Some(rd) = ra_desc {
+                desc.bi_vec.extend_from_slice(&rd.bi_vec)
+            };
+        }
 
         let start = self.ios.latency_start();
         // Avoid copying `desc`

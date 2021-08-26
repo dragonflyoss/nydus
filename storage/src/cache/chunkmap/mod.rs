@@ -25,7 +25,7 @@ pub trait ChunkMap {
     fn has_ready(&self, chunk: &dyn RafsChunkInfo, wait: bool) -> Result<bool>;
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()>;
     fn finish(&self, _chunk: &dyn RafsChunkInfo) {}
-    fn has_ready_lite(&self, _chunk: &dyn RafsChunkInfo) -> Result<bool> {
+    fn has_ready_nowait(&self, _chunk: &dyn RafsChunkInfo) -> Result<bool> {
         Ok(false)
     }
 }
@@ -90,6 +90,8 @@ pub struct BlobChunkMap<C, I> {
     inflight_tracer: Mutex<HashMap<I, Arc<ChunkSlot>>>,
 }
 
+// TODO: Use chunk's compress offset a.k.a blob address as key, so we don't need
+// ChunkIndexGetter<Index = I> anymore.
 impl<C, I> BlobChunkMap<C, I>
 where
     C: ChunkMap + ChunkIndexGetter<Index = I> + NoWaitSupport,
@@ -165,7 +167,7 @@ where
         }
     }
 
-    fn has_ready_lite(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
+    fn has_ready_nowait(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
         self.c.has_ready(chunk, false)
     }
 }
