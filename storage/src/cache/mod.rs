@@ -22,24 +22,27 @@ pub mod blobcache;
 pub mod chunkmap;
 pub mod dummycache;
 
+/// A segment is always a continuous part in a single chunk, which is later copied
+/// from to user buffer memory.
 #[derive(Clone, Debug)]
 pub struct ChunkSegment {
-    seg_offset: u32,
-    seg_len: u32,
+    // From where within a chunk user data is stored
+    offset: u32,
+    // Tht user data total length in a chunk
+    len: u32,
 }
 
 impl ChunkSegment {
     fn new(offset: u32, len: u32) -> Self {
-        Self {
-            seg_offset: offset,
-            seg_len: len,
-        }
+        Self { offset, len }
     }
 }
 
+/// `IoInitiator` denotes that a chunk fulfill user io or internal io.
 #[derive(Clone, Debug)]
 pub enum IoInitiator {
     User(ChunkSegment),
+    // (Chunk index, blob/compressed offset)
     Internal(u32, u64),
 }
 
@@ -100,7 +103,6 @@ impl MergedBackendRequest {
         };
 
         self.chunks.push(cki);
-
         self.chunk_tags.push(tag);
     }
 }

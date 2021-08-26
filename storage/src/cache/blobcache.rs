@@ -204,8 +204,12 @@ enum RequestRegionStatus {
 #[derive(PartialEq, Copy, Clone)]
 enum RegionType {
     Init,
+    // A region composed of partial chunks that can directly read from blob cache, without decompression or validation.
     CachePartialChunks,
+    // A region composed of chunks that must be read from blobcache with decompression or validation.
+    // Each chunk has to be read completely.
     CacheWholeChunks,
+    // Chunks in `Backend` region must involve backend IO e.g. OSS and Registry.
     Backend,
 }
 
@@ -215,15 +219,23 @@ impl RegionType {
     }
 }
 
-/// A continuous region in cache file or backend storage/blob.
+/// A continuous region in cache file or backend storage/blob. It is composed of
+/// several chunks.
 struct RequestRegion {
     region_type: RegionType,
     status: RequestRegionStatus,
-    pub start: u64,
-    pub continuous_len: usize,
-    pub concatenated: usize,
+    // This locates the start position where this request has to fetch back.
+    pub blob_address: u64,
+    pub blob_len: u32,
+    // For debug and trace purpose implying how many chunks are concatenated
+    pub concatenated: u32,
+    // User data starts at `seg_offset` until `seg_offset` + `seg_len` occupying multiple chunks.
+    // `seg_offset` is pointing into the first chunk within the region.anyhow
     pub seg_offset: u32,
-    pub total_seg_len: u32,
+    // The total amount of user data in unit of bytes this region covers.
+    pub seg_len: u32,
+    // The chunks that composing this region. Only with this region, we can know
+    // how to decompress each chunk
     pub cki_set: Vec<Arc<dyn RafsChunkInfo>>,
     pub cki_tags: Vec<bool>,
     user_appended: bool,
@@ -234,14 +246,14 @@ impl RequestRegion {
     fn new(region_type: RegionType, blob_entry: Arc<RafsBlobEntry>) -> Self {
         RequestRegion {
             region_type,
-            start: 0,
-            continuous_len: 0,
+            blob_address: 0,
+            blob_len: 0,
             status: RequestRegionStatus::Init,
             cki_set: Vec::new(),
             cki_tags: Vec::new(),
             concatenated: 0,
             seg_offset: 0,
-            total_seg_len: 0,
+            seg_len: 0,
             user_appended: false,
             blob_entry,
         }
@@ -250,30 +262,30 @@ impl RequestRegion {
     fn append(
         &mut self,
         start: u64,
-        len: usize,
+        len: u32,
         segment: IoInitiator,
         cki: Option<Arc<dyn RafsChunkInfo>>,
     ) -> StorageResult<()> {
-        use RequestRegionStatus::*;
-
-        if self.status == Open && self.start + self.continuous_len as u64 != start {
+        if self.status == RequestRegionStatus::Open
+            && self.blob_address + self.blob_len as u64 != start
+        {
             return Err(StorageError::NotContinuous);
         }
 
         if !self.user_appended {
             if let IoInitiator::User(ref s) = segment {
-                self.seg_offset = s.seg_offset;
-                self.total_seg_len = s.seg_len;
+                self.seg_offset = s.offset;
+                self.seg_len = s.len;
                 self.user_appended = true;
             }
         } else if let IoInitiator::User(ref s) = segment {
-            self.total_seg_len += s.seg_len;
+            self.seg_len += s.len;
         }
 
-        if self.status == Init {
-            self.status = Open;
-            self.start = start;
-            self.continuous_len = len;
+        if self.status == RequestRegionStatus::Init {
+            self.status = RequestRegionStatus::Open;
+            self.blob_address = start;
+            self.blob_len = len;
             self.concatenated = 1;
 
             if let Some(c) = cki {
@@ -287,8 +299,8 @@ impl RequestRegion {
             return Ok(());
         }
 
-        assert_eq!(self.status, Open);
-        self.continuous_len += len;
+        assert_eq!(self.status, RequestRegionStatus::Open);
+        self.blob_len += len;
         self.concatenated += 1;
 
         if let Some(c) = cki {
@@ -303,17 +315,8 @@ impl RequestRegion {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn commit(&mut self, reader: &mut dyn FnMut(&Self) -> Result<usize>) -> Result<usize> {
-        self.status = RequestRegionStatus::Committed;
-        if self.is_empty() {
-            return Ok(0);
-        }
-        reader(self)
-    }
-
     fn is_empty(&self) -> bool {
-        self.total_seg_len == 0
+        self.seg_len == 0
     }
 }
 
@@ -362,8 +365,8 @@ impl BlobCache {
         let read_size = self.read_partial_chunk(
             fd,
             cursor,
-            region.start + region.seg_offset as u64,
-            region.total_seg_len as usize,
+            region.blob_address + region.seg_offset as u64,
+            region.seg_len as usize,
         )?;
         Ok(read_size)
     }
@@ -381,7 +384,7 @@ impl BlobCache {
             let user_offset = if i == 0 { region.seg_offset } else { 0 };
             let size = std::cmp::min(
                 c.decompress_size() - user_offset,
-                region.total_seg_len - total_read as u32,
+                region.seg_len - total_read as u32,
             );
             total_read += self.read_single_chunk(c, blob_entry, user_offset, size, cursor)?;
         }
@@ -412,14 +415,14 @@ impl BlobCache {
         let mut buffer_holder: Vec<Arc<DataBuffer>> = Vec::new();
         let mut total_read = 0;
 
-        let blob_offset = region.start;
+        let blob_offset = region.blob_address;
         let blob_id = &region.blob_entry.blob_id;
-        let blob_size = region.continuous_len;
+        let blob_size = region.blob_len;
         let continuous_chunks = &region.cki_set;
         let chunk_tags = &region.cki_tags;
         let blob_entry = &region.blob_entry;
 
-        debug!("total backend data {}", blob_size);
+        debug!("total backend data {}KB", blob_size / 1024);
 
         if !continuous_chunks.is_empty() {
             let mut chunks =
@@ -454,7 +457,7 @@ impl BlobCache {
                 &chunk_buffers,
                 mem_cursor.mem_slice,
                 region.seg_offset as usize,
-                region.total_seg_len as usize,
+                region.seg_len as usize,
                 mem_cursor.index,
                 mem_cursor.offset,
             )
@@ -493,7 +496,7 @@ impl BlobCache {
 
         debug!("single bio, blob offset {}", chunk.compress_offset());
 
-        let has_ready = chunk_map.has_ready(ck, true)?;
+        let has_ready = chunk_map.has_ready(ck, false)?;
         let buffer_holder;
 
         drop(cache_guard);
@@ -649,7 +652,7 @@ impl BlobCache {
                             .unwrap()
                             .append(
                                 chunk.decompress_offset(),
-                                chunk.decompress_size() as usize,
+                                chunk.decompress_size(),
                                 IoInitiator::User(s.clone()),
                                 None,
                             )
@@ -689,7 +692,7 @@ impl BlobCache {
                             .unwrap()
                             .append(
                                 chunk.decompress_offset(),
-                                chunk.decompress_size() as usize,
+                                chunk.decompress_size(),
                                 IoInitiator::User(s.clone()),
                                 Some(chunk.clone()),
                             )
@@ -730,7 +733,7 @@ impl BlobCache {
 
                     rgn.append(
                         chunk.compress_offset(),
-                        chunk.compress_size() as usize,
+                        chunk.compress_size(),
                         initiator,
                         Some(chunk.clone()),
                     )
@@ -1112,6 +1115,9 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     }
 
                     if !issue_batch {
+                        for c in continuous_chunks {
+                            chunk_map.finish(c.as_ref());
+                        }
                         continue 'wait_mr;
                     }
 
@@ -1133,7 +1139,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .map_err(|_| error!("Set cache index error!"))
                         {
                             for (i, c) in continuous_chunks.iter().enumerate() {
-                                if !chunk_map.has_ready(c.as_ref(), false).unwrap_or_default() {
+                                if !chunk_map.has_ready_nowait(c.as_ref()).unwrap_or_default() {
                                     // Write multiple chunks once
                                     match BlobCache::persist_chunk(
                                         blobcache.is_compressed,
@@ -1209,20 +1215,9 @@ impl RafsCache for BlobCache {
                 }
             }
         }
-
-        let size = if bios.len() > 1 {
-            self.read_iter(bios, bufs)?
-        } else {
-            let mut cursor = MemSliceCursor::new(bufs);
-            let b = &bios[0];
-            self.read_single_chunk(
-                &b.chunkinfo,
-                b.blob.as_ref(),
-                b.offset,
-                b.size as u32,
-                &mut cursor,
-            )?
-        };
+        // TODO: Single bio optimization here? So we don't have to involve other management
+        // structures.
+        let size = self.read_iter(bios, bufs)?;
         Ok(size)
     }
 
@@ -1279,7 +1274,7 @@ impl RafsCache for BlobCache {
     fn is_chunk_cached(&self, chunk: &dyn RafsChunkInfo, blob: &RafsBlobEntry) -> bool {
         let cache_guard = self.cache.read().unwrap();
         if let Some((_, _, chunk_map)) = cache_guard.get(blob) {
-            chunk_map.has_ready_lite(chunk).unwrap_or(false)
+            chunk_map.has_ready_nowait(chunk).unwrap_or(false)
         } else {
             false
         }
