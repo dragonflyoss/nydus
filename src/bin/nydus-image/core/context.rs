@@ -17,8 +17,9 @@ use rafs::{RafsIoReader, RafsIoWriter};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
 
-use super::node::*;
-use super::prefetch::Prefetch;
+use crate::core::blob::BlobInfoMap;
+use crate::core::node::*;
+use crate::core::prefetch::Prefetch;
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
@@ -67,6 +68,8 @@ pub struct BuildContext {
     pub blob_index: u32,
     /// Store all blob id entry during build.
     pub blob_table: RafsV5BlobTable,
+    /// Store state infomration for blobs.
+    pub blob_info_map: BlobInfoMap,
 
     /// Bootstrap file writer.
     pub f_bootstrap: RafsIoWriter,
@@ -79,8 +82,6 @@ pub struct BuildContext {
 
     /// Store all chunk digest for chunk deduplicate during build.
     pub chunk_cache: HashMap<RafsDigest, RafsV5ChunkInfo>,
-    /// Mapping `blob_index` to number of chunks in blob file.
-    pub chunk_count_map: ChunkCountMap,
     /// Scratch data buffer for reading from/writing to disk files.
     pub chunk_data_buf: Vec<u8>,
 
@@ -111,6 +112,7 @@ impl BuildContext {
             blob_id,
             blob_index: 0,
             blob_table: RafsV5BlobTable::new(),
+            blob_info_map: BlobInfoMap::default(),
 
             f_bootstrap,
             f_parent_bootstrap: None,
@@ -119,7 +121,6 @@ impl BuildContext {
             upper_inode_map: HashMap::new(),
 
             chunk_cache: HashMap::new(),
-            chunk_count_map: ChunkCountMap::default(),
             chunk_data_buf: vec![0u8; RAFS_MAX_BLOCK_SIZE as usize],
 
             nodes: Vec::new(),

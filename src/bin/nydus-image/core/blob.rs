@@ -2,12 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use sha2::{Digest, Sha256};
 use vmm_sys_util::tempfile::TempFile;
 
@@ -103,6 +105,41 @@ impl Write for BlobBufferWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.file.flush()
+    }
+}
+
+pub struct BlobInfoEntry {
+    chunk_count: u32,
+}
+
+#[derive(Default)]
+pub struct BlobInfoMap {
+    /// Store the number of chunks in blob, it's HashMap<blob_index, chunk_count>.
+    map: HashMap<u32, BlobInfoEntry>,
+}
+
+impl BlobInfoMap {
+    /// Allocate a count index sequentially by the index of blob table.
+    pub fn alloc_index(&mut self, blob_index: u32) -> Result<u32> {
+        match self.map.entry(blob_index) {
+            Entry::Occupied(entry) => {
+                let info = entry.into_mut();
+                let index = info.chunk_count;
+                info.chunk_count = index.checked_add(1).ok_or_else(|| {
+                    Error::msg("the number of chunks in blob exceeds the u32 limit")
+                })?;
+                Ok(index)
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(BlobInfoEntry { chunk_count: 1 });
+                Ok(0)
+            }
+        }
+    }
+
+    /// Get the number of counts in a blob by the index of blob table.
+    pub fn count(&self, blob_index: u32) -> Option<u32> {
+        self.map.get(&blob_index).map(|v| v.chunk_count)
     }
 }
 

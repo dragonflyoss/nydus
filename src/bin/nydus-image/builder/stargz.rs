@@ -549,7 +549,7 @@ impl StargzBuilder {
             for chunk in node.chunks.iter_mut() {
                 blob_cache_size += chunk.decompress_size as u64;
                 compressed_blob_size += chunk.compress_size as u64;
-                let chunk_index = ctx.chunk_count_map.alloc_index(blob_index)?;
+                let chunk_index = ctx.blob_info_map.alloc_index(blob_index)?;
                 (*chunk).index = chunk_index;
                 (*chunk).blob_index = blob_index;
                 inode_hasher.digest_update(chunk.block_id.as_ref());

@@ -259,7 +259,7 @@ impl Bootstrap {
                 ctx.blob_id.clone(),
                 0,
                 u32::try_from(blob_comp_info.blob_readahead_size)?,
-                *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
+                ctx.blob_info_map.count(blob_index).unwrap_or(0),
                 blob_comp_info.decompressed_blob_size,
                 blob_comp_info.compressed_blob_size,
             );
