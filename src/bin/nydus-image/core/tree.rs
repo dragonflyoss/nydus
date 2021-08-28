@@ -16,6 +16,7 @@
 //! - Traverse the merged tree (OverlayTree) to dump bootstrap and blob file.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -133,12 +134,19 @@ impl Tree {
         // Handle whiteout file
         if handle_whiteout {
             if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
+                let origin_name = target.origin_name(whiteout_type);
+                let parent_name = if let Some(parent_path) = target.path.parent() {
+                    parent_path.file_name()
+                } else {
+                    None
+                };
+
                 event_tracer!("whiteout_files", +1);
                 if whiteout_type == WhiteoutType::OverlayFsOpaque {
-                    self.remove(target, whiteout_spec)?;
+                    self.remove(target, whiteout_type, origin_name, parent_name)?;
                     return self.apply(target, false, whiteout_spec);
                 }
-                return self.remove(target, whiteout_spec);
+                return self.remove(target, whiteout_type, origin_name, parent_name);
             }
         }
 
@@ -197,19 +205,23 @@ impl Tree {
     }
 
     /// Remove node from node tree, return true if removed
-    fn remove(&mut self, target: &Node, whiteout_spec: &WhiteoutSpec) -> Result<bool> {
+    fn remove(
+        &mut self,
+        target: &Node,
+        whiteout_type: WhiteoutType,
+        origin_name: Option<&OsStr>,
+        parent_name: Option<&OsStr>,
+    ) -> Result<bool> {
         let target_paths = target.path_vec();
         let target_paths_len = target_paths.len();
         let node_paths = self.node.path_vec();
         let depth = node_paths.len();
 
-        // Don't continue to search if current path not matched with target path or recursive depth out of target path
+        // Don't continue to search if current path not matched with target path or recursive depth
+        // out of target path
         if depth >= target_paths_len || node_paths[depth - 1] != target_paths[depth - 1] {
             return Ok(false);
         }
-
-        // safe because it's checked before calling into here
-        let whiteout_type = target.whiteout_type(whiteout_spec).unwrap();
 
         // Handle Opaques for root path (/)
         if depth == 1
@@ -220,14 +232,6 @@ impl Tree {
             self.children.clear();
             return Ok(true);
         }
-
-        let mut parent_name = None;
-        if let Some(parent_path) = target.path.parent() {
-            if let Some(file_name) = parent_path.file_name() {
-                parent_name = Some(file_name);
-            }
-        }
-        let origin_name = target.origin_name(whiteout_type);
 
         // TODO: Search child by binary search
         for idx in 0..self.children.len() {
@@ -268,7 +272,7 @@ impl Tree {
 
             if child.node.is_dir() {
                 // Search the node recursively
-                let found = child.remove(target, whiteout_spec)?;
+                let found = child.remove(target, whiteout_type, origin_name, parent_name)?;
                 if found {
                     return Ok(true);
                 }
