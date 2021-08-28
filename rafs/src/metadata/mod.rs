@@ -37,7 +37,7 @@ pub mod direct_v5;
 pub mod layout;
 mod noop;
 
-pub use crate::storage::RAFS_DEFAULT_BLOCK_SIZE;
+pub use crate::storage::{RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE};
 
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;

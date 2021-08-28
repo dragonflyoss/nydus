@@ -104,7 +104,7 @@ impl Prefetch {
     }
 
     pub fn insert_if_need(&mut self, node: &Node) {
-        let path = &node.rootfs();
+        let path = node.target();
         let inode = node.inode.i_ino;
         let index = node.index;
 
@@ -140,7 +140,7 @@ impl Prefetch {
     }
 
     pub fn contains(&mut self, node: &Node) -> bool {
-        self.readahead_files.get(&node.rootfs()).is_some()
+        self.readahead_files.get(node.target()).is_some()
     }
 
     pub fn get_file_indexes(&self) -> Vec<u64> {

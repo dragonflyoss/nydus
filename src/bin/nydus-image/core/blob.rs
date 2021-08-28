@@ -106,10 +106,34 @@ impl Write for BlobBufferWriter {
     }
 }
 
+pub struct BlobCompInfo {
+    pub blob_hash: Sha256,
+    pub blob_size: u64,
+    pub blob_readahead_size: u64,
+    pub compressed_blob_size: u64,
+    pub compress_offset: u64,
+    pub decompressed_blob_size: u64,
+    pub decompress_offset: u64,
+}
+
+impl BlobCompInfo {
+    pub fn new() -> Self {
+        BlobCompInfo {
+            blob_hash: Sha256::new(),
+            blob_size: 0,
+            blob_readahead_size: 0,
+            compressed_blob_size: 0,
+            compress_offset: 0,
+            decompressed_blob_size: 0,
+            decompress_offset: 0,
+        }
+    }
+}
+
 pub struct Blob {
     writer: BlobBufferWriter,
     /// The size of newly generated blob. It might be ZERO if everything is the same with upper layer.
-    blob_size: usize,
+    blob_size: u64,
 }
 
 impl Blob {
@@ -121,16 +145,10 @@ impl Blob {
     }
 
     /// Dump blob file and generate chunks
-    pub fn dump(&mut self, ctx: &mut BuildContext) -> Result<(Sha256, usize, usize, u64, u64)> {
-        let blob_index = ctx.blob_table.entries.len() as u32;
+    pub fn dump(&mut self, ctx: &mut BuildContext) -> Result<BlobCompInfo> {
+        let mut blob_comp_info = BlobCompInfo::new();
 
-        let mut blob_readahead_size = 0usize;
-        let mut blob_size = 0usize;
-        let mut blob_cache_size = 0u64;
-        let mut compressed_blob_size = 0u64;
-        let mut compress_offset = 0u64;
-        let mut decompress_offset = 0u64;
-        let mut blob_hash = Sha256::new();
+        ctx.blob_index = ctx.blob_table.entries.len() as u32;
 
         match ctx.source_type {
             SourceType::Directory => {
@@ -146,31 +164,21 @@ impl Blob {
                     if node.overlay == Overlay::UpperAddition
                         || node.overlay == Overlay::UpperModification
                     {
-                        blob_readahead_size += node
-                            .dump_blob(
-                                // Safe to unwrap because `Directory source` must have blob
-                                &mut self.writer,
-                                &mut blob_hash,
-                                &mut compress_offset,
-                                &mut decompress_offset,
-                                &mut blob_cache_size,
-                                &mut compressed_blob_size,
-                                &mut ctx.chunk_cache,
-                                &mut ctx.chunk_count_map,
-                                ctx.compressor,
-                                ctx.digester,
-                                blob_index,
-                                // TODO: Introduce build context to enclose the sparse states?
-                                ctx.aligned_chunk,
-                            )
-                            .context("failed to dump readahead blob chunks")?;
+                        blob_comp_info.blob_readahead_size += Node::dump_blob(
+                            *index as usize,
+                            ctx,
+                            &mut self.writer,
+                            &mut blob_comp_info,
+                        )
+                        .context("failed to dump readahead blob chunks")?;
                     }
                 }
 
-                blob_size += blob_readahead_size;
+                blob_comp_info.blob_size += blob_comp_info.blob_readahead_size;
 
                 // Dump other nodes
-                for node in &mut ctx.nodes {
+                for index in 0..ctx.nodes.len() {
+                    let node = &ctx.nodes[index];
                     if ctx.prefetch.contains(node) {
                         continue;
                     }
@@ -181,23 +189,9 @@ impl Blob {
                             || node.overlay == Overlay::UpperModification)
                     {
                         // Safe to unwrap because `Directory source` must have blob
-                        blob_size += node
-                            .dump_blob(
-                                // Safe to unwrap because `Directory source` must have blob
-                                &mut self.writer,
-                                &mut blob_hash,
-                                &mut compress_offset,
-                                &mut decompress_offset,
-                                &mut blob_cache_size,
-                                &mut compressed_blob_size,
-                                &mut ctx.chunk_cache,
-                                &mut ctx.chunk_count_map,
-                                ctx.compressor,
-                                ctx.digester,
-                                blob_index,
-                                ctx.aligned_chunk,
-                            )
-                            .context("failed to dump remaining blob chunks")?;
+                        blob_comp_info.blob_size +=
+                            Node::dump_blob(index, ctx, &mut self.writer, &mut blob_comp_info)
+                                .context("failed to dump remaining blob chunks")?;
                     }
                 }
             }
@@ -211,7 +205,7 @@ impl Blob {
                     let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
 
                     for chunk in node.chunks.iter_mut() {
-                        (*chunk).blob_index = blob_index;
+                        (*chunk).blob_index = ctx.blob_index;
                         inode_hasher.digest_update(chunk.block_id.as_ref());
                     }
 
@@ -227,15 +221,9 @@ impl Blob {
             }
         }
 
-        self.blob_size = blob_size;
+        self.blob_size = blob_comp_info.blob_size;
 
-        Ok((
-            blob_hash,
-            blob_size,
-            blob_readahead_size,
-            blob_cache_size,
-            compressed_blob_size,
-        ))
+        Ok(blob_comp_info)
     }
 
     pub fn flush(self, ctx: &BuildContext) -> Result<()> {

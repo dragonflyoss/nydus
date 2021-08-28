@@ -373,8 +373,12 @@ impl<'a> MetadataTreeBuilder<'a> {
         // Get OndiskInode
         let ondisk_inode = cast_rafsv5_inode(&inode);
 
-        // Inodes from parent bootstrap can't have nodes with unique inode number.
-        // So we assign an invalid dev here.
+        let source = PathBuf::from("/");
+        let target = Node::generate_target(&path, &source);
+        let path_vec = Node::generate_path_vec(&target);
+
+        // Nodes loaded from bootstrap will only be used as `Overlay::Lower`, so make `dev` invalid
+        // to avoid breaking hardlink detecting logic.
         Ok(Node {
             index: 0,
             real_ino: ondisk_inode.i_ino,
@@ -382,8 +386,10 @@ impl<'a> MetadataTreeBuilder<'a> {
             rdev: inode.rdev() as u64,
             overlay: Overlay::Lower,
             explicit_uidgid: self.rs.meta.explicit_uidgid(),
-            source: PathBuf::from("/"),
+            source,
+            target,
             path,
+            path_vec,
             inode: ondisk_inode,
             chunks,
             symlink,

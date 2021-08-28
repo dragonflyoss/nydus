@@ -8,7 +8,6 @@ use std::mem::size_of;
 
 use anyhow::{Context, Result};
 use sha2::digest::Digest;
-use sha2::Sha256;
 
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use rafs::metadata::layout::v5::{
@@ -17,6 +16,7 @@ use rafs::metadata::layout::v5::{
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
+use crate::core::blob::BlobCompInfo;
 use crate::core::context::BuildContext;
 use crate::core::context::SourceType;
 use crate::core::node::*;
@@ -240,31 +240,28 @@ impl Bootstrap {
     pub fn dump(
         &mut self,
         mut ctx: &mut BuildContext,
-        blob_hash: Sha256,
-        blob_size: usize,
-        mut blob_readahead_size: usize,
-        blob_cache_size: u64,
-        compressed_blob_size: u64,
-    ) -> Result<(Vec<String>, usize)> {
+        blob_comp_info: &mut BlobCompInfo,
+    ) -> Result<(Vec<String>, u64)> {
         // Name blob id by blob hash if not specified.
         if ctx.blob_id.is_empty() {
-            ctx.blob_id = format!("{:x}", blob_hash.finalize());
+            ctx.blob_id = format!("{:x}", blob_comp_info.blob_hash.clone().finalize());
         }
 
-        if blob_size > 0 || (ctx.source_type == SourceType::StargzIndex && !ctx.blob_id.is_empty())
+        if blob_comp_info.blob_size > 0
+            || (ctx.source_type == SourceType::StargzIndex && !ctx.blob_id.is_empty())
         {
             if ctx.prefetch.policy != PrefetchPolicy::Blob {
-                blob_readahead_size = 0;
+                blob_comp_info.blob_readahead_size = 0;
             }
             // Add new blob to blob table
             let blob_index = u32::try_from(ctx.blob_table.entries.len())?;
             ctx.blob_table.add(
                 ctx.blob_id.clone(),
                 0,
-                u32::try_from(blob_readahead_size)?,
+                u32::try_from(blob_comp_info.blob_readahead_size)?,
                 *ctx.chunk_count_map.count(blob_index).unwrap_or(&0),
-                blob_cache_size,
-                compressed_blob_size,
+                blob_comp_info.decompressed_blob_size,
+                blob_comp_info.compressed_blob_size,
             );
         }
 
@@ -405,6 +402,6 @@ impl Bootstrap {
         // Flush remaining data in BufWriter to file
         ctx.f_bootstrap.flush()?;
 
-        Ok((blob_ids, blob_size))
+        Ok((blob_ids, blob_comp_info.blob_size))
     }
 }

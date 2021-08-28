@@ -15,7 +15,6 @@ use std::str::FromStr;
 use anyhow::{anyhow, bail, Context, Result};
 use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
@@ -25,6 +24,7 @@ use rafs::metadata::layout::v5::{
 use rafs::metadata::Inode;
 
 use crate::builder::Builder;
+use crate::core::blob::BlobCompInfo;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::BuildContext;
 use crate::core::node::*;
@@ -502,6 +502,11 @@ impl StargzIndexTreeBuilder {
             i_reserved: [0; 8],
         };
 
+        let path = entry.path()?;
+        let source = PathBuf::from_str("/").unwrap();
+        let target = Node::generate_target(&path, &source);
+        let path_vec = Node::generate_path_vec(&target);
+
         Ok(Node {
             index: 0,
             real_ino: ino,
@@ -509,8 +514,10 @@ impl StargzIndexTreeBuilder {
             rdev: inode.i_rdev as u64,
             overlay: Overlay::UpperAddition,
             explicit_uidgid,
-            source: PathBuf::from_str("/").unwrap(),
-            path: entry.path()?,
+            source,
+            target,
+            path,
+            path_vec,
             inode,
             chunks,
             symlink,
@@ -571,7 +578,7 @@ impl StargzBuilder {
 }
 
 impl Builder for StargzBuilder {
-    fn build(&mut self, mut ctx: &mut BuildContext) -> Result<(Vec<String>, usize)> {
+    fn build(&mut self, mut ctx: &mut BuildContext) -> Result<(Vec<String>, u64)> {
         let mut bootstrap = Bootstrap::new()?;
 
         // Build tree from source
@@ -589,15 +596,11 @@ impl Builder for StargzBuilder {
 
         // Calculate node chunks and digest
         let (blob_cache_size, compressed_blob_size) = self.calculate_nodes(&mut ctx)?;
+        let mut blob_comp_info = BlobCompInfo::new();
 
+        blob_comp_info.decompressed_blob_size = blob_cache_size;
+        blob_comp_info.compressed_blob_size = compressed_blob_size;
         // Dump bootstrap file
-        bootstrap.dump(
-            &mut ctx,
-            Sha256::new(),
-            0,
-            0,
-            blob_cache_size,
-            compressed_blob_size,
-        )
+        bootstrap.dump(&mut ctx, &mut blob_comp_info)
     }
 }

@@ -10,5 +10,5 @@ use anyhow::Result;
 use crate::core::context::BuildContext;
 
 pub trait Builder {
-    fn build(&mut self, ctx: &mut BuildContext) -> Result<(Vec<String>, usize)>;
+    fn build(&mut self, ctx: &mut BuildContext) -> Result<(Vec<String>, u64)>;
 }

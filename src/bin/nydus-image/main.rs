@@ -28,7 +28,6 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
-use std::collections::HashMap;
 use std::fs::metadata;
 use std::fs::OpenOptions;
 use std::io::BufWriter;
@@ -45,13 +44,12 @@ use crate::core::blob::BlobStorage;
 use crate::core::context::BuildContext;
 use crate::core::context::SourceType;
 use crate::core::context::BUF_WRITER_CAPACITY;
-use crate::core::node::{self, ChunkCountMap, WhiteoutSpec};
+use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
-use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::RafsIoReader;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
@@ -420,26 +418,13 @@ fn main() -> Result<()> {
             None
         };
 
-        let mut ctx = BuildContext {
-            source_type,
-            source_path,
-            blob_id,
-            f_bootstrap,
-            f_parent_bootstrap,
-            compressor,
-            digester,
-            explicit_uidgid: !repeatable,
-            whiteout_spec,
-            aligned_chunk,
-            prefetch,
-
-            lower_inode_map: HashMap::new(),
-            upper_inode_map: HashMap::new(),
-            chunk_cache: HashMap::new(),
-            chunk_count_map: ChunkCountMap::default(),
-            blob_table: RafsV5BlobTable::new(),
-            nodes: Vec::new(),
-        };
+        let mut ctx = BuildContext::new(blob_id, source_type, source_path, prefetch, f_bootstrap);
+        ctx.aligned_chunk = aligned_chunk;
+        ctx.compressor = compressor;
+        ctx.digester = digester;
+        ctx.explicit_uidgid = !repeatable;
+        ctx.whiteout_spec = whiteout_spec;
+        ctx.f_parent_bootstrap = f_parent_bootstrap;
 
         let mut builder: Box<dyn Builder> = match source_type {
             SourceType::Directory => {

@@ -96,7 +96,7 @@ impl DirectoryBuilder {
 }
 
 impl Builder for DirectoryBuilder {
-    fn build(&mut self, mut ctx: &mut BuildContext) -> Result<(Vec<String>, usize)> {
+    fn build(&mut self, mut ctx: &mut BuildContext) -> Result<(Vec<String>, u64)> {
         let mut blob = Blob::new(self.blob_stor.clone())?;
         let mut bootstrap = Bootstrap::new()?;
 
@@ -114,18 +114,10 @@ impl Builder for DirectoryBuilder {
         }
 
         // Dump blob file
-        let (blob_hash, blob_size, blob_readahead_size, blob_cache_size, compressed_blob_size) =
-            timing_tracer!({ blob.dump(&mut ctx) }, "dump_blob")?;
+        let mut blob_comp_info = timing_tracer!({ blob.dump(&mut ctx) }, "dump_blob")?;
 
         // Dump bootstrap file
-        let (blob_ids, blob_size) = bootstrap.dump(
-            &mut ctx,
-            blob_hash,
-            blob_size,
-            blob_readahead_size,
-            blob_cache_size,
-            compressed_blob_size,
-        )?;
+        let (blob_ids, blob_size) = bootstrap.dump(&mut ctx, &mut blob_comp_info)?;
         blob.flush(&ctx)?;
 
         Ok((blob_ids, blob_size))

@@ -30,6 +30,7 @@ macro_rules! impl_getter {
 
 // FIXME: u64 for this constant is extremely large, which is unnecessary as `u32` can represent block size 4GB.
 pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
+pub const RAFS_MAX_BLOCK_SIZE: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum StorageError {
