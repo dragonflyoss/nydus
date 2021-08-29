@@ -18,6 +18,7 @@ use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
 
 use crate::core::blob::BlobInfoMap;
+use crate::core::layout::BlobLayout;
 use crate::core::node::*;
 use crate::core::prefetch::Prefetch;
 
@@ -70,6 +71,8 @@ pub struct BuildContext {
     pub blob_table: RafsV5BlobTable,
     /// Store state infomration for blobs.
     pub blob_info_map: BlobInfoMap,
+    /// Blob data layout manager
+    pub blob_layout: BlobLayout,
 
     /// Bootstrap file writer.
     pub f_bootstrap: RafsIoWriter,
@@ -113,6 +116,7 @@ impl BuildContext {
             blob_index: 0,
             blob_table: RafsV5BlobTable::new(),
             blob_info_map: BlobInfoMap::default(),
+            blob_layout: BlobLayout::new(),
 
             f_bootstrap,
             f_parent_bootstrap: None,

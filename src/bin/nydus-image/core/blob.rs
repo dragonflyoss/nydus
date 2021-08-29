@@ -17,6 +17,7 @@ use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 
 use super::context::{BuildContext, SourceType, BUF_WRITER_CAPACITY};
 use super::node::*;
+use crate::core::layout::BlobLayout;
 
 #[derive(Debug, Clone)]
 pub enum BlobStorage {
@@ -209,46 +210,13 @@ impl Blob {
 
         match ctx.source_type {
             SourceType::Directory => {
-                // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
-                // belonging to the same directory arranged in adjacent in blob file. Together with
-                // BFS style collecting descendants inodes, it will have a higher merging possibility.
-                let readahead_files = ctx.prefetch.get_file_indexes();
-
-                // Dump readahead nodes
-                for index in &readahead_files {
-                    let node = ctx.nodes.get_mut(*index as usize - 1).unwrap();
-                    debug!("[{}]\treadahead {}", node.overlay, node);
-                    if node.overlay == Overlay::UpperAddition
-                        || node.overlay == Overlay::UpperModification
-                    {
-                        blob_comp_info.blob_readahead_size += Node::dump_blob(
-                            *index as usize,
-                            ctx,
-                            &mut self.writer,
-                            &mut blob_comp_info,
-                        )
-                        .context("failed to dump readahead blob chunks")?;
-                    }
-                }
-
-                blob_comp_info.blob_size += blob_comp_info.blob_readahead_size;
-
-                // Dump other nodes
-                for index in 0..ctx.nodes.len() {
-                    let node = &ctx.nodes[index];
-                    if ctx.prefetch.contains(node) {
-                        continue;
-                    }
-                    // Ignore lower layer node when dump blob
-                    debug!("[{}]\t{}", node.overlay, node);
-                    if !node.is_dir()
-                        && (node.overlay == Overlay::UpperAddition
-                            || node.overlay == Overlay::UpperModification)
-                    {
-                        // Safe to unwrap because `Directory source` must have blob
-                        blob_comp_info.blob_size +=
-                            Node::dump_blob(index, ctx, &mut self.writer, &mut blob_comp_info)
-                                .context("failed to dump remaining blob chunks")?;
+                let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(ctx)?;
+                for inode in inodes {
+                    let size = Node::dump_blob(inode, ctx, &mut self.writer, &mut blob_comp_info)
+                        .context("failed to dump blob chunks")?;
+                    blob_comp_info.blob_size += size;
+                    if inode < prefetch_entries {
+                        blob_comp_info.blob_readahead_size += size;
                     }
                 }
             }
