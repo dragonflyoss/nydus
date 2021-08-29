@@ -49,8 +49,8 @@ impl FilesystemTreeBuilder {
 
             // as per OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
-            if child.whiteout_type(&ctx.whiteout_spec).is_some()
-                && !child.is_overlayfs_opaque(&ctx.whiteout_spec)
+            if child.whiteout_type(ctx.whiteout_spec).is_some()
+                && !child.is_overlayfs_opaque(ctx.whiteout_spec)
                 && !layered
             {
                 continue;
@@ -107,7 +107,7 @@ impl Builder for DirectoryBuilder {
         if ctx.f_parent_bootstrap.is_some() {
             bootstrap.build(&mut ctx, &mut tree);
             // Apply to parent bootstrap for layered build
-            let mut tree = bootstrap.apply(&mut ctx)?;
+            let mut tree = bootstrap.apply(&mut ctx, None)?;
             timing_tracer!({ bootstrap.build(&mut ctx, &mut tree) }, "build_bootstrap");
         } else {
             bootstrap.build(&mut ctx, &mut tree);
@@ -117,7 +117,7 @@ impl Builder for DirectoryBuilder {
         let mut blob_comp_info = timing_tracer!({ blob.dump(&mut ctx) }, "dump_blob")?;
 
         // Dump bootstrap file
-        let (blob_ids, blob_size) = bootstrap.dump(&mut ctx, &mut blob_comp_info)?;
+        let (blob_ids, blob_size) = bootstrap.dump_rafsv5(&mut ctx, &mut blob_comp_info)?;
         blob.flush(&ctx)?;
 
         Ok((blob_ids, blob_size))

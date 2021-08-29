@@ -253,25 +253,21 @@ impl Blob {
                 }
             }
             SourceType::StargzIndex => {
-                // Set blob index and inode digest for upper nodes
                 for node in &mut ctx.nodes {
                     if node.overlay.is_lower_layer() {
                         continue;
-                    }
-
-                    let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
-
-                    for chunk in node.chunks.iter_mut() {
-                        (*chunk).blob_index = ctx.blob_index;
-                        inode_hasher.digest_update(chunk.block_id.as_ref());
-                    }
-
-                    if node.is_symlink() {
+                    } else if node.is_symlink() {
                         node.inode.i_digest = RafsDigest::from_buf(
                             node.symlink.as_ref().unwrap().as_bytes(),
                             digest::Algorithm::Sha256,
                         );
                     } else {
+                        // Set blob index and inode digest for upper nodes
+                        let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+                        for chunk in node.chunks.iter_mut() {
+                            (*chunk).blob_index = ctx.blob_index;
+                            inode_hasher.digest_update(chunk.block_id.as_ref());
+                        }
                         node.inode.i_digest = inode_hasher.digest_finalize();
                     }
                 }

@@ -129,7 +129,7 @@ impl Tree {
         &mut self,
         target: &Node,
         handle_whiteout: bool,
-        whiteout_spec: &WhiteoutSpec,
+        whiteout_spec: WhiteoutSpec,
     ) -> Result<bool> {
         // Handle whiteout file
         if handle_whiteout {

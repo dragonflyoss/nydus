@@ -417,7 +417,7 @@ impl StargzIndexTreeBuilder {
                 node.inode.i_size = *size;
             }
             if let Some(tree) = &mut tree {
-                tree.apply(node, false, &ctx.whiteout_spec)?;
+                tree.apply(node, false, ctx.whiteout_spec)?;
             }
         }
 
@@ -588,7 +588,7 @@ impl Builder for StargzBuilder {
         if ctx.f_parent_bootstrap.is_some() {
             bootstrap.build(&mut ctx, &mut tree);
             // Apply to parent bootstrap for layered build
-            let mut tree = bootstrap.apply(&mut ctx)?;
+            let mut tree = bootstrap.apply(&mut ctx, None)?;
             timing_tracer!({ bootstrap.build(&mut ctx, &mut tree) }, "build_bootstrap");
         } else {
             bootstrap.build(&mut ctx, &mut tree);
@@ -601,6 +601,6 @@ impl Builder for StargzBuilder {
         blob_comp_info.decompressed_blob_size = blob_cache_size;
         blob_comp_info.compressed_blob_size = compressed_blob_size;
         // Dump bootstrap file
-        bootstrap.dump(&mut ctx, &mut blob_comp_info)
+        bootstrap.dump_rafsv5(&mut ctx, &mut blob_comp_info)
     }
 }

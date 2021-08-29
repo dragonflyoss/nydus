@@ -80,7 +80,7 @@ impl WhiteoutType {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum WhiteoutSpec {
     /// https://github.com/opencontainers/image-spec/blob/master/layer.md#whiteouts
     Oci,
@@ -583,8 +583,8 @@ impl Node {
         &self.path_vec
     }
 
-    pub fn is_overlayfs_whiteout(&self, spec: &WhiteoutSpec) -> bool {
-        if *spec != WhiteoutSpec::Overlayfs {
+    pub fn is_overlayfs_whiteout(&self, spec: WhiteoutSpec) -> bool {
+        if spec != WhiteoutSpec::Overlayfs {
             return false;
         }
 
@@ -593,8 +593,8 @@ impl Node {
             && stat::minor(self.rdev) == 0
     }
 
-    pub fn is_overlayfs_opaque(&self, spec: &WhiteoutSpec) -> bool {
-        if *spec != WhiteoutSpec::Overlayfs {
+    pub fn is_overlayfs_opaque(&self, spec: WhiteoutSpec) -> bool {
+        if spec != WhiteoutSpec::Overlayfs {
             return false;
         }
 
@@ -609,7 +609,7 @@ impl Node {
         false
     }
 
-    pub fn whiteout_type(&self, spec: &WhiteoutSpec) -> Option<WhiteoutType> {
+    pub fn whiteout_type(&self, spec: WhiteoutSpec) -> Option<WhiteoutType> {
         if self.overlay == Overlay::Lower {
             return None;
         }

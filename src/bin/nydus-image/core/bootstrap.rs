@@ -17,8 +17,7 @@ use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
 use crate::core::blob::BlobCompInfo;
-use crate::core::context::BuildContext;
-use crate::core::context::SourceType;
+use crate::core::context::{BuildContext, SourceType};
 use crate::core::node::*;
 use crate::core::prefetch::PrefetchPolicy;
 use crate::core::tree::Tree;
@@ -49,17 +48,16 @@ impl Bootstrap {
         if parent.is_dir() {
             parent.inode.i_child_index = index;
             parent.inode.i_child_count = tree.children.len() as u32;
-        }
 
-        let parent_ino = parent.inode.i_ino;
+            // Sort children list by name, so that we can improve performance in fs read_dir using
+            // binary search.
+            tree.children
+                .sort_by_key(|child| child.node.name().to_os_string());
+        }
 
         // Cache dir tree for BFS walk
         let mut dirs: Vec<&mut Tree> = Vec::new();
-
-        // Sort children list by name,
-        // so that we can improve performance in fs read_dir using binary search.
-        tree.children
-            .sort_by_key(|child| child.node.name().to_os_string());
+        let parent_ino = parent.inode.i_ino;
 
         for child in tree.children.iter_mut() {
             let index = nodes.len() as u64 + 1;
@@ -75,18 +73,15 @@ impl Bootstrap {
                 &mut ctx.upper_inode_map
             };
             if let Some(indexes) = inode_map.get_mut(&(child.node.real_ino, child.node.dev)) {
-                indexes.push(index);
-                let first_index = indexes.first().unwrap();
-                let nlink = indexes.len() as u32;
-                child.node.inode.i_ino = *first_index;
+                let nlink = indexes.len() as u32 + 1;
+                let first_index = indexes[0];
+                child.node.inode.i_ino = first_index;
                 child.node.inode.i_nlink = nlink;
                 // Update nlink for previous hardlink inodes
-                for idx in indexes {
-                    if index == *idx {
-                        continue;
-                    }
+                for idx in indexes.iter() {
                     nodes[*idx as usize - 1].inode.i_nlink = nlink;
                 }
+                indexes.push(index);
             } else {
                 child.node.inode.i_ino = index;
                 child.node.inode.i_nlink = 1;
@@ -102,11 +97,11 @@ impl Bootstrap {
             // so that it can be applied to the node tree of lower layer first than other files of upper layer.
             match (
                 &ctx.f_parent_bootstrap,
-                child.node.whiteout_type(&ctx.whiteout_spec),
+                child.node.whiteout_type(ctx.whiteout_spec),
             ) {
                 (Some(_), Some(whiteout_type)) => {
-                    // For the overlayfs opaque, we need to remove the lower node that has the same name
-                    // first, then apply upper node to the node tree of lower layer.
+                    // For the overlayfs opaque, we need to remove the lower node that has the same
+                    // name first, then apply upper node to the node tree of lower layer.
                     nodes.insert(0, child.node.clone());
                     if whiteout_type == WhiteoutType::OverlayFsOpaque {
                         child
@@ -152,42 +147,25 @@ impl Bootstrap {
     }
 
     /// Calculate inode digest
-    fn digest_node(&self, ctx: &mut BuildContext, node: Node) -> RafsDigest {
-        // We have set digest for non-directory inode in the previous dump_blob workflow, so just return digest here.
-        if !node.is_dir() {
-            return node.inode.i_digest;
+    fn digest_node(&self, ctx: &mut BuildContext, index: usize) {
+        let node = &ctx.nodes[index];
+
+        // We have set digest for non-directory inode in the previous dump_blob workflow.
+        if node.is_dir() {
+            let child_index = node.inode.i_child_index;
+            let child_count = node.inode.i_child_count;
+            let mut inode_hasher = RafsDigest::hasher(ctx.digester);
+
+            for idx in child_index..child_index + child_count {
+                let child = &ctx.nodes[(idx - 1) as usize];
+                inode_hasher.digest_update(child.inode.i_digest.as_ref());
+            }
+
+            ctx.nodes[index].inode.i_digest = inode_hasher.digest_finalize();
         }
-
-        let child_index = node.inode.i_child_index;
-        let child_count = node.inode.i_child_count;
-        let mut inode_hasher = RafsDigest::hasher(ctx.digester);
-
-        for idx in child_index..child_index + child_count {
-            let child = &ctx.nodes[(idx - 1) as usize];
-            inode_hasher.digest_update(child.inode.i_digest.as_ref());
-        }
-
-        inode_hasher.digest_finalize()
     }
 
-    /// Build an in-memory tree, representing the source file system.
-    pub fn build(&mut self, ctx: &mut BuildContext, tree: &mut Tree) {
-        let index = RAFS_ROOT_INODE;
-
-        tree.node.index = index;
-        tree.node.inode.i_ino = index;
-        // Filesystem walking skips root inode within subsequent while loop, however, we allow
-        // user to pass the source root as prefetch hint. Check it here.
-        ctx.prefetch.insert_if_need(&tree.node);
-
-        let mut nodes = vec![tree.node.clone()];
-        self.build_rafs(ctx, tree, &mut nodes);
-        ctx.nodes = nodes;
-    }
-
-    /// Apply new node (upper layer from filesystem directory) to
-    /// bootstrap node tree (lower layer from bootstrap file)
-    pub fn apply(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
+    fn load_parent_bootstrap(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
             validate_digest: true,
@@ -212,14 +190,39 @@ impl Bootstrap {
 
         // Build node tree of lower layer from a bootstrap file, drop by to add
         // chunks of lower node to chunk_cache for chunk deduplication on next.
-        let mut tree = Tree::from_bootstrap(&rs, Some(&mut ctx.chunk_cache))
-            .context("failed to build tree from bootstrap")?;
+        Tree::from_bootstrap(&rs, Some(&mut ctx.chunk_cache))
+            .context("failed to build tree from bootstrap")
+    }
+
+    /// Build an in-memory tree, representing the source file system.
+    pub fn build(&mut self, ctx: &mut BuildContext, tree: &mut Tree) {
+        let index = RAFS_ROOT_INODE;
+
+        tree.node.index = index;
+        tree.node.inode.i_ino = index;
+        // Filesystem walking skips root inode within subsequent while loop, however, we allow
+        // user to pass the source root as prefetch hint. Check it here.
+        ctx.prefetch.insert_if_need(&tree.node);
+
+        let mut nodes = vec![tree.node.clone()];
+        self.build_rafs(ctx, tree, &mut nodes);
+        ctx.nodes = nodes;
+    }
+
+    /// Apply the diff tree (upper layer) to the base tree (lower layer).
+    ///
+    /// If `tree` is none, the base tree will be loaded from the parent bootstrap.
+    pub fn apply(&mut self, ctx: &mut BuildContext, tree: Option<Tree>) -> Result<Tree> {
+        let mut tree = match tree {
+            Some(v) => v,
+            None => self.load_parent_bootstrap(ctx)?,
+        };
 
         // Apply new node (upper layer) to node tree (lower layer)
         timing_tracer!(
             {
                 for node in &ctx.nodes {
-                    tree.apply(&node, true, &ctx.whiteout_spec)
+                    tree.apply(&node, true, ctx.whiteout_spec)
                         .context("failed to apply tree")?;
                 }
                 Ok(true)
@@ -237,7 +240,7 @@ impl Bootstrap {
     }
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
-    pub fn dump(
+    pub fn dump_rafsv5(
         &mut self,
         mut ctx: &mut BuildContext,
         blob_comp_info: &mut BlobCompInfo,
@@ -267,8 +270,7 @@ impl Bootstrap {
 
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
         for idx in (0..ctx.nodes.len()).rev() {
-            let node = ctx.nodes[idx].clone();
-            ctx.nodes[idx].inode.i_digest = self.digest_node(&mut ctx, node);
+            self.digest_node(&mut ctx, idx);
         }
 
         // Set inode table
@@ -392,15 +394,15 @@ impl Bootstrap {
             Result<()>
         )?;
 
+        // Flush remaining data in BufWriter to file
+        ctx.f_bootstrap.flush()?;
+
         let blob_ids: Vec<String> = ctx
             .blob_table
             .entries
             .iter()
             .map(|entry| entry.blob_id.clone())
             .collect();
-
-        // Flush remaining data in BufWriter to file
-        ctx.f_bootstrap.flush()?;
 
         Ok((blob_ids, blob_comp_info.blob_size))
     }
