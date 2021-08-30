@@ -88,6 +88,7 @@ func (builder *Builder) Run(option BuilderOption) error {
 	stdin.Close()
 
 	if err := cmd.Run(); err != nil {
+		logrus.WithError(err).Errorf("fail to run %v %+v", builder.binaryPath, args)
 		return err
 	}
 
