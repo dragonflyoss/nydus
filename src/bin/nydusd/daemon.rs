@@ -31,12 +31,11 @@ use fuse_rs::Error as VhostUserFsError;
 
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
-use chrono::{self, DateTime, Local};
 use rust_fsm::*;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
-use serde_with::{serde_as, DisplayFromStr};
 
+use nydus::FsBackendType;
 use nydus_app::BuildTimeInfo;
 use rafs::{
     fs::{Rafs, RafsConfig},
@@ -45,6 +44,7 @@ use rafs::{
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
 use crate::EVENT_MANAGER_RUN;
+use nydus::FsBackendDesc;
 
 //TODO: Try to public below type from fuse-rs thus no need to redefine it here.
 type BackFileSystem = Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>;
@@ -168,26 +168,6 @@ impl From<VfsError> for DaemonError {
 
 pub type DaemonResult<T> = std::result::Result<T, DaemonError>;
 
-#[derive(Clone, Serialize, PartialEq)]
-pub enum FsBackendType {
-    Rafs,
-    PassthroughFs,
-}
-
-impl FromStr for FsBackendType {
-    type Err = DaemonError;
-    fn from_str(s: &str) -> DaemonResult<FsBackendType> {
-        match s {
-            "rafs" => Ok(FsBackendType::Rafs),
-            "passthrough_fs" => Ok(FsBackendType::PassthroughFs),
-            o => Err(DaemonError::InvalidArguments(format!(
-                "Fs backend type only accepts 'rafs' and 'passthrough_fs', but {} was specified",
-                o
-            ))),
-        }
-    }
-}
-
 /// Used to export daemon working state
 #[derive(Serialize)]
 pub struct DaemonInfo {
@@ -210,16 +190,6 @@ pub struct FsBackendMountCmd {
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct FsBackendUmountCmd {
     pub mountpoint: String,
-}
-
-#[serde_as]
-#[derive(Serialize, Clone)]
-pub struct FsBackendDesc {
-    backend_type: FsBackendType,
-    mountpoint: String,
-    #[serde_as(as = "DisplayFromStr")]
-    mounted_time: DateTime<Local>,
-    config: serde_json::Value,
 }
 
 #[derive(Default, Serialize, Clone)]

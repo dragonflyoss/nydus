@@ -13,6 +13,11 @@ panic = "abort"
 name = "nydusd"
 path = "src/bin/nydusd/main.rs"
 
+[lib]
+name = "nydus"
+path = "src/lib.rs"
+
+
 [dependencies]
 rlimit = "0.3.0"
 log = "0.4.8"
