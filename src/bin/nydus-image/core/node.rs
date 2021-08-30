@@ -530,12 +530,12 @@ impl Node {
     /// Generate the path relative to original rootfs.
     /// For example:
     /// `/absolute/path/to/rootfs/file` after converting `/file`
-    pub fn generate_target(path: &PathBuf, root: &PathBuf) -> PathBuf {
+    pub fn generate_target(path: &Path, root: &Path) -> PathBuf {
         if let Ok(p) = path.strip_prefix(root) {
             Path::new("/").join(p)
         } else {
             // Compatible with path `/`
-            path.clone()
+            path.to_path_buf()
         }
     }
 
@@ -568,7 +568,7 @@ impl Node {
         None
     }
 
-    pub fn generate_path_vec(target: &PathBuf) -> Vec<OsString> {
+    pub fn generate_path_vec(target: &Path) -> Vec<OsString> {
         target
             .components()
             .map(|comp| match comp {
