@@ -4,13 +4,12 @@ The Nydusify CLI tool converts an OCI container image from source registry into 
 
 ### Get binaries from release page
 
-Get `nydus-image` and `nydusify` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+Get `nydus-image`, `nydusd` and `nydusify` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page and install them to system PATH like `/usr/bin` or /usr/local/bin`.
 
 ## Basic Usage
 
 ```
 nydusify convert \
-  --nydus-image /path/to/nydus-image \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
 ```
@@ -33,7 +32,6 @@ cat /path/to/backend-config.json
 
 ``` shell
 nydusify convert \
-  --nydus-image /path/to/nydus-image \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus \
   --backend-type oss \
@@ -48,7 +46,6 @@ Only check the manifest and bootstrap of Nydus image:
 
 ``` shell
 nydusify check \
-  --nydus-image /path/to/nydus-image \
   --target myregistry/repo:tag-nydus
 ```
 
@@ -66,12 +63,10 @@ $ tree ./output
 └── oci_manifest.json
 ```
 
-Specify `--source` and `--nydusd` options to walk the rootfs of OCI image and Nydus image to compare file metadata:
+Specify `--source` and options to walk the rootfs of OCI image and Nydus image to compare file metadata:
 
 ``` shell
 nydusify check \
-  --nydus-image /path/to/nydus-image \
-  --nydusd /path/to/nydusd \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
 ```
@@ -80,8 +75,6 @@ Specify `--backend-type` and `--backend-config` options to compare file metadata
 
 ``` shell
 nydusify check \
-  --nydus-image /path/to/nydus-image \
-  --nydusd /path/to/nydusd \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus \
   --backend-type oss \
