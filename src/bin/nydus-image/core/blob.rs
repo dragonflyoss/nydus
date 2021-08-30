@@ -211,11 +211,17 @@ impl Blob {
         match ctx.source_type {
             SourceType::Directory => {
                 let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(ctx)?;
-                for inode in inodes {
-                    let size = Node::dump_blob(inode, ctx, &mut self.writer, &mut blob_comp_info)
+                for (idx, inode) in inodes.iter().enumerate() {
+                    let node = &ctx.nodes[*inode];
+                    if idx < prefetch_entries {
+                        debug!("[{}]\treadahead {}", node.overlay, node);
+                    } else {
+                        debug!("[{}]\t{}", node.overlay, node);
+                    }
+                    let size = Node::dump_blob(*inode, ctx, &mut self.writer, &mut blob_comp_info)
                         .context("failed to dump blob chunks")?;
                     blob_comp_info.blob_size += size;
-                    if inode < prefetch_entries {
+                    if idx < prefetch_entries {
                         blob_comp_info.blob_readahead_size += size;
                     }
                 }

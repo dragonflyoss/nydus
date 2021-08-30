@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Error, Result};
+use anyhow::Result;
 
 use crate::core::context::BuildContext;
 use crate::core::node::{Node, Overlay};
@@ -24,9 +24,10 @@ impl BlobLayout {
         let mut readahead_files = ctx.prefetch.get_file_indexes();
         readahead_files.sort_unstable();
         for index in &readahead_files {
-            let node = &ctx.nodes[*index as usize - 1];
+            let index = *index as usize - 1;
+            let node = &ctx.nodes[index];
             if Self::should_dump_node(node) {
-                inodes.push(*index as usize);
+                inodes.push(index);
             }
         }
         let prefetch_entries = inodes.len();
@@ -36,7 +37,7 @@ impl BlobLayout {
             let node = &ctx.nodes[index];
             if !ctx.prefetch.contains(node) {
                 // Ignore lower layer node when dump blob
-                if !node.is_dir() && Self::should_dump_node(node) {
+                if Self::should_dump_node(node) {
                     inodes.push(index);
                 }
             }
