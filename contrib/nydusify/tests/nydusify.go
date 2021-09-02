@@ -114,11 +114,11 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		CacheMaxRecords: 10,
 		CacheVersion:    "v1",
 
-		WorkDir:        "./tmp",
-		PrefetchDir:    "/",
-		NydusImagePath: nydusImagePath,
-		MultiPlatform:  false,
-		DockerV2Format: true,
+		WorkDir:          "./tmp",
+		PrefetchPatterns: "/",
+		NydusImagePath:   nydusImagePath,
+		MultiPlatform:    false,
+		DockerV2Format:   true,
 
 		BackendType:   nydusify.backendType,
 		BackendConfig: nydusify.backendConfig,

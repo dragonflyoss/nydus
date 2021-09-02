@@ -74,9 +74,9 @@ type Opt struct {
 	CacheMaxRecords uint
 	CacheVersion    string
 
-	NydusImagePath string
-	WorkDir        string
-	PrefetchDir    string
+	NydusImagePath   string
+	WorkDir          string
+	PrefetchPatterns string
 
 	MultiPlatform  bool
 	DockerV2Format bool
@@ -102,9 +102,9 @@ type Converter struct {
 	CacheMaxRecords uint
 	CacheVersion    string
 
-	NydusImagePath string
-	WorkDir        string
-	PrefetchDir    string
+	NydusImagePath   string
+	WorkDir          string
+	PrefetchPatterns string
 
 	MultiPlatform  bool
 	DockerV2Format bool
@@ -146,7 +146,7 @@ func New(opt Opt) (*Converter, error) {
 		CacheVersion:        opt.CacheVersion,
 		NydusImagePath:      opt.NydusImagePath,
 		WorkDir:             opt.WorkDir,
-		PrefetchDir:         opt.PrefetchDir,
+		PrefetchPatterns:    opt.PrefetchPatterns,
 		MultiPlatform:       opt.MultiPlatform,
 		DockerV2Format:      opt.DockerV2Format,
 		BackendForcePush:    opt.BackendForcePush,
@@ -207,10 +207,10 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 		return errors.Wrap(err, "Create bootstrap directory")
 	}
 	buildWorkflow, err := build.NewWorkflow(build.WorkflowOption{
-		ChunkDict:      chunkDictOpt,
-		NydusImagePath: cvt.NydusImagePath,
-		PrefetchDir:    cvt.PrefetchDir,
-		TargetDir:      cvt.WorkDir,
+		ChunkDict:        chunkDictOpt,
+		NydusImagePath:   cvt.NydusImagePath,
+		PrefetchPatterns: cvt.PrefetchPatterns,
+		TargetDir:        cvt.WorkDir,
 	})
 	if err != nil {
 		return errors.Wrap(err, "Create build flow")

@@ -112,6 +112,35 @@ func getCacheReference(c *cli.Context, target string) (string, error) {
 	return cache, nil
 }
 
+func getPrefetchPatterns(c *cli.Context) (string, error) {
+	prefetchedDir := c.String("prefetch-dir")
+	prefetchPatterns := c.Bool("prefetch-patterns")
+
+	if len(prefetchedDir) > 0 && prefetchPatterns {
+		return "", fmt.Errorf("--prefetch-dir conflicts with --prefetch-patterns")
+	}
+
+	var patterns string
+
+	if prefetchPatterns {
+		bytes, err := ioutil.ReadAll(os.Stdin)
+		if err != nil {
+			return "", errors.Wrap(err, "read prefetch patterns from STDIN")
+		}
+		patterns = string(bytes)
+	}
+
+	if len(prefetchedDir) > 0 {
+		patterns = prefetchedDir
+	}
+
+	if len(patterns) <= 0 {
+		patterns = "/"
+	}
+
+	return patterns, nil
+}
+
 func main() {
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
@@ -139,7 +168,8 @@ func main() {
 				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
 				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
 				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image conversion", EnvVars: []string{"WORK_DIR"}},
-				&cli.StringFlag{Name: "prefetch-dir", Value: "/", Usage: "Prefetch directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
+				&cli.StringFlag{Name: "prefetch-dir", Value: "", Usage: "Prefetched directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
+				&cli.BoolFlag{Name: "prefetch-patterns", Value: false, Usage: "Prefetched file path patterns from STDIN, specify absolute/relative path of rootfs line by line", EnvVars: []string{"PREFETCH_PATTERNS"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "nydus-image", Usage: "The nydus-image binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Merge OCI & Nydus manifest to manifest index for target image, please ensure that OCI manifest already exists in target image", EnvVars: []string{"MULTI_PLATFORM"}},
 				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
@@ -238,6 +268,11 @@ func main() {
 					return err
 				}
 
+				prefetchPatterns, err := getPrefetchPatterns(c)
+				if err != nil {
+					return err
+				}
+
 				opt := converter.Opt{
 					Logger:          logger,
 					SourceProviders: sourceProviders,
@@ -248,11 +283,11 @@ func main() {
 					CacheMaxRecords: cacheMaxRecords,
 					CacheVersion:    cacheVersion,
 
-					WorkDir:        c.String("work-dir"),
-					PrefetchDir:    c.String("prefetch-dir"),
-					NydusImagePath: c.String("nydus-image"),
-					MultiPlatform:  c.Bool("multi-platform"),
-					DockerV2Format: c.Bool("docker-v2-format"),
+					WorkDir:          c.String("work-dir"),
+					PrefetchPatterns: prefetchPatterns,
+					NydusImagePath:   c.String("nydus-image"),
+					MultiPlatform:    c.Bool("multi-platform"),
+					DockerV2Format:   c.Bool("docker-v2-format"),
 
 					BackendType:         backendType,
 					BackendConfig:       backendConfig,

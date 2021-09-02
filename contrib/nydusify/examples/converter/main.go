@@ -50,11 +50,11 @@ func main() {
 		SourceProviders: sourceProviders,
 		TargetRemote:    targetRemote,
 
-		WorkDir:        wordDir,
-		PrefetchDir:    "/",
-		NydusImagePath: nydusImagePath,
-		MultiPlatform:  false,
-		DockerV2Format: true,
+		WorkDir:          wordDir,
+		PrefetchPatterns: "/",
+		NydusImagePath:   nydusImagePath,
+		MultiPlatform:    false,
+		DockerV2Format:   true,
 	}
 
 	cvt, err := converter.New(opt)
