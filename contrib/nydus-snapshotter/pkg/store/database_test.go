@@ -54,7 +54,7 @@ func Test_daemon(t *testing.T) {
 	require.Equal(t, ok, true)
 
 	// Cleanup records
-	err = db.Cleanup(ctx)
+	err = db.CleanupDaemons(ctx)
 	require.Nil(t, err)
 	ids2 := make([]string, 0)
 	err = db.WalkDaemons(ctx, func(info *daemon.Daemon) error {

@@ -17,8 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 )
@@ -41,7 +41,6 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 
 	mgr, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: "",
-		RootDir:          snapshotRoot,
 	})
 	require.Nil(t, err)
 
@@ -50,7 +49,7 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 			RootDir: snapshotRoot,
 		},
 		manager:     mgr,
-		daemonCfg:   nydus.DaemonConfig{},
+		daemonCfg:   config.DaemonConfig{},
 		resolver:    nil,
 		vpcRegistry: false,
 	}
@@ -68,13 +67,12 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 
 	content, err := ioutil.ReadFile("testdata/config/nydus.json")
 	require.Nil(t, err)
-	var cfg nydus.DaemonConfig
+	var cfg config.DaemonConfig
 	err = json.Unmarshal(content, &cfg)
 	require.Nil(t, err)
 
 	mgr, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: "",
-		RootDir:          snapshotRoot,
 	})
 	require.Nil(t, err)
 
