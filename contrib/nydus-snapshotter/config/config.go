@@ -45,6 +45,7 @@ type Config struct {
 	MetricsFile          string        `toml:"metrics_file"`
 	EnableStargz         bool          `toml:"enable_stargz"`
 	LogLevel             string        `toml:"-"`
+	DisableCacheManager  bool          `toml:"disable_cache_manager"`
 }
 
 func (c *Config) FillupWithDefaults() error {

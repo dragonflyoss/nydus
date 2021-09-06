@@ -214,11 +214,14 @@ func (fs *filesystem) Umount(ctx context.Context, mountPoint string) error {
 	if err := fs.manager.DestroyDaemon(daemon); err != nil {
 		return errors.Wrap(err, "destroy daemon err")
 	}
-	if err := fs.cacheMgr.DelSnapshot(daemon.ImageID); err != nil {
-		return errors.Wrap(err, "del snapshot err")
+
+	if fs.cacheMgr != nil {
+		if err := fs.cacheMgr.DelSnapshot(daemon.ImageID); err != nil {
+			return errors.Wrap(err, "del snapshot err")
+		}
+		log.L.Debugf("remove snapshot %s\n", daemon.ImageID)
+		fs.cacheMgr.SchedGC()
 	}
-	log.L.Debugf("remove snapshot %s\n", daemon.ImageID)
-	fs.cacheMgr.SchedGC()
 	return nil
 }
 
@@ -266,9 +269,12 @@ func (fs *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonCo
 	if err != nil {
 		return config.DaemonConfig{}, err
 	}
-	// Overriding work_dir option of nyudsd config as we want to set it
-	// via snapshotter config option to let snapshotter handle blob cache GC.
-	cfg.Device.Cache.Config.WorkDir = fs.cacheMgr.CacheDir()
+
+	if fs.cacheMgr != nil {
+		// Overriding work_dir option of nyudsd config as we want to set it
+		// via snapshotter config option to let snapshotter handle blob cache GC.
+		cfg.Device.Cache.Config.WorkDir = fs.cacheMgr.CacheDir()
+	}
 	return cfg, nil
 }
 
@@ -291,6 +297,11 @@ func (fs *filesystem) mount(d *daemon.Daemon, labels map[string]string) error {
 }
 
 func (fs *filesystem) addSnapshot(imageID string, labels map[string]string) error {
+	// Do nothing if there's no cacheMgr
+	if fs.cacheMgr == nil {
+		return nil
+	}
+
 	blobs, err := fs.getBlobIDs(labels)
 	if err != nil {
 		return err
@@ -312,6 +323,7 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		d   *daemon.Daemon
 		err error
 	)
+
 	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithSocketDir(fs.SocketRoot()),
@@ -341,6 +353,7 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 	if sharedDaemon, err = fs.manager.GetByID(daemon.SharedNydusDaemonID); err != nil {
 		return nil, err
 	}
+
 	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithRootMountPoint(*sharedDaemon.RootMountPoint),
@@ -365,9 +378,12 @@ func (fs *filesystem) generateDaemonConfig(d *daemon.Daemon, labels map[string]s
 	if err != nil {
 		return errors.Wrapf(err, "failed to generate daemon config for daemon %s", d.ID)
 	}
-	// Overriding work_dir option of nyudsd config as we want to set it
-	// via snapshotter config option to let snapshotter handle blob cache GC.
-	cfg.Device.Cache.Config.WorkDir = fs.cacheMgr.CacheDir()
+
+	if fs.cacheMgr != nil {
+		// Overriding work_dir option of nyudsd config as we want to set it
+		// via snapshotter config option to let snapshotter handle blob cache GC.
+		cfg.Device.Cache.Config.WorkDir = fs.cacheMgr.CacheDir()
+	}
 	return config.SaveConfig(cfg, d.ConfigFile())
 }
 

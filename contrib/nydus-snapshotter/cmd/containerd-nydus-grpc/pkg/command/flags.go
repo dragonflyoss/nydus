@@ -45,6 +45,7 @@ type Args struct {
 	EnableMetrics        bool
 	MetricsFile          string
 	EnableStargz         bool
+	DisableCacheManager  bool
 }
 
 type Flags struct {
@@ -154,6 +155,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether to support stargz image",
 			Destination: &args.EnableStargz,
 		},
+		&cli.BoolFlag{
+			Name:        "disable-cache-manager",
+			Value:       false,
+			Usage:       "whether to disable blob cache manager",
+			Destination: &args.DisableCacheManager,
+		},
 	}
 }
 
@@ -199,6 +206,7 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.EnableMetrics = args.EnableMetrics
 	cfg.MetricsFile = args.MetricsFile
 	cfg.EnableStargz = args.EnableStargz
+	cfg.DisableCacheManager = args.DisableCacheManager
 
 	d, err := time.ParseDuration(args.GCPeriod)
 	if err != nil {
