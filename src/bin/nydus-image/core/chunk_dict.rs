@@ -14,7 +14,7 @@ use rafs::metadata::{RafsMode, RafsSuper};
 use crate::core::node::ChunkWrapper;
 use crate::core::tree::Tree;
 
-pub trait ChunkDict {
+pub trait ChunkDict: Sync + Send + 'static {
     fn add_chunk(&mut self, chunk: ChunkWrapper);
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&ChunkWrapper>;
     fn get_blobs(&self) -> Arc<RafsV5BlobTable>;

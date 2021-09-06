@@ -541,6 +541,7 @@ impl StargzIndexTreeBuilder {
             chunks,
             symlink,
             xattrs,
+            ctime: 0,
         })
     }
 }

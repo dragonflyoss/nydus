@@ -343,6 +343,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             chunks,
             symlink,
             xattrs,
+            ctime: 0,
         })
     }
 }

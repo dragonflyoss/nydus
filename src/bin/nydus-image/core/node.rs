@@ -177,6 +177,8 @@ pub struct Node {
     pub(crate) target: PathBuf,
     /// Parsed version of `target`.
     pub(crate) target_vec: Vec<OsString>,
+    /// Last status change time of the file, in nanoseconds.
+    pub ctime: i64,
 }
 
 impl Display for Node {
@@ -229,6 +231,7 @@ impl Node {
             symlink: None,
             xattrs: RafsXAttrs::default(),
             explicit_uidgid,
+            ctime: 0,
         };
 
         node.build_inode(chunk_size)
@@ -452,6 +455,7 @@ impl Node {
         self.src_ino = meta.st_ino();
         self.src_dev = meta.st_dev();
         self.rdev = meta.st_rdev();
+        self.ctime = meta.st_ctime();
         self.inode
             .set_inode_info(&meta, &self.xattrs, self.explicit_uidgid);
 

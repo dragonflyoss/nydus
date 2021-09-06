@@ -30,7 +30,7 @@ use nydus_utils::digest;
 use rafs::RafsIoReader;
 use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
 
-use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
+use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::chunk_dict::import_chunk_dict;
 use crate::core::context::{
     BlobManager, BlobStorage, BootstrapContext, BuildContext, RafsVersion, SourceType,
@@ -106,7 +106,7 @@ fn main() -> Result<()> {
                     Arg::with_name("SOURCE")
                         .help("source path to build the nydus image from")
                         .required(true)
-                        .index(1),
+                        .multiple(true),
                 )
                 .arg(
                     Arg::with_name("source-type")
@@ -115,7 +115,13 @@ fn main() -> Result<()> {
                         .help("type of the source:")
                         .takes_value(true)
                         .default_value("directory")
-                        .possible_values(&["directory", "stargz_index"])
+                        .possible_values(&["directory", "stargz_index", "diff"])
+                )
+                .arg(
+                    Arg::with_name("diff-overlay-hint")
+                        .long("diff-overlay-hint")
+                        .help("Enable to specify each upper directory paths of layer in overlayfs for speeding up diff build")
+                        .takes_value(false)
                 )
                 .arg(
                     Arg::with_name("bootstrap")
@@ -333,6 +339,10 @@ impl Command {
         let bootstrap_path = Self::get_bootstrap(&matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(&matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
+        let extra_paths: Vec<PathBuf> = matches
+            .values_of("SOURCE")
+            .map(|paths| paths.map(PathBuf::from).skip(1).collect())
+            .unwrap();
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
         let blob_stor = Self::get_blob_storage(&matches, source_type)?;
         let repeatable = matches.is_present("repeatable");
@@ -344,7 +354,7 @@ impl Command {
         let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
         match source_type {
-            SourceType::Directory => {
+            SourceType::Directory | SourceType::Diff => {
                 let source_file = metadata(&source_path)
                     .context(format!("failed to get source path {:?}", source_path))?;
                 if !source_file.is_dir() {
@@ -412,9 +422,11 @@ impl Command {
             )?);
         }
 
+        let diff_overlay_hint = matches.is_present("diff-overlay-hint");
         let mut builder: Box<dyn Builder> = match source_type {
             SourceType::Directory => Box::new(DirectoryBuilder::new()),
             SourceType::StargzIndex => Box::new(StargzBuilder::new()),
+            SourceType::Diff => Box::new(DiffBuilder::new(extra_paths, diff_overlay_hint)),
         };
         let (blob_ids, blob_size) = timing_tracer!(
             {
@@ -492,7 +504,7 @@ impl Command {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
-        let blob_stor = if source_type == SourceType::Directory {
+        let blob_stor = if source_type == SourceType::Directory || source_type == SourceType::Diff {
             if let Some(p) = matches
                 .value_of("blob")
                 .map(|b| BlobStorage::SingleFile(b.into()))
