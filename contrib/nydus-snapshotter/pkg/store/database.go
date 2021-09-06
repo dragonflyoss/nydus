@@ -89,6 +89,15 @@ func (d *Database) initDatabase() error {
 	})
 }
 
+func (d *Database) Close() error {
+	err := d.db.Close()
+	if err != nil {
+		return errors.Wrapf(err, "Close boltdb failed")
+	}
+
+	return nil
+}
+
 // SaveDaemon saves daemon record from database
 func (d *Database) SaveDaemon(ctx context.Context, dmn *daemon.Daemon) error {
 	return d.db.Update(func(tx *bolt.Tx) error {
