@@ -144,7 +144,6 @@ func (f *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon
 		daemon.WithConfigDir(f.ConfigRoot()),
 		daemon.WithSnapshotDir(f.SnapshotRoot()),
 		daemon.WithLogDir(f.LogRoot()),
-		daemon.WithCacheDir(f.CacheRoot()),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(f.logLevel),
 	)

@@ -318,7 +318,6 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		daemon.WithConfigDir(fs.ConfigRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
 		daemon.WithLogDir(fs.LogRoot()),
-		daemon.WithCacheDir(fs.cacheMgr.CacheDir()),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
 	); err != nil {
@@ -349,7 +348,6 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		daemon.WithAPISock(sharedDaemon.APISock()),
 		daemon.WithConfigDir(fs.ConfigRoot()),
 		daemon.WithLogDir(fs.LogRoot()),
-		daemon.WithCacheDir(fs.cacheMgr.CacheDir()),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
 	); err != nil {
