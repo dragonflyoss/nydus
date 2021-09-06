@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
@@ -21,7 +22,10 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
 )
+
+const dataBaseDir = "db"
 
 func ensureExists(path string) error {
 	_, err := os.Stat(path)
@@ -39,8 +43,15 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 		_ = os.RemoveAll(snapshotRoot)
 	}()
 
+	databaseDir := path.Join("testdata", dataBaseDir)
+	db, err := store.NewDatabase(databaseDir)
+	assert.Nil(t, err)
+	// Close db to release database flock
+	defer db.Close()
+
 	mgr, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: "",
+		Database:         db,
 	})
 	require.Nil(t, err)
 
@@ -71,8 +82,13 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 	err = json.Unmarshal(content, &cfg)
 	require.Nil(t, err)
 
+	databaseDir := path.Join("testdata", dataBaseDir)
+	db, err := store.NewDatabase(databaseDir)
+	assert.Nil(t, err)
+
 	mgr, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: "",
+		Database:         db,
 	})
 	require.Nil(t, err)
 
@@ -86,6 +102,7 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 		vpcRegistry: false,
 	}
 	d, err := f.createNewDaemon("1", "example.com/test/testimage:0.1")
+	assert.Nil(t, err)
 	err = f.generateDaemonConfig(d, map[string]string{
 		label.ImagePullUsername: "mock",
 		label.ImagePullSecret:   "mock",
