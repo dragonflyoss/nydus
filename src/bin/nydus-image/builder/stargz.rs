@@ -24,9 +24,8 @@ use rafs::metadata::layout::v5::{
 use rafs::metadata::Inode;
 
 use crate::builder::Builder;
-use crate::core::blob::BlobCompInfo;
 use crate::core::bootstrap::Bootstrap;
-use crate::core::context::BuildContext;
+use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext};
 use crate::core::node::*;
 use crate::core::tree::Tree;
 
@@ -321,7 +320,7 @@ impl StargzIndexTreeBuilder {
         Ok(())
     }
 
-    fn build(&mut self, ctx: &BuildContext) -> Result<Tree> {
+    fn build(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
         // Parse stargz TOC index from a file
         let toc_index = parse_index(&ctx.source_path)?;
 
@@ -533,23 +532,30 @@ impl StargzBuilder {
         Self {}
     }
 
-    fn calculate_nodes(&mut self, ctx: &mut BuildContext) -> Result<(u64, u64)> {
-        let mut blob_cache_size = 0u64;
+    fn calculate_nodes(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_mgr: &mut BlobManager,
+    ) -> Result<()> {
+        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone())?;
+        let blob_index = blob_mgr.alloc_index()?;
+
+        let mut decompressed_blob_size = 0u64;
         let mut compressed_blob_size = 0u64;
 
         // Set blob index and inode digest for upper nodes
-        for node in &mut ctx.nodes {
+        for node in &mut bootstrap_ctx.nodes {
             if node.overlay.is_lower_layer() {
                 continue;
             }
 
             let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
 
-            let blob_index = ctx.blob_table.entries.len() as u32;
             for chunk in node.chunks.iter_mut() {
-                blob_cache_size += chunk.decompress_size as u64;
+                decompressed_blob_size += chunk.decompress_size as u64;
                 compressed_blob_size += chunk.compress_size as u64;
-                let chunk_index = ctx.blob_info_map.alloc_index(blob_index)?;
+                let chunk_index = blob_ctx.alloc_index()?;
                 (*chunk).index = chunk_index;
                 (*chunk).blob_index = blob_index;
                 inode_hasher.digest_update(chunk.block_id.as_ref());
@@ -566,41 +572,52 @@ impl StargzBuilder {
             node.inode.i_digest = digest;
         }
 
-        Ok((blob_cache_size, compressed_blob_size))
+        blob_ctx.decompressed_blob_size = decompressed_blob_size;
+        blob_ctx.compressed_blob_size = compressed_blob_size;
+        if blob_ctx.decompressed_blob_size > 0 {
+            blob_mgr.add(blob_ctx);
+        }
+
+        Ok(())
     }
 
     fn build_tree_from_index(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
         let mut tree_builder = StargzIndexTreeBuilder::new();
         tree_builder
-            .build(&ctx)
+            .build(ctx)
             .context("failed to build tree from stargz index")
     }
 }
 
 impl Builder for StargzBuilder {
-    fn build(&mut self, mut ctx: &mut BuildContext) -> Result<(Vec<String>, u64)> {
+    fn build(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_mgr: &mut BlobManager,
+    ) -> Result<(Vec<String>, u64)> {
         let mut bootstrap = Bootstrap::new()?;
 
         // Build tree from source
-        let mut tree = self.build_tree_from_index(&mut ctx)?;
+        let mut tree = self.build_tree_from_index(ctx)?;
 
         // Build bootstrap from source
-        if ctx.f_parent_bootstrap.is_some() {
-            bootstrap.build(&mut ctx, &mut tree);
+        if bootstrap_ctx.f_parent_bootstrap.is_some() {
+            bootstrap.build(ctx, bootstrap_ctx, &mut tree);
             // Apply to parent bootstrap for layered build
-            let mut tree = bootstrap.apply(&mut ctx, None)?;
-            timing_tracer!({ bootstrap.build(&mut ctx, &mut tree) }, "build_bootstrap");
+            let mut tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
+            timing_tracer!(
+                { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+                "build_bootstrap"
+            );
         } else {
-            bootstrap.build(&mut ctx, &mut tree);
+            bootstrap.build(ctx, bootstrap_ctx, &mut tree);
         }
 
         // Calculate node chunks and digest
-        let (blob_cache_size, compressed_blob_size) = self.calculate_nodes(&mut ctx)?;
-        let mut blob_comp_info = BlobCompInfo::new();
+        self.calculate_nodes(ctx, bootstrap_ctx, blob_mgr)?;
 
-        blob_comp_info.decompressed_blob_size = blob_cache_size;
-        blob_comp_info.compressed_blob_size = compressed_blob_size;
         // Dump bootstrap file
-        bootstrap.dump_rafsv5(&mut ctx, &mut blob_comp_info)
+        bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr)
     }
 }

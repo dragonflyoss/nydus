@@ -231,6 +231,8 @@ pub struct RafsBlobEntry {
     pub blob_index: u32,
     /// The expected decompress size of blob cache file.
     pub blob_cache_size: u64,
+    /// The compressed size of blob file.
+    pub compressed_blob_size: u64,
 }
 
 impl RafsBlobEntry {

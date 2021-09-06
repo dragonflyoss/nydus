@@ -89,9 +89,9 @@ impl Tree {
         }
     }
 
-    pub fn iterate<F>(&self, cb: &F) -> Result<()>
+    pub fn iterate<F>(&self, cb: &mut F) -> Result<()>
     where
-        F: Fn(&Node) -> bool,
+        F: FnMut(&Node) -> bool,
     {
         if !cb(&self.node) {
             return Ok(());

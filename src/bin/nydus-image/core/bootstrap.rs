@@ -2,12 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ffi::OsString;
 use std::mem::size_of;
 
 use anyhow::{Context, Result};
-use sha2::digest::Digest;
 
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use rafs::metadata::layout::v5::{
@@ -16,8 +16,7 @@ use rafs::metadata::layout::v5::{
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
-use crate::core::blob::BlobCompInfo;
-use crate::core::context::{BuildContext, SourceType};
+use crate::core::context::{BlobManager, BootstrapContext, BuildContext, SourceType};
 use crate::core::node::*;
 use crate::core::prefetch::PrefetchPolicy;
 use crate::core::tree::Tree;
@@ -34,12 +33,18 @@ impl Bootstrap {
 
     /// Traverse node tree, set inode index, ino, child_index and
     /// child_count etc according to RAFS format, then store to nodes collection.
-    fn build_rafs(&mut self, ctx: &mut BuildContext, tree: &mut Tree, nodes: &mut Vec<Node>) {
+    fn build_rafs(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        tree: &mut Tree,
+        nodes: &mut Vec<Node>,
+    ) {
         // FIX: Insert parent inode to inode map to keep correct inodes count in superblock.
         let inode_map = if tree.node.overlay.is_lower_layer() {
-            &mut ctx.lower_inode_map
+            &mut bootstrap_ctx.lower_inode_map
         } else {
-            &mut ctx.upper_inode_map
+            &mut bootstrap_ctx.upper_inode_map
         };
         inode_map.insert((tree.node.real_ino, tree.node.dev), vec![tree.node.index]);
 
@@ -68,9 +73,9 @@ impl Bootstrap {
             // because the real_ino may be conflicted between different layers,
             // so we need to find hardlink node index list in the layer where the node is located.
             let inode_map = if child.node.overlay.is_lower_layer() {
-                &mut ctx.lower_inode_map
+                &mut bootstrap_ctx.lower_inode_map
             } else {
-                &mut ctx.upper_inode_map
+                &mut bootstrap_ctx.upper_inode_map
             };
             if let Some(indexes) = inode_map.get_mut(&(child.node.real_ino, child.node.dev)) {
                 let nlink = indexes.len() as u32 + 1;
@@ -96,7 +101,7 @@ impl Bootstrap {
             // Put the whiteout file of upper layer in the front of node list for layered build,
             // so that it can be applied to the node tree of lower layer first than other files of upper layer.
             match (
-                &ctx.f_parent_bootstrap,
+                &bootstrap_ctx.f_parent_bootstrap,
                 child.node.whiteout_type(ctx.whiteout_spec),
             ) {
                 (Some(_), Some(whiteout_type)) => {
@@ -142,13 +147,18 @@ impl Bootstrap {
         }
 
         for dir in dirs {
-            self.build_rafs(ctx, dir, nodes);
+            self.build_rafs(ctx, bootstrap_ctx, dir, nodes);
         }
     }
 
     /// Calculate inode digest
-    fn digest_node(&self, ctx: &mut BuildContext, index: usize) {
-        let node = &ctx.nodes[index];
+    fn digest_node(
+        &self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        index: usize,
+    ) {
+        let node = &bootstrap_ctx.nodes[index];
 
         // We have set digest for non-directory inode in the previous dump_blob workflow.
         if node.is_dir() {
@@ -157,22 +167,27 @@ impl Bootstrap {
             let mut inode_hasher = RafsDigest::hasher(ctx.digester);
 
             for idx in child_index..child_index + child_count {
-                let child = &ctx.nodes[(idx - 1) as usize];
+                let child = &bootstrap_ctx.nodes[(idx - 1) as usize];
                 inode_hasher.digest_update(child.inode.i_digest.as_ref());
             }
 
-            ctx.nodes[index].inode.i_digest = inode_hasher.digest_finalize();
+            bootstrap_ctx.nodes[index].inode.i_digest = inode_hasher.digest_finalize();
         }
     }
 
-    fn load_parent_bootstrap(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
+    fn load_parent_bootstrap(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_mgr: &mut BlobManager,
+    ) -> Result<Tree> {
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
             validate_digest: true,
             ..Default::default()
         };
 
-        rs.load(ctx.f_parent_bootstrap.as_mut().unwrap())
+        rs.load(bootstrap_ctx.f_parent_bootstrap.as_mut().unwrap())
             .context("failed to load superblock from bootstrap")?;
 
         let lower_compressor = rs.meta.get_compressor();
@@ -186,16 +201,24 @@ impl Bootstrap {
 
         // Reuse lower layer blob table,
         // we need to append the blob entry of upper layer to the table
-        ctx.blob_table = rs.superblock.get_blob_table().as_ref().clone();
+        blob_mgr.from_blob_table(rs.superblock.get_blob_table().as_ref());
+        let mut chunk_cache = HashMap::new();
 
         // Build node tree of lower layer from a bootstrap file, drop by to add
         // chunks of lower node to chunk_cache for chunk deduplication on next.
-        Tree::from_bootstrap(&rs, Some(&mut ctx.chunk_cache))
-            .context("failed to build tree from bootstrap")
+        let tree = Tree::from_bootstrap(&rs, Some(&mut chunk_cache))
+            .context("failed to build tree from bootstrap")?;
+
+        Ok(tree)
     }
 
     /// Build an in-memory tree, representing the source file system.
-    pub fn build(&mut self, ctx: &mut BuildContext, tree: &mut Tree) {
+    pub fn build(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        tree: &mut Tree,
+    ) {
         let index = RAFS_ROOT_INODE;
 
         tree.node.index = index;
@@ -205,23 +228,29 @@ impl Bootstrap {
         ctx.prefetch.insert_if_need(&tree.node);
 
         let mut nodes = vec![tree.node.clone()];
-        self.build_rafs(ctx, tree, &mut nodes);
-        ctx.nodes = nodes;
+        self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes);
+        bootstrap_ctx.nodes = nodes;
     }
 
     /// Apply the diff tree (upper layer) to the base tree (lower layer).
     ///
     /// If `tree` is none, the base tree will be loaded from the parent bootstrap.
-    pub fn apply(&mut self, ctx: &mut BuildContext, tree: Option<Tree>) -> Result<Tree> {
+    pub fn apply(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_mgr: &mut BlobManager,
+        tree: Option<Tree>,
+    ) -> Result<Tree> {
         let mut tree = match tree {
             Some(v) => v,
-            None => self.load_parent_bootstrap(ctx)?,
+            None => self.load_parent_bootstrap(ctx, bootstrap_ctx, blob_mgr)?,
         };
 
         // Apply new node (upper layer) to node tree (lower layer)
         timing_tracer!(
             {
-                for node in &ctx.nodes {
+                for node in &bootstrap_ctx.nodes {
                     tree.apply(&node, true, ctx.whiteout_spec)
                         .context("failed to apply tree")?;
                 }
@@ -232,8 +261,8 @@ impl Bootstrap {
         )?;
 
         // Clear all cached states for next upper layer build.
-        ctx.lower_inode_map.clear();
-        ctx.upper_inode_map.clear();
+        bootstrap_ctx.lower_inode_map.clear();
+        bootstrap_ctx.upper_inode_map.clear();
         ctx.prefetch.clear();
 
         Ok(tree)
@@ -242,40 +271,32 @@ impl Bootstrap {
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
     pub fn dump_rafsv5(
         &mut self,
-        mut ctx: &mut BuildContext,
-        blob_comp_info: &mut BlobCompInfo,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
-        // Name blob id by blob hash if not specified.
-        if ctx.blob_id.is_empty() {
-            ctx.blob_id = format!("{:x}", blob_comp_info.blob_hash.clone().finalize());
-        }
+        let blob_ctx = blob_mgr.current();
 
-        if blob_comp_info.blob_size > 0
-            || (ctx.source_type == SourceType::StargzIndex && !ctx.blob_id.is_empty())
-        {
-            if ctx.prefetch.policy != PrefetchPolicy::Blob {
-                blob_comp_info.blob_readahead_size = 0;
+        let blob_size = if let Some(blob_ctx) = blob_ctx {
+            if (blob_ctx.compressed_blob_size > 0
+                || (ctx.source_type == SourceType::StargzIndex && !blob_ctx.blob_id.is_empty()))
+                && ctx.prefetch.policy != PrefetchPolicy::Blob
+            {
+                blob_ctx.blob_readahead_size = 0;
             }
-            // Add new blob to blob table
-            let blob_index = u32::try_from(ctx.blob_table.entries.len())?;
-            ctx.blob_table.add(
-                ctx.blob_id.clone(),
-                0,
-                u32::try_from(blob_comp_info.blob_readahead_size)?,
-                ctx.blob_info_map.count(blob_index).unwrap_or(0),
-                blob_comp_info.decompressed_blob_size,
-                blob_comp_info.compressed_blob_size,
-            );
-        }
+            blob_ctx.compressed_blob_size
+        } else {
+            0
+        };
 
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
-        for idx in (0..ctx.nodes.len()).rev() {
-            self.digest_node(&mut ctx, idx);
+        for idx in (0..bootstrap_ctx.nodes.len()).rev() {
+            self.digest_node(ctx, bootstrap_ctx, idx);
         }
 
         // Set inode table
         let super_block_size = size_of::<RafsV5SuperBlock>();
-        let inode_table_entries = ctx.nodes.len() as u32;
+        let inode_table_entries = bootstrap_ctx.nodes.len() as u32;
         let mut inode_table = RafsV5InodeTable::new(inode_table_entries as usize);
         let inode_table_size = inode_table.size();
 
@@ -288,16 +309,18 @@ impl Bootstrap {
             };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
+        let blob_table = blob_mgr.to_blob_table()?;
         let prefetch_table_offset = super_block_size + inode_table_size;
         let blob_table_offset = prefetch_table_offset + prefetch_table_size;
-        let blob_table_size = ctx.blob_table.size();
+        let blob_table_size = blob_table.size();
         let extended_blob_table_offset = blob_table_offset + blob_table_size;
-        let extended_blob_table_size = ctx.blob_table.extended.size();
-        let extended_blob_table_entries = ctx.blob_table.extended.entries();
+        let extended_blob_table_size = blob_table.extended.size();
+        let extended_blob_table_entries = blob_table.extended.entries();
 
         // Set super block
         let mut super_block = RafsV5SuperBlock::new();
-        let inodes_count = (ctx.lower_inode_map.len() + ctx.upper_inode_map.len()) as u64;
+        let inodes_count =
+            (bootstrap_ctx.lower_inode_map.len() + bootstrap_ctx.upper_inode_map.len()) as u64;
         super_block.set_inodes_count(inodes_count);
         super_block.set_inode_table_offset(super_block_size as u64);
         super_block.set_inode_table_entries(inode_table_entries);
@@ -324,7 +347,7 @@ impl Bootstrap {
             + extended_blob_table_size) as u32;
 
         let mut has_xattr = false;
-        for node in &mut ctx.nodes {
+        for node in &mut bootstrap_ctx.nodes {
             inode_table.set(node.index, inode_offset)?;
             // Add inode size
             inode_offset += node.inode.size() as u32;
@@ -347,35 +370,35 @@ impl Bootstrap {
 
         // Dump super block
         super_block
-            .store(&mut ctx.f_bootstrap)
+            .store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store superblock")?;
 
         // Dump inode table
         inode_table
-            .store(&mut ctx.f_bootstrap)
+            .store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store inode table")?;
 
         // Dump prefetch table
         if let Some(mut prefetch_table) = ctx.prefetch.get_rafsv5_prefetch_table() {
             prefetch_table
-                .store(&mut ctx.f_bootstrap)
+                .store(&mut bootstrap_ctx.f_bootstrap)
                 .context("failed to store prefetch table")?;
         }
 
         // Dump blob table
-        ctx.blob_table
-            .store(&mut ctx.f_bootstrap)
+        blob_table
+            .store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store blob table")?;
 
         // Dump extended blob table
-        ctx.blob_table
-            .store_extended(&mut ctx.f_bootstrap)
+        blob_table
+            .store_extended(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store extended blob table")?;
 
         // Dump inodes and chunks
         timing_tracer!(
             {
-                for node in &mut ctx.nodes {
+                for node in &mut bootstrap_ctx.nodes {
                     if ctx.source_type == SourceType::StargzIndex {
                         debug!("[{}]\t{}", node.overlay, node);
                         if log::max_level() >= log::LevelFilter::Debug {
@@ -384,7 +407,7 @@ impl Bootstrap {
                             }
                         }
                     }
-                    node.dump_bootstrap_v5(&mut ctx.f_bootstrap)
+                    node.dump_bootstrap_v5(&mut bootstrap_ctx.f_bootstrap)
                         .context("failed to dump bootstrap")?;
                 }
 
@@ -395,15 +418,14 @@ impl Bootstrap {
         )?;
 
         // Flush remaining data in BufWriter to file
-        ctx.f_bootstrap.flush()?;
+        bootstrap_ctx.f_bootstrap.flush()?;
 
-        let blob_ids: Vec<String> = ctx
-            .blob_table
+        let blob_ids: Vec<String> = blob_table
             .entries
             .iter()
             .map(|entry| entry.blob_id.clone())
             .collect();
 
-        Ok((blob_ids, blob_comp_info.blob_size))
+        Ok((blob_ids, blob_size))
     }
 }

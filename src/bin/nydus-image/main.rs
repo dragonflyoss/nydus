@@ -40,10 +40,9 @@ use crate::builder::directory::DirectoryBuilder;
 use crate::builder::stargz::StargzBuilder;
 use crate::builder::Builder;
 
-use crate::core::blob::BlobStorage;
-use crate::core::context::BuildContext;
-use crate::core::context::SourceType;
-use crate::core::context::BUF_WRITER_CAPACITY;
+use crate::core::context::{
+    BlobManager, BlobStorage, BootstrapContext, BuildContext, SourceType, BUF_WRITER_CAPACITY,
+};
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
@@ -294,9 +293,6 @@ fn main() -> Result<()> {
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
 
-        let source_file = metadata(&source_path)
-            .context(format!("failed to get source path {:?}", source_path))?;
-
         let mut blob_id = String::new();
         if let Some(p_blob_id) = matches.value_of("blob-id") {
             blob_id = String::from(p_blob_id);
@@ -311,14 +307,30 @@ fn main() -> Result<()> {
 
         match source_type {
             SourceType::Directory => {
+                let source_file = metadata(&source_path)
+                    .context(format!("failed to get source path {:?}", source_path))?;
                 if !source_file.is_dir() {
                     bail!("source {:?} must be a directory", source_path);
                 }
             }
             SourceType::StargzIndex => {
+                let source_file = metadata(&source_path)
+                    .context(format!("failed to get source path {:?}", source_path))?;
                 if !source_file.is_file() {
                     bail!("source {:?} must be a JSON file", source_path);
                 }
+            }
+        }
+
+        match source_type {
+            SourceType::Directory => {
+                let source_file = metadata(&source_path)
+                    .context(format!("failed to get source path {:?}", source_path))?;
+                if !source_file.is_dir() {
+                    bail!("source {:?} must be a directory", source_path);
+                }
+            }
+            SourceType::StargzIndex => {
                 if blob_id.trim() == "" {
                     bail!("blob-id can't be empty");
                 }
@@ -418,22 +430,32 @@ fn main() -> Result<()> {
             None
         };
 
-        let mut ctx = BuildContext::new(blob_id, source_type, source_path, prefetch, f_bootstrap);
-        ctx.aligned_chunk = aligned_chunk;
-        ctx.compressor = compressor;
-        ctx.digester = digester;
-        ctx.explicit_uidgid = !repeatable;
-        ctx.whiteout_spec = whiteout_spec;
-        ctx.f_parent_bootstrap = f_parent_bootstrap;
+        let mut build_ctx = BuildContext::new(
+            blob_id,
+            aligned_chunk,
+            compressor,
+            digester,
+            !repeatable,
+            whiteout_spec,
+            source_type,
+            source_path,
+            prefetch,
+            blob_stor,
+        );
+
+        let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, f_parent_bootstrap);
+        let mut blob_mgr = BlobManager::new();
 
         let mut builder: Box<dyn Builder> = match source_type {
-            SourceType::Directory => {
-                Box::new(DirectoryBuilder::new(blob_stor.as_ref().unwrap().clone()))
-            }
+            SourceType::Directory => Box::new(DirectoryBuilder::new()),
             SourceType::StargzIndex => Box::new(StargzBuilder::new()),
         };
         let (blob_ids, blob_size) = timing_tracer!(
-            { builder.build(&mut ctx).context("build failed") },
+            {
+                builder
+                    .build(&mut build_ctx, &mut bootstrap_ctx, &mut blob_mgr)
+                    .context("build failed")
+            },
             "total_build"
         )?;
 

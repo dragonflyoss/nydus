@@ -30,8 +30,7 @@ use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
 use rafs::RafsIoWriter;
 use storage::compress;
 
-use crate::core::blob::{BlobBufferWriter, BlobCompInfo};
-use crate::core::context::BuildContext;
+use crate::core::context::{BlobContext, BuildContext};
 
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
@@ -86,6 +85,12 @@ pub enum WhiteoutSpec {
     Oci,
     /// "whiteouts and opaque directories" in https://www.kernel.org/doc/Documentation/filesystems/overlayfs.txt
     Overlayfs,
+}
+
+impl Default for WhiteoutSpec {
+    fn default() -> Self {
+        Self::Oci
+    }
 }
 
 impl FromStr for WhiteoutSpec {
@@ -226,43 +231,41 @@ impl Node {
     }
 
     pub fn dump_blob(
-        index: usize,
-        ctx: &mut BuildContext,
-        blob_writer: &mut BlobBufferWriter,
-        comp_info: &mut BlobCompInfo,
+        self: &mut Node,
+        ctx: &BuildContext,
+        blob_ctx: &mut BlobContext,
+        blob_index: u32,
     ) -> Result<u64> {
-        let node = &mut ctx.nodes[index];
-
-        if node.is_dir() {
+        if self.is_dir() {
             return Ok(0);
-        } else if node.is_symlink() {
-            node.inode.i_digest =
-                RafsDigest::from_buf(node.symlink.as_ref().unwrap().as_bytes(), ctx.digester);
+        } else if self.is_symlink() {
+            self.inode.i_digest =
+                RafsDigest::from_buf(self.symlink.as_ref().unwrap().as_bytes(), ctx.digester);
             return Ok(0);
-        } else if node.is_special() {
-            node.inode.i_digest = RafsDigest::hasher(ctx.digester).digest_finalize();
+        } else if self.is_special() {
+            self.inode.i_digest = RafsDigest::hasher(ctx.digester).digest_finalize();
             return Ok(0);
         }
 
         let mut blob_size = 0u64;
         let mut inode_hasher = RafsDigest::hasher(ctx.digester);
-        let mut file = File::open(&node.path)
-            .with_context(|| format!("failed to open node file {:?}", node.path))?;
+        let mut file = File::open(&self.path)
+            .with_context(|| format!("failed to open node file {:?}", self.path))?;
 
-        for i in 0..node.inode.i_child_count {
+        for i in 0..self.inode.i_child_count {
             // FIXME: Should not assume that block size must be the default one.
             // Use the configured value instead!
             let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
-            let chunk_size = if i == node.inode.i_child_count - 1 {
-                node.inode.i_size - (RAFS_DEFAULT_BLOCK_SIZE * i as u64)
+            let chunk_size = if i == self.inode.i_child_count - 1 {
+                self.inode.i_size - (RAFS_DEFAULT_BLOCK_SIZE * i as u64)
             } else {
                 RAFS_DEFAULT_BLOCK_SIZE
             };
             let mut chunk = RafsV5ChunkInfo::new();
 
-            let mut chunk_data = &mut ctx.chunk_data_buf[0..chunk_size as usize];
+            let mut chunk_data = &mut blob_ctx.chunk_data_buf[0..chunk_size as usize];
             file.read_exact(&mut chunk_data)
-                .with_context(|| format!("failed to read node file {:?}", node.path))?;
+                .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
             // Calculate chunk digest
             // TODO: check for hole chunks. One possible way is to always save
@@ -272,7 +275,7 @@ impl Node {
             inode_hasher.digest_update(chunk.block_id.as_ref());
 
             // Check whether we already have the same chunk data by matching chunk digest.
-            if let Some(cached_chunk) = ctx.chunk_cache.get(&chunk.block_id) {
+            if let Some(cached_chunk) = blob_ctx.chunk_cache.get(&chunk.block_id) {
                 // TODO: we should also compare the actual data to avoid chunk digest confliction.
                 // hole cached_chunk can have zero decompress size
                 if cached_chunk.decompress_size == 0
@@ -280,7 +283,7 @@ impl Node {
                 {
                     chunk.clone_from(&cached_chunk);
                     chunk.file_offset = file_offset;
-                    node.chunks.push(chunk);
+                    self.chunks.push(chunk);
                     trace!(
                         "\t\tbuilding duplicated chunk: {} compressor {}",
                         chunk,
@@ -289,12 +292,10 @@ impl Node {
 
                     // The chunks of hardlink should be always deduplicated, so don't
                     // trace this situation here.
-                    if !node.is_hardlink() {
+                    if !self.is_hardlink() {
                         event_tracer!("dedup_decompressed_size", +chunk_size);
                         event_tracer!("dedup_chunks", +1);
                     }
-
-                    ctx.blob_info_map.inc_ref_count(chunk.blob_index);
 
                     continue;
                 }
@@ -302,19 +303,8 @@ impl Node {
 
             // Compress chunk data
             let (compressed, is_compressed) = compress::compress(&chunk_data, ctx.compressor)
-                .with_context(|| format!("failed to compress node file {:?}", node.path))?;
+                .with_context(|| format!("failed to compress node file {:?}", self.path))?;
             let compressed_size = compressed.len();
-            if is_compressed {
-                chunk.flags |= RafsChunkFlags::COMPRESSED;
-            }
-
-            chunk.blob_index = ctx.blob_index;
-            chunk.file_offset = file_offset;
-            chunk.compress_offset = comp_info.compress_offset;
-            chunk.decompress_offset = comp_info.decompress_offset;
-            chunk.compress_size = compressed_size as u32;
-            chunk.decompress_size = chunk_size as u32;
-            chunk.index = ctx.blob_info_map.alloc_index(ctx.blob_index)?;
             blob_size += compressed_size as u64;
 
             // Move cursor to offset of next chunk
@@ -325,22 +315,36 @@ impl Node {
             } else {
                 chunk_size
             };
-            comp_info.compress_offset += compressed_size as u64;
-            comp_info.decompressed_blob_size = comp_info.decompress_offset + chunk_size;
-            comp_info.compressed_blob_size += compressed_size as u64;
-            comp_info.decompress_offset += aligned_chunk_size;
-            comp_info.blob_hash.update(&compressed);
+            chunk.compress_offset = blob_ctx.compress_offset;
+            chunk.decompress_offset = blob_ctx.decompress_offset;
+
+            blob_ctx.compress_offset += compressed_size as u64;
+            blob_ctx.decompressed_blob_size = blob_ctx.decompress_offset + chunk_size;
+            blob_ctx.compressed_blob_size += compressed_size as u64;
+            blob_ctx.decompress_offset += aligned_chunk_size;
+            blob_ctx.blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
             event_tracer!("blob_decompressed_size", +chunk_size);
             event_tracer!("blob_compressed_size", +compressed_size);
-            blob_writer
-                .write_all(&compressed)
-                .context("failed to write blob")?;
+            if let Some(writer) = &mut blob_ctx.writer {
+                writer
+                    .write_all(&compressed)
+                    .context("failed to write blob")?;
+            }
+
+            if is_compressed {
+                chunk.flags |= RafsChunkFlags::COMPRESSED;
+            }
+            chunk.blob_index = blob_index;
+            chunk.file_offset = file_offset;
+            chunk.compress_size = compressed_size as u32;
+            chunk.decompress_size = chunk_size as u32;
+            chunk.index = blob_ctx.alloc_index()?;
 
             // Cache chunk digest info
-            ctx.chunk_cache.insert(chunk.block_id, chunk);
-            node.chunks.push(chunk);
+            blob_ctx.chunk_cache.insert(chunk.block_id, chunk);
+            self.chunks.push(chunk);
 
             trace!(
                 "\t\tbuilding chunk: {} compressor {}",
@@ -350,7 +354,7 @@ impl Node {
         }
 
         // Finish inode digest calculation
-        node.inode.i_digest = inode_hasher.digest_finalize();
+        self.inode.i_digest = inode_hasher.digest_finalize();
 
         Ok(blob_size)
     }

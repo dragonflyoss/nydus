@@ -25,6 +25,12 @@ pub enum PrefetchPolicy {
     Blob,
 }
 
+impl Default for PrefetchPolicy {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 impl FromStr for PrefetchPolicy {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
@@ -78,6 +84,7 @@ fn gather_readahead_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     Ok(files)
 }
 
+#[derive(Default, Clone)]
 pub struct Prefetch {
     pub policy: PrefetchPolicy,
 
@@ -138,7 +145,7 @@ impl Prefetch {
         }
     }
 
-    pub fn contains(&mut self, node: &Node) -> bool {
+    pub fn contains(&self, node: &Node) -> bool {
         self.readahead_files.contains_key(node.target())
     }
 

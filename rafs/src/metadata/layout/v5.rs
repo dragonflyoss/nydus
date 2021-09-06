@@ -462,6 +462,7 @@ impl RafsV5BlobTable {
             blob_id,
             blob_index,
             blob_cache_size,
+            compressed_blob_size,
         }));
         self.extended
             .add(chunk_count, blob_cache_size, compressed_blob_size);
@@ -520,23 +521,25 @@ impl RafsV5BlobTable {
             let index = self.entries.len();
 
             // For compatibility concern, blob table might not associate with extended blob table.
-            let (chunk_count, blob_cache_size) = if !self.extended.entries.is_empty() {
-                // chge: Though below can hardly happen and we can do nothing meeting
-                // this possibly due to bootstrap corruption, someone like this kind of check, make them happy.
-                if index > self.extended.entries.len() - 1 {
-                    error!(
-                        "Extended blob table({}) is shorter than blob table",
-                        self.extended.entries.len()
-                    );
-                    return Err(einval!());
-                }
-                (
-                    self.extended.entries[index].chunk_count,
-                    self.extended.entries[index].blob_cache_size,
-                )
-            } else {
-                (0, 0)
-            };
+            let (chunk_count, blob_cache_size, compressed_blob_size) =
+                if !self.extended.entries.is_empty() {
+                    // chge: Though below can hardly happen and we can do nothing meeting
+                    // this possibly due to bootstrap corruption, someone like this kind of check, make them happy.
+                    if index > self.extended.entries.len() - 1 {
+                        error!(
+                            "Extended blob table({}) is shorter than blob table",
+                            self.extended.entries.len()
+                        );
+                        return Err(einval!());
+                    }
+                    (
+                        self.extended.entries[index].chunk_count,
+                        self.extended.entries[index].blob_cache_size,
+                        self.extended.entries[index].compressed_blob_size,
+                    )
+                } else {
+                    (0, 0, 0)
+                };
 
             self.entries.push(Arc::new(RafsBlobEntry {
                 blob_id: blob_id.to_owned(),
@@ -545,6 +548,7 @@ impl RafsV5BlobTable {
                 readahead_offset,
                 readahead_size,
                 blob_cache_size,
+                compressed_blob_size,
             }));
 
             if rafsv5_align(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
@@ -1463,6 +1467,7 @@ pub mod tests {
                     blob_id: String::from("blobid"),
                     blob_index: 0,
                     blob_cache_size: 0,
+                    compressed_blob_size: 0,
                 }),
             );
             assert_eq!(*result, res);

@@ -7,8 +7,13 @@ pub mod stargz;
 
 use anyhow::Result;
 
-use crate::core::context::BuildContext;
+use crate::core::context::{BlobManager, BootstrapContext, BuildContext};
 
 pub trait Builder {
-    fn build(&mut self, ctx: &mut BuildContext) -> Result<(Vec<String>, u64)>;
+    fn build(
+        &mut self,
+        build_ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_mgr: &mut BlobManager,
+    ) -> Result<(Vec<String>, u64)>;
 }
