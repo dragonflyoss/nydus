@@ -109,6 +109,5 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 	})
 	require.Nil(t, err)
 	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "config", d.ID, "config.json")))
-	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "cache")))
 	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "socket", d.ID)))
 }
