@@ -24,9 +24,11 @@ use rafs::{RafsIoReader, RafsIoWriter};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
 
+use crate::core::chunk_dict::ChunkDict;
 use crate::core::layout::BlobLayout;
 use crate::core::node::*;
 use crate::core::prefetch::Prefetch;
+use std::sync::Arc;
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
@@ -183,6 +185,8 @@ pub struct BlobContext {
     pub chunk_data_buf: Vec<u8>,
     /// Store all chunk digest for chunk deduplicate during build.
     pub chunk_cache: HashMap<RafsDigest, RafsV5ChunkInfo>,
+    /// ChunkDict which would be loaded when builder start
+    pub chunk_dict: Option<Arc<dyn ChunkDict>>,
 
     // Blob writer for writing to disk file.
     pub writer: Option<BlobBufferWriter>,
@@ -202,8 +206,13 @@ impl BlobContext {
             blob_layout: BlobLayout::new(),
             chunk_data_buf: vec![0u8; RAFS_MAX_BLOCK_SIZE as usize],
             chunk_cache: HashMap::new(),
+            chunk_dict: None,
             writer,
         }
+    }
+
+    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
+        self.chunk_dict = Some(dict);
     }
 
     pub fn new(blob_id: String, blob_stor: Option<BlobStorage>) -> Result<Self> {
@@ -245,11 +254,23 @@ impl BlobContext {
 /// the vector index will be as the blob index.
 pub struct BlobManager {
     blobs: Vec<BlobContext>,
+    chunk_dict: Option<Arc<dyn ChunkDict>>,
 }
 
 impl BlobManager {
     pub fn new() -> Self {
-        Self { blobs: Vec::new() }
+        Self {
+            blobs: Vec::new(),
+            chunk_dict: None,
+        }
+    }
+
+    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
+        self.chunk_dict = Some(dict)
+    }
+
+    pub fn get_chunk_dict(&self) -> Option<Arc<dyn ChunkDict>> {
+        self.chunk_dict.clone()
     }
 
     /// Get blob context for current layer
@@ -354,7 +375,6 @@ pub struct BuildContext {
     /// - StargzIndex: `source_path` should be a stargz index json file path
     /// - Diff: `source_path` should be a directory path sets
     pub source_path: PathBuf,
-
     /// Track file/chunk prefetch state.
     pub prefetch: Prefetch,
 
@@ -381,7 +401,6 @@ impl BuildContext {
     ) -> Self {
         BuildContext {
             blob_id,
-
             aligned_chunk,
             compressor,
             digester,

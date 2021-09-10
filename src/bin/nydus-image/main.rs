@@ -47,6 +47,7 @@ use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
+use crate::core::chunk_dict::import_chunk_dict;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
 use rafs::RafsIoReader;
@@ -224,6 +225,12 @@ fn main() -> Result<()> {
                     Arg::with_name("backend-config")
                         .long("backend-config")
                         .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("chunk_dict")
+                        .long("chunk_dict")
+                        .help("specify a chunk dictionary file in bootstrap/db format for chunk deduplication.")
                         .takes_value(true)
                 )
         )
@@ -445,6 +452,13 @@ fn main() -> Result<()> {
 
         let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, f_parent_bootstrap);
         let mut blob_mgr = BlobManager::new();
+
+        if let Some(chunk_dict_arg) = matches.value_of("chunk_dict") {
+            blob_mgr.set_chunk_dict(timing_tracer!(
+                { import_chunk_dict(chunk_dict_arg) },
+                "import_chunk_dict"
+            )?);
+        }
 
         let mut builder: Box<dyn Builder> = match source_type {
             SourceType::Directory => Box::new(DirectoryBuilder::new()),

@@ -274,8 +274,21 @@ impl Node {
             // Calculate inode digest
             inode_hasher.digest_update(chunk.block_id.as_ref());
 
+            let exist_chunk = {
+                if let Some(chunk_dict) = blob_ctx.chunk_dict.as_ref() {
+                    if let Some(c) = chunk_dict.get_chunk(&chunk.block_id) {
+                        Some(c)
+                    } else {
+                        blob_ctx.chunk_cache.get(&chunk.block_id)
+                    }
+                } else {
+                    // get from build chunk cache
+                    blob_ctx.chunk_cache.get(&chunk.block_id)
+                }
+            };
+
             // Check whether we already have the same chunk data by matching chunk digest.
-            if let Some(cached_chunk) = blob_ctx.chunk_cache.get(&chunk.block_id) {
+            if let Some(cached_chunk) = exist_chunk {
                 // TODO: we should also compare the actual data to avoid chunk digest confliction.
                 // hole cached_chunk can have zero decompress size
                 if cached_chunk.decompress_size == 0

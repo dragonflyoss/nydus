@@ -130,6 +130,9 @@ impl Builder for DirectoryBuilder {
 
         // Dump blob file
         let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone())?;
+        if let Some(dict) = blob_mgr.get_chunk_dict() {
+            blob_ctx.set_chunk_dict(dict);
+        }
         let blob_index = blob_mgr.alloc_index()?;
         timing_tracer!(
             { blob.dump(ctx, &mut blob_ctx, blob_index, &mut bootstrap_ctx.nodes) },
