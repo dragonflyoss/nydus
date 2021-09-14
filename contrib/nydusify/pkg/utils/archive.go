@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/opencontainers/go-digest"
@@ -136,7 +138,11 @@ func UnpackTargz(ctx context.Context, dst string, r io.Reader) error {
 	}
 	defer ds.Close()
 
-	if err := os.MkdirAll(dst, 0770); err != nil {
+	// Guarantee that umask won't affect file/directory creation
+	mask := unix.Umask(0)
+	defer unix.Umask(mask)
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err
 	}
 
