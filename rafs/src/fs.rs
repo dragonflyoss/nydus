@@ -566,8 +566,16 @@ impl FileSystem for Rafs {
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
-        let attr = self.get_inode_attr(ino).map(|r| {
+
+        let attr = self.get_inode_attr(ino).map(|mut r| {
             recorder.mark_success(0);
+            // Only touch permissions bits. This trick is some sort of workaround
+            // since nydusify gives root directory permission of 0o750 and fuse mount
+            // options `rootmode=` does not affect root directory's permission bits, ending
+            // up with preventing other users from accessing the container rootfs.
+            if ino == ROOT_ID {
+                r.mode = r.mode & !0o777 | 0o755;
+            }
             r
         })?;
         Ok((attr.into(), self.sb.meta.attr_timeout))
