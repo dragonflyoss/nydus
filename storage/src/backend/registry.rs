@@ -626,8 +626,8 @@ impl Registry {
 }
 
 impl BlobBackend for Registry {
-    fn release(&self) {
-        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e))
+    fn shutdown(&self) {
+        self.connection.shutdown();
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -658,6 +658,12 @@ impl BlobBackend for Registry {
         Err(BackendError::Unsupported(
             "Registry backend does not support prefetch as per on-disk blob entries".to_string(),
         ))
+    }
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
     }
 }
 

@@ -9,8 +9,9 @@ use std::mem::{size_of, ManuallyDrop};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::{thread, time};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::thread;
+use std::time::Duration;
 
 use nix::sys::uio;
 use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
@@ -72,6 +73,7 @@ struct LocalFsEntry {
     metrics: Arc<BackendMetrics>,
     trace: Arc<LocalFsTracer>,
     trace_sec: u32,
+    trace_condvar: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl BlobReader for LocalFsEntry {
@@ -154,6 +156,8 @@ impl BlobReader for LocalFsEntry {
         {
             let tracer = self.trace.clone();
             let trace_sec = self.trace_sec;
+            let trace_to = Duration::from_secs(trace_sec as u64);
+            let trace_cond = self.trace_condvar.clone();
 
             tracer.active.store(true, Ordering::Release);
 
@@ -161,7 +165,10 @@ impl BlobReader for LocalFsEntry {
             let _ = thread::Builder::new()
                 .name("nydus-localfs-access-recorder".to_string())
                 .spawn(move || {
-                    thread::sleep(time::Duration::from_secs(trace_sec as u64));
+                    let guard = trace_cond.0.lock().unwrap();
+                    if !*guard {
+                        let _ = trace_cond.1.wait_timeout(guard, trace_to);
+                    }
                     LocalFsTracer::flush(log_file, log_path, tracer);
                 });
         }
@@ -189,7 +196,7 @@ pub struct LocalFs {
     // Metrics collector.
     metrics: Arc<BackendMetrics>,
     // Hashmap to map blob id to blob file.
-    entries: RwLock<HashMap<String, Arc<dyn BlobReader>>>,
+    entries: RwLock<HashMap<String, Arc<LocalFsEntry>>>,
 }
 
 impl LocalFs {
@@ -239,13 +246,14 @@ impl LocalFs {
         if let Some(entry) = table_guard.get(blob_id) {
             Ok(entry.clone())
         } else {
-            let entry: Arc<dyn BlobReader> = Arc::new(LocalFsEntry {
+            let entry = Arc::new(LocalFsEntry {
                 id: blob_id.to_owned(),
                 path: blob_file_path,
                 file,
                 metrics: self.metrics.clone(),
                 trace: Arc::new(LocalFsTracer::new()),
                 trace_sec: self.readahead_sec,
+                trace_condvar: Arc::new((Mutex::new(false), Condvar::new())),
             });
             table_guard.insert(blob_id.to_string(), entry.clone());
             Ok(entry)
@@ -254,9 +262,10 @@ impl LocalFs {
 }
 
 impl BlobBackend for LocalFs {
-    fn release(&self) {
-        if let Err(e) = self.metrics().release() {
-            error!("{:?}", e);
+    fn shutdown(&self) {
+        for entry in self.entries.read().unwrap().values() {
+            *entry.trace_condvar.0.lock().unwrap() = true;
+            entry.trace_condvar.1.notify_all();
         }
     }
 
@@ -294,6 +303,12 @@ impl BlobBackend for LocalFs {
 
         self.get_reader(blob_id)?
             .prefetch_blob_data_range(ra_offset, ra_size)
+    }
+}
+
+impl Drop for LocalFs {
+    fn drop(&mut self) {
+        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
     }
 }
 
@@ -602,7 +617,7 @@ mod tests {
 
         let config = LocalFsConfig {
             readahead: true,
-            readahead_sec: 1,
+            readahead_sec: 10,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
         };
@@ -628,7 +643,8 @@ mod tests {
         assert_eq!(buf2[0], 0x2);
         assert_eq!(buf3[0], 0x3);
 
-        thread::sleep(time::Duration::from_secs(3));
+        fs.shutdown();
+        thread::sleep(Duration::from_secs(1));
 
         let mut trace: Vec<AccessLogEntry> = vec![Default::default(); 4];
         let log_path = path.to_str().unwrap().to_owned() + BLOB_ACCESSED_SUFFIX;

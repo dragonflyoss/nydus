@@ -26,6 +26,7 @@ const HEADER_AUTHORIZATION: &str = "Authorization";
 /// Error codes related to network communication.
 #[derive(Debug)]
 pub enum ConnectionError {
+    Disconnected,
     ErrorWithMsg(String),
     Common(reqwest::Error),
     Format(reqwest::Error),
@@ -206,6 +207,10 @@ impl Connection {
         headers: HeaderMap,
         catch_status: bool,
     ) -> ConnectionResult<Response> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(ConnectionError::Disconnected);
+        }
+
         if let Some(proxy) = &self.proxy {
             if proxy.health.ok() {
                 let data_cloned: Option<ReqBody<R>> = match data.as_ref() {

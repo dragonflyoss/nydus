@@ -285,10 +285,8 @@ impl Oss {
 }
 
 impl BlobBackend for Oss {
-    fn release(&self) {
-        self.metrics()
-            .release()
-            .unwrap_or_else(|e| error!("{:?}", e))
+    fn shutdown(&self) {
+        self.connection.shutdown();
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -329,6 +327,14 @@ impl BlobBackend for Oss {
         Err(BackendError::Unsupported(
             "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
         ))
+    }
+}
+
+impl Drop for Oss {
+    fn drop(&mut self) {
+        if let Some(metrics) = self.metrics.as_ref() {
+            metrics.release().unwrap_or_else(|e| error!("{:?}", e));
+        }
     }
 }
 
@@ -381,6 +387,6 @@ mod tests {
         let writer = oss.get_writer("test").unwrap();
         assert_eq!(writer.retry_limit(), 5);
 
-        oss.release();
+        oss.shutdown();
     }
 }

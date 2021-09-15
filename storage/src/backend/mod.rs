@@ -185,7 +185,7 @@ pub trait BlobWrite: Send + Sync {
 /// Trait to access blob files on backend storages, such as OSS, registry, local fs etc.
 pub trait BlobBackend: Send + Sync {
     /// Destroy the `BlobBackend` storage object.
-    fn release(&self);
+    fn shutdown(&self);
 
     /// Get metrics object.
     fn metrics(&self) -> &BackendMetrics;

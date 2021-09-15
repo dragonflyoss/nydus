@@ -1242,7 +1242,7 @@ impl RafsCache for BlobCache {
         self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
 
         // TODO: Cache is responsible to release backend's resources
-        self.backend().release()
+        self.backend().shutdown()
     }
 
     fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
@@ -1458,7 +1458,7 @@ pub mod blob_cache_tests {
     }
 
     impl BlobBackend for MockBackend {
-        fn release(&self) {}
+        fn shutdown(&self) {}
 
         fn metrics(&self) -> &BackendMetrics {
             // Safe because nydusd must have backend attached with id, only image builder can no id
