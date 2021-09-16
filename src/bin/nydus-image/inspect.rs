@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ffi::{OsStr, OsString};
+use std::fs::Permissions;
 use std::io::Write;
 use std::ops::DerefMut;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -195,6 +197,38 @@ impl RafsInspector {
         Ok(chunks)
     }
 
+    fn stat_single_file(inode: &OndiskInode, name: &str, index: usize) {
+        println!(
+            r#"
+Inode Number:       {inode_number}
+Index:              {index}
+Name:               {name:?}
+Size:               {size}
+Parent:             {parent}
+Mode:               0x{mode:X}
+Permissions:        {permissions:o}
+Nlink:              {nlink}
+UID:                {uid}
+GID:                {gid}
+Mtime:              {mtime}
+MtimeNsec:          {mtime_nsec}
+Blocks:             {blocks}"#,
+            inode_number = inode.i_ino,
+            name = name,
+            index = index,
+            size = inode.i_size,
+            parent = inode.i_parent,
+            mode = inode.i_mode,
+            permissions = Permissions::from_mode(inode.i_mode).mode(),
+            nlink = inode.i_nlink,
+            uid = inode.i_uid,
+            gid = inode.i_gid,
+            mtime = inode.i_mtime,
+            mtime_nsec = inode.i_mtime_nsec,
+            blocks = inode.i_blocks,
+        );
+    }
+
     pub fn iter_dir(
         &self,
         mut op: impl FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
@@ -203,8 +237,7 @@ impl RafsInspector {
         let parent_ino = dir_inode.i_ino;
 
         let children_count = dir_inode.i_child_count;
-        // FIXME: In fact, `i_child_index` is the first inode number rather than index
-        // Fix naming and logics in `nydus-image` building progress.
+        // Somehow, the it has subtract 1 to identify the first child file's index in inode table.
         let first_index = dir_inode.i_child_index - 1;
         let last_index = first_index + children_count - 1;
 
@@ -221,6 +254,46 @@ impl RafsInspector {
                 Action::Break => break,
                 Action::Continue => continue,
             }
+        }
+
+        Ok(())
+    }
+
+    fn walk_fs(
+        &self,
+        top_index: u32,
+        op: &mut dyn FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
+    ) -> Result<()> {
+        let (top, _) = self.load_inode_by_index(top_index as usize)?;
+        let parent_ino = top.i_ino;
+        let mut dir_indexes = vec![];
+
+        let children_count = top.i_child_count;
+        // Somehow, the it has subtract 1 to identify the first child file's index in inode table.
+        let first_index = top.i_child_index - 1;
+        let last_index = first_index + children_count - 1;
+
+        for idx in first_index..=last_index {
+            let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
+
+            if child_inode.i_parent != parent_ino {
+                bail!("File {:?} is not a child of CWD", name);
+            }
+
+            if child_inode.is_dir() {
+                dir_indexes.push(idx);
+            }
+
+            trace!("inode: {:?}; name: {:?}", child_inode, name);
+            let inode_offset = self.inodes_table.data[idx as usize] << 3;
+            match op(name.as_os_str(), &child_inode, idx, inode_offset) {
+                Action::Break => break,
+                Action::Continue => continue,
+            }
+        }
+
+        for i in dir_indexes {
+            self.walk_fs(i, op)?;
         }
 
         Ok(())
@@ -245,6 +318,73 @@ impl RafsInspector {
         }
 
         Ok(path)
+    }
+
+    pub fn cmd_show_chunk(&self, offset_in_blob: u64) -> Result<Option<Value>> {
+        let b = self.bootstrap.clone();
+        self.walk_fs(0, &mut |name, inode, _index, offset| {
+            // Not expect poisoned lock
+            let mut guard = b.lock().unwrap();
+            let bootstrap = &mut *guard;
+
+            // Only regular file has data chunks.
+            if !inode.is_reg() {
+                return Action::Continue;
+            }
+
+            if let Ok(Some(chunks)) = Self::list_chunks(bootstrap, inode, offset) {
+                drop(guard);
+                for c in chunks {
+                    if c.compress_offset == offset_in_blob {
+                        let path = self.path_from_ino(inode.i_parent).unwrap();
+                        println!(
+                            r#"
+    {:width$} Parent Path {:width$}
+    Chunk ID: {:50}, Blob ID: {}
+"#,
+                            name.to_string_lossy(),
+                            path.to_string_lossy(),
+                            c.block_id,
+                            if let Ok(ref blob) = self.blobs_table.get(c.blob_index) {
+                                &blob.blob_id
+                            } else {
+                                error!("Can't find blob by its index, index={:?}", c.blob_index);
+                                return Action::Break;
+                            },
+                            width = 32
+                        );
+                    }
+                }
+            } else {
+                return Action::Break;
+            }
+            Action::Continue
+        })?;
+
+        Ok(None)
+    }
+
+    fn cmd_check_inode(&self, ino: u64) -> Result<Option<Value>> {
+        self.walk_fs(0, &mut |name, inode, index, _offset| {
+            // Not expect poisoned lock
+            if inode.i_ino == ino {
+                println!(
+                    r#"{}"#,
+                    self.path_from_ino(inode.i_ino).unwrap().to_string_lossy(),
+                );
+                Self::stat_single_file(inode, &name.to_string_lossy(), index as usize);
+            }
+
+            Action::Continue
+        })?;
+
+        Ok(None)
+    }
+
+    fn cmd_stat_file_by_index(&self, index: usize) -> Result<Option<Value>> {
+        let (inode, name) = self.load_inode_by_index(index)?;
+        Self::stat_single_file(&inode, &name.to_string_lossy(), index);
+        Ok(None)
     }
 
     pub fn cmd_list_dir(&mut self) -> Result<Option<Value>> {
@@ -315,52 +455,54 @@ impl RafsInspector {
 
     pub fn cmd_stat_file(&self, name: &str) -> Result<Option<Value>> {
         let b = self.bootstrap.clone();
+
+        if name == "." {
+            let (dir_inode, name) = self.load_inode_by_index(self.cur_dir_index as usize)?;
+            Self::stat_single_file(
+                &dir_inode,
+                &name.to_string_lossy(),
+                self.cur_dir_index as usize,
+            );
+            return Ok(None);
+        }
+
         self.iter_dir(|f, inode, idx, offset| {
             if f == name {
                 let mut guard = b.lock().unwrap();
                 let bootstrap = guard.deref_mut();
                 let chunks = Self::list_chunks(bootstrap, inode, offset);
-                println!(
-                    r#"
-    Inode Number:       {inode_number}
-    Index:              {index}
-    Name:               {name:?}
-    Size:               {size}
-    Mode:               0x{mode:X}
-    Nlink:              {nlink}
-    UID:                {uid}
-    GID:                {gid}
-    Mtime:              {mtime}
-    MtimeNsec:          {mtime_nsec}
-    Blocks:             {blocks}"#,
-                    inode_number = inode.i_ino,
-                    name = f,
-                    index = idx,
-                    size = inode.i_size,
-                    mode = inode.i_mode,
-                    nlink = inode.i_nlink,
-                    uid = inode.i_uid,
-                    gid = inode.i_gid,
-                    mtime = inode.i_mtime,
-                    mtime_nsec = inode.i_mtime_nsec,
-                    blocks = inode.i_blocks,
-                );
+                Self::stat_single_file(inode, name, idx as usize);
 
                 if let Ok(Some(cks)) = chunks {
                     println!("    Chunks list:");
                     for (i, c) in cks.iter().enumerate() {
-                        let blob_id = if let Ok(entry) =  self.blobs_table.get(c.blob_index) {
+                        let blob_id = if let Ok(entry) = self.blobs_table.get(c.blob_index) {
                             entry.blob_id.clone()
                         } else {
-                            error!("Blob index is {} . But no blob entry associate with it", c.blob_index);
+                            error!(
+                                "Blob index is {} . But no blob entry associate with it",
+                                c.blob_index
+                            );
                             return Action::Break;
                         };
 
-                        println!(r#"        {}  compressed size: {compressed_size}, decompressed size: {decompressed_size}, compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset}, blob id: {blob_id}, chunk id: {chunk_id}"#,
-                        i,
-                        compressed_size=c.compress_size, decompressed_size=c.decompress_size,
-                        decompressed_offset = c.decompress_offset,
-                        compressed_offset=c.compress_offset, blob_id=blob_id, chunk_id=c.block_id);
+                        println!(
+                            r#"        {} ->
+            file offset: {file_offset}, chunk index: {chunk_index}
+            compressed size: {compressed_size}, decompressed size: {decompressed_size}
+            compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset},
+            blob id: {blob_id}, chunk id: {chunk_id}
+        "#,
+                            i,
+                            chunk_index = c.index,
+                            file_offset = c.file_offset,
+                            compressed_size = c.compress_size,
+                            decompressed_size = c.decompress_size,
+                            decompressed_offset = c.decompress_offset,
+                            compressed_offset = c.compress_offset,
+                            blob_id = blob_id,
+                            chunk_id = c.block_id
+                        );
                     }
                 }
 
@@ -383,6 +525,9 @@ impl RafsInspector {
             }
             return Ok(None);
         }
+
+        // let path: PathBuf = name.to_string().into();
+        // let entries = path.components();
 
         let mut new_dir_index = None;
         let mut err = "File does not exist";
@@ -496,6 +641,7 @@ pub(crate) struct Prompt {}
 pub(crate) enum ExecuteError {
     HelpCommand,
     IllegalCommand,
+    ArgumentParse,
     Exit,
     ExecuteError(anyhow::Error),
 }
@@ -525,6 +671,24 @@ impl Executor {
             ("stat", Some(file_name)) => inspector.cmd_stat_file(file_name),
             ("blobs", None) => inspector.cmd_list_blobs(),
             ("prefetch", None) => inspector.cmd_list_prefetch(),
+            ("chunk", Some(argument)) => {
+                let offset: u64 = argument.parse().unwrap();
+                inspector.cmd_show_chunk(offset)
+            }
+            ("icheck", Some(argument)) => {
+                let ino: u64 = argument.parse().map_err(|_| {
+                    println!("Wrong INODE is specified. Is it a inode number?");
+                    ExecuteError::ArgumentParse
+                })?;
+                inspector.cmd_check_inode(ino)
+            }
+            ("index", Some(argument)) => {
+                let index: usize = argument.parse().map_err(|_| {
+                    println!("Wrong INDEX is specified. Is it an integer?");
+                    ExecuteError::ArgumentParse
+                })?;
+                inspector.cmd_stat_file_by_index(index)
+            }
             _ => {
                 println!("Unsupported command!");
                 {
@@ -547,6 +711,9 @@ impl Executor {
     stat FILE_NAME:     Show particular information of rafs inode
     blobs:              Show blobs table
     prefetch:           Show prefetch table
+    chunk OFFSET:       List basic info of a single chunk together with a list of files that share it
+    icheck INODE:       Show path of the inode and basic information
+    index INDEX:        Show information about a file by its index
         "#
         );
     }

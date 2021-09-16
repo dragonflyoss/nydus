@@ -253,6 +253,7 @@ fn main() -> Result<()> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
+                        .short("B")
                         .help("bootstrap path")
                         .required(true)
                         .takes_value(true),
