@@ -1,4 +1,4 @@
-// Copyright 2020 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2020-2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,18 +6,18 @@ use std::collections::HashMap;
 use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{Error, Result};
 use std::mem::{size_of, ManuallyDrop};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::{thread, time};
 
 use nix::sys::uio;
+use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
 use vm_memory::VolatileSlice;
 
-use crate::backend::{BackendError, BackendResult, BlobBackend};
+use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite};
 use crate::utils::{readahead, readv, MemSliceCursor};
-
-use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
 
 const BLOB_ACCESSED_SUFFIX: &str = ".access";
 const BLOB_ACCESS_RECORD_SECOND: u32 = 10;
@@ -28,8 +28,10 @@ const ACCESS_RECORD_ENTRY_SIZE: usize = size_of::<u64>() + size_of::<u32>() + si
 const MAX_ACCESS_RECORD_FILE_SIZE: usize = 32768;
 const MAX_ACCESS_RECORD: usize = MAX_ACCESS_RECORD_FILE_SIZE / ACCESS_RECORD_ENTRY_SIZE;
 
-type FileTableEntry = (File, Option<Arc<LocalFsAccessLog>>);
+type LocalFsResult<T> = std::result::Result<T, LocalFsError>;
+type AccessLogEntry = (u64, u32, u32);
 
+/// Error codes related to localfs storage backend.
 #[derive(Debug)]
 pub enum LocalFsError {
     BlobFile(Error),
@@ -40,30 +42,18 @@ pub enum LocalFsError {
     AccessLog(Error),
 }
 
-type LocalFsResult<T> = std::result::Result<T, LocalFsError>;
-
 impl From<LocalFsError> for BackendError {
     fn from(error: LocalFsError) -> Self {
         BackendError::LocalFs(error)
     }
 }
 
-#[derive(Default)]
-pub struct LocalFs {
-    // the specified blob file
-    blob_file: String,
-    // directory to blob files
-    dir: String,
-    // readahead blob file
-    readahead: bool,
-    // number of seconds to record blob access logs
-    readahead_sec: u32,
-    // blobid-File map
-    file_table: RwLock<HashMap<String, FileTableEntry>>,
-    metrics: Option<Arc<BackendMetrics>>,
+fn default_readahead_sec() -> u32 {
+    BLOB_ACCESS_RECORD_SECOND
 }
 
-#[derive(Clone, Deserialize)]
+/// Configuration information for localfs storage backend.
+#[derive(Clone, Deserialize, Serialize)]
 struct LocalFsConfig {
     #[serde(default)]
     readahead: bool,
@@ -75,403 +65,104 @@ struct LocalFsConfig {
     dir: String,
 }
 
-fn default_readahead_sec() -> u32 {
-    BLOB_ACCESS_RECORD_SECOND
+struct LocalFsEntry {
+    id: String,
+    path: PathBuf,
+    file: File,
+    metrics: Arc<BackendMetrics>,
+    trace: Arc<LocalFsTracer>,
+    trace_sec: u32,
 }
 
-pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs> {
-    let config: LocalFsConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
-
-    if config.blob_file.is_empty() && config.dir.is_empty() {
-        return Err(einval!("blob file or dir is required"));
+impl BlobReader for LocalFsEntry {
+    fn blob_size(&self) -> BackendResult<u64> {
+        self.file
+            .metadata()
+            .map(|v| v.len())
+            .map_err(|e| LocalFsError::BlobFile(e).into())
     }
 
-    let metrics = id.map(|i| BackendMetrics::new(i, "localfs"));
-    if !config.blob_file.is_empty() {
-        return Ok(LocalFs {
-            blob_file: config.blob_file,
-            readahead: config.readahead,
-            readahead_sec: config.readahead_sec,
-            file_table: RwLock::new(HashMap::new()),
-            metrics,
-            ..Default::default()
-        });
+    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        debug!(
+            "local blob file reading: offset={}, size={} from={}",
+            offset,
+            buf.len(),
+            self.id,
+        );
+
+        uio::pread(self.file.as_raw_fd(), buf, offset as i64)
+            .map(|v| {
+                debug!("local blob file read {} bytes", v);
+                self.trace.record(offset, v as u32);
+                v
+            })
+            .map_err(|e| LocalFsError::ReadBlob(e).into())
     }
 
-    Ok(LocalFs {
-        dir: config.dir,
-        readahead: config.readahead,
-        readahead_sec: config.readahead_sec,
-        file_table: RwLock::new(HashMap::new()),
-        metrics,
-        ..Default::default()
-    })
-}
+    fn readv(&self, bufs: &[VolatileSlice], offset: u64, max_size: usize) -> BackendResult<usize> {
+        let mut c = MemSliceCursor::new(bufs);
+        let iovec = c.consume(max_size);
 
-type AccessLogEntry = (u64, u32, u32);
-
-// Access entries can be either mmapped or Vec-allocated.
-// Use mmap for read case and Vec-allocated for write case.
-struct LocalFsAccessLog {
-    log_path: String,                                  // log file path
-    log_fd: RawFd,                                     // log file fd
-    log_base: *const u8,                               // mmapped access log base
-    log_size: usize,                                   // log file size
-    blob_fd: RawFd,                                    // blob fd for readahead
-    blob_size: usize,                                  // blob file size
-    records: ManuallyDrop<Mutex<Vec<AccessLogEntry>>>, // access records
-}
-
-unsafe impl Send for LocalFsAccessLog {}
-
-unsafe impl Sync for LocalFsAccessLog {}
-
-impl LocalFsAccessLog {
-    fn new() -> LocalFsAccessLog {
-        LocalFsAccessLog {
-            log_path: "".to_string(),
-            log_fd: -1,
-            log_base: std::ptr::null(),
-            log_size: 0,
-            blob_fd: -1,
-            blob_size: 0,
-            records: ManuallyDrop::new(Mutex::new(Vec::new())),
-        }
+        readv(self.file.as_raw_fd(), &iovec, offset)
+            .map(|v| {
+                debug!("local blob file read {} bytes", v);
+                self.trace.record(offset, v as u32);
+                v
+            })
+            .map_err(|e| LocalFsError::ReadVecBlob(e).into())
     }
 
-    fn init(
-        &mut self,
-        log_file: File,
-        log_path: String,
-        blob_fd: RawFd,
-        blob_size: usize,
-        load_entries: bool,
-    ) -> Result<()> {
-        if self.log_fd > 0
-            || !self.log_path.is_empty()
-            || self.blob_fd > 0
-            || self.records.lock().unwrap().len() > 0
-        {
-            return Err(einval!("invalid access log info"));
-        }
+    fn prefetch_blob_data_range(&self, ra_offset: u32, ra_size: u32) -> BackendResult<()> {
+        let blob_size = self.blob_size()?;
+        let prefix = self
+            .path
+            .to_str()
+            .ok_or(LocalFsError::BlobFile(einval!("invalid blob path")))?;
+        let log_path = prefix.to_owned() + BLOB_ACCESSED_SUFFIX;
 
-        self.log_fd = unsafe { libc::dup(log_file.as_raw_fd()) };
-        if self.log_fd < 0 {
-            return Err(last_error!("failed to dup log fd"));
-        }
-        self.blob_fd = unsafe { libc::dup(blob_fd) };
-        if self.blob_fd < 0 {
-            return Err(last_error!("failed to dup blob fd"));
-        }
-        self.log_path = log_path;
-        self.blob_size = blob_size;
-
-        if !load_entries {
-            return Ok(());
-        }
-
-        // load exiting entries
-        let size = log_file.metadata()?.len() as usize;
-        if size == 0 || size % ACCESS_RECORD_ENTRY_SIZE != 0 {
-            warn!("ignoring unaligned log file");
-            return Ok(());
-        }
-        let count = size / ACCESS_RECORD_ENTRY_SIZE;
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                size as usize,
-                libc::PROT_READ,
-                libc::MAP_NORESERVE | libc::MAP_PRIVATE,
-                self.log_fd,
-                0,
-            )
-        } as *const AccessLogEntry;
-        if base as *mut core::ffi::c_void == libc::MAP_FAILED {
-            return Err(last_error!("failed to mmap access log file"));
-        }
-        if base.is_null() {
-            return Err(ebadf!("failed to mmap access log file"));
-        }
-        // safe because we have validated size
-        self.records = unsafe {
-            ManuallyDrop::new(Mutex::new(Vec::from_raw_parts(
-                base as *mut AccessLogEntry,
-                count as usize,
-                count as usize,
-            )))
-        };
-        self.log_base = base as *const u8;
-        self.log_size = size;
-        Ok(())
-    }
-
-    fn do_readahead(&self) -> Result<()> {
-        info!("starting localfs blob readahead");
-        // Convert from `usize` to `u64` is safe to unwrap and it's hard to overflow here.
-        let blob_end: u64 = try_round_up_4k(self.blob_size as u64).unwrap();
-        for &(offset, len, zero) in self.records.lock().unwrap().iter() {
-            let end: u64 = offset
-                .checked_add(len as u64)
-                .ok_or_else(|| einval!("invalid length"))?;
-            if offset > blob_end || end > blob_end || zero != 0 {
-                return Err(einval!(format!(
-                    "invalid readahead entry ({}, {}), blob size {}",
-                    offset, len, blob_end
-                )));
-            }
-            unsafe { libc::readahead(self.blob_fd, offset as i64, len as usize) };
-        }
-        Ok(())
-    }
-
-    fn record(&self, offset: u64, len: u32) -> bool {
-        // Never modify mmapped records
-        if !self.log_base.is_null() {
-            return false;
-        }
-
-        if let Some(rounded_len) = try_round_up_4k(len) {
-            let mut r = self.records.lock().unwrap();
-            if r.len() < MAX_ACCESS_RECORD {
-                r.push((round_down_4k(offset), rounded_len, 0));
-                return true;
-            }
-            false
-        } else {
-            false
-        }
-    }
-
-    fn flush(&self) {
-        info!("flushing access log to {}", &self.log_path);
-        let mut r = self.records.lock().unwrap();
-        if r.len() == 0 {
-            info!(
-                "No read access is recorded. Drop access file {}",
-                &self.log_path
-            );
-            // set record length to max to no new record is saved
-            // safe because we have locked records
-            unsafe { r.set_len(MAX_ACCESS_RECORD) };
-            drop(r);
-            if let Err(e) = remove_file(Path::new(&self.log_path)) {
-                warn!("failed to remove access file {}: {}", &self.log_path, e);
-            }
-            return;
-        }
-        r.sort_unstable();
-        r.dedup();
-
-        // record is valid as long as LocalFsAccessLog is not dropped
-        // which means it must be valid within flush()
-        let record = unsafe {
-            std::slice::from_raw_parts(
-                r.as_ptr() as *const u8,
-                r.len() * std::mem::size_of::<AccessLogEntry>(),
-            )
-        };
-
-        // set record length to max to no new record is saved
-        // safe because we have locked records
-        unsafe { r.set_len(MAX_ACCESS_RECORD) };
-        drop(r);
-
-        let _ = nix::unistd::write(self.log_fd, record).map_err(|e| {
-            warn!("fail to write access log: {}", e);
-            eio!(e)
-        });
-    }
-}
-
-impl Drop for LocalFsAccessLog {
-    fn drop(&mut self) {
-        if !self.log_base.is_null() {
-            unsafe {
-                libc::munmap(
-                    self.log_base as *mut u8 as *mut libc::c_void,
-                    self.log_size as usize,
-                )
-            };
-            self.log_base = std::ptr::null();
-            self.log_size = 0;
-        } else {
-            // Drop records if it is not mmapped
-            unsafe {
-                ManuallyDrop::drop(&mut self.records);
-            }
-        }
-        if self.blob_fd > 0 {
-            let _ = nix::unistd::close(self.blob_fd);
-            self.blob_fd = -1;
-        }
-        if self.log_fd > 0 {
-            let _ = nix::unistd::close(self.log_fd);
-            self.log_fd = -1;
-        }
-    }
-}
-
-impl LocalFs {
-    fn get_blob_path(&self, blob_id: &str) -> PathBuf {
-        if self.use_blob_file() {
-            Path::new(&self.blob_file).to_path_buf()
-        } else {
-            Path::new(&self.dir).join(blob_id)
-        }
-    }
-
-    fn get_blob_fd(&self, blob_id: &str, offset: u64, len: usize) -> LocalFsResult<RawFd> {
-        let blob_file_path = self.get_blob_path(blob_id);
-
-        let mut drop_access_log = false;
-        let blob_file;
-        // Don't expect poisoned lock here.
-        let table_guard = self.file_table.read().unwrap();
-        if let Some((file, access_log)) = table_guard.get(blob_id) {
-            if let Some(access_log) = access_log {
-                if len != 0 {
-                    drop_access_log = !access_log.record(offset, len as u32);
-                }
-            }
-            if !drop_access_log {
-                return Ok(file.as_raw_fd());
-            }
-            // need to drop access log file, clone the blob file first
-            blob_file = file.try_clone().map_err(LocalFsError::BlobFile)?;
-            drop(table_guard);
-
-            let fd = blob_file.as_raw_fd();
-            self.file_table
-                .write()
-                .unwrap()
-                .insert(blob_id.to_owned(), (blob_file, None));
-            return Ok(fd);
-        }
-        drop(table_guard);
-
-        let file = OpenOptions::new()
-            .read(true)
-            .open(&blob_file_path)
-            .map_err(LocalFsError::BlobFile)?;
-
-        let fd = file.as_raw_fd();
-
-        // Don't expect poisoned lock here.
-        let mut table_guard = self.file_table.write().unwrap();
-        // Double check whether someone else inserted the file concurrently.
-        if let Some((other, access_log)) = table_guard.get(blob_id) {
-            if let Some(access_log) = access_log {
-                if len != 0 {
-                    let _ = access_log.record(offset, len as u32);
-                }
-            }
-            return Ok(other.as_raw_fd());
-        }
-
-        table_guard.insert(blob_id.to_string(), (file, None));
-        Ok(fd)
-    }
-
-    fn use_blob_file(&self) -> bool {
-        !self.blob_file.is_empty()
-    }
-}
-
-impl BlobBackend for LocalFs {
-    fn prefetch_blob(
-        &self,
-        blob_id: &str,
-        blob_readahead_offset: u32,
-        blob_readahead_size: u32,
-    ) -> BackendResult<()> {
-        if !self.readahead {
-            return Ok(());
-        }
-
-        let _ = self.get_blob_fd(blob_id, 0, 0)?;
-
-        // Do not expect get failure as we just added it above in get_blob_fd
-        let blob_file = self
-            .file_table
-            .read()
-            .unwrap()
-            .get(blob_id)
-            .unwrap()
-            .0
-            .try_clone()
-            .map_err(LocalFsError::BlobFile)?;
-
-        let blob_size = blob_file.metadata().map_err(LocalFsError::BlobFile)?.len() as usize;
-        let blob_fd = blob_file.as_raw_fd();
-        let blob_path = self.get_blob_path(blob_id);
-
-        // try to kick off readahead
-        let access_file_path = blob_path.to_str().unwrap().to_owned() + BLOB_ACCESSED_SUFFIX;
-        if let Ok(access_file) = OpenOptions::new()
-            .read(true)
-            .open(Path::new(&access_file_path))
-        {
+        // Prefetch according to the trace file if it's ready.
+        if let Ok(log_file) = OpenOptions::new().read(true).open(Path::new(&log_path)) {
             // Found access log, kick off readahead
-            if access_file
-                .metadata()
-                .map_err(LocalFsError::AccessLog)?
-                .len()
-                > 0
-            {
+            if log_file.metadata().map_err(LocalFsError::AccessLog)?.len() > 0 {
                 // Don't expect poisoned lock here.
-                let mut access_log = LocalFsAccessLog::new();
-                access_log
-                    .init(access_file, access_file_path, blob_fd, blob_size, true)
+                let prefetcher = Prefetcher::new(log_file, log_path, &self.file, blob_size)
                     .map_err(LocalFsError::AccessLog)?;
                 let _ = thread::Builder::new()
                     .name("nydus-localfs-readahead".to_string())
                     .spawn(move || {
-                        let _ = access_log.do_readahead();
+                        let _ = prefetcher.do_readahead();
                     });
                 return Ok(());
             }
         }
 
-        // kick off hinted blob readahead
-        if blob_readahead_size != 0
-            && ((blob_readahead_offset + blob_readahead_size) as usize) <= blob_size
-        {
+        // Prefetch data according to the hint if it's valid.
+        let end = ra_offset as u64 + ra_size as u64;
+        if ra_size != 0 && end <= blob_size {
             info!(
                 "kick off hinted blob readahead offset {} len {}",
-                blob_readahead_offset, blob_readahead_size
+                ra_offset, ra_size
             );
-            readahead(
-                blob_file.as_raw_fd(),
-                blob_readahead_offset as u64,
-                (blob_readahead_offset + blob_readahead_size) as u64,
-            );
+            readahead(self.file.as_raw_fd(), ra_offset as u64, end);
         }
 
         // start access logging
-        if let Ok(access_file) = OpenOptions::new()
+        if let Ok(log_file) = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(Path::new(&access_file_path))
+            .open(Path::new(&log_path))
         {
-            let mut access_log = LocalFsAccessLog::new();
-            access_log
-                .init(access_file, access_file_path, blob_fd, blob_size, false)
-                .map_err(LocalFsError::AccessLog)?;
-            let access_log = Arc::new(access_log);
-            // Do not expect poisoned lock here
-            self.file_table
-                .write()
-                .unwrap()
-                .insert(blob_id.to_owned(), (blob_file, Some(access_log.clone())));
+            let tracer = self.trace.clone();
+            let trace_sec = self.trace_sec;
 
-            // Split a thread to flush access record
-            let wait_sec = self.readahead_sec;
+            tracer.active.store(true, Ordering::Release);
+
+            // Spawn a working thread to flush access trace records.
             let _ = thread::Builder::new()
                 .name("nydus-localfs-access-recorder".to_string())
                 .spawn(move || {
-                    thread::sleep(time::Duration::from_secs(wait_sec as u64));
-                    access_log.flush();
+                    thread::sleep(time::Duration::from_secs(trace_sec as u64));
+                    LocalFsTracer::flush(log_file, log_path, tracer);
                 });
         }
 
@@ -479,53 +170,476 @@ impl BlobBackend for LocalFs {
     }
 
     fn metrics(&self) -> &BackendMetrics {
-        // Safe because nydusd must have backend attached with id, only image builder can no id
-        // but use backend instance to upload blob.
-        self.metrics.as_ref().unwrap()
+        &self.metrics
+    }
+}
+
+#[derive(Default)]
+pub struct LocalFs {
+    // The blob file specified by the user.
+    blob_file: String,
+    // Directory to store blob files. If `blob_file` is not specified, `dir`/`blob_id` will be used
+    // as the blob file name.
+    dir: String,
+    // Whether to prefetch data from the blob file
+    readahead: bool,
+    // Number of seconds to collect blob access logs
+    readahead_sec: u32,
+    // Metrics collector.
+    metrics: Arc<BackendMetrics>,
+    // Hashmap to map blob id to blob file.
+    entries: RwLock<HashMap<String, Arc<dyn BlobReader>>>,
+}
+
+impl LocalFs {
+    pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs> {
+        let config: LocalFsConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
+        let id = id.ok_or(einval!("LocalFs requires blob_id"))?;
+
+        if config.blob_file.is_empty() && config.dir.is_empty() {
+            return Err(einval!("blob file or dir is required"));
+        }
+
+        Ok(LocalFs {
+            blob_file: config.blob_file,
+            dir: config.dir,
+            readahead: config.readahead,
+            readahead_sec: config.readahead_sec,
+            metrics: BackendMetrics::new(id, "localfs"),
+            entries: RwLock::new(HashMap::new()),
+        })
     }
 
+    // Use the user specified blob file name if available, otherwise generate the file name by
+    // concatenating `dir` and `blob_id`.
+    fn get_blob_path(&self, blob_id: &str) -> LocalFsResult<PathBuf> {
+        let path = if !self.blob_file.is_empty() {
+            Path::new(&self.blob_file).to_path_buf()
+        } else {
+            Path::new(&self.dir).join(blob_id)
+        };
+
+        path.canonicalize().map_err(LocalFsError::BlobFile)
+    }
+
+    fn get_blob(&self, blob_id: &str) -> LocalFsResult<Arc<dyn BlobReader>> {
+        // Don't expect poisoned lock here.
+        if let Some(entry) = self.entries.read().unwrap().get(blob_id) {
+            return Ok(entry.clone());
+        }
+
+        let blob_file_path = self.get_blob_path(blob_id)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&blob_file_path)
+            .map_err(LocalFsError::BlobFile)?;
+        // Don't expect poisoned lock here.
+        let mut table_guard = self.entries.write().unwrap();
+        if let Some(entry) = table_guard.get(blob_id) {
+            Ok(entry.clone())
+        } else {
+            let entry: Arc<dyn BlobReader> = Arc::new(LocalFsEntry {
+                id: blob_id.to_owned(),
+                path: blob_file_path,
+                file,
+                metrics: self.metrics.clone(),
+                trace: Arc::new(LocalFsTracer::new()),
+                trace_sec: self.readahead_sec,
+            });
+            table_guard.insert(blob_id.to_string(), entry.clone());
+            Ok(entry)
+        }
+    }
+}
+
+impl BlobBackend for LocalFs {
     fn release(&self) {
-        self.metrics()
-            .release()
-            .unwrap_or_else(|e| error!("{:?}", e))
+        if let Err(e) = self.metrics().release() {
+            error!("{:?}", e);
+        }
+    }
+
+    fn metrics(&self) -> &BackendMetrics {
+        &self.metrics
+    }
+
+    fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
+        self.get_blob(blob_id).map_err(|e| e.into())
+    }
+
+    fn get_writer(&self, _blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>> {
+        Err(BackendError::Unsupported(
+            "LocalFs backend doesn't support write operations".to_string(),
+        ))
     }
 
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
-        let blob_file_path = self.get_blob_path(blob_id);
-        let meta = fs::metadata(blob_file_path).map_err(LocalFsError::BlobFile)?;
-        Ok(meta.len())
+        let blob_file_path = self.get_blob_path(blob_id)?;
+
+        fs::metadata(blob_file_path)
+            .map(|meta| meta.len())
+            .map_err(|e| LocalFsError::BlobFile(e).into())
     }
 
-    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        let fd = self.get_blob_fd(blob_id, offset, buf.len())?;
-
-        debug!(
-            "local blob file reading: offset={}, size={} from={}",
-            offset,
-            buf.len(),
-            blob_id,
-        );
-        let len = uio::pread(fd, buf, offset as i64).map_err(LocalFsError::ReadBlob)?;
-
-        debug!("local blob file read {} bytes", len);
-
-        Ok(len)
-    }
-
-    fn readv(
+    fn prefetch_blob_data_range(
         &self,
         blob_id: &str,
-        bufs: &[VolatileSlice],
-        offset: u64,
-        max_size: usize,
-    ) -> BackendResult<usize> {
-        let fd = self.get_blob_fd(blob_id, offset, max_size)?;
-        let mut c = MemSliceCursor::new(bufs);
-        let iovec = c.consume(max_size);
-        Ok(readv(fd, &iovec, offset).map_err(LocalFsError::ReadVecBlob)?)
+        ra_offset: u32,
+        ra_size: u32,
+    ) -> BackendResult<()> {
+        if !self.readahead {
+            return Ok(());
+        }
+
+        self.get_reader(blob_id)?
+            .prefetch_blob_data_range(ra_offset, ra_size)
+    }
+}
+
+struct LocalFsTracer {
+    active: AtomicBool,
+    records: Mutex<Vec<AccessLogEntry>>,
+}
+
+impl LocalFsTracer {
+    fn new() -> Self {
+        LocalFsTracer {
+            active: AtomicBool::new(false),
+            records: Mutex::new(Vec::new()),
+        }
     }
 
-    fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
-        unimplemented!("write operation not supported with localfs");
+    fn record(&self, offset: u64, len: u32) {
+        // TODO: avoid rounding
+        if self.active.load(Ordering::Acquire) {
+            if let Some(rounded_len) = try_round_up_4k(len) {
+                let mut r = self.records.lock().unwrap();
+                if r.len() < MAX_ACCESS_RECORD {
+                    if self.active.load(Ordering::Acquire) {
+                        r.push((round_down_4k(offset), rounded_len, 0));
+                    }
+                } else {
+                    self.active.store(false, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    fn flush(file: File, path: String, tracer: Arc<LocalFsTracer>) {
+        info!("flushing access log to {}", &path);
+
+        // Disable tracer and the underlying vector won't change anymore once we acquired the lock.
+        tracer.active.store(false, Ordering::Release);
+        // Do not expected poisoned lock here.
+        let mut r = tracer.records.lock().unwrap();
+
+        if r.len() == 0 {
+            drop(r);
+            info!("No read access is recorded. Drop access file {}", &path);
+            let _ = remove_file(Path::new(&path)).map_err(|e| {
+                warn!("failed to remove access file {}: {}", &path, e);
+            });
+        } else {
+            r.sort_unstable();
+            r.dedup();
+            // Safe because `records` is valid and never changes anymore.
+            let buf = unsafe {
+                std::slice::from_raw_parts(
+                    r.as_ptr() as *const u8,
+                    r.len() * std::mem::size_of::<AccessLogEntry>(),
+                )
+            };
+            drop(r);
+
+            let _ = nix::unistd::write(file.as_raw_fd(), buf).map_err(|e| {
+                warn!("fail to write access log: {}", e);
+                ()
+            });
+
+            // Do not expected poisoned lock here.
+            tracer.records.lock().unwrap().resize(0, Default::default());
+        }
+    }
+}
+
+/// Struct to prefetch blob data according to access trace.
+#[derive(Debug)]
+struct Prefetcher {
+    blob_file: File,     // blob file for readahead
+    blob_size: u64,      // blob file size
+    log_path: String,    // log file path
+    log_file: File,      // file for access logging
+    log_base: *const u8, // mmapped access log base
+    log_size: u64,       // size of mmapped area
+    records: ManuallyDrop<Vec<AccessLogEntry>>,
+}
+
+unsafe impl Send for Prefetcher {}
+
+unsafe impl Sync for Prefetcher {}
+
+impl Prefetcher {
+    fn new(log_file: File, log_path: String, blob_file: &File, blob_size: u64) -> Result<Self> {
+        let blob_file = blob_file.try_clone()?;
+        let size = log_file.metadata()?.len();
+        if size == 0 || size % (ACCESS_RECORD_ENTRY_SIZE as u64) != 0 || size > usize::MAX as u64 {
+            warn!("ignoring unaligned log file");
+            return Err(einval!("access trace log file is invalid"));
+        }
+
+        let count = size / (ACCESS_RECORD_ENTRY_SIZE as u64);
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                libc::PROT_READ,
+                libc::MAP_NORESERVE | libc::MAP_SHARED,
+                log_file.as_raw_fd(),
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(last_error!("failed to mmap access log file"));
+        } else if base.is_null() {
+            return Err(ebadf!("failed to mmap access log file"));
+        }
+
+        // safe because we have validated size
+        let records = unsafe {
+            ManuallyDrop::new(Vec::from_raw_parts(
+                base as *mut AccessLogEntry,
+                count as usize,
+                count as usize,
+            ))
+        };
+
+        Ok(Prefetcher {
+            blob_file,
+            blob_size,
+            log_path,
+            log_file,
+            log_base: base as *const u8,
+            log_size: size,
+            records,
+        })
+    }
+
+    fn do_readahead(&self) -> Result<()> {
+        info!("starting localfs blob readahead");
+
+        for &(offset, len, zero) in self.records.iter() {
+            let end: u64 = offset
+                .checked_add(len as u64)
+                .ok_or_else(|| einval!("invalid length"))?;
+            if offset > self.blob_size || end > self.blob_size || zero != 0 {
+                return Err(einval!(format!(
+                    "invalid readahead entry ({}, {}), blob size {}",
+                    offset, len, self.blob_size
+                )));
+            }
+
+            unsafe { libc::readahead(self.blob_file.as_raw_fd(), offset as i64, len as usize) };
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for Prefetcher {
+    fn drop(&mut self) {
+        if !self.log_base.is_null() {
+            let ptr = self.log_base as *mut u8 as *mut libc::c_void;
+            unsafe { libc::munmap(ptr, self.log_size as usize) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[test]
+    fn test_invalid_localfs_new() {
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "".to_string(),
+            dir: "".to_string(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(LocalFs::new(json, Some("test")).is_err());
+
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "/a/b/c".to_string(),
+            dir: "/a/b".to_string(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(LocalFs::new(json, None).is_err());
+    }
+
+    #[test]
+    fn test_localfs_get_blob_path() {
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "/a/b/cxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
+            dir: "/a/b".to_string(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some("test")).unwrap();
+        assert!(fs.get_blob_path("test").is_err());
+
+        let tempfile = TempFile::new().unwrap();
+        let path = tempfile.as_path();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: path.to_str().unwrap().to_owned(),
+            dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some("test")).unwrap();
+        assert_eq!(fs.get_blob_path("test").unwrap().to_str(), path.to_str());
+
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "".to_string(),
+            dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        assert_eq!(fs.get_blob_path(filename).unwrap().to_str(), path.to_str());
+    }
+
+    #[test]
+    fn test_localfs_get_blob() {
+        let tempfile = TempFile::new().unwrap();
+        let path = tempfile.as_path();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "".to_string(),
+            dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        let blob1 = fs.get_blob(filename).unwrap();
+        let blob2 = fs.get_blob(filename).unwrap();
+        assert_eq!(Arc::strong_count(&blob1), 3);
+        assert_eq!(Arc::strong_count(&blob2), 3);
+    }
+
+    #[test]
+    fn test_localfs_get_reader() {
+        let tempfile = TempFile::new().unwrap();
+        let path = tempfile.as_path();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+
+        {
+            let mut file = unsafe { File::from_raw_fd(tempfile.as_file().as_raw_fd()) };
+            file.write(&[0x1u8, 0x2, 0x3, 0x4]).unwrap();
+            let _ = file.into_raw_fd();
+        }
+
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "".to_string(),
+            dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        let blob1 = fs.get_reader(filename).unwrap();
+        let blob2 = fs.get_reader(filename).unwrap();
+        assert_eq!(Arc::strong_count(&blob1), 3);
+
+        let mut buf1 = [0x0u8];
+        blob1.read(&mut buf1, 0x0).unwrap();
+        assert_eq!(buf1[0], 0x1);
+
+        let mut buf2 = [0x0u8];
+        let mut buf3 = [0x0u8];
+        let bufs = [
+            unsafe { VolatileSlice::new(buf2.as_mut_ptr(), 1) },
+            unsafe { VolatileSlice::new(buf3.as_mut_ptr(), 1) },
+        ];
+
+        assert_eq!(blob2.readv(&bufs, 0x1, 2).unwrap(), 2);
+        assert_eq!(buf2[0], 0x2);
+        assert_eq!(buf3[0], 0x3);
+
+        assert_eq!(blob2.readv(&bufs, 0x3, 3).unwrap(), 1);
+        assert_eq!(buf2[0], 0x4);
+        assert_eq!(buf3[0], 0x3);
+
+        assert_eq!(blob2.blob_size().unwrap(), 4);
+        assert_eq!(fs.blob_size(filename).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_localfs_trace_and_prefetch() {
+        let tempfile = TempFile::new().unwrap();
+        let path = tempfile.as_path();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+
+        {
+            let mut file = unsafe { File::from_raw_fd(tempfile.as_file().as_raw_fd()) };
+            file.write(&[0x1u8, 0x2, 0x3, 0x4]).unwrap();
+            file.write_all_at(&[0x1u8, 0x2, 0x3, 0x4], 0x1000).unwrap();
+            let _ = file.into_raw_fd();
+        }
+
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 1,
+            blob_file: "".to_string(),
+            dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        fs.prefetch_blob_data_range(filename, 0x0, 0x1).unwrap();
+
+        let blob1 = fs.get_reader(filename).unwrap();
+        let blob2 = fs.get_reader(filename).unwrap();
+        assert_eq!(Arc::strong_count(&blob1), 3);
+
+        let mut buf1 = [0x0u8];
+        blob1.read(&mut buf1, 0x0).unwrap();
+        assert_eq!(buf1[0], 0x1);
+
+        let mut buf2 = [0x0u8];
+        let mut buf3 = [0x0u8];
+        let bufs = [
+            unsafe { VolatileSlice::new(buf2.as_mut_ptr(), 1) },
+            unsafe { VolatileSlice::new(buf3.as_mut_ptr(), 1) },
+        ];
+        assert_eq!(blob2.readv(&bufs, 0x1001, 3).unwrap(), 2);
+        assert_eq!(buf2[0], 0x2);
+        assert_eq!(buf3[0], 0x3);
+
+        thread::sleep(time::Duration::from_secs(3));
+
+        let mut trace: Vec<AccessLogEntry> = vec![Default::default(); 4];
+        let log_path = path.to_str().unwrap().to_owned() + BLOB_ACCESSED_SUFFIX;
+        let mut log_file = File::open(&log_path).unwrap();
+        let mut buf = unsafe { std::slice::from_raw_parts_mut(trace.as_mut_ptr() as *mut u8, 64) };
+        assert_eq!(log_file.read(&mut buf).unwrap(), 32);
+
+        assert_eq!(trace[0].0, 0x0);
+        assert_eq!(trace[0].1, 0x1000);
+        assert_eq!(trace[0].2, 0);
+        assert_eq!(trace[1].0, 0x1000);
+        assert_eq!(trace[1].1, 0x1000);
+        assert_eq!(trace[1].2, 0);
     }
 }
