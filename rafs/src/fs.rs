@@ -265,7 +265,7 @@ impl Rafs {
         // Without too much layout concern, just prefetch a certain range from backend.
         let prefetch_vec = self
             .sb
-            .inodes
+            .superblock
             .get_blobs()
             .iter()
             .map(|b| BlobPrefetchControl {

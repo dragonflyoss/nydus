@@ -14,10 +14,9 @@ use serde_json::Value;
 
 use anyhow::Result;
 
-use rafs::metadata::extended::blob_table::ExtendedBlobTable;
-use rafs::metadata::layout::{
-    OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeTable, OndiskSuperBlock,
-    OndiskXAttrs, PrefetchTable,
+use rafs::metadata::layout::v5::{
+    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobTable, RafsV5Inode, RafsV5InodeTable,
+    RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
 use rafs::{RafsIoRead, RafsIoReader};
 
@@ -28,9 +27,9 @@ pub(crate) struct RafsInspector {
     rafs_meta: RafsMeta,
     cur_dir_index: u32,
     parent_indexes: Vec<u32>,
-    inodes_table: OndiskInodeTable,
-    blobs_table: OndiskBlobTable,
-    extended_blobs_table: Option<ExtendedBlobTable>,
+    inodes_table: RafsV5InodeTable,
+    blobs_table: RafsV5BlobTable,
+    extended_blobs_table: Option<RafsV5ExtBlobTable>,
 }
 
 /// | Superblock | inode table | prefetch table |inode + name + symlink pointer + xattr size + xattr pairs + chunk info
@@ -53,8 +52,8 @@ pub(crate) struct RafsMeta {
     extended_blob_table_entries: u32,
 }
 
-impl From<&OndiskSuperBlock> for RafsMeta {
-    fn from(sb: &OndiskSuperBlock) -> Self {
+impl From<&RafsV5SuperBlock> for RafsMeta {
+    fn from(sb: &RafsV5SuperBlock) -> Self {
         Self {
             inode_table_offset: sb.inode_table_offset(),
             inode_table_entries: sb.inode_table_entries(),
@@ -92,19 +91,19 @@ impl RafsInspector {
         let sb = Self::super_block(&mut f, &layout_profile)?;
         let rafs_meta: RafsMeta = (&sb).into();
 
-        let mut inodes_table = OndiskInodeTable::new(rafs_meta.inode_table_entries as usize);
+        let mut inodes_table = RafsV5InodeTable::new(rafs_meta.inode_table_entries as usize);
         f.seek_to_offset(rafs_meta.inode_table_offset)?;
         inodes_table.load(&mut f)?;
 
         f.seek_to_offset(rafs_meta.blob_table_offset)?;
-        let mut blobs_table = OndiskBlobTable::new();
+        let mut blobs_table = RafsV5BlobTable::new();
         blobs_table.load(&mut f, rafs_meta.blob_table_size)?;
 
         // Load extended blob table if the bootstrap including
         // extended blob table.
         let extended_blobs_table = if rafs_meta.extended_blob_table_offset > 0 {
             f.seek_to_offset(rafs_meta.extended_blob_table_offset)?;
-            let mut et = ExtendedBlobTable::new();
+            let mut et = RafsV5ExtBlobTable::new();
             et.load(&mut f, rafs_meta.extended_blob_table_entries as usize)?;
             Some(et)
         } else {
@@ -128,8 +127,8 @@ impl RafsInspector {
     fn super_block(
         b: &mut RafsIoReader,
         layout_profile: &RafsLayoutV5,
-    ) -> Result<OndiskSuperBlock> {
-        let mut sb = OndiskSuperBlock::new();
+    ) -> Result<RafsV5SuperBlock> {
+        let mut sb = RafsV5SuperBlock::new();
 
         b.seek_to_offset(layout_profile.super_block_offset as u64)?;
         sb.load(b)
@@ -138,8 +137,8 @@ impl RafsInspector {
         Ok(sb)
     }
 
-    fn load_ondisk_inode(&self, offset: u32) -> Result<(OndiskInode, OsString)> {
-        let mut ondisk_inode = OndiskInode::new();
+    fn load_ondisk_inode(&self, offset: u32) -> Result<(RafsV5Inode, OsString)> {
+        let mut ondisk_inode = RafsV5Inode::new();
         let mut guard = self.bootstrap.lock().unwrap();
         let bootstrap = guard.deref_mut();
         bootstrap.seek_to_offset(offset as u64)?;
@@ -154,7 +153,7 @@ impl RafsInspector {
     }
 
     /// Index is u32, by which the inode can be found.
-    fn load_inode_by_index(&self, index: usize) -> Result<(OndiskInode, OsString)> {
+    fn load_inode_by_index(&self, index: usize) -> Result<(RafsV5Inode, OsString)> {
         // Safe to truncate `inode_table_offset` now.
         let inode_offset = self.inodes_table.data[index] << 3;
         self.load_ondisk_inode(inode_offset)
@@ -162,9 +161,9 @@ impl RafsInspector {
 
     fn list_chunks(
         r: &mut RafsIoReader,
-        inode: &OndiskInode,
+        inode: &RafsV5Inode,
         inode_offset: u32,
-    ) -> Result<Option<Vec<OndiskChunkInfo>>> {
+    ) -> Result<Option<Vec<RafsV5ChunkInfo>>> {
         if !inode.is_reg() {
             return Ok(None);
         }
@@ -176,7 +175,7 @@ impl RafsInspector {
             let xattr_header_offset = inode_offset + inode.size() as u32;
             r.seek_to_offset(xattr_header_offset as u64)?;
             // TODO: implement `load()` for `OndiskXattr`
-            let mut xattrs_header = OndiskXAttrs::new();
+            let mut xattrs_header = RafsV5XAttrsTable::new();
             r.read_exact(xattrs_header.as_mut())?;
             xattr_pairs_aligned_size = xattrs_header.aligned_size() as u32 + 8;
         }
@@ -186,9 +185,9 @@ impl RafsInspector {
         r.seek_to_offset(chunks_offset as u64)?;
 
         if inode.i_child_count > 0 {
-            chunks = Some(Vec::<OndiskChunkInfo>::new());
+            chunks = Some(Vec::<RafsV5ChunkInfo>::new());
             for _ in 0..inode.i_child_count {
-                let mut chunk = OndiskChunkInfo::new();
+                let mut chunk = RafsV5ChunkInfo::new();
                 chunk.load(r)?;
                 chunks.as_mut().unwrap().push(chunk);
             }
@@ -197,7 +196,7 @@ impl RafsInspector {
         Ok(chunks)
     }
 
-    fn stat_single_file(inode: &OndiskInode, name: &str, index: usize) {
+    fn stat_single_file(inode: &RafsV5Inode, name: &str, index: usize) {
         println!(
             r#"
 Inode Number:       {inode_number}
@@ -231,7 +230,7 @@ Blocks:             {blocks}"#,
 
     pub fn iter_dir(
         &self,
-        mut op: impl FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
+        mut op: impl FnMut(&OsStr, &RafsV5Inode, u32, u32) -> Action,
     ) -> Result<()> {
         let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
         let parent_ino = dir_inode.i_ino;
@@ -262,7 +261,7 @@ Blocks:             {blocks}"#,
     fn walk_fs(
         &self,
         top_index: u32,
-        op: &mut dyn FnMut(&OsStr, &OndiskInode, u32, u32) -> Action,
+        op: &mut dyn FnMut(&OsStr, &RafsV5Inode, u32, u32) -> Action,
     ) -> Result<()> {
         let (top, _) = self.load_inode_by_index(top_index as usize)?;
         let parent_ino = top.i_ino;
@@ -415,7 +414,7 @@ Blocks:             {blocks}"#,
     }
 
     fn cmd_list_prefetch(&mut self) -> Result<Option<Value>> {
-        let mut pt = PrefetchTable::new();
+        let mut pt = RafsV5PrefetchTable::new();
         let mut guard = self.bootstrap.lock().unwrap();
         let bootstrap = guard.deref_mut();
         pt.load_prefetch_table_from(

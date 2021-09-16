@@ -10,30 +10,41 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
+use std::io::SeekFrom;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::size_of;
+use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use fuse_rs::abi::linux_abi;
 use fuse_rs::api::filesystem::Entry;
 
-use crate::metadata::layout::*;
-use crate::metadata::*;
+use crate::metadata::layout::v5::{
+    rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo,
+    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeOps,
+    RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
+};
+use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
+use crate::metadata::{
+    Inode, RafsBioDesc, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
+    RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
+};
 use crate::RafsIoReader;
 
+use nydus_utils::digest::Algorithm;
 use nydus_utils::{digest::RafsDigest, ByteSize};
 
-pub struct CachedInodes {
-    s_blob: Arc<OndiskBlobTable>,
+pub struct CachedSuperBlockV5 {
+    s_blob: Arc<RafsV5BlobTable>,
     s_meta: Arc<RafsSuperMeta>,
-    s_inodes: BTreeMap<Inode, Arc<CachedInode>>,
+    s_inodes: BTreeMap<Inode, Arc<CachedInodeV5>>,
     digest_validate: bool,
 }
 
-impl CachedInodes {
+impl CachedSuperBlockV5 {
     pub fn new(meta: RafsSuperMeta, digest_validate: bool) -> Self {
-        CachedInodes {
-            s_blob: Arc::new(OndiskBlobTable::new()),
+        CachedSuperBlockV5 {
+            s_blob: Arc::new(RafsV5BlobTable::new()),
             s_inodes: BTreeMap::new(),
             s_meta: Arc::new(meta),
             digest_validate,
@@ -50,7 +61,7 @@ impl CachedInodes {
             if entries >= self.s_meta.inode_table_entries {
                 break;
             }
-            let mut inode = CachedInode::new(self.s_blob.clone(), self.s_meta.clone());
+            let mut inode = CachedInodeV5::new(self.s_blob.clone(), self.s_meta.clone());
             match inode.load(&self.s_meta, r) {
                 Ok(_) => {
                     entries += 1;
@@ -89,15 +100,15 @@ impl CachedInodes {
         Ok(())
     }
 
-    fn get_node(&self, ino: Inode) -> Result<Arc<CachedInode>> {
+    fn get_node(&self, ino: Inode) -> Result<Arc<CachedInodeV5>> {
         Ok(self.s_inodes.get(&ino).ok_or_else(|| enoent!())?.clone())
     }
 
-    fn get_node_mut(&mut self, ino: Inode) -> Result<&mut Arc<CachedInode>> {
+    fn get_node_mut(&mut self, ino: Inode) -> Result<&mut Arc<CachedInodeV5>> {
         self.s_inodes.get_mut(&ino).ok_or_else(|| enoent!())
     }
 
-    fn hash_inode(&mut self, inode: Arc<CachedInode>) -> Result<Arc<CachedInode>> {
+    fn hash_inode(&mut self, inode: Arc<CachedInodeV5>) -> Result<Arc<CachedInodeV5>> {
         if inode.is_hardlink() {
             if let Some(i) = self.s_inodes.get(&inode.i_ino) {
                 if !i.i_data.is_empty() {
@@ -110,7 +121,7 @@ impl CachedInodes {
         self.get_node(ino)
     }
 
-    fn add_into_parent(&mut self, child_inode: Arc<CachedInode>) {
+    fn add_into_parent(&mut self, child_inode: Arc<CachedInodeV5>) {
         if let Ok(parent_inode) = self.get_node_mut(child_inode.parent()) {
             Arc::get_mut(parent_inode)
                 .unwrap()
@@ -119,7 +130,34 @@ impl CachedInodes {
     }
 }
 
-impl RafsSuperInodes for CachedInodes {
+impl RafsSuperInodes for CachedSuperBlockV5 {
+    fn get_max_ino(&self) -> u64 {
+        self.s_inodes.len() as u64
+    }
+
+    fn get_inode(&self, ino: Inode, _digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
+        self.s_inodes
+            .get(&ino)
+            .map_or(Err(enoent!()), |i| Ok(i.clone()))
+    }
+
+    fn validate_digest(
+        &self,
+        inode: Arc<dyn RafsInode>,
+        recursive: bool,
+        digester: Algorithm,
+    ) -> Result<bool> {
+        rafsv5_validate_digest(inode, recursive, digester)
+    }
+}
+
+impl RafsSuperBlobs for CachedSuperBlockV5 {
+    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
+        self.s_blob.clone()
+    }
+}
+
+impl RafsSuperBlock for CachedSuperBlockV5 {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         // FIXME: add validator for all load operations.
 
@@ -129,12 +167,12 @@ impl RafsSuperInodes for CachedInodes {
         let mut offset = [0u8; size_of::<u32>()];
         r.read_exact(&mut offset)?;
         // The offset is aligned with 8 bytes to make it easier to
-        // validate OndiskInode.
+        // validate RafsV5Inode.
         let inode_offset = u32::from_le_bytes(offset) << 3;
 
         // Load blob table.
         r.seek(SeekFrom::Start(self.s_meta.blob_table_offset))?;
-        let mut blob_table = OndiskBlobTable::new();
+        let mut blob_table = RafsV5BlobTable::new();
         let meta = &self.s_meta;
 
         // Load extended blob table if the bootstrap including
@@ -158,7 +196,7 @@ impl RafsSuperInodes for CachedInodes {
         // Validate inode digest tree
         let digester = self.s_meta.get_digester();
         if self.digest_validate
-            && !self.digest_validate(self.get_inode(RAFS_ROOT_INODE, false)?, true, digester)?
+            && !self.validate_digest(self.get_inode(RAFS_ROOT_INODE, false)?, true, digester)?
         {
             return Err(einval!("invalid inode digest"));
         }
@@ -166,31 +204,17 @@ impl RafsSuperInodes for CachedInodes {
         Ok(())
     }
 
-    fn destroy(&mut self) {
-        self.s_inodes.clear();
-    }
-
-    fn get_inode(&self, ino: Inode, _digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
-        self.s_inodes
-            .get(&ino)
-            .map_or(Err(enoent!()), |i| Ok(i.clone()))
-    }
-
-    fn get_max_ino(&self) -> u64 {
-        self.s_inodes.len() as u64
-    }
-
-    fn get_blob_table(&self) -> Arc<OndiskBlobTable> {
-        self.s_blob.clone()
-    }
-
     fn update(&self, _r: &mut RafsIoReader) -> RafsResult<()> {
         Err(RafsError::Unsupported)
+    }
+
+    fn destroy(&mut self) {
+        self.s_inodes.clear();
     }
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CachedInode {
+pub struct CachedInodeV5 {
     i_ino: Inode,
     i_name: OsString,
     i_digest: RafsDigest,
@@ -199,7 +223,7 @@ pub struct CachedInode {
     i_projid: u32,
     i_uid: u32,
     i_gid: u32,
-    i_flags: RafsInodeFlags,
+    i_flags: RafsV5InodeFlags,
     i_size: u64,
     i_blocks: u64,
     i_nlink: u32,
@@ -212,15 +236,15 @@ pub struct CachedInode {
     i_mtime: u64,
     i_target: OsString, // for symbol link
     i_xattr: HashMap<OsString, Vec<u8>>,
-    i_data: Vec<Arc<CachedChunkInfo>>,
-    i_child: Vec<Arc<CachedInode>>,
-    i_blob_table: Arc<OndiskBlobTable>,
+    i_data: Vec<Arc<CachedChunkInfoV5>>,
+    i_child: Vec<Arc<CachedInodeV5>>,
+    i_blob_table: Arc<RafsV5BlobTable>,
     i_meta: Arc<RafsSuperMeta>,
 }
 
-impl CachedInode {
-    pub fn new(blob_table: Arc<OndiskBlobTable>, meta: Arc<RafsSuperMeta>) -> Self {
-        CachedInode {
+impl CachedInodeV5 {
+    pub fn new(blob_table: Arc<RafsV5BlobTable>, meta: Arc<RafsSuperMeta>) -> Self {
+        CachedInodeV5 {
             i_blob_table: blob_table,
             i_meta: meta,
             ..Default::default()
@@ -233,7 +257,7 @@ impl CachedInode {
             r.read_exact(name_buf.as_mut_slice())?;
             self.i_name = bytes_to_os_str(&name_buf).to_os_string();
         }
-        r.seek_to_next_aligned(name_size)?;
+        r.seek_to_next_aligned(name_size, RAFSV5_ALIGNMENT)?;
         Ok(())
     }
 
@@ -243,13 +267,13 @@ impl CachedInode {
             r.read_exact(symbol_buf.as_mut_slice())?;
             self.i_target = bytes_to_os_str(&symbol_buf).to_os_string();
         }
-        r.seek_to_next_aligned(symlink_size)?;
+        r.seek_to_next_aligned(symlink_size, RAFSV5_ALIGNMENT)?;
         Ok(())
     }
 
     fn load_xattr(&mut self, r: &mut RafsIoReader) -> Result<()> {
         if self.has_xattr() {
-            let mut xattrs = OndiskXAttrs::new();
+            let mut xattrs = RafsV5XAttrsTable::new();
             r.read_exact(xattrs.as_mut())?;
             let mut xattr_buf = vec![0u8; xattrs.aligned_size()];
             r.read_exact(xattr_buf.as_mut_slice())?;
@@ -263,21 +287,21 @@ impl CachedInode {
 
     fn load_chunk_info(&mut self, r: &mut RafsIoReader) -> Result<()> {
         if self.is_reg() && self.i_child_cnt > 0 {
-            let mut chunk = OndiskChunkInfo::new();
+            let mut chunk = RafsV5ChunkInfo::new();
             for _i in 0..self.i_child_cnt {
                 chunk.load(r)?;
-                self.i_data.push(Arc::new(CachedChunkInfo::from(&chunk)));
+                self.i_data.push(Arc::new(CachedChunkInfoV5::from(&chunk)));
             }
         }
         Ok(())
     }
 
     pub fn load(&mut self, sb: &RafsSuperMeta, r: &mut RafsIoReader) -> Result<()> {
-        // OndiskInode...name...symbol link...chunks
-        let mut inode = OndiskInode::new();
+        // RafsV5Inode...name...symbol link...chunks
+        let mut inode = RafsV5Inode::new();
 
         // parse ondisk inode
-        // OndiskInode|name|symbol|xattr|chunks
+        // RafsV5Inode|name|symbol|xattr|chunks
         r.read_exact(inode.as_mut())?;
         self.copy_from_ondisk(&inode);
         self.load_name(inode.i_name_size as usize, r)?;
@@ -290,7 +314,7 @@ impl CachedInode {
         Ok(())
     }
 
-    fn copy_from_ondisk(&mut self, inode: &OndiskInode) {
+    fn copy_from_ondisk(&mut self, inode: &RafsV5Inode) {
         self.i_ino = inode.i_ino;
         self.i_digest = inode.i_digest;
         self.i_parent = inode.i_parent;
@@ -309,7 +333,7 @@ impl CachedInode {
         self.i_mtime_nsec = inode.i_mtime_nsec;
     }
 
-    fn add_child(&mut self, child: Arc<CachedInode>) {
+    fn add_child(&mut self, child: Arc<CachedInodeV5>) {
         self.i_child.push(child);
         if self.i_child.len() == (self.i_child_cnt as usize) {
             // all children are ready, do sort
@@ -318,63 +342,13 @@ impl CachedInode {
     }
 }
 
-impl RafsInode for CachedInode {
+impl RafsInode for CachedInodeV5 {
     fn validate(&self) -> Result<()> {
         // TODO: validate
         if self.is_symlink() && self.i_target.is_empty() {
             return Err(einval!("invalid inode"));
         }
         Ok(())
-    }
-
-    fn name(&self) -> OsString {
-        self.i_name.clone()
-    }
-
-    fn get_symlink(&self) -> Result<OsString> {
-        if !self.is_symlink() {
-            Err(einval!("inode is not a symlink"))
-        } else {
-            Ok(self.i_target.clone())
-        }
-    }
-
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
-        let idx = self
-            .i_child
-            .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
-            .map_err(|_| enoent!())?;
-        Ok(self.i_child[idx].clone())
-    }
-
-    #[inline]
-    fn get_child_by_index(&self, index: Inode) -> Result<Arc<dyn RafsInode>> {
-        Ok(self.i_child[index as usize].clone())
-    }
-
-    #[inline]
-    fn get_digest(&self) -> RafsDigest {
-        self.i_digest
-    }
-
-    #[inline]
-    fn get_child_index(&self) -> Result<u32> {
-        Ok(self.i_child_idx)
-    }
-
-    #[inline]
-    fn get_child_count(&self) -> u32 {
-        self.i_child_cnt
-    }
-
-    #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
-        Ok(self.i_data[idx as usize].clone())
-    }
-
-    #[inline]
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
-        self.i_blob_table.get(idx)
     }
 
     #[inline]
@@ -402,6 +376,45 @@ impl RafsInode for CachedInode {
         }
     }
 
+    fn get_symlink(&self) -> Result<OsString> {
+        if !self.is_symlink() {
+            Err(einval!("inode is not a symlink"))
+        } else {
+            Ok(self.i_target.clone())
+        }
+    }
+
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+        let idx = self
+            .i_child
+            .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
+            .map_err(|_| enoent!())?;
+        Ok(self.i_child[idx].clone())
+    }
+
+    #[inline]
+    fn get_child_by_index(&self, index: Inode) -> Result<Arc<dyn RafsInode>> {
+        Ok(self.i_child[index as usize].clone())
+    }
+
+    fn get_child_index(&self) -> Result<u32> {
+        Ok(self.i_child_idx)
+    }
+
+    #[inline]
+    fn get_child_count(&self) -> u32 {
+        self.i_child_cnt
+    }
+
+    #[inline]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
+        Ok(self.i_data[idx as usize].clone())
+    }
+
+    fn has_xattr(&self) -> bool {
+        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+    }
+
     #[inline]
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
         Ok(self.i_xattr.get(name).cloned())
@@ -413,10 +426,6 @@ impl RafsInode for CachedInode {
             .keys()
             .map(|k| k.as_bytes().to_vec())
             .collect::<Vec<XattrName>>())
-    }
-
-    fn get_blocksize(&self) -> u32 {
-        self.i_blksize
     }
 
     fn is_dir(&self) -> bool {
@@ -435,12 +444,16 @@ impl RafsInode for CachedInode {
         !self.is_dir() && self.i_nlink > 1
     }
 
-    fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsInodeFlags::XATTR)
+    fn name(&self) -> OsString {
+        self.i_name.clone()
     }
 
-    fn has_hole(&self) -> bool {
-        self.i_flags.contains(RafsInodeFlags::HAS_HOLE)
+    fn flags(&self) -> u64 {
+        self.i_flags.bits()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        self.i_digest
     }
 
     fn collect_descendants_inodes(
@@ -472,13 +485,49 @@ impl RafsInode for CachedInode {
         Ok(0)
     }
 
-    fn cast_ondisk(&self) -> Result<OndiskInode> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc> {
+        rafsv5_alloc_bio_desc(self, offset, size)
+    }
+
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
+    fn get_symlink_size(&self) -> u16 {
+        if self.is_symlink() {
+            self.i_target.byte_size() as u16
+        } else {
+            0
+        }
+    }
+
+    impl_getter!(ino, i_ino, u64);
+    impl_getter!(parent, i_parent, u64);
+    impl_getter!(size, i_size, u64);
+    impl_getter!(rdev, i_rdev, u32);
+    impl_getter!(projid, i_projid, u32);
+}
+
+impl RafsV5InodeOps for CachedInodeV5 {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+        self.i_blob_table.get(idx)
+    }
+
+    fn get_blocksize(&self) -> u32 {
+        self.i_blksize
+    }
+
+    fn has_hole(&self) -> bool {
+        self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
+    }
+
+    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
         let i_symlink_size = if self.is_symlink() {
             self.get_symlink()?.byte_size() as u16
         } else {
             0
         };
-        Ok(OndiskInode {
+        Ok(RafsV5Inode {
             i_digest: self.i_digest,
             i_parent: self.i_parent,
             i_ino: self.i_ino,
@@ -500,16 +549,11 @@ impl RafsInode for CachedInode {
             i_reserved: [0; 8],
         })
     }
-
-    impl_getter!(ino, i_ino, u64);
-    impl_getter!(parent, i_parent, u64);
-    impl_getter!(size, i_size, u64);
-    impl_getter!(rdev, i_rdev, u32);
 }
 
 /// Cached information about an Rafs Data Chunk.
 #[derive(Clone, Default, Debug)]
-pub struct CachedChunkInfo {
+pub struct CachedChunkInfoV5 {
     // block hash
     c_block_id: Arc<RafsDigest>,
     // blob containing the block
@@ -527,15 +571,15 @@ pub struct CachedChunkInfo {
     c_flags: RafsChunkFlags,
 }
 
-impl CachedChunkInfo {
+impl CachedChunkInfoV5 {
     pub fn new() -> Self {
-        CachedChunkInfo {
+        CachedChunkInfoV5 {
             ..Default::default()
         }
     }
 
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        let mut chunk = OndiskChunkInfo::new();
+        let mut chunk = RafsV5ChunkInfo::new();
 
         r.read_exact(chunk.as_mut())?;
         self.copy_from_ondisk(&chunk);
@@ -543,7 +587,7 @@ impl CachedChunkInfo {
         Ok(())
     }
 
-    fn copy_from_ondisk(&mut self, chunk: &OndiskChunkInfo) {
+    fn copy_from_ondisk(&mut self, chunk: &RafsV5ChunkInfo) {
         self.c_block_id = Arc::new(chunk.block_id);
         self.c_blob_index = chunk.blob_index;
         self.c_index = chunk.index;
@@ -556,7 +600,7 @@ impl CachedChunkInfo {
     }
 }
 
-impl RafsChunkInfo for CachedChunkInfo {
+impl RafsChunkInfo for CachedChunkInfoV5 {
     fn block_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
@@ -579,9 +623,9 @@ impl RafsChunkInfo for CachedChunkInfo {
     impl_getter!(flags, c_flags, RafsChunkFlags);
 }
 
-impl From<&OndiskChunkInfo> for CachedChunkInfo {
-    fn from(info: &OndiskChunkInfo) -> Self {
-        let mut chunk = CachedChunkInfo::new();
+impl From<&RafsV5ChunkInfo> for CachedChunkInfoV5 {
+    fn from(info: &RafsV5ChunkInfo) -> Self {
+        let mut chunk = CachedChunkInfoV5::new();
         chunk.copy_from_ondisk(info);
         chunk
     }
@@ -589,13 +633,6 @@ impl From<&OndiskChunkInfo> for CachedChunkInfo {
 
 #[cfg(test)]
 mod cached_tests {
-    use crate::metadata::cached::CachedInode;
-    use crate::metadata::layout::{
-        OndiskBlobTable, OndiskChunkInfo, OndiskInode, OndiskInodeWrapper, XAttrs,
-    };
-    use crate::metadata::{align_to_rafs, RafsInode, RafsStore, RafsSuperMeta};
-    use crate::{RafsIoReader, RafsIoWriter};
-    use nydus_utils::ByteSize;
     use std::cmp;
     use std::ffi::{OsStr, OsString};
     use std::fs::OpenOptions;
@@ -603,6 +640,16 @@ mod cached_tests {
     use std::io::SeekFrom::Start;
     use std::os::unix::ffi::OsStrExt;
     use std::sync::Arc;
+
+    use nydus_utils::ByteSize;
+
+    use crate::metadata::cached_v5::CachedInodeV5;
+    use crate::metadata::layout::v5::{
+        rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper,
+        RafsV5XAttrs,
+    };
+    use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
+    use crate::{RafsIoReader, RafsIoWriter};
 
     #[test]
     fn test_load_inode() {
@@ -615,9 +662,9 @@ mod cached_tests {
             .unwrap();
         let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
-        let mut ondisk_inode = OndiskInode::new();
+        let mut ondisk_inode = RafsV5Inode::new();
         let file_name = OsString::from("c_inode_1");
-        let mut xattr = XAttrs::default();
+        let mut xattr = RafsV5XAttrs::default();
         xattr.add(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
         xattr.add(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
@@ -625,12 +672,12 @@ mod cached_tests {
         ondisk_inode.i_ino = 3;
         ondisk_inode.i_size = 8192;
         ondisk_inode.i_mode = libc::S_IFREG;
-        let mut chunk = OndiskChunkInfo::new();
+        let mut chunk = RafsV5ChunkInfo::new();
         chunk.decompress_size = 8192;
         chunk.decompress_offset = 0;
         chunk.compress_offset = 0;
         chunk.compress_size = 4096;
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: None,
             inode: &ondisk_inode,
@@ -641,8 +688,8 @@ mod cached_tests {
 
         f.seek(Start(0)).unwrap();
         let meta = Arc::new(RafsSuperMeta::default());
-        let blob_table = Arc::new(OndiskBlobTable::new());
-        let mut cached_inode = CachedInode::new(blob_table, meta.clone());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         // check data
         assert_eq!(cached_inode.i_name, file_name.to_str().unwrap());
@@ -680,12 +727,12 @@ mod cached_tests {
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
         let file_name = OsString::from("c_inode_2");
         let symlink_name = OsString::from("c_inode_1");
-        let mut ondisk_inode = OndiskInode::new();
+        let mut ondisk_inode = RafsV5Inode::new();
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
         ondisk_inode.i_symlink_size = symlink_name.byte_size() as u16;
         ondisk_inode.i_mode = libc::S_IFLNK;
 
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: Some(symlink_name.as_os_str()),
             inode: &ondisk_inode,
@@ -694,8 +741,8 @@ mod cached_tests {
 
         f.seek(Start(0)).unwrap();
         let meta = Arc::new(RafsSuperMeta::default());
-        let blob_table = Arc::new(OndiskBlobTable::new());
-        let mut cached_inode = CachedInode::new(blob_table, meta.clone());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
 
         assert_eq!(cached_inode.i_name, "c_inode_2");
@@ -717,13 +764,13 @@ mod cached_tests {
         let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
         let file_name = OsString::from("c_inode_3");
-        let mut ondisk_inode = OndiskInode::new();
-        ondisk_inode.i_name_size = align_to_rafs(file_name.len()) as u16;
+        let mut ondisk_inode = RafsV5Inode::new();
+        ondisk_inode.i_name_size = rafsv5_align(file_name.len()) as u16;
         ondisk_inode.i_child_count = 4;
         ondisk_inode.i_mode = libc::S_IFREG;
         ondisk_inode.i_size = 1024 * 1024 * 3 + 8192;
 
-        let inode = OndiskInodeWrapper {
+        let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: None,
             inode: &ondisk_inode,
@@ -732,7 +779,7 @@ mod cached_tests {
 
         let mut size = ondisk_inode.i_size;
         for i in 0..ondisk_inode.i_child_count {
-            let mut chunk = OndiskChunkInfo::new();
+            let mut chunk = RafsV5ChunkInfo::new();
             chunk.decompress_size = cmp::min(1024 * 1024, size as u32);
             chunk.decompress_offset = (i * 1024 * 1024) as u64;
             chunk.compress_size = chunk.decompress_size / 2;
@@ -744,11 +791,11 @@ mod cached_tests {
         f.seek(Start(0)).unwrap();
         let mut meta = Arc::new(RafsSuperMeta::default());
         Arc::get_mut(&mut meta).unwrap().block_size = 1024 * 1024;
-        let mut blob_table = Arc::new(OndiskBlobTable::new());
+        let mut blob_table = Arc::new(RafsV5BlobTable::new());
         Arc::get_mut(&mut blob_table)
             .unwrap()
             .add(String::from("123333"), 0, 0, 0, 0, 0);
-        let mut cached_inode = CachedInode::new(blob_table, meta.clone());
+        let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         let desc1 = cached_inode.alloc_bio_desc(0, 100).unwrap();
         assert_eq!(desc1.bi_size, 100);
