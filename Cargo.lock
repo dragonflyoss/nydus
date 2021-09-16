@@ -64,6 +64,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cff77d8686867eceff3105329d4698d96c2391c176d5d03adc90c7389162b5b8"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4dc07131ffa69b8072d35f5007352af944213cde02545e2103680baed38fcd"
+
+[[package]]
 name = "atty"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -119,11 +125,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce4f9586c9a3151c4b49b19e82ba163dd073614dd057e53c969e1a4db5b52720"
 dependencies = [
  "arrayref",
- "arrayvec",
+ "arrayvec 0.5.1",
  "cc",
  "cfg-if 0.1.10",
  "constant_time_eq",
  "crypto-mac",
+ "digest",
+]
+
+[[package]]
+name = "blake3"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcd555c66291d5f836dbb6883b48660ece810fe25a31f3bdfb911945dff2691f"
+dependencies = [
+ "arrayref",
+ "arrayvec 0.7.1",
+ "cc",
+ "cfg-if 1.0.0",
+ "constant_time_eq",
  "digest",
 ]
 
@@ -1187,7 +1207,7 @@ dependencies = [
 name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
- "blake3",
+ "blake3 0.3.6",
  "epoll",
  "fuse-rs",
  "lazy_static",
@@ -1409,7 +1429,7 @@ dependencies = [
  "arc-swap",
  "base64 0.13.0",
  "bitflags",
- "blake3",
+ "blake3 1.0.0",
  "flate2",
  "fuse-rs",
  "futures",
