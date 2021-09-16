@@ -30,7 +30,9 @@ impl RafsCache for DummyCache {
 
     fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()> {
         for b in prefetch_vec {
-            let _ = self.backend.prefetch_blob(&b.blob_id, b.offset, b.len);
+            let _ = self
+                .backend
+                .prefetch_blob_data_range(&b.blob_id, b.offset, b.len);
         }
         Ok(())
     }

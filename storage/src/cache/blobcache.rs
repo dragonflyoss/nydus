@@ -1196,7 +1196,9 @@ impl RafsCache for BlobCache {
         // to blobcache. This should be asynchronous, so filesystem read cache hit
         // should validate data integrity.
         for b in blobs {
-            let _ = self.backend.prefetch_blob(&b.blob_id, b.offset, b.len);
+            let _ = self
+                .backend
+                .prefetch_blob_data_range(&b.blob_id, b.offset, b.len);
         }
         Ok(())
     }
@@ -1403,7 +1405,7 @@ pub mod blob_cache_tests {
     use vm_memory::{VolatileMemory, VolatileSlice};
     use vmm_sys_util::tempdir::TempDir;
 
-    use crate::backend::{BackendResult, BlobBackend};
+    use crate::backend::{BackendResult, BlobBackend, BlobReader, BlobWrite};
     use crate::cache::{blobcache, MergedBackendRequest, PrefetchWorker, RafsCache};
     use crate::compress;
     use crate::device::{RafsBio, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
@@ -1420,8 +1422,12 @@ pub mod blob_cache_tests {
         metrics: Arc<BackendMetrics>,
     }
 
-    impl BlobBackend for MockBackend {
-        fn try_read(&self, _blob_id: &str, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
+    impl BlobReader for MockBackend {
+        fn blob_size(&self) -> BackendResult<u64> {
+            Ok(0)
+        }
+
+        fn try_read(&self, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
             let mut i = 0;
             while i < buf.len() {
                 buf[i] = i as u8;
@@ -1430,19 +1436,8 @@ pub mod blob_cache_tests {
             Ok(i)
         }
 
-        fn write(&self, _blob_id: &str, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
-            Ok(0)
-        }
-
-        fn blob_size(&self, _blob_id: &str) -> BackendResult<u64> {
-            Ok(0)
-        }
-
-        fn release(&self) {}
-
-        fn prefetch_blob(
+        fn prefetch_blob_data_range(
             &self,
-            _blob_id: &str,
             _blob_readahead_offset: u32,
             _blob_readahead_size: u32,
         ) -> BackendResult<()> {
@@ -1453,6 +1448,43 @@ pub mod blob_cache_tests {
             // Safe because nydusd must have backend attached with id, only image builder can no id
             // but use backend instance to upload blob.
             &self.metrics
+        }
+    }
+
+    impl BlobWrite for MockBackend {
+        fn write(&self, _buf: &[u8], _offset: u64) -> BackendResult<usize> {
+            Ok(0)
+        }
+    }
+
+    impl BlobBackend for MockBackend {
+        fn release(&self) {}
+
+        fn metrics(&self) -> &BackendMetrics {
+            // Safe because nydusd must have backend attached with id, only image builder can no id
+            // but use backend instance to upload blob.
+            &self.metrics
+        }
+
+        fn get_reader(&self, _blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
+            Ok(Arc::new(MockBackend {
+                metrics: self.metrics.clone(),
+            }))
+        }
+
+        fn get_writer(&self, _blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>> {
+            Ok(Arc::new(MockBackend {
+                metrics: self.metrics.clone(),
+            }))
+        }
+
+        fn prefetch_blob_data_range(
+            &self,
+            _blob_id: &str,
+            _ra_offset: u32,
+            _ra_size: u32,
+        ) -> BackendResult<()> {
+            todo!()
         }
     }
 

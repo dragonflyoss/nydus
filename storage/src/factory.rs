@@ -79,7 +79,10 @@ pub fn new_backend(
         #[cfg(feature = "backend-registry")]
         "registry" => Ok(Arc::new(registry::new(config.backend_config, Some(id))?)),
         #[cfg(feature = "backend-localfs")]
-        "localfs" => Ok(Arc::new(localfs::new(config.backend_config, Some(id))?)),
+        "localfs" => Ok(Arc::new(localfs::LocalFs::new(
+            config.backend_config,
+            Some(id),
+        )?)),
         _ => Err(einval!(format!(
             "unsupported backend type '{}'",
             config.backend_type

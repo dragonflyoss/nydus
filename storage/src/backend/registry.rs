@@ -589,7 +589,7 @@ impl BlobBackend for Registry {
             .unwrap_or_else(|e| error!("{:?}", e))
     }
 
-    fn prefetch_blob(
+    fn prefetch_blob_data_range(
         &self,
         _blob_id: &str,
         _blob_readahead_offset: u32,
