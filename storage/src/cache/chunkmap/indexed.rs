@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use nydus_utils::div_round_up;
 
 use super::ChunkMap;
+use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
 use crate::device::RafsChunkInfo;
 use crate::utils::readahead;
 
@@ -46,7 +47,10 @@ pub struct IndexedChunkMap {
 }
 
 unsafe impl Send for IndexedChunkMap {}
+
 unsafe impl Sync for IndexedChunkMap {}
+
+impl NoWaitSupport for IndexedChunkMap {}
 
 impl IndexedChunkMap {
     pub fn new(blob_path: &str, chunk_count: u32) -> Result<Self> {
@@ -118,7 +122,7 @@ impl IndexedChunkMap {
         })
     }
 
-    fn check_index(&self, idx: u32) -> Result<()> {
+    fn validate_index(&self, idx: u32) -> Result<()> {
         if idx > self.chunk_count - 1 {
             return Err(einval!(format!(
                 "chunk index {} exceeds chunk count {}",
@@ -128,22 +132,33 @@ impl IndexedChunkMap {
         Ok(())
     }
 
-    fn read_u8(&self, idx: u32) -> Result<(u8, u8)> {
-        self.check_index(idx)?;
+    fn read_u8(&self, idx: u32) -> u8 {
         let start = HEADER_SIZE + (idx as usize >> 3);
         let current = unsafe { self.base.add(start) as *const AtomicU8 };
-        let pos = 8 - ((idx & 0b111) + 1);
-        let mask = 1 << pos;
-        Ok((unsafe { (*current).load(Ordering::Acquire) }, mask))
+        unsafe { (*current).load(Ordering::Acquire) }
     }
 
-    fn write_u8(&self, idx: u32, current: u8, expected: u8) -> Result<bool> {
-        self.check_index(idx)?;
+    fn write_u8(&self, idx: u32, current: u8) -> bool {
+        let mask = Self::index_to_mask(idx);
+        let expected = current | mask;
         let start = HEADER_SIZE + (idx as usize >> 3);
         let atomic_value = unsafe { &*{ self.base.add(start) as *const AtomicU8 } };
-        Ok(atomic_value
+        atomic_value
             .compare_exchange(current, expected, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok())
+            .is_ok()
+    }
+
+    #[inline]
+    fn index_to_mask(index: u32) -> u8 {
+        let pos = 8 - ((index & 0b111) + 1);
+        1 << pos
+    }
+
+    fn is_chunk_ready(&self, index: u32) -> (bool, u8) {
+        let mask = Self::index_to_mask(index);
+        let current = self.read_u8(index);
+        let ready = current & mask == mask;
+        (ready, current)
     }
 }
 
@@ -156,24 +171,34 @@ impl Drop for IndexedChunkMap {
     }
 }
 
+impl ChunkIndexGetter for IndexedChunkMap {
+    type Index = u32;
+
+    fn get_index(chunk: &dyn RafsChunkInfo) -> Self::Index {
+        chunk.blob_index()
+    }
+}
+
 impl ChunkMap for IndexedChunkMap {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
-        let (current, mask) = self.read_u8(chunk.index())?;
-        Ok((current & mask) == mask)
+    fn has_ready(&self, chunk: &dyn RafsChunkInfo, _wait: bool) -> Result<bool> {
+        let index = chunk.index();
+        let _ = self.validate_index(index)?;
+        let (ready, _) = self.is_chunk_ready(index);
+        Ok(ready)
     }
 
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
         // Loop to write one byte (a bitmap with 8 bits capacity) to
         // blob chunk_map file until success.
+        let index = chunk.index();
+        let _ = self.validate_index(index)?;
         loop {
-            let index = chunk.index();
-            let (current, mask) = self.read_u8(index)?;
-            let ready = (current & mask) == mask;
+            let (ready, current) = self.is_chunk_ready(index);
             if ready {
                 break;
             }
-            let expected = current | mask;
-            if self.write_u8(index, current, expected)? {
+
+            if self.write_u8(index, current) {
                 break;
             }
         }
