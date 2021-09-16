@@ -23,7 +23,6 @@ pub mod dummycache;
 
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
-    seq: u64,
     // Chunks that are continuous to each other.
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
     pub blob_offset: u64,
@@ -32,14 +31,13 @@ struct MergedBackendRequest {
 }
 
 impl MergedBackendRequest {
-    fn new(seq: u64, first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
+    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
         let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
         chunks.push(first_cki);
 
         MergedBackendRequest {
-            seq,
             blob_offset,
             blob_size,
             chunks,
@@ -96,17 +94,12 @@ pub trait RafsCache {
     /// It depends on `cki` how to describe the chunk data.
     /// Moreover, chunk data from backend can be validated as per nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
-    fn read_backend_chunk<F>(
+    fn read_backend_chunk(
         &self,
         blob: &RafsBlobEntry,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
-        cacher: F,
-    ) -> Result<usize>
-    where
-        F: FnOnce(&[u8]) -> Result<()>,
-        Self: Sized,
-    {
+    ) -> Result<usize> {
         let offset = cki.compress_offset();
         let mut d;
 
@@ -181,7 +174,6 @@ pub trait RafsCache {
             self.need_validate(),
         )
         .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
-        cacher(chunk)?;
         Ok(chunk.len())
     }
 
