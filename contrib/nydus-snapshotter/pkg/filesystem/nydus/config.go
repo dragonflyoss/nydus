@@ -8,6 +8,8 @@ package nydus
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
@@ -114,6 +116,16 @@ func WithLogLevel(logLevel string) NewFSOpt {
 		} else {
 			d.logLevel = logLevel
 		}
+		return nil
+	}
+}
+
+func WithLogDir(dir string) NewFSOpt {
+	return func(d *filesystem) error {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return errors.New(fmt.Sprintf("failed to create logDir %s: %v", dir, err))
+		}
+		d.logDir = dir
 		return nil
 	}
 }

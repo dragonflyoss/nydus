@@ -45,6 +45,7 @@ type Config struct {
 	MetricsFile          string        `toml:"metrics_file"`
 	EnableStargz         bool          `toml:"enable_stargz"`
 	LogLevel             string        `toml:"-"`
+	LogDir               string        `toml:"log_dir"`
 	DisableCacheManager  bool          `toml:"disable_cache_manager"`
 }
 
@@ -74,6 +75,10 @@ func (c *Config) FillupWithDefaults() error {
 
 	if len(c.CacheDir) == 0 {
 		c.CacheDir = filepath.Join(c.RootDir, "cache")
+	}
+
+	if len(c.LogDir) == 0 {
+		c.LogDir = filepath.Join(c.RootDir, "logs")
 	}
 	var daemonCfg DaemonConfig
 	if err := LoadConfig(c.DaemonCfgPath, &daemonCfg); err != nil {

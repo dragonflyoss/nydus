@@ -40,6 +40,7 @@ type filesystem struct {
 	nydusdBinaryPath string
 	mode             fspkg.FSMode
 	logLevel         string
+	logDir           string
 }
 
 // NewFileSystem initialize Filesystem instance
@@ -107,7 +108,7 @@ func (fs *filesystem) newSharedDaemon() (*daemon.Daemon, error) {
 		daemon.WithSnapshotID(daemon.SharedNydusDaemonID),
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithLogDir(fs.logDir),
 		daemon.WithRootMountPoint(filepath.Join(fs.RootDir, "mnt")),
 		daemon.WithLogLevel(fs.logLevel),
 		modeOpt,
@@ -329,7 +330,7 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithConfigDir(fs.ConfigRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithLogDir(fs.logDir),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
 	); err != nil {
@@ -360,7 +361,7 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
 		daemon.WithAPISock(sharedDaemon.APISock()),
 		daemon.WithConfigDir(fs.ConfigRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithLogDir(fs.logDir),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
 	); err != nil {

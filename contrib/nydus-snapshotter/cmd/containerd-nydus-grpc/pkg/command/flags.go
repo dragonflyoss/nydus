@@ -30,6 +30,7 @@ const (
 type Args struct {
 	Address              string
 	LogLevel             string
+	LogDir               string
 	ConfigPath           string
 	RootDir              string
 	CacheDir             string
@@ -65,6 +66,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Value:       defaultLogLevel.String(),
 			Usage:       "set the logging level [trace, debug, info, warn, error, fatal, panic]",
 			Destination: &args.LogLevel,
+		},
+		&cli.StringFlag{
+			Name:        "log-dir",
+			Value:       "",
+			Usage:       "path to the log dir",
+			Destination: &args.LogDir,
 		},
 		&cli.StringFlag{
 			Name:        "config-path",
@@ -190,6 +197,10 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.CacheDir = args.CacheDir
 	if len(cfg.CacheDir) == 0 {
 		cfg.CacheDir = filepath.Join(cfg.RootDir, "cache")
+	}
+	cfg.LogDir = args.LogDir
+	if len(cfg.LogDir) == 0 {
+		cfg.LogDir = filepath.Join(cfg.RootDir, "logs")
 	}
 	cfg.ValidateSignature = args.ValidateSignature
 	cfg.PublicKeyFile = args.PublicKeyFile
