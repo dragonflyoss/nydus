@@ -144,7 +144,7 @@ impl Blob {
             SourceType::Directory => {
                 // Dump readahead nodes
                 for index in &readahead_files {
-                    let node = ctx.nodes.get_mut(**index as usize - 1).unwrap();
+                    let node = ctx.nodes.get_mut(*index as usize - 1).unwrap();
                     debug!("[{}]\treadahead {}", node.overlay, node);
                     if node.overlay == Overlay::UpperAddition
                         || node.overlay == Overlay::UpperModification
