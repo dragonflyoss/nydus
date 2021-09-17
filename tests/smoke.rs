@@ -18,7 +18,7 @@ const COMPAT_BOOTSTRAPS: [&str; 2] = [
     "sha256-nocompress-repeatable",
 ];
 
-fn check_compact(
+fn check_compatibility(
     work_dir: &Path,
     enable_cache: bool,
     bootstrap_name: &str,
@@ -192,10 +192,10 @@ fn integration_test_compact() {
 
     for mode in vec!["direct", "cached"].iter() {
         for bs in COMPAT_BOOTSTRAPS.iter() {
-            check_compact(&work_dir, false, bs, mode, false);
-            check_compact(&work_dir, false, bs, mode, true);
-            check_compact(&work_dir, true, bs, mode, false);
-            check_compact(&work_dir, true, bs, mode, true);
+            check_compatibility(&work_dir, false, bs, mode, false);
+            check_compatibility(&work_dir, false, bs, mode, true);
+            check_compatibility(&work_dir, true, bs, mode, false);
+            check_compatibility(&work_dir, true, bs, mode, true);
         }
     }
 }
