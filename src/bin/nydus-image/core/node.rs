@@ -4,6 +4,7 @@
 
 //! Node structure to store information for RAFS file system inode.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
@@ -235,6 +236,7 @@ impl Node {
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
         blob_index: u32,
+        chunk_cache: &mut HashMap<RafsDigest, RafsV5ChunkInfo>,
     ) -> Result<u64> {
         if self.is_dir() {
             return Ok(0);
@@ -279,11 +281,11 @@ impl Node {
                     if let Some(c) = chunk_dict.get_chunk(&chunk.block_id) {
                         Some(c)
                     } else {
-                        blob_ctx.chunk_cache.get(&chunk.block_id)
+                        chunk_cache.get(&chunk.block_id)
                     }
                 } else {
                     // get from build chunk cache
-                    blob_ctx.chunk_cache.get(&chunk.block_id)
+                    chunk_cache.get(&chunk.block_id)
                 }
             };
 
@@ -356,7 +358,7 @@ impl Node {
             chunk.index = blob_ctx.alloc_index()?;
 
             // Cache chunk digest info
-            blob_ctx.chunk_cache.insert(chunk.block_id, chunk);
+            chunk_cache.insert(chunk.block_id, chunk);
             self.chunks.push(chunk);
 
             trace!(

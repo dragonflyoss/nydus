@@ -183,8 +183,6 @@ pub struct BlobContext {
     pub blob_layout: BlobLayout,
     /// Scratch data buffer for reading from/writing to disk files.
     pub chunk_data_buf: Vec<u8>,
-    /// Store all chunk digest for chunk deduplicate during build.
-    pub chunk_cache: HashMap<RafsDigest, RafsV5ChunkInfo>,
     /// ChunkDict which would be loaded when builder start
     pub chunk_dict: Option<Arc<dyn ChunkDict>>,
 
@@ -205,7 +203,6 @@ impl BlobContext {
             chunk_count: 0,
             blob_layout: BlobLayout::new(),
             chunk_data_buf: vec![0u8; RAFS_MAX_BLOCK_SIZE as usize],
-            chunk_cache: HashMap::new(),
             chunk_dict: None,
             writer,
         }
@@ -255,6 +252,8 @@ impl BlobContext {
 pub struct BlobManager {
     blobs: Vec<BlobContext>,
     chunk_dict: Option<Arc<dyn ChunkDict>>,
+    /// Store all chunk digest for chunk deduplicate during build.
+    pub chunk_cache: HashMap<RafsDigest, RafsV5ChunkInfo>,
 }
 
 impl BlobManager {
@@ -262,6 +261,7 @@ impl BlobManager {
         Self {
             blobs: Vec::new(),
             chunk_dict: None,
+            chunk_cache: HashMap::new(),
         }
     }
 

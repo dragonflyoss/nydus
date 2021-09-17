@@ -71,9 +71,11 @@ func (rule *BootstrapRule) Validate() error {
 	// the blob list recorded in blob table of bootstrap
 	if !reflect.DeepEqual(bootstrap.Blobs, blobListInAnnotation) {
 		return fmt.Errorf(
-			"nydus blob list in bootstrap(%d) does not match with manifest(%d)'s",
+			"nydus blob list in bootstrap(%d) does not match with manifest(%d)'s, %v != %v",
 			len(bootstrap.Blobs),
 			len(blobListInAnnotation),
+			bootstrap.Blobs,
+			blobListInAnnotation,
 		)
 	}
 

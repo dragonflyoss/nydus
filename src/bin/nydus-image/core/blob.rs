@@ -6,8 +6,10 @@ use std::os::unix::ffi::OsStrExt;
 
 use anyhow::{Context, Result};
 use sha2::Digest;
+use std::collections::HashMap;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
+use rafs::metadata::layout::v5::RafsV5ChunkInfo;
 
 use super::context::{BlobContext, BuildContext, SourceType};
 use super::node::*;
@@ -27,6 +29,7 @@ impl Blob {
         mut blob_ctx: &mut BlobContext,
         blob_index: u32,
         nodes: &mut Vec<Node>,
+        chunk_cache: &mut HashMap<RafsDigest, RafsV5ChunkInfo>,
     ) -> Result<()> {
         match ctx.source_type {
             SourceType::Directory => {
@@ -35,7 +38,7 @@ impl Blob {
                 for (idx, inode) in inodes.iter().enumerate() {
                     let node = &mut nodes[*inode];
                     let size = node
-                        .dump_blob(ctx, blob_ctx, blob_index)
+                        .dump_blob(ctx, blob_ctx, blob_index, chunk_cache)
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
                         debug!("[{}]\treadahead {}", node.overlay, node);

@@ -135,7 +135,15 @@ impl Builder for DirectoryBuilder {
         }
         let blob_index = blob_mgr.alloc_index()?;
         timing_tracer!(
-            { blob.dump(ctx, &mut blob_ctx, blob_index, &mut bootstrap_ctx.nodes) },
+            {
+                blob.dump(
+                    ctx,
+                    &mut blob_ctx,
+                    blob_index,
+                    &mut bootstrap_ctx.nodes,
+                    &mut blob_mgr.chunk_cache,
+                )
+            },
             "dump_blob"
         )?;
         blob.flush(&mut blob_ctx)?;
