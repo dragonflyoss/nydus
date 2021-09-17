@@ -24,6 +24,7 @@ type BuilderOption struct {
 	OutputJSONPath      string
 	// A regular file or fifo into which commands nydus-image to dump contents.
 	BlobPath string
+	AlignedChunk	    bool
 }
 
 type Builder struct {
@@ -54,6 +55,10 @@ func (builder *Builder) Run(option BuilderOption) error {
 			option.ParentBootstrapPath,
 		}
 	}
+	if option.AlignedChunk {
+		args = append(args, "--aligned-chunk")
+	}
+
 	args = append(
 		args,
 		"--bootstrap",

@@ -80,6 +80,7 @@ type Opt struct {
 	BackendType      string
 	BackendConfig    string
 	BackendForcePush bool
+	BackendAlignedChunk bool
 
 	NydusifyVersion string
 	Source          string
@@ -103,6 +104,7 @@ type Converter struct {
 	DockerV2Format bool
 
 	BackendForcePush bool
+	BackendAlignedChunk bool
 
 	NydusifyVersion string
 	Source          string
@@ -131,6 +133,7 @@ func New(opt Opt) (*Converter, error) {
 		MultiPlatform:    opt.MultiPlatform,
 		DockerV2Format:   opt.DockerV2Format,
 		BackendForcePush: opt.BackendForcePush,
+		BackendAlignedChunk: opt.BackendAlignedChunk,
 		NydusifyVersion:  opt.NydusifyVersion,
 		Source:           opt.Source,
 
@@ -200,6 +203,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 			dockerV2Format: cvt.DockerV2Format,
 			backend:        cvt.storageBackend,
 			forcePush:      cvt.BackendForcePush,
+			alignedChunk:   cvt.BackendAlignedChunk,
 		}
 		parentBuildLayer = buildLayer
 		buildLayers = append(buildLayers, buildLayer)
@@ -272,10 +276,15 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "Get source manifest")
 	}
-	buildInfo.SetSourceReference(SourceReference{
-		Reference: cvt.Source,
-		Digest:    sourceManifest.Digest.String(),
-	})
+
+	// In the buildkit environment, the source manifest may be empty because
+	// the source image is built from a Dockerfile.
+	if sourceManifest != nil {
+		buildInfo.SetSourceReference(SourceReference{
+			Reference: cvt.Source,
+			Digest:    sourceManifest.Digest.String(),
+		})
+	}
 
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{

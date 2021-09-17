@@ -101,7 +101,7 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 
 // Build nydus bootstrap and blob, returned blobPath's basename is sha256 hex string
 func (workflow *Workflow) Build(
-	layerDir, whiteoutSpec, parentBootstrapPath, bootstrapPath string,
+	layerDir, whiteoutSpec, parentBootstrapPath, bootstrapPath string, alignedChunk bool,
 ) (string, error) {
 	workflow.bootstrapPath = bootstrapPath
 
@@ -119,6 +119,7 @@ func (workflow *Workflow) Build(
 		WhiteoutSpec:        whiteoutSpec,
 		OutputJSONPath:      workflow.buildOutputJSONPath(),
 		BlobPath:            blobPath,
+		AlignedChunk:	     alignedChunk,
 	}); err != nil {
 		return "", errors.Wrapf(err, "build layer %s", layerDir)
 	}

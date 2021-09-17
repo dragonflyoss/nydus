@@ -54,6 +54,7 @@ type buildLayer struct {
 	bootstrapPath   string
 	backend         backend.Backend
 	forcePush       bool
+	alignedChunk    bool
 }
 
 // parseSourceMount parses mounts object returned by the Mount method in
@@ -291,7 +292,7 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 		parentBootstrapPath = parentLayer.bootstrapPath
 	}
 	blobPath, err := layer.buildWorkflow.Build(
-		layer.sourceMount.Source, layer.sourceMount.WhiteoutSpec, parentBootstrapPath, layer.bootstrapPath,
+		layer.sourceMount.Source, layer.sourceMount.WhiteoutSpec, parentBootstrapPath, layer.bootstrapPath, layer.alignedChunk,
 	)
 	if err != nil {
 		return buildDone(errors.Wrapf(err, "Build source layer %s", layer.source.Digest()))

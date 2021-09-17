@@ -145,6 +145,7 @@ func main() {
 				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
 				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
 				&cli.BoolFlag{Name: "backend-force-push", Value: false, Usage: "Force to push Nydus blob to storage backend, even if the blob already exists in storage backend", EnvVars: []string{"BACKEND_FORCE_PUSH"}},
+				&cli.BoolFlag{Name: "backend-aligned-chunk", Value: false, Usage: "Produce 4096 aligned decompressed_offset in Nydus bootstrap", EnvVars: []string{"BACKEND_ALIGNED_CHUNK"}},
 				&cli.StringFlag{Name: "build-cache", Value: "", Usage: "An remote image reference for accelerating nydus image build", EnvVars: []string{"BUILD_CACHE"}},
 				&cli.StringFlag{Name: "build-cache-tag", Value: "", Usage: "Use $target:$build-cache-tag as cache image reference, conflict with --build-cache", EnvVars: []string{"BUILD_CACHE_TAG"}},
 				&cli.StringFlag{Name: "build-cache-version", Value: "v1", Usage: "Specify the version of cache image, if the existed remote cache image does not match the version, cache records will be dropped", EnvVars: []string{"BUILD_CACHE_VERSION"}},
@@ -250,6 +251,7 @@ func main() {
 					BackendType:      backendType,
 					BackendConfig:    backendConfig,
 					BackendForcePush: c.Bool("backend-force-push"),
+					BackendAlignedChunk: c.Bool("backend-aligned-chunk"),
 
 					NydusifyVersion: version,
 					Source:          c.String("source"),
