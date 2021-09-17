@@ -77,7 +77,10 @@ pub fn new_backend(
         #[cfg(feature = "backend-oss")]
         "oss" => Ok(Arc::new(oss::Oss::new(config.backend_config, Some(id))?)),
         #[cfg(feature = "backend-registry")]
-        "registry" => Ok(Arc::new(registry::new(config.backend_config, Some(id))?)),
+        "registry" => Ok(Arc::new(registry::Registry::new(
+            config.backend_config,
+            Some(id),
+        )?)),
         #[cfg(feature = "backend-localfs")]
         "localfs" => Ok(Arc::new(localfs::LocalFs::new(
             config.backend_config,

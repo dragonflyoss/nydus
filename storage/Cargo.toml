@@ -40,4 +40,4 @@ vmm-sys-util = ">=0.8.0"
 [features]
 backend-localfs = ["sha2"]
 backend-oss = ["base64", "httpdate", "reqwest", "sha-1", "sha2", "hmac", "url"]
-backend-registry = ["reqwest", "sha2", "url"]
+backend-registry = ["base64", "reqwest", "sha2", "url"]

@@ -174,6 +174,7 @@ impl BlobReader for LocalFsEntry {
     }
 }
 
+/// Storage backend based on local filesystem.
 #[derive(Default)]
 pub struct LocalFs {
     // The blob file specified by the user.
