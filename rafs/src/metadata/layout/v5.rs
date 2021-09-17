@@ -1072,7 +1072,7 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     inode: &I,
     offset: u64,
     size: usize,
-    is_user: bool,
+    user_io: bool,
 ) -> Result<RafsBioDesc> {
     // Do not process zero size bio
     let mut desc = RafsBioDesc::new();
@@ -1101,7 +1101,7 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     for idx in index_start..index_end {
         let chunk = inode.get_chunk_info(idx)?;
         let blob = inode.get_blob_by_index(chunk.blob_index())?;
-        if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob, is_user) {
+        if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob, user_io) {
             break;
         }
     }
@@ -1125,7 +1125,7 @@ fn add_chunk_to_bio_desc(
     desc: &mut RafsBioDesc,
     blksize: u32,
     blob: Arc<RafsBlobEntry>,
-    is_user: bool,
+    user_io: bool,
 ) -> bool {
     if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
         return true;
@@ -1151,7 +1151,7 @@ fn add_chunk_to_bio_desc(
         chunk_start as u32,
         (chunk_end - chunk_start) as usize,
         blksize,
-        is_user,
+        user_io,
     );
 
     desc.bi_size += bio.size;

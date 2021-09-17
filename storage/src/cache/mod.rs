@@ -74,7 +74,7 @@ impl MergedBackendRequest {
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
 
-        let tag = if bio.is_user {
+        let tag = if bio.user_io {
             IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
         } else {
             IoInitiator::Internal(first_cki.index(), first_cki.compress_offset())
@@ -96,7 +96,7 @@ impl MergedBackendRequest {
     fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
         self.blob_size += cki.compress_size();
 
-        let tag = if bio.is_user {
+        let tag = if bio.user_io {
             IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
         } else {
             IoInitiator::Internal(cki.index(), cki.compress_offset())
