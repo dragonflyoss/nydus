@@ -91,23 +91,9 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to new process manager")
 	}
-	cacheMgr, err := cache.NewManager(cache.Opt{
-		Database: db,
-		Period:   cfg.GCPeriod,
-		CacheDir: cfg.CacheDir,
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to new cache manager")
-	}
 
-	// Prefetch mode counts as no daemon, as daemon is only for prefetch,
-	// container rootfs doesn't need daemon
-	hasDaemon := cfg.DaemonMode != config.DaemonModeNone && cfg.DaemonMode != config.DaemonModePrefetch
-
-	nydusFs, err := nydus.NewFileSystem(
-		ctx,
+	opts := []nydus.NewFSOpt{
 		nydus.WithProcessManager(pm),
-		nydus.WithCacheManager(cacheMgr),
 		nydus.WithNydusdBinaryPath(cfg.NydusdBinaryPath),
 		nydus.WithMeta(cfg.RootDir),
 		nydus.WithDaemonConfig(cfg.DaemonCfg),
@@ -115,7 +101,25 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		nydus.WithVerifier(verifier),
 		nydus.WithDaemonMode(cfg.DaemonMode),
 		nydus.WithLogLevel(cfg.LogLevel),
-	)
+	}
+
+	if !cfg.DisableCacheManager {
+		cacheMgr, err := cache.NewManager(cache.Opt{
+			Database: db,
+			Period:   cfg.GCPeriod,
+			CacheDir: cfg.CacheDir,
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to new cache manager")
+		}
+		opts = append(opts, nydus.WithCacheManager(cacheMgr))
+	}
+
+	// Prefetch mode counts as no daemon, as daemon is only for prefetch,
+	// container rootfs doesn't need daemon
+	hasDaemon := cfg.DaemonMode != config.DaemonModeNone && cfg.DaemonMode != config.DaemonModePrefetch
+
+	nydusFs, err := nydus.NewFileSystem(ctx, opts ...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
 	}

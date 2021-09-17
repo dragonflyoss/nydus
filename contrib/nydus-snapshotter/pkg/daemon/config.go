@@ -70,17 +70,6 @@ func WithLogLevel(logLevel string) NewDaemonOpt {
 	}
 }
 
-func WithCacheDir(dir string) NewDaemonOpt {
-	return func(d *Daemon) error {
-		// this may be failed, should handle that
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return errors.Wrapf(err, "failed to create cache dir %s", dir)
-		}
-		d.CacheDir = dir
-		return nil
-	}
-}
-
 func WithRootMountPoint(rootMountPoint string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		if err := os.MkdirAll(rootMountPoint, 0755); err != nil {
