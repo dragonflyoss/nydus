@@ -43,7 +43,7 @@ impl RafsCache for DummyCache {
         let bios_len = bios.len();
 
         for bio in bios {
-            if !bio.is_user {
+            if !bio.user_io {
                 continue;
             }
 

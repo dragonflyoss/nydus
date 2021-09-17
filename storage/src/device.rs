@@ -258,7 +258,10 @@ pub struct RafsBio {
     pub size: usize,
     /// block size to read in one shot
     pub blksize: u32,
-    pub is_user: bool,
+    /// Distinguish from a bio that is not initiated by user or fuse frontend.
+    /// It might be initiated by user io amplification. With this flag, lower device
+    /// layer is acknowledged with how to fill up user provided buffer.
+    pub user_io: bool,
 }
 
 impl Debug for RafsBio {
@@ -269,7 +272,7 @@ impl Debug for RafsBio {
             .field("chunk index", &self.chunkinfo.index())
             .field("file offset", &self.offset)
             .field("size", &self.size)
-            .field("user", &self.is_user)
+            .field("user", &self.user_io)
             .finish()
     }
 }
@@ -281,7 +284,7 @@ impl RafsBio {
         offset: u32,
         size: usize,
         blksize: u32,
-        is_user: bool,
+        user_io: bool,
     ) -> Self {
         RafsBio {
             chunkinfo,
@@ -289,7 +292,7 @@ impl RafsBio {
             offset,
             size,
             blksize,
-            is_user,
+            user_io,
         }
     }
 }

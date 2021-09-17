@@ -841,7 +841,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, is_user: bool) -> Result<RafsBioDesc>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.
