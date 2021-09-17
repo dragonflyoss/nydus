@@ -9,11 +9,11 @@ use std::time::SystemTime;
 
 use hmac::{Hmac, Mac, NewMac};
 use nydus_utils::metrics::BackendMetrics;
-use reqwest::header::CONTENT_LENGTH;
+use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
 use sha1::Sha1;
 
-use crate::backend::request::{HeaderMap, Request, RequestError};
+use crate::backend::connection::{Connection, ConnectionError};
 use crate::backend::{
     default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite,
     CommonConfig,
@@ -29,7 +29,7 @@ type HmacSha1 = Hmac<Sha1>;
 pub enum OssError {
     Auth(Error),
     Url(String),
-    Request(RequestError),
+    Request(ConnectionError),
     ConstructHeader(String),
     Transport(reqwest::Error),
     Response(String),
@@ -143,8 +143,8 @@ impl OssState {
 
 struct OssReader {
     blob_id: String,
+    connection: Arc<Connection>,
     state: Arc<OssState>,
-    request: Arc<Request>,
     metrics: Arc<BackendMetrics>,
 }
 
@@ -158,7 +158,7 @@ impl BlobReader for OssReader {
             .map_err(OssError::Auth)?;
 
         let resp = self
-            .request
+            .connection
             .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
         let content_length = resp
@@ -193,7 +193,7 @@ impl BlobReader for OssReader {
 
         // Safe because the the call() is a synchronous operation.
         let mut resp = self
-            .request
+            .connection
             .call::<&[u8]>(Method::GET, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
 
@@ -220,8 +220,8 @@ impl BlobReader for OssReader {
 
 struct OssWriter {
     blob_id: String,
+    connection: Arc<Connection>,
     state: Arc<OssState>,
-    request: Arc<Request>,
 }
 
 impl BlobWrite for OssWriter {
@@ -239,7 +239,7 @@ impl BlobWrite for OssWriter {
             .sign(Method::POST, &mut headers, resource.as_str())
             .map_err(OssError::Auth)?;
         // Safe because the the call() is a synchronous operation.
-        self.request
+        self.connection
             .call::<&[u8]>(Method::POST, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
 
@@ -250,8 +250,8 @@ impl BlobWrite for OssWriter {
 /// Storage backend to access data stored in OSS.
 #[derive(Debug)]
 pub struct Oss {
+    connection: Arc<Connection>,
     state: Arc<OssState>,
-    request: Arc<Request>,
     metrics: Option<Arc<BackendMetrics>>,
     id: Option<String>,
 }
@@ -262,7 +262,7 @@ impl Oss {
         let common_config: CommonConfig =
             serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
         let retry_limit = common_config.retry_limit;
-        let request = Request::new(&common_config)?;
+        let connection = Connection::new(&common_config)?;
         let oss_config: OssConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
         let state = Arc::new(OssState {
             scheme: oss_config.scheme,
@@ -277,7 +277,7 @@ impl Oss {
 
         Ok(Oss {
             state,
-            request,
+            connection,
             metrics,
             id: id.map(|i| i.to_string()),
         })
@@ -302,7 +302,7 @@ impl BlobBackend for Oss {
             Ok(Arc::new(OssReader {
                 blob_id: blob_id.to_string(),
                 state: self.state.clone(),
-                request: self.request.clone(),
+                connection: self.connection.clone(),
                 metrics: metrics.clone(),
             }))
         } else {
@@ -316,7 +316,7 @@ impl BlobBackend for Oss {
         Ok(Arc::new(OssWriter {
             blob_id: blob_id.to_string(),
             state: self.state.clone(),
-            request: self.request.clone(),
+            connection: self.connection.clone(),
         }))
     }
 

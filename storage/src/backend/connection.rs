@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use reqwest::header::HeaderMap;
 use reqwest::{
     self,
     blocking::{Body, Client, Response},
@@ -20,20 +21,18 @@ use reqwest::{
 
 use crate::backend::CommonConfig;
 
-pub use reqwest::header::HeaderMap;
-
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
 /// Error codes related to network communication.
 #[derive(Debug)]
-pub enum RequestError {
+pub enum ConnectionError {
     ErrorWithMsg(String),
     Common(reqwest::Error),
     Format(reqwest::Error),
 }
 
 /// Specialized `Result` for network communication.
-pub type RequestResult<T> = std::result::Result<T, RequestError>;
+type ConnectionResult<T> = std::result::Result<T, ConnectionError>;
 
 /// HTTP request data with progress callback.
 #[derive(Clone)]
@@ -107,31 +106,31 @@ struct Proxy {
 }
 
 /// Check whether the HTTP status code is a success result.
-pub fn is_success_status(status: StatusCode) -> bool {
+pub(crate) fn is_success_status(status: StatusCode) -> bool {
     status >= StatusCode::OK && status < StatusCode::BAD_REQUEST
 }
 
 /// Convert a HTTP `Response` into an `Result<Response>`.
-pub fn respond(resp: Response) -> RequestResult<Response> {
+pub(crate) fn respond(resp: Response) -> ConnectionResult<Response> {
     if is_success_status(resp.status()) {
         Ok(resp)
     } else {
-        let msg = resp.text().map_err(RequestError::Format)?;
-        Err(RequestError::ErrorWithMsg(msg))
+        let msg = resp.text().map_err(ConnectionError::Format)?;
+        Err(ConnectionError::ErrorWithMsg(msg))
     }
 }
 
-/// A network
+/// A network connection to communicate with remote server.
 #[derive(Debug)]
-pub struct Request {
+pub(crate) struct Connection {
     client: Client,
     proxy: Option<Proxy>,
     shutdown: AtomicBool,
 }
 
-impl Request {
+impl Connection {
     /// Create a new connection according to the configuration.
-    pub fn new(config: &CommonConfig) -> Result<Arc<Request>> {
+    pub fn new(config: &CommonConfig) -> Result<Arc<Connection>> {
         info!("backend config: {:?}", config);
         let client = Self::build_connection("", config)?;
         let proxy = if !config.proxy.url.is_empty() {
@@ -148,7 +147,7 @@ impl Request {
         } else {
             None
         };
-        let connection = Arc::new(Request {
+        let connection = Arc::new(Connection {
             client,
             proxy,
             shutdown: AtomicBool::new(false),
@@ -204,7 +203,7 @@ impl Request {
         data: Option<ReqBody<R>>,
         headers: HeaderMap,
         catch_status: bool,
-    ) -> RequestResult<Response> {
+    ) -> ConnectionResult<Response> {
         if let Some(proxy) = &self.proxy {
             if proxy.health.ok() {
                 let data_cloned: Option<ReqBody<R>> = match data.as_ref() {
@@ -290,7 +289,7 @@ impl Request {
         headers: HeaderMap,
         catch_status: bool,
         proxy: bool,
-    ) -> RequestResult<Response> {
+    ) -> ConnectionResult<Response> {
         debug!(
             "Request: {} {} headers: {:?}, proxy: {}, data: {}",
             method,
@@ -328,13 +327,13 @@ impl Request {
         }
 
         match ret {
+            Err(err) => Err(ConnectionError::Common(err)),
             Ok(resp) => {
                 if !catch_status {
                     return Ok(resp);
                 }
                 respond(resp)
             }
-            Err(err) => Err(RequestError::Common(err)),
         }
     }
 }

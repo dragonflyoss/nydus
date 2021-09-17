@@ -11,14 +11,14 @@ use vm_memory::VolatileSlice;
 use crate::utils::copyv;
 use crate::StorageError;
 
+#[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
+pub mod connection;
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
 #[cfg(feature = "backend-oss")]
 pub mod oss;
 #[cfg(feature = "backend-registry")]
 pub mod registry;
-#[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
-pub mod request;
 
 /// Error codes related to storage backend operations.
 #[derive(Debug)]

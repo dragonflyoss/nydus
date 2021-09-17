@@ -13,7 +13,9 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
-use crate::backend::request::{is_success_status, respond, ReqBody, Request, RequestError};
+use crate::backend::connection::{
+    is_success_status, respond, Connection, ConnectionError, ReqBody,
+};
 use crate::backend::{
     default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite,
     CommonConfig,
@@ -28,7 +30,7 @@ const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 pub enum RegistryError {
     Common(String),
     Url(ParseError),
-    Request(RequestError),
+    Request(ConnectionError),
     Scheme(String),
     Auth(String),
     ResponseHead(String),
@@ -178,7 +180,7 @@ impl RegistryState {
     }
 
     /// Request registry authentication server to get bearer token
-    fn get_token(&self, auth: BearerAuth, request: &Arc<Request>) -> Result<String> {
+    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<String> {
         // The information needed for getting token needs to be placed both in
         // the query and in the body to be compatible with different registry
         // implementations, which have been tested on these platforms:
@@ -203,7 +205,7 @@ impl RegistryState {
             headers.insert(HEADER_AUTHORIZATION, auth_header.clone());
         }
 
-        let token_resp = request
+        let token_resp = connection
             .call::<&[u8]>(
                 Method::GET,
                 auth.realm.as_str(),
@@ -222,7 +224,7 @@ impl RegistryState {
         Ok(ret.token)
     }
 
-    fn get_auth_header(&self, auth: Auth, request: &Arc<Request>) -> Result<String> {
+    fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> Result<String> {
         match auth {
             Auth::Basic(_) => self
                 .auth
@@ -230,7 +232,7 @@ impl RegistryState {
                 .map(|auth| format!("Basic {}", auth))
                 .ok_or_else(|| einval!("invalid auth config")),
             Auth::Bearer(auth) => {
-                let token = self.get_token(auth, request)?;
+                let token = self.get_token(auth, connection)?;
                 Ok(format!("Bearer {}", token))
             }
         }
@@ -294,8 +296,8 @@ impl RegistryState {
 
 struct RegistryReader {
     blob_id: String,
+    connection: Arc<Connection>,
     state: Arc<RegistryState>,
-    request: Arc<Request>,
     metrics: Arc<BackendMetrics>,
 }
 
@@ -349,14 +351,14 @@ impl RegistryReader {
         // after create_upload(), so we can request registry server directly
         if let Some(data) = data {
             return self
-                .request
+                .connection
                 .call(method, url, None, Some(data), headers, catch_status)
                 .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
         let resp = self
-            .request
+            .connection
             .call::<&[u8]>(method.clone(), url, None, None, headers.clone(), false)
             .map_err(RegistryError::Request)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
@@ -365,7 +367,7 @@ impl RegistryReader {
                 if let Some(auth) = RegistryState::parse_auth(resp_auth_header) {
                     let auth_header = self
                         .state
-                        .get_auth_header(auth, &self.request)
+                        .get_auth_header(auth, &self.connection)
                         .map_err(|e| RegistryError::Common(e.to_string()))?;
                     headers.insert(
                         HEADER_AUTHORIZATION,
@@ -374,7 +376,7 @@ impl RegistryReader {
 
                     // Try to request registry server with `authorization` header again
                     let resp = self
-                        .request
+                        .connection
                         .call(method, url, None, data, headers, catch_status)
                         .map_err(RegistryError::Request)?;
 
@@ -430,7 +432,7 @@ impl RegistryReader {
 
         if let Some(cached_redirect) = cached_redirect {
             resp = self
-                .request
+                .connection
                 .call::<&[u8]>(
                     Method::GET,
                     cached_redirect.as_str(),
@@ -490,7 +492,7 @@ impl RegistryReader {
                         debug!("New redirected location {:?}", location.host_str());
                     }
                     let resp_ret = self
-                        .request
+                        .connection
                         .call::<&[u8]>(Method::GET, location.as_str(), None, None, headers, true)
                         .map_err(RegistryError::Request);
                     match resp_ret {
@@ -558,8 +560,8 @@ impl BlobReader for RegistryReader {
 
 /// Storage backend based on image registry.
 pub struct Registry {
+    connection: Arc<Connection>,
     state: Arc<RegistryState>,
-    request: Arc<Request>,
     metrics: Arc<BackendMetrics>,
 }
 
@@ -570,7 +572,7 @@ impl Registry {
         let common_config: CommonConfig =
             serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
         let retry_limit = common_config.retry_limit;
-        let request = Request::new(&common_config)?;
+        let connection = Connection::new(&common_config)?;
         let config: RegistryConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
         let auth = trim(config.auth);
         let registry_token = trim(config.registry_token);
@@ -598,7 +600,7 @@ impl Registry {
         });
 
         Ok(Registry {
-            request,
+            connection,
             state,
             metrics: BackendMetrics::new(id, "registry"),
         })
@@ -643,7 +645,7 @@ impl BlobBackend for Registry {
         Ok(Arc::new(RegistryReader {
             blob_id: blob_id.to_owned(),
             state: self.state.clone(),
-            request: self.request.clone(),
+            connection: self.connection.clone(),
             metrics: self.metrics.clone(),
         }))
     }
