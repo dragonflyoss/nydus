@@ -94,11 +94,13 @@ pub trait RafsCache {
     /// It depends on `cki` how to describe the chunk data.
     /// Moreover, chunk data from backend can be validated as per nydus configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
+    /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
     fn read_backend_chunk(
         &self,
         blob: &RafsBlobEntry,
         cki: &dyn RafsChunkInfo,
         chunk: &mut [u8],
+        raw_hook: Option<&dyn Fn(&[u8])>,
     ) -> Result<usize> {
         let offset = cki.compress_offset();
         let mut d;
@@ -174,6 +176,11 @@ pub trait RafsCache {
             self.need_validate(),
         )
         .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
+
+        if let Some(hook) = raw_hook {
+            hook(raw_chunk)
+        }
+
         Ok(chunk.len())
     }
 
