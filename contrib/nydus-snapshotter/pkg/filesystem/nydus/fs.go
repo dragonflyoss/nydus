@@ -46,7 +46,7 @@ type filesystem struct {
 }
 
 // NewFileSystem initialize Filesystem instance
-func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, retErr error) {
+func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (fspkg.FileSystem, error) {
 	var fs filesystem
 	for _, o := range opt {
 		err := o(&fs)
@@ -59,45 +59,6 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 	if err := fs.manager.Reconnect(ctx); err != nil {
 		return nil, errors.Wrap(err, "failed to reconnect daemons")
 	}
-
-	// Both SharedInstance and PrefetchInstance use shared daemon
-	if fs.mode == fspkg.SharedInstance || fs.mode == fspkg.PrefetchInstance {
-		isPrefetch := fs.mode == fspkg.PrefetchInstance
-
-		// Check if daemon is already running
-		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
-		if err == nil && d != nil {
-			log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
-			fs.sharedDaemon = d
-			return &fs, nil
-		}
-
-		d, err = fs.newSharedDaemon()
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to init shared daemon")
-		}
-
-		defer func() {
-			if retErr != nil {
-				fs.manager.DeleteDaemon(d)
-			}
-		}()
-		if err := fs.manager.StartDaemon(d); err != nil {
-			return nil, errors.Wrap(err, "failed to start shared daemon")
-		}
-
-		// We don't need to wait instance to be ready in
-		// PrefetchInstance mode, as we want to return snapshot to
-		// containerd as soon as possible, and prefetch instance is
-		// only for prefetch.
-		if !isPrefetch {
-			if err := fs.WaitUntilReady(ctx, daemon.SharedNydusDaemonID); err != nil {
-				return nil, errors.Wrap(err, "failed to wait shared daemon")
-			}
-		}
-		fs.sharedDaemon = d
-	}
-
 	return &fs, nil
 }
 
@@ -148,7 +109,7 @@ func (fs *filesystem) Mount(ctx context.Context, snapshotID string, labels map[s
 	if !ok {
 		return fmt.Errorf("failed to find image ref of snapshot %s, labels %v", snapshotID, labels)
 	}
-	d, err := fs.newDaemon(snapshotID, imageID)
+	d, err := fs.newDaemon(ctx, snapshotID, imageID)
 	// if daemon already exists for snapshotID, just return
 	if err != nil {
 		if errdefs.IsAlreadyExists(err) {
@@ -316,8 +277,52 @@ func (fs *filesystem) addSnapshot(imageID string, labels map[string]string) erro
 	return fs.cacheMgr.AddSnapshot(imageID, blobs)
 }
 
-func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
+func (fs *filesystem) initSharedDaemon(ctx context.Context) (_ *daemon.Daemon, retErr error) {
+	d, err := fs.newSharedDaemon()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to init shared daemon")
+	}
+
+	defer func() {
+		if retErr != nil {
+			fs.manager.DeleteDaemon(d)
+		}
+	}()
+	if err := fs.manager.StartDaemon(d); err != nil {
+		return nil, errors.Wrap(err, "failed to start shared daemon")
+	}
+	fs.sharedDaemon = d
+
+	return d, nil
+}
+
+func (fs *filesystem) newDaemon(ctx context.Context, snapshotID string, imageID string) (_ *daemon.Daemon, retErr error) {
 	if fs.mode == fspkg.SharedInstance || fs.mode == fspkg.PrefetchInstance {
+		// Check if daemon is already running
+		d, err := fs.getSharedDaemon()
+		if err == nil && d != nil {
+			if fs.sharedDaemon == nil {
+				fs.sharedDaemon = d
+				log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
+			}
+		} else {
+			d, err = fs.initSharedDaemon(ctx)
+			if err != nil {
+				// AlreadyExists means someone else has initialized shared daemon.
+				if !errdefs.IsAlreadyExists(err) {
+					return nil, err
+				}
+			}
+
+			// We don't need to wait instance to be ready in PrefetchInstance mode, as we want
+			// to return snapshot to containerd as soon as possible, and prefetch instance is
+			// only for prefetch.
+			if fs.mode != fspkg.PrefetchInstance {
+				if err := fs.WaitUntilReady(ctx, daemon.SharedNydusDaemonID); err != nil {
+					return nil, errors.Wrap(err, "failed to wait shared daemon")
+				}
+			}
+		}
 		return fs.createSharedDaemon(snapshotID, imageID)
 	}
 	return fs.createNewDaemon(snapshotID, imageID)
@@ -328,7 +333,8 @@ func (fs *filesystem) getSharedDaemon() (*daemon.Daemon, error) {
 	if fs.sharedDaemon != nil {
 		return fs.sharedDaemon, nil
 	} else {
-		return fs.manager.GetByID(daemon.SharedNydusDaemonID)
+		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
+		return d, err
 	}
 }
 
