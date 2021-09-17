@@ -1,4 +1,5 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -7,21 +8,23 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use hmac::{Hmac, Mac, NewMac};
+use nydus_utils::metrics::BackendMetrics;
 use reqwest::header::CONTENT_LENGTH;
 use reqwest::Method;
 use sha1::Sha1;
 
 use crate::backend::request::{HeaderMap, Request, RequestError};
-use crate::backend::{default_http_scheme, BackendError, BackendResult};
-use crate::backend::{BlobBackend, CommonConfig};
-
-use nydus_utils::metrics::BackendMetrics;
+use crate::backend::{
+    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite,
+    CommonConfig,
+};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
 type HmacSha1 = Hmac<Sha1>;
 
+/// Error codes related to OSS storage backend.
 #[derive(Debug)]
 pub enum OssError {
     Auth(Error),
@@ -38,21 +41,7 @@ impl From<OssError> for BackendError {
     }
 }
 
-#[derive(Debug)]
-pub struct Oss {
-    request: Arc<Request>,
-    access_key_id: String,
-    access_key_secret: String,
-    scheme: String,
-    object_prefix: String,
-    endpoint: String,
-    bucket_name: String,
-    retry_limit: u8,
-    metrics: Option<Arc<BackendMetrics>>,
-    id: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct OssConfig {
     endpoint: String,
     access_key_id: String,
@@ -60,28 +49,59 @@ struct OssConfig {
     bucket_name: String,
     #[serde(default = "default_http_scheme")]
     scheme: String,
-    /// Prefix object_prefix to OSS object key, for exmaple the
-    /// simulation of subdirectory:
-    /// object_key: sha256:xxx, object_prefix: nydus/
-    /// object_key with object_prefix: nydus/sha256:xxx
+    /// Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
+    /// - object_key: sha256:xxx
+    /// - object_prefix: nydus/
+    /// - object_key with object_prefix: nydus/sha256:xxx
     #[serde(default)]
     object_prefix: String,
 }
 
-impl Oss {
+// `OssState` is almost identical to `OssConfig`, but let's keep them separated.
+#[derive(Debug)]
+struct OssState {
+    access_key_id: String,
+    access_key_secret: String,
+    scheme: String,
+    object_prefix: String,
+    endpoint: String,
+    bucket_name: String,
+    retry_limit: u8,
+}
+
+impl OssState {
+    fn resource(&self, object_key: &str, query_str: &str) -> String {
+        format!("/{}/{}{}", self.bucket_name, object_key, query_str)
+    }
+
+    fn url(&self, object_key: &str, query: &[&str]) -> (String, String) {
+        let object_key = &format!("{}{}", self.object_prefix, object_key);
+        let url = format!(
+            "{}://{}.{}/{}",
+            self.scheme, self.bucket_name, self.endpoint, object_key
+        );
+
+        if query.is_empty() {
+            (self.resource(object_key, ""), url)
+        } else {
+            let query_str = format!("?{}", query.join("&"));
+            let resource = self.resource(object_key, &query_str);
+            let url = format!("{}{}", url.as_str(), &query_str);
+            (resource, url)
+        }
+    }
+
     /// generate oss request signature
     fn sign(
         &self,
         verb: Method,
-        mut headers: HeaderMap,
+        headers: &mut HeaderMap,
         canonicalized_resource: &str,
-    ) -> Result<HeaderMap> {
+    ) -> Result<()> {
         let content_md5 = "";
         let content_type = "";
         let mut canonicalized_oss_headers = vec![];
-
         let date = httpdate::fmt_http_date(SystemTime::now());
-
         let mut data = vec![
             verb.as_str(),
             content_md5,
@@ -90,7 +110,8 @@ impl Oss {
             // canonicalized_oss_headers,
             canonicalized_resource,
         ];
-        for (name, value) in &headers {
+
+        for (name, value) in headers.iter() {
             let name = name.as_str();
             let value = value.to_str().map_err(|e| einval!(e))?;
             if name.starts_with("x-oss-") {
@@ -116,95 +137,30 @@ impl Oss {
             authorization.as_str().parse().map_err(|e| einval!(e))?,
         );
 
-        Ok(headers)
-    }
-
-    fn resource(&self, object_key: &str, query_str: &str) -> String {
-        format!("/{}/{}{}", self.bucket_name, object_key, query_str)
-    }
-
-    fn url(&self, object_key: &str, query: &[&str]) -> (String, String) {
-        let object_key = &format!("{}{}", self.object_prefix, object_key);
-
-        let url = format!(
-            "{}://{}.{}/{}",
-            self.scheme, self.bucket_name, self.endpoint, object_key
-        );
-
-        if query.is_empty() {
-            (self.resource(object_key, ""), url)
-        } else {
-            let query_str = format!("?{}", query.join("&"));
-            let resource = self.resource(object_key, &query_str);
-            let url = format!("{}{}", url.as_str(), &query_str);
-            (resource, url)
-        }
+        Ok(())
     }
 }
 
-pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Oss> {
-    let common_config: CommonConfig =
-        serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
-    let retry_limit = common_config.retry_limit;
-    let request = Request::new(common_config)?;
-
-    let config: OssConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
-
-    Ok(Oss {
-        scheme: config.scheme,
-        object_prefix: config.object_prefix,
-        endpoint: config.endpoint,
-        access_key_id: config.access_key_id,
-        access_key_secret: config.access_key_secret,
-        bucket_name: config.bucket_name,
-        request,
-        retry_limit,
-        metrics: id.map(|i| BackendMetrics::new(i, "oss")),
-        id: id.map(|i| i.to_string()),
-    })
+struct OssReader {
+    blob_id: String,
+    state: Arc<OssState>,
+    request: Arc<Request>,
+    metrics: Arc<BackendMetrics>,
 }
 
-impl BlobBackend for Oss {
-    #[inline]
-    fn retry_limit(&self) -> u8 {
-        self.retry_limit
-    }
+impl BlobReader for OssReader {
+    fn blob_size(&self) -> BackendResult<u64> {
+        let (resource, url) = self.state.url(&self.blob_id, &[]);
+        let mut headers = HeaderMap::new();
 
-    fn metrics(&self) -> &BackendMetrics {
-        // Safe because nydusd must have backend attached with id, only image builder can no id
-        // but use backend instance to upload blob.
-        self.metrics.as_ref().unwrap()
-    }
-
-    fn release(&self) {
-        self.metrics()
-            .release()
-            .unwrap_or_else(|e| error!("{:?}", e))
-    }
-
-    fn prefetch_blob_data_range(
-        &self,
-        _blob_id: &str,
-        _blob_readahead_offset: u32,
-        _blob_readahead_size: u32,
-    ) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
-
-    fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
-        let (resource, url) = self.url(blob_id, &[]);
-        let headers = HeaderMap::new();
-        let headers = self
-            .sign(Method::HEAD, headers, resource.as_str())
+        self.state
+            .sign(Method::HEAD, &mut headers, resource.as_str())
             .map_err(OssError::Auth)?;
 
         let resp = self
             .request
             .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
-
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)
@@ -217,14 +173,13 @@ impl BlobBackend for Oss {
             .map_err(|err| OssError::Response(format!("invalid content length: {:?}", err)))?)
     }
 
-    /// read ranged data from oss object
-    fn try_read(&self, blob_id: &str, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    fn try_read(&self, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let query = &[];
-        let (resource, url) = self.url(blob_id, query);
-
+        let (resource, url) = self.state.url(&self.blob_id, query);
         let mut headers = HeaderMap::new();
         let end_at = offset + buf.len() as u64 - 1;
         let range = format!("bytes={}-{}", offset, end_at);
+
         headers.insert(
             "Range",
             range
@@ -232,8 +187,8 @@ impl BlobBackend for Oss {
                 .parse()
                 .map_err(|e| OssError::ConstructHeader(format!("{}", e)))?,
         );
-        let headers = self
-            .sign(Method::GET, headers, resource.as_str())
+        self.state
+            .sign(Method::GET, &mut headers, resource.as_str())
             .map_err(OssError::Auth)?;
 
         // Safe because the the call() is a synchronous operation.
@@ -248,20 +203,184 @@ impl BlobBackend for Oss {
             .map(|size| size as usize)?)
     }
 
-    /// append data to oss object
-    fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize> {
+    fn prefetch_blob_data_range(&self, _ra_offset: u32, _ra_size: u32) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
+        ))
+    }
+
+    fn metrics(&self) -> &BackendMetrics {
+        &self.metrics
+    }
+
+    fn retry_limit(&self) -> u8 {
+        self.state.retry_limit
+    }
+}
+
+struct OssWriter {
+    blob_id: String,
+    state: Arc<OssState>,
+    request: Arc<Request>,
+}
+
+impl BlobWrite for OssWriter {
+    fn retry_limit(&self) -> u8 {
+        self.state.retry_limit
+    }
+
+    fn write(&self, buf: &[u8], offset: u64) -> BackendResult<usize> {
         let position = format!("position={}", offset);
         let query = &["append", position.as_str()];
-        let (resource, url) = self.url(blob_id, query);
-        let headers = self
-            .sign(Method::POST, HeaderMap::new(), resource.as_str())
-            .map_err(OssError::Auth)?;
+        let (resource, url) = self.state.url(&self.blob_id, query);
+        let mut headers = HeaderMap::new();
 
+        self.state
+            .sign(Method::POST, &mut headers, resource.as_str())
+            .map_err(OssError::Auth)?;
         // Safe because the the call() is a synchronous operation.
         self.request
             .call::<&[u8]>(Method::POST, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
 
         Ok(buf.len())
+    }
+}
+
+/// Storage backend to access data stored in OSS.
+#[derive(Debug)]
+pub struct Oss {
+    state: Arc<OssState>,
+    request: Arc<Request>,
+    metrics: Option<Arc<BackendMetrics>>,
+    id: Option<String>,
+}
+
+impl Oss {
+    /// Create a new OSS storage backend.
+    pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Oss> {
+        let common_config: CommonConfig =
+            serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
+        let retry_limit = common_config.retry_limit;
+        let request = Request::new(&common_config)?;
+        let oss_config: OssConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
+        let state = Arc::new(OssState {
+            scheme: oss_config.scheme,
+            object_prefix: oss_config.object_prefix,
+            endpoint: oss_config.endpoint,
+            access_key_id: oss_config.access_key_id,
+            access_key_secret: oss_config.access_key_secret,
+            bucket_name: oss_config.bucket_name,
+            retry_limit,
+        });
+        let metrics = id.map(|i| BackendMetrics::new(i, "oss"));
+
+        Ok(Oss {
+            state,
+            request,
+            metrics,
+            id: id.map(|i| i.to_string()),
+        })
+    }
+}
+
+impl BlobBackend for Oss {
+    fn release(&self) {
+        self.metrics()
+            .release()
+            .unwrap_or_else(|e| error!("{:?}", e))
+    }
+
+    fn metrics(&self) -> &BackendMetrics {
+        // `metrics()` is only used for nydusd, which will always provide valid `blob_id`, thus
+        // `self.metrics` has valid value.
+        self.metrics.as_ref().unwrap()
+    }
+
+    fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
+        if let Some(metrics) = self.metrics.as_ref() {
+            Ok(Arc::new(OssReader {
+                blob_id: blob_id.to_string(),
+                state: self.state.clone(),
+                request: self.request.clone(),
+                metrics: metrics.clone(),
+            }))
+        } else {
+            Err(BackendError::Unsupported(
+                "no metrics object available for OssReader".to_string(),
+            ))
+        }
+    }
+
+    fn get_writer(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>> {
+        Ok(Arc::new(OssWriter {
+            blob_id: blob_id.to_string(),
+            state: self.state.clone(),
+            request: self.request.clone(),
+        }))
+    }
+
+    fn prefetch_blob_data_range(
+        &self,
+        _blob_id: &str,
+        _blob_readahead_offset: u32,
+        _blob_readahead_size: u32,
+    ) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn test_oss_state() {
+        let state = OssState {
+            access_key_id: "key".to_string(),
+            access_key_secret: "secret".to_string(),
+            scheme: "https".to_string(),
+            object_prefix: "nydus".to_string(),
+            endpoint: "oss".to_string(),
+            bucket_name: "images".to_string(),
+            retry_limit: 5,
+        };
+
+        assert_eq!(
+            state.resource("obj_key", "?idontcare"),
+            "/images/obj_key?idontcare"
+        );
+
+        let (resource, url) = state.url("obj_key", &["idontcare", "second"]);
+        assert_eq!(resource, "/images/nydusobj_key?idontcare&second");
+        assert_eq!(url, "https://images.oss/nydusobj_key?idontcare&second");
+
+        let mut headers = HeaderMap::new();
+        state
+            .sign(Method::HEAD, &mut headers, resource.as_str())
+            .unwrap();
+        let signature = headers.get(HEADER_AUTHORIZATION).unwrap();
+        assert!(signature.to_str().unwrap().contains("OSS key:"));
+    }
+
+    #[test]
+    fn test_oss_new() {
+        let json_str = "{\"access_key_id\":\"key\",\"access_key_secret\":\"secret\",\"bucket_name\":\"images\",\"endpoint\":\"/oss\",\"object_prefix\":\"nydus\",\"scheme\":\"\",\"proxy\":{\"url\":\"\",\"ping_url\":\"\",\"fallback\":true,\"check_interval\":5},\"timeout\":5,\"connect_timeout\":5,\"retry_limit\":5}";
+        let json: Value = serde_json::from_str(&json_str).unwrap();
+        let oss = Oss::new(json, Some("test-image")).unwrap();
+
+        oss.metrics();
+        assert!(oss.prefetch_blob_data_range("test", 0, 0x1000).is_err());
+
+        let reader = oss.get_reader("test").unwrap();
+        assert_eq!(reader.retry_limit(), 5);
+
+        let writer = oss.get_writer("test").unwrap();
+        assert_eq!(writer.retry_limit(), 5);
+
+        oss.release();
     }
 }

@@ -75,7 +75,7 @@ pub fn new_backend(
 ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
     match config.backend_type.as_str() {
         #[cfg(feature = "backend-oss")]
-        "oss" => Ok(Arc::new(oss::new(config.backend_config, Some(id))?)),
+        "oss" => Ok(Arc::new(oss::Oss::new(config.backend_config, Some(id))?)),
         #[cfg(feature = "backend-registry")]
         "registry" => Ok(Arc::new(registry::new(config.backend_config, Some(id))?)),
         #[cfg(feature = "backend-localfs")]
