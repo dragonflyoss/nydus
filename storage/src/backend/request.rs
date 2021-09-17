@@ -24,6 +24,7 @@ pub use reqwest::header::HeaderMap;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
+/// Error codes related to network communication.
 #[derive(Debug)]
 pub enum RequestError {
     ErrorWithMsg(String),
@@ -31,8 +32,10 @@ pub enum RequestError {
     Format(reqwest::Error),
 }
 
+/// Specialized `Result` for network communication.
 pub type RequestResult<T> = std::result::Result<T, RequestError>;
 
+/// HTTP request data with progress callback.
 #[derive(Clone)]
 pub struct Progress<R> {
     inner: R,
@@ -42,6 +45,7 @@ pub struct Progress<R> {
 }
 
 impl<R> Progress<R> {
+    /// Create a new `Progress` object.
     pub fn new(r: R, total: usize, callback: fn((usize, usize))) -> Progress<R> {
         Progress {
             inner: r,
@@ -62,6 +66,7 @@ impl<R: Read + Send + 'static> Read for Progress<R> {
     }
 }
 
+/// HTTP request data to send to server.
 #[derive(Clone)]
 pub enum ReqBody<R> {
     Read(Progress<R>, usize),
@@ -84,9 +89,11 @@ impl ProxyHealth {
             check_interval: Duration::from_secs(check_interval),
         }
     }
+
     fn ok(&self) -> bool {
         self.status.load(Ordering::Relaxed)
     }
+
     fn set(&self, health: bool) {
         self.status.store(health, Ordering::Relaxed);
     }
@@ -99,26 +106,156 @@ struct Proxy {
     fallback: bool,
 }
 
-#[derive(Debug)]
-pub struct Request {
-    client: Client,
-    proxy: Option<Proxy>,
-}
-
+/// Check whether the HTTP status code is a success result.
 pub fn is_success_status(status: StatusCode) -> bool {
     status >= StatusCode::OK && status < StatusCode::BAD_REQUEST
 }
 
+/// Convert a HTTP `Response` into an `Result<Response>`.
 pub fn respond(resp: Response) -> RequestResult<Response> {
     if is_success_status(resp.status()) {
-        return Ok(resp);
+        Ok(resp)
+    } else {
+        let msg = resp.text().map_err(RequestError::Format)?;
+        Err(RequestError::ErrorWithMsg(msg))
     }
-    let msg = resp.text().map_err(RequestError::Format)?;
-    Err(RequestError::ErrorWithMsg(msg))
+}
+
+/// A network
+#[derive(Debug)]
+pub struct Request {
+    client: Client,
+    proxy: Option<Proxy>,
+    shutdown: AtomicBool,
 }
 
 impl Request {
-    fn build_client(proxy: &str, config: &CommonConfig) -> Result<Client> {
+    /// Create a new connection according to the configuration.
+    pub fn new(config: &CommonConfig) -> Result<Arc<Request>> {
+        info!("backend config: {:?}", config);
+        let client = Self::build_connection("", config)?;
+        let proxy = if !config.proxy.url.is_empty() {
+            let ping_url = if !config.proxy.ping_url.is_empty() {
+                Some(Url::from_str(&config.proxy.ping_url).map_err(|e| einval!(e))?)
+            } else {
+                None
+            };
+            Some(Proxy {
+                client: Self::build_connection(&config.proxy.url, config)?,
+                health: ProxyHealth::new(config.proxy.check_interval, ping_url),
+                fallback: config.proxy.fallback,
+            })
+        } else {
+            None
+        };
+        let connection = Arc::new(Request {
+            client,
+            proxy,
+            shutdown: AtomicBool::new(false),
+        });
+
+        if let Some(proxy) = &connection.proxy {
+            if proxy.health.ping_url.is_some() {
+                let conn = connection.clone();
+                let connect_timeout = config.connect_timeout;
+
+                // Spawn thread to update the health status of proxy server
+                thread::spawn(move || {
+                    let proxy = conn.proxy.as_ref().unwrap();
+                    let ping_url = proxy.health.ping_url.as_ref().unwrap();
+
+                    loop {
+                        let client = Client::new();
+                        let _ = client
+                            .get(ping_url.clone())
+                            .timeout(Duration::from_secs(connect_timeout))
+                            .send()
+                            .map(|resp| {
+                                proxy.health.set(is_success_status(resp.status()));
+                            })
+                            .map_err(|_e| proxy.health.set(false));
+
+                        if conn.shutdown.load(Ordering::Acquire) {
+                            break;
+                        }
+                        thread::sleep(proxy.health.check_interval);
+                        if conn.shutdown.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+
+        Ok(connection)
+    }
+
+    /// Shutdown the connection.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Send a request to server and wait for response.
+    pub fn call<R: Read + Send + 'static>(
+        &self,
+        method: Method,
+        url: &str,
+        query: Option<Vec<(&str, &str)>>,
+        data: Option<ReqBody<R>>,
+        headers: HeaderMap,
+        catch_status: bool,
+    ) -> RequestResult<Response> {
+        if let Some(proxy) = &self.proxy {
+            if proxy.health.ok() {
+                let data_cloned: Option<ReqBody<R>> = match data.as_ref() {
+                    Some(ReqBody::Form(form)) => Some(ReqBody::Form(form.clone())),
+                    Some(ReqBody::Buf(buf)) => Some(ReqBody::Buf(buf.clone())),
+                    _ => None,
+                };
+                let result = self.call_inner(
+                    &proxy.client,
+                    method.clone(),
+                    url,
+                    &query,
+                    data_cloned,
+                    headers.clone(),
+                    catch_status,
+                    true,
+                );
+
+                match result {
+                    Ok(resp) => {
+                        if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
+                            return Ok(resp);
+                        }
+                    }
+                    Err(err) => {
+                        if !proxy.fallback {
+                            return Err(err);
+                        }
+                    }
+                }
+                // If proxy server respond invalid status code or http connection failed, we need to
+                // fallback to origin server, the policy only applicable to non-upload operation
+                warn!("Request proxy server failed, fallback to origin server");
+            } else {
+                warn!("Proxy server not health, fallback to origin server");
+            }
+        }
+
+        self.call_inner(
+            &self.client,
+            method,
+            url,
+            &query,
+            data,
+            headers,
+            catch_status,
+            false,
+        )
+    }
+
+    fn build_connection(proxy: &str, config: &CommonConfig) -> Result<Client> {
         let connect_timeout = if config.connect_timeout != 0 {
             Some(Duration::from_secs(config.connect_timeout))
         } else {
@@ -140,54 +277,6 @@ impl Request {
         }
 
         cb.build().map_err(|e| einval!(e))
-    }
-
-    pub fn new(config: CommonConfig) -> Result<Arc<Request>> {
-        info!("backend config: {:?}", config);
-        let client = Self::build_client("", &config)?;
-        let proxy = if !config.proxy.url.is_empty() {
-            let ping_url = if !config.proxy.ping_url.is_empty() {
-                Some(Url::from_str(&config.proxy.ping_url).map_err(|e| einval!(e))?)
-            } else {
-                None
-            };
-            Some(Proxy {
-                client: Self::build_client(&config.proxy.url, &config)?,
-                health: ProxyHealth::new(config.proxy.check_interval, ping_url),
-                fallback: config.proxy.fallback,
-            })
-        } else {
-            None
-        };
-
-        let request = Arc::new(Request { client, proxy });
-
-        if let Some(proxy) = &request.proxy {
-            let request = request.clone();
-            if proxy.health.ping_url.is_some() {
-                // Spawn thread to update the health status of proxy server
-                thread::spawn(move || loop {
-                    let proxy = request.proxy.as_ref().unwrap();
-                    let ping_url = proxy.health.ping_url.as_ref().unwrap();
-                    let client = Client::new();
-                    let resp = client
-                        .get(ping_url.clone())
-                        .timeout(Duration::from_secs(config.connect_timeout))
-                        .send();
-                    match resp {
-                        Ok(resp) => {
-                            proxy.health.set(is_success_status(resp.status()));
-                        }
-                        Err(_err) => {
-                            proxy.health.set(false);
-                        }
-                    }
-                    thread::sleep(proxy.health.check_interval);
-                });
-            }
-        }
-
-        Ok(request)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -248,61 +337,50 @@ impl Request {
             Err(err) => Err(RequestError::Common(err)),
         }
     }
+}
 
-    pub fn call<R: Read + Send + 'static>(
-        &self,
-        method: Method,
-        url: &str,
-        query: Option<Vec<(&str, &str)>>,
-        data: Option<ReqBody<R>>,
-        headers: HeaderMap,
-        catch_status: bool,
-    ) -> RequestResult<Response> {
-        if let Some(proxy) = &self.proxy {
-            if proxy.health.ok() {
-                let data_cloned: Option<ReqBody<R>> = match data.as_ref() {
-                    Some(ReqBody::Form(form)) => Some(ReqBody::Form(form.clone())),
-                    Some(ReqBody::Buf(buf)) => Some(ReqBody::Buf(buf.clone())),
-                    _ => None,
-                };
-                let result = self.call_inner(
-                    &proxy.client,
-                    method.clone(),
-                    url,
-                    &query,
-                    data_cloned,
-                    headers.clone(),
-                    catch_status,
-                    true,
-                );
-                match result {
-                    Ok(resp) => {
-                        if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                            return Ok(resp);
-                        }
-                    }
-                    Err(err) => {
-                        if !proxy.fallback {
-                            return Err(err);
-                        }
-                    }
-                }
-                // If proxy server respond invalid status code or http connection failed, we need to
-                // fallback to origin server, the policy only applicable to non-upload operation
-                warn!("Request proxy server failed, fallback to origin server");
-            } else {
-                warn!("Proxy server not health, fallback to origin server");
-            }
-        }
-        self.call_inner(
-            &self.client,
-            method,
-            url,
-            &query,
-            data,
-            headers,
-            catch_status,
-            false,
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_progress() {
+        let buf = vec![0x1u8, 2, 3, 4, 5];
+        let mut progress = Progress::new(Cursor::new(buf), 5, |(curr, total)| {
+            assert!(curr == 2 || curr == 4);
+            assert_eq!(total, 5);
+        });
+
+        let mut buf1 = [0x0u8; 2];
+        assert_eq!(progress.read(&mut buf1).unwrap(), 2);
+        assert_eq!(buf1[0], 1);
+        assert_eq!(buf1[1], 2);
+
+        assert_eq!(progress.read(&mut buf1).unwrap(), 2);
+        assert_eq!(buf1[0], 3);
+        assert_eq!(buf1[1], 4);
+    }
+
+    #[test]
+    fn test_proxy_health() {
+        let checker = ProxyHealth::new(5, None);
+
+        assert!(checker.ok());
+        assert!(checker.ok());
+        checker.set(false);
+        assert!(!checker.ok());
+        assert!(!checker.ok());
+        checker.set(true);
+        assert!(checker.ok());
+        assert!(checker.ok());
+    }
+
+    #[test]
+    fn test_is_success_status() {
+        assert_eq!(is_success_status(StatusCode::CONTINUE), false);
+        assert_eq!(is_success_status(StatusCode::OK), true);
+        assert_eq!(is_success_status(StatusCode::PERMANENT_REDIRECT), true);
+        assert_eq!(is_success_status(StatusCode::BAD_REQUEST), false);
     }
 }
