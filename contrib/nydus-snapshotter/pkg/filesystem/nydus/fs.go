@@ -35,6 +35,7 @@ type filesystem struct {
 	manager          *process.Manager
 	cacheMgr         *cache.Manager
 	verifier         *signature.Verifier
+	sharedDaemon     *daemon.Daemon
 	daemonCfg        config.DaemonConfig
 	vpcRegistry      bool
 	nydusdBinaryPath string
@@ -66,6 +67,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
 		if err == nil && d != nil {
 			log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
+			fs.sharedDaemon = d
 			return &fs, nil
 		}
 
@@ -92,6 +94,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 				return nil, errors.Wrap(err, "failed to wait shared daemon")
 			}
 		}
+		fs.sharedDaemon = d
 	}
 
 	return &fs, nil
@@ -318,6 +321,15 @@ func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daem
 	return fs.createNewDaemon(snapshotID, imageID)
 }
 
+// Find saved sharedDaemon first, if not found then find it in db
+func (fs *filesystem) getSharedDaemon() (*daemon.Daemon, error) {
+	if fs.sharedDaemon != nil {
+		return fs.sharedDaemon, nil
+	} else {
+		return fs.manager.GetByID(daemon.SharedNydusDaemonID)
+	}
+}
+
 // createNewDaemon create new nydus daemon by snapshotID and imageID
 func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
 	var (
@@ -351,10 +363,11 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		d            *daemon.Daemon
 		err          error
 	)
-	if sharedDaemon, err = fs.manager.GetByID(daemon.SharedNydusDaemonID); err != nil {
+
+	sharedDaemon, err = fs.getSharedDaemon()
+	if err != nil {
 		return nil, err
 	}
-
 	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithRootMountPoint(*sharedDaemon.RootMountPoint),
