@@ -11,17 +11,21 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/nydus"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
+	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/store"
 )
+
+const dataBaseDir = "db"
 
 func ensureExists(path string) error {
 	_, err := os.Stat(path)
@@ -39,9 +43,15 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 		_ = os.RemoveAll(snapshotRoot)
 	}()
 
+	databaseDir := path.Join("testdata", dataBaseDir)
+	db, err := store.NewDatabase(databaseDir)
+	assert.Nil(t, err)
+	// Close db to release database flock
+	defer db.Close()
+
 	mgr, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: "",
-		RootDir:          snapshotRoot,
+		Database:         db,
 	})
 	require.Nil(t, err)
 
@@ -50,7 +60,7 @@ func Test_filesystem_createNewDaemon(t *testing.T) {
 			RootDir: snapshotRoot,
 		},
 		manager:     mgr,
-		daemonCfg:   nydus.DaemonConfig{},
+		daemonCfg:   config.DaemonConfig{},
 		resolver:    nil,
 		vpcRegistry: false,
 	}
@@ -68,13 +78,17 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 
 	content, err := ioutil.ReadFile("testdata/config/nydus.json")
 	require.Nil(t, err)
-	var cfg nydus.DaemonConfig
+	var cfg config.DaemonConfig
 	err = json.Unmarshal(content, &cfg)
 	require.Nil(t, err)
 
+	databaseDir := path.Join("testdata", dataBaseDir)
+	db, err := store.NewDatabase(databaseDir)
+	assert.Nil(t, err)
+
 	mgr, err := process.NewManager(process.Opt{
 		NydusdBinaryPath: "",
-		RootDir:          snapshotRoot,
+		Database:         db,
 	})
 	require.Nil(t, err)
 
@@ -88,12 +102,12 @@ func Test_filesystem_generateDaemonConfig(t *testing.T) {
 		vpcRegistry: false,
 	}
 	d, err := f.createNewDaemon("1", "example.com/test/testimage:0.1")
+	assert.Nil(t, err)
 	err = f.generateDaemonConfig(d, map[string]string{
 		label.ImagePullUsername: "mock",
 		label.ImagePullSecret:   "mock",
 	})
 	require.Nil(t, err)
 	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "config", d.ID, "config.json")))
-	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "cache")))
 	assert.Nil(t, ensureExists(filepath.Join(snapshotRoot, "socket", d.ID)))
 }
