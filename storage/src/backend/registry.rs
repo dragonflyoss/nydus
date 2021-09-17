@@ -385,19 +385,12 @@ impl RegistryReader {
                         // Cache authorization header for next request
                         self.state.cached_auth.set(&last_cached_auth, auth_header)
                     }
-                    if !catch_status {
-                        return Ok(resp);
-                    }
-                    return respond(resp).map_err(RegistryError::Request);
+                    return respond(resp, catch_status).map_err(RegistryError::Request);
                 }
             }
         }
 
-        if !catch_status {
-            return Ok(resp);
-        }
-
-        respond(resp).map_err(RegistryError::Request)
+        respond(resp, catch_status).map_err(RegistryError::Request)
     }
 
     /// Read data from registry server
@@ -508,7 +501,7 @@ impl RegistryReader {
                     }
                 };
             } else {
-                resp = respond(resp).map_err(RegistryError::Request)?;
+                resp = respond(resp, true).map_err(RegistryError::Request)?;
             }
         }
 
