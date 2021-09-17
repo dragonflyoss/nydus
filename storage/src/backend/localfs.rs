@@ -369,7 +369,6 @@ impl LocalFsTracer {
 
             let _ = nix::unistd::write(file.as_raw_fd(), buf).map_err(|e| {
                 warn!("fail to write access log: {}", e);
-                ()
             });
 
             // Do not expected poisoned lock here.

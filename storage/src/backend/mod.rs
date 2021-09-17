@@ -153,8 +153,8 @@ pub trait BlobReader: Send + Sync {
             let mut data = Vec::with_capacity(size);
             unsafe { data.set_len(size) };
 
-            self.read(blob_id, data, offset)?;
-            copyv(&[&data], bufs, offset, result, 0, 0)
+            let result = self.read(&mut data, offset)?;
+            copyv(&[&data], bufs, 0, result, 0, 0)
                 .map(|r| r.0)
                 .map_err(BackendError::CopyData)
         }
