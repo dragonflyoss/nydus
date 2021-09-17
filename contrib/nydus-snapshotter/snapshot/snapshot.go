@@ -102,6 +102,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		nydus.WithDaemonMode(cfg.DaemonMode),
 		nydus.WithLogLevel(cfg.LogLevel),
 		nydus.WithLogDir(cfg.LogDir),
+		nydus.WithLogToStdout(cfg.LogToStdout),
 	}
 
 	if !cfg.DisableCacheManager {
@@ -137,6 +138,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 				stargz.WithDaemonConfig(cfg.DaemonCfg),
 				stargz.WithLogLevel(cfg.LogLevel),
 				stargz.WithLogDir(cfg.LogDir),
+				stargz.WithLogToStdout(cfg.LogToStdout),
 			)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to initialize stargz filesystem")

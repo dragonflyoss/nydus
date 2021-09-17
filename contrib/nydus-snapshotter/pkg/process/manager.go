@@ -135,8 +135,10 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 	args := []string{
 		"--apisock", d.APISock(),
 		"--log-level", d.LogLevel,
-		"--log-file", d.LogFile(),
 		"--thread-num", "10",
+	}
+	if !d.LogToStdout {
+		args = append(args, "--log-file", d.LogFile())
 	}
 	if d.IsMultipleDaemon() {
 		bootstrap, err := d.BootstrapFile()
@@ -159,7 +161,12 @@ func (m *Manager) buildStartCommand(d *daemon.Daemon) (*exec.Cmd, error) {
 	} else {
 		return nil, errors.Errorf("DaemonMode %s doesn't have daemon configured", d.DaemonMode)
 	}
-	return exec.Command(m.nydusdBinaryPath, args...), nil
+	cmd := exec.Command(m.nydusdBinaryPath, args...)
+	if d.LogToStdout {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stdout
+	}
+	return cmd, nil
 }
 
 func (m *Manager) DestroyBySnapshotID(id string) error {

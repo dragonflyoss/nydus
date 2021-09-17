@@ -90,4 +90,11 @@ func WithLogDir(dir string) NewFSOpt {
 	}
 }
 
+func WithLogToStdout(logToStdout bool) NewFSOpt {
+	return func(d *filesystem) error {
+		d.logToStdout = logToStdout
+		return nil
+	}
+}
+
 type NewFSOpt func(d *filesystem) error

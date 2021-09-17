@@ -46,6 +46,7 @@ type Config struct {
 	EnableStargz         bool          `toml:"enable_stargz"`
 	LogLevel             string        `toml:"-"`
 	LogDir               string        `toml:"log_dir"`
+	LogToStdout          bool          `toml:"log_to_stdout"`
 	DisableCacheManager  bool          `toml:"disable_cache_manager"`
 }
 
