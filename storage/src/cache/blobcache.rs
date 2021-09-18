@@ -950,7 +950,7 @@ pub fn new(
 
 #[cfg(test)]
 pub mod blob_cache_tests {
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{alloc_zeroed, Layout};
     use std::slice::from_raw_parts;
     use std::sync::Arc;
 
@@ -1116,7 +1116,7 @@ pub mod blob_cache_tests {
         // read from cache
         let r1 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
@@ -1124,7 +1124,7 @@ pub mod blob_cache_tests {
 
         let r2 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
@@ -1525,7 +1525,7 @@ pub mod blob_cache_tests {
         // Read from blobcache instance 1.
         let r1 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache1.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
@@ -1552,7 +1552,7 @@ pub mod blob_cache_tests {
         // if disable `cache_validate` option.
         let r2 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache2.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
@@ -1562,7 +1562,7 @@ pub mod blob_cache_tests {
         // Read from blobcache instance 1, the data should be corrected.
         let r3 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache1.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
