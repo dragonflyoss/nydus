@@ -46,7 +46,7 @@ pub fn copyv(
     mut dst_offset: usize,
 ) -> StorageResult<(usize, (usize, usize))> {
     // Validate input parameters first to protect following loop block.
-    if src.len() == 0 || length == 0 {
+    if src.is_empty() || length == 0 {
         return Ok((0, (dst_index, dst_offset)));
     } else if offset > src[0].len() || dst_index >= dst.len() || dst_offset > dst[dst_index].len() {
         return Err(StorageError::MemOverflow);

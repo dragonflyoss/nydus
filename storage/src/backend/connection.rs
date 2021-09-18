@@ -113,9 +113,7 @@ pub(crate) fn is_success_status(status: StatusCode) -> bool {
 
 /// Convert a HTTP `Response` into an `Result<Response>`.
 pub(crate) fn respond(resp: Response, catch_status: bool) -> ConnectionResult<Response> {
-    if !catch_status {
-        Ok(resp)
-    } else if is_success_status(resp.status()) {
+    if !catch_status || is_success_status(resp.status()) {
         Ok(resp)
     } else {
         let msg = resp.text().map_err(ConnectionError::Format)?;

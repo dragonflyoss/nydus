@@ -119,7 +119,7 @@ impl BlobReader for LocalFsEntry {
         let prefix = self
             .path
             .to_str()
-            .ok_or(LocalFsError::BlobFile(einval!("invalid blob path")))?;
+            .ok_or_else(|| LocalFsError::BlobFile(einval!("invalid blob path")))?;
         let log_path = prefix.to_owned() + BLOB_ACCESSED_SUFFIX;
 
         // Prefetch according to the trace file if it's ready.
@@ -165,9 +165,10 @@ impl BlobReader for LocalFsEntry {
             let _ = thread::Builder::new()
                 .name("nydus-localfs-access-recorder".to_string())
                 .spawn(move || {
-                    let guard = trace_cond.0.lock().unwrap();
+                    let &(ref lock, ref cvar) = &*trace_cond;
+                    let guard = lock.lock().unwrap();
                     if !*guard {
-                        let _ = trace_cond.1.wait_timeout(guard, trace_to);
+                        let _guard = cvar.wait_timeout(guard, trace_to);
                     }
                     LocalFsTracer::flush(log_file, log_path, tracer);
                 });
@@ -202,7 +203,7 @@ pub struct LocalFs {
 impl LocalFs {
     pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs> {
         let config: LocalFsConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
-        let id = id.ok_or(einval!("LocalFs requires blob_id"))?;
+        let id = id.ok_or_else(|| einval!("LocalFs requires blob_id"))?;
 
         if config.blob_file.is_empty() && config.dir.is_empty() {
             return Err(einval!("blob file or dir is required"));
@@ -230,6 +231,7 @@ impl LocalFs {
         path.canonicalize().map_err(LocalFsError::BlobFile)
     }
 
+    #[allow(clippy::mutex_atomic)]
     fn get_blob(&self, blob_id: &str) -> LocalFsResult<Arc<dyn BlobReader>> {
         // Don't expect poisoned lock here.
         if let Some(entry) = self.entries.read().unwrap().get(blob_id) {
@@ -264,8 +266,9 @@ impl LocalFs {
 impl BlobBackend for LocalFs {
     fn shutdown(&self) {
         for entry in self.entries.read().unwrap().values() {
-            *entry.trace_condvar.0.lock().unwrap() = true;
-            entry.trace_condvar.1.notify_all();
+            let &(ref lock, ref cvar) = &*entry.trace_condvar;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
         }
     }
 
@@ -562,7 +565,7 @@ mod tests {
 
         {
             let mut file = unsafe { File::from_raw_fd(tempfile.as_file().as_raw_fd()) };
-            file.write(&[0x1u8, 0x2, 0x3, 0x4]).unwrap();
+            file.write_all(&[0x1u8, 0x2, 0x3, 0x4]).unwrap();
             let _ = file.into_raw_fd();
         }
 
@@ -609,7 +612,7 @@ mod tests {
 
         {
             let mut file = unsafe { File::from_raw_fd(tempfile.as_file().as_raw_fd()) };
-            file.write(&[0x1u8, 0x2, 0x3, 0x4]).unwrap();
+            file.write_all(&[0x1u8, 0x2, 0x3, 0x4]).unwrap();
             file.write_all_at(&[0x1u8, 0x2, 0x3, 0x4], 0x1000).unwrap();
             let _ = file.into_raw_fd();
         }

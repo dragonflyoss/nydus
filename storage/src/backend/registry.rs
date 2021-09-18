@@ -63,7 +63,7 @@ impl Cache {
     }
 
     fn set(&self, last: &str, current: String) {
-        if last != &current {
+        if last != current {
             let mut cached_guard = self.0.write().unwrap();
             *cached_guard = current;
         }
@@ -561,7 +561,7 @@ pub struct Registry {
 impl Registry {
     #[allow(clippy::useless_let_if_seq)]
     pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
-        let id = id.ok_or(einval!("Registry backend requires blob_id"))?;
+        let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
         let common_config: CommonConfig =
             serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
         let retry_limit = common_config.retry_limit;
