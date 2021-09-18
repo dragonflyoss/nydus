@@ -107,7 +107,7 @@ impl RafsDevice {
     }
 
     pub fn close(&self) -> io::Result<()> {
-        self.rw_layer.load().release();
+        self.rw_layer.load().destroy();
         Ok(())
     }
 

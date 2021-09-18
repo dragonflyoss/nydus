@@ -1238,7 +1238,7 @@ impl RafsCache for BlobCache {
         Ok(size)
     }
 
-    fn release(&self) {
+    fn destroy(&self) {
         self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
 
         // TODO: Cache is responsible to release backend's resources

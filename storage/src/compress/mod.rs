@@ -269,3 +269,52 @@ mod tests {
         assert_eq!(buf, decompressed);
     }
 }
+
+/// Estimate the maximum compressed data size from uncompressed data size.
+///
+/// Gzip is special that it doesn't carry compress_size. We need to read the maximum possible size
+/// of compressed data for `chunk_decompress_size`, and try to decompress `chunk_decompress_size`
+/// bytes of data out of it.
+//
+// Per man(1) gzip
+// The worst case expansion is a few bytes for the gzip file header, plus 5 bytes every 32K block,
+// or an expansion ratio of 0.015% for large files.
+//
+// Per http://www.zlib.org/rfc-gzip.html#header-trailer, each member has the following structure:
+// +---+---+---+---+---+---+---+---+---+---+
+// |ID1|ID2|CM |FLG|     MTIME     |XFL|OS | (more-->)
+// +---+---+---+---+---+---+---+---+---+---+
+// (if FLG.FEXTRA set)
+// +---+---+=================================+
+// | XLEN  |...XLEN bytes of "extra field"...| (more-->)
+// +---+---+=================================+
+// (if FLG.FNAME set)
+// +=========================================+
+// |...original file name, zero-terminated...| (more-->)
+// +=========================================+
+// (if FLG.FCOMMENT set)
+// +===================================+
+// |...file comment, zero-terminated...| (more-->)
+// +===================================+
+// (if FLG.FHCRC set)
+// +---+---+
+// | CRC16 |
+// +---+---+
+// +=======================+
+// |...compressed blocks...| (more-->)
+// +=======================+
+//   0   1   2   3   4   5   6   7
+// +---+---+---+---+---+---+---+---+
+// |     CRC32     |     ISIZE     |
+// +---+---+---+---+---+---+---+---+
+// gzip head+footer is at least 10+8 bytes, stargz header doesn't include any flags
+// so it's 18 bytes. Let's read at least 128 bytes more, to allow the decompressor to
+// find out end of the gzip stream.
+//
+// Ideally we should introduce a streaming cache for stargz that maintains internal
+// chunks and expose stream APIs.
+pub fn compute_compressed_gzip_size(size: usize, max_size: usize) -> usize {
+    let size = size + 10 + 8 + 5 + (size / (16 << 10)) * 5 + 128;
+
+    std::cmp::min(size, max_size)
+}

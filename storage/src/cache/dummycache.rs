@@ -110,7 +110,7 @@ impl RafsCache for DummyCache {
         Ok(())
     }
 
-    fn release(&self) {
+    fn destroy(&self) {
         self.backend().shutdown()
     }
 
