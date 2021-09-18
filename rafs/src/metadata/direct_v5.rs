@@ -848,6 +848,10 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
 }
 
 impl BlobV5ChunkInfo for DirectChunkInfoV5 {
+    fn as_base(&self) -> &dyn BlobChunkInfo {
+        self
+    }
+
     impl_chunkinfo_getter!(blob_index, u32);
     impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(file_offset, u64);

@@ -626,6 +626,10 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
 }
 
 impl BlobV5ChunkInfo for CachedChunkInfoV5 {
+    fn as_base(&self) -> &dyn BlobChunkInfo {
+        self
+    }
+
     impl_getter!(blob_index, c_blob_index, u32);
     impl_getter!(index, c_index, u32);
     impl_getter!(file_offset, c_file_offset, u64);

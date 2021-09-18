@@ -11,7 +11,7 @@ use nydus_utils::div_round_up;
 
 use super::ChunkMap;
 use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
-use crate::device::v5::BlobV5ChunkInfo;
+use crate::device::BlobChunkInfo;
 use crate::utils::readahead;
 
 /// The magic number of blob chunk_map file, it's ASCII hex of string "BMAP".
@@ -30,36 +30,30 @@ struct Header {
     reserved: [u8; HEADER_RESERVED_SIZE],
 }
 
-/// The IndexedChunkMap is an implementation that uses a file as bitmap
-/// (like HashMap<chunk_index, has_ready>). It creates or opens a file with
-/// the name $blob_id.chunk_map which records whether a chunk has been cached
-/// by the blobcache. This approach can be used to share chunk ready state
-/// between multiple nydusd instances, which was not possible with the previous
-/// implementation using in-memory hashmap.
+/// A `ChunkMap` implementation based on atomic bitmap.
 ///
-/// For example: the bitmap file layout is [0b00000000, 0b00000000],
-/// when blobcache calls set_ready(3), the layout should be changed
-/// to [0b00010000, 0b00000000].
+/// The `IndexedChunkMap` is an implementation of `ChunkMap` which uses a file and atomic bitmap
+/// operations to track chunk data readiness. It creates or opens a file with the name
+/// `$blob_id.chunk_map` to record whether a chunk has been cached by the blob cache, and atomic
+/// bitmap operations are used to manipulate the state bit.
+///
+/// This approach can be used to share chunk ready state between multiple nydusd instances.
+/// For example: the bitmap file layout is [0b00000000, 0b00000000], when blobcache calls
+/// set_ready(3), the layout should be changed to [0b00010000, 0b00000000].
 pub struct IndexedChunkMap {
     chunk_count: u32,
     size: usize,
     base: *const u8,
 }
 
-unsafe impl Send for IndexedChunkMap {}
-
-unsafe impl Sync for IndexedChunkMap {}
-
-impl NoWaitSupport for IndexedChunkMap {}
-
 impl IndexedChunkMap {
+    /// Create a new instance of `IndexedChunkMap`.
     pub fn new(blob_path: &str, chunk_count: u32) -> Result<Self> {
         if chunk_count == 0 {
             return Err(einval!("chunk count should be greater than 0"));
         }
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
-
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -96,8 +90,7 @@ impl IndexedChunkMap {
         };
         if base == libc::MAP_FAILED {
             return Err(last_error!("failed to mmap blob chunk_map"));
-        }
-        if base.is_null() {
+        } else if base.is_null() {
             return Err(ebadf!("failed to mmap blob chunk_map"));
         }
 
@@ -122,27 +115,30 @@ impl IndexedChunkMap {
         })
     }
 
-    fn validate_index(&self, idx: u32) -> Result<()> {
-        if idx > self.chunk_count - 1 {
-            return Err(einval!(format!(
+    fn validate_index(&self, idx: u32) -> Result<u32> {
+        if idx < self.chunk_count {
+            Ok(idx)
+        } else {
+            Err(einval!(format!(
                 "chunk index {} exceeds chunk count {}",
                 idx, self.chunk_count
-            )));
+            )))
         }
-        Ok(())
     }
 
     fn read_u8(&self, idx: u32) -> u8 {
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let current = unsafe { self.base.add(start) as *const AtomicU8 };
-        unsafe { (*current).load(Ordering::Acquire) }
+        let current = unsafe { &*(self.base.add(start) as *const AtomicU8) };
+
+        current.load(Ordering::Acquire)
     }
 
     fn write_u8(&self, idx: u32, current: u8) -> bool {
         let mask = Self::index_to_mask(idx);
         let expected = current | mask;
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let atomic_value = unsafe { &*{ self.base.add(start) as *const AtomicU8 } };
+        let atomic_value = unsafe { &*(self.base.add(start) as *const AtomicU8) };
+
         atomic_value
             .compare_exchange(current, expected, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
@@ -158,6 +154,7 @@ impl IndexedChunkMap {
         let mask = Self::index_to_mask(index);
         let current = self.read_u8(index);
         let ready = current & mask == mask;
+
         (ready, current)
     }
 }
@@ -171,37 +168,38 @@ impl Drop for IndexedChunkMap {
     }
 }
 
-impl ChunkIndexGetter for IndexedChunkMap {
-    type Index = u32;
+unsafe impl Send for IndexedChunkMap {}
 
-    fn get_index(chunk: &dyn BlobV5ChunkInfo) -> Self::Index {
-        chunk.index()
-    }
-}
+unsafe impl Sync for IndexedChunkMap {}
+
+impl NoWaitSupport for IndexedChunkMap {}
 
 impl ChunkMap for IndexedChunkMap {
-    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, _wait: bool) -> Result<bool> {
-        let index = chunk.index();
-        let _ = self.validate_index(index)?;
-        let (ready, _) = self.is_chunk_ready(index);
-        Ok(ready)
+    fn is_ready(&self, chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
+        let index = self.validate_index(chunk.id())?;
+
+        Ok(self.is_chunk_ready(index).0)
     }
 
-    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()> {
-        // Loop to write one byte (a bitmap with 8 bits capacity) to
-        // blob chunk_map file until success.
-        let index = chunk.index();
-        let _ = self.validate_index(index)?;
+    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
+        let index = self.validate_index(chunk.id())?;
+
+        // Loop to atomically update the state bit corresponding to the chunk index.
         loop {
             let (ready, current) = self.is_chunk_ready(index);
-            if ready {
-                break;
-            }
-
-            if self.write_u8(index, current) {
+            if ready || self.write_u8(index, current) {
                 break;
             }
         }
+
         Ok(())
+    }
+}
+
+impl ChunkIndexGetter for IndexedChunkMap {
+    type Index = u32;
+
+    fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index {
+        chunk.id()
     }
 }

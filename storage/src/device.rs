@@ -134,6 +134,9 @@ pub mod v5 {
 
         /// Get flags associated with the data chunk.
         fn flags(&self) -> BlobChunkFlags;
+
+        /// Cast to the base `BlobChunkInfo` trait object.
+        fn as_base(&self) -> &dyn BlobChunkInfo;
     }
 
     /// Struct to maintain information for Rafs V5 blob IO operations.

@@ -28,9 +28,7 @@ use governor::{
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
-use crate::cache::chunkmap::{
-    digested::DigestedChunkMap, indexed::IndexedChunkMap, BlobChunkMap, ChunkMap,
-};
+use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::RafsCache;
 use crate::cache::*;
 use crate::device::v5::BlobV5Bio;
@@ -347,11 +345,11 @@ impl BlobCache {
                         delayed_chunk.compress_offset(),
                         e
                     );
-                    delayed_chunk_map.finish(delayed_chunk.as_ref())
+                    delayed_chunk_map.notify_ready(delayed_chunk.as_base())
                 }
                 Ok(_) => delayed_chunk_map
                     .as_ref()
-                    .set_ready(delayed_chunk.as_ref())
+                    .set_ready(delayed_chunk.as_base())
                     .unwrap_or_else(|e| {
                         error!(
                             "Failed change caching state for chunk of offset {}, {:?}",
@@ -414,7 +412,7 @@ impl BlobCache {
                 .map_err(|_| error!("Set cache index error!"))
             {
                 for c in &region.cki_set {
-                    chunk_map.finish(c.as_ref());
+                    chunk_map.notify_ready(c.as_base());
                 }
             }
 
@@ -504,7 +502,7 @@ impl BlobCache {
 
         debug!("single bio, blob offset {}", chunk.compress_offset());
 
-        let has_ready = chunk_map.has_ready(ck, false)?;
+        let has_ready = chunk_map.is_ready(ck.as_base(), false)?;
         let buffer_holder;
 
         drop(cache_guard);
@@ -525,7 +523,7 @@ impl BlobCache {
                 .is_ok()
         {
             self.metrics.whole_hits.inc();
-            chunk_map.set_ready(chunk.as_ref())?;
+            chunk_map.set_ready(chunk.as_base())?;
             trace!(
                 "recover blob cache {} {} offset {} size {}",
                 chunk.block_id(),
@@ -553,7 +551,7 @@ impl BlobCache {
                                 },
                             );
                             chunk_map
-                                .set_ready(chunk.as_ref())
+                                .set_ready(chunk.as_base())
                                 .unwrap_or_else(|e| error!("set ready failed, {}", e));
                         }
                     }),
@@ -570,7 +568,7 @@ impl BlobCache {
             }
             .map_err(|e: std::io::Error|
                 // Thanks to above curly bracket, we can clean tracer up if any of the steps fails.
-                {chunk_map.finish(chunk.as_ref());e})?
+                {chunk_map.notify_ready(chunk.as_base());e})?
         };
 
         let read_size = copyv(
@@ -629,7 +627,7 @@ impl BlobCache {
                 }
             };
             for (i, chunk) in req.chunks.iter().enumerate() {
-                let has_ready = chunk_map.has_ready(chunk.as_ref(), true)?;
+                let has_ready = chunk_map.is_ready(chunk.as_base(), true)?;
                 // Hit cache if cache ready
                 // Bios that can directly read from blobcache, no need to validate data integrity.
                 // Move them to a merged request.
@@ -707,7 +705,7 @@ impl BlobCache {
                             .map_err(|e| einval!(e))?;
                     } else {
                         // On slow path, don't try to handle internal IO.
-                        chunk_map.finish(chunk.as_ref());
+                        chunk_map.notify_ready(chunk.as_base());
                     }
                     // Only user io is accounted.
                     // TODO: If all user IO is satisfied, just return.
@@ -1078,7 +1076,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     };
 
                     for c in continuous_chunks {
-                        if chunk_map.has_ready(c.as_ref(), false).unwrap_or_default() {
+                        if chunk_map.is_ready(c.as_base(), false).unwrap_or_default() {
                             continue;
                         }
 
@@ -1101,7 +1099,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                                 break;
                             } else {
                                 let _ = chunk_map
-                                    .set_ready(c.as_ref())
+                                    .set_ready(c.as_base())
                                     .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
                             }
                         } else {
@@ -1111,7 +1109,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
 
                     if !issue_batch {
                         for c in continuous_chunks {
-                            chunk_map.finish(c.as_ref());
+                            chunk_map.notify_ready(c.as_base());
                         }
                         continue 'wait_mr;
                     }
@@ -1140,7 +1138,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             .map_err(|_| error!("Set cache index error!"))
                         {
                             for (i, c) in continuous_chunks.iter().enumerate() {
-                                if !chunk_map.has_ready_nowait(c.as_ref()).unwrap_or_default() {
+                                if !chunk_map.is_ready_nowait(c.as_base()).unwrap_or_default() {
                                     // Write multiple chunks once
                                     match BlobCache::persist_chunk(
                                         blobcache.is_compressed,
@@ -1150,10 +1148,10 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                                     ) {
                                         Err(e) => {
                                             error!("Failed to cache chunk: {}", e);
-                                            chunk_map.finish(c.as_ref())
+                                            chunk_map.notify_ready(c.as_base())
                                         }
                                         Ok(_) => {
-                                            chunk_map.set_ready(c.as_ref()).unwrap_or_else(|e| {
+                                            chunk_map.set_ready(c.as_base()).unwrap_or_else(|e| {
                                                 error!("Failed to set chunk ready: {:?}", e)
                                             })
                                         }
@@ -1165,7 +1163,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         // Before issue a merged backend request, we already mark
                         // them as `OnTrip` inflight.
                         for c in continuous_chunks.iter().map(|i| i.as_ref()) {
-                            chunk_map.finish(c);
+                            chunk_map.notify_ready(c.as_base());
                         }
                     }
                 }
@@ -1275,7 +1273,7 @@ impl RafsCache for BlobCache {
     fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobEntry) -> bool {
         let cache_guard = self.cache.read().unwrap();
         if let Some((_, _, chunk_map)) = cache_guard.get(blob) {
-            chunk_map.has_ready_nowait(chunk).unwrap_or(false)
+            chunk_map.is_ready_nowait(chunk.as_base()).unwrap_or(false)
         } else {
             false
         }
@@ -1527,6 +1525,10 @@ pub mod blob_cache_tests {
     }
 
     impl BlobV5ChunkInfo for MockChunkInfo {
+        fn as_base(&self) -> &dyn BlobChunkInfo {
+            self
+        }
+
         impl_getter!(blob_index, blob_index, u32);
         impl_getter!(index, index, u32);
         impl_getter!(file_offset, file_offset, u64);

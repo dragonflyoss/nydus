@@ -2,42 +2,52 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Result;
-
-use crate::cache::blobcache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
-use crate::device::v5::BlobV5ChunkInfo;
-use crate::{StorageError, StorageResult};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::io::Result;
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::time::Duration;
 
-pub mod digested;
-pub mod indexed;
+use crate::cache::blobcache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
+use crate::device::BlobChunkInfo;
+use crate::{StorageError, StorageResult};
 
-/// only to mark ChunkMap who doesn't support wait
+mod chunk_digested;
+mod chunk_indexed;
+
+pub use chunk_digested::DigestedChunkMap;
+pub use chunk_indexed::IndexedChunkMap;
+
+/// Marker for ChunkMap who doesn't support wait.
 pub trait NoWaitSupport {}
 
-/// The chunk map checks whether a chunk data has been cached in
-/// blob cache based on the chunk info.
-pub trait ChunkMap {
-    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, wait: bool) -> Result<bool>;
-    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()>;
-    fn finish(&self, _chunk: &dyn BlobV5ChunkInfo) {}
-    fn has_ready_nowait(&self, _chunk: &dyn BlobV5ChunkInfo) -> Result<bool> {
-        Ok(false)
+/// Trait to check/set chunk data cache status.
+pub trait ChunkMap: Send + Sync {
+    /// Check whether the chunk data is ready for use.
+    fn is_ready(&self, chunk: &dyn BlobChunkInfo, wait: bool) -> Result<bool>;
+
+    /// Check whether the chunk data is ready for use without waiting.
+    fn is_ready_nowait(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
+        self.is_ready(chunk, false)
     }
+
+    /// Set chunk data to ready state.
+    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()>;
+
+    /// Notify that data for the chunk is ready.
+    fn notify_ready(&self, _chunk: &dyn BlobChunkInfo) {}
 }
 
 /// convert RafsChunkInfo to ChunkMap inner index
 pub trait ChunkIndexGetter {
     type Index;
 
-    fn get_index(chunk: &dyn BlobV5ChunkInfo) -> Self::Index;
+    /// Get the chunk's id/key for HashMap.
+    fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index;
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone)]
 enum Status {
     Inflight,
     Complete,
@@ -66,9 +76,10 @@ impl ChunkSlot {
         self.notify();
     }
 
-    fn wait_for_inflight(&self, timeout: Duration) -> StorageResult<()> {
+    fn wait_for_inflight(&self, timeout: Duration) -> StorageResult<Status> {
         let mut inflight = self.on_trip.lock().unwrap();
         let mut tor: WaitTimeoutResult;
+
         while *inflight == Status::Inflight {
             // Do not expect poisoned lock, so unwrap here.
             let r = self.condvar.wait_timeout(inflight, timeout).unwrap();
@@ -79,25 +90,25 @@ impl ChunkSlot {
             }
         }
 
-        Ok(())
+        Ok(*inflight)
     }
 }
 
-/// general chunk map
-/// support single inflight io if backend ChunkMap doesn't support
+/// Struct to manage chunk map state for a blob object.
+///
+/// If the backend `ChunkMap` implementation doesn't track inflight chunks, a default in memory
+/// inflight tracker using `Mutex<HashMap>` will be used.
 pub struct BlobChunkMap<C, I> {
     c: C,
     inflight_tracer: Mutex<HashMap<I, Arc<ChunkSlot>>>,
 }
 
-// TODO: Use chunk's compress offset a.k.a blob address as key, so we don't need
-// ChunkIndexGetter<Index = I> anymore.
-impl<C, I> BlobChunkMap<C, I>
+impl<C, I> From<C> for BlobChunkMap<C, I>
 where
     C: ChunkMap + ChunkIndexGetter<Index = I> + NoWaitSupport,
     I: Eq + Hash + Display,
 {
-    pub fn from(c: C) -> Self {
+    fn from(c: C) -> Self {
         Self {
             c,
             inflight_tracer: Mutex::new(HashMap::new()),
@@ -108,67 +119,58 @@ where
 impl<C, I> ChunkMap for BlobChunkMap<C, I>
 where
     C: ChunkMap + ChunkIndexGetter<Index = I> + NoWaitSupport,
-    I: Eq + Hash + Display,
+    I: Eq + Hash + Display + Send,
 {
-    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, wait: bool) -> Result<bool> {
-        let ready = self.c.has_ready(chunk, false)?;
+    fn is_ready(&self, chunk: &dyn BlobChunkInfo, wait: bool) -> Result<bool> {
+        let mut ready = self.c.is_ready(chunk, false)?;
+        if ready {
+            return Ok(true);
+        }
 
-        if !ready {
-            let index = C::get_index(chunk);
-            let mut guard = self.inflight_tracer.lock().unwrap();
-            trace!("chunk index {}, tracer scale {}", index, guard.len());
-            if let Some(i) = guard.get(&index).cloned() {
-                if wait {
-                    drop(guard);
-                    return match i
-                        .wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT))
-                    {
-                        Err(StorageError::Timeout) => {
-                            // Notice that lock of tracer is already dropped.
-                            let mut t = self.inflight_tracer.lock().unwrap();
-                            t.remove(&index);
-                            i.notify();
-                            warn!(
-                                "Waiting for another backend IO expires. chunk index {}, \
-                            compressed offset {}, tracer scale {}",
-                                index,
-                                chunk.compress_offset(),
-                                t.len()
-                            );
-                            // TODO: Take argument `true` or `false` is strange since it is not used.
-                            self.c.has_ready(chunk, false)
-                        }
-                        _ => self.c.has_ready(chunk, false),
-                    };
-                }
+        let index = C::get_index(chunk);
+        let mut guard = self.inflight_tracer.lock().unwrap();
+        trace!("chunk index {}, tracer scale {}", index, guard.len());
+
+        if let Some(i) = guard.get(&index).cloned() {
+            if wait {
+                drop(guard);
+                let result =
+                    i.wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT));
+                if let Err(StorageError::Timeout) = result {
+                    // Notice that lock of tracer is already dropped.
+                    let mut t = self.inflight_tracer.lock().unwrap();
+                    t.remove(&index);
+                    i.notify();
+                    warn!("Waiting for another backend IO expires. chunk index {}, compressed offset {}, tracer scale {}",
+                          index, chunk.compress_offset(), t.len());
+                };
+                ready = self.c.is_ready(chunk, false)?;
+            }
+        } else {
+            // Double check to close the window where prior slot was just removed after backend IO
+            // returned.
+            if self.c.is_ready(chunk, false)? {
+                ready = true;
             } else {
-                // Double check to close the window where prior slot was just
-                // removed after backend IO returned.
-                if self.c.has_ready(chunk, false)? {
-                    return Ok(true);
-                }
                 guard.insert(index, Arc::new(ChunkSlot::new()));
             }
         }
+
         Ok(ready)
     }
 
-    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()> {
+    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         self.c.set_ready(chunk).map(|_| {
-            self.finish(chunk);
+            self.notify_ready(chunk);
         })
     }
 
-    fn finish(&self, chunk: &dyn BlobV5ChunkInfo) {
+    fn notify_ready(&self, chunk: &dyn BlobChunkInfo) {
         let index = C::get_index(chunk);
         let mut guard = self.inflight_tracer.lock().unwrap();
         if let Some(i) = guard.remove(&index) {
             i.done();
         }
-    }
-
-    fn has_ready_nowait(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<bool> {
-        self.c.has_ready(chunk, false)
     }
 }
 
@@ -178,16 +180,14 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    use vmm_sys_util::tempdir::TempDir;
-
-    use super::digested::DigestedChunkMap;
-    use super::indexed::IndexedChunkMap;
-    use super::*;
-    use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
-    use crate::device::{RafsChunkFlags, RafsV5ChunkInfo};
     use nydus_utils::digest::Algorithm::Blake3;
     use nydus_utils::digest::{Algorithm, RafsDigest};
+    use vmm_sys_util::tempdir::TempDir;
     use vmm_sys_util::tempfile::TempFile;
+
+    use super::*;
+    use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
+    use crate::device::BlobChunkInfo;
 
     struct Chunk {
         index: u32,
@@ -206,17 +206,13 @@ mod tests {
         }
     }
 
-    impl BlobV5ChunkInfo for Chunk {
+    impl BlobChunkInfo for Chunk {
         fn block_id(&self) -> &RafsDigest {
             &self.digest
         }
 
-        fn index(&self) -> u32 {
+        fn id(&self) -> u32 {
             self.index
-        }
-
-        fn blob_index(&self) -> u32 {
-            unimplemented!();
         }
 
         fn compress_offset(&self) -> u64 {
@@ -235,10 +231,6 @@ mod tests {
             unimplemented!();
         }
 
-        fn file_offset(&self) -> u64 {
-            unimplemented!();
-        }
-
         fn is_compressed(&self) -> bool {
             unimplemented!();
         }
@@ -246,11 +238,27 @@ mod tests {
         fn is_hole(&self) -> bool {
             unimplemented!();
         }
+    }
+
+    /*
+    impl BlobV5ChunkInfo for Chunk {
+        fn blob_index(&self) -> u32 {
+            unimplemented!();
+        }
+
+        fn file_offset(&self) -> u64 {
+            unimplemented!();
+        }
+
+        fn index(&self) -> u32 {
+            self.index
+        }
 
         fn flags(&self) -> RafsChunkFlags {
             unimplemented!();
         }
     }
+     */
 
     #[test]
     fn test_chunk_map() {
@@ -305,7 +313,7 @@ mod tests {
         for idx in 0..chunk_count {
             let chunk = Chunk::new(idx);
 
-            let has_ready = indexed_chunk_map3.has_ready(chunk.as_ref(), false).unwrap();
+            let has_ready = indexed_chunk_map3.is_ready(chunk.as_ref(), false).unwrap();
             if idx % skip_index == 0 {
                 if has_ready {
                     panic!("indexed chunk map: index {} shouldn't be ready", idx);
@@ -323,7 +331,7 @@ mod tests {
         for idx in 0..chunk_count {
             assert_eq!(
                 chunk_map
-                    .has_ready(chunks[idx as usize].as_ref(), false)
+                    .is_ready(chunks[idx as usize].as_ref(), false)
                     .unwrap(),
                 true
             );
@@ -360,13 +368,13 @@ mod tests {
 
     #[test]
     fn test_inflight_tracer() {
-        let chunk_1: Arc<dyn BlobV5ChunkInfo> = Arc::new({
+        let chunk_1: Arc<dyn BlobChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 1;
             c.block_id = RafsDigest::from_buf("hello world".as_bytes(), Blake3);
             c
         });
-        let chunk_2: Arc<dyn BlobV5ChunkInfo> = Arc::new({
+        let chunk_2: Arc<dyn BlobChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 2;
             c.block_id = RafsDigest::from_buf("hello world 2".as_bytes(), Blake3);
@@ -377,40 +385,31 @@ mod tests {
         let index_map = Arc::new(BlobChunkMap::from(
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
-        index_map.has_ready(chunk_1.as_ref(), false).unwrap();
+        index_map.is_ready(chunk_1.as_ref(), false).unwrap();
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
-        index_map.has_ready(chunk_2.as_ref(), false).unwrap();
+        index_map.is_ready(chunk_2.as_ref(), false).unwrap();
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 2);
-        assert_eq!(index_map.has_ready(chunk_1.as_ref(), false).unwrap(), false);
-        assert_eq!(index_map.has_ready(chunk_2.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.is_ready(chunk_1.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
         index_map.set_ready(chunk_1.as_ref()).unwrap();
-        assert_eq!(index_map.has_ready(chunk_1.as_ref(), false).unwrap(), true);
-        index_map.finish(chunk_2.as_ref());
-        assert_eq!(index_map.has_ready(chunk_2.as_ref(), false).unwrap(), false);
-        index_map.finish(chunk_2.as_ref());
+        assert_eq!(index_map.is_ready(chunk_1.as_ref(), false).unwrap(), true);
+        index_map.notify_ready(chunk_2.as_ref());
+        assert_eq!(index_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
+        index_map.notify_ready(chunk_2.as_ref());
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
         // digested ChunkMap
         let digest_map = Arc::new(BlobChunkMap::from(DigestedChunkMap::new()));
-        digest_map.has_ready(chunk_1.as_ref(), false).unwrap();
+        digest_map.is_ready(chunk_1.as_ref(), false).unwrap();
         assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 1);
-        digest_map.has_ready(chunk_2.as_ref(), false).unwrap();
+        digest_map.is_ready(chunk_2.as_ref(), false).unwrap();
         assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 2);
-        assert_eq!(
-            digest_map.has_ready(chunk_1.as_ref(), false).unwrap(),
-            false
-        );
-        assert_eq!(
-            digest_map.has_ready(chunk_2.as_ref(), false).unwrap(),
-            false
-        );
+        assert_eq!(digest_map.is_ready(chunk_1.as_ref(), false).unwrap(), false);
+        assert_eq!(digest_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
         digest_map.set_ready(chunk_1.as_ref()).unwrap();
-        assert_eq!(digest_map.has_ready(chunk_1.as_ref(), false).unwrap(), true);
-        digest_map.finish(chunk_2.as_ref());
-        assert_eq!(
-            digest_map.has_ready(chunk_2.as_ref(), false).unwrap(),
-            false
-        );
-        digest_map.finish(chunk_2.as_ref());
+        assert_eq!(digest_map.is_ready(chunk_1.as_ref(), false).unwrap(), true);
+        digest_map.notify_ready(chunk_2.as_ref());
+        assert_eq!(digest_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
+        digest_map.notify_ready(chunk_2.as_ref());
         assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 0);
     }
 
@@ -421,13 +420,13 @@ mod tests {
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
-        let chunk_4: Arc<dyn BlobV5ChunkInfo> = Arc::new({
+        let chunk_4: Arc<dyn BlobChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 4;
             c
         });
 
-        map.as_ref().has_ready(chunk_4.as_ref(), false).unwrap();
+        map.as_ref().is_ready(chunk_4.as_ref(), false).unwrap();
         let map_cloned = map.clone();
 
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 1);
@@ -436,7 +435,7 @@ mod tests {
         let t1 = thread::Builder::new()
             .spawn(move || {
                 for _ in 0..4 {
-                    let ready = map_cloned.has_ready(chunk_4_cloned.as_ref(), true).unwrap();
+                    let ready = map_cloned.is_ready(chunk_4_cloned.as_ref(), true).unwrap();
                     assert_eq!(ready, true);
                 }
             })
@@ -448,7 +447,7 @@ mod tests {
             .spawn(move || {
                 for _ in 0..2 {
                     let ready = map_cloned_2
-                        .has_ready(chunk_4_cloned_2.as_ref(), true)
+                        .is_ready(chunk_4_cloned_2.as_ref(), true)
                         .unwrap();
                     assert_eq!(ready, true);
                 }
@@ -483,13 +482,13 @@ mod tests {
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
-        let chunk_4: Arc<dyn BlobV5ChunkInfo> = Arc::new({
+        let chunk_4: Arc<dyn BlobChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 4;
             c
         });
 
-        map.as_ref().has_ready(chunk_4.as_ref(), false).unwrap();
+        map.as_ref().is_ready(chunk_4.as_ref(), false).unwrap();
         let map_cloned = map.clone();
 
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 1);
@@ -498,7 +497,7 @@ mod tests {
         let t1 = thread::Builder::new()
             .spawn(move || {
                 for _ in 0..4 {
-                    map_cloned.has_ready(chunk_4_cloned.as_ref(), true).unwrap();
+                    map_cloned.is_ready(chunk_4_cloned.as_ref(), true).unwrap();
                 }
             })
             .unwrap();
@@ -507,10 +506,10 @@ mod tests {
 
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 1);
 
-        let ready = map.as_ref().has_ready(chunk_4.as_ref(), false).unwrap();
+        let ready = map.as_ref().is_ready(chunk_4.as_ref(), false).unwrap();
         assert_eq!(ready, false);
 
-        map.finish(chunk_4.as_ref());
+        map.notify_ready(chunk_4.as_ref());
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 0);
     }
 }
