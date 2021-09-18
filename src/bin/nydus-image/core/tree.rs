@@ -24,7 +24,7 @@ use anyhow::Result;
 
 use nydus_utils::digest::RafsDigest;
 use rafs::metadata::layout::v5::{
-    RafsChunkInfo, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
+    BlobV5ChunkInfo, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
 };
 use rafs::metadata::layout::{bytes_to_os_str, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
@@ -32,7 +32,7 @@ use rafs::metadata::{Inode, RafsInode, RafsSuper};
 use crate::node::*;
 
 /// Construct a `RafsV5ChunkInfo` object from a `dyn RafsChunkInfo` object.
-fn cast_rafsv5_chunk_info(cki: &dyn RafsChunkInfo) -> RafsV5ChunkInfo {
+fn cast_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
     RafsV5ChunkInfo {
         block_id: *cki.block_id(),
         blob_index: cki.blob_index(),

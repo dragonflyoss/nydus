@@ -11,7 +11,7 @@ use nydus_utils::div_round_up;
 
 use super::ChunkMap;
 use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
-use crate::device::RafsChunkInfo;
+use crate::device::v5::BlobV5ChunkInfo;
 use crate::utils::readahead;
 
 /// The magic number of blob chunk_map file, it's ASCII hex of string "BMAP".
@@ -174,20 +174,20 @@ impl Drop for IndexedChunkMap {
 impl ChunkIndexGetter for IndexedChunkMap {
     type Index = u32;
 
-    fn get_index(chunk: &dyn RafsChunkInfo) -> Self::Index {
+    fn get_index(chunk: &dyn BlobV5ChunkInfo) -> Self::Index {
         chunk.index()
     }
 }
 
 impl ChunkMap for IndexedChunkMap {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo, _wait: bool) -> Result<bool> {
+    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, _wait: bool) -> Result<bool> {
         let index = chunk.index();
         let _ = self.validate_index(index)?;
         let (ready, _) = self.is_chunk_ready(index);
         Ok(ready)
     }
 
-    fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
+    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()> {
         // Loop to write one byte (a bitmap with 8 bits capacity) to
         // blob chunk_map file until success.
         let index = chunk.index();

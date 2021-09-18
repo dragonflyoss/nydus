@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use rafs::metadata::layout::v5::{
-    RafsChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
+    BlobChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
 };
 use rafs::metadata::Inode;
 
@@ -361,7 +361,7 @@ impl StargzIndexTreeBuilder {
                     block_id,
                     // Will be set later
                     blob_index: 0,
-                    flags: RafsChunkFlags::COMPRESSED,
+                    flags: BlobChunkFlags::COMPRESSED,
                     // No available data on entry
                     compress_size: 0,
                     decompress_size: decompress_size as u32,

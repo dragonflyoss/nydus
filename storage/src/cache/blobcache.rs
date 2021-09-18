@@ -33,7 +33,8 @@ use crate::cache::chunkmap::{
 };
 use crate::cache::RafsCache;
 use crate::cache::*;
-use crate::device::{BlobPrefetchControl, RafsBio, RafsBlobEntry};
+use crate::device::v5::BlobV5Bio;
+use crate::device::{BlobEntry, BlobPrefetchControl};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, RAFS_DEFAULT_BLOCK_SIZE};
@@ -52,16 +53,13 @@ struct BlobCacheState {
 }
 
 impl BlobCacheState {
-    fn get(&self, blob: &RafsBlobEntry) -> Option<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
+    fn get(&self, blob: &BlobEntry) -> Option<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
         self.blob_map
             .get(&blob.blob_index)
             .map(|(file, size, chunk_map)| (file.as_raw_fd(), *size, chunk_map.clone()))
     }
 
-    fn set(
-        &mut self,
-        blob: &RafsBlobEntry,
-    ) -> Result<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
+    fn set(&mut self, blob: &BlobEntry) -> Result<(RawFd, u64, Arc<dyn ChunkMap + Sync + Send>)> {
         if let Some((fd, size, chunk_map)) = self.get(blob) {
             return Ok((fd, size, chunk_map));
         }
@@ -85,7 +83,7 @@ impl BlobCacheState {
         // The builder now records the number of chunks in the blob table, so we can
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
-        let chunk_map = if blob.with_extended_blob_table() {
+        let chunk_map = if blob.with_v5_extended_blob_table() && !self.disable_indexed_map {
             Arc::new(BlobChunkMap::from(IndexedChunkMap::new(
                 &blob_file_path,
                 blob.chunk_count,
@@ -243,14 +241,14 @@ struct RequestRegion {
     pub seg_len: u32,
     // The chunks that composing this region. Only with this region, we can know
     // how to decompress each chunk
-    pub cki_set: Vec<Arc<dyn RafsChunkInfo>>,
+    pub cki_set: Vec<Arc<dyn BlobV5ChunkInfo>>,
     pub cki_tags: Vec<bool>,
     user_appended: bool,
-    blob_entry: Arc<RafsBlobEntry>,
+    blob_entry: Arc<BlobEntry>,
 }
 
 impl RequestRegion {
-    fn new(region_type: RegionType, blob_entry: Arc<RafsBlobEntry>) -> Self {
+    fn new(region_type: RegionType, blob_entry: Arc<BlobEntry>) -> Self {
         RequestRegion {
             region_type,
             blob_address: 0,
@@ -271,7 +269,7 @@ impl RequestRegion {
         start: u64,
         len: u32,
         segment: IoInitiator,
-        cki: Option<Arc<dyn RafsChunkInfo>>,
+        cki: Option<Arc<dyn BlobV5ChunkInfo>>,
     ) -> StorageResult<()> {
         if self.status == RequestRegionStatus::Open
             && self.blob_address + self.blob_len as u64 != start
@@ -332,7 +330,7 @@ impl BlobCache {
         &self,
         fd: RawFd,
         chunk_map: &Arc<dyn ChunkMap + Send + Sync>,
-        chunk_info: &Arc<dyn RafsChunkInfo>,
+        chunk_info: &Arc<dyn BlobV5ChunkInfo>,
         buffer: Arc<DataBuffer>,
     ) {
         let delayed_chunk = chunk_info.clone();
@@ -485,8 +483,8 @@ impl BlobCache {
     // TODO: explain why no reused buffer anymore.
     fn read_single_chunk(
         &self,
-        chunk: &Arc<dyn RafsChunkInfo>,
-        blob: &RafsBlobEntry,
+        chunk: &Arc<dyn BlobV5ChunkInfo>,
+        blob: &BlobEntry,
         user_offset: u32,
         size: u32,
         mem_cursor: &mut MemSliceCursor,
@@ -515,7 +513,7 @@ impl BlobCache {
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
 
         let owned_buffer = if (self.compressor() != compress::Algorithm::GZip
-            && !blob.with_extended_blob_table()
+            && !blob.with_v5_extended_blob_table()
             || has_ready)
             && self
                 .read_blobcache_chunk(
@@ -593,7 +591,7 @@ impl BlobCache {
         Ok(read_size)
     }
 
-    fn read_iter(&self, bios: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize> {
+    fn read_iter(&self, bios: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize> {
         let mut cursor = MemSliceCursor::new(bufs);
         let sorted_bios = bios;
 
@@ -670,7 +668,7 @@ impl BlobCache {
                     }
                     previous_region_type = region_type;
                 } else if (self.compressor() != compress::Algorithm::GZip
-                    && !blob.with_extended_blob_table()
+                    && !blob.with_v5_extended_blob_table()
                     && !has_ready)
                     || (self.compressor() == compress::Algorithm::GZip)
                 {
@@ -679,7 +677,7 @@ impl BlobCache {
                     // Gzip compressed format -> Has no knowledge to validate data, only hit cache here.
                     // Other format including compressed and uncompressed
 
-                    if blob.with_extended_blob_table()
+                    if blob.with_v5_extended_blob_table()
                         && !self.need_validate()
                         && self.compressor() != compress::Algorithm::GZip
                     {
@@ -782,7 +780,7 @@ impl BlobCache {
     fn read_blobcache_chunk(
         &self,
         fd: RawFd,
-        cki: &dyn RafsChunkInfo,
+        cki: &dyn BlobV5ChunkInfo,
         chunk: &mut [u8],
         need_validate: bool,
     ) -> Result<()> {
@@ -859,7 +857,7 @@ impl BlobCache {
     fn persist_chunk(
         compressed: bool,
         fd: RawFd,
-        cki: &dyn RafsChunkInfo,
+        cki: &dyn BlobV5ChunkInfo,
         chunk_buffer: &[u8],
     ) -> Result<usize> {
         let offset = if compressed {
@@ -887,7 +885,7 @@ impl BlobCache {
         Ok(n)
     }
 
-    fn convert_to_merge_request(continuous_bios: &[&RafsBio]) -> MergedBackendRequest {
+    fn convert_to_merge_request(continuous_bios: &[&BlobV5Bio]) -> MergedBackendRequest {
         let first = continuous_bios[0];
         let mut mr = MergedBackendRequest::new(first.chunkinfo.clone(), first.blob.clone(), first);
 
@@ -898,7 +896,7 @@ impl BlobCache {
         mr
     }
 
-    fn is_chunk_continuous(prior: &RafsBio, cur: &RafsBio) -> bool {
+    fn is_chunk_continuous(prior: &BlobV5Bio, cur: &BlobV5Bio) -> bool {
         let prior_cki = &prior.chunkinfo;
         let cur_cki = &cur.chunkinfo;
         let prior_end = prior_cki.compress_offset() + prior_cki.compress_size() as u64;
@@ -911,7 +909,7 @@ impl BlobCache {
 
     fn generate_merged_requests_for_prefetch(
         &self,
-        bios: &mut [RafsBio],
+        bios: &mut [BlobV5Bio],
         tx: &mut spmc::Sender<MergedBackendRequest>,
         merging_size: usize,
     ) {
@@ -938,7 +936,7 @@ impl BlobCache {
 
     fn generate_merged_requests_for_user(
         &self,
-        bios: &mut [RafsBio],
+        bios: &mut [BlobV5Bio],
         merging_size: usize,
     ) -> Option<Vec<MergedBackendRequest>> {
         let mut merged_requests: Vec<MergedBackendRequest> = Vec::new();
@@ -961,7 +959,7 @@ impl BlobCache {
 
     fn generate_merged_requests(
         &self,
-        bios: &mut [RafsBio],
+        bios: &mut [BlobV5Bio],
         merging_size: usize,
         sort: bool,
         op: &mut dyn FnMut(MergedBackendRequest),
@@ -1084,7 +1082,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                             continue;
                         }
 
-                        if !&mr.blob_entry.with_extended_blob_table() {
+                        if !&mr.blob_entry.with_v5_extended_blob_table() {
                             // Always validate if chunk's hash is equal to `block_id` by which
                             // blobcache judges if the data is up-to-date.
                             let d_size = c.decompress_size() as usize;
@@ -1208,7 +1206,7 @@ impl RafsCache for BlobCache {
     }
 
     /// `offset` indicates the start position within a chunk to start copy. So `usize` type is suitable.
-    fn read(&self, bios: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize> {
+    fn read(&self, bios: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize> {
         self.metrics.total.inc();
 
         // Try to get rid of effect from prefetch.
@@ -1226,7 +1224,7 @@ impl RafsCache for BlobCache {
         Ok(size)
     }
 
-    fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64> {
+    fn blob_size(&self, blob: &BlobEntry) -> Result<u64> {
         let cache_guard = self.cache.read().unwrap();
         let (_, size, _) = match cache_guard.get(blob) {
             Some(entry) => entry,
@@ -1245,7 +1243,7 @@ impl RafsCache for BlobCache {
         self.backend().shutdown()
     }
 
-    fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
+    fn prefetch(&self, bios: &mut [BlobV5Bio]) -> StorageResult<usize> {
         let merging_size = self.prefetch_ctx.merging_size;
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
@@ -1274,7 +1272,7 @@ impl RafsCache for BlobCache {
         Ok(())
     }
 
-    fn is_chunk_cached(&self, chunk: &dyn RafsChunkInfo, blob: &RafsBlobEntry) -> bool {
+    fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobEntry) -> bool {
         let cache_guard = self.cache.read().unwrap();
         if let Some((_, _, chunk_map)) = cache_guard.get(blob) {
             chunk_map.has_ready_nowait(chunk).unwrap_or(false)
@@ -1408,7 +1406,8 @@ pub mod blob_cache_tests {
     use crate::backend::{BackendResult, BlobBackend, BlobReader, BlobWrite};
     use crate::cache::{blobcache, MergedBackendRequest, PrefetchWorker, RafsCache};
     use crate::compress;
-    use crate::device::{RafsBio, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
+    use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
+    use crate::device::{BlobChunkFlags, BlobChunkInfo, BlobEntry};
     use crate::factory::CacheConfig;
     use crate::impl_getter;
     use crate::RAFS_DEFAULT_BLOCK_SIZE;
@@ -1492,7 +1491,7 @@ pub mod blob_cache_tests {
     pub struct MockChunkInfo {
         pub block_id: RafsDigest,
         pub blob_index: u32,
-        pub flags: RafsChunkFlags,
+        pub flags: BlobChunkFlags,
         pub compress_size: u32,
         pub decompress_size: u32,
         pub compress_offset: u64,
@@ -1508,24 +1507,30 @@ pub mod blob_cache_tests {
         }
     }
 
-    impl RafsChunkInfo for MockChunkInfo {
+    impl BlobChunkInfo for MockChunkInfo {
         fn block_id(&self) -> &RafsDigest {
             &self.block_id
         }
+        fn id(&self) -> u32 {
+            self.index
+        }
         fn is_compressed(&self) -> bool {
-            self.flags.contains(RafsChunkFlags::COMPRESSED)
+            self.flags.contains(BlobChunkFlags::COMPRESSED)
         }
         fn is_hole(&self) -> bool {
-            self.flags.contains(RafsChunkFlags::HOLECHUNK)
+            self.flags.contains(BlobChunkFlags::HOLECHUNK)
         }
-        impl_getter!(blob_index, blob_index, u32);
-        impl_getter!(index, index, u32);
         impl_getter!(compress_offset, compress_offset, u64);
         impl_getter!(compress_size, compress_size, u32);
         impl_getter!(decompress_offset, decompress_offset, u64);
         impl_getter!(decompress_size, decompress_size, u32);
+    }
+
+    impl BlobV5ChunkInfo for MockChunkInfo {
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(index, index, u32);
         impl_getter!(file_offset, file_offset, u64);
-        impl_getter!(flags, flags, RafsChunkFlags);
+        impl_getter!(flags, flags, BlobChunkFlags);
     }
 
     #[test]
@@ -1575,9 +1580,9 @@ pub mod blob_cache_tests {
         chunk.compress_size = 100;
         chunk.decompress_offset = 0;
         chunk.decompress_size = 100;
-        let bio = RafsBio::new(
+        let bio = BlobV5Bio::new(
             Arc::new(chunk),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1652,9 +1657,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio = RafsBio::new(
+        let bio = BlobV5Bio::new(
             Arc::new(single_chunk.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1689,9 +1694,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = RafsBio::new(
+        let bio1 = BlobV5Bio::new(
             Arc::new(chunk1.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1712,9 +1717,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = RafsBio::new(
+        let bio2 = BlobV5Bio::new(
             Arc::new(chunk2.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1751,9 +1756,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = RafsBio::new(
+        let bio1 = BlobV5Bio::new(
             Arc::new(chunk1.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1774,9 +1779,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = RafsBio::new(
+        let bio2 = BlobV5Bio::new(
             Arc::new(chunk2.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1814,9 +1819,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = RafsBio::new(
+        let bio1 = BlobV5Bio::new(
             Arc::new(chunk1.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1837,9 +1842,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = RafsBio::new(
+        let bio2 = BlobV5Bio::new(
             Arc::new(chunk2.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1877,9 +1882,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = RafsBio::new(
+        let bio1 = BlobV5Bio::new(
             Arc::new(chunk1.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1900,9 +1905,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = RafsBio::new(
+        let bio2 = BlobV5Bio::new(
             Arc::new(chunk2.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1923,9 +1928,9 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio3 = RafsBio::new(
+        let bio3 = BlobV5Bio::new(
             Arc::new(chunk3.clone()),
-            Arc::new(RafsBlobEntry {
+            Arc::new(BlobEntry {
                 chunk_count: 0,
                 readahead_offset: 0,
                 readahead_size: 0,
@@ -1958,5 +1963,125 @@ pub mod blob_cache_tests {
         let mr = recv.recv().unwrap();
         assert_eq!(mr.blob_offset, chunk3.compress_offset());
         assert_eq!(mr.blob_size, chunk3.compress_size());
+    }
+
+    #[test]
+    // This test deletes the blobcache file without deleting its corresponding
+    // chunkmap file. The expected result is that newly created blobcache
+    // instance will read corrupt blob data, but old blobcache instance
+    // should not be affected, and reading blob data should not be affected
+    // if only the chunkmap file is deleted but not the blobcache file.
+    fn test_chunk_map_corrupted() {
+        let tmp_dir = TempDir::new().unwrap();
+        let cache_dir = tmp_dir.as_path().to_path_buf().join("cache");
+        let s = format!(
+            r###"
+        {{
+            "work_dir": {:?}
+        }}
+        "###,
+            cache_dir,
+        );
+
+        let cache_config = CacheConfig {
+            cache_validate: false,
+            cache_compressed: false,
+            cache_type: String::from("blobcache"),
+            cache_config: serde_json::from_str(&s).unwrap(),
+            prefetch_worker: PrefetchWorker::default(),
+        };
+
+        // Create blobcache instance 1.
+        let blob_cache1 = blobcache::new(
+            cache_config.clone(),
+            Arc::new(MockBackend {
+                metrics: BackendMetrics::new("id", "mock"),
+            }) as Arc<dyn BlobBackend + Send + Sync>,
+            compress::Algorithm::Lz4Block,
+            digest::Algorithm::Blake3,
+            "id",
+        )
+        .unwrap();
+
+        // Generate blobcache and blobcache.chunk_map file.
+        let mut expect = vec![1u8; 100];
+        let blob_id = "blobcache";
+        blob_cache1
+            .backend
+            .read(blob_id, expect.as_mut(), 0)
+            .unwrap();
+
+        // Generate chunkinfo and bio.
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest::from_buf(&expect, digest::Algorithm::Blake3);
+        chunk.file_offset = 0;
+        chunk.compress_offset = 0;
+        chunk.compress_size = 100;
+        chunk.decompress_offset = 0;
+        chunk.decompress_size = 100;
+        chunk.index = 0;
+        let bio = BlobV5Bio::new(
+            Arc::new(chunk),
+            Arc::new(BlobEntry {
+                chunk_count: 1,
+                readahead_offset: 0,
+                readahead_size: 0,
+                blob_id: blob_id.to_string(),
+                blob_index: 0,
+                blob_cache_size: 0,
+                compressed_blob_size: 0,
+            }),
+            50,
+            50,
+            RAFS_DEFAULT_BLOCK_SIZE as u32,
+            true,
+        );
+
+        // Read from blobcache instance 1.
+        let r1 = unsafe {
+            let layout = Layout::from_size_align(50, 1).unwrap();
+            let ptr = alloc(layout);
+            let vs = VolatileSlice::new(ptr, 50);
+            blob_cache1.read(&mut [bio.clone()], &[vs]).unwrap();
+            Vec::from(from_raw_parts(ptr, 50))
+        };
+
+        assert_eq!(r1, &expect[50..]);
+
+        // Only remove blobcache file, keep blobcache.chunk_map.
+        std::fs::remove_file(cache_dir.join("blobcache")).unwrap();
+
+        // Create blobcache instance 2.
+        let blob_cache2 = blobcache::new(
+            cache_config,
+            Arc::new(MockBackend {
+                metrics: BackendMetrics::new("id", "mock"),
+            }) as Arc<dyn BlobBackend + Send + Sync>,
+            compress::Algorithm::Lz4Block,
+            digest::Algorithm::Blake3,
+            "id",
+        )
+        .unwrap();
+
+        // Read from blobcache instance 2, the data should be corrupted
+        // if disable `cache_validate` option.
+        let r2 = unsafe {
+            let layout = Layout::from_size_align(50, 1).unwrap();
+            let ptr = alloc(layout);
+            let vs = VolatileSlice::new(ptr, 50);
+            blob_cache2.read(&mut [bio.clone()], &[vs]).unwrap();
+            Vec::from(from_raw_parts(ptr, 50))
+        };
+        assert_ne!(r2, &expect[50..]);
+
+        // Read from blobcache instance 1, the data should be corrected.
+        let r3 = unsafe {
+            let layout = Layout::from_size_align(50, 1).unwrap();
+            let ptr = alloc(layout);
+            let vs = VolatileSlice::new(ptr, 50);
+            blob_cache1.read(&mut [bio], &[vs]).unwrap();
+            Vec::from(from_raw_parts(ptr, 50))
+        };
+        assert_eq!(r3, &expect[50..]);
     }
 }

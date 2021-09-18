@@ -10,7 +10,7 @@ use nydus_utils::digest::RafsDigest;
 
 use super::ChunkMap;
 use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
-use crate::device::RafsChunkInfo;
+use crate::device::v5::BlobV5ChunkInfo;
 
 /// The DigestedChunkMap is an implementation that uses a hash map
 /// (HashMap<chunk_digest, has_ready>) to records whether a chunk has been
@@ -33,11 +33,11 @@ impl DigestedChunkMap {
 }
 
 impl ChunkMap for DigestedChunkMap {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo, _wait: bool) -> Result<bool> {
+    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, _wait: bool) -> Result<bool> {
         Ok(self.cache.read().unwrap().get(chunk.block_id()).is_some())
     }
 
-    fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
+    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()> {
         self.cache.write().unwrap().insert(*chunk.block_id(), true);
         Ok(())
     }
@@ -46,7 +46,7 @@ impl ChunkMap for DigestedChunkMap {
 impl ChunkIndexGetter for DigestedChunkMap {
     type Index = RafsDigest;
 
-    fn get_index(chunk: &dyn RafsChunkInfo) -> Self::Index {
+    fn get_index(chunk: &dyn BlobV5ChunkInfo) -> Self::Index {
         *chunk.block_id()
     }
 }

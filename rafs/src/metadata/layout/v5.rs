@@ -46,7 +46,7 @@ use std::sync::Arc;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use storage::compress;
-use storage::device::{RafsBio, RafsBioDesc};
+use storage::device::v5::{BlobV5Bio, BlobV5BioDesc};
 
 use crate::metadata::layout::{
     bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
@@ -58,7 +58,8 @@ use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, Rafs
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
 // compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures
 // have been moved into the storage manager.
-pub use storage::device::{RafsBlobEntry, RafsChunkFlags, RafsChunkInfo};
+pub use storage::device::v5::BlobV5ChunkInfo;
+pub use storage::device::{BlobChunkFlags, BlobEntry};
 
 pub(crate) const RAFSV5_ALIGNMENT: usize = 8;
 pub(crate) const RAFSV5_SUPERBLOCK_SIZE: usize = 8192;
@@ -69,7 +70,7 @@ const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
 const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
 
 pub(crate) trait RafsV5InodeOps {
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>>;
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobEntry>>;
     fn get_blocksize(&self) -> u32;
     fn has_hole(&self) -> bool;
     fn cast_ondisk(&self) -> Result<RafsV5Inode>;
@@ -416,7 +417,7 @@ impl RafsV5PrefetchTable {
 // TODO: FIXME: This is not a well defined disk structure
 #[derive(Clone, Debug, Default)]
 pub struct RafsV5BlobTable {
-    pub entries: Vec<Arc<RafsBlobEntry>>,
+    pub entries: Vec<Arc<BlobEntry>>,
     pub extended: RafsV5ExtBlobTable,
 }
 
@@ -455,7 +456,7 @@ impl RafsV5BlobTable {
         compressed_blob_size: u64,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
-        self.entries.push(Arc::new(RafsBlobEntry {
+        self.entries.push(Arc::new(BlobEntry {
             chunk_count,
             readahead_offset,
             readahead_size,
@@ -470,7 +471,7 @@ impl RafsV5BlobTable {
     }
 
     #[inline]
-    pub fn get(&self, blob_index: u32) -> Result<Arc<RafsBlobEntry>> {
+    pub fn get(&self, blob_index: u32) -> Result<Arc<BlobEntry>> {
         if blob_index >= self.entries.len() as u32 {
             return Err(enoent!("blob not found"));
         }
@@ -541,7 +542,7 @@ impl RafsV5BlobTable {
                     (0, 0, 0)
                 };
 
-            self.entries.push(Arc::new(RafsBlobEntry {
+            self.entries.push(Arc::new(BlobEntry {
                 blob_id: blob_id.to_owned(),
                 blob_index: index as u32,
                 chunk_count,
@@ -559,7 +560,7 @@ impl RafsV5BlobTable {
         Ok(())
     }
 
-    pub fn get_all(&self) -> Vec<Arc<RafsBlobEntry>> {
+    pub fn get_all(&self) -> Vec<Arc<BlobEntry>> {
         self.entries.clone()
     }
 
@@ -908,7 +909,7 @@ pub struct RafsV5ChunkInfo {
     /// blob index (blob_id = blob_table[blob_index])
     pub blob_index: u32,
     /// chunk flags
-    pub flags: RafsChunkFlags, // 40
+    pub flags: BlobChunkFlags, // 40
     /// compressed size in blob
     pub compress_size: u32,
     /// decompressed size in blob
@@ -958,7 +959,7 @@ impl Display for RafsV5ChunkInfo {
             self.blob_index,
             self.block_id,
             self.index,
-            self.flags.contains(RafsChunkFlags::COMPRESSED),
+            self.flags.contains(BlobChunkFlags::COMPRESSED),
         )
     }
 }
@@ -1073,9 +1074,9 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     offset: u64,
     size: usize,
     user_io: bool,
-) -> Result<RafsBioDesc> {
+) -> Result<BlobV5BioDesc> {
     // Do not process zero size bio
-    let mut desc = RafsBioDesc::new();
+    let mut desc = BlobV5BioDesc::new();
     if size == 0 {
         return Ok(desc);
     }
@@ -1121,10 +1122,10 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
 fn add_chunk_to_bio_desc(
     offset: u64,
     end: u64,
-    chunk: Arc<dyn RafsChunkInfo>,
-    desc: &mut RafsBioDesc,
+    chunk: Arc<dyn BlobV5ChunkInfo>,
+    desc: &mut BlobV5BioDesc,
     blksize: u32,
-    blob: Arc<RafsBlobEntry>,
+    blob: Arc<BlobEntry>,
     user_io: bool,
 ) -> bool {
     if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
@@ -1145,7 +1146,7 @@ fn add_chunk_to_bio_desc(
         chunk.decompress_size() as u64
     };
 
-    let bio = RafsBio::new(
+    let bio = BlobV5Bio::new(
         chunk,
         blob,
         chunk_start as u32,
@@ -1388,7 +1389,7 @@ pub mod tests {
     struct MockChunkInfo {
         pub block_id: RafsDigest,
         pub blob_index: u32,
-        pub flags: RafsChunkFlags,
+        pub flags: BlobChunkFlags,
         pub compress_size: u32,
         pub decompress_size: u32,
         pub compress_offset: u64,
@@ -1404,15 +1405,15 @@ pub mod tests {
         }
     }
 
-    impl RafsChunkInfo for MockChunkInfo {
+    impl RafsV5ChunkInfo for MockChunkInfo {
         fn block_id(&self) -> &RafsDigest {
             &self.block_id
         }
         fn is_compressed(&self) -> bool {
-            self.flags.contains(RafsChunkFlags::COMPRESSED)
+            self.flags.contains(BlobChunkFlags::COMPRESSED)
         }
         fn is_hole(&self) -> bool {
-            self.flags.contains(RafsChunkFlags::HOLECHUNK)
+            self.flags.contains(BlobChunkFlags::HOLECHUNK)
         }
         impl_getter!(blob_index, blob_index, u32);
         impl_getter!(index, index, u32);
@@ -1421,7 +1422,7 @@ pub mod tests {
         impl_getter!(decompress_offset, decompress_offset, u64);
         impl_getter!(decompress_size, decompress_size, u32);
         impl_getter!(file_offset, file_offset, u64);
-        impl_getter!(flags, flags, RafsChunkFlags);
+        impl_getter!(flags, flags, BlobChunkFlags);
     }
 
     #[test]
@@ -1456,14 +1457,14 @@ pub mod tests {
         ];
 
         for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
-            let mut desc = RafsBioDesc::new();
+            let mut desc = BlobV5BioDesc::new();
             let res = add_chunk_to_bio_desc(
                 *offset,
                 *end,
                 Arc::new(chunk),
                 &mut desc,
                 100,
-                Arc::new(RafsBlobEntry {
+                Arc::new(BlobEntry {
                     chunk_count: 0,
                     readahead_offset: 0,
                     readahead_size: 0,

@@ -24,7 +24,7 @@ use nydus_utils::{
     div_round_up, try_round_up_4k, ByteSize,
 };
 use rafs::metadata::layout::v5::{
-    RafsChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
+    BlobChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
     RafsV5XAttrs,
 };
 use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
@@ -357,7 +357,7 @@ impl Node {
             }
 
             if is_compressed {
-                chunk.flags |= RafsChunkFlags::COMPRESSED;
+                chunk.flags |= BlobChunkFlags::COMPRESSED;
             }
             chunk.blob_index = blob_index;
             chunk.file_offset = file_offset;

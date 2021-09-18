@@ -9,7 +9,8 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
 use crate::cache::*;
-use crate::device::{BlobPrefetchControl, RafsBio};
+use crate::device::v5::BlobV5Bio;
+use crate::device::BlobPrefetchControl;
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageResult};
@@ -37,7 +38,7 @@ impl RafsCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, bios: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize> {
+    fn read(&self, bios: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize> {
         let mut buffer_holder: Vec<Vec<u8>> = Vec::new();
         let offset = bios[0].offset;
         let mut user_size = 0;
@@ -83,7 +84,7 @@ impl RafsCache for DummyCache {
         .map_err(|e| eother!(e))
     }
 
-    fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64> {
+    fn blob_size(&self, blob: &BlobEntry) -> Result<u64> {
         self.backend()
             .blob_size(&blob.blob_id)
             .map_err(|e| eother!(e))
@@ -102,7 +103,7 @@ impl RafsCache for DummyCache {
     }
 
     /// Prefetch works when blobcache is enabled
-    fn prefetch(&self, _bios: &mut [RafsBio]) -> StorageResult<usize> {
+    fn prefetch(&self, _bios: &mut [BlobV5Bio]) -> StorageResult<usize> {
         Ok(0)
     }
 
@@ -114,7 +115,7 @@ impl RafsCache for DummyCache {
         self.backend().shutdown()
     }
 
-    fn is_chunk_cached(&self, _chunk: &dyn RafsChunkInfo, _blob: &RafsBlobEntry) -> bool {
+    fn is_chunk_cached(&self, _chunk: &dyn BlobV5ChunkInfo, _blob: &BlobEntry) -> bool {
         false
     }
 }

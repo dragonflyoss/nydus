@@ -30,13 +30,13 @@ use std::sync::Arc;
 use arc_swap::{ArcSwap, Guard};
 
 use nydus_utils::digest::{Algorithm, RafsDigest};
-use storage::device::RafsBioDesc;
+use storage::device::v5::BlobV5BioDesc;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags,
-    RafsChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable,
-    RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
+    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobEntry,
+    BlobV5ChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps,
+    RafsV5InodeTable, RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, XattrName, XattrValue,
@@ -46,6 +46,7 @@ use crate::metadata::{
     RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
+use storage::device::BlobChunkInfo;
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {
@@ -655,7 +656,7 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     #[allow(clippy::cast_ptr_alignment)]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
         let state = self.state();
         let inode = self.inode(state.deref());
 
@@ -745,7 +746,7 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobV5BioDesc> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 
@@ -764,7 +765,7 @@ impl RafsInode for OndiskInodeWrapper {
 }
 
 impl RafsV5InodeOps for OndiskInodeWrapper {
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobEntry>> {
         self.state().blob_table.get(idx)
     }
 
@@ -819,29 +820,36 @@ impl DirectChunkInfoV5 {
     }
 }
 
-impl RafsChunkInfo for DirectChunkInfoV5 {
+impl BlobChunkInfo for DirectChunkInfoV5 {
     fn block_id(&self) -> &RafsDigest {
         &self.digest
+    }
+
+    fn id(&self) -> u32 {
+        self.index()
     }
 
     fn is_compressed(&self) -> bool {
         self.chunk(self.state().deref())
             .flags
-            .contains(RafsChunkFlags::COMPRESSED)
+            .contains(BlobChunkFlags::COMPRESSED)
     }
 
     fn is_hole(&self) -> bool {
         self.chunk(self.state().deref())
             .flags
-            .contains(RafsChunkFlags::HOLECHUNK)
+            .contains(BlobChunkFlags::HOLECHUNK)
     }
 
-    impl_chunkinfo_getter!(blob_index, u32);
-    impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(compress_offset, u64);
     impl_chunkinfo_getter!(compress_size, u32);
     impl_chunkinfo_getter!(decompress_offset, u64);
     impl_chunkinfo_getter!(decompress_size, u32);
+}
+
+impl BlobV5ChunkInfo for DirectChunkInfoV5 {
+    impl_chunkinfo_getter!(blob_index, u32);
+    impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(file_offset, u64);
-    impl_chunkinfo_getter!(flags, RafsChunkFlags);
+    impl_chunkinfo_getter!(flags, BlobChunkFlags);
 }

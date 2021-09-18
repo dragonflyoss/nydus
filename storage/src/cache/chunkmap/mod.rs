@@ -5,7 +5,7 @@
 use std::io::Result;
 
 use crate::cache::blobcache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
-use crate::device::RafsChunkInfo;
+use crate::device::v5::BlobV5ChunkInfo;
 use crate::{StorageError, StorageResult};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -22,10 +22,10 @@ pub trait NoWaitSupport {}
 /// The chunk map checks whether a chunk data has been cached in
 /// blob cache based on the chunk info.
 pub trait ChunkMap {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo, wait: bool) -> Result<bool>;
-    fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()>;
-    fn finish(&self, _chunk: &dyn RafsChunkInfo) {}
-    fn has_ready_nowait(&self, _chunk: &dyn RafsChunkInfo) -> Result<bool> {
+    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, wait: bool) -> Result<bool>;
+    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()>;
+    fn finish(&self, _chunk: &dyn BlobV5ChunkInfo) {}
+    fn has_ready_nowait(&self, _chunk: &dyn BlobV5ChunkInfo) -> Result<bool> {
         Ok(false)
     }
 }
@@ -34,7 +34,7 @@ pub trait ChunkMap {
 pub trait ChunkIndexGetter {
     type Index;
 
-    fn get_index(chunk: &dyn RafsChunkInfo) -> Self::Index;
+    fn get_index(chunk: &dyn BlobV5ChunkInfo) -> Self::Index;
 }
 
 #[derive(PartialEq)]
@@ -110,7 +110,7 @@ where
     C: ChunkMap + ChunkIndexGetter<Index = I> + NoWaitSupport,
     I: Eq + Hash + Display,
 {
-    fn has_ready(&self, chunk: &dyn RafsChunkInfo, wait: bool) -> Result<bool> {
+    fn has_ready(&self, chunk: &dyn BlobV5ChunkInfo, wait: bool) -> Result<bool> {
         let ready = self.c.has_ready(chunk, false)?;
 
         if !ready {
@@ -153,13 +153,13 @@ where
         Ok(ready)
     }
 
-    fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()> {
+    fn set_ready(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<()> {
         self.c.set_ready(chunk).map(|_| {
             self.finish(chunk);
         })
     }
 
-    fn finish(&self, chunk: &dyn RafsChunkInfo) {
+    fn finish(&self, chunk: &dyn BlobV5ChunkInfo) {
         let index = C::get_index(chunk);
         let mut guard = self.inflight_tracer.lock().unwrap();
         if let Some(i) = guard.remove(&index) {
@@ -167,7 +167,7 @@ where
         }
     }
 
-    fn has_ready_nowait(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
+    fn has_ready_nowait(&self, chunk: &dyn BlobV5ChunkInfo) -> Result<bool> {
         self.c.has_ready(chunk, false)
     }
 }
@@ -184,7 +184,7 @@ mod tests {
     use super::indexed::IndexedChunkMap;
     use super::*;
     use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
-    use crate::device::{RafsChunkFlags, RafsChunkInfo};
+    use crate::device::{RafsChunkFlags, RafsV5ChunkInfo};
     use nydus_utils::digest::Algorithm::Blake3;
     use nydus_utils::digest::{Algorithm, RafsDigest};
     use vmm_sys_util::tempfile::TempFile;
@@ -206,7 +206,7 @@ mod tests {
         }
     }
 
-    impl RafsChunkInfo for Chunk {
+    impl BlobV5ChunkInfo for Chunk {
         fn block_id(&self) -> &RafsDigest {
             &self.digest
         }
@@ -360,13 +360,13 @@ mod tests {
 
     #[test]
     fn test_inflight_tracer() {
-        let chunk_1: Arc<dyn RafsChunkInfo> = Arc::new({
+        let chunk_1: Arc<dyn BlobV5ChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 1;
             c.block_id = RafsDigest::from_buf("hello world".as_bytes(), Blake3);
             c
         });
-        let chunk_2: Arc<dyn RafsChunkInfo> = Arc::new({
+        let chunk_2: Arc<dyn BlobV5ChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 2;
             c.block_id = RafsDigest::from_buf("hello world 2".as_bytes(), Blake3);
@@ -421,7 +421,7 @@ mod tests {
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
-        let chunk_4: Arc<dyn RafsChunkInfo> = Arc::new({
+        let chunk_4: Arc<dyn BlobV5ChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 4;
             c
@@ -483,7 +483,7 @@ mod tests {
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
-        let chunk_4: Arc<dyn RafsChunkInfo> = Arc::new({
+        let chunk_4: Arc<dyn BlobV5ChunkInfo> = Arc::new({
             let mut c = MockChunkInfo::new();
             c.index = 4;
             c

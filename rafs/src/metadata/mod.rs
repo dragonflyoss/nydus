@@ -22,7 +22,8 @@ use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
-use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
+use storage::device::v5::{BlobV5BioDesc, BlobV5ChunkInfo};
+use storage::device::BlobEntry;
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
@@ -329,7 +330,7 @@ impl RafsSuper {
         &self,
         r: &mut RafsIoReader,
         files: Option<Vec<Inode>>,
-        fetcher: &dyn Fn(&mut RafsBioDesc),
+        fetcher: &dyn Fn(&mut BlobV5BioDesc),
     ) -> RafsResult<()> {
         // Prefer to use the file list specified by daemon for prefetching, then
         // use the file list specified by builder for prefetching.
@@ -337,7 +338,7 @@ impl RafsSuper {
             // No need to prefetch blob data for each alias as they share the same range,
             // we do it once.
             let mut hardlinks: HashSet<u64> = HashSet::new();
-            let mut head_desc = RafsBioDesc {
+            let mut head_desc = BlobV5BioDesc {
                 bi_size: 0,
                 bi_flags: 0,
                 bi_vec: Vec::new(),
@@ -522,11 +523,11 @@ impl RafsSuper {
     fn build_prefetch_desc_v4v5(
         &self,
         ino: u64,
-        head_desc: &mut RafsBioDesc,
+        head_desc: &mut BlobV5BioDesc,
         hardlinks: &mut HashSet<u64>,
-        fetcher: &dyn Fn(&mut RafsBioDesc),
+        fetcher: &dyn Fn(&mut BlobV5BioDesc),
     ) -> Result<()> {
-        let try_prefetch = |desc: &mut RafsBioDesc| {
+        let try_prefetch = |desc: &mut BlobV5BioDesc| {
             // Issue a prefetch request since target is large enough.
             // As files belonging to the same directory are arranged in adjacent,
             // it should fetch a range of blob in batch.
@@ -589,7 +590,7 @@ impl RafsSuper {
     fn prefetch_v4v5(
         &self,
         r: &mut RafsIoReader,
-        fetcher: &dyn Fn(&mut RafsBioDesc),
+        fetcher: &dyn Fn(&mut BlobV5BioDesc),
     ) -> RafsResult<()> {
         let hint_entries = self.meta.prefetch_table_entries as usize;
         if hint_entries == 0 {
@@ -600,7 +601,7 @@ impl RafsSuper {
 
         let mut prefetch_table = RafsV5PrefetchTable::new();
         let mut hardlinks: HashSet<u64> = HashSet::new();
-        let mut head_desc = RafsBioDesc {
+        let mut head_desc = BlobV5BioDesc {
             bi_size: 0,
             bi_flags: 0,
             bi_vec: Vec::new(),
@@ -636,7 +637,7 @@ impl RafsSuper {
     // The total size of all chunks carried by `desc` might exceed `expected_size`, this
     // method ensures the total size mustn't exceed `expected_size`. If it truly does,
     // just trim several trailing chunks from `desc`.
-    fn steal_chunks(desc: &mut RafsBioDesc, expected_size: u32) -> Option<&mut RafsBioDesc> {
+    fn steal_chunks(desc: &mut BlobV5BioDesc, expected_size: u32) -> Option<&mut BlobV5BioDesc> {
         enum State {
             All,
             None,
@@ -687,12 +688,12 @@ impl RafsSuper {
         &self,
         inode: &dyn RafsInode,
         bound: u64,
-        tail_chunk: &dyn RafsChunkInfo,
+        tail_chunk: &dyn BlobV5ChunkInfo,
         expected_size: u64,
-    ) -> Result<Option<RafsBioDesc>> {
+    ) -> Result<Option<BlobV5BioDesc>> {
         let mut left = expected_size;
         let inode_size = inode.size();
-        let mut ra_desc = RafsBioDesc::new();
+        let mut ra_desc = BlobV5BioDesc::new();
 
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
@@ -838,7 +839,7 @@ pub trait RafsSuperInodes {
 }
 
 pub trait RafsSuperBlobs {
-    fn get_blobs(&self) -> Vec<Arc<RafsBlobEntry>> {
+    fn get_blobs(&self) -> Vec<Arc<BlobEntry>> {
         self.get_blob_table().get_all()
     }
 
@@ -873,7 +874,7 @@ pub trait RafsInode {
     fn get_child_by_index(&self, idx: Inode) -> Result<Arc<dyn RafsInode>>;
     fn get_child_index(&self) -> Result<u32>;
     fn get_child_count(&self) -> u32;
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>>;
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>>;
     fn has_xattr(&self) -> bool;
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;
     fn get_xattrs(&self) -> Result<Vec<XattrName>>;
@@ -900,7 +901,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobV5BioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

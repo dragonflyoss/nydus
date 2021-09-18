@@ -149,7 +149,7 @@ impl fmt::Display for RafsConfig {
 /// Main entrance of the RAFS readonly FUSE file system.
 pub struct Rafs {
     id: String,
-    device: device::RafsDevice,
+    device: device::v5::BlobV5Device,
     pub sb: Arc<RafsSuper>,
     digest_validate: bool,
     fs_prefetch: bool,
@@ -194,7 +194,7 @@ impl Rafs {
 
         let rafs = Rafs {
             id: id.to_string(),
-            device: device::RafsDevice::new(
+            device: device::v5::BlobV5Device::new(
                 device_conf,
                 sb.meta.get_compressor(),
                 sb.meta.get_digester(),

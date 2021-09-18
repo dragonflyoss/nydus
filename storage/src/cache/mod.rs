@@ -13,7 +13,8 @@ use nydus_utils::digest;
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
-use crate::device::{BlobPrefetchControl, RafsBio, RafsBlobEntry, RafsChunkInfo};
+use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
+use crate::device::{BlobEntry, BlobPrefetchControl};
 use crate::utils::{alloc_buf, digest_check};
 use crate::{compress, StorageResult};
 
@@ -48,11 +49,11 @@ pub enum IoInitiator {
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
     // Chunks that are continuous to each other.
-    pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
+    pub chunks: Vec<Arc<dyn BlobV5ChunkInfo>>,
     pub chunk_tags: Vec<IoInitiator>,
     pub blob_offset: u64,
     pub blob_size: u32,
-    pub blob_entry: Arc<RafsBlobEntry>,
+    pub blob_entry: Arc<BlobEntry>,
 }
 
 impl Debug for MergedBackendRequest {
@@ -67,8 +68,8 @@ impl Debug for MergedBackendRequest {
 }
 
 impl MergedBackendRequest {
-    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>, bio: &RafsBio) -> Self {
-        let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
+    fn new(first_cki: Arc<dyn BlobV5ChunkInfo>, blob: Arc<BlobEntry>, bio: &BlobV5Bio) -> Self {
+        let mut chunks = Vec::<Arc<dyn BlobV5ChunkInfo>>::new();
         let mut tags: Vec<IoInitiator> = Vec::new();
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
@@ -92,7 +93,7 @@ impl MergedBackendRequest {
         }
     }
 
-    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
+    fn merge_one_chunk(&mut self, cki: Arc<dyn BlobV5ChunkInfo>, bio: &BlobV5Bio) {
         self.blob_size += cki.compress_size();
 
         let tag = if bio.user_io {
@@ -139,13 +140,13 @@ pub trait RafsCache {
     fn need_validate(&self) -> bool;
 
     /// Get size of the blob object.
-    fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64>;
+    fn blob_size(&self, blob: &BlobEntry) -> Result<u64>;
 
     /// Check whether data of a chunk has been cached.
-    fn is_chunk_cached(&self, chunk: &dyn RafsChunkInfo, blob: &RafsBlobEntry) -> bool;
+    fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobEntry) -> bool;
 
     /// Start to prefetch specified blob data.
-    fn prefetch(&self, bio: &mut [RafsBio]) -> StorageResult<usize>;
+    fn prefetch(&self, bio: &mut [BlobV5Bio]) -> StorageResult<usize>;
 
     /// Stop prefetching blob data.
     fn stop_prefetch(&self) -> StorageResult<()>;
@@ -158,7 +159,7 @@ pub trait RafsCache {
     // TODO: Cache is indexed by each chunk's block id. When this read request can't
     // hit local cache and it spans two chunks, group more than one requests to backend
     // storage could benefit the performance.
-    fn read(&self, bio: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize>;
+    fn read(&self, bio: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize>;
 
     /// Read multiple full chunks from the backend storage in batch.
     ///
@@ -171,7 +172,7 @@ pub trait RafsCache {
         blob_id: &str,
         blob_offset: u64,
         blob_size: usize,
-        cki_set: &[Arc<dyn RafsChunkInfo>],
+        cki_set: &[Arc<dyn BlobV5ChunkInfo>],
     ) -> Result<Vec<Vec<u8>>> {
         // TODO: Also check if sorted and continuous here?
 
@@ -216,8 +217,8 @@ pub trait RafsCache {
     /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
     fn read_backend_chunk(
         &self,
-        blob: &RafsBlobEntry,
-        cki: &dyn RafsChunkInfo,
+        blob: &BlobEntry,
+        cki: &dyn BlobV5ChunkInfo,
         chunk: &mut [u8],
         raw_hook: Option<&dyn Fn(&[u8])>,
     ) -> Result<usize> {
@@ -272,7 +273,7 @@ pub trait RafsCache {
     /// An inside trick is that it tries to directly save data into caller's buffer.
     fn process_raw_chunk(
         &self,
-        cki: &dyn RafsChunkInfo,
+        cki: &dyn BlobV5ChunkInfo,
         raw_chunk: &[u8],
         raw_stream: Option<File>,
         chunk: &mut [u8],

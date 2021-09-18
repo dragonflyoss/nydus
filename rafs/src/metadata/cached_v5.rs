@@ -20,19 +20,20 @@ use fuse_backend_rs::abi::linux_abi;
 use fuse_backend_rs::api::filesystem::Entry;
 
 use crate::metadata::layout::v5::{
-    rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo,
+    rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobEntry, BlobV5ChunkInfo,
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeOps,
     RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    Inode, RafsBioDesc, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
+    BlobV5BioDesc, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
     RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
 };
 use crate::RafsIoReader;
 
 use nydus_utils::digest::Algorithm;
 use nydus_utils::{digest::RafsDigest, ByteSize};
+use storage::device::BlobChunkInfo;
 
 pub struct CachedSuperBlockV5 {
     s_blob: Arc<RafsV5BlobTable>,
@@ -408,7 +409,7 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
         Ok(self.i_data[idx as usize].clone())
     }
 
@@ -486,7 +487,7 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobV5BioDesc> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 
@@ -510,7 +511,7 @@ impl RafsInode for CachedInodeV5 {
 }
 
 impl RafsV5InodeOps for CachedInodeV5 {
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<RafsBlobEntry>> {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobEntry>> {
         self.i_blob_table.get(idx)
     }
 
@@ -569,7 +570,7 @@ pub struct CachedChunkInfoV5 {
     // size of the block, compressed
     c_compr_size: u32,
     c_decompress_size: u32,
-    c_flags: RafsChunkFlags,
+    c_flags: BlobChunkFlags,
 }
 
 impl CachedChunkInfoV5 {
@@ -601,27 +602,34 @@ impl CachedChunkInfoV5 {
     }
 }
 
-impl RafsChunkInfo for CachedChunkInfoV5 {
+impl BlobChunkInfo for CachedChunkInfoV5 {
     fn block_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
 
+    fn id(&self) -> u32 {
+        self.index()
+    }
+
     fn is_compressed(&self) -> bool {
-        self.c_flags.contains(RafsChunkFlags::COMPRESSED)
+        self.c_flags.contains(BlobChunkFlags::COMPRESSED)
     }
 
     fn is_hole(&self) -> bool {
-        self.c_flags.contains(RafsChunkFlags::HOLECHUNK)
+        self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
-    impl_getter!(blob_index, c_blob_index, u32);
-    impl_getter!(index, c_index, u32);
     impl_getter!(compress_offset, c_compress_offset, u64);
     impl_getter!(compress_size, c_compr_size, u32);
     impl_getter!(decompress_offset, c_decompress_offset, u64);
     impl_getter!(decompress_size, c_decompress_size, u32);
+}
+
+impl BlobV5ChunkInfo for CachedChunkInfoV5 {
+    impl_getter!(blob_index, c_blob_index, u32);
+    impl_getter!(index, c_index, u32);
     impl_getter!(file_offset, c_file_offset, u64);
-    impl_getter!(flags, c_flags, RafsChunkFlags);
+    impl_getter!(flags, c_flags, BlobChunkFlags);
 }
 
 impl From<&RafsV5ChunkInfo> for CachedChunkInfoV5 {
