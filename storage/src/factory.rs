@@ -66,7 +66,7 @@ pub struct CacheConfig {
     #[serde(skip_serializing, skip_deserializing)]
     pub cache_validate: bool,
     #[serde(skip_serializing, skip_deserializing)]
-    pub prefetch_worker: PrefetchWorker,
+    pub prefetch_worker: BlobPrefetchConfig,
 }
 
 pub fn new_backend(
@@ -93,26 +93,31 @@ pub fn new_backend(
     }
 }
 
-pub fn new_rw_layer(
-    config: Config,
-    compressor: compress::Algorithm,
-    digester: digest::Algorithm,
-    id: &str,
-) -> IOResult<Arc<dyn RafsCache + Send + Sync>> {
-    let backend = new_backend(config.backend, id)?;
-    match config.cache.cache_type.as_str() {
-        "blobcache" => Ok(blobcache::new(
-            config.cache,
-            backend,
-            compressor,
-            digester,
-            id,
-        )?),
-        _ => Ok(Arc::new(dummycache::new(
-            config.cache,
-            backend,
-            compressor,
-            digester,
-        )?)),
+pub mod v5 {
+    use super::*;
+    use crate::cache::v5::BlobV5Cache;
+
+    pub fn new_rw_layer(
+        config: Config,
+        compressor: compress::Algorithm,
+        digester: digest::Algorithm,
+        id: &str,
+    ) -> IOResult<Arc<dyn BlobV5Cache + Send + Sync>> {
+        let backend = new_backend(config.backend, id)?;
+        match config.cache.cache_type.as_str() {
+            "blobcache" => Ok(blobcache::new(
+                config.cache,
+                backend,
+                compressor,
+                digester,
+                id,
+            )?),
+            _ => Ok(Arc::new(dummycache::new(
+                config.cache,
+                backend,
+                compressor,
+                digester,
+            )?)),
+        }
     }
 }

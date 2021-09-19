@@ -9,6 +9,7 @@ use std::mem::ManuallyDrop;
 use std::num::NonZeroU32;
 use std::ops::DerefMut;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::slice;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, Mutex, RwLock,
@@ -29,17 +30,15 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
 use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
-use crate::cache::RafsCache;
+use crate::cache::v5::{BlobV5Cache, MergedBackendRequest};
 use crate::cache::*;
-use crate::device::v5::BlobV5Bio;
+use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
 use crate::device::{BlobEntry, BlobPrefetchControl};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, RAFS_DEFAULT_BLOCK_SIZE};
 
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-
-pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
 struct BlobCacheState {
     /// Index blob info by blob index, HashMap<blob_index, (blob_file, blob_size, Arc<ChunkMap>)>.
@@ -113,8 +112,8 @@ struct PrefetchContext {
     pub prefetch_threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
-impl From<PrefetchWorker> for PrefetchContext {
-    fn from(p: PrefetchWorker) -> Self {
+impl From<BlobPrefetchConfig> for PrefetchContext {
+    fn from(p: BlobPrefetchConfig) -> Self {
         PrefetchContext {
             enable: p.enable,
             threads_count: p.threads_count,
@@ -1186,7 +1185,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
     }
 }
 
-impl RafsCache for BlobCache {
+impl BlobV5Cache for BlobCache {
     fn init(&self, blobs: &[BlobPrefetchControl]) -> Result<()> {
         // Backend may be capable to prefetch a range of blob bypass upper file system
         // to blobcache. This should be asynchronous, so filesystem read cache hit
@@ -1402,7 +1401,7 @@ pub mod blob_cache_tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use crate::backend::{BackendResult, BlobBackend, BlobReader, BlobWrite};
-    use crate::cache::{blobcache, MergedBackendRequest, PrefetchWorker, RafsCache};
+    use crate::cache::{blobcache, BlobPrefetchConfig, BlobV5Cache, MergedBackendRequest};
     use crate::compress;
     use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
     use crate::device::{BlobChunkFlags, BlobChunkInfo, BlobEntry};
@@ -1553,7 +1552,7 @@ pub mod blob_cache_tests {
             cache_compressed: false,
             cache_type: String::from("blobcache"),
             cache_config: serde_json::from_str(&s).unwrap(),
-            prefetch_worker: PrefetchWorker::default(),
+            prefetch_worker: BlobPrefetchConfig::default(),
         };
         let blob_cache = blobcache::new(
             cache_config,
@@ -1637,7 +1636,7 @@ pub mod blob_cache_tests {
             cache_compressed: false,
             cache_type: String::from("blobcache"),
             cache_config: serde_json::from_str(&s).unwrap(),
-            prefetch_worker: PrefetchWorker::default(),
+            prefetch_worker: BlobPrefetchConfig::default(),
         };
 
         let blob_cache = blobcache::new(
@@ -1990,7 +1989,7 @@ pub mod blob_cache_tests {
             cache_compressed: false,
             cache_type: String::from("blobcache"),
             cache_config: serde_json::from_str(&s).unwrap(),
-            prefetch_worker: PrefetchWorker::default(),
+            prefetch_worker: BlobPrefetchConfig::default(),
         };
 
         // Create blobcache instance 1.

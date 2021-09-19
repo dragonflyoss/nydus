@@ -31,7 +31,7 @@ use std::io::Result;
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::time::Duration;
 
-use crate::cache::blobcache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
+use crate::cache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
 use crate::device::BlobChunkInfo;
 use crate::{StorageError, StorageResult};
 

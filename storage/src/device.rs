@@ -5,8 +5,6 @@
 
 use nydus_utils::digest::RafsDigest;
 
-use crate::cache::RafsCache;
-
 bitflags! {
     pub struct BlobChunkFlags: u32 {
         /// chunk is compressed
@@ -107,7 +105,9 @@ pub mod v5 {
     use vm_memory::{Bytes, VolatileSlice};
 
     use super::*;
+    use crate::cache::v5::BlobV5Cache;
     use crate::device::BlobChunkInfo;
+    use crate::factory::v5::new_rw_layer;
     use crate::{compress, factory, StorageResult};
 
     static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
@@ -216,7 +216,7 @@ pub mod v5 {
     // Rafs V5 storage device to execute blob IO operations.
     #[derive(Clone)]
     pub struct BlobV5Device {
-        pub rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
+        pub rw_layer: ArcSwap<Arc<dyn BlobV5Cache + Send + Sync>>,
     }
 
     impl BlobV5Device {
@@ -228,9 +228,7 @@ pub mod v5 {
             id: &str,
         ) -> io::Result<BlobV5Device> {
             Ok(BlobV5Device {
-                rw_layer: ArcSwap::new(Arc::new(factory::new_rw_layer(
-                    config, compressor, digester, id,
-                )?)),
+                rw_layer: ArcSwap::new(Arc::new(new_rw_layer(config, compressor, digester, id)?)),
             })
         }
 
@@ -245,9 +243,8 @@ pub mod v5 {
             // threads cloned Arc<Cache>, the swap operation can't drop inner object completely.
             // Otherwise prefetch threads will be leaked.
             self.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
-            self.rw_layer.store(Arc::new(factory::new_rw_layer(
-                config, compressor, digester, id,
-            )?));
+            self.rw_layer
+                .store(Arc::new(new_rw_layer(config, compressor, digester, id)?));
             Ok(())
         }
 

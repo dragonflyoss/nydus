@@ -31,7 +31,7 @@ use crate::*;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 use storage::device::BlobPrefetchControl;
 use storage::*;
-use storage::{cache::PrefetchWorker, device};
+use storage::{cache::BlobPrefetchConfig, device};
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -164,7 +164,7 @@ pub struct Rafs {
     i_time: u64,
 }
 
-impl TryFrom<&RafsConfig> for PrefetchWorker {
+impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
     type Error = RafsError;
     fn try_from(c: &RafsConfig) -> RafsResult<Self> {
         if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_BLOCK_SIZE {
@@ -173,7 +173,7 @@ impl TryFrom<&RafsConfig> for PrefetchWorker {
             ));
         }
 
-        Ok(PrefetchWorker {
+        Ok(BlobPrefetchConfig {
             enable: c.fs_prefetch.enable,
             threads_count: c.fs_prefetch.threads_count,
             merging_size: c.fs_prefetch.merging_size,

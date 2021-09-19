@@ -5,17 +5,16 @@
 use std::io::Result;
 use std::sync::Arc;
 
+use nydus_utils::digest;
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobBackend;
-use crate::cache::*;
-use crate::device::v5::BlobV5Bio;
-use crate::device::BlobPrefetchControl;
+use crate::cache::v5::BlobV5Cache;
+use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
+use crate::device::{BlobEntry, BlobPrefetchControl};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageResult};
-
-use nydus_utils::digest;
 
 pub struct DummyCache {
     pub backend: Arc<dyn BlobBackend + Sync + Send>,
@@ -24,7 +23,7 @@ pub struct DummyCache {
     digester: digest::Algorithm,
 }
 
-impl RafsCache for DummyCache {
+impl BlobV5Cache for DummyCache {
     fn backend(&self) -> &(dyn BlobBackend + Sync + Send) {
         self.backend.as_ref()
     }
