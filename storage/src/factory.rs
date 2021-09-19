@@ -112,11 +112,12 @@ pub mod v5 {
                 digester,
                 id,
             )?),
-            _ => Ok(Arc::new(dummycache::new(
+            _ => Ok(Arc::new(dummycache::DummyCacheMgr::new(
                 config.cache,
                 backend,
                 compressor,
                 digester,
+                false,
             )?)),
         }
     }

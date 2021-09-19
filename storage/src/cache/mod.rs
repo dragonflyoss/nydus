@@ -57,6 +57,45 @@ pub struct BlobPrefetchConfig {
     pub bandwidth_rate: u32,
 }
 
+pub trait BlobCache {
+    /// Get message digest algorithm used by the underlying blob.
+    fn digester(&self) -> digest::Algorithm;
+
+    /// Get data compression algorithm used by the underlying blob.
+    fn compressor(&self) -> compress::Algorithm;
+
+    /// Check whether need to validate the data chunk.
+    fn need_validate(&self) -> bool;
+
+    /// Get size of the blob object.
+    fn blob_size(&self) -> Result<u64>;
+
+    /// Check whether data of a chunk has been cached and ready for use.
+    fn is_chunk_cached(&self, chunk: &dyn BlobChunkInfo) -> bool;
+}
+
+pub trait BlobCacheMgr {
+    /// Initialize the blob cache manager.
+    fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()>;
+
+    /// Tear down the blob cache manager.
+    fn destroy(&self);
+
+    /// Get the underlying `BlobBackend` object of the blob cache object.
+    fn backend(&self) -> &(dyn BlobBackend);
+
+    /// Get the blob cache to provide access to the `blob` object.
+    fn get_blob_cache(&self, blob: BlobEntry) -> Result<Arc<dyn BlobCache>>;
+
+    /*
+    /// Check whether data of a chunk has been cached and ready for use.
+    fn prefetch(&self, bio: &mut [BlobV5Bio]) -> StorageResult<usize>;
+
+    /// Stop prefetching blob data.
+    fn stop_prefetch(&self) -> StorageResult<()>;
+     */
+}
+
 /// Blob cache manager to access Rafs V5 images.
 pub mod v5 {
     use std::cmp;
@@ -70,18 +109,8 @@ pub mod v5 {
     use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
     use crate::utils::{alloc_buf, digest_check};
 
-    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     /// Trait representing a blob cache manager to access Rafs V5 images.
-    pub trait BlobV5Cache {
-        /// Initialize the blob cache manager.
-        fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()>;
-
-        /// Tear down the blob cache manager.
-        fn destroy(&self);
-
-        /// Get the underlying `BlobBackend` object of the blob cache object.
-        fn backend(&self) -> &(dyn BlobBackend + Sync + Send);
-
+    pub trait BlobV5Cache: BlobCacheMgr {
         /// Get message digest algorithm used by the underlying blob.
         fn digester(&self) -> digest::Algorithm;
 
@@ -94,10 +123,11 @@ pub mod v5 {
         /// Get size of the blob object.
         fn blob_size(&self, blob: &BlobEntry) -> Result<u64>;
 
+        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         /// Check whether data of a chunk has been cached.
         fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobEntry) -> bool;
 
-        /// Start to prefetch specified blob data.
+        /// Check whether data of a chunk has been cached and ready for use.
         fn prefetch(&self, bio: &mut [BlobV5Bio]) -> StorageResult<usize>;
 
         /// Stop prefetching blob data.
@@ -254,8 +284,10 @@ pub mod v5 {
 
             Ok(d_size)
         }
+        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     }
 
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     #[derive(Default, Clone)]
     pub(crate) struct MergedBackendRequest {
         // Chunks that are continuous to each other.
