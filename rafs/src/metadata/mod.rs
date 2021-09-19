@@ -22,8 +22,8 @@ use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
-use storage::device::v5::{BlobV5BioDesc, BlobV5ChunkInfo};
-use storage::device::BlobEntry;
+use storage::device::v5::{BlobIoVec, BlobV5ChunkInfo};
+use storage::device::BlobInfo;
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
@@ -330,7 +330,7 @@ impl RafsSuper {
         &self,
         r: &mut RafsIoReader,
         files: Option<Vec<Inode>>,
-        fetcher: &dyn Fn(&mut BlobV5BioDesc),
+        fetcher: &dyn Fn(&mut BlobIoVec),
     ) -> RafsResult<()> {
         // Prefer to use the file list specified by daemon for prefetching, then
         // use the file list specified by builder for prefetching.
@@ -338,7 +338,7 @@ impl RafsSuper {
             // No need to prefetch blob data for each alias as they share the same range,
             // we do it once.
             let mut hardlinks: HashSet<u64> = HashSet::new();
-            let mut head_desc = BlobV5BioDesc {
+            let mut head_desc = BlobIoVec {
                 bi_size: 0,
                 bi_flags: 0,
                 bi_vec: Vec::new(),
@@ -523,11 +523,11 @@ impl RafsSuper {
     fn build_prefetch_desc_v4v5(
         &self,
         ino: u64,
-        head_desc: &mut BlobV5BioDesc,
+        head_desc: &mut BlobIoVec,
         hardlinks: &mut HashSet<u64>,
-        fetcher: &dyn Fn(&mut BlobV5BioDesc),
+        fetcher: &dyn Fn(&mut BlobIoVec),
     ) -> Result<()> {
-        let try_prefetch = |desc: &mut BlobV5BioDesc| {
+        let try_prefetch = |desc: &mut BlobIoVec| {
             // Issue a prefetch request since target is large enough.
             // As files belonging to the same directory are arranged in adjacent,
             // it should fetch a range of blob in batch.
@@ -590,7 +590,7 @@ impl RafsSuper {
     fn prefetch_v4v5(
         &self,
         r: &mut RafsIoReader,
-        fetcher: &dyn Fn(&mut BlobV5BioDesc),
+        fetcher: &dyn Fn(&mut BlobIoVec),
     ) -> RafsResult<()> {
         let hint_entries = self.meta.prefetch_table_entries as usize;
         if hint_entries == 0 {
@@ -601,7 +601,7 @@ impl RafsSuper {
 
         let mut prefetch_table = RafsV5PrefetchTable::new();
         let mut hardlinks: HashSet<u64> = HashSet::new();
-        let mut head_desc = BlobV5BioDesc {
+        let mut head_desc = BlobIoVec {
             bi_size: 0,
             bi_flags: 0,
             bi_vec: Vec::new(),
@@ -637,7 +637,7 @@ impl RafsSuper {
     // The total size of all chunks carried by `desc` might exceed `expected_size`, this
     // method ensures the total size mustn't exceed `expected_size`. If it truly does,
     // just trim several trailing chunks from `desc`.
-    fn steal_chunks(desc: &mut BlobV5BioDesc, expected_size: u32) -> Option<&mut BlobV5BioDesc> {
+    fn steal_chunks(desc: &mut BlobIoVec, expected_size: u32) -> Option<&mut BlobIoVec> {
         enum State {
             All,
             None,
@@ -690,10 +690,10 @@ impl RafsSuper {
         bound: u64,
         tail_chunk: &dyn BlobV5ChunkInfo,
         expected_size: u64,
-    ) -> Result<Option<BlobV5BioDesc>> {
+    ) -> Result<Option<BlobIoVec>> {
         let mut left = expected_size;
         let inode_size = inode.size();
-        let mut ra_desc = BlobV5BioDesc::new();
+        let mut ra_desc = BlobIoVec::new();
 
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
@@ -839,7 +839,7 @@ pub trait RafsSuperInodes {
 }
 
 pub trait RafsSuperBlobs {
-    fn get_blobs(&self) -> Vec<Arc<BlobEntry>> {
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         self.get_blob_table().get_all()
     }
 
@@ -901,7 +901,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobV5BioDesc>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobIoVec>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

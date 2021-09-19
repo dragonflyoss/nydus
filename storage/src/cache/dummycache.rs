@@ -10,7 +10,7 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::{BlobChunkInfo, BlobEntry, BlobPrefetchControl};
+use crate::device::{BlobChunkInfo, BlobInfo, BlobPrefetchRequest};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageResult};
@@ -75,7 +75,7 @@ impl DummyCacheMgr {
 }
 
 impl BlobCacheMgr for DummyCacheMgr {
-    fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()> {
+    fn init(&self, prefetch_vec: &[BlobPrefetchRequest]) -> Result<()> {
         for b in prefetch_vec {
             if let Ok(reader) = self.backend.get_reader(&b.blob_id) {
                 let _ = reader.prefetch_blob_data_range(b.offset, b.len);
@@ -92,7 +92,7 @@ impl BlobCacheMgr for DummyCacheMgr {
         self.backend.as_ref()
     }
 
-    fn get_blob_cache(&self, blob: BlobEntry) -> Result<Arc<dyn BlobCache>> {
+    fn get_blob_cache(&self, blob: BlobInfo) -> Result<Arc<dyn BlobCache>> {
         let reader = self
             .backend
             .get_reader(&blob.blob_id)
@@ -112,7 +112,8 @@ impl BlobCacheMgr for DummyCacheMgr {
 mod v5 {
     use super::*;
     use crate::cache::v5::BlobV5Cache;
-    use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
+    use crate::device::v5::BlobV5ChunkInfo;
+    use crate::device::{BlobIoChunk, BlobIoDesc};
 
     impl BlobV5Cache for DummyCacheMgr {
         fn digester(&self) -> digest::Algorithm {
@@ -127,7 +128,7 @@ mod v5 {
             self.validate
         }
 
-        fn blob_size(&self, blob: &BlobEntry) -> Result<u64> {
+        fn blob_size(&self, blob: &BlobInfo) -> Result<u64> {
             let reader = self
                 .backend
                 .get_reader(&blob.blob_id)
@@ -136,12 +137,12 @@ mod v5 {
             reader.blob_size().map_err(|e| eother!(e))
         }
 
-        fn is_chunk_cached(&self, _chunk: &dyn BlobV5ChunkInfo, _blob: &BlobEntry) -> bool {
+        fn is_chunk_cached(&self, _chunk: &dyn BlobV5ChunkInfo, _blob: &BlobInfo) -> bool {
             self.cached
         }
 
         //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        fn prefetch(&self, _bios: &mut [BlobV5Bio]) -> StorageResult<usize> {
+        fn prefetch(&self, _bios: &mut [BlobIoDesc]) -> StorageResult<usize> {
             Ok(0)
         }
 
@@ -151,7 +152,7 @@ mod v5 {
         //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
         //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        fn read(&self, bios: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize> {
+        fn read(&self, bios: &mut [BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize> {
             let mut buffer_holder: Vec<Vec<u8>> = Vec::new();
             let offset = bios[0].offset;
             let mut user_size = 0;
@@ -164,7 +165,10 @@ mod v5 {
                 }
 
                 user_size += bio.size;
-                let chunk = &bio.chunkinfo;
+                let chunk = match &bio.chunkinfo {
+                    BlobIoChunk::V5(v) => v,
+                    _ => panic!("BlobV5Cache::read() encounters non Rafs v5 requests"),
+                };
                 let mut reuse = false;
                 let d_size = chunk.decompress_size() as usize;
                 let one_chunk_buf =

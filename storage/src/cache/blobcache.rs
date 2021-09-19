@@ -32,8 +32,8 @@ use crate::backend::BlobBackend;
 use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::v5::{BlobV5Cache, MergedBackendRequest};
 use crate::cache::*;
-use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
-use crate::device::{BlobEntry, BlobPrefetchControl};
+use crate::device::v5::{BlobIoDesc, BlobV5ChunkInfo};
+use crate::device::{BlobEntry, BlobPrefetchRequest};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, RAFS_DEFAULT_BLOCK_SIZE};
@@ -588,7 +588,7 @@ impl BlobCache {
         Ok(read_size)
     }
 
-    fn read_iter(&self, bios: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize> {
+    fn read_iter(&self, bios: &mut [BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize> {
         let mut cursor = MemSliceCursor::new(bufs);
         let sorted_bios = bios;
 
@@ -882,7 +882,7 @@ impl BlobCache {
         Ok(n)
     }
 
-    fn convert_to_merge_request(continuous_bios: &[&BlobV5Bio]) -> MergedBackendRequest {
+    fn convert_to_merge_request(continuous_bios: &[&BlobIoDesc]) -> MergedBackendRequest {
         let first = continuous_bios[0];
         let mut mr = MergedBackendRequest::new(first.chunkinfo.clone(), first.blob.clone(), first);
 
@@ -893,7 +893,7 @@ impl BlobCache {
         mr
     }
 
-    fn is_chunk_continuous(prior: &BlobV5Bio, cur: &BlobV5Bio) -> bool {
+    fn is_chunk_continuous(prior: &BlobIoDesc, cur: &BlobIoDesc) -> bool {
         let prior_cki = &prior.chunkinfo;
         let cur_cki = &cur.chunkinfo;
         let prior_end = prior_cki.compress_offset() + prior_cki.compress_size() as u64;
@@ -906,7 +906,7 @@ impl BlobCache {
 
     fn generate_merged_requests_for_prefetch(
         &self,
-        bios: &mut [BlobV5Bio],
+        bios: &mut [BlobIoDesc],
         tx: &mut spmc::Sender<MergedBackendRequest>,
         merging_size: usize,
     ) {
@@ -933,7 +933,7 @@ impl BlobCache {
 
     fn generate_merged_requests_for_user(
         &self,
-        bios: &mut [BlobV5Bio],
+        bios: &mut [BlobIoDesc],
         merging_size: usize,
     ) -> Option<Vec<MergedBackendRequest>> {
         let mut merged_requests: Vec<MergedBackendRequest> = Vec::new();
@@ -956,7 +956,7 @@ impl BlobCache {
 
     fn generate_merged_requests(
         &self,
-        bios: &mut [BlobV5Bio],
+        bios: &mut [BlobIoDesc],
         merging_size: usize,
         sort: bool,
         op: &mut dyn FnMut(MergedBackendRequest),
@@ -1186,7 +1186,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
 }
 
 impl BlobV5Cache for BlobCache {
-    fn init(&self, blobs: &[BlobPrefetchControl]) -> Result<()> {
+    fn init(&self, blobs: &[BlobPrefetchRequest]) -> Result<()> {
         // Backend may be capable to prefetch a range of blob bypass upper file system
         // to blobcache. This should be asynchronous, so filesystem read cache hit
         // should validate data integrity.
@@ -1203,7 +1203,7 @@ impl BlobV5Cache for BlobCache {
     }
 
     /// `offset` indicates the start position within a chunk to start copy. So `usize` type is suitable.
-    fn read(&self, bios: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize> {
+    fn read(&self, bios: &mut [BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize> {
         self.metrics.total.inc();
 
         // Try to get rid of effect from prefetch.
@@ -1240,7 +1240,7 @@ impl BlobV5Cache for BlobCache {
         self.backend().shutdown()
     }
 
-    fn prefetch(&self, bios: &mut [BlobV5Bio]) -> StorageResult<usize> {
+    fn prefetch(&self, bios: &mut [BlobIoDesc]) -> StorageResult<usize> {
         let merging_size = self.prefetch_ctx.merging_size;
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
@@ -1403,7 +1403,7 @@ pub mod blob_cache_tests {
     use crate::backend::{BackendResult, BlobBackend, BlobReader, BlobWrite};
     use crate::cache::{blobcache, BlobPrefetchConfig, BlobV5Cache, MergedBackendRequest};
     use crate::compress;
-    use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
+    use crate::device::v5::{BlobIoDesc, BlobV5ChunkInfo};
     use crate::device::{BlobChunkFlags, BlobChunkInfo, BlobEntry};
     use crate::factory::CacheConfig;
     use crate::impl_getter;
@@ -1581,7 +1581,7 @@ pub mod blob_cache_tests {
         chunk.compress_size = 100;
         chunk.decompress_offset = 0;
         chunk.decompress_size = 100;
-        let bio = BlobV5Bio::new(
+        let bio = BlobIoDesc::new(
             Arc::new(chunk),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1589,8 +1589,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: blob_id.to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1658,7 +1658,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio = BlobV5Bio::new(
+        let bio = BlobIoDesc::new(
             Arc::new(single_chunk.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1666,8 +1666,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1695,7 +1695,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = BlobV5Bio::new(
+        let bio1 = BlobIoDesc::new(
             Arc::new(chunk1.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1703,8 +1703,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1718,7 +1718,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = BlobV5Bio::new(
+        let bio2 = BlobIoDesc::new(
             Arc::new(chunk2.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1726,8 +1726,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1757,7 +1757,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = BlobV5Bio::new(
+        let bio1 = BlobIoDesc::new(
             Arc::new(chunk1.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1765,8 +1765,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1780,7 +1780,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = BlobV5Bio::new(
+        let bio2 = BlobIoDesc::new(
             Arc::new(chunk2.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1788,8 +1788,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1820,7 +1820,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = BlobV5Bio::new(
+        let bio1 = BlobIoDesc::new(
             Arc::new(chunk1.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1828,8 +1828,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1843,7 +1843,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = BlobV5Bio::new(
+        let bio2 = BlobIoDesc::new(
             Arc::new(chunk2.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1851,8 +1851,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "2".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1883,7 +1883,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio1 = BlobV5Bio::new(
+        let bio1 = BlobIoDesc::new(
             Arc::new(chunk1.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1891,8 +1891,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1906,7 +1906,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio2 = BlobV5Bio::new(
+        let bio2 = BlobIoDesc::new(
             Arc::new(chunk2.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1914,8 +1914,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "1".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -1929,7 +1929,7 @@ pub mod blob_cache_tests {
             ..Default::default()
         };
 
-        let bio3 = BlobV5Bio::new(
+        let bio3 = BlobIoDesc::new(
             Arc::new(chunk3.clone()),
             Arc::new(BlobEntry {
                 chunk_count: 0,
@@ -1937,8 +1937,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: "2".to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,
@@ -2021,7 +2021,7 @@ pub mod blob_cache_tests {
         chunk.decompress_offset = 0;
         chunk.decompress_size = 100;
         chunk.index = 0;
-        let bio = BlobV5Bio::new(
+        let bio = BlobIoDesc::new(
             Arc::new(chunk),
             Arc::new(BlobEntry {
                 chunk_count: 1,
@@ -2029,8 +2029,8 @@ pub mod blob_cache_tests {
                 readahead_size: 0,
                 blob_id: blob_id.to_string(),
                 blob_index: 0,
-                blob_cache_size: 0,
-                compressed_blob_size: 0,
+                blob_decompressed_size: 0,
+                blob_compressed_size: 0,
             }),
             50,
             50,

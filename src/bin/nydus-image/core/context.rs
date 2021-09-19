@@ -317,8 +317,8 @@ impl BlobManager {
                     entry.blob_id.clone(),
                     entry.chunk_count,
                     entry.readahead_size,
-                    entry.blob_cache_size,
-                    entry.compressed_blob_size,
+                    entry.blob_decompressed_size,
+                    entry.blob_compressed_size,
                 )
             })
             .collect();

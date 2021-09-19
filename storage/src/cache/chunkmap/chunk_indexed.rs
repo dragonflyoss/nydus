@@ -278,7 +278,7 @@ mod tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
-    use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
+    use crate::cache::filecache::blob_cache_tests::MockChunkInfo;
     use crate::device::v5::BlobV5ChunkInfo;
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use nydus_utils::digest;
 
 use crate::backend::BlobBackend;
-use crate::device::{BlobChunkInfo, BlobEntry, BlobPrefetchControl};
+use crate::device::{BlobChunkInfo, BlobInfo, BlobPrefetchRequest};
 use crate::{compress, StorageResult};
 
 pub mod blobcache;
@@ -74,9 +74,9 @@ pub trait BlobCache {
     fn is_chunk_cached(&self, chunk: &dyn BlobChunkInfo) -> bool;
 }
 
-pub trait BlobCacheMgr {
+pub trait BlobCacheMgr: Send + Sync {
     /// Initialize the blob cache manager.
-    fn init(&self, prefetch_vec: &[BlobPrefetchControl]) -> Result<()>;
+    fn init(&self, prefetch_vec: &[BlobPrefetchRequest]) -> Result<()>;
 
     /// Tear down the blob cache manager.
     fn destroy(&self);
@@ -85,7 +85,7 @@ pub trait BlobCacheMgr {
     fn backend(&self) -> &(dyn BlobBackend);
 
     /// Get the blob cache to provide access to the `blob` object.
-    fn get_blob_cache(&self, blob: BlobEntry) -> Result<Arc<dyn BlobCache>>;
+    fn get_blob_cache(&self, blob: BlobInfo) -> Result<Arc<dyn BlobCache>>;
 
     /*
     /// Check whether data of a chunk has been cached and ready for use.
@@ -106,7 +106,8 @@ pub mod v5 {
     use vm_memory::VolatileSlice;
 
     use super::*;
-    use crate::device::v5::{BlobV5Bio, BlobV5ChunkInfo};
+    use crate::device::v5::BlobV5ChunkInfo;
+    use crate::device::BlobIoDesc;
     use crate::utils::{alloc_buf, digest_check};
 
     /// Trait representing a blob cache manager to access Rafs V5 images.
@@ -121,14 +122,14 @@ pub mod v5 {
         fn need_validate(&self) -> bool;
 
         /// Get size of the blob object.
-        fn blob_size(&self, blob: &BlobEntry) -> Result<u64>;
+        fn blob_size(&self, blob: &BlobInfo) -> Result<u64>;
 
         //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         /// Check whether data of a chunk has been cached.
-        fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobEntry) -> bool;
+        fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobInfo) -> bool;
 
         /// Check whether data of a chunk has been cached and ready for use.
-        fn prefetch(&self, bio: &mut [BlobV5Bio]) -> StorageResult<usize>;
+        fn prefetch(&self, bio: &mut [BlobIoDesc]) -> StorageResult<usize>;
 
         /// Stop prefetching blob data.
         fn stop_prefetch(&self) -> StorageResult<()>;
@@ -141,7 +142,7 @@ pub mod v5 {
         // TODO: Cache is indexed by each chunk's block id. When this read request can't
         // hit local cache and it spans two chunks, group more than one requests to backend
         // storage could benefit the performance.
-        fn read(&self, bio: &mut [BlobV5Bio], bufs: &[VolatileSlice]) -> Result<usize>;
+        fn read(&self, bio: &mut [BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize>;
 
         /// Read multiple full chunks from the backend storage in batch.
         ///
@@ -199,7 +200,7 @@ pub mod v5 {
         /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
         fn read_backend_chunk(
             &self,
-            blob: &BlobEntry,
+            blob: &BlobInfo,
             cki: &dyn BlobV5ChunkInfo,
             chunk: &mut [u8],
             raw_hook: Option<&dyn Fn(&[u8])>,
@@ -295,7 +296,7 @@ pub mod v5 {
         pub chunk_tags: Vec<IoInitiator>,
         pub blob_offset: u64,
         pub blob_size: u32,
-        pub blob_entry: Arc<BlobEntry>,
+        pub blob_entry: Arc<BlobInfo>,
     }
 
     impl Debug for MergedBackendRequest {
@@ -312,8 +313,8 @@ pub mod v5 {
     impl MergedBackendRequest {
         pub(crate) fn new(
             first_cki: Arc<dyn BlobV5ChunkInfo>,
-            blob: Arc<BlobEntry>,
-            bio: &BlobV5Bio,
+            blob: Arc<BlobInfo>,
+            bio: &BlobIoDesc,
         ) -> Self {
             let mut chunks = Vec::<Arc<dyn BlobV5ChunkInfo>>::new();
             let mut tags: Vec<IoInitiator> = Vec::new();
@@ -339,7 +340,7 @@ pub mod v5 {
             }
         }
 
-        pub(crate) fn merge_one_chunk(&mut self, cki: Arc<dyn BlobV5ChunkInfo>, bio: &BlobV5Bio) {
+        pub(crate) fn merge_one_chunk(&mut self, cki: Arc<dyn BlobV5ChunkInfo>, bio: &BlobIoDesc) {
             self.blob_size += cki.compress_size();
 
             let tag = if bio.user_io {

@@ -29,7 +29,7 @@ use crate::metadata::{
 };
 use crate::*;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
-use storage::device::BlobPrefetchControl;
+use storage::device::BlobPrefetchRequest;
 use storage::*;
 use storage::{cache::BlobPrefetchConfig, device};
 
@@ -276,12 +276,12 @@ impl Rafs {
             .superblock
             .get_blobs()
             .iter()
-            .map(|b| BlobPrefetchControl {
+            .map(|b| BlobPrefetchRequest {
                 blob_id: b.blob_id.clone(),
                 offset: b.readahead_offset,
                 len: b.readahead_size,
             })
-            .collect::<Vec<BlobPrefetchControl>>();
+            .collect::<Vec<BlobPrefetchRequest>>();
 
         self.device
             .init(&prefetch_vec)
@@ -629,29 +629,24 @@ impl FileSystem for Rafs {
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
         let mut all_cached = true;
 
-        if self.amplify_io != 0 {
-            if let Some(d) = self.amplify_io.checked_sub(size) {
-                for b in &desc.bi_vec {
-                    let c = b.chunkinfo.as_ref();
-                    let blob = b.blob.as_ref();
-                    all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
-                }
-                // Try to amplify user io from here, aim at better performance.
-                if !all_cached {
-                    let ra_desc = self.sb.carry_more_until(
-                        inode.as_ref(),
-                        offset + size as u64,
-                        desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
-                        d as u64,
-                    );
-                    // Event fails in amplifying, still handle this read op.
-                    match ra_desc {
-                        Ok(Some(rd)) => desc.bi_vec.extend_from_slice(&rd.bi_vec),
-                        Ok(None) => debug!("Can't append more chunks"),
-                        Err(e) => warn!("Fail in trying to amplify user ios, {:?}", e),
-                    }
-                }
-            }
+        for b in &desc.bi_vec {
+            let c = b.chunkinfo.as_ref();
+            let blob = b.blob.as_ref();
+            all_cached &= self.device.cache.load().is_chunk_cached(c, blob);
+        }
+
+        // Try to amplify user io from here, aim at better performance.
+        if !all_cached {
+            let ra_desc = self.sb.carry_more_until(
+                inode.as_ref(),
+                offset + size as u64,
+                desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
+                1024 * 128 - size as u64,
+            )?;
+
+            if let Some(rd) = ra_desc {
+                desc.bi_vec.extend_from_slice(&rd.bi_vec)
+            };
         }
 
         let start = self.ios.latency_start();

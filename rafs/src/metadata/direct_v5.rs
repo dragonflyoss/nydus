@@ -30,11 +30,11 @@ use std::sync::Arc;
 use arc_swap::{ArcSwap, Guard};
 
 use nydus_utils::digest::{Algorithm, RafsDigest};
-use storage::device::v5::BlobV5BioDesc;
+use storage::device::v5::BlobIoVec;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobEntry,
+    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobInfo,
     BlobV5ChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps,
     RafsV5InodeTable, RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
 };
@@ -746,7 +746,7 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobV5BioDesc> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobIoVec> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 
@@ -765,7 +765,7 @@ impl RafsInode for OndiskInodeWrapper {
 }
 
 impl RafsV5InodeOps for OndiskInodeWrapper {
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobEntry>> {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobInfo>> {
         self.state().blob_table.get(idx)
     }
 

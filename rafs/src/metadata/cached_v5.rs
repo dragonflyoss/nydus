@@ -20,13 +20,13 @@ use fuse_backend_rs::abi::linux_abi;
 use fuse_backend_rs::api::filesystem::Entry;
 
 use crate::metadata::layout::v5::{
-    rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobEntry, BlobV5ChunkInfo,
+    rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobInfo, BlobV5ChunkInfo,
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeOps,
     RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    BlobV5BioDesc, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
+    BlobIoVec, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
     RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
 };
 use crate::RafsIoReader;
@@ -487,7 +487,7 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobV5BioDesc> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobIoVec> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 
@@ -511,7 +511,7 @@ impl RafsInode for CachedInodeV5 {
 }
 
 impl RafsV5InodeOps for CachedInodeV5 {
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobEntry>> {
+    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobInfo>> {
         self.i_blob_table.get(idx)
     }
 
