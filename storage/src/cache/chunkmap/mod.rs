@@ -175,7 +175,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Instant;
@@ -239,26 +239,6 @@ mod tests {
             unimplemented!();
         }
     }
-
-    /*
-    impl BlobV5ChunkInfo for Chunk {
-        fn blob_index(&self) -> u32 {
-            unimplemented!();
-        }
-
-        fn file_offset(&self) -> u64 {
-            unimplemented!();
-        }
-
-        fn index(&self) -> u32 {
-            self.index
-        }
-
-        fn flags(&self) -> RafsChunkFlags {
-            unimplemented!();
-        }
-    }
-     */
 
     #[test]
     fn test_chunk_map() {
@@ -391,12 +371,22 @@ mod tests {
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 2);
         assert_eq!(index_map.is_ready(chunk_1.as_ref(), false).unwrap(), false);
         assert_eq!(index_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 2);
+
         index_map.set_ready(chunk_1.as_ref()).unwrap();
         assert_eq!(index_map.is_ready(chunk_1.as_ref(), false).unwrap(), true);
-        index_map.notify_ready(chunk_2.as_ref());
-        assert_eq!(index_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
+
         index_map.notify_ready(chunk_2.as_ref());
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
+        assert_eq!(index_map.is_ready(chunk_2.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
+        index_map.notify_ready(chunk_2.as_ref());
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
+        index_map.set_ready(chunk_2.as_ref()).unwrap();
+        assert_eq!(index_map.is_ready(chunk_2.as_ref(), false).unwrap(), true);
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
+
         // digested ChunkMap
         let digest_map = Arc::new(BlobChunkMap::from(DigestedChunkMap::new()));
         digest_map.is_ready(chunk_1.as_ref(), false).unwrap();
@@ -426,9 +416,11 @@ mod tests {
             c
         });
 
-        map.as_ref().is_ready(chunk_4.as_ref(), false).unwrap();
+        assert_eq!(
+            map.as_ref().is_ready(chunk_4.as_ref(), false).unwrap(),
+            false
+        );
         let map_cloned = map.clone();
-
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 1);
 
         let chunk_4_cloned = chunk_4.clone();
@@ -508,6 +500,7 @@ mod tests {
 
         let ready = map.as_ref().is_ready(chunk_4.as_ref(), false).unwrap();
         assert_eq!(ready, false);
+        assert_eq!(map.inflight_tracer.lock().unwrap().len(), 1);
 
         map.notify_ready(chunk_4.as_ref());
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 0);

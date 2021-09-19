@@ -1,11 +1,12 @@
 // Copyright 2021 Ant Group. All rights reserved.
+// Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::OpenOptions;
-use std::io::Result;
+use std::fs::{File, OpenOptions};
+use std::io::{Result, Write};
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use nydus_utils::div_round_up;
 
@@ -15,19 +16,35 @@ use crate::device::BlobChunkInfo;
 use crate::utils::readahead;
 
 /// The magic number of blob chunk_map file, it's ASCII hex of string "BMAP".
-const MAGIC: u32 = 0x424D_4150;
+const MAGIC1: u32 = 0x424D_4150;
+const MAGIC2: u32 = 0x434D_4150;
+const MAGIC_ALL_READY: u32 = 0x4D4D_4150;
 /// The name suffix of blob chunk_map file, named $blob_id.chunk_map.
 const FILE_SUFFIX: &str = "chunk_map";
 /// The header of blob chunk_map file.
 const HEADER_SIZE: usize = 4096;
-const HEADER_RESERVED_SIZE: usize = HEADER_SIZE - 4;
+const HEADER_RESERVED_SIZE: usize = HEADER_SIZE - 16;
 
 /// The blob chunk map file header, 4096 bytes.
 #[repr(C)]
 struct Header {
     /// IndexedChunkMap magic number
     magic: u32,
+    version: u32,
+    magic2: u32,
+    all_ready: u32,
     reserved: [u8; HEADER_RESERVED_SIZE],
+}
+
+impl Header {
+    fn as_slice(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self as *const Header as *const u8,
+                std::mem::size_of::<Header>(),
+            )
+        }
+    }
 }
 
 /// A `ChunkMap` implementation based on atomic bitmap.
@@ -44,6 +61,7 @@ pub struct IndexedChunkMap {
     chunk_count: u32,
     size: usize,
     base: *const u8,
+    all_ready: AtomicBool,
 }
 
 impl IndexedChunkMap {
@@ -54,7 +72,7 @@ impl IndexedChunkMap {
         }
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -70,11 +88,16 @@ impl IndexedChunkMap {
         let bitmap_size = div_round_up(chunk_count as u64, 8u64);
         let expected_size = HEADER_SIZE as u64 + bitmap_size;
 
-        if file_size != expected_size {
-            if file_size > 0 {
-                warn!("blob chunk_map file may be corrupted: {:?}", cache_path);
-            }
-            file.set_len(expected_size)?;
+        if file_size == 0 {
+            Self::write_header(&mut file, expected_size)?;
+        } else if file_size != expected_size {
+            // File size doesn't match, it's too risky to accept the chunk state file. Fallback to
+            // always mark chunk data as not ready.
+            warn!("blob chunk_map file may be corrupted: {:?}", cache_path);
+            return Err(einval!(format!(
+                "chunk_map file {:?} is invalid",
+                cache_path
+            )));
         }
 
         let fd = file.as_raw_fd();
@@ -94,16 +117,33 @@ impl IndexedChunkMap {
             return Err(ebadf!("failed to mmap blob chunk_map"));
         }
 
-        // Make clippy of 1.45 happy. Higher version of clippy won't complain about this
-        #[allow(clippy::cast_ptr_alignment)]
+        let mut all_ready = false;
         let header = unsafe { &mut *(base as *mut Header) };
-        if file_size == 0 {
-            header.magic = MAGIC
-        } else if header.magic != MAGIC {
-            return Err(einval!(format!(
-                "invalid blob chunk_map file header: {:?}",
-                cache_path
-            )));
+        if header.magic != MAGIC1 {
+            // There's race window between "file.set_len()" and "file.write(&header)". If that
+            // happens, all file content should be zero. Detect the race window and write out
+            // header again to fix it.
+            let content =
+                unsafe { std::slice::from_raw_parts(base as *const u8, expected_size as usize) };
+            for c in content {
+                if *c != 0 {
+                    return Err(einval!(format!(
+                        "invalid blob chunk_map file header: {:?}",
+                        cache_path
+                    )));
+                }
+            }
+            Self::write_header(&mut file, expected_size)?;
+        } else if header.version >= 1 {
+            if header.magic2 != MAGIC2 {
+                return Err(einval!(format!(
+                    "invalid blob chunk_map file header: {:?}",
+                    cache_path
+                )));
+            }
+            if header.all_ready == MAGIC_ALL_READY {
+                all_ready = true;
+            }
         }
 
         readahead(fd, 0, expected_size);
@@ -112,7 +152,27 @@ impl IndexedChunkMap {
             chunk_count,
             size: expected_size as usize,
             base: base as *const u8,
+            all_ready: AtomicBool::new(all_ready),
         })
+    }
+
+    fn write_header(file: &mut File, size: u64) -> Result<()> {
+        let header = Header {
+            magic: MAGIC1,
+            version: 1,
+            magic2: MAGIC2,
+            all_ready: 0,
+            reserved: [0x0u8; HEADER_RESERVED_SIZE],
+        };
+
+        // Set file size to expected value and sync to disk.
+        file.set_len(size)?;
+        file.sync_all()?;
+        // write file header and sync to disk.
+        file.write_all(header.as_slice())?;
+        file.sync_all()?;
+
+        Ok(())
     }
 
     fn validate_index(&self, idx: u32) -> Result<u32> {
@@ -176,9 +236,12 @@ impl NoWaitSupport for IndexedChunkMap {}
 
 impl ChunkMap for IndexedChunkMap {
     fn is_ready(&self, chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
-        let index = self.validate_index(chunk.id())?;
-
-        Ok(self.is_chunk_ready(index).0)
+        if self.all_ready.load(Ordering::Acquire) {
+            Ok(true)
+        } else {
+            let index = self.validate_index(chunk.id())?;
+            Ok(self.is_chunk_ready(index).0)
+        }
     }
 
     fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
@@ -201,5 +264,202 @@ impl ChunkIndexGetter for IndexedChunkMap {
 
     fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index {
         chunk.id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vmm_sys_util::tempdir::TempDir;
+
+    use super::*;
+    use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
+    use crate::device::v5::BlobV5ChunkInfo;
+
+    #[test]
+    fn test_indexed_new_invalid_file_size() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+
+        let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&cache_path)
+            .map_err(|err| {
+                einval!(format!(
+                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    cache_path, err
+                ))
+            })
+            .unwrap();
+        file.write_all(&[0x0u8]).unwrap();
+
+        let chunk = MockChunkInfo::new();
+        assert_eq!(chunk.id(), 0);
+
+        assert!(IndexedChunkMap::new(&blob_path, 1).is_err());
+    }
+
+    #[test]
+    fn test_indexed_new_zero_file_size() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+
+        let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let _file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&cache_path)
+            .map_err(|err| {
+                einval!(format!(
+                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    cache_path, err
+                ))
+            })
+            .unwrap();
+
+        let chunk = MockChunkInfo::new();
+        assert_eq!(chunk.id(), 0);
+
+        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        assert_eq!(map.all_ready.load(Ordering::Acquire), false);
+        assert_eq!(map.chunk_count, 1);
+        assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
+        map.set_ready(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+    }
+
+    #[test]
+    fn test_indexed_new_header_not_ready() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+
+        let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&cache_path)
+            .map_err(|err| {
+                einval!(format!(
+                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    cache_path, err
+                ))
+            })
+            .unwrap();
+        file.set_len(0x1001).unwrap();
+
+        let chunk = MockChunkInfo::new();
+        assert_eq!(chunk.id(), 0);
+
+        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        assert_eq!(map.all_ready.load(Ordering::Acquire), false);
+        assert_eq!(map.chunk_count, 1);
+        assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
+        map.set_ready(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+    }
+
+    #[test]
+    fn test_indexed_new_all_ready() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+
+        let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&cache_path)
+            .map_err(|err| {
+                einval!(format!(
+                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    cache_path, err
+                ))
+            })
+            .unwrap();
+        let header = Header {
+            magic: MAGIC1,
+            version: 1,
+            magic2: MAGIC2,
+            all_ready: MAGIC_ALL_READY,
+            reserved: [0x0u8; HEADER_RESERVED_SIZE],
+        };
+
+        // write file header and sync to disk.
+        file.write_all(header.as_slice()).unwrap();
+        file.write_all(&[0x0u8]).unwrap();
+
+        let chunk = MockChunkInfo::new();
+        assert_eq!(chunk.id(), 0);
+
+        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        assert_eq!(map.all_ready.load(Ordering::Acquire), true);
+        assert_eq!(map.chunk_count, 1);
+        assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+        map.set_ready(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+    }
+
+    #[test]
+    fn test_indexed_new_load_v0() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+
+        let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&cache_path)
+            .map_err(|err| {
+                einval!(format!(
+                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    cache_path, err
+                ))
+            })
+            .unwrap();
+        let header = Header {
+            magic: MAGIC1,
+            version: 0,
+            magic2: 0,
+            all_ready: 0,
+            reserved: [0x0u8; HEADER_RESERVED_SIZE],
+        };
+
+        // write file header and sync to disk.
+        file.write_all(header.as_slice()).unwrap();
+        file.write_all(&[0x0u8]).unwrap();
+
+        let chunk = MockChunkInfo::new();
+        assert_eq!(chunk.id(), 0);
+
+        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        assert_eq!(map.all_ready.load(Ordering::Acquire), false);
+        assert_eq!(map.chunk_count, 1);
+        assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
+        map.set_ready(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
     }
 }
