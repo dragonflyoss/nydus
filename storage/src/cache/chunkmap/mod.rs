@@ -15,9 +15,11 @@ use crate::{StorageError, StorageResult};
 
 mod chunk_digested;
 mod chunk_indexed;
+mod noop;
 
 pub use chunk_digested::DigestedChunkMap;
 pub use chunk_indexed::IndexedChunkMap;
+pub use noop::NoopChunkMap;
 
 /// Marker for ChunkMap who doesn't support wait.
 pub trait NoWaitSupport {}
