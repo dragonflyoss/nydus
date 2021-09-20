@@ -138,7 +138,7 @@ mod v5 {
     use super::*;
     use crate::cache::v5::BlobV5Cache;
     use crate::device::v5::BlobV5ChunkInfo;
-    use crate::device::{BlobIoChunk, BlobIoDesc};
+    use crate::device::BlobIoDesc;
 
     impl BlobV5Cache for DummyCacheMgr {
         fn digester(&self) -> digest::Algorithm {

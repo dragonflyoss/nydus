@@ -30,7 +30,7 @@ use std::sync::Arc;
 use arc_swap::{ArcSwap, Guard};
 
 use nydus_utils::digest::{Algorithm, RafsDigest};
-use storage::device::v5::BlobIoVec;
+use storage::device::BlobIoVec;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{

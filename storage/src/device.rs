@@ -19,9 +19,24 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use nydus_utils::digest::RafsDigest;
+use nydus_utils::digest::{self, RafsDigest};
+
+use crate::compress;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
+
+/// Version number for blob files.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BlobVersion {
+    /// Blob files for Rafs v5 images
+    V5 = 5,
+}
+
+impl Default for BlobVersion {
+    fn default() -> Self {
+        BlobVersion::V5
+    }
+}
 
 /// Configuration information for a metadata/data blob object.
 ///
@@ -29,27 +44,116 @@ static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, un
 /// and serve blob IO requests for clients.
 #[derive(Clone, Debug, Default)]
 pub struct BlobInfo {
-    /// The index of blob in RAFS blob table.
-    pub blob_index: u32,
+    blob_version: BlobVersion,
     /// A sha256 hex string generally.
     pub blob_id: String,
-    /// Size of the decompressed blob file, or the cache file.
-    pub blob_decompressed_size: u64,
     /// Size of the compressed blob file.
     pub blob_compressed_size: u64,
+    /// Size of the decompressed blob file, or the cache file.
+    pub blob_decompressed_size: u64,
     /// Number of chunks in blob file.
     /// A helper to distinguish bootstrap with extended blob table or not:
     ///     Bootstrap with extended blob table always has non-zero `chunk_count`
     pub chunk_count: u32,
-    /// The data range to be prefetched in blob file.
+    /// Starting offset of the data to prefetch.
     pub readahead_offset: u32,
+    /// Size of blob data to prefetch.
     pub readahead_size: u32,
+    /// Compression algorithm to process the blob.
+    pub compressor: compress::Algorithm,
+    /// Message digest algorithm to process the blob.
+    pub digester: digest::Algorithm,
+    /// Whether to validate blob data.
+    pub validate_data: bool,
+
+    /// V5: The index of blob in RAFS blob table.
+    pub blob_index: u32,
 }
 
 impl BlobInfo {
+    /// Create a new instance of `BlobInfo`.
+    pub fn new(
+        version: BlobVersion,
+        id: String,
+        decompressed_size: u64,
+        compressed_size: u64,
+        chunk_count: u32,
+    ) -> Self {
+        BlobInfo {
+            blob_version: version,
+            blob_id: id,
+            blob_decompressed_size: decompressed_size,
+            blob_compressed_size: compressed_size,
+            chunk_count,
+            compressor: compress::Algorithm::None,
+            digester: digest::Algorithm::Blake3,
+
+            readahead_offset: 0,
+            readahead_size: 0,
+            validate_data: false,
+            blob_index: 0,
+        }
+    }
+
+    /// Check whether it's a blob for Rafs V5 image.
+    pub fn is_v5(&self) -> bool {
+        self.blob_version == BlobVersion::V5
+    }
+
     /// Get the id of the blob.
     pub fn blob_id(&self) -> &str {
         &self.blob_id
+    }
+
+    /// Get the compression algorithm to handle the blob data.
+    pub fn compressor(&self) -> compress::Algorithm {
+        self.compressor
+    }
+
+    /// Get the message digest algorithm for the blob.
+    pub fn digester(&self) -> digest::Algorithm {
+        self.digester
+    }
+
+    /// Check blob data validation configuration.
+    pub fn validate_blob_data(&self) -> bool {
+        self.validate_data
+    }
+
+    /// Enable blob data validation
+    pub fn enable_data_validation(&mut self, validate: bool) {
+        self.validate_data = validate;
+    }
+
+    /// Get blob data prefetching offset.
+    pub fn readahead_offset(&self) -> u64 {
+        self.readahead_offset as u64
+    }
+
+    /// Get blob data prefetching offset.
+    pub fn readahead_size(&self) -> u64 {
+        self.readahead_size as u64
+    }
+
+    /// Set a range for blob data prefetching.
+    ///
+    /// Only one range could be configured per blob, and zero readahead_size means disabling blob
+    /// data prefetching.
+    pub fn set_readahead(&mut self, offset: u64, size: u64) {
+        self.readahead_offset = offset as u32;
+        self.readahead_size = size as u32;
+    }
+
+    /// Set the blob index in Rafs v5 metadata's blob array.
+    pub fn get_blob_index(&self) -> u32 {
+        assert!(self.is_v5());
+        self.blob_index
+    }
+
+    /// Set the blob index in Rafs v5 metadata's blob array.
+    pub fn set_blob_index(&mut self, blob_index: u32) {
+        assert!(self.is_v5());
+        self.blob_index = blob_index;
     }
 }
 
@@ -358,13 +462,12 @@ pub mod v5 {
 
     use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
     use fuse_backend_rs::transport::FileReadWriteVolatile;
-    use nydus_utils::digest;
     use vm_memory::{Bytes, VolatileSlice};
 
     use super::*;
     use crate::cache::v5::BlobV5Cache;
     use crate::factory::v5::new_rw_layer;
-    use crate::{compress, factory, StorageResult};
+    use crate::{factory, StorageResult};
 
     /// Trait to provide extended information for a Rafs v5 chunk.
     ///
@@ -548,8 +651,7 @@ pub mod v5 {
     impl BlobInfo {
         /// Check whether the Rafs v5 metadata blob has extended blob table.
         pub fn with_v5_extended_blob_table(&self) -> bool {
-            // TODO: check it's really a Rafs v5 blob file.
-            self.chunk_count != 0
+            self.blob_version == BlobVersion::V5 && self.chunk_count != 0
         }
     }
 }

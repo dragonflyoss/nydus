@@ -57,7 +57,7 @@ pub struct BlobPrefetchConfig {
     pub bandwidth_rate: u32,
 }
 
-pub trait BlobCache {
+pub trait BlobCache: Send + Sync {
     /// Get message digest algorithm used by the underlying blob.
     fn digester(&self) -> digest::Algorithm;
 

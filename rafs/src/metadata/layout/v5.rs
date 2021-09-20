@@ -46,7 +46,7 @@ use std::sync::Arc;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use storage::compress;
-use storage::device::v5::{BlobIoDesc, BlobIoVec};
+use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
 use crate::metadata::layout::{
     bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
@@ -456,15 +456,17 @@ impl RafsV5BlobTable {
         compressed_blob_size: u64,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
-        self.entries.push(Arc::new(BlobInfo {
-            chunk_count,
-            readahead_offset,
-            readahead_size,
+        let mut blob_info = BlobInfo::new(
+            BlobVersion::V5,
             blob_id,
-            blob_index,
-            blob_decompressed_size: blob_cache_size,
-            blob_compressed_size: compressed_blob_size,
-        }));
+            blob_cache_size,
+            compressed_blob_size,
+            chunk_count,
+        );
+
+        blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+        blob_info.set_blob_index(blob_index);
+        self.entries.push(Arc::new(blob_info));
         self.extended
             .add(chunk_count, blob_cache_size, compressed_blob_size);
         blob_index
@@ -542,15 +544,16 @@ impl RafsV5BlobTable {
                     (0, 0, 0)
                 };
 
-            self.entries.push(Arc::new(BlobInfo {
-                blob_id: blob_id.to_owned(),
-                blob_index: index as u32,
+            let mut blob_info = BlobInfo::new(
+                BlobVersion::V5,
+                blob_id.to_ascii_uppercase(),
+                blob_cache_size,
+                compressed_blob_size,
                 chunk_count,
-                readahead_offset,
-                readahead_size,
-                blob_decompressed_size: blob_cache_size,
-                blob_compressed_size: compressed_blob_size,
-            }));
+            );
+            blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+            blob_info.set_blob_index(index as u32);
+            self.entries.push(Arc::new(blob_info));
 
             if rafsv5_align(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
                 break;
@@ -1147,8 +1150,8 @@ fn add_chunk_to_bio_desc(
     };
 
     let bio = BlobIoDesc::new(
-        chunk,
         blob,
+        chunk.into(),
         chunk_start as u32,
         (chunk_end - chunk_start) as usize,
         blksize,

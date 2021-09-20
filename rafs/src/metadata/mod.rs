@@ -22,8 +22,8 @@ use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
-use storage::device::v5::{BlobIoVec, BlobV5ChunkInfo};
-use storage::device::BlobInfo;
+use storage::device::v5::BlobV5ChunkInfo;
+use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
@@ -704,14 +704,14 @@ impl RafsSuper {
                 let ck = d.bi_vec[0].chunkinfo.clone();
                 // Might be smaller than decompress size. It is user part.
                 let trimming_size = d.bi_vec[0].size;
-                let head_chunk = ck.as_ref();
-                let trimming = tail_chunk.compress_offset() == head_chunk.compress_offset();
-
-                let head_cki = if trimming {
-                    if d.bi_vec.len() == 1 {
-                        // The first chunk is already requested by user IO. For amplification, we
-                        // must move on to next file to find more continuous chunks
-                        None
+                let trimming = tail_chunk.compress_offset() == ck.compress_offset();
+                // Stolen chunk bigger than expected size will involve more backend IO, thus
+                // to slow down current user IO.
+                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
+                    if trimming {
+                        ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
+                        ra_desc.bi_size += cks.bi_size;
+                        ra_desc.bi_size -= trimming_size;
                     } else {
                         Some(&d.bi_vec[1].chunkinfo)
                     }
