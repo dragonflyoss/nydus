@@ -118,6 +118,7 @@ pub mod v5 {
                 compressor,
                 digester,
                 false,
+                false,
             )?)),
         }
     }

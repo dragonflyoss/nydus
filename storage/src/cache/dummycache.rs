@@ -2,6 +2,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! A dummy implementation of the [BlobCacheMgr](trait.BlobCacheMgr.html) trait.
+//!
+//! The [DummyCacheMgr](struct.DummyCacheMgr.html) is a dummy implementation of the
+//! [BlobCacheMgr](../trait.BlobCacheMgr.html) trait, which doesn't really cache any data.
+//! Instead it just reads data from the backend, uncompressed it if needed and then pass on
+//! the data to the clients.
+//!
+//! There are two possible usage mode of the [DummyCacheMgr]:
+//! - Read compressed/uncompressed data from remote Registry/OSS backend but not cache the
+//!   uncompressed data on local storage. The
+//!   [is_chunk_cached()](../trait.BlobCache.html#tymethod.is_chunk_cached)
+//!   method always return false to disable data prefetching.
+//! - Read uncompressed data from local disk and no need to double cache the data.
+//!   The [is_chunk_cached()](../trait.BlobCache.html#tymethod.is_chunk_cached) method always
+//!   return true to enable data prefetching.
 use std::io::Result;
 use std::sync::Arc;
 
@@ -47,11 +62,16 @@ impl BlobCache for DummyCache {
 
 /// A dummy `BlobCacheMgr` implementation, reporting every chunk as cached or not cached as
 /// configured.
+///
+/// The `DummyCacheMgr` is a dummy implementation of the `BlobCacheMgr`, which doesn't really cache
+/// data. Instead it just reads data from the backend, uncompressed it if needed and then pass on
+/// the data to the clients.
 pub struct DummyCacheMgr {
-    pub backend: Arc<dyn BlobBackend>,
+    backend: Arc<dyn BlobBackend>,
     cached: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    enable_prefetch: bool,
     validate: bool,
 }
 
@@ -63,6 +83,7 @@ impl DummyCacheMgr {
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
         cached: bool,
+        enable_prefetch: bool,
     ) -> Result<DummyCacheMgr> {
         Ok(DummyCacheMgr {
             backend,
@@ -70,17 +91,21 @@ impl DummyCacheMgr {
             compressor,
             digester,
             validate: config.cache_validate,
+            enable_prefetch,
         })
     }
 }
 
 impl BlobCacheMgr for DummyCacheMgr {
     fn init(&self, prefetch_vec: &[BlobPrefetchRequest]) -> Result<()> {
-        for b in prefetch_vec {
-            if let Ok(reader) = self.backend.get_reader(&b.blob_id) {
-                let _ = reader.prefetch_blob_data_range(b.offset, b.len);
+        if self.enable_prefetch {
+            for b in prefetch_vec {
+                if let Ok(reader) = self.backend.get_reader(&b.blob_id) {
+                    let _ = reader.prefetch_blob_data_range(b.offset, b.len);
+                }
             }
         }
+
         Ok(())
     }
 
@@ -141,50 +166,53 @@ mod v5 {
             self.cached
         }
 
-        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        fn prefetch(&self, _bios: &mut [BlobIoDesc]) -> StorageResult<usize> {
+        fn prefetch(&self, bios: &mut [BlobIoDesc]) -> StorageResult<usize> {
+            if self.enable_prefetch {
+                for b in bios {
+                    if let Ok(reader) = self.backend.get_reader(b.blob.blob_id()) {
+                        let _ = reader.prefetch_blob_data_range(b.offset, b.size as u32);
+                    }
+                }
+            }
+
             Ok(0)
         }
 
         fn stop_prefetch(&self) -> StorageResult<()> {
+            // TODO: find a way to disable prefetch
             Ok(())
         }
-        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
-        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         fn read(&self, bios: &mut [BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize> {
-            let mut buffer_holder: Vec<Vec<u8>> = Vec::new();
-            let offset = bios[0].offset;
-            let mut user_size = 0;
+            if bios.is_empty() {
+                return Err(einval!("parameter `bios` is empty"));
+            }
 
             let bios_len = bios.len();
+            let offset = bios[0].offset;
+            let chunk = bios[0].chunkinfo.as_v5()?;
+            let d_size = chunk.decompress_size() as usize;
+            // Use the destination buffer to received the decompressed data if possible.
+            if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
+                if !bios[0].user_io {
+                    return Ok(0);
+                }
+                let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
+                return self.read_backend_chunk(&bios[0].blob, chunk.as_ref(), buf, None);
+            }
 
-            for bio in bios {
+            let mut user_size = 0;
+            let mut buffer_holder: Vec<Vec<u8>> = Vec::with_capacity(bios.len());
+            for bio in bios.iter() {
                 if !bio.user_io {
                     continue;
                 }
 
+                let mut d = alloc_buf(chunk.decompress_size() as usize);
+                let chunk = bio.chunkinfo.as_v5()?;
+                self.read_backend_chunk(&bio.blob, chunk.as_ref(), d.as_mut_slice(), None)?;
+                buffer_holder.push(d);
                 user_size += bio.size;
-                let chunk = match &bio.chunkinfo {
-                    BlobIoChunk::V5(v) => v,
-                    _ => panic!("BlobV5Cache::read() encounters non Rafs v5 requests"),
-                };
-                let mut reuse = false;
-                let d_size = chunk.decompress_size() as usize;
-                let one_chunk_buf =
-                    if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
-                        // Use the destination buffer to received the decompressed data.
-                        reuse = true;
-                        unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) }
-                    } else {
-                        let d = alloc_buf(d_size);
-                        buffer_holder.push(d);
-                        buffer_holder.last_mut().unwrap().as_mut_slice()
-                    };
-                self.read_backend_chunk(&bio.blob, chunk.as_ref(), one_chunk_buf, None)?;
-                if reuse {
-                    return Ok(one_chunk_buf.len());
-                }
             }
 
             let chunk_buffers: Vec<&[u8]> = buffer_holder.iter().map(|b| b.as_slice()).collect();
@@ -201,5 +229,4 @@ mod v5 {
             .map_err(|e| eother!(e))
         }
     }
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
