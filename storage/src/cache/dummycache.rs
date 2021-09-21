@@ -25,43 +25,84 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::{BlobChunkInfo, BlobInfo, BlobPrefetchRequest};
+use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobPrefetchRequest};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
-use crate::{compress, StorageResult};
+use crate::{compress, StorageError, StorageResult};
 
 struct DummyCache {
     reader: Arc<dyn BlobReader>,
     cached: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    prefetch: bool,
     validate: bool,
 }
 
 impl BlobCache for DummyCache {
-    fn digester(&self) -> digest::Algorithm {
-        self.digester
+    fn blob_size(&self) -> Result<u64> {
+        self.reader.blob_size().map_err(|e| eother!(e))
     }
 
     fn compressor(&self) -> compress::Algorithm {
         self.compressor
     }
 
-    fn need_validate(&self) -> bool {
-        self.validate
+    fn digester(&self) -> digest::Algorithm {
+        self.digester
     }
 
-    fn blob_size(&self) -> Result<u64> {
-        self.reader.blob_size().map_err(|e| eother!(e))
+    fn need_validate(&self) -> bool {
+        self.validate
     }
 
     fn is_chunk_cached(&self, _chunk: &dyn BlobChunkInfo) -> bool {
         self.cached
     }
+
+    fn prefetch(
+        &self,
+        prefetches: &[BlobPrefetchRequest],
+        bios: &[BlobIoDesc],
+    ) -> StorageResult<usize> {
+        if self.prefetch {
+            let mut cnt = 0usize;
+            for p in prefetches.iter() {
+                if self
+                    .reader
+                    .prefetch_blob_data_range(p.offset, p.len)
+                    .is_ok()
+                {
+                    cnt += 1;
+                }
+            }
+            for b in bios {
+                if self
+                    .reader
+                    .prefetch_blob_data_range(b.offset, b.size as u32)
+                    .is_ok()
+                {
+                    cnt += 1;
+                }
+            }
+            Ok(cnt)
+        } else {
+            Err(StorageError::Unsupported)
+        }
+    }
+
+    fn stop_prefetch(&self) -> StorageResult<()> {
+        if self.prefetch {
+            // TODO: add reader.stop_prefetch_data()
+            //self.reader.stop_prefetch_data();
+        }
+
+        Ok(())
+    }
 }
 
-/// A dummy `BlobCacheMgr` implementation, reporting every chunk as cached or not cached as
-/// configured.
+/// A dummy implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html), simply reporting each
+/// chunk as cached or not cached according to configuration.
 ///
 /// The `DummyCacheMgr` is a dummy implementation of the `BlobCacheMgr`, which doesn't really cache
 /// data. Instead it just reads data from the backend, uncompressed it if needed and then pass on
@@ -97,15 +138,7 @@ impl DummyCacheMgr {
 }
 
 impl BlobCacheMgr for DummyCacheMgr {
-    fn init(&self, prefetch_vec: &[BlobPrefetchRequest]) -> Result<()> {
-        if self.enable_prefetch {
-            for b in prefetch_vec {
-                if let Ok(reader) = self.backend.get_reader(&b.blob_id) {
-                    let _ = reader.prefetch_blob_data_range(b.offset, b.len);
-                }
-            }
-        }
-
+    fn init(&self) -> Result<()> {
         Ok(())
     }
 
@@ -129,6 +162,7 @@ impl BlobCacheMgr for DummyCacheMgr {
             cached: self.cached,
             compressor: self.compressor,
             digester: self.digester,
+            prefetch: self.enable_prefetch,
             validate: self.validate,
         }))
     }

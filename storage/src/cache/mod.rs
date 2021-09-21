@@ -3,28 +3,41 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! A blob cache layer over storage backend to improve performance.
+//!
+//! One of Rafs filesystem's goal is to support "on demand data loading". On demand loading may
+//! help to speed up application/container startup, but it may also cause serious performance
+//! penalty if all data chunks are retrieved from remoted backend storage. So cache layer is
+//! introduced between Rafs filesystem and backend storage, which caches remote data onto local
+//! storage and merge small data request into bigger request to improve network performance.
+//!
+//! There are several cache drivers implemented:
+//! - [DummyCacheMgr](dummycache/struct.DummyCacheMgr.html): a dummy implementation of
+//!   `BlobCacheMgr`, simply reporting each chunk as cached or not cached according to
+//!   configuration.
+
 use std::io::Result;
 use std::sync::Arc;
 
 use nydus_utils::digest;
 
 use crate::backend::BlobBackend;
-use crate::device::{BlobChunkInfo, BlobInfo, BlobPrefetchRequest};
+use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobPrefetchRequest};
 use crate::{compress, StorageResult};
 
-pub mod blobcache;
+//pub mod blobcache;
 pub mod chunkmap;
 pub mod dummycache;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
-/// A segment representing a continuous range in a data chunk.
+/// A segment representing a continuous range in a chunk.
 #[derive(Clone, Debug)]
 pub struct ChunkSegment {
-    // From where within a chunk user data is stored
+    /// Start position of the range within the chunk
     pub offset: u32,
-    // Tht user data total length in a chunk
+    /// Size of the range within the chunk
     pub len: u32,
 }
 
@@ -35,9 +48,9 @@ impl ChunkSegment {
     }
 }
 
-/// `IoInitiator` denotes that a chunk fulfill user io or internal io.
+/// Struct to maintain information about chunk IO operation.
 #[derive(Clone, Debug)]
-pub enum IoInitiator {
+pub enum ChunkIoInfo {
     /// Io requests to fulfill user requests.
     User(ChunkSegment),
     /// Io requests to fulfill internal requirements with (Chunk index, blob/compressed offset).
@@ -57,26 +70,46 @@ pub struct BlobPrefetchConfig {
     pub bandwidth_rate: u32,
 }
 
+/// Trait representing a cache object of a blob.
+///
+/// The caller may use the `BlobCache` trait to access blob data on storage backend, with an
+/// optional intermediate cache layer to improve performance.
 pub trait BlobCache: Send + Sync {
-    /// Get message digest algorithm used by the underlying blob.
-    fn digester(&self) -> digest::Algorithm;
+    /// Get size of the blob object.
+    fn blob_size(&self) -> Result<u64>;
 
     /// Get data compression algorithm used by the underlying blob.
     fn compressor(&self) -> compress::Algorithm;
 
+    /// Get message digest algorithm used by the underlying blob.
+    fn digester(&self) -> digest::Algorithm;
+
     /// Check whether need to validate the data chunk.
     fn need_validate(&self) -> bool;
 
-    /// Get size of the blob object.
-    fn blob_size(&self) -> Result<u64>;
-
     /// Check whether data of a chunk has been cached and ready for use.
     fn is_chunk_cached(&self, chunk: &dyn BlobChunkInfo) -> bool;
+
+    /// Start to prefetch requested data in background.
+    fn prefetch(
+        &self,
+        prefetches: &[BlobPrefetchRequest],
+        bios: &[BlobIoDesc],
+    ) -> StorageResult<usize>;
+
+    /// Stop prefetching blob data in background.
+    fn stop_prefetch(&self) -> StorageResult<()>;
+
+    // TODO: add read/read_chunk/read_raw_backend etc.
 }
 
+/// Trait representing blob manager to manage a group of [BlobCache](trait.BlobCache.html) objects.
+///
+/// The main responsibility of the blob cache manager is to create blob cache objects for blobs,
+/// all IO requests should be issued to the blob cache object directly.
 pub trait BlobCacheMgr: Send + Sync {
     /// Initialize the blob cache manager.
-    fn init(&self, prefetch_vec: &[BlobPrefetchRequest]) -> Result<()>;
+    fn init(&self) -> Result<()>;
 
     /// Tear down the blob cache manager.
     fn destroy(&self);
@@ -86,14 +119,6 @@ pub trait BlobCacheMgr: Send + Sync {
 
     /// Get the blob cache to provide access to the `blob` object.
     fn get_blob_cache(&self, blob: BlobInfo) -> Result<Arc<dyn BlobCache>>;
-
-    /*
-    /// Check whether data of a chunk has been cached and ready for use.
-    fn prefetch(&self, bio: &mut [BlobV5Bio]) -> StorageResult<usize>;
-
-    /// Stop prefetching blob data.
-    fn stop_prefetch(&self) -> StorageResult<()>;
-     */
 }
 
 /// Blob cache manager to access Rafs V5 images.
@@ -110,13 +135,14 @@ pub mod v5 {
     use crate::device::BlobIoDesc;
     use crate::utils::{alloc_buf, digest_check};
 
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     /// Trait representing a blob cache manager to access Rafs V5 images.
     pub trait BlobV5Cache: BlobCacheMgr {
-        /// Get message digest algorithm used by the underlying blob.
-        fn digester(&self) -> digest::Algorithm;
-
         /// Get data compression algorithm used by the underlying blob.
         fn compressor(&self) -> compress::Algorithm;
+
+        /// Get message digest algorithm used by the underlying blob.
+        fn digester(&self) -> digest::Algorithm;
 
         /// Check whether need to validate the data chunk.
         fn need_validate(&self) -> bool;
@@ -124,7 +150,6 @@ pub mod v5 {
         /// Get size of the blob object.
         fn blob_size(&self, blob: &BlobInfo) -> Result<u64>;
 
-        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         /// Check whether data of a chunk has been cached.
         fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobInfo) -> bool;
 
@@ -285,15 +310,13 @@ pub mod v5 {
 
             Ok(d_size)
         }
-        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     }
 
-    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     #[derive(Default, Clone)]
     pub(crate) struct MergedBackendRequest {
         // Chunks that are continuous to each other.
         pub chunks: Vec<Arc<dyn BlobV5ChunkInfo>>,
-        pub chunk_tags: Vec<IoInitiator>,
+        pub chunk_tags: Vec<ChunkIoInfo>,
         pub blob_offset: u64,
         pub blob_size: u32,
         pub blob_entry: Arc<BlobInfo>,
@@ -317,14 +340,14 @@ pub mod v5 {
             bio: &BlobIoDesc,
         ) -> Self {
             let mut chunks = Vec::<Arc<dyn BlobV5ChunkInfo>>::new();
-            let mut tags: Vec<IoInitiator> = Vec::new();
+            let mut tags: Vec<ChunkIoInfo> = Vec::new();
             let blob_size = first_cki.compress_size();
             let blob_offset = first_cki.compress_offset();
 
             let tag = if bio.user_io {
-                IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
+                ChunkIoInfo::User(ChunkSegment::new(bio.offset, bio.size as u32))
             } else {
-                IoInitiator::Internal(first_cki.index(), first_cki.compress_offset())
+                ChunkIoInfo::Internal(first_cki.index(), first_cki.compress_offset())
             };
 
             chunks.push(first_cki);
@@ -344,9 +367,9 @@ pub mod v5 {
             self.blob_size += cki.compress_size();
 
             let tag = if bio.user_io {
-                IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
+                ChunkIoInfo::User(ChunkSegment::new(bio.offset, bio.size as u32))
             } else {
-                IoInitiator::Internal(cki.index(), cki.compress_offset())
+                ChunkIoInfo::Internal(cki.index(), cki.compress_offset())
             };
 
             self.chunks.push(cki);

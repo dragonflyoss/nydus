@@ -530,8 +530,9 @@ pub mod v5 {
         }
 
         /// Initialize the Rafs V5 blob device and start to prefetch blob data in background.
-        pub fn init(&self, prefetch_vec: &[BlobPrefetchRequest]) -> io::Result<()> {
-            self.cache.load().init(prefetch_vec)
+        pub fn init(&self, _prefetch_vec: &[BlobPrefetchRequest]) -> io::Result<()> {
+            self.cache.load().init()
+            // TODO: prefetch data prefetch_vec
         }
 
         /// Update configuration of the Rafs v5 blob object.
