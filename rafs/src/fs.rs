@@ -629,8 +629,10 @@ impl FileSystem for Rafs {
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
         let mut all_cached = true;
 
+        // TODO: refine the logic
+        /*
         for b in &desc.bi_vec {
-            let c = b.chunkinfo.as_ref();
+            let c = b.chunkinfo.as_v5();
             let blob = b.blob.as_ref();
             all_cached &= self.device.cache.load().is_chunk_cached(c, blob);
         }
@@ -648,6 +650,7 @@ impl FileSystem for Rafs {
                 desc.bi_vec.extend_from_slice(&rd.bi_vec)
             };
         }
+         */
 
         let start = self.ios.latency_start();
         // Avoid copying `desc`

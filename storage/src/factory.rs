@@ -105,6 +105,7 @@ pub mod v5 {
     ) -> IOResult<Arc<dyn BlobV5Cache + Send + Sync>> {
         let backend = new_backend(config.backend, id)?;
         match config.cache.cache_type.as_str() {
+            /*
             "blobcache" => Ok(blobcache::new(
                 config.cache,
                 backend,
@@ -112,6 +113,7 @@ pub mod v5 {
                 digester,
                 id,
             )?),
+             */
             _ => Ok(Arc::new(dummycache::DummyCacheMgr::new(
                 config.cache,
                 backend,
