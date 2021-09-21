@@ -3,6 +3,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! A chunk state tracking driver based on a bitmap file.
+//!
+//! This module provides a chunk state tracking driver based on a bitmap file. There's a state bit
+//! in the bitmap file for each chunk, and atomic operations are used to manipulate the bitmap.
+//! So it supports concurrent downloading.
 use std::fs::{File, OpenOptions};
 use std::io::{Result, Write};
 use std::os::unix::io::AsRawFd;
@@ -47,10 +52,11 @@ impl Header {
     }
 }
 
-/// A `ChunkMap` implementation based on atomic bitmap.
+/// An implementation of [ChunkMap](../trait.ChunkMap.html) to support chunk state tracking by using
+/// a bitmap file.
 ///
-/// The `IndexedChunkMap` is an implementation of `ChunkMap` which uses a file and atomic bitmap
-/// operations to track chunk data readiness. It creates or opens a file with the name
+/// The `IndexedChunkMap` is an implementation of [ChunkMap] which uses a bitmap file and atomic
+/// bitmap operations to track chunk state. It creates or opens a file with the name
 /// `$blob_id.chunk_map` to record whether a chunk has been cached by the blob cache, and atomic
 /// bitmap operations are used to manipulate the state bit.
 ///

@@ -2,6 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! A chunk state tracking driver for legacy Nydus images without chunk array
+//!
+//! This module provides a chunk state tracking driver for legacy Rafs images without chunk array,
+//! which uses chunk digest as id to track chunk readiness state. The [DigestedChunkMap] is not
+//! optimal in case of performance and memory consumption. So it is only used only to keep backward
+/// compatibility with the old nydus image format.
 use std::collections::HashSet;
 use std::io::Result;
 use std::sync::RwLock;
@@ -12,7 +18,8 @@ use super::ChunkMap;
 use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
 use crate::device::BlobChunkInfo;
 
-/// A `ChunkMap` implementation based on `HashSet<RafsDigest>`.
+/// An implementation of [ChunkMap](../trait.ChunkMap.html) to support chunk state tracking by using
+/// `HashSet<RafsDigest>`.
 ///
 /// The `DigestedChunkMap` is an implementation of `ChunkMap` which uses a hash set
 /// (HashSet<chunk_digest>) to record whether a chunk has already been cached by the blob cache.

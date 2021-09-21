@@ -2,6 +2,28 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Chunk readiness state tracking drivers.
+//!
+//! To cache data from remote backend storage onto local storage, a chunk state tracking mechanism
+//! is needed to track whether a specific chunk is ready on local storage and to cooperate on
+//! concurrent data downloading. The [ChunkMap](trait.ChunkMap.html) is the main interface to
+//! track chunk state. And [BlobChunkMap](struct.BlobChunkMap.html) is a wrapper implementation of
+//! [ChunkMap] to support concurrent data downloading, which is based on a base [ChunkMap]
+//! implementation to track chunk readiness state.
+//!
+//! There are several base implementation of the [ChunkMap] trait to track chunk readiness state:
+//! - [DigestedChunkMap](chunk_digested/struct.DigestedChunkMap.html): a chunk state tracking driver
+//!   for legacy Rafs images without chunk array, which uses chunk digest as the id to track chunk
+//!   readiness state. The [DigestedChunkMap] is not optimal in case of performance and memory
+//!   consumption.
+//! - [IndexedChunkMap](chunk_indexed/struct.IndexedChunkMap.html): a chunk state tracking driver
+//!   based on a bitmap file. There's a state bit in the bitmap file for each chunk, and atomic
+//!   operations are used to manipulate the bitmap. So it supports concurrent downloading. It's the
+//!   recommended state tracking driver.
+//! - [NoopChunkMap](noop/struct.NoopChunkMap.html): a no-operation chunk state tracking driver,
+//!   which just reports every chunk as always ready to use. It may be used to support disk based
+//!   backend storage.
+
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -21,31 +43,34 @@ pub use chunk_digested::DigestedChunkMap;
 pub use chunk_indexed::IndexedChunkMap;
 pub use noop::NoopChunkMap;
 
-/// Marker for ChunkMap who doesn't support wait.
+/// Marker trait for [ChunkMap] which supports
+/// [is_ready_nowait()](trait.ChunkMap.html#method.is_ready_nowait).
 pub trait NoWaitSupport {}
 
-/// Trait to check/set chunk data cache status.
+/// Trait to query and manage chunk readiness state.
 pub trait ChunkMap: Send + Sync {
-    /// Check whether the chunk data is ready for use.
+    /// Check whether the chunk is ready for use.
     fn is_ready(&self, chunk: &dyn BlobChunkInfo, wait: bool) -> Result<bool>;
 
-    /// Check whether the chunk data is ready for use without waiting.
+    /// Check whether the chunk is ready for use without waiting.
     fn is_ready_nowait(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
         self.is_ready(chunk, false)
     }
 
-    /// Set chunk data to ready state.
+    /// Set chunk to ready state.
     fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()>;
 
-    /// Notify that data for the chunk is ready.
+    /// Notify that the chunk is ready for use.
     fn notify_ready(&self, _chunk: &dyn BlobChunkInfo) {}
 }
 
-/// convert RafsChunkInfo to ChunkMap inner index
+/// Trait to convert [BlobChunkInfo](../../device/trait.BlobChunkInfo.html) to index needed by
+/// [ChunkMap]
 pub trait ChunkIndexGetter {
+    /// Type of index needed by [ChunkMap].
     type Index;
 
-    /// Get the chunk's id/key for HashMap.
+    /// Get the chunk's id/key for state tracking.
     fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index;
 }
 
@@ -96,10 +121,11 @@ impl ChunkSlot {
     }
 }
 
-/// Struct to manage chunk map state for a blob object.
+/// Struct to enable concurrent downloading based on a base implementation of [ChunkMap].
 ///
-/// If the backend `ChunkMap` implementation doesn't track inflight chunks, a default in memory
-/// inflight tracker using `Mutex<HashMap>` will be used.
+/// The base implementation of [ChunkMap] needs to support chunk state tacking, and `BlobChunkMap`
+/// add concurrent downloading over the base implementation. Internally, `BlobChunkMap` uses
+/// an in memory inflight chunk tracker using `Mutex<HashMap>`.
 pub struct BlobChunkMap<C, I> {
     c: C,
     inflight_tracer: Mutex<HashMap<I, Arc<ChunkSlot>>>,
