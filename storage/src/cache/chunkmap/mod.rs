@@ -235,7 +235,7 @@ pub(crate) mod tests {
     }
 
     impl BlobChunkInfo for Chunk {
-        fn block_id(&self) -> &RafsDigest {
+        fn chunk_id(&self) -> &RafsDigest {
             &self.digest
         }
 

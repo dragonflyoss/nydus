@@ -603,7 +603,7 @@ impl CachedChunkInfoV5 {
 }
 
 impl BlobChunkInfo for CachedChunkInfoV5 {
-    fn block_id(&self) -> &RafsDigest {
+    fn chunk_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
 

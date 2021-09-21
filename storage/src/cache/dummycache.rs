@@ -120,7 +120,7 @@ impl BlobCacheMgr for DummyCacheMgr {
     fn get_blob_cache(&self, blob: BlobInfo) -> Result<Arc<dyn BlobCache>> {
         let reader = self
             .backend
-            .get_reader(&blob.blob_id)
+            .get_reader(blob.blob_id())
             .map_err(|e| eother!(e))?;
 
         // TODO: set compressor and digester according to blob configuration
@@ -156,7 +156,7 @@ mod v5 {
         fn blob_size(&self, blob: &BlobInfo) -> Result<u64> {
             let reader = self
                 .backend
-                .get_reader(&blob.blob_id)
+                .get_reader(blob.blob_id())
                 .map_err(|e| eother!(e))?;
 
             reader.blob_size().map_err(|e| eother!(e))

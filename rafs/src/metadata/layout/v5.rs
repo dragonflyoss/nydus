@@ -440,7 +440,7 @@ impl RafsV5BlobTable {
         // Blob entry split with '\0'
         rafsv5_align(
             self.entries.iter().fold(0usize, |size, entry| {
-                let entry_size = size_of::<u32>() * 2 + entry.blob_id.len();
+                let entry_size = size_of::<u32>() * 2 + entry.blob_id().len();
                 size + entry_size + 1
             }) - 1,
         )
@@ -592,14 +592,14 @@ impl RafsStore for RafsV5BlobTable {
             .iter()
             .enumerate()
             .try_for_each::<_, Result<()>>(|(idx, entry)| {
-                w.write_all(&u32::to_le_bytes(entry.readahead_offset))?;
-                w.write_all(&u32::to_le_bytes(entry.readahead_size))?;
-                w.write_all(entry.blob_id.as_bytes())?;
+                w.write_all(&u32::to_le_bytes(entry.readahead_offset() as u32))?;
+                w.write_all(&u32::to_le_bytes(entry.readahead_size() as u32))?;
+                w.write_all(entry.blob_id().as_bytes())?;
                 if idx != self.entries.len() - 1 {
-                    size += size_of::<u32>() * 2 + entry.blob_id.len() + 1;
+                    size += size_of::<u32>() * 2 + entry.blob_id().len() + 1;
                     w.write_all(&[b'\0'])?;
                 } else {
-                    size += size_of::<u32>() * 2 + entry.blob_id.len();
+                    size += size_of::<u32>() * 2 + entry.blob_id().len();
                 }
                 Ok(())
             })?;
@@ -1218,7 +1218,7 @@ pub(crate) fn rafsv5_validate_digest(
     } else if inode.is_reg() {
         for idx in 0..child_count {
             let chunk = inode.get_chunk_info(idx)?;
-            let chunk_digest = chunk.block_id();
+            let chunk_digest = chunk.chunk_id();
 
             hasher.digest_update(chunk_digest.as_ref());
         }

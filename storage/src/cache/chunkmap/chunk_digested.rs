@@ -43,12 +43,12 @@ impl DigestedChunkMap {
 impl ChunkMap for DigestedChunkMap {
     fn is_ready(&self, chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
         // Do not expect poisoned lock.
-        Ok(self.cache.read().unwrap().contains(chunk.block_id()))
+        Ok(self.cache.read().unwrap().contains(chunk.chunk_id()))
     }
 
     fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         // Do not expect poisoned lock.
-        self.cache.write().unwrap().insert(*chunk.block_id());
+        self.cache.write().unwrap().insert(*chunk.chunk_id());
         Ok(())
     }
 }
@@ -59,6 +59,6 @@ impl ChunkIndexGetter for DigestedChunkMap {
     type Index = RafsDigest;
 
     fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index {
-        *chunk.block_id()
+        *chunk.chunk_id()
     }
 }

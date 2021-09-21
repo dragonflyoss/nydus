@@ -346,7 +346,7 @@ Blocks:             {blocks}"#,
                             path.to_string_lossy(),
                             c.block_id,
                             if let Ok(ref blob) = self.blobs_table.get(c.blob_index) {
-                                &blob.blob_id
+                                blob.blob_id()
                             } else {
                                 error!("Can't find blob by its index, index={:?}", c.blob_index);
                                 return Action::Break;
@@ -477,7 +477,7 @@ Blocks:             {blocks}"#,
                     println!("    Chunks list:");
                     for (i, c) in cks.iter().enumerate() {
                         let blob_id = if let Ok(entry) = self.blobs_table.get(c.blob_index) {
-                            entry.blob_id.clone()
+                            entry.blob_id().to_owned()
                         } else {
                             error!(
                                 "Blob index is {} . But no blob entry associate with it",
@@ -600,8 +600,8 @@ Blocks:             {blocks}"#,
                     (None, None)
                 };
 
-                let v = json!({"blob_id": b.blob_id, "readahead_offset": b.readahead_offset,
-                "readahead_size":b.readahead_size, "decompressed_size": decompressed_size, "compressed_size": compressed_size});
+                let v = json!({"blob_id": b.blob_id(), "readahead_offset": b.readahead_offset(),
+                "readahead_size":b.readahead_size(), "decompressed_size": decompressed_size, "compressed_size": compressed_size});
                 value.as_array_mut().unwrap().push(v);
             }
             Some(value)
@@ -613,9 +613,9 @@ Blocks:             {blocks}"#,
     Readahead Offset:   {readahead_offset}
     Readahead Size:     {readahead_size}
     "#,
-                    blob_id = b.blob_id,
-                    readahead_offset = b.readahead_offset,
-                    readahead_size = b.readahead_size,
+                    blob_id = b.blob_id(),
+                    readahead_offset = b.readahead_offset(),
+                    readahead_size = b.readahead_size(),
                 );
 
                 if let Some(et) = extended {

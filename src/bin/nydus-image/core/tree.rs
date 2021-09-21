@@ -34,7 +34,7 @@ use crate::node::*;
 /// Construct a `RafsV5ChunkInfo` object from a `dyn RafsChunkInfo` object.
 fn cast_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
     RafsV5ChunkInfo {
-        block_id: *cki.block_id(),
+        block_id: *cki.chunk_id(),
         blob_index: cki.blob_index(),
         flags: cki.flags(),
         compress_size: cki.compress_size(),

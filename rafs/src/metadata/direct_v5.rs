@@ -821,7 +821,7 @@ impl DirectChunkInfoV5 {
 }
 
 impl BlobChunkInfo for DirectChunkInfoV5 {
-    fn block_id(&self) -> &RafsDigest {
+    fn chunk_id(&self) -> &RafsDigest {
         &self.digest
     }
 

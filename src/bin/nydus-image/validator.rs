@@ -58,7 +58,7 @@ impl Validator {
             .get_blob_table()
             .entries
             .iter()
-            .map(|entry| entry.blob_id.to_string())
+            .map(|entry| entry.blob_id().to_owned())
             .collect::<Vec<String>>();
 
         Ok(blob_ids)

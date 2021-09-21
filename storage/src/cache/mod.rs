@@ -227,7 +227,7 @@ pub mod v5 {
 
             let size = self
                 .backend()
-                .read(&blob.blob_id, raw_chunk, offset)
+                .read(blob.blob_id(), raw_chunk, offset)
                 .map_err(|e| eio!(e))?;
 
             if size != raw_chunk.len() {
@@ -279,7 +279,7 @@ pub mod v5 {
             if chunk.len() != d_size {
                 return Err(eio!());
             }
-            if need_validate && !digest_check(chunk, cki.block_id(), self.digester()) {
+            if need_validate && !digest_check(chunk, cki.chunk_id(), self.digester()) {
                 return Err(eio!());
             }
 
@@ -302,7 +302,7 @@ pub mod v5 {
     impl Debug for MergedBackendRequest {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.debug_struct("MergedBackendRequest")
-                .field("blob index", &self.blob_entry.blob_index)
+                .field("blob index", &self.blob_entry.blob_index())
                 .field("chunk tags", &self.chunk_tags)
                 .field("blob offset", &self.blob_offset)
                 .field("blob size", &self.blob_size)

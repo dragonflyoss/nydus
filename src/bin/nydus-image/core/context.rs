@@ -314,11 +314,11 @@ impl BlobManager {
             .iter()
             .map(|entry| {
                 BlobContext::from(
-                    entry.blob_id.clone(),
-                    entry.chunk_count,
-                    entry.readahead_size,
-                    entry.blob_decompressed_size,
-                    entry.blob_compressed_size,
+                    entry.blob_id().to_owned(),
+                    entry.chunk_count(),
+                    entry.readahead_size() as u32,
+                    entry.decompressed_size(),
+                    entry.compressed_size(),
                 )
             })
             .collect();

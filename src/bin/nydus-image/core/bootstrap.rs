@@ -421,7 +421,7 @@ impl Bootstrap {
         let blob_ids: Vec<String> = blob_table
             .entries
             .iter()
-            .map(|entry| entry.blob_id.clone())
+            .map(|entry| entry.blob_id().to_owned())
             .collect();
 
         Ok((blob_ids, blob_size))

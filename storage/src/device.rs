@@ -46,28 +46,28 @@ impl Default for BlobVersion {
 pub struct BlobInfo {
     blob_version: BlobVersion,
     /// A sha256 hex string generally.
-    pub blob_id: String,
+    blob_id: String,
     /// Size of the compressed blob file.
-    pub blob_compressed_size: u64,
+    compressed_size: u64,
     /// Size of the decompressed blob file, or the cache file.
-    pub blob_decompressed_size: u64,
+    decompressed_size: u64,
     /// Number of chunks in blob file.
     /// A helper to distinguish bootstrap with extended blob table or not:
     ///     Bootstrap with extended blob table always has non-zero `chunk_count`
-    pub chunk_count: u32,
-    /// Starting offset of the data to prefetch.
-    pub readahead_offset: u32,
-    /// Size of blob data to prefetch.
-    pub readahead_size: u32,
+    chunk_count: u32,
     /// Compression algorithm to process the blob.
-    pub compressor: compress::Algorithm,
+    compressor: compress::Algorithm,
     /// Message digest algorithm to process the blob.
-    pub digester: digest::Algorithm,
+    digester: digest::Algorithm,
+    /// Starting offset of the data to prefetch.
+    readahead_offset: u32,
+    /// Size of blob data to prefetch.
+    readahead_size: u32,
     /// Whether to validate blob data.
-    pub validate_data: bool,
+    validate_data: bool,
 
     /// V5: The index of blob in RAFS blob table.
-    pub blob_index: u32,
+    blob_index: u32,
 }
 
 impl BlobInfo {
@@ -82,8 +82,8 @@ impl BlobInfo {
         BlobInfo {
             blob_version: version,
             blob_id: id,
-            blob_decompressed_size: decompressed_size,
-            blob_compressed_size: compressed_size,
+            decompressed_size: decompressed_size,
+            compressed_size: compressed_size,
             chunk_count,
             compressor: compress::Algorithm::None,
             digester: digest::Algorithm::Blake3,
@@ -105,6 +105,21 @@ impl BlobInfo {
         &self.blob_id
     }
 
+    /// Get size of the compressed blob.
+    pub fn compressed_size(&self) -> u64 {
+        self.compressed_size
+    }
+
+    /// Get size of the decompressed blob.
+    pub fn decompressed_size(&self) -> u64 {
+        self.decompressed_size
+    }
+
+    // Get number of chunks in the blob.
+    pub fn chunk_count(&self) -> u32 {
+        self.chunk_count
+    }
+
     /// Get the compression algorithm to handle the blob data.
     pub fn compressor(&self) -> compress::Algorithm {
         self.compressor
@@ -116,7 +131,7 @@ impl BlobInfo {
     }
 
     /// Check blob data validation configuration.
-    pub fn validate_blob_data(&self) -> bool {
+    pub fn validate_data(&self) -> bool {
         self.validate_data
     }
 
@@ -144,8 +159,8 @@ impl BlobInfo {
         self.readahead_size = size as u32;
     }
 
-    /// Set the blob index in Rafs v5 metadata's blob array.
-    pub fn get_blob_index(&self) -> u32 {
+    /// Get the blob index in Rafs v5 metadata's blob array.
+    pub fn blob_index(&self) -> u32 {
         assert!(self.is_v5());
         self.blob_index
     }
@@ -186,7 +201,7 @@ impl Default for BlobChunkFlags {
 /// a chunk.
 pub trait BlobChunkInfo: Sync + Send {
     /// Get the message digest value of the chunk, which acts as an identifier for the chunk.
-    fn block_id(&self) -> &RafsDigest;
+    fn chunk_id(&self) -> &RafsDigest;
 
     /// Get a unique ID to identify the chunk within the metadata/data blob.
     ///
@@ -256,8 +271,8 @@ impl From<Arc<dyn self::v5::BlobV5ChunkInfo>> for BlobIoChunk {
 }
 
 impl BlobChunkInfo for BlobIoChunk {
-    fn block_id(&self) -> &RafsDigest {
-        self.as_base().block_id()
+    fn chunk_id(&self) -> &RafsDigest {
+        self.as_base().chunk_id()
     }
 
     fn id(&self) -> u32 {
@@ -392,7 +407,7 @@ mod tests {
     }
 
     impl BlobChunkInfo for MockChunk {
-        fn block_id(&self) -> &RafsDigest {
+        fn chunk_id(&self) -> &RafsDigest {
             &self.digest
         }
 
