@@ -403,75 +403,6 @@ pub struct BlobPrefetchRequest {
     pub len: u32,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct MockChunk {
-        digest: RafsDigest,
-        id: u32,
-        compressed_offset: u64,
-        compressed_size: u32,
-        decompressed_offset: u64,
-        decompressed_size: u32,
-    }
-
-    impl BlobChunkInfo for MockChunk {
-        fn chunk_id(&self) -> &RafsDigest {
-            &self.digest
-        }
-
-        fn id(&self) -> u32 {
-            self.id
-        }
-
-        fn compress_offset(&self) -> u64 {
-            self.compressed_offset
-        }
-
-        fn compress_size(&self) -> u32 {
-            self.compressed_size
-        }
-
-        fn decompress_offset(&self) -> u64 {
-            self.decompressed_offset
-        }
-
-        fn decompress_size(&self) -> u32 {
-            self.decompressed_size
-        }
-
-        fn is_compressed(&self) -> bool {
-            true
-        }
-
-        fn is_hole(&self) -> bool {
-            false
-        }
-    }
-
-    #[test]
-    fn test_blob_io_chunk() {
-        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunk {
-            digest: Default::default(),
-            id: 3,
-            compressed_offset: 0x1000,
-            compressed_size: 0x100,
-            decompressed_offset: 0x2000,
-            decompressed_size: 0x200,
-        });
-        let iochunk: BlobIoChunk = chunk.clone().into();
-
-        assert_eq!(iochunk.id(), 3);
-        assert_eq!(iochunk.compress_offset(), 0x1000);
-        assert_eq!(iochunk.compress_size(), 0x100);
-        assert_eq!(iochunk.decompress_offset(), 0x2000);
-        assert_eq!(iochunk.decompress_size(), 0x200);
-        assert_eq!(iochunk.is_compressed(), true);
-        assert_eq!(iochunk.is_hole(), false);
-    }
-}
-
 /// A wrapping object over an underlying [BlobCache] object.
 ///
 /// All blob Io requests are actually served by the underlying [BlobCache] object. A new method
@@ -630,11 +561,73 @@ pub mod v5 {
         /// Cast to a base [BlobChunkInfo] trait object.
         fn as_base(&self) -> &dyn BlobChunkInfo;
     }
+}
 
-    impl BlobInfo {
-        /// Check whether the Rafs v5 metadata blob has extended blob table.
-        pub fn with_v5_extended_blob_table(&self) -> bool {
-            self.blob_version == BlobVersion::V5 && self.chunk_count != 0
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockChunk {
+        digest: RafsDigest,
+        id: u32,
+        compressed_offset: u64,
+        compressed_size: u32,
+        decompressed_offset: u64,
+        decompressed_size: u32,
+    }
+
+    impl BlobChunkInfo for MockChunk {
+        fn chunk_id(&self) -> &RafsDigest {
+            &self.digest
         }
+
+        fn id(&self) -> u32 {
+            self.id
+        }
+
+        fn compress_offset(&self) -> u64 {
+            self.compressed_offset
+        }
+
+        fn compress_size(&self) -> u32 {
+            self.compressed_size
+        }
+
+        fn decompress_offset(&self) -> u64 {
+            self.decompressed_offset
+        }
+
+        fn decompress_size(&self) -> u32 {
+            self.decompressed_size
+        }
+
+        fn is_compressed(&self) -> bool {
+            true
+        }
+
+        fn is_hole(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_blob_io_chunk() {
+        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunk {
+            digest: Default::default(),
+            id: 3,
+            compressed_offset: 0x1000,
+            compressed_size: 0x100,
+            decompressed_offset: 0x2000,
+            decompressed_size: 0x200,
+        });
+        let iochunk: BlobIoChunk = chunk.clone().into();
+
+        assert_eq!(iochunk.id(), 3);
+        assert_eq!(iochunk.compress_offset(), 0x1000);
+        assert_eq!(iochunk.compress_size(), 0x100);
+        assert_eq!(iochunk.decompress_offset(), 0x2000);
+        assert_eq!(iochunk.decompress_size(), 0x200);
+        assert_eq!(iochunk.is_compressed(), true);
+        assert_eq!(iochunk.is_hole(), false);
     }
 }

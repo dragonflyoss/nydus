@@ -278,8 +278,8 @@ mod tests {
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
-    use crate::cache::filecache::blob_cache_tests::MockChunkInfo;
     use crate::device::v5::BlobV5ChunkInfo;
+    use crate::test::MockChunkInfo;
 
     #[test]
     fn test_indexed_new_invalid_file_size() {

@@ -382,9 +382,6 @@ mod tests {
         let reader = oss.get_reader("test").unwrap();
         assert_eq!(reader.retry_limit(), 5);
 
-        let writer = oss.get_writer("test").unwrap();
-        assert_eq!(writer.retry_limit(), 5);
-
         oss.shutdown();
     }
 }

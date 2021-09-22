@@ -16,9 +16,12 @@ pub mod cache;
 pub mod compress;
 pub mod device;
 pub mod factory;
+#[cfg(test)]
+pub(crate) mod test;
 pub mod utils;
 
 // A helper to impl RafsChunkInfo for upper layers like Rafs different metadata mode.
+#[doc(hidden)]
 #[macro_export]
 macro_rules! impl_getter {
     ($G: ident, $F: ident, $U: ty) => {
@@ -28,10 +31,12 @@ macro_rules! impl_getter {
     };
 }
 
-// FIXME: u64 for this constant is extremely large, which is unnecessary as `u32` can represent block size 4GB.
+/// Default blob chunk size.
 pub const RAFS_DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
+/// Maxixmum blob chunk size.
 pub const RAFS_MAX_BLOCK_SIZE: u64 = 1024 * 1024;
 
+/// Error codes related to storage subsystem.
 #[derive(Debug)]
 pub enum StorageError {
     Unsupported,
@@ -41,4 +46,5 @@ pub enum StorageError {
     NotContinuous,
 }
 
+/// Specialized std::result::Result for storage subsystem.
 pub type StorageResult<T> = std::result::Result<T, StorageError>;

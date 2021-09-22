@@ -230,7 +230,10 @@ mod tests {
         let src_buf_2 = vec![4u8, 5u8, 6u8];
         let src_bufs = vec![src_buf_1.as_slice(), src_buf_2.as_slice()];
 
-        assert_eq!(copyv(&[], &dst_bufs, 0, 1, 1, 1).unwrap(), (0, (1, 1)));
+        assert_eq!(
+            copyv(&[Vec::<u8>::new(); 0], &dst_bufs, 0, 1, 1, 1).unwrap(),
+            (0, (1, 1))
+        );
         assert_eq!(
             copyv(&src_bufs, &dst_bufs, 0, 0, 1, 1).unwrap(),
             (0, (1, 1))

@@ -1,4 +1,5 @@
 // Copyright 2021 Ant Group. All rights reserved.
+// Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -214,8 +215,8 @@ pub(crate) mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
-    use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
     use crate::device::BlobChunkInfo;
+    use crate::test::MockChunkInfo;
 
     struct Chunk {
         index: u32,

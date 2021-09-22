@@ -1,4 +1,5 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -97,8 +98,7 @@ impl BlobCache for DummyCache {
 
     fn stop_prefetch(&self) -> StorageResult<()> {
         if self.prefetch {
-            // TODO: add reader.stop_prefetch_data()
-            //self.reader.stop_prefetch_data();
+            let _ = self.reader.stop_data_prefetch();
         }
 
         Ok(())

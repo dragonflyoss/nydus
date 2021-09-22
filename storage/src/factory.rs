@@ -25,7 +25,7 @@ use crate::cache::*;
 use crate::device::BlobInfo;
 
 /// Configuration information for storage backend.
-#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendConfig {
     /// Type of storage backend.
     #[serde(rename = "type")]
