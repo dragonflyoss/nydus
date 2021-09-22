@@ -7,8 +7,10 @@
 //!
 //! This module provides public data structures for clients to issue blob IO requests. The main
 //! traits and structs provided include:
-//! - [BlobInfo](struct.BlobInfo.html): configuration information for a metadata/data blob object.
 //! - [BlobChunkInfo](trait.BlobChunkInfo.html): trait to provide basic information for a  chunk.
+//! - [BlobDevice](struct.BlobDevice.html): a wrapping object over an underlying [BlobCache] object
+//!   to serve blob data access requests.
+//! - [BlobInfo](struct.BlobInfo.html): configuration information for a metadata/data blob object.
 //! - [BlobIoChunk](enum.BlobIoChunk.html): an enumeration to encapsulate different [BlobChunkInfo]
 //!   implementations for [BlobIoDesc].
 //! - [BlobIoDesc](struct.BlobIoDesc.html): a blob IO descriptor, containing information for a
@@ -16,12 +18,20 @@
 //! - [BlobIoVec](struct.BlobIoVec.html): a scatter/gather list for blob IO operation, containing
 //!   one or more blob IO descriptors
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
+use std::cmp;
 use std::fmt::Debug;
+use std::io::{self, Error};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
+use fuse_backend_rs::transport::FileReadWriteVolatile;
 use nydus_utils::digest::{self, RafsDigest};
+use vm_memory::{Bytes, VolatileSlice};
 
+use crate::cache::BlobCache;
 use crate::compress;
+use crate::factory::{FactoryConfig, BLOB_FACTORY};
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
@@ -462,6 +472,131 @@ mod tests {
     }
 }
 
+/// A wrapping object over an underlying [BlobCache] object.
+///
+/// All blob Io requests are actually served by the underlying [BlobCache] object. A new method
+/// [update()]() is added to switch the storage backend on demand.
+#[derive(Clone)]
+pub struct BlobDevice {
+    cache: ArcSwap<Arc<dyn BlobCache>>,
+}
+
+impl BlobDevice {
+    /// Create new blob device instance.
+    pub fn new(config: &Arc<FactoryConfig>, blob_info: &Arc<BlobInfo>) -> io::Result<BlobDevice> {
+        Ok(BlobDevice {
+            cache: ArcSwap::new(Arc::new(BLOB_FACTORY.new_blob_cache(config, blob_info)?)),
+        })
+    }
+
+    /// Update configuration of the Rafs v5 blob object.
+    ///
+    /// The `update()` method switch a new storage backend object according to the configuration
+    /// information passed in.
+    pub fn update(&self, config: &Arc<FactoryConfig>, blob_info: &Arc<BlobInfo>) -> io::Result<()> {
+        let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+
+        // Stop prefetch if it is running before swapping backend since prefetch threads cloned
+        // Arc<Cache>, the swap operation can't drop inner object completely.
+        // Otherwise prefetch threads will be leaked.
+        self.cache
+            .load()
+            .stop_prefetch()
+            .unwrap_or_else(|e| error!("{:?}", e));
+        self.cache.store(Arc::new(blob));
+
+        Ok(())
+    }
+
+    /// Close the Rafs v5 blob device.
+    pub fn close(&self, stop_prefetching: bool) -> io::Result<()> {
+        if stop_prefetching {
+            self.cache
+                .load()
+                .stop_prefetch()
+                .unwrap_or_else(|e| error!("{:?}", e));
+        }
+
+        Ok(())
+    }
+
+    /// Read a range of data from blob into the provided writer
+    pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: &mut BlobIoVec) -> io::Result<usize> {
+        let size = desc.bi_size;
+        let mut f = BlobDeviceIoVec::new(desc, self);
+        // The `off` parameter to w.write_from() is actually ignored by
+        // BlobV5IoVec::read_vectored_at_volatile()
+        let count = w.write_from(&mut f, size, 0)?;
+
+        Ok(count)
+    }
+}
+
+/// Struct to execute Io requests with a Rafs v5 blob object.
+struct BlobDeviceIoVec<'a> {
+    dev: &'a BlobDevice,
+    desc: &'a mut BlobIoVec,
+}
+
+impl<'a> BlobDeviceIoVec<'a> {
+    fn new(desc: &'a mut BlobIoVec, b: &'a BlobDevice) -> Self {
+        BlobDeviceIoVec { desc, dev: b }
+    }
+}
+
+#[allow(dead_code)]
+impl BlobDeviceIoVec<'_> {
+    fn fill_hole(&self, bufs: &[VolatileSlice], size: usize) -> Result<usize, Error> {
+        let mut count: usize = 0;
+        let mut remain = size;
+
+        for &buf in bufs.iter() {
+            let mut total = cmp::min(remain, buf.len());
+            let mut offset = 0;
+            while total > 0 {
+                let cnt = cmp::min(total, ZEROS.len());
+                buf.write_slice(&ZEROS[0..cnt], offset)
+                    .map_err(|_| eio!("decompression failed"))?;
+                count += cnt;
+                remain -= cnt;
+                total -= cnt;
+                offset += cnt;
+            }
+        }
+
+        Ok(count)
+    }
+}
+
+impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
+    fn read_volatile(&mut self, _slice: VolatileSlice) -> Result<usize, Error> {
+        // Skip because we don't really use it
+        unimplemented!();
+    }
+
+    fn write_volatile(&mut self, _slice: VolatileSlice) -> Result<usize, Error> {
+        // Skip because we don't really use it
+        unimplemented!();
+    }
+
+    fn read_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
+        unimplemented!();
+    }
+
+    // The default read_vectored_at_volatile only read to the first slice, so we have to overload it.
+    fn read_vectored_at_volatile(
+        &mut self,
+        bufs: &[VolatileSlice],
+        _offset: u64,
+    ) -> Result<usize, Error> {
+        self.dev.cache.load().read(&mut self.desc.bi_vec, bufs)
+    }
+
+    fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
+        unimplemented!()
+    }
+}
+
 /// Traits and Structs to support Rafs v5 image format.
 ///
 /// The Rafs v5 image format is designed with fused filesystem metadata and blob management
@@ -471,18 +606,7 @@ mod tests {
 /// which could be easily used to support both fuse and virtio-fs. So Rafs v5 image specific
 /// interfaces are isolated into a dedicated sub-module.
 pub mod v5 {
-    use arc_swap::ArcSwap;
-    use std::cmp;
-    use std::io::{self, Error};
-
-    use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
-    use fuse_backend_rs::transport::FileReadWriteVolatile;
-    use vm_memory::{Bytes, VolatileSlice};
-
     use super::*;
-    use crate::cache::BlobCache;
-    use crate::factory::{FactoryConfig, BLOB_FACTORY};
-    use crate::StorageResult;
 
     /// Trait to provide extended information for a Rafs v5 chunk.
     ///
@@ -505,166 +629,6 @@ pub mod v5 {
 
         /// Cast to a base [BlobChunkInfo] trait object.
         fn as_base(&self) -> &dyn BlobChunkInfo;
-    }
-
-    /// Rafs V5 storage device to execute blob IO operations.
-    ///
-    /// All blob Io requests are served through an intermediate `BlobCache` layer, to improve
-    /// data fetch performance.
-    #[derive(Clone)]
-    pub struct BlobV5Device {
-        cache: ArcSwap<Arc<dyn BlobCache>>,
-    }
-
-    impl BlobV5Device {
-        /// Create a Rafs v5 blob device.
-        pub fn new(
-            config: &Arc<FactoryConfig>,
-            _compressor: compress::Algorithm,
-            _digester: digest::Algorithm,
-            blob_info: &Arc<BlobInfo>,
-        ) -> io::Result<BlobV5Device> {
-            Ok(BlobV5Device {
-                cache: ArcSwap::new(Arc::new(BLOB_FACTORY.new_blob_cache(config, blob_info)?)),
-            })
-        }
-
-        /// Initialize the Rafs V5 blob device and start to prefetch blob data in background.
-        pub fn init(&self, _prefetch_vec: &[BlobPrefetchRequest]) -> io::Result<()> {
-            //self.cache.load().init()
-            // TODO: prefetch data prefetch_vec
-            Ok(())
-        }
-
-        /// Update configuration of the Rafs v5 blob object.
-        ///
-        /// The `update()` method switch a new storage backend object according to the configuration
-        /// information passed in.
-        pub fn update(
-            &self,
-            config: &Arc<FactoryConfig>,
-            _compressor: compress::Algorithm,
-            _digester: digest::Algorithm,
-            blob_info: &Arc<BlobInfo>,
-        ) -> io::Result<()> {
-            // Stop prefetch if it is running before swapping backend since prefetch
-            // threads cloned Arc<Cache>, the swap operation can't drop inner object completely.
-            // Otherwise prefetch threads will be leaked.
-            self.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
-            self.cache
-                .store(Arc::new(BLOB_FACTORY.new_blob_cache(config, blob_info)?));
-
-            Ok(())
-        }
-
-        /// Close the Rafs v5 blob device.
-        pub fn close(&self) -> io::Result<()> {
-            //self.cache.load().destroy();
-            Ok(())
-        }
-
-        /// Read a range of data from blob into the provided writer
-        pub fn read_to(
-            &self,
-            w: &mut dyn ZeroCopyWriter,
-            desc: &mut BlobIoVec,
-        ) -> io::Result<usize> {
-            let offset = desc.bi_vec[0].offset;
-            let size = desc.bi_size;
-            let mut f = BlobV5IoVec::new(desc, self);
-            // TODO: `offset` is ignored by BlobV5IoVec::read_vectored_at_volatile(), what happens
-            // if `offset` is not zero?
-            let count = w.write_from(&mut f, size, offset as u64)?;
-
-            Ok(count)
-        }
-
-        /// Start to prefetch blob data in the background.
-        pub fn prefetch(&self, desc: &mut BlobIoVec) -> StorageResult<usize> {
-            self.cache
-                .load()
-                .prefetch(&[], desc.bi_vec.as_mut_slice())?;
-
-            Ok(desc.bi_size)
-        }
-
-        /// Stop the background data prefetching task.
-        pub fn stop_prefetch(&self) -> StorageResult<()> {
-            self.cache.load().stop_prefetch()
-        }
-    }
-
-    /// Struct to execute Io requests with a Rafs v5 blob object.
-    struct BlobV5IoVec<'a> {
-        dev: &'a BlobV5Device,
-        desc: &'a mut BlobIoVec,
-    }
-
-    impl<'a> BlobV5IoVec<'a> {
-        fn new(desc: &'a mut BlobIoVec, b: &'a BlobV5Device) -> Self {
-            BlobV5IoVec { desc, dev: b }
-        }
-    }
-
-    #[allow(dead_code)]
-    impl BlobV5IoVec<'_> {
-        fn fill_hole(&self, bufs: &[VolatileSlice], size: usize) -> Result<usize, Error> {
-            let mut count: usize = 0;
-            let mut remain = size;
-
-            for &buf in bufs.iter() {
-                let mut total = cmp::min(remain, buf.len());
-                let mut offset = 0;
-                while total > 0 {
-                    let cnt = cmp::min(total, ZEROS.len());
-                    buf.write_slice(&ZEROS[0..cnt], offset)
-                        .map_err(|_| eio!("decompression failed"))?;
-                    count += cnt;
-                    remain -= cnt;
-                    total -= cnt;
-                    offset += cnt;
-                }
-            }
-
-            Ok(count)
-        }
-    }
-
-    impl FileReadWriteVolatile for BlobV5IoVec<'_> {
-        fn read_volatile(&mut self, _slice: VolatileSlice) -> Result<usize, Error> {
-            // Skip because we don't really use it
-            unimplemented!();
-        }
-
-        fn write_volatile(&mut self, _slice: VolatileSlice) -> Result<usize, Error> {
-            // Skip because we don't really use it
-            unimplemented!();
-        }
-
-        fn read_at_volatile(
-            &mut self,
-            _slice: VolatileSlice,
-            _offset: u64,
-        ) -> Result<usize, Error> {
-            unimplemented!();
-        }
-
-        // The default read_vectored_at_volatile only read to the first slice, so we have to overload it.
-        fn read_vectored_at_volatile(
-            &mut self,
-            bufs: &[VolatileSlice],
-            _offset: u64,
-        ) -> Result<usize, Error> {
-            self.dev.cache.load().read(&mut self.desc.bi_vec, bufs)
-        }
-
-        fn write_at_volatile(
-            &mut self,
-            _slice: VolatileSlice,
-            _offset: u64,
-        ) -> Result<usize, Error> {
-            unimplemented!()
-        }
     }
 
     impl BlobInfo {
