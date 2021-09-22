@@ -130,7 +130,7 @@ impl ChunkIoMerged {
 }
 
 /// Configuration information for blob data prefetching.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Eq, Hash, PartialEq)]
 pub struct BlobPrefetchConfig {
     /// Whether to enable blob data prefetching.
     pub enable: bool,
@@ -329,51 +329,18 @@ pub trait BlobCacheMgr: Send + Sync {
     fn backend(&self) -> &(dyn BlobBackend);
 
     /// Get the blob cache to provide access to the `blob` object.
-    fn get_blob_cache(&self, blob: BlobInfo) -> Result<Arc<dyn BlobCache>>;
+    fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>>;
 }
 
 /// Blob cache manager to access Rafs V5 images.
 pub mod v5 {
 
     use super::*;
-    use crate::device::v5::BlobV5ChunkInfo;
 
     /// Trait representing a blob cache manager to access Rafs V5 images.
-    pub trait BlobV5Cache: BlobCacheMgr {
-        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        /// Get data compression algorithm used by the underlying blob.
-        fn compressor(&self) -> compress::Algorithm;
-
-        /// Get message digest algorithm used by the underlying blob.
-        fn digester(&self) -> digest::Algorithm;
-
-        /// Check whether need to validate the data chunk.
-        fn need_validate(&self) -> bool;
-
-        /// Get size of the blob object.
-        fn blob_size(&self, blob: &BlobInfo) -> Result<u64>;
-
-        /// Check whether data of a chunk has been cached.
-        fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobInfo) -> bool;
-
-        /// Check whether data of a chunk has been cached and ready for use.
-        fn prefetch(&self, bio: &mut [BlobIoDesc]) -> StorageResult<usize>;
-
-        /// Stop prefetching blob data.
-        fn stop_prefetch(&self) -> StorageResult<()>;
-        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
+    pub trait BlobV5Cache: BlobCache {
         //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        /// Read chunk data described by `bio` from the blob into the `bufs`.
-        ///
-        /// This method should only used to serve RAFS v4/v5 data blobs only because it depends on
-        /// the RAFS v4/v5 filesystem metadata information to serve the request.
-        //
-        // TODO: Cache is indexed by each chunk's block id. When this read request can't
-        // hit local cache and it spans two chunks, group more than one requests to backend
-        // storage could benefit the performance.
-        fn read(&self, bio: &mut [BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize>;
-
+        /*
         /// Read multiple full chunks from the backend storage in batch.
         ///
         /// Callers must ensure that chunks in `cki_set` covers a continuous range, and the range
@@ -516,5 +483,6 @@ pub mod v5 {
 
             Ok(d_size)
         }
+         */
     }
 }

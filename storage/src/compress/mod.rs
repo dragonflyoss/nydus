@@ -17,7 +17,7 @@ use self::lz4_standard::*;
 
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Algorithm {
     None,
     Lz4Block,

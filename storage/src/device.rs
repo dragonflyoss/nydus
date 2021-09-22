@@ -480,9 +480,9 @@ pub mod v5 {
     use vm_memory::{Bytes, VolatileSlice};
 
     use super::*;
-    use crate::cache::v5::BlobV5Cache;
-    use crate::factory::v5::new_rw_layer;
-    use crate::{factory, StorageResult};
+    use crate::cache::BlobCache;
+    use crate::factory::{FactoryConfig, BLOB_FACTORY};
+    use crate::StorageResult;
 
     /// Trait to provide extended information for a Rafs v5 chunk.
     ///
@@ -513,26 +513,27 @@ pub mod v5 {
     /// data fetch performance.
     #[derive(Clone)]
     pub struct BlobV5Device {
-        cache: ArcSwap<Arc<dyn BlobV5Cache>>,
+        cache: ArcSwap<Arc<dyn BlobCache>>,
     }
 
     impl BlobV5Device {
         /// Create a Rafs v5 blob device.
         pub fn new(
-            config: factory::Config,
-            compressor: compress::Algorithm,
-            digester: digest::Algorithm,
-            id: &str,
+            config: &Arc<FactoryConfig>,
+            _compressor: compress::Algorithm,
+            _digester: digest::Algorithm,
+            blob_info: &Arc<BlobInfo>,
         ) -> io::Result<BlobV5Device> {
             Ok(BlobV5Device {
-                cache: ArcSwap::new(Arc::new(new_rw_layer(config, compressor, digester, id)?)),
+                cache: ArcSwap::new(Arc::new(BLOB_FACTORY.new_blob_cache(config, blob_info)?)),
             })
         }
 
         /// Initialize the Rafs V5 blob device and start to prefetch blob data in background.
         pub fn init(&self, _prefetch_vec: &[BlobPrefetchRequest]) -> io::Result<()> {
-            self.cache.load().init()
+            //self.cache.load().init()
             // TODO: prefetch data prefetch_vec
+            Ok(())
         }
 
         /// Update configuration of the Rafs v5 blob object.
@@ -541,24 +542,24 @@ pub mod v5 {
         /// information passed in.
         pub fn update(
             &self,
-            config: factory::Config,
-            compressor: compress::Algorithm,
-            digester: digest::Algorithm,
-            id: &str,
+            config: &Arc<FactoryConfig>,
+            _compressor: compress::Algorithm,
+            _digester: digest::Algorithm,
+            blob_info: &Arc<BlobInfo>,
         ) -> io::Result<()> {
             // Stop prefetch if it is running before swapping backend since prefetch
             // threads cloned Arc<Cache>, the swap operation can't drop inner object completely.
             // Otherwise prefetch threads will be leaked.
             self.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
             self.cache
-                .store(Arc::new(new_rw_layer(config, compressor, digester, id)?));
+                .store(Arc::new(BLOB_FACTORY.new_blob_cache(config, blob_info)?));
 
             Ok(())
         }
 
         /// Close the Rafs v5 blob device.
         pub fn close(&self) -> io::Result<()> {
-            self.cache.load().destroy();
+            //self.cache.load().destroy();
             Ok(())
         }
 
@@ -580,7 +581,9 @@ pub mod v5 {
 
         /// Start to prefetch blob data in the background.
         pub fn prefetch(&self, desc: &mut BlobIoVec) -> StorageResult<usize> {
-            self.cache.load().prefetch(desc.bi_vec.as_mut_slice())?;
+            self.cache
+                .load()
+                .prefetch(&[], desc.bi_vec.as_mut_slice())?;
 
             Ok(desc.bi_size)
         }

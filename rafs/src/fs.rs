@@ -96,7 +96,7 @@ macro_rules! trim_backend_config {
 /// Rafs storage backend configuration information.
 #[derive(Clone, Default, Deserialize)]
 pub struct RafsConfig {
-    pub device: factory::Config,
+    pub device: factory::FactoryConfig,
     pub mode: String,
     #[serde(default)]
     pub digest_validate: bool,
