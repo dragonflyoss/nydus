@@ -14,7 +14,7 @@ use crate::device::v5::BlobV5ChunkInfo;
 use crate::device::{BlobChunkFlags, BlobChunkInfo};
 
 pub(crate) struct MockBackend {
-    metrics: Arc<BackendMetrics>,
+    pub metrics: Arc<BackendMetrics>,
 }
 
 impl BlobReader for MockBackend {

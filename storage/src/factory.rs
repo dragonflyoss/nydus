@@ -25,7 +25,7 @@ use crate::backend::oss;
 #[cfg(feature = "backend-registry")]
 use crate::backend::registry;
 use crate::backend::{localfs, BlobBackend};
-use crate::cache::{BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr};
+use crate::cache::{BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr};
 use crate::device::BlobInfo;
 
 /// Configuration information for storage backend.
@@ -88,6 +88,8 @@ pub struct CacheConfig {
 /// Configuration information to create blob cache manager.
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FactoryConfig {
+    /// Id of the factory.
+    pub id: String,
     /// Configuration for storage backend.
     pub backend: BackendConfig,
     /// Configuration for blob cache manager.
@@ -142,22 +144,20 @@ impl BlobFactory {
 
         let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
         let mgr = match key.config.cache.cache_type.as_str() {
-            /*
-            "blobcache" => Ok(blobcache::new(
-                config.cache,
-                backend,
-                compressor,
-                digester,
-                id,
-            )?),
-             */
-            _ => DummyCacheMgr::new(config.cache.clone(), backend, false, false),
-        }?;
-
-        mgr.init()?;
+            "blobcache" => {
+                let mgr = FileCacheMgr::new(config.cache.clone(), backend, &config.id)?;
+                mgr.init()?;
+                Arc::new(mgr) as Arc<dyn BlobCacheMgr>
+            }
+            _ => {
+                let mgr = DummyCacheMgr::new(config.cache.clone(), backend, false, false)?;
+                mgr.init()?;
+                Arc::new(mgr) as Arc<dyn BlobCacheMgr>
+            }
+        };
 
         let mut guard = self.mgrs.lock().unwrap();
-        let mgr = guard.entry(key).or_insert_with(|| Arc::new(mgr));
+        let mgr = guard.entry(key).or_insert_with(|| mgr);
 
         return mgr.get_blob_cache(blob_info);
     }

@@ -33,11 +33,12 @@ use crate::device::{
 use crate::utils::{alloc_buf, digest_check};
 use crate::{compress, StorageResult, RAFS_MAX_BLOCK_SIZE};
 
-//pub mod blobcache;
 pub mod chunkmap;
 mod dummycache;
+mod filecache;
 
 pub use dummycache::DummyCacheMgr;
+pub use filecache::FileCacheMgr;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
