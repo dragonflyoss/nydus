@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Utility helpers to supprt the storage subsystem.
 use std::cmp::{self, min};
 use std::io::{ErrorKind, Result};
 use std::os::unix::io::RawFd;
@@ -10,7 +11,6 @@ use std::slice::from_raw_parts_mut;
 use libc::off64_t;
 use nix::sys::uio::{preadv, IoVec};
 use vm_memory::{Bytes, VolatileSlice};
-
 use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
@@ -94,6 +94,7 @@ pub fn copyv<S: AsRef<[u8]>>(
     Ok((copied, (dst_index, dst_offset)))
 }
 
+/// An memory cursor to access an `VolatileSlice` array.
 pub struct MemSliceCursor<'a> {
     pub mem_slice: &'a [VolatileSlice<'a>],
     pub index: usize,
@@ -101,6 +102,7 @@ pub struct MemSliceCursor<'a> {
 }
 
 impl<'a> MemSliceCursor<'a> {
+    /// Create a new `MemSliceCursor` object.
     pub fn new<'b: 'a>(slice: &'b [VolatileSlice]) -> Self {
         Self {
             mem_slice: slice,
@@ -109,6 +111,7 @@ impl<'a> MemSliceCursor<'a> {
         }
     }
 
+    /// Move cursor forward by `size`.
     pub fn move_cursor(&mut self, mut size: usize) {
         while size > 0 && self.index < self.mem_slice.len() {
             let slice = self.mem_slice[self.index];
@@ -134,6 +137,7 @@ impl<'a> MemSliceCursor<'a> {
         }
     }
 
+    /// Consume `size` bytes of memory content from the cursor.
     pub fn consume(&mut self, mut size: usize) -> Vec<IoVec<&mut [u8]>> {
         let mut vectors: Vec<IoVec<&mut [u8]>> = Vec::with_capacity(8);
 
@@ -173,6 +177,7 @@ impl<'a> MemSliceCursor<'a> {
         vectors
     }
 
+    /// Get the inner `VolatileSlice` array.
     pub fn inner_slice(&self) -> &[VolatileSlice] {
         self.mem_slice
     }
