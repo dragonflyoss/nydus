@@ -3,6 +3,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Storage backends to read blob data from Registry, OSS, disk, file system etc.
+//!
+//! There are several types of storage backend drivers implemented:
+//! - [Registry](registry/struct.Registry.html): backend driver to access blobs on container image
+//!   registry.
+//! - [Oss](oss/struct.Oss.html): backend driver to access blobs on Oss(Object Storage System).
+//! - [LocalFs](localfs/struct.LocalFs.html): backend driver to access blobs on local file system.
+//!   The [LocalFs](localfs/struct.LocalFs.html) storage backend supports backend level data
+//!   prefetching, which is to load data into page cache.
+
 use std::sync::Arc;
 
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
@@ -83,7 +93,7 @@ impl Default for CommonConfig {
     }
 }
 
-/// Trait to read data from a blob file on storage backends.
+/// Trait to read data from a on storage backend.
 pub trait BlobReader: Send + Sync {
     /// Get size of the blob file.
     fn blob_size(&self) -> BackendResult<u64>;
@@ -161,7 +171,14 @@ pub trait BlobReader: Send + Sync {
     }
 
     /// Give hints to prefetch blob data range.
+    ///
+    /// This method only prefetch blob data from storage backends, it doesn't cache data in the
+    /// blob cache subsystem. So it's useful for disk and file system based storage backends, but
+    /// it may not help for Registry/OSS based storage backends.
     fn prefetch_blob_data_range(&self, ra_offset: u32, ra_size: u32) -> BackendResult<()>;
+
+    /// Stop the background data prefetching tasks.
+    fn stop_data_prefetch(&self) -> BackendResult<()>;
 
     /// Get metrics object.
     fn metrics(&self) -> &BackendMetrics;
@@ -170,16 +187,6 @@ pub trait BlobReader: Send + Sync {
     fn retry_limit(&self) -> u8 {
         0
     }
-}
-
-pub trait BlobWrite: Send + Sync {
-    /// Get maximum number of times to retry when encountering IO errors.
-    fn retry_limit(&self) -> u8 {
-        0
-    }
-
-    /// Write data from buffer into the blob file.
-    fn write(&self, buf: &[u8], offset: u64) -> BackendResult<usize>;
 }
 
 /// Trait to access blob files on backend storages, such as OSS, registry, local fs etc.
@@ -192,9 +199,6 @@ pub trait BlobBackend: Send + Sync {
 
     /// Get a blob reader object to access blod `blob_id`.
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>>;
-
-    /// Get a blob writer object to access blod `blob_id`.
-    fn get_writer(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>>;
 
     /// Get size of the blob file.
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
@@ -247,11 +251,6 @@ pub trait BlobBackend: Send + Sync {
         ra_offset: u32,
         ra_size: u32,
     ) -> BackendResult<()>;
-
-    /// Write data from buffer into the blob file.
-    fn write(&self, blob_id: &str, buf: &[u8], offset: u64) -> BackendResult<usize> {
-        self.get_writer(blob_id)?.write(buf, offset)
-    }
 }
 
 #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]

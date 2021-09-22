@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Help library to manage network connections.
 use std::collections::HashMap;
 use std::io::Read;
 use std::io::Result;

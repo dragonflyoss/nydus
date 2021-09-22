@@ -10,11 +10,11 @@ use std::slice::from_raw_parts_mut;
 
 use libc::off64_t;
 use nix::sys::uio::{preadv, IoVec};
-use vm_memory::{Bytes, VolatileSlice};
 use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
+use vm_memory::{Bytes, VolatileSlice};
 
 use crate::{StorageError, StorageResult};
 

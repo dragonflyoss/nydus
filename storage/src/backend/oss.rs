@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Storage backend driver to access blobs on Oss(Object Storage System).
 use std::io::{Error, Result};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -15,8 +16,7 @@ use sha1::Sha1;
 
 use crate::backend::connection::{Connection, ConnectionError};
 use crate::backend::{
-    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite,
-    CommonConfig,
+    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, CommonConfig,
 };
 
 const HEADER_DATE: &str = "Date";
@@ -209,6 +209,12 @@ impl BlobReader for OssReader {
         ))
     }
 
+    fn stop_data_prefetch(&self) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
+        ))
+    }
+
     fn metrics(&self) -> &BackendMetrics {
         &self.metrics
     }
@@ -308,14 +314,6 @@ impl BlobBackend for Oss {
                 "no metrics object available for OssReader".to_string(),
             ))
         }
-    }
-
-    fn get_writer(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>> {
-        Ok(Arc::new(OssWriter {
-            blob_id: blob_id.to_string(),
-            state: self.state.clone(),
-            connection: self.connection.clone(),
-        }))
     }
 
     fn prefetch_blob_data_range(

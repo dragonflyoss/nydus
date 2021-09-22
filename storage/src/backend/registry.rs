@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Storage backend driver to access blobs on container image registry.
 use std::collections::HashMap;
 use std::io::{Error, Read, Result};
 use std::sync::{Arc, RwLock};
@@ -17,8 +18,7 @@ use crate::backend::connection::{
     is_success_status, respond, Connection, ConnectionError, ReqBody,
 };
 use crate::backend::{
-    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite,
-    CommonConfig,
+    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, CommonConfig,
 };
 
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
@@ -542,6 +542,12 @@ impl BlobReader for RegistryReader {
         ))
     }
 
+    fn stop_data_prefetch(&self) -> BackendResult<()> {
+        Err(BackendError::Unsupported(
+            "Registry backend does not support prefetch as per on-disk blob entries".to_string(),
+        ))
+    }
+
     fn metrics(&self) -> &BackendMetrics {
         &self.metrics
     }
@@ -641,12 +647,6 @@ impl BlobBackend for Registry {
             connection: self.connection.clone(),
             metrics: self.metrics.clone(),
         }))
-    }
-
-    fn get_writer(&self, _blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>> {
-        Err(BackendError::Unsupported(
-            "Registry backend doesn't support write operations".to_string(),
-        ))
     }
 
     fn prefetch_blob_data_range(

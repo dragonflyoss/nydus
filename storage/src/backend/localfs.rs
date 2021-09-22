@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Storage backend driver to access blobs on local filesystems.
+
 use std::collections::HashMap;
 use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::{Error, Result};
@@ -17,7 +19,7 @@ use nix::sys::uio;
 use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
 use vm_memory::VolatileSlice;
 
-use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader, BlobWrite};
+use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 use crate::utils::{readahead, readv, MemSliceCursor};
 
 const BLOB_ACCESSED_SUFFIX: &str = ".access";
@@ -177,6 +179,14 @@ impl BlobReader for LocalFsEntry {
         Ok(())
     }
 
+    fn stop_data_prefetch(&self) -> BackendResult<()> {
+        let &(ref lock, ref cvar) = &*self.trace_condvar;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+
+        Ok(())
+    }
+
     fn metrics(&self) -> &BackendMetrics {
         &self.metrics
     }
@@ -278,12 +288,6 @@ impl BlobBackend for LocalFs {
 
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
         self.get_blob(blob_id).map_err(|e| e.into())
-    }
-
-    fn get_writer(&self, _blob_id: &str) -> BackendResult<Arc<dyn BlobWrite>> {
-        Err(BackendError::Unsupported(
-            "LocalFs backend doesn't support write operations".to_string(),
-        ))
     }
 
     fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
