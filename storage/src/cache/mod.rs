@@ -16,15 +16,20 @@
 //!   `BlobCacheMgr`, simply reporting each chunk as cached or not cached according to
 //!   configuration.
 
+use std::cmp;
 use std::fmt::{Debug, Formatter};
+use std::fs::File;
 use std::io::Result;
+use std::slice;
 use std::sync::Arc;
 
 use nydus_utils::digest;
+use vm_memory::VolatileSlice;
 
-use crate::backend::BlobBackend;
+use crate::backend::{BlobBackend, BlobReader};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobPrefetchRequest};
-use crate::{compress, StorageResult};
+use crate::utils::{alloc_buf, digest_check};
+use crate::{compress, StorageResult, RAFS_MAX_BLOCK_SIZE};
 
 //pub mod blobcache;
 pub mod chunkmap;
@@ -137,25 +142,28 @@ pub struct BlobPrefetchConfig {
     pub bandwidth_rate: u32,
 }
 
-/// Trait representing a cache object of a blob.
+/// Trait representing a cache object for a blob on backend storage.
 ///
-/// The caller may use the `BlobCache` trait to access blob data on storage backend, with an
+/// The caller may use the `BlobCache` trait to access blob data on backend storage, with an
 /// optional intermediate cache layer to improve performance.
 pub trait BlobCache: Send + Sync {
     /// Get size of the blob object.
     fn blob_size(&self) -> Result<u64>;
 
-    /// Get data compression algorithm used by the underlying blob.
+    /// Get data compression algorithm to handle chunks in the blob.
     fn compressor(&self) -> compress::Algorithm;
 
-    /// Get message digest algorithm used by the underlying blob.
+    /// Get message digest algorithm to handle chunks in the blob.
     fn digester(&self) -> digest::Algorithm;
 
-    /// Check whether need to validate the data chunk.
+    /// Get the [BlobReader](../backend/trait.BlobReader.html) to read data from storage backend.
+    fn reader(&self) -> &dyn BlobReader;
+
+    /// Check whether need to validate the data chunk by digest value.
     fn need_validate(&self) -> bool;
 
     /// Check whether data of a chunk has been cached and ready for use.
-    fn is_chunk_cached(&self, chunk: &dyn BlobChunkInfo) -> bool;
+    fn is_chunk_ready(&self, chunk: &dyn BlobChunkInfo) -> bool;
 
     /// Start to prefetch requested data in background.
     fn prefetch(
@@ -167,7 +175,143 @@ pub trait BlobCache: Send + Sync {
     /// Stop prefetching blob data in background.
     fn stop_prefetch(&self) -> StorageResult<()>;
 
-    // TODO: add read/read_chunk/read_raw_backend etc.
+    /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
+    fn read(&self, bios: &[BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize>;
+
+    /// Read multiple chunks from the blob cache in batch mode.
+    ///
+    /// This is an interface to optimize chunk data fetch performance by merging multiple continuous
+    /// chunks into one backend request. Callers must ensure that chunks in `cki_set` covers a
+    /// continuous range, and the range exactly matches [`blob_offset`..`blob_offset` + `blob_size`].
+    /// Function `read_chunks()` returns one buffer containing decompressed chunk data for each
+    /// entry in the `cki_set` array in corresponding order.
+    ///
+    /// This method returns success only if all requested data are successfully fetched.
+    fn read_chunks(
+        &self,
+        blob_offset: u64,
+        blob_size: usize,
+        cki_set: &[BlobIoChunk],
+    ) -> Result<Vec<Vec<u8>>> {
+        // Read requested data from the backend by altogether.
+        let mut c_buf = alloc_buf(blob_size);
+        let nr_read = self
+            .reader()
+            .read(c_buf.as_mut_slice(), blob_offset)
+            .map_err(|e| eio!(e))?;
+        if nr_read != blob_size {
+            return Err(eio!(format!(
+                "request for {} bytes but got {} bytes",
+                blob_size, nr_read
+            )));
+        }
+
+        let mut last = blob_offset;
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(cki_set.len());
+        for cki in cki_set {
+            // Ensure BlobIoChunk is valid and continuous.
+            let offset = cki.compress_offset();
+            let size = cki.compress_size();
+            let d_size = cki.decompress_size() as usize;
+            if offset != last
+                || offset - blob_offset > usize::MAX as u64
+                || offset.checked_add(size as u64).is_none()
+                || d_size as u64 > RAFS_MAX_BLOCK_SIZE
+            {
+                return Err(eio!("cki_set to read_chunks() is invalid"));
+            }
+
+            let offset_merged = (offset - blob_offset) as usize;
+            let end_merged = offset_merged + size as usize;
+            let buf = &c_buf[offset_merged..end_merged];
+            let mut chunk = alloc_buf(d_size);
+
+            self.process_raw_chunk(cki, buf, None, &mut chunk, cki.is_compressed())?;
+            chunks.push(chunk);
+            last = offset + size as u64;
+        }
+
+        Ok(chunks)
+    }
+
+    /// Read a whole chunk directly from the storage backend.
+    ///
+    /// The fetched chunk data may be compressed or not, which depends chunk information from `cki`.
+    /// Moreover, chunk data from backend storage may be validated per user's configuration.
+    /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
+    /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
+    fn read_raw_chunk(
+        &self,
+        cki: &BlobIoChunk,
+        chunk: &mut [u8],
+        raw_hook: Option<&dyn Fn(&[u8])>,
+    ) -> Result<usize> {
+        let mut d;
+        let offset = cki.compress_offset();
+        let raw_chunk = if cki.is_compressed() {
+            // Need a scratch buffer to decompress compressed data.
+            let max_size = self
+                .blob_size()?
+                .checked_sub(offset)
+                .ok_or_else(|| einval!("chunk compressed offset is bigger than blob file size"))?;
+            let max_size = cmp::min(max_size, usize::MAX as u64);
+            let c_size = if self.compressor() == compress::Algorithm::GZip {
+                compress::compute_compressed_gzip_size(chunk.len(), max_size as usize)
+            } else {
+                cki.compress_size() as usize
+            };
+            d = alloc_buf(c_size);
+            d.as_mut_slice()
+        } else {
+            // We have this unsafe assignment as it can directly store data into call's buffer.
+            unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
+        };
+
+        let size = self.reader().read(raw_chunk, offset).map_err(|e| eio!(e))?;
+        if size != raw_chunk.len() {
+            return Err(eio!("storage backend returns less data than requested"));
+        }
+
+        self.process_raw_chunk(cki.as_base(), raw_chunk, None, chunk, cki.is_compressed())
+            .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
+        if let Some(hook) = raw_hook {
+            hook(raw_chunk)
+        }
+
+        Ok(chunk.len())
+    }
+
+    /// Hook point to post-process data received from storage backend.
+    ///
+    /// This hook method provides a chance to transform data received from storage backend into
+    /// data cached on local disk.
+    fn process_raw_chunk(
+        &self,
+        cki: &dyn BlobChunkInfo,
+        raw_chunk: &[u8],
+        raw_stream: Option<File>,
+        chunk: &mut [u8],
+        need_decompress: bool,
+    ) -> Result<usize> {
+        if need_decompress {
+            compress::decompress(raw_chunk, raw_stream, chunk, self.compressor()).map_err(|e| {
+                error!("failed to decompress chunk: {}", e);
+                e
+            })?;
+        } else if raw_chunk.as_ptr() != chunk.as_ptr() {
+            // raw_chunk and chunk may point to the same buffer, so only copy data when needed.
+            chunk.copy_from_slice(raw_chunk);
+        }
+
+        let d_size = cki.decompress_size() as usize;
+        if chunk.len() != d_size {
+            Err(eio!("decompressed size and buffer size doesn't match"))
+        } else if self.need_validate() && !digest_check(chunk, cki.chunk_id(), self.digester()) {
+            Err(eio!("data digest value doesn't match"))
+        } else {
+            Ok(d_size)
+        }
+    }
 }
 
 /// Trait representing blob manager to manage a group of [BlobCache](trait.BlobCache.html) objects.
@@ -190,19 +334,13 @@ pub trait BlobCacheMgr: Send + Sync {
 
 /// Blob cache manager to access Rafs V5 images.
 pub mod v5 {
-    use std::cmp;
-    use std::fs::File;
-    use std::slice;
-
-    use vm_memory::VolatileSlice;
 
     use super::*;
     use crate::device::v5::BlobV5ChunkInfo;
-    use crate::utils::{alloc_buf, digest_check};
 
-    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     /// Trait representing a blob cache manager to access Rafs V5 images.
     pub trait BlobV5Cache: BlobCacheMgr {
+        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         /// Get data compression algorithm used by the underlying blob.
         fn compressor(&self) -> compress::Algorithm;
 
@@ -223,7 +361,9 @@ pub mod v5 {
 
         /// Stop prefetching blob data.
         fn stop_prefetch(&self) -> StorageResult<()>;
+        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
+        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         /// Read chunk data described by `bio` from the blob into the `bufs`.
         ///
         /// This method should only used to serve RAFS v4/v5 data blobs only because it depends on
@@ -338,6 +478,7 @@ pub mod v5 {
 
             Ok(chunk.len())
         }
+        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
         /// Before storing chunk data into blob cache file. We have cook the raw chunk from
         /// backend a bit as per the chunk description as blob cache always saves plain data
@@ -376,5 +517,4 @@ pub mod v5 {
             Ok(d_size)
         }
     }
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }

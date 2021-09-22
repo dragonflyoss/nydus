@@ -37,8 +37,8 @@ pub fn readv(fd: RawFd, iovec: &[IoVec<&mut [u8]>], offset: u64) -> Result<usize
 /// Up to bytes of `length` is wanted in `src`.
 /// `dst_index` and `dst_slice_offset` indicate from where to start write destination.
 /// Return (Total copied bytes, (Final written destination index, Final written destination offset))
-pub fn copyv(
-    src: &[&[u8]],
+pub fn copyv<S: AsRef<[u8]>>(
+    src: &[S],
     dst: &[VolatileSlice],
     offset: usize,
     length: usize,
@@ -48,13 +48,17 @@ pub fn copyv(
     // Validate input parameters first to protect following loop block.
     if src.is_empty() || length == 0 {
         return Ok((0, (dst_index, dst_offset)));
-    } else if offset > src[0].len() || dst_index >= dst.len() || dst_offset > dst[dst_index].len() {
+    } else if offset > src[0].as_ref().len()
+        || dst_index >= dst.len()
+        || dst_offset > dst[dst_index].len()
+    {
         return Err(StorageError::MemOverflow);
     }
 
     let mut copied = 0;
     let mut src_offset = offset;
     'next_source: for s in src {
+        let s = s.as_ref();
         let mut buffer_len = min(s.len() - src_offset, length - copied);
 
         loop {

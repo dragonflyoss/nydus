@@ -52,11 +52,15 @@ impl BlobCache for DummyCache {
         self.digester
     }
 
+    fn reader(&self) -> &dyn BlobReader {
+        &*self.reader
+    }
+
     fn need_validate(&self) -> bool {
         self.validate
     }
 
-    fn is_chunk_cached(&self, _chunk: &dyn BlobChunkInfo) -> bool {
+    fn is_chunk_ready(&self, _chunk: &dyn BlobChunkInfo) -> bool {
         self.cached
     }
 
@@ -98,6 +102,40 @@ impl BlobCache for DummyCache {
         }
 
         Ok(())
+    }
+
+    fn read(&self, bios: &[BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize> {
+        if bios.is_empty() {
+            return Err(einval!("parameter `bios` is empty"));
+        }
+
+        let bios_len = bios.len();
+        let offset = bios[0].offset;
+        //let chunk = bios[0].chunkinfo.as_v5()?;
+        let d_size = bios[0].chunkinfo.decompress_size() as usize;
+        // Use the destination buffer to received the decompressed data if possible.
+        if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
+            if !bios[0].user_io {
+                return Ok(0);
+            }
+            let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
+            return self.read_raw_chunk(&bios[0].chunkinfo, buf, None);
+        }
+
+        let mut user_size = 0;
+        let mut buffer_holder: Vec<Vec<u8>> = Vec::with_capacity(bios.len());
+        for bio in bios.iter() {
+            if bio.user_io {
+                let mut d = alloc_buf(bio.chunkinfo.decompress_size() as usize);
+                self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), None)?;
+                buffer_holder.push(d);
+                user_size += bio.size;
+            }
+        }
+
+        copyv(&buffer_holder, bufs, offset as usize, user_size, 0, 0)
+            .map(|(n, _)| n)
+            .map_err(|e| eother!(e))
     }
 }
 
@@ -242,8 +280,8 @@ mod v5 {
                     continue;
                 }
 
-                let mut d = alloc_buf(chunk.decompress_size() as usize);
                 let chunk = bio.chunkinfo.as_v5()?;
+                let mut d = alloc_buf(chunk.decompress_size() as usize);
                 self.read_backend_chunk(&bio.blob, chunk.as_ref(), d.as_mut_slice(), None)?;
                 buffer_holder.push(d);
                 user_size += bio.size;
