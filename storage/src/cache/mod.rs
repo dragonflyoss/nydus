@@ -16,13 +16,14 @@
 //!   `BlobCacheMgr`, simply reporting each chunk as cached or not cached according to
 //!   configuration.
 
+use std::fmt::{Debug, Formatter};
 use std::io::Result;
 use std::sync::Arc;
 
 use nydus_utils::digest;
 
 use crate::backend::BlobBackend;
-use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobPrefetchRequest};
+use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobPrefetchRequest};
 use crate::{compress, StorageResult};
 
 //pub mod blobcache;
@@ -50,11 +51,77 @@ impl ChunkSegment {
 
 /// Struct to maintain information about chunk IO operation.
 #[derive(Clone, Debug)]
-pub enum ChunkIoInfo {
+enum ChunkIoTag {
     /// Io requests to fulfill user requests.
     User(ChunkSegment),
     /// Io requests to fulfill internal requirements with (Chunk index, blob/compressed offset).
-    Internal(u32, u64),
+    Internal(Arc<BlobInfo>, u64),
+}
+
+/// Struct to merge multiple continuous chunk IO as one storage backend request.
+///
+/// For network based remote storage backend, such as Registry/OS, it may have limited IOPs
+/// due to high request round-trip time, but have enough network bandwidth. In such cases,
+/// it may help to improve performance by merging multiple continuous and small chunk IO
+/// requests into one big backend request.
+#[derive(Default, Clone)]
+struct ChunkIoMerged {
+    pub blob_info: Arc<BlobInfo>,
+    pub blob_offset: u64,
+    pub blob_size: u64,
+    pub chunks: Vec<BlobIoChunk>,
+    pub chunk_tags: Vec<ChunkIoTag>,
+}
+
+impl Debug for ChunkIoMerged {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        f.debug_struct("MergedBackendRequest")
+            .field("blob id", &self.blob_info.blob_id())
+            .field("blob offset", &self.blob_offset)
+            .field("blob size", &self.blob_size)
+            .field("chunk tags", &self.chunk_tags)
+            .finish()
+    }
+}
+
+impl ChunkIoMerged {
+    pub fn new(blob_info: Arc<BlobInfo>, cki: BlobIoChunk, bio: &BlobIoDesc) -> Self {
+        let blob_size = cki.compress_size() as u64;
+        let blob_offset = cki.compress_offset();
+        let tag = if bio.user_io {
+            ChunkIoTag::User(ChunkSegment::new(bio.offset, bio.size as u32))
+        } else {
+            ChunkIoTag::Internal(blob_info.clone(), cki.compress_offset())
+        };
+
+        assert!(blob_offset.checked_add(blob_size).is_some());
+
+        ChunkIoMerged {
+            blob_info,
+            blob_offset,
+            blob_size,
+            chunks: vec![cki],
+            chunk_tags: vec![tag],
+        }
+    }
+
+    pub fn merge(&mut self, cki: BlobIoChunk, bio: &BlobIoDesc) {
+        assert_eq!(
+            self.blob_offset.checked_add(self.blob_size),
+            Some(cki.compress_offset())
+        );
+        self.blob_size += cki.compress_size() as u64;
+        assert!(self.blob_offset.checked_add(self.blob_size).is_some());
+
+        let tag = if bio.user_io {
+            ChunkIoTag::User(ChunkSegment::new(bio.offset, bio.size as u32))
+        } else {
+            ChunkIoTag::Internal(self.blob_info.clone(), cki.compress_offset())
+        };
+
+        self.chunks.push(cki);
+        self.chunk_tags.push(tag);
+    }
 }
 
 /// Configuration information for blob data prefetching.
@@ -124,7 +191,6 @@ pub trait BlobCacheMgr: Send + Sync {
 /// Blob cache manager to access Rafs V5 images.
 pub mod v5 {
     use std::cmp;
-    use std::fmt::Debug;
     use std::fs::File;
     use std::slice;
 
@@ -132,7 +198,6 @@ pub mod v5 {
 
     use super::*;
     use crate::device::v5::BlobV5ChunkInfo;
-    use crate::device::BlobIoDesc;
     use crate::utils::{alloc_buf, digest_check};
 
     //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -311,70 +376,5 @@ pub mod v5 {
             Ok(d_size)
         }
     }
-
-    #[derive(Default, Clone)]
-    pub(crate) struct MergedBackendRequest {
-        // Chunks that are continuous to each other.
-        pub chunks: Vec<Arc<dyn BlobV5ChunkInfo>>,
-        pub chunk_tags: Vec<ChunkIoInfo>,
-        pub blob_offset: u64,
-        pub blob_size: u32,
-        pub blob_entry: Arc<BlobInfo>,
-    }
-
-    impl Debug for MergedBackendRequest {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.debug_struct("MergedBackendRequest")
-                .field("blob index", &self.blob_entry.blob_index())
-                .field("chunk tags", &self.chunk_tags)
-                .field("blob offset", &self.blob_offset)
-                .field("blob size", &self.blob_size)
-                .finish()
-        }
-    }
-
-    impl MergedBackendRequest {
-        pub(crate) fn new(
-            first_cki: Arc<dyn BlobV5ChunkInfo>,
-            blob: Arc<BlobInfo>,
-            bio: &BlobIoDesc,
-        ) -> Self {
-            let mut chunks = Vec::<Arc<dyn BlobV5ChunkInfo>>::new();
-            let mut tags: Vec<ChunkIoInfo> = Vec::new();
-            let blob_size = first_cki.compress_size();
-            let blob_offset = first_cki.compress_offset();
-
-            let tag = if bio.user_io {
-                ChunkIoInfo::User(ChunkSegment::new(bio.offset, bio.size as u32))
-            } else {
-                ChunkIoInfo::Internal(first_cki.index(), first_cki.compress_offset())
-            };
-
-            chunks.push(first_cki);
-
-            tags.push(tag);
-
-            MergedBackendRequest {
-                blob_offset,
-                blob_size,
-                chunks,
-                chunk_tags: tags,
-                blob_entry: blob,
-            }
-        }
-
-        pub(crate) fn merge_one_chunk(&mut self, cki: Arc<dyn BlobV5ChunkInfo>, bio: &BlobIoDesc) {
-            self.blob_size += cki.compress_size();
-
-            let tag = if bio.user_io {
-                ChunkIoInfo::User(ChunkSegment::new(bio.offset, bio.size as u32))
-            } else {
-                ChunkIoInfo::Internal(cki.index(), cki.compress_offset())
-            };
-
-            self.chunks.push(cki);
-            self.chunk_tags.push(tag);
-        }
-    }
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
