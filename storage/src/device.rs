@@ -3,13 +3,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provide public data structures for clients to issue blob IO requests.
+//! Blob Storage Public Service APIs
 //!
-//! This module provides public data structures for clients to issue blob IO requests. The main
-//! traits and structs provided include:
+//! The core functionality of the nydus-storage crate is to serve blob IO request, mainly read chunk
+//! data from blobs. This module provides public APIs and data structures for clients to issue blob
+//! IO requests. The main traits and structs provided include:
 //! - [BlobChunkInfo](trait.BlobChunkInfo.html): trait to provide basic information for a  chunk.
-//! - [BlobDevice](struct.BlobDevice.html): a wrapping object over an underlying [BlobCache] object
-//!   to serve blob data access requests.
+//! - [BlobDevice](struct.BlobDevice.html): a wrapping object over a group of underlying [BlobCache]
+//!   object to serve blob data access requests.
 //! - [BlobInfo](struct.BlobInfo.html): configuration information for a metadata/data blob object.
 //! - [BlobIoChunk](enum.BlobIoChunk.html): an enumeration to encapsulate different [BlobChunkInfo]
 //!   implementations for [BlobIoDesc].
@@ -54,7 +55,10 @@ impl Default for BlobVersion {
 /// and serve blob IO requests for clients.
 #[derive(Clone, Debug, Default)]
 pub struct BlobInfo {
+    /// Version of the Rafs filesystem.
     blob_version: BlobVersion,
+    /// The index of blob in RAFS blob table.
+    blob_index: u32,
     /// A sha256 hex string generally.
     blob_id: String,
     /// Size of the compressed blob file.
@@ -75,39 +79,47 @@ pub struct BlobInfo {
     readahead_size: u32,
     /// Whether to validate blob data.
     validate_data: bool,
-
-    /// V5: The index of blob in RAFS blob table.
-    blob_index: u32,
 }
 
 impl BlobInfo {
     /// Create a new instance of `BlobInfo`.
     pub fn new(
-        version: BlobVersion,
-        id: String,
+        blob_version: BlobVersion,
+        blob_index: u32,
+        blob_id: String,
         decompressed_size: u64,
         compressed_size: u64,
         chunk_count: u32,
     ) -> Self {
         BlobInfo {
-            blob_version: version,
-            blob_id: id,
-            decompressed_size: decompressed_size,
-            compressed_size: compressed_size,
+            blob_version,
+            blob_index,
+            blob_id,
+            decompressed_size,
+            compressed_size,
             chunk_count,
+
             compressor: compress::Algorithm::None,
             digester: digest::Algorithm::Blake3,
-
             readahead_offset: 0,
             readahead_size: 0,
             validate_data: false,
-            blob_index: 0,
         }
+    }
+
+    /// Get the blob version number.
+    pub fn blob_version(&self) -> BlobVersion {
+        self.blob_version
     }
 
     /// Check whether it's a blob for Rafs V5 image.
     pub fn is_v5(&self) -> bool {
         self.blob_version == BlobVersion::V5
+    }
+
+    /// Get the blob index in the blob array.
+    pub fn blob_index(&self) -> u32 {
+        self.blob_index
     }
 
     /// Get the id of the blob.
@@ -135,19 +147,19 @@ impl BlobInfo {
         self.compressor
     }
 
+    /// Set compression algorithm for the blob.
+    pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
+        self.compressor = compressor;
+    }
+
     /// Get the message digest algorithm for the blob.
     pub fn digester(&self) -> digest::Algorithm {
         self.digester
     }
 
-    /// Check blob data validation configuration.
-    pub fn validate_data(&self) -> bool {
-        self.validate_data
-    }
-
-    /// Enable blob data validation
-    pub fn enable_data_validation(&mut self, validate: bool) {
-        self.validate_data = validate;
+    /// Set compression algorithm for the blob.
+    pub fn set_digestor(&mut self, digester: digest::Algorithm) {
+        self.digester = digester;
     }
 
     /// Get blob data prefetching offset.
@@ -169,14 +181,14 @@ impl BlobInfo {
         self.readahead_size = size as u32;
     }
 
-    /// Get the blob index in Rafs v5 metadata's blob array.
-    pub fn blob_index(&self) -> u32 {
-        self.blob_index
+    /// Check blob data validation configuration.
+    pub fn validate_data(&self) -> bool {
+        self.validate_data
     }
 
-    /// Set the blob index in Rafs v5 metadata's blob array.
-    pub fn set_blob_index(&mut self, blob_index: u32) {
-        self.blob_index = blob_index;
+    /// Enable blob data validation
+    pub fn enable_data_validation(&mut self, validate: bool) {
+        self.validate_data = validate;
     }
 
     /// Check whether the Rafs v5 metadata blob has extended blob table.
@@ -412,43 +424,63 @@ pub struct BlobPrefetchRequest {
 /// [update()]() is added to switch the storage backend on demand.
 #[derive(Clone)]
 pub struct BlobDevice {
-    cache: ArcSwap<Arc<dyn BlobCache>>,
+    //meta: ArcSwap<Arc<dyn BlobCache>>,
+    blobs: ArcSwap<Vec<Arc<dyn BlobCache>>>,
+    blob_count: usize,
 }
 
 impl BlobDevice {
     /// Create new blob device instance.
-    pub fn new(config: &Arc<FactoryConfig>, blob_info: &Arc<BlobInfo>) -> io::Result<BlobDevice> {
+    pub fn new(
+        config: &Arc<FactoryConfig>,
+        blob_infos: &[Arc<BlobInfo>],
+    ) -> io::Result<BlobDevice> {
+        let mut blobs = Vec::with_capacity(blob_infos.len());
+        for blob_info in blob_infos.iter() {
+            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            blobs.push(blob);
+        }
+
         Ok(BlobDevice {
-            cache: ArcSwap::new(Arc::new(BLOB_FACTORY.new_blob_cache(config, blob_info)?)),
+            blobs: ArcSwap::new(Arc::new(blobs)),
+            blob_count: blob_infos.len(),
         })
     }
 
-    /// Update configuration of the Rafs v5 blob object.
+    /// Update configuration and storage backends of the blob device.
     ///
     /// The `update()` method switch a new storage backend object according to the configuration
     /// information passed in.
-    pub fn update(&self, config: &Arc<FactoryConfig>, blob_info: &Arc<BlobInfo>) -> io::Result<()> {
-        let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+    pub fn update(
+        &self,
+        config: &Arc<FactoryConfig>,
+        blob_infos: &[Arc<BlobInfo>],
+    ) -> io::Result<()> {
+        if self.blobs.load().len() != blob_infos.len() {
+            return Err(einval!("number of blobs doesn't match"));
+        }
+        let mut blobs = Vec::with_capacity(blob_infos.len());
+        for blob_info in blob_infos.iter() {
+            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            blobs.push(blob);
+        }
 
         // Stop prefetch if it is running before swapping backend since prefetch threads cloned
-        // Arc<Cache>, the swap operation can't drop inner object completely.
+        // Arc<BlobCache>, the swap operation can't drop inner object completely.
         // Otherwise prefetch threads will be leaked.
-        self.cache
-            .load()
-            .stop_prefetch()
-            .unwrap_or_else(|e| error!("{:?}", e));
-        self.cache.store(Arc::new(blob));
+        for blob in self.blobs.load().iter() {
+            blob.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
+        }
+
+        self.blobs.store(Arc::new(blobs));
 
         Ok(())
     }
 
-    /// Close the Rafs v5 blob device.
-    pub fn close(&self, stop_prefetching: bool) -> io::Result<()> {
-        if stop_prefetching {
-            self.cache
-                .load()
-                .stop_prefetch()
-                .unwrap_or_else(|e| error!("{:?}", e));
+    /// Close the blob device.
+    pub fn close(&self) -> io::Result<()> {
+        for blob in self.blobs.load().iter() {
+            blob.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
         }
 
         Ok(())
@@ -456,25 +488,44 @@ impl BlobDevice {
 
     /// Read a range of data from blob into the provided writer
     pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: &mut BlobIoVec) -> io::Result<usize> {
-        let size = desc.bi_size;
-        let mut f = BlobDeviceIoVec::new(desc, self);
+        // Validate that:
+        // - bi_vec[0] is valid
+        // - bi_vec[0].blob.blob_index() is valid
+        // - all IOs are against a single blob.
+        if desc.bi_vec.len() == 0 {
+            if desc.bi_size == 0 {
+                return Ok(0);
+            } else {
+                return Err(einval!("BlobIoVec size doesn't match."));
+            };
+        } else if desc.bi_vec.len() > 1 {
+            if desc.bi_vec[0].blob.blob_index() as usize >= self.blob_count {
+                return Err(einval!("BlobIoVec has out of range blob_index."));
+            }
+            for i in 0..desc.bi_vec.len() - 1 {
+                if desc.bi_vec[i].blob.blob_index() != desc.bi_vec[i + 1].blob.blob_index() {
+                    return Err(einval!("BlobIoVec targets multiple blobs."));
+                }
+            }
+        }
+
+        let mut f = BlobDeviceIoVec::new(self, desc);
+
         // The `off` parameter to w.write_from() is actually ignored by
         // BlobV5IoVec::read_vectored_at_volatile()
-        let count = w.write_from(&mut f, size, 0)?;
-
-        Ok(count)
+        w.write_from(&mut f, desc.bi_size, 0)
     }
 }
 
-/// Struct to execute Io requests with a Rafs v5 blob object.
+/// Struct to execute Io requests with a single blob.
 struct BlobDeviceIoVec<'a> {
     dev: &'a BlobDevice,
-    desc: &'a mut BlobIoVec,
+    desc: &'a BlobIoVec,
 }
 
 impl<'a> BlobDeviceIoVec<'a> {
-    fn new(desc: &'a mut BlobIoVec, b: &'a BlobDevice) -> Self {
-        BlobDeviceIoVec { desc, dev: b }
+    fn new(dev: &'a BlobDevice, desc: &'a BlobIoVec) -> Self {
+        BlobDeviceIoVec { dev, desc }
     }
 }
 
@@ -523,7 +574,14 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         bufs: &[VolatileSlice],
         _offset: u64,
     ) -> Result<usize, Error> {
-        self.dev.cache.load().read(&mut self.desc.bi_vec, bufs)
+        // BlobDevice::read_to() has validated that:
+        // - bi_vec[0] is valid
+        // - bi_vec[0].blob.blob_index() is valid
+        // - all IOs are against a single blob.
+        let index = self.desc.bi_vec[0].blob.blob_index();
+        let blobs = &self.dev.blobs.load();
+
+        blobs[index as usize].read(&self.desc.bi_vec, bufs)
     }
 
     fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
