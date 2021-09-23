@@ -879,6 +879,7 @@ pub trait RafsInode {
     fn get_child_by_index(&self, idx: Inode) -> Result<Arc<dyn RafsInode>>;
     fn get_child_index(&self) -> Result<u32>;
     fn get_child_count(&self) -> u32;
+    fn get_chunk_count(&self) -> u32;
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>>;
     fn has_xattr(&self) -> bool;
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;

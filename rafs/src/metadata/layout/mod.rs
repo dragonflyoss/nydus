@@ -3,6 +3,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Rafs filesystem metadata layout and data structures.
+
 use std::convert::TryInto;
 use std::ffi::OsStr;
 use std::io::Result;
@@ -11,16 +13,23 @@ use std::os::unix::ffi::OsStrExt;
 
 use fuse_backend_rs::abi::linux_abi::ROOT_ID;
 
+/// Version number for Rafs v4.
 pub const RAFS_SUPER_VERSION_V4: u32 = 0x400;
+/// Version number for Rafs v5.
 pub const RAFS_SUPER_VERSION_V5: u32 = 0x500;
+/// Minimal version of Rafs supported.
 pub const RAFS_SUPER_MIN_VERSION: u32 = RAFS_SUPER_VERSION_V4;
+/// Inode number for Rafs root inode.
 pub const RAFS_ROOT_INODE: u64 = ROOT_ID;
 
+/// Type for filesystem xattr attribute key.
 pub type XattrName = Vec<u8>;
+/// Type for filesystem xattr attribute value.
 pub type XattrValue = Vec<u8>;
 
 pub mod v5;
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! impl_bootstrap_converter {
     ($T: ty) => {
@@ -72,6 +81,7 @@ macro_rules! impl_bootstrap_converter {
     };
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! impl_pub_getter_setter {
     ($G: ident, $S: ident, $F: ident, $U: ty) => {

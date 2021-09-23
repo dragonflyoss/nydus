@@ -7,7 +7,7 @@
 //! The Rafs filesystem is blob based filesystem with chunk deduplication. A Rafs filesystem is
 //! composed up of a metadata blob and zero or more data blobs. A blob is just a plain object
 //! storage containing data chunks. Data chunks may be compressed, encrypted and deduplicated by
-//! contest digest value. When Rafs file is used for container images, Rafs metadata blob contains
+//! content digest value. When Rafs file is used for container images, Rafs metadata blob contains
 //! all filesystem metadatas, such as directory, file name, permission etc. Actually file contents
 //! are split into chunks and stored into data blobs. Rafs may built one data blob for each
 //! container image layer or build a  single data blob for the whole image, according to building

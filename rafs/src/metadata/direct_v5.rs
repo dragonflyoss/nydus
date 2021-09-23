@@ -34,7 +34,7 @@ use storage::device::BlobIoVec;
 use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_desc, rafsv5_validate_digest, BlobChunkFlags, BlobInfo,
+    rafsv5_align, rafsv5_alloc_bio_vecs, rafsv5_validate_digest, BlobChunkFlags, BlobInfo,
     BlobV5ChunkInfo, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeOps,
     RafsV5InodeTable, RafsV5XAttrsTable, RAFSV5_ALIGNMENT, RAFSV5_SUPERBLOCK_SIZE,
 };
@@ -655,6 +655,11 @@ impl RafsInode for OndiskInodeWrapper {
         inode.i_child_count
     }
 
+    #[inline]
+    fn get_chunk_count(&self) -> u32 {
+        self.get_chunk_count()
+    }
+
     /// Get chunk information with index `idx`
     ///
     /// # Safety
@@ -751,7 +756,7 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
-        rafsv5_alloc_bio_desc(self, offset, size, user_io)
+        rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
     impl_inode_wrapper!(is_dir, bool);
@@ -773,7 +778,7 @@ impl RafsV5InodeOps for OndiskInodeWrapper {
         self.state().blob_table.get(idx)
     }
 
-    fn get_blocksize(&self) -> u32 {
+    fn get_chunk_size(&self) -> u32 {
         self.mapping.state.load().meta.block_size
     }
 

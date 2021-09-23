@@ -346,7 +346,7 @@ pub struct BlobIoDesc {
     /// Size of the IO operation
     pub size: usize,
     /// Block size to read in one shot.
-    pub blksize: u32,
+    pub chunk_size: u32,
     /// Whether it's a user initiated IO, otherwise is a storage system internal IO.
     ///
     /// It might be initiated by user io amplification. With this flag, lower device
@@ -361,7 +361,7 @@ impl BlobIoDesc {
         chunkinfo: BlobIoChunk,
         offset: u32,
         size: usize,
-        blksize: u32,
+        chunk_size: u32,
         user_io: bool,
     ) -> Self {
         BlobIoDesc {
@@ -369,7 +369,7 @@ impl BlobIoDesc {
             blob,
             offset,
             size,
-            blksize,
+            chunk_size,
             user_io,
         }
     }

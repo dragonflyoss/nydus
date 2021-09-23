@@ -883,10 +883,11 @@ impl FileSystem for Rafs {
     }
 }
 
-#[cfg(test)]
+#[cfg(test1)]
 mod tests {
     use super::*;
     use std::convert::TryInto;
+    use storage::RAFS_MAX_BLOCK_SIZE;
 
     fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"

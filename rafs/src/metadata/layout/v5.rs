@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! RAFS on disk layout structures.
+//! RAFS v5 on disk layout structures.
 //!
 //! # RAFS File System Meta Data Format Version 5
 //! Previously RAFS has different formats for on disk meta data and runtime meta data. So when
@@ -69,14 +69,22 @@ const RAFSV5_SUPERBLOCK_RESERVED_SIZE: usize = RAFSV5_SUPERBLOCK_SIZE - 80;
 const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
 const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
 
+/// Trait to get information about a Rafs v5 inode.
 pub(crate) trait RafsV5InodeOps {
-    fn get_blob_by_index(&self, idx: u32) -> Result<Arc<BlobInfo>>;
-    fn get_blocksize(&self) -> u32;
+    /// Get the `BlobInfo` object corresponding to the `blob_index`.
+    fn get_blob_by_index(&self, blob_index: u32) -> Result<Arc<BlobInfo>>;
+
+    /// Get chunk size for the inode.
+    fn get_chunk_size(&self) -> u32;
+
+    /// Check whether the inode has hole chunk.
     fn has_hole(&self) -> bool;
+
+    /// Convert to the on disk data format.
     fn cast_ondisk(&self) -> Result<RafsV5Inode>;
 }
 
-/// RAFS SuperBlock on disk data format, 8192 bytes.
+/// Rafs v5 superblock on disk metadata, 8192 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RafsV5SuperBlock {
@@ -114,10 +122,12 @@ pub struct RafsV5SuperBlock {
 }
 
 impl RafsV5SuperBlock {
+    /// Create a new instance of `RafsV5SuperBlock`.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Check whether it's a valid Rafs v5 super block.
     pub fn detect(&self) -> bool {
         self.magic() == RAFSV5_SUPER_MAGIC
             && self.version() >= RAFS_SUPER_VERSION_V4 as u32
@@ -125,6 +135,7 @@ impl RafsV5SuperBlock {
             && self.sb_size() == RAFSV5_SUPERBLOCK_SIZE as u32
     }
 
+    /// Validate the Rafs v5 super block.
     pub fn validate(&self) -> Result<()> {
         if self.magic() != RAFSV5_SUPER_MAGIC
             || self.version() < RAFS_SUPER_MIN_VERSION as u32
@@ -161,20 +172,24 @@ impl RafsV5SuperBlock {
         Ok(())
     }
 
+    /// Set compression algorithm to handle chunk of the Rafs filesystem.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         let c: RafsSuperFlags = compressor.into();
         self.s_flags |= c.bits();
     }
 
+    /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();
         self.s_flags |= c.bits();
     }
 
+    /// Enable explicit Uid/Gid feature.
     pub fn set_explicit_uidgid(&mut self) {
         self.s_flags |= RafsSuperFlags::EXPLICIT_UID_GID.bits();
     }
 
+    /// Enable support of filesystem xattr.
     pub fn set_has_xattr(&mut self) {
         self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
     }
@@ -229,6 +244,7 @@ impl RafsV5SuperBlock {
         u32
     );
 
+    /// Load a super block from a `RafsIoReader` object.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
     }
@@ -273,12 +289,15 @@ impl Display for RafsV5SuperBlock {
     }
 }
 
+/// Rafs v5 on disk inode offset table.
 #[derive(Clone, Default)]
 pub struct RafsV5InodeTable {
+    /// Inode offset array.
     pub data: Vec<u32>,
 }
 
 impl RafsV5InodeTable {
+    /// Create a new instance of `RafsV5InodeTable`.
     pub fn new(entries: usize) -> Self {
         let table_size = rafsv5_align(entries * size_of::<u32>()) / size_of::<u32>();
         RafsV5InodeTable {
@@ -286,21 +305,25 @@ impl RafsV5InodeTable {
         }
     }
 
+    /// Get size in bytes of the Rafs v5 inode table.
     #[inline]
     pub fn size(&self) -> usize {
         rafsv5_align(self.data.len() * size_of::<u32>())
     }
 
+    /// Get number of inodes in the table.
     #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Check whether the table is empty or not.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
+    /// Set inode offset in the metadata blob for an inode.
     pub fn set(&mut self, ino: Inode, offset: u32) -> Result<()> {
         if ino == 0 || ino > self.data.len() as u64 {
             return Err(einval!("invalid inode number"));
@@ -315,6 +338,7 @@ impl RafsV5InodeTable {
         Ok(())
     }
 
+    /// Get inode offset in the metadata blob of an inode.
     pub fn get(&self, ino: Inode) -> Result<u32> {
         if ino == 0 || ino > self.data.len() as u64 {
             return Err(enoent!());
@@ -328,6 +352,7 @@ impl RafsV5InodeTable {
         Ok((offset << 3) as u32)
     }
 
+    /// Load inode offset table for a `RafsIoReader` object.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         let (_, data, _) = unsafe { self.data.align_to_mut::<u8>() };
         r.read_exact(data)?;
@@ -344,14 +369,7 @@ impl RafsStore for RafsV5InodeTable {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct RafsV5PrefetchTable {
-    /// List of inode numbers for prefetch.
-    /// Note: It's not inode index of inodes table being stored here.
-    pub inodes: Vec<u32>,
-}
-
-/// Rafs v5 inode prefetch table on disk layout.
+/// Rafs v5 on disk inode prefetch table.
 ///
 /// From super block disk structure, its start offset can be told.
 /// In order not to load every meta/inode to page cache under rafs Direct
@@ -361,27 +379,40 @@ pub struct RafsV5PrefetchTable {
 /// For a single directory, only its inode index will be put into the table.
 /// But all of its descendants files(recursively) will be prefetch(by hint)
 /// when rafs is mounted at the very beginning.
+#[derive(Clone, Default)]
+pub struct RafsV5PrefetchTable {
+    /// List of inode numbers for prefetch.
+    /// Note: It's not inode index of inodes table being stored here.
+    pub inodes: Vec<u32>,
+}
+
 impl RafsV5PrefetchTable {
+    /// Create a new instance of `RafsV5PrefetchTable`.
     pub fn new() -> RafsV5PrefetchTable {
         RafsV5PrefetchTable { inodes: vec![] }
     }
 
+    /// Get content size of the inode prefetch table.
     pub fn size(&self) -> usize {
         rafsv5_align(self.len() * size_of::<u32>())
     }
 
+    /// Get number of entries in the prefetch table.
     pub fn len(&self) -> usize {
         self.inodes.len()
     }
 
+    /// Check whether the inode prefetch table is empty.
     pub fn is_empty(&self) -> bool {
         self.inodes.is_empty()
     }
 
+    /// Add an inode into the inode prefetch table.
     pub fn add_entry(&mut self, ino: u32) {
         self.inodes.push(ino);
     }
 
+    /// Store the inode prefetch table to a writer.
     pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
         // Sort prefetch table by inode index, hopefully, it can save time when mounting rafs
         // Because file data is dumped in the order of inode index.
@@ -399,6 +430,8 @@ impl RafsV5PrefetchTable {
         Ok(data.len() + padding_bytes)
     }
 
+    /// Load a inode prefetch table from a reader.
+    ///
     /// Note: Generally, prefetch happens after loading bootstrap, so with methods operating
     /// files with changing their offset won't bring errors. But we still use `pread` now so as
     /// to make this method more stable and robust. Even dup(2) can't give us a separated file struct.
@@ -414,17 +447,20 @@ impl RafsV5PrefetchTable {
     }
 }
 
-// TODO: FIXME: This is not a well defined disk structure
+// A helper struct to extract blob table entries from disk.
+struct BlobEntryFrontPart(u32, u32);
+
+/// Rafs v5 blob description table.
 #[derive(Clone, Debug, Default)]
 pub struct RafsV5BlobTable {
+    /// Base blob information array.
     pub entries: Vec<Arc<BlobInfo>>,
+    /// Extended blob information array.
     pub extended: RafsV5ExtBlobTable,
 }
 
-// A helper to extract blob table entries from disk.
-struct BlobEntryFrontPart(u32, u32);
-
 impl RafsV5BlobTable {
+    /// Create a new instance of `RafsV5BlobTable`.
     pub fn new() -> Self {
         RafsV5BlobTable {
             entries: Vec::new(),
@@ -446,22 +482,23 @@ impl RafsV5BlobTable {
         )
     }
 
+    /// Add information for new blob into the blob information table.
     pub fn add(
         &mut self,
         blob_id: String,
         readahead_offset: u32,
         readahead_size: u32,
         chunk_count: u32,
-        blob_cache_size: u64,
-        compressed_blob_size: u64,
+        uncompressed_size: u64,
+        compressed_size: u64,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         let mut blob_info = BlobInfo::new(
             BlobVersion::V5,
             blob_index,
             blob_id,
-            blob_cache_size,
-            compressed_blob_size,
+            uncompressed_size,
+            compressed_size,
             chunk_count,
         );
 
@@ -469,10 +506,12 @@ impl RafsV5BlobTable {
         blob_info.set_blob_index(blob_index);
         self.entries.push(Arc::new(blob_info));
         self.extended
-            .add(chunk_count, blob_cache_size, compressed_blob_size);
+            .add(chunk_count, uncompressed_size, compressed_size);
+
         blob_index
     }
 
+    /// Get base information for a blob.
     #[inline]
     pub fn get(&self, blob_index: u32) -> Result<Arc<BlobInfo>> {
         if blob_index >= self.entries.len() as u32 {
@@ -481,8 +520,7 @@ impl RafsV5BlobTable {
         Ok(self.entries[blob_index as usize].clone())
     }
 
-    // The goal is to fill `entries` according to blob table. If it is zero-sized,
-    // just return Ok.
+    /// Load blob information table from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader, blob_table_size: u32) -> Result<()> {
         if blob_table_size == 0 {
             return Ok(());
@@ -513,7 +551,7 @@ impl RafsV5BlobTable {
 
             // Excluding trailing '\0'.
             // Note: we can't use string.len() to move pointer.
-            let bytes_len = pointer_offset(id_offset, id_end) + 1;
+            let bytes_len = unsafe { pointer_offset(id_offset, id_end) } + 1;
 
             let id_bytes = unsafe { std::slice::from_raw_parts(id_offset, bytes_len) };
 
@@ -538,8 +576,8 @@ impl RafsV5BlobTable {
                     }
                     (
                         self.extended.entries[index].chunk_count,
-                        self.extended.entries[index].blob_cache_size,
-                        self.extended.entries[index].compressed_blob_size,
+                        self.extended.entries[index].uncompressed_size,
+                        self.extended.entries[index].compressed_size,
                     )
                 } else {
                     (0, 0, 0)
@@ -548,7 +586,7 @@ impl RafsV5BlobTable {
             let mut blob_info = BlobInfo::new(
                 BlobVersion::V5,
                 index as u32,
-                blob_id.to_ascii_uppercase(),
+                blob_id.to_owned(),
                 blob_cache_size,
                 compressed_blob_size,
                 chunk_count,
@@ -556,7 +594,8 @@ impl RafsV5BlobTable {
             blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
             self.entries.push(Arc::new(blob_info));
 
-            if rafsv5_align(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
+            let ptr_offset = unsafe { pointer_offset(begin_ptr, frame) };
+            if rafsv5_align(ptr_offset) as u32 >= blob_table_size {
                 break;
             }
         }
@@ -564,10 +603,12 @@ impl RafsV5BlobTable {
         Ok(())
     }
 
+    /// Get the base blob information array.
     pub fn get_all(&self) -> Vec<Arc<BlobInfo>> {
         self.entries.clone()
     }
 
+    /// Store the extended blob information array.
     pub fn store_extended(&self, w: &mut RafsIoWriter) -> Result<usize> {
         self.extended.store(w)
     }
@@ -577,7 +618,8 @@ impl RafsV5BlobTable {
         loop {
             let next_byte = unsafe { id_end.add(1) };
             // b'\0' is the splitter
-            if unsafe { *next_byte } == 0 || pointer_offset(begin_ptr, next_byte) >= total_size {
+            let ptr_offset = unsafe { pointer_offset(begin_ptr, next_byte) };
+            if unsafe { *next_byte } == 0 || ptr_offset >= total_size {
                 return id_end;
             }
 
@@ -613,6 +655,7 @@ impl RafsStore for RafsV5BlobTable {
     }
 }
 
+/// Rafs v5 extended blob information on disk metadata.
 /// RafsV5ExtDBlobEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
 // This disk structure is well defined and rafs aligned.
@@ -621,10 +664,9 @@ impl RafsStore for RafsV5BlobTable {
 pub struct RafsV5ExtBlobEntry {
     /// Number of chunks in a blob file.
     pub chunk_count: u32,
-    pub reserved1: [u8; 4], //   --  8 Bytes
-    /// The expected decompress size of blob cache file.
-    pub blob_cache_size: u64, // -- 16 Bytes
-    pub compressed_blob_size: u64, // -- 24 Bytes
+    pub reserved1: [u8; 4],     //   --  8 Bytes
+    pub uncompressed_size: u64, // -- 16 Bytes
+    pub compressed_size: u64,   // -- 24 Bytes
     pub reserved2: [u8; RAFSV5_EXT_BLOB_RESERVED_SIZE],
 }
 
@@ -634,8 +676,8 @@ impl Debug for RafsV5ExtBlobEntry {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         f.debug_struct("ExtendedBlobTableEntry")
             .field("chunk_count", &self.chunk_count)
-            .field("blob_cache_size", &self.blob_cache_size)
-            .field("compressed_blob_size", &self.compressed_blob_size)
+            .field("blob_cache_size", &self.uncompressed_size)
+            .field("compressed_blob_size", &self.compressed_size)
             .finish()
     }
 }
@@ -645,8 +687,8 @@ impl Default for RafsV5ExtBlobEntry {
         RafsV5ExtBlobEntry {
             chunk_count: 0,
             reserved1: [0; 4],
-            blob_cache_size: 0,
-            compressed_blob_size: 0,
+            uncompressed_size: 0,
+            compressed_size: 0,
             reserved2: [0; RAFSV5_EXT_BLOB_RESERVED_SIZE],
         }
     }
@@ -656,13 +698,14 @@ impl RafsV5ExtBlobEntry {
     pub fn new(chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) -> Self {
         Self {
             chunk_count,
-            blob_cache_size,
-            compressed_blob_size,
+            uncompressed_size: blob_cache_size,
+            compressed_size: compressed_blob_size,
             ..Default::default()
         }
     }
 }
 
+/// Rafs v5 on disk extended blob information table.
 #[derive(Clone, Debug, Default)]
 pub struct RafsV5ExtBlobTable {
     /// The vector index means blob index, every entry represents
@@ -671,22 +714,26 @@ pub struct RafsV5ExtBlobTable {
 }
 
 impl RafsV5ExtBlobTable {
+    /// Create a new instance of `RafsV5ExtBlobTable`.
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
     }
 
+    /// Get content size of the extended blob information table.
     pub fn size(&self) -> usize {
         // `ExtendedBlobTableEntry` is already a well defined disk structure and rafs-aligned
         // So directly use its `size_of()` is reliable.
         rafsv5_align(size_of::<RafsV5ExtBlobEntry>() * self.entries.len())
     }
 
+    /// Get number of entries in the extended blob information table.
     pub fn entries(&self) -> usize {
         self.entries.len()
     }
 
+    /// Add a new entry into the extended blob information table.
     pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) {
         self.entries.push(Arc::new(RafsV5ExtBlobEntry::new(
             chunk_count,
@@ -695,6 +742,7 @@ impl RafsV5ExtBlobTable {
         )));
     }
 
+    /// Get extended information about a blob.
     pub fn get(&self, blob_index: u32) -> Option<Arc<RafsV5ExtBlobEntry>> {
         let len = self.entries.len();
 
@@ -705,6 +753,7 @@ impl RafsV5ExtBlobTable {
         }
     }
 
+    /// Load extended blob information table from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader, count: usize) -> Result<()> {
         let mut entries = Vec::<RafsV5ExtBlobEntry>::with_capacity(count);
         // Safe because it is already reserved enough space
@@ -731,8 +780,8 @@ impl RafsStore for RafsV5ExtBlobTable {
             .try_for_each::<_, Result<()>>(|(_idx, entry)| {
                 w.write_all(&u32::to_le_bytes(entry.chunk_count))?;
                 w.write_all(&entry.reserved1)?;
-                w.write_all(&u64::to_le_bytes(entry.blob_cache_size))?;
-                w.write_all(&u64::to_le_bytes(entry.compressed_blob_size))?;
+                w.write_all(&u64::to_le_bytes(entry.uncompressed_size))?;
+                w.write_all(&u64::to_le_bytes(entry.compressed_size))?;
                 w.write_all(&entry.reserved2)?;
                 size += size_of::<u32>()
                     + entry.reserved1.len()
@@ -751,6 +800,7 @@ impl RafsStore for RafsV5ExtBlobTable {
 }
 
 bitflags! {
+    /// Rafs v5 inode flags.
     pub struct RafsV5InodeFlags: u64 {
         /// Inode is a symlink.
         const SYMLINK = 0x0000_0001;
@@ -769,7 +819,7 @@ impl Default for RafsV5InodeFlags {
     }
 }
 
-/// Rafs v5 inode on disk layout.
+/// Rafs v5 inode on disk metadata.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RafsV5Inode {
@@ -805,20 +855,24 @@ pub struct RafsV5Inode {
 }
 
 impl RafsV5Inode {
+    /// Create a new instance of `RafsV5Inode`.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set size of the file name.
     #[inline]
     pub fn set_name_size(&mut self, name_len: usize) {
         self.i_name_size = name_len as u16;
     }
 
+    /// Mark the inode as a symlink.
     #[inline]
     pub fn set_symlink_size(&mut self, symlink_len: usize) {
         self.i_symlink_size = symlink_len as u16;
     }
 
+    /// Get on disk size of the inode content.
     #[inline]
     pub fn size(&self) -> usize {
         size_of::<Self>()
@@ -826,40 +880,48 @@ impl RafsV5Inode {
                 as usize
     }
 
+    /// Load an inode from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
     }
 
+    /// Check whether the inode is a directory.
     #[inline]
     pub fn is_dir(&self) -> bool {
         self.i_mode & libc::S_IFMT == libc::S_IFDIR
     }
 
+    /// Check whether the inode is a symlink.
     #[inline]
     pub fn is_symlink(&self) -> bool {
         self.i_mode & libc::S_IFMT == libc::S_IFLNK
     }
 
+    /// Check whether the inode is a regular file.
     #[inline]
     pub fn is_reg(&self) -> bool {
         self.i_mode & libc::S_IFMT == libc::S_IFREG
     }
 
+    /// Check whether the inode is a hardlink.
     #[inline]
     pub fn is_hardlink(&self) -> bool {
         self.i_nlink > 1
     }
 
+    /// Mark the inode as having extended attributes.
     #[inline]
     pub fn has_xattr(&self) -> bool {
         self.i_flags.contains(RafsV5InodeFlags::XATTR)
     }
 
+    /// Mark the inode as having hole chunks.
     #[inline]
     pub fn has_hole(&self) -> bool {
         self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
     }
 
+    /// Set filename for the inode.
     pub fn file_name(&self, r: &mut RafsIoReader) -> Result<OsString> {
         let mut name_buf = vec![0u8; self.i_name_size as usize];
         r.read_exact(name_buf.as_mut_slice())?;
@@ -869,6 +931,7 @@ impl RafsV5Inode {
 
 impl_bootstrap_converter!(RafsV5Inode);
 
+/// A in-memory wrapper of a Rafs v5 inode.
 pub struct RafsV5InodeWrapper<'a> {
     pub name: &'a OsStr,
     pub symlink: Option<&'a OsStr>,
@@ -904,7 +967,7 @@ impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
     }
 }
 
-/// On disk Rafs data chunk information.
+/// Rafs v5 chunk on disk metadata.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct RafsV5ChunkInfo {
@@ -924,18 +987,19 @@ pub struct RafsV5ChunkInfo {
     pub uncompress_offset: u64, // 64
     /// offset in file
     pub file_offset: u64, // 72
-    /// chunk index, it's allocated sequentially
-    /// starting from 0 for one blob.
+    /// chunk index, it's allocated sequentially and starting from 0 for one blob.
     pub index: u32,
     /// reserved
     pub reserved: u32, //80
 }
 
 impl RafsV5ChunkInfo {
+    /// Create a new instance of `RafsV5ChunkInfo`.
     pub fn new() -> Self {
         RafsV5ChunkInfo::default()
     }
 
+    /// Load a Rafs v5 indoe from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
     }
@@ -968,7 +1032,10 @@ impl Display for RafsV5ChunkInfo {
     }
 }
 
-/// On disk xattr data.
+/// Rafs v5 on disk extended attribute table.
+///
+/// A on disk Rafs v5 extended attribute table contains an u64 content size, followed by extended
+/// attribute pairs.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct RafsV5XAttrsTable {
@@ -976,17 +1043,20 @@ pub struct RafsV5XAttrsTable {
 }
 
 impl RafsV5XAttrsTable {
+    /// Create a new instance of `RafsV5XAttrsTable`.
     pub fn new() -> Self {
         RafsV5XAttrsTable {
             ..Default::default()
         }
     }
 
+    /// Get content size of the extended attribute table.
     #[inline]
     pub fn size(self) -> usize {
         self.size as usize
     }
 
+    /// Get aligned content size of the extended attribute table.
     #[inline]
     pub fn aligned_size(self) -> usize {
         rafsv5_align(self.size())
@@ -995,18 +1065,23 @@ impl RafsV5XAttrsTable {
 
 impl_bootstrap_converter!(RafsV5XAttrsTable);
 
+/// Rafs v5 extended attributes.
+///
+/// An extended attribute is a (String, String) pair associated with a inode.
 #[derive(Clone, Default)]
 pub struct RafsV5XAttrs {
     pairs: HashMap<OsString, XattrValue>,
 }
 
 impl RafsV5XAttrs {
+    /// Create a new instance of `RafsV5Xattrs`.
     pub fn new() -> Self {
         Self {
             pairs: HashMap::new(),
         }
     }
 
+    /// Get size needed to store the extended attributes.
     pub fn size(&self) -> usize {
         let mut size: usize = 0;
 
@@ -1018,23 +1093,28 @@ impl RafsV5XAttrs {
         size
     }
 
+    /// Get aligned size needed to store the extended attributes.
     #[inline]
     pub fn aligned_size(&self) -> usize {
         rafsv5_align(self.size())
     }
 
+    /// Get extended attribute with  key `name`.
     pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
         self.pairs.get(name)
     }
 
+    /// Add or update an extended attribute.
     pub fn add(&mut self, name: OsString, value: XattrValue) {
         self.pairs.insert(name, value);
     }
 
+    /// Remove an extended attribute
     pub fn remove(&mut self, name: &OsStr) {
         self.pairs.remove(name);
     }
 
+    /// Check whether there's any extended attribute.
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
     }
@@ -1073,7 +1153,11 @@ impl RafsStore for RafsV5XAttrs {
     }
 }
 
-pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
+/// Allocate a group of `BlobIoVec` to handle blob io to range `offset..ofset + size`.
+///
+/// The range `offset..ofset + size` may be backed by multiple blobs, so a group of `BlobIoVec` will
+/// be returned on success, each one covers a continuous range on a single blob.
+pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeOps>(
     inode: &I,
     offset: u64,
     size: usize,
@@ -1082,22 +1166,30 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     let end = offset
         .checked_add(size as u64)
         .ok_or_else(|| einval!("invalid read size"))?;
-    let blksize = inode.get_blocksize() as u64;
+    let chunk_size = inode.get_chunk_size() as u64;
     let (index_start, index_end) = calculate_bio_chunk_index(
         offset,
         end,
-        blksize,
+        chunk_size,
         inode.get_child_count(),
         inode.has_hole(),
     );
     trace!("alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
-            offset, size, inode.size(), blksize, index_start, index_end, inode.get_child_count());
+            offset, size, inode.size(), chunk_size, index_start, index_end, inode.get_child_count());
 
     let mut descs = Vec::with_capacity(4);
     let mut desc = BlobIoVec::new();
     let chunk = inode.get_chunk_info(index_start)?;
     let blob = inode.get_blob_by_index(chunk.blob_index())?;
-    if !add_chunk_to_bio_desc(&mut desc, offset, end, chunk, blksize as u32, blob, user_io) {
+    if !add_chunk_to_bio_desc(
+        &mut desc,
+        offset,
+        end,
+        chunk,
+        chunk_size as u32,
+        blob,
+        user_io,
+    ) {
         return Err(einval!("failed to create blob io vector"));
     }
     for idx in index_start + 1..index_end {
@@ -1107,7 +1199,15 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
             descs.push(desc);
             desc = BlobIoVec::new();
         }
-        if !add_chunk_to_bio_desc(&mut desc, offset, end, chunk, blksize as u32, blob, user_io) {
+        if !add_chunk_to_bio_desc(
+            &mut desc,
+            offset,
+            end,
+            chunk,
+            chunk_size as u32,
+            blob,
+            user_io,
+        ) {
             return Err(einval!("failed to create blob io vector"));
         }
     }
@@ -1116,27 +1216,49 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     Ok(descs)
 }
 
-/// Add a new bio covering the IO range into the provided bio desc. Returns
-/// true if caller should continue checking more chunks.
+/// Allocate a `BlobIoVec` to handle blob io to range `offset..ofset + size`.
 ///
-/// offset: IO offset to the file start, inclusive.
-/// end: IO end to the file start, exclusive.
-/// chunk: a data chunk overlapping with the IO range.
-/// desc: the targeting bio desc.
-/// blksize: chunk size.
-/// blob_id: chunk data blob id.
+/// The range `offset..ofset + size` must be backed by a single blob.
+pub(crate) fn rafsv5_alloc_bio_vec<I: RafsInode + RafsV5InodeOps>(
+    inode: &I,
+    offset: u64,
+    size: usize,
+    user_io: bool,
+) -> Result<BlobIoVec> {
+    let mut vec = rafsv5_alloc_bio_vecs(inode, offset, size, user_io)?;
+
+    if vec.len() == 1 {
+        Ok(vec.remove(0))
+    } else {
+        Err(einval!("file range is backed by multiple blobs"))
+    }
+}
+
+/// Add a new bio covering the IO range into the provided bio desc.
+///
+/// Returns true if caller should continue checking more chunks.
+///
+/// # Parameters
+/// - desc: the targeting bio desc.
+/// - offset: IO offset to the file start, inclusive.
+/// - end: IO end to the file start, exclusive.
+/// - chunk: a data chunk overlapping with the IO range.
+/// - chunk_size: chunk size.
+/// - blob: the blob which the chunk data belongs to.
 fn add_chunk_to_bio_desc(
     desc: &mut BlobIoVec,
     offset: u64,
     end: u64,
     chunk: Arc<dyn BlobV5ChunkInfo>,
-    blksize: u32,
+    chunk_size: u32,
     blob: Arc<BlobInfo>,
     user_io: bool,
 ) -> bool {
+    // The chunk is ahead of the start of the range.
     if offset >= (chunk.file_offset() + chunk.uncompress_size() as u64) {
         return true;
     }
+    // The chunk is passing the end of the range.
     if end <= chunk.file_offset() {
         return false;
     }
@@ -1157,37 +1279,39 @@ fn add_chunk_to_bio_desc(
         chunk.into(),
         chunk_start as u32,
         (chunk_end - chunk_start) as usize,
-        blksize,
+        chunk_size,
         user_io,
     );
-
     desc.bi_size += bio.size;
     desc.bi_vec.push(bio);
+
     true
 }
 
 /// Calculate bio chunk indices that overlaps with the provided IO range.
 ///
-/// offset: IO offset to the file start, inclusive.
-/// end: IO end to the file start, exclusive.
-/// blksize: chunk block size.
-/// has_hole: whether a file has holes in it.
+/// # Parameters
+/// - offset: IO offset to the file start, inclusive.
+/// - end: IO end to the file start, exclusive.
+/// - chunk_size: chunk size.
+/// - chunk_cnt: maximum number of chunks
+/// - has_hole: whether a file has holes in it.
 fn calculate_bio_chunk_index(
     offset: u64,
     end: u64,
-    blksize: u64,
+    chunk_size: u64,
     chunk_cnt: u32,
     has_hole: bool,
 ) -> (u32, u32) {
     debug_assert!(offset < end);
 
     let index_start = if !has_hole {
-        (offset / blksize) as u32
+        (offset / chunk_size) as u32
     } else {
         0
     };
     let index_end = if !has_hole {
-        cmp::min(((end - 1) / blksize) as u32 + 1, chunk_cnt)
+        cmp::min(((end - 1) / chunk_size) as u32 + 1, chunk_cnt)
     } else {
         chunk_cnt
     };
@@ -1255,7 +1379,8 @@ pub(crate) fn rafsv5_validate_digest(
     Ok(result)
 }
 
-fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
+// Safety: the caller must ensure `later_ptr` is bigger than `former_ptr`.
+unsafe fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
     // Rust provides unsafe method `offset_from` from 1.47.0
     // Hopefully, we can adopt it someday. For now, for compatibility, use blow trick.
     later_ptr as usize - former_ptr as usize
@@ -1267,6 +1392,7 @@ pub mod tests {
     use std::io::BufWriter;
     use std::io::{SeekFrom, Write};
 
+    use storage::device::BlobChunkInfo;
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
@@ -1331,9 +1457,9 @@ pub mod tests {
         }
 
         assert_eq!(first.bar, first.foo + 1);
-        assert_eq!(blob_table.entries[0].blob_id, first_id);
-        assert_eq!(blob_table.entries[1].blob_id, second_id);
-        assert_eq!(blob_table.entries[2].blob_id, third_id);
+        assert_eq!(blob_table.entries[0].blob_id(), first_id);
+        assert_eq!(blob_table.entries[1].blob_id(), second_id);
+        assert_eq!(blob_table.entries[2].blob_id(), third_id);
 
         blob_table.entries.truncate(0);
 
@@ -1347,7 +1473,7 @@ pub mod tests {
             .load(&mut file, (buffer.len() - 100) as u32)
             .unwrap();
 
-        assert_eq!(blob_table.entries[0].blob_id, first_id);
+        assert_eq!(blob_table.entries[0].blob_id(), first_id);
     }
 
     #[test]
@@ -1383,7 +1509,7 @@ pub mod tests {
         for i in 0..5 {
             assert_eq!(table.get(i).unwrap().chunk_count, i * 3);
             assert_eq!(table.get(i).unwrap().reserved1, [0u8; 4]);
-            assert_eq!(table.get(i).unwrap().blob_cache_size, 100);
+            assert_eq!(table.get(i).unwrap().uncompressed_size, 100);
             assert_eq!(
                 table.get(i).unwrap().reserved2,
                 [0u8; RAFSV5_EXT_BLOB_RESERVED_SIZE]
@@ -1411,22 +1537,35 @@ pub mod tests {
         }
     }
 
-    impl RafsV5ChunkInfo for MockChunkInfo {
-        fn block_id(&self) -> &RafsDigest {
+    impl BlobChunkInfo for MockChunkInfo {
+        fn chunk_id(&self) -> &RafsDigest {
             &self.block_id
         }
+
+        fn id(&self) -> u32 {
+            self.index
+        }
+
         fn is_compressed(&self) -> bool {
             self.flags.contains(BlobChunkFlags::COMPRESSED)
         }
+
         fn is_hole(&self) -> bool {
             self.flags.contains(BlobChunkFlags::HOLECHUNK)
         }
-        impl_getter!(blob_index, blob_index, u32);
-        impl_getter!(index, index, u32);
+
         impl_getter!(compress_offset, compress_offset, u64);
         impl_getter!(compress_size, compress_size, u32);
         impl_getter!(uncompress_offset, uncompress_offset, u64);
         impl_getter!(uncompress_size, uncompress_size, u32);
+    }
+
+    impl BlobV5ChunkInfo for MockChunkInfo {
+        fn as_base(&self) -> &dyn BlobChunkInfo {
+            self
+        }
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(index, index, u32);
         impl_getter!(file_offset, file_offset, u64);
         impl_getter!(flags, flags, BlobChunkFlags);
     }
@@ -1464,23 +1603,16 @@ pub mod tests {
 
         for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
             let mut desc = BlobIoVec::new();
-            let res = add_chunk_to_bio_desc(
-                *offset,
-                *end,
-                Arc::new(chunk),
-                &mut desc,
-                100,
-                Arc::new(BlobInfo {
-                    chunk_count: 0,
-                    readahead_offset: 0,
-                    readahead_size: 0,
-                    blob_id: String::from("blobid"),
-                    blob_index: 0,
-                    blob_uncompressed_size: 0,
-                    blob_compressed_size: 0,
-                }),
-                true,
-            );
+            let blob = Arc::new(BlobInfo::new(
+                BlobVersion::V5,
+                0,
+                String::from("blobid"),
+                0,
+                0,
+                0,
+            ));
+            let res =
+                add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), 100, blob, true);
             assert_eq!(*result, res);
             if !desc.bi_vec.is_empty() {
                 assert_eq!(desc.bi_vec.len(), 1);
@@ -1535,5 +1667,14 @@ pub mod tests {
             assert_eq!(start, *expected_start);
             assert_eq!(end, *expected_end as u32);
         }
+    }
+
+    #[test]
+    fn test_rafsv5_align() {
+        assert_eq!(rafsv5_align(0), 0);
+        assert_eq!(rafsv5_align(1), 8);
+        assert_eq!(rafsv5_align(7), 8);
+        assert_eq!(rafsv5_align(8), 8);
+        assert_eq!(rafsv5_align(9), 16);
     }
 }

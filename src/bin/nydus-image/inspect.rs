@@ -593,8 +593,8 @@ Blocks:             {blocks}"#,
             for (i, b) in blobs.entries.iter().enumerate() {
                 let (decompressed_size, compressed_size) = if let Some(et) = extended {
                     (
-                        Some(et.entries[i].blob_cache_size),
-                        Some(et.entries[i].compressed_blob_size),
+                        Some(et.entries[i].uncompressed_size),
+                        Some(et.entries[i].compressed_size),
                     )
                 } else {
                     (None, None)
@@ -623,8 +623,8 @@ Blocks:             {blocks}"#,
                         r#"Cache Size:         {cache_size}
     Compressed Size:    {compressed_size}
     "#,
-                        cache_size = et.entries[i].blob_cache_size,
-                        compressed_size = et.entries[i].compressed_blob_size
+                        cache_size = et.entries[i].uncompressed_size,
+                        compressed_size = et.entries[i].compressed_size
                     )
                 }
             }

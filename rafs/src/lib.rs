@@ -2,17 +2,32 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! RAFS: an on-demand loading, chunk dedup, readonly fuse filesystem.
+//! RAFS: a chunk dedup, on-demand loading, readonly fuse filesystem.
 //!
-//! A RAFS filesystem image includes two types of components:
-//! - metadata blob: containing filesystem, directory and file metadata. There's only one metadata
-//!   blob for an RAFS filesystem.
-//! - data blob: containing actual file data. There may be 0, 1 or multiple data blobs for an RAFS
-//!   filesystem. And several RAFS filesystems may share one data blob.
+//! The Rafs filesystem is blob based readonly filesystem with chunk deduplication. A Rafs
+//! filesystem is composed up of a metadata blob and zero or more data blobs. A blob is just a
+//! plain object containing data chunks. Data chunks may be compressed, encrypted and deduplicated
+//! by chunk content digest value. When Rafs file is used for container images, Rafs metadata blob
+//! contains all filesystem metadatas, such as directory, file name, permission etc. Actually file
+//! contents are divided into chunks and stored into data blobs. Rafs may built one data blob for
+//! each container image layer or build a  single data blob for the whole image, according to
+//! building options.
 //!
-//! The metadata blob are pre-loaded when mounting the filesystem, and data blobs may be loaded
-//! on demand when the data is actually accessed.
-#![deny(warnings)]
+//! There are several versions of Rafs filesystem defined:
+//! - V4: the original Rafs filesystem format
+//! - V5: an optimized version based on V4 with metadata direct mapping, data prefetching etc.
+//! - V6: a redesigned version to reduce metadata blob size and inter-operable with in kernel erofs,
+//!   better support of virtio-fs.
+//!
+//! The nydus-rafs crate depends on the nydus-storage crate to access metadata and data blobs and
+//! improve performance by caching data on local storage. The nydus-rafs itself includes two main
+//! sub modules:
+//! - [fs](fs/index.html): the Rafs core to glue fuse, storage backend and filesystem metadata.
+//! - [metadata](rafs/metadata/index.html): defines and accesses Rafs filesystem metadata.
+//!
+//! For more information, please refer to
+//! [Dragonfly Image Service](https://github.com/dragonflyoss/image-service)
+
 #[macro_use]
 extern crate log;
 #[macro_use]
@@ -32,6 +47,7 @@ pub mod fs;
 pub mod metadata;
 pub mod mock;
 
+/// Error codes for rafs related operations.
 #[derive(Debug)]
 pub enum RafsError {
     Unsupported,
@@ -47,6 +63,7 @@ pub enum RafsError {
     Configure(String),
 }
 
+/// Speicialized version of std::result::Result<> for Rafs.
 pub type RafsResult<T> = std::result::Result<T, RafsError>;
 
 /// Handler to read file system bootstrap.
@@ -105,6 +122,7 @@ impl dyn RafsIoWrite {
 }
 
 impl dyn RafsIoRead {
+    /// Seek the reader to next aligned position.
     pub fn seek_to_next_aligned(&mut self, last_read_len: usize, alignment: usize) -> Result<u64> {
         let suffix = last_read_len & (alignment - 1);
         let offset = if suffix == 0 { 0 } else { alignment - suffix };
@@ -115,6 +133,7 @@ impl dyn RafsIoRead {
         })
     }
 
+    /// Move the reader current position forward with `plus_offset` bytes.
     pub fn seek_plus_offset(&mut self, plus_offset: i64) -> Result<u64> {
         // Seek should not fail otherwise rafs goes insane.
         self.seek(SeekFrom::Current(plus_offset)).map_err(|e| {
@@ -126,6 +145,7 @@ impl dyn RafsIoRead {
         })
     }
 
+    /// Seek the reader to the `offset`.
     pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
         self.seek(SeekFrom::Start(offset)).map_err(|e| {
             error!("Seeking to offset {} from start fails, {}", offset, e);
@@ -133,11 +153,44 @@ impl dyn RafsIoRead {
         })
     }
 
+    /// Create a reader from a file path.
     pub fn from_file(path: impl AsRef<Path>) -> RafsResult<RafsIoReader> {
         let f = File::open(&path).map_err(|e| {
             RafsError::ReadMetadata(e, path.as_ref().to_string_lossy().into_owned())
         })?;
 
         Ok(Box::new(f))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[test]
+    fn test_rafs_io_writer() {
+        let mut file = TempFile::new().unwrap().into_file();
+
+        assert!(file.validate_alignment(2, 8).is_err());
+        assert!(file.validate_alignment(7, 8).is_err());
+        assert!(file.validate_alignment(9, 8).is_err());
+        assert!(file.validate_alignment(8, 8).is_ok());
+
+        file.write(&[0x0u8; 7]).unwrap();
+        assert!(file.validate_alignment(8, 8).is_err());
+        {
+            let obj: &mut dyn RafsIoWrite = &mut file;
+            obj.write_padding(1);
+        }
+        assert!(file.validate_alignment(8, 8).is_ok());
+        file.write(&[0x0u8; 1]).unwrap();
+        assert!(file.validate_alignment(8, 8).is_err());
+
+        let obj: &mut dyn RafsIoRead = &mut file;
+        assert_eq!(obj.seek_to_offset(0).unwrap(), 0);
+        assert_eq!(obj.seek_plus_offset(7).unwrap(), 7);
+        assert_eq!(obj.seek_to_next_aligned(7, 8).unwrap(), 8);
+        assert_eq!(obj.seek_plus_offset(7).unwrap(), 15);
     }
 }
