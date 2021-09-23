@@ -122,6 +122,11 @@ impl BlobInfo {
         self.blob_index
     }
 
+    /// Set the blob index.
+    pub fn set_blob_index(&mut self, index: u32) {
+        self.blob_index = index;
+    }
+
     /// Get the id of the blob.
     pub fn blob_id(&self) -> &str {
         &self.blob_id

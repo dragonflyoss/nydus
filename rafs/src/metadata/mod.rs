@@ -556,8 +556,9 @@ impl RafsSuper {
                             }
                         }
                         let mut desc = i.alloc_bio_desc(0, i.size() as usize, false)?;
-                        head_desc.bi_vec.append(desc.bi_vec.as_mut());
-                        head_desc.bi_size += desc.bi_size;
+                        assert_eq!(desc.len(), 1);
+                        head_desc.bi_vec.append(desc[0].bi_vec.as_mut());
+                        head_desc.bi_size += desc[0].bi_size;
 
                         try_prefetch(head_desc);
                     }
@@ -573,8 +574,9 @@ impl RafsSuper {
                         }
                     }
                     let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false)?;
-                    head_desc.bi_vec.append(desc.bi_vec.as_mut());
-                    head_desc.bi_size += desc.bi_size;
+                    assert_eq!(desc.len(), 1);
+                    head_desc.bi_vec.append(desc[0].bi_vec.as_mut());
+                    head_desc.bi_size += desc[0].bi_size;
 
                     try_prefetch(head_desc);
                 }
@@ -698,16 +700,17 @@ impl RafsSuper {
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
             let mut d = inode.alloc_bio_desc(bound, sz as usize, false)?;
+            assert_eq!(d.len(), 1);
 
             // It is possible that read size is beyond file size, so chunks vector is zero length.
-            if !d.bi_vec.is_empty() {
-                let ck = d.bi_vec[0].chunkinfo.clone();
+            if !d[0].bi_vec.is_empty() {
+                let ck = d[0].bi_vec[0].chunkinfo.clone();
                 // Might be smaller than decompress size. It is user part.
-                let trimming_size = d.bi_vec[0].size;
+                let trimming_size = d[0].bi_vec[0].size;
                 let trimming = tail_chunk.compress_offset() == ck.compress_offset();
                 // Stolen chunk bigger than expected size will involve more backend IO, thus
                 // to slow down current user IO.
-                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
+                if let Some(cks) = Self::steal_chunks(&mut d[0], left as u32) {
                     if trimming {
                         ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
                         ra_desc.bi_size += cks.bi_size;
@@ -797,7 +800,7 @@ impl RafsSuper {
 
                     // Stolen chunk bigger than expected size will involve more backend IO, thus
                     // to slow down current user IO.
-                    if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
+                    if let Some(cks) = Self::steal_chunks(&mut d[0], sz as u32) {
                         ra_desc.bi_vec.append(&mut cks.bi_vec);
                         ra_desc.bi_size += cks.bi_size;
                     } else {
@@ -852,6 +855,8 @@ pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes {
     fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
 
     fn destroy(&mut self);
+
+    fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
 }
 
 /// Readonly accessors for RAFS filesystem inodes.
@@ -901,7 +906,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobIoVec>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

@@ -458,6 +458,7 @@ impl RafsV5BlobTable {
         let blob_index = self.entries.len() as u32;
         let mut blob_info = BlobInfo::new(
             BlobVersion::V5,
+            blob_index,
             blob_id,
             blob_cache_size,
             compressed_blob_size,
@@ -546,13 +547,13 @@ impl RafsV5BlobTable {
 
             let mut blob_info = BlobInfo::new(
                 BlobVersion::V5,
+                index as u32,
                 blob_id.to_ascii_uppercase(),
                 blob_cache_size,
                 compressed_blob_size,
                 chunk_count,
             );
             blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
-            blob_info.set_blob_index(index as u32);
             self.entries.push(Arc::new(blob_info));
 
             if rafsv5_align(pointer_offset(begin_ptr, frame)) as u32 >= blob_table_size {
@@ -1077,17 +1078,10 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
     offset: u64,
     size: usize,
     user_io: bool,
-) -> Result<BlobIoVec> {
-    // Do not process zero size bio
-    let mut desc = BlobIoVec::new();
-    if size == 0 {
-        return Ok(desc);
-    }
-
+) -> Result<Vec<BlobIoVec>> {
     let end = offset
         .checked_add(size as u64)
         .ok_or_else(|| einval!("invalid read size"))?;
-
     let blksize = inode.get_blocksize() as u64;
     let (index_start, index_end) = calculate_bio_chunk_index(
         offset,
@@ -1096,21 +1090,30 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
         inode.get_child_count(),
         inode.has_hole(),
     );
+    trace!("alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
+            offset, size, inode.size(), blksize, index_start, index_end, inode.get_child_count());
 
-    trace!(
-            "alloc bio desc offset {} size {} i_size {} blksize {} index_start {} index_end {} i_child_count {}",
-            offset, size, inode.size(), blksize, index_start, index_end, inode.get_child_count()
-        );
-
-    for idx in index_start..index_end {
+    let mut descs = Vec::with_capacity(4);
+    let mut desc = BlobIoVec::new();
+    let chunk = inode.get_chunk_info(index_start)?;
+    let blob = inode.get_blob_by_index(chunk.blob_index())?;
+    if !add_chunk_to_bio_desc(&mut desc, offset, end, chunk, blksize as u32, blob, user_io) {
+        return Err(einval!("failed to create blob io vector"));
+    }
+    for idx in index_start + 1..index_end {
         let chunk = inode.get_chunk_info(idx)?;
         let blob = inode.get_blob_by_index(chunk.blob_index())?;
-        if !add_chunk_to_bio_desc(offset, end, chunk, &mut desc, blksize as u32, blob, user_io) {
-            break;
+        if blob.blob_index() != desc.bi_vec[0].blob.blob_index() {
+            descs.push(desc);
+            desc = BlobIoVec::new();
+        }
+        if !add_chunk_to_bio_desc(&mut desc, offset, end, chunk, blksize as u32, blob, user_io) {
+            return Err(einval!("failed to create blob io vector"));
         }
     }
+    descs.push(desc);
 
-    Ok(desc)
+    Ok(descs)
 }
 
 /// Add a new bio covering the IO range into the provided bio desc. Returns
@@ -1123,10 +1126,10 @@ pub(crate) fn rafsv5_alloc_bio_desc<I: RafsInode + RafsV5InodeOps>(
 /// blksize: chunk size.
 /// blob_id: chunk data blob id.
 fn add_chunk_to_bio_desc(
+    desc: &mut BlobIoVec,
     offset: u64,
     end: u64,
     chunk: Arc<dyn BlobV5ChunkInfo>,
-    desc: &mut BlobIoVec,
     blksize: u32,
     blob: Arc<BlobInfo>,
     user_io: bool,

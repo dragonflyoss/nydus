@@ -392,6 +392,10 @@ impl RafsSuperBlock for DirectSuperBlockV5 {
         let state = DirectMappingState::new(&RafsSuperMeta::default(), false);
         self.state.store(Arc::new(state));
     }
+
+    fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
+        self.state.load().blob_table.entries.clone()
+    }
 }
 
 pub struct OndiskInodeWrapper {
@@ -746,7 +750,7 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobIoVec> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 

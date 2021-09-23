@@ -7,6 +7,7 @@
 //! RAFS: a readonly FUSE file system designed for Cloud Native.
 
 use std::any::Any;
+use std::cmp;
 use std::convert::TryFrom;
 use std::ffi::{CStr, OsStr};
 use std::fmt;
@@ -23,15 +24,16 @@ use serde::Deserialize;
 use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
+use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
+use storage::cache::BlobPrefetchConfig;
+use storage::device::{BlobDevice, BlobInfo, BlobPrefetchRequest, BlobVersion};
+use storage::factory::FactoryConfig;
+//use storage::*;
 
 use crate::metadata::{
     layout::RAFS_ROOT_INODE, Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE,
 };
 use crate::*;
-use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
-use storage::device::BlobPrefetchRequest;
-use storage::*;
-use storage::{cache::BlobPrefetchConfig, device};
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -60,6 +62,7 @@ fn default_amplify_io() -> u32 {
     128 * 1024
 }
 
+/// Configuration information for filesystem data prefetch.
 #[derive(Clone, Default, Deserialize)]
 pub struct FsPrefetchControl {
     #[serde(default)]
@@ -81,6 +84,28 @@ pub struct FsPrefetchControl {
     pub prefetch_all: bool,
 }
 
+impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
+    type Error = RafsError;
+    fn try_from(c: &RafsConfig) -> RafsResult<Self> {
+        if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_BLOCK_SIZE {
+            return Err(RafsError::Configure(
+                "Merging size can't exceed chunk size".to_string(),
+            ));
+        } else if c.fs_prefetch.enable && c.fs_prefetch.threads_count == 0 {
+            return Err(RafsError::Configure(
+                "try to enable fs prefetching with zero working threads".to_string(),
+            ));
+        }
+
+        Ok(BlobPrefetchConfig {
+            enable: c.fs_prefetch.enable,
+            threads_count: c.fs_prefetch.threads_count,
+            merging_size: c.fs_prefetch.merging_size,
+            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
+        })
+    }
+}
+
 /// Not everything can be safely exported from configuration.
 /// We trim the unneeded info from here.
 #[macro_export]
@@ -96,7 +121,8 @@ macro_rules! trim_backend_config {
 /// Rafs storage backend configuration information.
 #[derive(Clone, Default, Deserialize)]
 pub struct RafsConfig {
-    pub device: factory::FactoryConfig,
+    /// Configuration for storage subsystem.
+    pub device: FactoryConfig,
     pub mode: String,
     #[serde(default)]
     pub digest_validate: bool,
@@ -115,24 +141,26 @@ pub struct RafsConfig {
     pub amplify_io: u32,
 }
 
-impl FromStr for RafsConfig {
-    type Err = RafsError;
-
-    fn from_str(s: &str) -> RafsResult<RafsConfig> {
-        serde_json::from_str(s).map_err(RafsError::ParseConfig)
-    }
-}
-
 impl RafsConfig {
+    /// Create a new instance of `RafsConfig`.
     pub fn new() -> RafsConfig {
         RafsConfig {
             ..Default::default()
         }
     }
 
+    /// Load Rafs configuration information from a configuration file.
     pub fn from_file(path: &str) -> RafsResult<RafsConfig> {
         let file = File::open(path).map_err(RafsError::LoadConfig)?;
         serde_json::from_reader::<File, RafsConfig>(file).map_err(RafsError::ParseConfig)
+    }
+}
+
+impl FromStr for RafsConfig {
+    type Err = RafsError;
+
+    fn from_str(s: &str) -> RafsResult<RafsConfig> {
+        serde_json::from_str(s).map_err(RafsError::ParseConfig)
     }
 }
 
@@ -149,66 +177,50 @@ impl fmt::Display for RafsConfig {
 /// Main entrance of the RAFS readonly FUSE file system.
 pub struct Rafs {
     id: String,
-    device: device::v5::BlobDevice,
+    device: BlobDevice,
+    ios: Arc<metrics::GlobalIoStats>,
     pub sb: Arc<RafsSuper>,
+
+    initialized: bool,
     digest_validate: bool,
     fs_prefetch: bool,
     prefetch_all: bool,
-    initialized: bool,
     xattr_enabled: bool,
     ios: Arc<metrics::GlobalIoStats>,
     amplify_io: u32,
+
     // static inode attributes
     i_uid: u32,
     i_gid: u32,
     i_time: u64,
 }
 
-impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
-    type Error = RafsError;
-    fn try_from(c: &RafsConfig) -> RafsResult<Self> {
-        if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_BLOCK_SIZE {
-            return Err(RafsError::Configure(
-                "Merging size can't exceed chunk size".to_string(),
-            ));
-        }
-
-        Ok(BlobPrefetchConfig {
-            enable: c.fs_prefetch.enable,
-            threads_count: c.fs_prefetch.threads_count,
-            merging_size: c.fs_prefetch.merging_size,
-            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
-        })
-    }
-}
-
 impl Rafs {
     pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
         let mut device_conf = conf.device.clone();
-
         device_conf.cache.cache_validate = conf.digest_validate;
         device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
 
         let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
         sb.load(r).map_err(RafsError::FillSuperblock)?;
 
+        let device_conf = Arc::new(device_conf);
+        let blob_infos = sb.superblock.get_blob_infos();
+        let device = BlobDevice::new(&device_conf, &blob_infos).map_err(RafsError::CreateDevice)?;
+
         let rafs = Rafs {
             id: id.to_string(),
-            device: device::v5::BlobDevice::new(
-                device_conf,
-                sb.meta.get_compressor(),
-                sb.meta.get_digester(),
-                id,
-            )
-            .map_err(RafsError::CreateDevice)?,
-            sb: Arc::new(sb),
-            initialized: false,
+            device,
             ios: metrics::new(id),
+            sb: Arc::new(sb),
+
+            initialized: false,
             digest_validate: conf.digest_validate,
             fs_prefetch: conf.fs_prefetch.enable,
             amplify_io: conf.amplify_io,
             prefetch_all: conf.fs_prefetch.prefetch_all,
             xattr_enabled: conf.enable_xattr,
+
             i_uid: geteuid().into(),
             i_gid: getegid().into(),
             i_time: SystemTime::now()
@@ -239,21 +251,18 @@ impl Rafs {
             error!("update failed due to {:?}", e);
             e
         })?;
-
         info!("update sb is successful");
 
         let mut device_conf = conf.device.clone();
         device_conf.cache.cache_validate = conf.digest_validate;
         device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
 
+        let device_conf = Arc::new(device_conf);
+        let blob_infos = self.sb.superblock.get_blob_infos();
+
         // step 2: update device (only localfs is supported)
         self.device
-            .update(
-                device_conf,
-                self.sb.meta.get_compressor(),
-                self.sb.meta.get_digester(),
-                self.id.as_str(),
-            )
+            .update(&device_conf, &blob_infos)
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
@@ -270,6 +279,8 @@ impl Rafs {
             return Err(RafsError::AlreadyMounted);
         }
 
+        // TODO
+        /*
         // Without too much layout concern, just prefetch a certain range from backend.
         let prefetch_vec = self
             .sb
@@ -343,6 +354,7 @@ impl Rafs {
                     .unwrap_or_else(|_| error!("Failed in stopping prefetch workers"));
             });
         }
+        */
 
         self.initialized = true;
         Ok(())
@@ -620,46 +632,57 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
-        let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
+        if offset.checked_add(size as u64).is_none() {
+            return Err(einval!("offset + size wraps around."));
+        }
+
         let inode = self.sb.get_inode(ino, false)?;
-        if offset >= inode.size() {
+        let inode_size = inode.size();
+        let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
+        // Check for zero size read.
+        if size == 0 || offset >= inode_size {
             recorder.mark_success(0);
             return Ok(0);
         }
-        let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
-        let mut all_cached = true;
 
-        // TODO: refine the logic
-        /*
-        for b in &desc.bi_vec {
-            let c = b.chunkinfo.as_v5();
-            let blob = b.blob.as_ref();
-            all_cached &= self.device.cache.load().is_chunk_cached(c, blob);
-        }
-
-        // Try to amplify user io from here, aim at better performance.
-        if !all_cached {
-            let ra_desc = self.sb.carry_more_until(
-                inode.as_ref(),
-                offset + size as u64,
-                desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
-                1024 * 128 - size as u64,
-            )?;
-
-            if let Some(rd) = ra_desc {
-                desc.bi_vec.extend_from_slice(&rd.bi_vec)
-            };
-        }
-         */
-
+        let real_size = cmp::min(size as u64, inode_size - offset);
+        let real_end = offset + real_size;
+        let mut result = 0;
+        let mut descs = inode.alloc_bio_desc(offset, real_size as usize, true)?;
         let start = self.ios.latency_start();
-        // Avoid copying `desc`
-        let r = self.device.read_to(w, &mut desc).map(|r| {
+
+        for desc in descs.iter_mut() {
+            assert!(!desc.bi_vec.is_empty());
+            assert_ne!(desc.bi_size, 0);
+
+            /*
+            // Try to amplify user io from here, aim at better performance.
+            let all_chunks_ready = self.device.is_all_chunks_ready(&desc.bi_vec);
+            if !all_chunks_ready {
+                let ra_desc = self.sb.carry_more_until(
+                    inode.as_ref(),
+                    real_end,
+                    desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
+                    1024 * 128 - size as u64,
+                )?;
+
+                if let Some(rd) = ra_desc {
+                    desc.bi_vec.extend_from_slice(&rd.bi_vec)
+                };
+            }
+            */
+
+            // Avoid copying `desc`
+            let r = self.device.read_to(w, desc)?;
             recorder.mark_success(r);
-            r
-        });
+            result += r;
+            if r != desc.bi_size {
+                break;
+            }
+        }
         self.ios.latency_end(&start, Read);
-        r
+
+        Ok(result)
     }
 
     fn open(
@@ -863,6 +886,7 @@ impl FileSystem for Rafs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::TryInto;
 
     fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
@@ -987,5 +1011,39 @@ mod tests {
                 assert_eq!(e.inode, 0);
             }
         }
+    }
+
+    #[test]
+    fn test_fsprefetchcontrol_from_rafs_config() {
+        let mut config = RafsConfig {
+            fs_prefetch: FsPrefetchControl {
+                enable: false,
+                threads_count: 0,
+                merging_size: 0,
+                bandwidth_rate: 0,
+                prefetch_all: false,
+            },
+            ..Default::default()
+        };
+
+        config.fs_prefetch.enable = true;
+        assert!(config.try_into::<FsPrefetchControl>::().is_err());
+
+        config.fs_prefetch.threads_count = 1;
+        assert!(config.try_into::<FsPrefetchControl>::().is_ok());
+
+        config.fs_prefetch.merging_size = RAFS_MAX_BLOCK_SIZE as usize + 1;
+        assert!(config.try_into::<FsPrefetchControl>::().is_err());
+
+        config.fs_prefetch.merging_size = RAFS_MAX_BLOCK_SIZE as usize;
+        config.fs_prefetch.bandwidth_rate = 1;
+        config.fs_prefetch.prefetch_all = true;
+
+        let p_config: FsPrefetchControl = config.try_into().unwrap();
+        assert_eq!(p_config.enable, true);
+        assert_eq!(p_config.threads_count, 1);
+        assert_eq!(p_config.bandwidth_rate, 1);
+        assert_eq!(p_config.merging_size, RAFS_MAX_BLOCK_SIZE as usize);
+        assert_eq!(p_config.prefetch_all, true);
     }
 }

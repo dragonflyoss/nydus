@@ -212,6 +212,10 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
     fn destroy(&mut self) {
         self.s_inodes.clear();
     }
+
+    fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
+        self.s_blob.entries.clone()
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -487,7 +491,7 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<BlobIoVec> {
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_desc(self, offset, size, user_io)
     }
 

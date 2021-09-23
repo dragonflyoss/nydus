@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use nydus_utils::digest;
 
-use crate::metadata::layout::v5::RafsV5BlobTable;
+use crate::metadata::layout::v5::{BlobInfo, RafsV5BlobTable};
 use crate::metadata::{Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes};
 use crate::{RafsIoReader, RafsResult};
 
@@ -62,4 +62,8 @@ impl RafsSuperBlock for NoopSuperBlock {
     }
 
     fn destroy(&mut self) {}
+
+    fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
+        Vec::new()
+    }
 }
