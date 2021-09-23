@@ -171,14 +171,17 @@ impl BlobInfo {
 
     /// Get the blob index in Rafs v5 metadata's blob array.
     pub fn blob_index(&self) -> u32 {
-        assert!(self.is_v5());
         self.blob_index
     }
 
     /// Set the blob index in Rafs v5 metadata's blob array.
     pub fn set_blob_index(&mut self, blob_index: u32) {
-        assert!(self.is_v5());
         self.blob_index = blob_index;
+    }
+
+    /// Check whether the Rafs v5 metadata blob has extended blob table.
+    pub fn with_v5_extended_blob_table(&self) -> bool {
+        self.blob_version == BlobVersion::V5 && self.chunk_count != 0
     }
 }
 
