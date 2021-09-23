@@ -8,8 +8,9 @@ use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
 
-use crate::node::*;
 use rafs::metadata::layout::v5::RafsV5PrefetchTable;
+
+use crate::node::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
@@ -24,6 +25,12 @@ pub enum PrefetchPolicy {
     Blob,
 }
 
+impl Default for PrefetchPolicy {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 impl FromStr for PrefetchPolicy {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
@@ -36,25 +43,26 @@ impl FromStr for PrefetchPolicy {
     }
 }
 
-/// Gather readahead file paths line by line from stdin
+/// Gather readahead file paths line by line from stdin.
+///
 /// Input format:
-///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/1"
+///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/2"
 /// This routine does not guarantee that specified file must exist in local filesystem,
 /// this is because we can't guarantee that source rootfs directory of parent bootstrap
 /// is located in local file system.
-fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
+fn gather_readahead_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     let stdin = std::io::stdin();
     let mut files = BTreeMap::new();
 
     loop {
         let mut file = String::new();
-
         let size = stdin
             .read_line(&mut file)
             .context("failed to parse readahead files")?;
         if size == 0 {
             break;
         }
+
         let file_trimmed: PathBuf = file.trim().into();
         // Sanity check for the list format.
         if !file_trimmed.starts_with(Path::new("/")) {
@@ -76,92 +84,84 @@ fn gather_readahead_files() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     Ok(files)
 }
 
+#[derive(Default, Clone)]
 pub struct Prefetch {
     pub policy: PrefetchPolicy,
-    /// Readahead file list, use BTreeMap to keep stable iteration order, HashMap<path, Option<index>>.
-    /// Files from this collection are all regular files and will be persisted to blob following a certain scheme.
-    readahead_files: BTreeMap<PathBuf, Option<u64>>,
-    /// Specify files or directories which need to prefetch. Their inode numbers will
-    /// be persist to prefetch table. They could be directory's or regular file's inode number, by which
-    /// its inode index of inode table can be calculated.
-    hint_readahead_files: BTreeMap<PathBuf, Option<u64>>,
+
+    /// Specify patterns for prefetch.
+    /// Their inode numbers will be persist to prefetch table. They could be directory's or regular
+    /// file's inode number, by which its inode index of inode table can be calculated.
+    readahead_patterns: BTreeMap<PathBuf, Option<u64>>,
+
+    /// Readahead file list, use BTreeMap to keep stable iteration order.
+    /// Files from this collection are all regular files and will be persisted to blob following
+    /// a certain scheme.
+    readahead_files: BTreeMap<PathBuf, u64>,
 }
 
 impl Prefetch {
     pub fn new(policy: PrefetchPolicy) -> Result<Self> {
-        let hint_readahead_files = if policy != PrefetchPolicy::None {
-            gather_readahead_files().context("failed to get readahead files")?
+        let readahead_patterns = if policy != PrefetchPolicy::None {
+            gather_readahead_patterns().context("failed to get readahead files")?
         } else {
             BTreeMap::new()
         };
+
         Ok(Self {
             policy,
-            hint_readahead_files,
+            readahead_patterns,
             readahead_files: BTreeMap::new(),
         })
     }
 
     pub fn insert_if_need(&mut self, node: &Node) {
-        let path = &node.rootfs();
+        let path = node.target();
         let inode = node.inode.i_ino;
         let index = node.index;
+        let mut remove_node = false;
 
         if self.policy == PrefetchPolicy::None || node.inode.i_size == 0 {
             return;
         }
 
-        let keys = self
-            .hint_readahead_files
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for f in &keys {
+        for (f, v) in self.readahead_patterns.iter_mut() {
             // As path is canonicalized, it should be reliable.
             if path == f {
                 if self.policy == PrefetchPolicy::Fs {
-                    if let Some(i) = self.hint_readahead_files.get_mut(path) {
-                        *i = Some(inode);
-                    }
+                    *v = Some(inode);
                 }
-                self.readahead_files.insert(path.clone(), Some(index));
+                self.readahead_files.insert(path.clone(), index);
             } else if path.starts_with(f) {
-                // Users can specify hinted parent directory with its child files hinted as well.
-                // Only put the parent directory into ondisk prefetch table since a hinted directory's
-                // all child files will be prefetched after mount.
-                if self.hint_readahead_files.get(path).is_some() {
-                    self.hint_readahead_files.remove(path);
-                }
-                self.readahead_files.insert(path.clone(), Some(index));
+                remove_node = true;
+                self.readahead_files.insert(path.clone(), index);
             }
+        }
+
+        if remove_node {
+            // Users can specify hinted parent directory with its child files hinted as well.
+            // Only put the parent directory into prefetch table since a hinted directory's
+            // all child files will be prefetched after mount.
+            self.readahead_patterns.remove(path);
         }
     }
 
-    pub fn contains(&mut self, node: &Node) -> bool {
-        self.readahead_files.get(&node.rootfs()).is_some()
+    pub fn contains(&self, node: &Node) -> bool {
+        self.readahead_files.contains_key(node.target())
     }
 
     pub fn get_file_indexes(&self) -> Vec<u64> {
-        let mut indexes: Vec<u64> = self
-            .readahead_files
-            .values()
-            .filter_map(|index| *index)
-            .collect();
+        let mut indexes: Vec<u64> = self.readahead_files.values().copied().collect();
 
         // Later, we might write chunks of data one by one according to inode number order.
         indexes.sort_unstable();
         indexes
     }
 
-    pub fn get_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
+    pub fn get_rafsv5_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
-            for i in self
-                .hint_readahead_files
-                .iter()
-                .filter_map(|(_, v)| v.as_ref())
-            {
-                prefetch_table.add_entry(*i as u32);
+            for i in self.readahead_patterns.values().filter_map(|v| *v) {
+                prefetch_table.add_entry(i as u32);
             }
             Some(prefetch_table)
         } else {

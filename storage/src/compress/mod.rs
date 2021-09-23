@@ -24,6 +24,12 @@ pub enum Algorithm {
     GZip,
 }
 
+impl Default for Algorithm {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 impl fmt::Display for Algorithm {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)

@@ -28,7 +28,6 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 
-use std::collections::HashMap;
 use std::fs::metadata;
 use std::fs::OpenOptions;
 use std::io::BufWriter;
@@ -41,17 +40,16 @@ use crate::builder::directory::DirectoryBuilder;
 use crate::builder::stargz::StargzBuilder;
 use crate::builder::Builder;
 
-use crate::core::blob::BlobStorage;
-use crate::core::context::BuildContext;
-use crate::core::context::SourceType;
-use crate::core::context::BUF_WRITER_CAPACITY;
-use crate::core::node::{self, ChunkCountMap, WhiteoutSpec};
+use crate::core::context::{
+    BlobManager, BlobStorage, BootstrapContext, BuildContext, SourceType, BUF_WRITER_CAPACITY,
+};
+use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 
+use crate::core::chunk_dict::import_chunk_dict;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
-use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::RafsIoReader;
 use storage::compress;
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
@@ -229,6 +227,12 @@ fn main() -> Result<()> {
                         .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
                         .takes_value(true)
                 )
+                .arg(
+                    Arg::with_name("chunk_dict")
+                        .long("chunk_dict")
+                        .help("specify a chunk dictionary file in bootstrap/db format for chunk deduplication.")
+                        .takes_value(true)
+                )
         )
         .subcommand(
             SubCommand::with_name("check")
@@ -296,9 +300,6 @@ fn main() -> Result<()> {
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
 
-        let source_file = metadata(&source_path)
-            .context(format!("failed to get source path {:?}", source_path))?;
-
         let mut blob_id = String::new();
         if let Some(p_blob_id) = matches.value_of("blob-id") {
             blob_id = String::from(p_blob_id);
@@ -313,14 +314,30 @@ fn main() -> Result<()> {
 
         match source_type {
             SourceType::Directory => {
+                let source_file = metadata(&source_path)
+                    .context(format!("failed to get source path {:?}", source_path))?;
                 if !source_file.is_dir() {
                     bail!("source {:?} must be a directory", source_path);
                 }
             }
             SourceType::StargzIndex => {
+                let source_file = metadata(&source_path)
+                    .context(format!("failed to get source path {:?}", source_path))?;
                 if !source_file.is_file() {
                     bail!("source {:?} must be a JSON file", source_path);
                 }
+            }
+        }
+
+        match source_type {
+            SourceType::Directory => {
+                let source_file = metadata(&source_path)
+                    .context(format!("failed to get source path {:?}", source_path))?;
+                if !source_file.is_dir() {
+                    bail!("source {:?} must be a directory", source_path);
+                }
+            }
+            SourceType::StargzIndex => {
                 if blob_id.trim() == "" {
                     bail!("blob-id can't be empty");
                 }
@@ -420,35 +437,39 @@ fn main() -> Result<()> {
             None
         };
 
-        let mut ctx = BuildContext {
-            source_type,
-            source_path,
+        let mut build_ctx = BuildContext::new(
             blob_id,
-            f_bootstrap,
-            f_parent_bootstrap,
+            aligned_chunk,
             compressor,
             digester,
-            explicit_uidgid: !repeatable,
+            !repeatable,
             whiteout_spec,
-            aligned_chunk,
+            source_type,
+            source_path,
             prefetch,
+            blob_stor,
+        );
 
-            lower_inode_map: HashMap::new(),
-            upper_inode_map: HashMap::new(),
-            chunk_cache: HashMap::new(),
-            chunk_count_map: ChunkCountMap::default(),
-            blob_table: RafsV5BlobTable::new(),
-            nodes: Vec::new(),
-        };
+        let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, f_parent_bootstrap);
+        let mut blob_mgr = BlobManager::new();
+
+        if let Some(chunk_dict_arg) = matches.value_of("chunk_dict") {
+            blob_mgr.set_chunk_dict(timing_tracer!(
+                { import_chunk_dict(chunk_dict_arg) },
+                "import_chunk_dict"
+            )?);
+        }
 
         let mut builder: Box<dyn Builder> = match source_type {
-            SourceType::Directory => {
-                Box::new(DirectoryBuilder::new(blob_stor.as_ref().unwrap().clone()))
-            }
+            SourceType::Directory => Box::new(DirectoryBuilder::new()),
             SourceType::StargzIndex => Box::new(StargzBuilder::new()),
         };
         let (blob_ids, blob_size) = timing_tracer!(
-            { builder.build(&mut ctx).context("build failed") },
+            {
+                builder
+                    .build(&mut build_ctx, &mut bootstrap_ctx, &mut blob_mgr)
+                    .context("build failed")
+            },
             "total_build"
         )?;
 

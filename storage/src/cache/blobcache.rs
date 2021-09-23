@@ -950,7 +950,7 @@ pub fn new(
 
 #[cfg(test)]
 pub mod blob_cache_tests {
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{alloc_zeroed, Layout};
     use std::slice::from_raw_parts;
     use std::sync::Arc;
 
@@ -1106,6 +1106,7 @@ pub mod blob_cache_tests {
                 blob_id: blob_id.to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1115,7 +1116,7 @@ pub mod blob_cache_tests {
         // read from cache
         let r1 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
@@ -1123,7 +1124,7 @@ pub mod blob_cache_tests {
 
         let r2 = unsafe {
             let layout = Layout::from_size_align(50, 1).unwrap();
-            let ptr = alloc(layout);
+            let ptr = alloc_zeroed(layout);
             let vs = VolatileSlice::new(ptr, 50);
             blob_cache.read(&bio, &[vs], 50).unwrap();
             Vec::from(from_raw_parts(ptr, 50))
@@ -1181,6 +1182,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1212,6 +1214,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1233,6 +1236,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1266,6 +1270,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1287,6 +1292,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1321,6 +1327,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1342,6 +1349,7 @@ pub mod blob_cache_tests {
                 blob_id: "2".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1376,6 +1384,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1397,6 +1406,7 @@ pub mod blob_cache_tests {
                 blob_id: "1".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
@@ -1418,6 +1428,7 @@ pub mod blob_cache_tests {
                 blob_id: "2".to_string(),
                 blob_index: 0,
                 blob_cache_size: 0,
+                compressed_blob_size: 0,
             }),
             50,
             50,
