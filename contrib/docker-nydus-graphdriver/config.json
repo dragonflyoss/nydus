@@ -1,0 +1,43 @@
+{
+  "description": "nydus image service plugin for Docker",
+  "documentation": "https://docs.docker.com/engine/extend/plugins/",
+  "entrypoint": [
+    "/plugin/nydus_graphdriver"
+  ],
+  "network": {
+    "type": "host"
+  },
+  "interface": {
+    "types": [
+      "docker.graphdriver/1.0"
+    ],
+    "socket": "plugin.sock"
+  },
+  "linux": {
+    "capabilities": [
+      "CAP_SYS_ADMIN",
+      "CAP_SYS_RESOURCE"
+    ],
+    "Devices": [
+      {
+        "Path": "/dev/fuse"
+      }
+    ]
+  },
+  "PropagatedMount": "/home",
+  "Mounts": [
+    {
+      "Name": "NYDUS_CONFIG",
+      "Source": "/var/lib/nydus/config.json",
+      "Destination": "/nydus/config.json",
+      "Type": "none",
+      "Options": [
+        "bind",
+        "ro"
+      ],
+      "Settable": [
+        "source"
+      ]
+    }
+  ]
+}

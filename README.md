@@ -52,6 +52,13 @@ Build and run Nydus snapshotter: [Nydus Snapshotter](./contrib/nydus-snapshotter
 
 Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
 
+## Docker graph driver support
+
+Docker graph driver is also accompanied, it helps to start container from nydus image. For more particular instructions, please refer to
+
+- [Nydus Graph Driver](./contrib/docker-nydus-graphdriver/README.md)
+- [使用 docker 启动容器](./docs/chinese_docker_graph_driver_guide.md)
+
 ## Learn Concepts and Commands
 
 Browse the documentation to learn more. Here are some topics you may be interested in:
