@@ -17,6 +17,7 @@ import (
 )
 
 type WorkflowOption struct {
+	ChunkDict      string
 	TargetDir      string
 	NydusImagePath string
 	PrefetchDir    string
@@ -119,7 +120,8 @@ func (workflow *Workflow) Build(
 		WhiteoutSpec:        whiteoutSpec,
 		OutputJSONPath:      workflow.buildOutputJSONPath(),
 		BlobPath:            blobPath,
-		AlignedChunk:	     alignedChunk,
+		AlignedChunk:        alignedChunk,
+		ChunkDict:           workflow.ChunkDict,
 	}); err != nil {
 		return "", errors.Wrapf(err, "build layer %s", layerDir)
 	}

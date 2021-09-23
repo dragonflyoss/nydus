@@ -150,6 +150,9 @@ func main() {
 				&cli.StringFlag{Name: "build-cache-tag", Value: "", Usage: "Use $target:$build-cache-tag as cache image reference, conflict with --build-cache", EnvVars: []string{"BUILD_CACHE_TAG"}},
 				&cli.StringFlag{Name: "build-cache-version", Value: "v1", Usage: "Specify the version of cache image, if the existed remote cache image does not match the version, cache records will be dropped", EnvVars: []string{"BUILD_CACHE_VERSION"}},
 				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
+				&cli.StringFlag{Name: "chunk-dict", Required: false, Usage: "Specify a chunk dict expression for image chunk deduplication, " +
+					"for examples: bootstrap:registry:localhost:5000/namespace/app:chunk_dict, bootstrap:local:/path/to/chunk_dict.boot", EnvVars: []string{"CHUNK_DICT"}},
+				&cli.BoolFlag{Name: "chunk-dict-insecure", Required: false, Value: false, Usage: "Allow http/insecure registry communication of chunk dict", EnvVars: []string{"CHUNK_DICT_INSECURE"}},
 				// The --build-cache-max-records flag represents the maximum number
 				// of layers in cache image. 50 (bootstrap + blob in one record) was
 				// chosen to make it compatible with the 127 max in graph driver of
@@ -248,13 +251,19 @@ func main() {
 					MultiPlatform:  c.Bool("multi-platform"),
 					DockerV2Format: c.Bool("docker-v2-format"),
 
-					BackendType:      backendType,
-					BackendConfig:    backendConfig,
-					BackendForcePush: c.Bool("backend-force-push"),
+					BackendType:         backendType,
+					BackendConfig:       backendConfig,
+					BackendForcePush:    c.Bool("backend-force-push"),
 					BackendAlignedChunk: c.Bool("backend-aligned-chunk"),
 
 					NydusifyVersion: version,
 					Source:          c.String("source"),
+
+					ChunkDict: converter.ChunkDictOpt{
+						Args:     c.String("chunk-dict"),
+						Insecure: c.Bool("chunk-dict-insecure"),
+						Platform: targetPlatform,
+					},
 				}
 
 				cvt, err := converter.New(opt)

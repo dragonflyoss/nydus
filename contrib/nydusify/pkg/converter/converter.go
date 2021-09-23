@@ -77,13 +77,15 @@ type Opt struct {
 	MultiPlatform  bool
 	DockerV2Format bool
 
-	BackendType      string
-	BackendConfig    string
-	BackendForcePush bool
+	BackendType         string
+	BackendConfig       string
+	BackendForcePush    bool
 	BackendAlignedChunk bool
 
 	NydusifyVersion string
 	Source          string
+
+	ChunkDict ChunkDictOpt
 }
 
 type Converter struct {
@@ -103,13 +105,15 @@ type Converter struct {
 	MultiPlatform  bool
 	DockerV2Format bool
 
-	BackendForcePush bool
+	BackendForcePush    bool
 	BackendAlignedChunk bool
 
 	NydusifyVersion string
 	Source          string
 
 	storageBackend backend.Backend
+
+	chunkDict ChunkDictOpt
 }
 
 func New(opt Opt) (*Converter, error) {
@@ -121,23 +125,25 @@ func New(opt Opt) (*Converter, error) {
 	}
 
 	return &Converter{
-		Logger:           opt.Logger,
-		SourceProviders:  opt.SourceProviders,
-		TargetRemote:     opt.TargetRemote,
-		CacheRemote:      opt.CacheRemote,
-		CacheMaxRecords:  opt.CacheMaxRecords,
-		CacheVersion:     opt.CacheVersion,
-		NydusImagePath:   opt.NydusImagePath,
-		WorkDir:          opt.WorkDir,
-		PrefetchDir:      opt.PrefetchDir,
-		MultiPlatform:    opt.MultiPlatform,
-		DockerV2Format:   opt.DockerV2Format,
-		BackendForcePush: opt.BackendForcePush,
+		Logger:              opt.Logger,
+		SourceProviders:     opt.SourceProviders,
+		TargetRemote:        opt.TargetRemote,
+		CacheRemote:         opt.CacheRemote,
+		CacheMaxRecords:     opt.CacheMaxRecords,
+		CacheVersion:        opt.CacheVersion,
+		NydusImagePath:      opt.NydusImagePath,
+		WorkDir:             opt.WorkDir,
+		PrefetchDir:         opt.PrefetchDir,
+		MultiPlatform:       opt.MultiPlatform,
+		DockerV2Format:      opt.DockerV2Format,
+		BackendForcePush:    opt.BackendForcePush,
 		BackendAlignedChunk: opt.BackendAlignedChunk,
-		NydusifyVersion:  opt.NydusifyVersion,
-		Source:           opt.Source,
+		NydusifyVersion:     opt.NydusifyVersion,
+		Source:              opt.Source,
 
 		storageBackend: backend,
+
+		chunkDict: opt.ChunkDict,
 	}, nil
 }
 
@@ -153,6 +159,16 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "Pull cache image")
 	}
+	var (
+		blobs        []string
+		chunkDictOpt string
+	)
+	if cvt.chunkDict.Args != "" {
+		chunkDictOpt, blobs, err = cvt.prepareChunkDict()
+		if err != nil {
+			logrus.Warnf("get chunk dict err %v", err)
+		}
+	}
 
 	// BuildWorkflow builds nydus blob/bootstrap layer by layer
 	bootstrapsDir := filepath.Join(cvt.WorkDir, "bootstraps")
@@ -163,6 +179,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 		return errors.Wrap(err, "Create bootstrap directory")
 	}
 	buildWorkflow, err := build.NewWorkflow(build.WorkflowOption{
+		ChunkDict:      chunkDictOpt,
 		NydusImagePath: cvt.NydusImagePath,
 		PrefetchDir:    cvt.PrefetchDir,
 		TargetDir:      cvt.WorkDir,
@@ -288,6 +305,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{
+		referenceBlobs: blobs,
 		sourceProvider: sourceProvider,
 		remote:         cvt.TargetRemote,
 		backend:        cvt.storageBackend,

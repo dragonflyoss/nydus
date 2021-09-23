@@ -15,6 +15,7 @@ import (
 
 type BuilderOption struct {
 	ParentBootstrapPath string
+	ChunkDict           string
 	BootstrapPath       string
 	RootfsPath          string
 	BackendType         string
@@ -23,8 +24,8 @@ type BuilderOption struct {
 	WhiteoutSpec        string
 	OutputJSONPath      string
 	// A regular file or fifo into which commands nydus-image to dump contents.
-	BlobPath string
-	AlignedChunk	    bool
+	BlobPath     string
+	AlignedChunk bool
 }
 
 type Builder struct {
@@ -57,6 +58,9 @@ func (builder *Builder) Run(option BuilderOption) error {
 	}
 	if option.AlignedChunk {
 		args = append(args, "--aligned-chunk")
+	}
+	if option.ChunkDict != "" {
+		args = append(args, "--chunk_dict", option.ChunkDict)
 	}
 
 	args = append(
