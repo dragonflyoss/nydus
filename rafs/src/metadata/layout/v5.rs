@@ -45,6 +45,8 @@ use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
+use serde::Serialize;
+use serde_with::{serde_as, DisplayFromStr};
 use storage::compress;
 use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
@@ -52,7 +54,7 @@ use crate::metadata::layout::{
     bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
     RAFS_SUPER_VERSION_V5,
 };
-use crate::metadata::{Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::metadata::{Inode, RafsInode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
@@ -82,6 +84,82 @@ pub(crate) trait RafsV5InodeOps {
 
     /// Convert to the on disk data format.
     fn cast_ondisk(&self) -> Result<RafsV5Inode>;
+}
+
+bitflags! {
+    /// Rafs filesystem feature flags.
+    #[derive(Serialize)]
+    pub struct RafsV5SuperFlags: u64 {
+        /// Data chunks are not compressed.
+        const COMPRESS_NONE = 0x0000_0001;
+        /// Data chunks are compressed with lz4_block.
+        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
+        /// Use blake3 hash algorithm to calculate digest.
+        const DIGESTER_BLAKE3 = 0x0000_0004;
+        /// Use sha256 hash algorithm to calculate digest.
+        const DIGESTER_SHA256 = 0x0000_0008;
+        /// Inode has explicit uid gid fields.
+        ///
+        /// If unset, use nydusd process euid/egid for all inodes at runtime.
+        const EXPLICIT_UID_GID = 0x0000_0010;
+        /// Inode has extended attributes.
+        const HAS_XATTR = 0x0000_0020;
+        // Data chunks are compressed with gzip
+        const COMPRESS_GZIP = 0x0000_0040;
+    }
+}
+
+impl Default for RafsV5SuperFlags {
+    fn default() -> Self {
+        RafsV5SuperFlags::empty()
+    }
+}
+
+impl Display for RafsV5SuperFlags {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        write!(f, "{}", format!("{:?}", self))?;
+        Ok(())
+    }
+}
+
+impl From<RafsV5SuperFlags> for digest::Algorithm {
+    fn from(flags: RafsV5SuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsV5SuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
+            x if x.contains(RafsV5SuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
+            _ => digest::Algorithm::Blake3,
+        }
+    }
+}
+
+impl From<digest::Algorithm> for RafsV5SuperFlags {
+    fn from(d: digest::Algorithm) -> RafsV5SuperFlags {
+        match d {
+            digest::Algorithm::Blake3 => RafsV5SuperFlags::DIGESTER_BLAKE3,
+            digest::Algorithm::Sha256 => RafsV5SuperFlags::DIGESTER_SHA256,
+        }
+    }
+}
+
+impl From<RafsV5SuperFlags> for compress::Algorithm {
+    fn from(flags: RafsV5SuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsV5SuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
+            x if x.contains(RafsV5SuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
+            x if x.contains(RafsV5SuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
+            _ => compress::Algorithm::Lz4Block,
+        }
+    }
+}
+
+impl From<compress::Algorithm> for RafsV5SuperFlags {
+    fn from(c: compress::Algorithm) -> RafsV5SuperFlags {
+        match c {
+            compress::Algorithm::None => RafsV5SuperFlags::COMPRESS_NONE,
+            compress::Algorithm::Lz4Block => RafsV5SuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsV5SuperFlags::COMPRESS_GZIP,
+        }
+    }
 }
 
 /// Rafs v5 superblock on disk metadata, 8192 bytes.
@@ -174,24 +252,24 @@ impl RafsV5SuperBlock {
 
     /// Set compression algorithm to handle chunk of the Rafs filesystem.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
-        let c: RafsSuperFlags = compressor.into();
+        let c: RafsV5SuperFlags = compressor.into();
         self.s_flags |= c.bits();
     }
 
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
-        let c: RafsSuperFlags = digester.into();
+        let c: RafsV5SuperFlags = digester.into();
         self.s_flags |= c.bits();
     }
 
     /// Enable explicit Uid/Gid feature.
     pub fn set_explicit_uidgid(&mut self) {
-        self.s_flags |= RafsSuperFlags::EXPLICIT_UID_GID.bits();
+        self.s_flags |= RafsV5SuperFlags::EXPLICIT_UID_GID.bits();
     }
 
     /// Enable support of filesystem xattr.
     pub fn set_has_xattr(&mut self) {
-        self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
+        self.s_flags |= RafsV5SuperFlags::HAS_XATTR.bits();
     }
 
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);

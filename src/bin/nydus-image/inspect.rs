@@ -16,9 +16,8 @@ use anyhow::Result;
 
 use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobTable, RafsV5Inode, RafsV5InodeTable,
-    RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5XAttrsTable,
+    RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5SuperFlags, RafsV5XAttrsTable,
 };
-use rafs::metadata::RafsSuperFlags;
 use rafs::{RafsIoRead, RafsIoReader};
 
 pub(crate) struct RafsInspector {
@@ -570,7 +569,7 @@ Blocks:             {blocks}"#,
     Flags:              {flags}"#,
                 version = sb.version(),
                 inodes_count = sb.inodes_count(),
-                flags = RafsSuperFlags::from_bits(sb.flags()).unwrap()
+                flags = RafsV5SuperFlags::from_bits(sb.flags()).unwrap()
             );
 
             None

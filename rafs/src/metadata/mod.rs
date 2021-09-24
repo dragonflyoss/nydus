@@ -15,19 +15,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
-
 use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
+use serde::Serialize;
+use serde_with::{serde_as, DisplayFromStr};
 use storage::compress;
 use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
 use self::cached_v5::CachedSuperBlockV5;
 use self::direct_v5::DirectSuperBlockV5;
-use self::layout::v5::{RafsV5BlobTable, RafsV5PrefetchTable, RafsV5SuperBlock};
+use self::layout::v5::{RafsV5BlobTable, RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5SuperFlags};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
@@ -40,91 +39,21 @@ mod noop;
 
 pub use crate::storage::{RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE};
 
-pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 72;
+/// Maximum size of blob id string.
+pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 64;
+/// Block size reported to fuse by get_attr()
 pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
+/// Maximum size of file name supported by rafs.
 pub const RAFS_MAX_NAME: usize = 255;
+/// Maximum size of the rafs metadata blob.
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
+/// Name for Unix current directory.
 pub const DOT: &str = ".";
+/// Name for Unix parent directory.
 pub const DOTDOT: &str = "..";
 
 /// Type of RAFS inode.
 pub type Inode = u64;
-
-bitflags! {
-    #[derive(Serialize)]
-    pub struct RafsSuperFlags: u64 {
-        /// Data chunks are not compressed.
-        const COMPRESS_NONE = 0x0000_0001;
-        /// Data chunks are compressed with lz4_block.
-        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
-        /// Use blake3 hash algorithm to calculate digest.
-        const DIGESTER_BLAKE3 = 0x0000_0004;
-        /// Use sha256 hash algorithm to calculate digest.
-        const DIGESTER_SHA256 = 0x0000_0008;
-        /// Inode has explicit uid gid fields.
-        /// If unset, use nydusd process euid/egid for all
-        /// inodes at runtime.
-        const EXPLICIT_UID_GID = 0x0000_0010;
-        /// Some inode has xattr.
-        /// Rafs may return ENOSYS for getxattr/listxattr calls if unset.
-        const HAS_XATTR = 0x0000_0020;
-        // Data chunks are compressed with gzip
-        const COMPRESS_GZIP = 0x0000_0040;
-    }
-}
-
-impl Default for RafsSuperFlags {
-    fn default() -> Self {
-        RafsSuperFlags::empty()
-    }
-}
-
-impl Display for RafsSuperFlags {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        write!(f, "{}", format!("{:?}", self))?;
-        Ok(())
-    }
-}
-
-impl From<RafsSuperFlags> for digest::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
-            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
-            _ => digest::Algorithm::Blake3,
-        }
-    }
-}
-
-impl From<digest::Algorithm> for RafsSuperFlags {
-    fn from(d: digest::Algorithm) -> RafsSuperFlags {
-        match d {
-            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
-            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
-        }
-    }
-}
-
-impl From<RafsSuperFlags> for compress::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
-            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
-            _ => compress::Algorithm::Lz4Block,
-        }
-    }
-}
-
-impl From<compress::Algorithm> for RafsSuperFlags {
-    fn from(c: compress::Algorithm) -> RafsSuperFlags {
-        match c {
-            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
-            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
-            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
-        }
-    }
-}
 
 /// Rafs filesystem meta-data cached from RAFS super block on disk.
 #[serde_as]
@@ -138,7 +67,7 @@ pub struct RafsSuperMeta {
     pub inodes_count: u64,
     // Use u64 as [u8; 8] => [.., digest::Algorithm, compress::Algorithm]
     #[serde_as(as = "DisplayFromStr")]
-    pub flags: RafsSuperFlags,
+    pub flags: RafsV5SuperFlags,
     pub inode_table_entries: u32,
     pub inode_table_offset: u64,
     pub blob_table_size: u32,
@@ -176,7 +105,7 @@ impl RafsSuperMeta {
 
     pub fn explicit_uidgid(&self) -> bool {
         if self.is_v4_v5() {
-            self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
+            self.flags.contains(RafsV5SuperFlags::EXPLICIT_UID_GID)
         } else {
             false
         }
@@ -184,7 +113,7 @@ impl RafsSuperMeta {
 
     pub fn has_xattr(&self) -> bool {
         if self.is_v4_v5() {
-            self.flags.contains(RafsSuperFlags::HAS_XATTR)
+            self.flags.contains(RafsV5SuperFlags::HAS_XATTR)
         } else {
             false
         }
@@ -200,7 +129,7 @@ impl Default for RafsSuperMeta {
             inodes_count: 0,
             root_inode: 0,
             block_size: 0,
-            flags: RafsSuperFlags::empty(),
+            flags: RafsV5SuperFlags::empty(),
             inode_table_entries: 0,
             inode_table_offset: 0,
             blob_table_size: 0,
@@ -377,7 +306,7 @@ impl RafsSuper {
         self.meta.version = sb.version();
         self.meta.sb_size = sb.sb_size();
         self.meta.block_size = sb.block_size();
-        self.meta.flags = RafsSuperFlags::from_bits(sb.flags())
+        self.meta.flags = RafsV5SuperFlags::from_bits(sb.flags())
             .ok_or_else(|| einval!(format!("invalid super flags {:x}", sb.flags())))?;
         self.meta.prefetch_table_offset = sb.prefetch_table_offset();
         self.meta.prefetch_table_entries = sb.prefetch_table_entries();
