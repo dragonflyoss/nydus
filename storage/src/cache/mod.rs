@@ -212,7 +212,7 @@ pub trait BlobCache: Send + Sync {
             // Ensure BlobIoChunk is valid and continuous.
             let offset = cki.compress_offset();
             let size = cki.compress_size();
-            let d_size = cki.decompress_size() as usize;
+            let d_size = cki.uncompress_size() as usize;
             if offset != last
                 || offset - blob_offset > usize::MAX as u64
                 || offset.checked_add(size as u64).is_none()
@@ -303,9 +303,9 @@ pub trait BlobCache: Send + Sync {
             chunk.copy_from_slice(raw_chunk);
         }
 
-        let d_size = cki.decompress_size() as usize;
+        let d_size = cki.uncompress_size() as usize;
         if chunk.len() != d_size {
-            Err(eio!("decompressed size and buffer size doesn't match"))
+            Err(eio!("uncompressed size and buffer size doesn't match"))
         } else if self.need_validate() && !digest_check(chunk, cki.chunk_id(), self.digester()) {
             Err(eio!("data digest value doesn't match"))
         } else {

@@ -916,12 +916,12 @@ pub struct RafsV5ChunkInfo {
     pub flags: BlobChunkFlags, // 40
     /// compressed size in blob
     pub compress_size: u32,
-    /// decompressed size in blob
-    pub decompress_size: u32, // 48
+    /// uncompressed size in blob
+    pub uncompress_size: u32, // 48
     /// compressed offset in blob
     pub compress_offset: u64, // 56
-    /// decompressed offset in blob
-    pub decompress_offset: u64, // 64
+    /// uncompressed offset in blob
+    pub uncompress_offset: u64, // 64
     /// offset in file
     pub file_offset: u64, // 72
     /// chunk index, it's allocated sequentially
@@ -954,12 +954,12 @@ impl Display for RafsV5ChunkInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(
             f,
-            "file_offset {}, compress_offset {}, compress_size {}, decompress_offset {}, decompress_size {}, blob_index {}, block_id {}, index {}, is_compressed {}",
+            "file_offset {}, compress_offset {}, compress_size {}, uncompress_offset {}, uncompress_size {}, blob_index {}, block_id {}, index {}, is_compressed {}",
             self.file_offset,
             self.compress_offset,
             self.compress_size,
-            self.decompress_offset,
-            self.decompress_size,
+            self.uncompress_offset,
+            self.uncompress_size,
             self.blob_index,
             self.block_id,
             self.index,
@@ -1134,7 +1134,7 @@ fn add_chunk_to_bio_desc(
     blob: Arc<BlobInfo>,
     user_io: bool,
 ) -> bool {
-    if offset >= (chunk.file_offset() + chunk.decompress_size() as u64) {
+    if offset >= (chunk.file_offset() + chunk.uncompress_size() as u64) {
         return true;
     }
     if end <= chunk.file_offset() {
@@ -1146,10 +1146,10 @@ fn add_chunk_to_bio_desc(
     } else {
         0
     };
-    let chunk_end = if end < (chunk.file_offset() + chunk.decompress_size() as u64) {
+    let chunk_end = if end < (chunk.file_offset() + chunk.uncompress_size() as u64) {
         end - chunk.file_offset()
     } else {
-        chunk.decompress_size() as u64
+        chunk.uncompress_size() as u64
     };
 
     let bio = BlobIoDesc::new(
@@ -1397,9 +1397,9 @@ pub mod tests {
         pub blob_index: u32,
         pub flags: BlobChunkFlags,
         pub compress_size: u32,
-        pub decompress_size: u32,
+        pub uncompress_size: u32,
         pub compress_offset: u64,
-        pub decompress_offset: u64,
+        pub uncompress_offset: u64,
         pub file_offset: u64,
         pub index: u32,
         pub reserved: u32,
@@ -1425,8 +1425,8 @@ pub mod tests {
         impl_getter!(index, index, u32);
         impl_getter!(compress_offset, compress_offset, u64);
         impl_getter!(compress_size, compress_size, u32);
-        impl_getter!(decompress_offset, decompress_offset, u64);
-        impl_getter!(decompress_size, decompress_size, u32);
+        impl_getter!(uncompress_offset, uncompress_offset, u64);
+        impl_getter!(uncompress_size, uncompress_size, u32);
         impl_getter!(file_offset, file_offset, u64);
         impl_getter!(flags, flags, BlobChunkFlags);
     }
@@ -1438,7 +1438,7 @@ pub mod tests {
         let size: u64 = 1024;
         // [offset, offset + size)
         chunk.file_offset = offset;
-        chunk.decompress_size = size as u32;
+        chunk.uncompress_size = size as u32;
 
         // (offset, end, expected_chunk_start, expected_size)
         let data = vec![
@@ -1476,7 +1476,7 @@ pub mod tests {
                     readahead_size: 0,
                     blob_id: String::from("blobid"),
                     blob_index: 0,
-                    blob_decompressed_size: 0,
+                    blob_uncompressed_size: 0,
                     blob_compressed_size: 0,
                 }),
                 true,

@@ -671,7 +671,7 @@ impl RafsSuper {
             State::All => Some(desc),
             State::Partial(fi) => {
                 for i in (fi + 1..len).rev() {
-                    desc.bi_size -= std::cmp::min(desc.bi_vec[i].size, desc.bi_size);
+                    desc.bi_size -= std::cmp::min(desc.bi_vec[i].chunkinfo.uncompress_size() as usize, desc.bi_size);
                     desc.bi_vec.remove(i as usize);
                 }
                 Some(desc)
@@ -705,7 +705,7 @@ impl RafsSuper {
             // It is possible that read size is beyond file size, so chunks vector is zero length.
             if !d[0].bi_vec.is_empty() {
                 let ck = d[0].bi_vec[0].chunkinfo.clone();
-                // Might be smaller than decompress size. It is user part.
+                // Might be smaller than uncompressed size. It is user part.
                 let trimming_size = d[0].bi_vec[0].size;
                 let trimming = tail_chunk.compress_offset() == ck.compress_offset();
                 // Stolen chunk bigger than expected size will involve more backend IO, thus

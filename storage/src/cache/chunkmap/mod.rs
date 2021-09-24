@@ -252,11 +252,11 @@ pub(crate) mod tests {
             unimplemented!();
         }
 
-        fn decompress_offset(&self) -> u64 {
+        fn uncompress_offset(&self) -> u64 {
             unimplemented!();
         }
 
-        fn decompress_size(&self) -> u32 {
+        fn uncompress_size(&self) -> u32 {
             unimplemented!();
         }
 

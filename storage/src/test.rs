@@ -81,9 +81,9 @@ pub(crate) struct MockChunkInfo {
     pub blob_index: u32,
     pub flags: BlobChunkFlags,
     pub compress_size: u32,
-    pub decompress_size: u32,
+    pub uncompress_size: u32,
     pub compress_offset: u64,
-    pub decompress_offset: u64,
+    pub uncompress_offset: u64,
     pub file_offset: u64,
     pub index: u32,
     pub reserved: u32,
@@ -110,8 +110,8 @@ impl BlobChunkInfo for MockChunkInfo {
     }
     impl_getter!(compress_offset, compress_offset, u64);
     impl_getter!(compress_size, compress_size, u32);
-    impl_getter!(decompress_offset, decompress_offset, u64);
-    impl_getter!(decompress_size, decompress_size, u32);
+    impl_getter!(uncompress_offset, uncompress_offset, u64);
+    impl_getter!(uncompress_size, uncompress_size, u32);
 }
 
 impl BlobV5ChunkInfo for MockChunkInfo {

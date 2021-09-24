@@ -317,7 +317,7 @@ impl BlobManager {
                     entry.blob_id().to_owned(),
                     entry.chunk_count(),
                     entry.readahead_size() as u32,
-                    entry.decompressed_size(),
+                    entry.uncompressed_size(),
                     entry.compressed_size(),
                 )
             })

@@ -112,8 +112,8 @@ impl BlobCache for DummyCache {
         let bios_len = bios.len();
         let offset = bios[0].offset;
         //let chunk = bios[0].chunkinfo.as_v5()?;
-        let d_size = bios[0].chunkinfo.decompress_size() as usize;
-        // Use the destination buffer to received the decompressed data if possible.
+        let d_size = bios[0].chunkinfo.uncompress_size() as usize;
+        // Use the destination buffer to received the uncompressed data if possible.
         if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
             if !bios[0].user_io {
                 return Ok(0);
@@ -126,7 +126,7 @@ impl BlobCache for DummyCache {
         let mut buffer_holder: Vec<Vec<u8>> = Vec::with_capacity(bios.len());
         for bio in bios.iter() {
             if bio.user_io {
-                let mut d = alloc_buf(bio.chunkinfo.decompress_size() as usize);
+                let mut d = alloc_buf(bio.chunkinfo.uncompress_size() as usize);
                 self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), None)?;
                 buffer_holder.push(d);
                 user_size += bio.size;

@@ -63,8 +63,8 @@ pub struct BlobInfo {
     blob_id: String,
     /// Size of the compressed blob file.
     compressed_size: u64,
-    /// Size of the decompressed blob file, or the cache file.
-    decompressed_size: u64,
+    /// Size of the uncompressed blob file, or the cache file.
+    uncompressed_size: u64,
     /// Number of chunks in blob file.
     /// A helper to distinguish bootstrap with extended blob table or not:
     ///     Bootstrap with extended blob table always has non-zero `chunk_count`
@@ -87,7 +87,7 @@ impl BlobInfo {
         blob_version: BlobVersion,
         blob_index: u32,
         blob_id: String,
-        decompressed_size: u64,
+        uncompressed_size: u64,
         compressed_size: u64,
         chunk_count: u32,
     ) -> Self {
@@ -95,7 +95,7 @@ impl BlobInfo {
             blob_version,
             blob_index,
             blob_id,
-            decompressed_size,
+            uncompressed_size,
             compressed_size,
             chunk_count,
 
@@ -137,9 +137,9 @@ impl BlobInfo {
         self.compressed_size
     }
 
-    /// Get size of the decompressed blob.
-    pub fn decompressed_size(&self) -> u64 {
-        self.decompressed_size
+    /// Get size of the uncompressed blob.
+    pub fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_size
     }
 
     // Get number of chunks in the blob.
@@ -246,10 +246,10 @@ pub trait BlobChunkInfo: Sync + Send {
     fn compress_size(&self) -> u32;
 
     /// Get the chunk offset in the uncompressed blob.
-    fn decompress_offset(&self) -> u64;
+    fn uncompress_offset(&self) -> u64;
 
     /// Get the size of the uncompressed chunk.
-    fn decompress_size(&self) -> u32;
+    fn uncompress_size(&self) -> u32;
 
     /// Check whether the chunk is compressed or not.
     ///
@@ -317,12 +317,12 @@ impl BlobChunkInfo for BlobIoChunk {
         self.as_base().compress_size()
     }
 
-    fn decompress_offset(&self) -> u64 {
-        self.as_base().decompress_offset()
+    fn uncompress_offset(&self) -> u64 {
+        self.as_base().uncompress_offset()
     }
 
-    fn decompress_size(&self) -> u32 {
-        self.as_base().decompress_size()
+    fn uncompress_size(&self) -> u32 {
+        self.as_base().uncompress_size()
     }
 
     fn is_compressed(&self) -> bool {
@@ -405,6 +405,48 @@ impl BlobIoVec {
         BlobIoVec {
             ..Default::default()
         }
+    }
+
+    /// Append another blob io vector to current one.
+    pub fn append(&mut self, mut desc: BlobIoVec) {
+        self.bi_vec.append(desc.bi_vec.as_mut());
+        self.bi_size += desc.bi_size;
+    }
+
+    /// Reset the blob io vector.
+    pub fn reset(&mut self) {
+        self.bi_size = 0;
+        self.bi_vec.truncate(0);
+    }
+
+    /// Get the target blob of the blob io vector.
+    pub fn get_target_blob(&self) -> Option<Arc<BlobInfo>> {
+        if self.bi_vec.is_empty() {
+            None
+        } else {
+            Some(self.bi_vec[0].blob.clone())
+        }
+    }
+
+    /// Get the target blob index of the blob io vector.
+    pub fn get_target_blob_index(&self) -> Option<u32> {
+        if self.bi_vec.is_empty() {
+            None
+        } else {
+            Some(self.bi_vec[0].blob.blob_index())
+        }
+    }
+
+    /// Check whether the blob io vector is targeting the blob with `blob_index`
+    pub fn is_target_blob(&self, blob_index: u32) -> bool {
+        !self.bi_vec.is_empty() && self.bi_vec[0].blob.blob_index() == blob_index
+    }
+
+    /// Check whether two blob io vector targets the same blob.
+    pub fn has_same_blob(&self, desc: &BlobIoVec) -> bool {
+        !self.bi_vec.is_empty()
+            && !desc.bi_vec.is_empty()
+            && self.bi_vec[0].blob.blob_index() == desc.bi_vec[0].blob.blob_index()
     }
 }
 
@@ -638,8 +680,8 @@ mod tests {
         id: u32,
         compressed_offset: u64,
         compressed_size: u32,
-        decompressed_offset: u64,
-        decompressed_size: u32,
+        uncompressed_offset: u64,
+        uncompressed_size: u32,
     }
 
     impl BlobChunkInfo for MockChunk {
@@ -659,12 +701,12 @@ mod tests {
             self.compressed_size
         }
 
-        fn decompress_offset(&self) -> u64 {
-            self.decompressed_offset
+        fn uncompress_offset(&self) -> u64 {
+            self.uncompressed_offset
         }
 
-        fn decompress_size(&self) -> u32 {
-            self.decompressed_size
+        fn uncompress_size(&self) -> u32 {
+            self.uncompressed_size
         }
 
         fn is_compressed(&self) -> bool {
@@ -683,16 +725,16 @@ mod tests {
             id: 3,
             compressed_offset: 0x1000,
             compressed_size: 0x100,
-            decompressed_offset: 0x2000,
-            decompressed_size: 0x200,
+            uncompressed_offset: 0x2000,
+            uncompressed_size: 0x200,
         });
         let iochunk: BlobIoChunk = chunk.clone().into();
 
         assert_eq!(iochunk.id(), 3);
         assert_eq!(iochunk.compress_offset(), 0x1000);
         assert_eq!(iochunk.compress_size(), 0x100);
-        assert_eq!(iochunk.decompress_offset(), 0x2000);
-        assert_eq!(iochunk.decompress_size(), 0x200);
+        assert_eq!(iochunk.uncompress_offset(), 0x2000);
+        assert_eq!(iochunk.uncompress_size(), 0x200);
         assert_eq!(iochunk.is_compressed(), true);
         assert_eq!(iochunk.is_hole(), false);
     }

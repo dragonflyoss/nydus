@@ -847,8 +847,8 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
 
     impl_chunkinfo_getter!(compress_offset, u64);
     impl_chunkinfo_getter!(compress_size, u32);
-    impl_chunkinfo_getter!(decompress_offset, u64);
-    impl_chunkinfo_getter!(decompress_size, u32);
+    impl_chunkinfo_getter!(uncompress_offset, u64);
+    impl_chunkinfo_getter!(uncompress_size, u32);
 }
 
 impl BlobV5ChunkInfo for DirectChunkInfoV5 {
