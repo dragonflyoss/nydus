@@ -101,6 +101,9 @@ docker-nydus-smoke: docker-static
 
 
 NYDUSIFY_PATH = /nydus-rs/contrib/nydusify
+# TODO: Nydusify smoke has to be time consuming for a while since it relies on musl nydusd and nydus-image.
+# So musl compliation must be involved.
+# And docker-in-docker deployment invovles image buiding?
 docker-nydusify-smoke: docker-static
 	$(call build_golang,$(NYDUSIFY_PATH),make build-smoke)
 	docker build -t nydusify-smoke misc/nydusify-smoke
