@@ -36,7 +36,7 @@ pub mod layout;
 mod md_v5;
 mod noop;
 
-pub use crate::storage::{RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE};
+pub use storage::{RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE};
 
 /// Maximum size of blob id string.
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 64;
@@ -101,7 +101,7 @@ pub trait RafsInode {
     ///
     /// The inode object may be transmuted from a raw buffer, read from an external file, so the
     /// caller must validate it before accessing any fields.
-    fn validate(&self) -> Result<()>;
+    fn validate(&self, max_inode: Inode, chunk_size: u64) -> Result<()>;
 
     /// Get `Entry` of the inode.
     fn get_entry(&self) -> Entry;
@@ -214,8 +214,8 @@ pub struct RafsSuperMeta {
     pub sb_size: u32,
     /// Inode number of root inode.
     pub root_inode: Inode,
-    /// Filesystem block size.
-    pub block_size: u32,
+    /// Chunk size.
+    pub chunk_size: u32,
     /// Number of inodes in the filesystem.
     pub inodes_count: u64,
     #[serde_as(as = "DisplayFromStr")]
@@ -248,9 +248,14 @@ pub struct RafsSuperMeta {
 }
 
 impl RafsSuperMeta {
+    /// Check whether the superblock is for Rafs v4/v5 filesystems.
+    pub fn is_v5(&self) -> bool {
+        self.version == RAFS_SUPER_VERSION_V5
+    }
+
     /// Check whether the explicit UID/GID feature has been enable or not.
     pub fn explicit_uidgid(&self) -> bool {
-        if self.is_v4_v5() {
+        if self.is_v5() {
             self.flags.contains(RafsV5SuperFlags::EXPLICIT_UID_GID)
         } else {
             false
@@ -259,7 +264,7 @@ impl RafsSuperMeta {
 
     /// Check whether the filesystem supports extended attribute or not.
     pub fn has_xattr(&self) -> bool {
-        if self.is_v4_v5() {
+        if self.is_v5() {
             self.flags.contains(RafsV5SuperFlags::HAS_XATTR)
         } else {
             false
@@ -275,7 +280,7 @@ impl Default for RafsSuperMeta {
             sb_size: 0,
             inodes_count: 0,
             root_inode: 0,
-            block_size: 0,
+            chunk_size: 0,
             flags: RafsV5SuperFlags::empty(),
             inode_table_entries: 0,
             inode_table_offset: 0,
@@ -380,21 +385,13 @@ impl RafsSuper {
 
     /// Load RAFS metadata and optionally cache inodes.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        let mut sb = RafsV5SuperBlock::new();
-        r.read_exact(sb.as_mut())?;
-        if sb.detect() {
-            if sb.is_rafs_v4v5() {
-                return self.load_v4v5(r, &sb);
-            }
-        }
-
         Err(einval!("invalid superblock version number"))
     }
 
     /// Store RAFS metadata to backend storage.
     pub fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        if self.meta.is_v4_v5() {
-            return self.store_v4v5(w);
+        if self.meta.is_v5() {
+            return self.store_v5(w);
         }
 
         Err(einval!("invalid superblock version number"))
@@ -482,28 +479,29 @@ impl RafsSuper {
         Ok(parent.ino())
     }
 
-    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    /// Prefetch filesystem data to improve performance.
+    /// Prefetch filesystem and file data to improve performance.
     ///
-    /// This is fs layer prefetch entry point where 2 kinds of prefetch can be started:
-    /// 1. Static method from prefetch table hint:
+    /// To improve application filesystem access performance, the filesystem may prefetch file or
+    /// metadata in advance. There are ways to configure the file list to be prefetched.
+    /// 1. Static file prefetch list configured during image building, recorded in prefetch list
+    ///    in Rafs v5 file system metadata.
     ///     Base on prefetch table which is persisted to bootstrap when building image.
-    /// 2. Dynamic method from hint directory list specified when nydusd starts.
-    ///     Specify as a directory list when rafs is being imported. No prefetch table has to be
-    ///     involved.
+    /// 2. Dynamic file prefetch list configured by command line. The dynamic file prefetch list
+    ///    has higher priority and the static file prefetch list will be ignored if there's dynamic
+    ///    prefetch list. When a directory is specified for dynamic prefetch list, all sub directory
+    ///    and files under the directory will be prefetched.
+    ///
     /// Each inode passed into should correspond to directory. And it already does the file type
     /// check inside.
-    pub fn prefetch_hint_files(
+    pub fn prefetch_files(
         &self,
         r: &mut RafsIoReader,
         files: Option<Vec<Inode>>,
         fetcher: &dyn Fn(&mut BlobIoVec),
     ) -> RafsResult<()> {
-        // Prefer to use the file list specified by daemon for prefetching, then
-        // use the file list specified by builder for prefetching.
+        // Try to prefetch files according to the list specified by the `--prefetch-files` option.
         if let Some(files) = files {
-            // No need to prefetch blob data for each alias as they share the same range,
-            // we do it once.
+            // Avoid prefetching multiple times for hardlinks to the same file.
             let mut hardlinks: HashSet<u64> = HashSet::new();
             let mut head_desc = BlobIoVec {
                 bi_size: 0,
@@ -511,20 +509,14 @@ impl RafsSuper {
                 bi_vec: Vec::new(),
             };
 
-            // Try to prefetch according to the list of files specified by the
-            // daemon's `--prefetch-files` option.
             for f_ino in files {
                 self.prefetch_data(f_ino, &mut head_desc, &mut hardlinks, fetcher)
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
-            // The left chunks whose size is smaller than 4MB will be fetched here.
+            // Flush the pending prefetch requests.
             fetcher(&mut head_desc);
-        } else if self.meta.is_v4_v5() {
-            self.prefetch_data_v4v5(r, fetcher)?;
-        } else {
-            return Err(RafsError::Prefetch(
-                "Unknown filesystem version, prefetch disabled".to_string(),
-            ));
+        } else if self.meta.is_v5() {
+            self.prefetch_data_v5(r, fetcher)?;
         }
 
         Ok(())

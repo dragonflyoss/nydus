@@ -16,8 +16,9 @@ use anyhow::Result;
 
 use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobTable, RafsV5Inode, RafsV5InodeTable,
-    RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5SuperFlags, RafsV5XAttrsTable,
+    RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
+use rafs::metadata::RafsSuperFlags;
 use rafs::{RafsIoRead, RafsIoReader};
 
 pub(crate) struct RafsInspector {
@@ -147,7 +148,7 @@ impl RafsInspector {
             .map_err(|e| anyhow!("failed to jump to inode offset={}, {:?}", offset, e))?;
 
         // No need to move offset forward
-        let file_name = ondisk_inode.file_name(bootstrap)?;
+        let file_name = ondisk_inode.load_file_name(bootstrap)?;
 
         Ok((ondisk_inode, file_name))
     }
@@ -569,7 +570,7 @@ Blocks:             {blocks}"#,
     Flags:              {flags}"#,
                 version = sb.version(),
                 inodes_count = sb.inodes_count(),
-                flags = RafsV5SuperFlags::from_bits(sb.flags()).unwrap()
+                flags = RafsSuperFlags::from_bits(sb.flags()).unwrap()
             );
 
             None

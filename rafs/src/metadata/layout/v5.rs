@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
-use std::io::Result;
+use std::io::{Read, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ use storage::compress;
 use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
 use crate::metadata::layout::{
-    bytes_to_os_str, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
+    bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
     RAFS_SUPER_VERSION_V5,
 };
 use crate::metadata::{Inode, RafsInode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
@@ -59,15 +59,16 @@ use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, Rafs
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
 // compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures
 // have been moved into the storage manager.
-pub use storage::device::v5::BlobV5ChunkInfo;
-pub use storage::device::{BlobChunkFlags, BlobInfo};
+use storage::device::v5::BlobV5ChunkInfo;
+use storage::device::{BlobChunkFlags, BlobInfo};
+use vm_memory::VolatileMemory;
 
 pub(crate) const RAFSV5_ALIGNMENT: usize = 8;
 pub(crate) const RAFSV5_SUPERBLOCK_SIZE: usize = 8192;
+pub(crate) const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
 
 const RAFSV5_SUPER_MAGIC: u32 = 0x5241_4653;
 const RAFSV5_SUPERBLOCK_RESERVED_SIZE: usize = RAFSV5_SUPERBLOCK_SIZE - 80;
-const RAFSV5_EXT_BLOB_ENTRY_SIZE: usize = 64;
 const RAFSV5_EXT_BLOB_RESERVED_SIZE: usize = RAFSV5_EXT_BLOB_ENTRY_SIZE - 24;
 
 /// Trait to get information about a Rafs v5 inode.
@@ -206,63 +207,98 @@ impl RafsV5SuperBlock {
 
     /// Check whether it's a valid Rafs v5 super block.
     pub fn detect(&self) -> bool {
-        self.is_rafs_v4v5()
+        self.is_rafs_v5()
     }
 
     /// Check whether it's super block for Rafs v4/v5.
-    pub fn is_rafs_v4v5(&self) -> bool {
-        self.magic() == RAFSV5_SUPER_MAGIC
-            && self.version() >= RAFS_SUPER_VERSION_V4 as u32
-            && self.version() <= RAFS_SUPER_VERSION_V5 as u32
-            && self.sb_size() == RAFSV5_SUPERBLOCK_SIZE as u32
+    pub fn is_rafs_v5(&self) -> bool {
+        self.magic() == RAFSV5_SUPER_MAGIC && self.version() == RAFS_SUPER_VERSION_V5
     }
 
     /// Validate the Rafs v5 super block.
-    pub fn validate(&self) -> Result<()> {
-        if self.magic() != RAFSV5_SUPER_MAGIC
-            || self.version() < RAFS_SUPER_MIN_VERSION as u32
-            || self.version() > RAFS_SUPER_VERSION_V5 as u32
-            || self.sb_size() != RAFSV5_SUPERBLOCK_SIZE as u32
+    pub fn validate(&self, meta_size: u64) -> Result<()> {
+        if !self.is_rafs_v5() {
+            return Err(einval!("invalid super block version number"));
+        } else if self.sb_size() as usize != RAFSV5_SUPERBLOCK_SIZE
+            || meta_size <= RAFSV5_SUPERBLOCK_SIZE as u64
         {
-            return Err(einval!("invalid superblock"));
+            return Err(einval!("invalid super block blob size"));
+        } else if self.block_size() != 512 && self.block_size() != 4096 {
+            return Err(einval!("invalid block size"));
+        } else if RafsV5SuperFlags::from_bits(self.flags()).is_none() {
+            return Err(einval!("invalid super block flags"));
         }
 
-        match self.version() {
-            RAFS_SUPER_VERSION_V4 => {
-                if self.inodes_count() != 0
-                    || self.inode_table_offset() != 0
-                    || self.inode_table_entries() != 0
-                {
-                    return Err(einval!("invalid superblock"));
-                }
-            }
-            RAFS_SUPER_VERSION_V5 => {
-                if self.inodes_count() == 0
-                    || self.inode_table_offset() < RAFSV5_SUPERBLOCK_SIZE as u64
-                    || self.inode_table_offset() & 0x7 != 0
-                {
-                    return Err(einval!("invalid super block"));
-                }
-            }
-            _ => {
-                return Err(einval!("invalid super block version number"));
+        let meta_range = MetaRange::new(
+            RAFSV5_SUPERBLOCK_SIZE as u64,
+            meta_size - RAFSV5_SUPERBLOCK_SIZE as u64,
+        )?;
+
+        let inodes_count = self.inodes_count();
+        let inode_table_offset = self.inode_table_offset();
+        let inode_table_entries = self.inode_table_entries() as u64;
+        let inode_table_size = inode_table_entries * size_of::<u32>() as u64;
+        let inode_table_range = MetaRange::new(inode_table_offset, inode_table_size)?;
+        if inodes_count > inode_table_entries || !inode_table_range.is_subrange_of(&meta_range) {
+            return Err(einval!("invalid inode table count, offset or entries."));
+        }
+
+        let blob_table_offset = self.blob_table_offset();
+        let blob_table_size = self.blob_table_size() as u64;
+        let blob_table_range = MetaRange::new(blob_table_offset, blob_table_size)?;
+        if !blob_table_range.is_subrange_of(&meta_range)
+            || blob_table_range.intersect_with(&inode_table_range)
+        {
+            return Err(einval!("invalid blob table offset or size."));
+        }
+
+        let ext_blob_table_offset = self.extended_blob_table_offset();
+        let ext_blob_table_size =
+            self.extended_blob_table_entries() as u64 * RAFSV5_EXT_BLOB_ENTRY_SIZE as u64;
+        let ext_blob_table_range = MetaRange::new(ext_blob_table_offset, ext_blob_table_size)?;
+        if ext_blob_table_size != 0 {
+            if !ext_blob_table_range.is_subrange_of(&meta_range)
+                || ext_blob_table_range.intersect_with(&inode_table_range)
+                || ext_blob_table_range.intersect_with(&blob_table_range)
+            {
+                return Err(einval!("invalid extended blob table offset or size."));
             }
         }
 
-        // TODO: validate block_size, flags and reserved.
+        let prefetch_table_offset = self.prefetch_table_offset();
+        let prefetch_table_size = self.prefetch_table_entries() as u64 * size_of::<u32>() as u64;
+        let pretech_table_range = MetaRange::new(prefetch_table_offset, prefetch_table_size)?;
+        if prefetch_table_size != 0 {
+            if !pretech_table_range.is_subrange_of(&meta_range)
+                || pretech_table_range.intersect_with(&inode_table_range)
+                || pretech_table_range.intersect_with(&blob_table_range)
+                || (ext_blob_table_size != 0
+                    && pretech_table_range.intersect_with(&ext_blob_table_range))
+            {
+                return Err(einval!("invalid prefetch table offset or size."));
+            }
+        }
 
         Ok(())
     }
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
     /// Set compression algorithm to handle chunk of the Rafs filesystem.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         let c: RafsV5SuperFlags = compressor.into();
+
+        self.s_flags &= !RafsV5SuperFlags::COMPRESS_NONE.bits();
+        self.s_flags &= !RafsV5SuperFlags::COMPRESS_LZ4_BLOCK.bits();
+        self.s_flags &= !RafsV5SuperFlags::COMPRESS_GZIP.bits();
         self.s_flags |= c.bits();
     }
 
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsV5SuperFlags = digester.into();
+
+        self.s_flags &= !RafsV5SuperFlags::DIGESTER_BLAKE3.bits();
+        self.s_flags &= !RafsV5SuperFlags::DIGESTER_SHA256.bits();
         self.s_flags |= c.bits();
     }
 
@@ -407,7 +443,7 @@ impl RafsV5InodeTable {
 
     /// Set inode offset in the metadata blob for an inode.
     pub fn set(&mut self, ino: Inode, offset: u32) -> Result<()> {
-        if ino == 0 || ino > self.data.len() as u64 {
+        if ino == 0 || ino >= self.data.len() as u64 {
             return Err(einval!("invalid inode number"));
         } else if offset as usize <= RAFSV5_SUPERBLOCK_SIZE || offset & 0x7 != 0 {
             return Err(einval!("invalid inode offset"));
@@ -422,7 +458,7 @@ impl RafsV5InodeTable {
 
     /// Get inode offset in the metadata blob of an inode.
     pub fn get(&self, ino: Inode) -> Result<u32> {
-        if ino == 0 || ino > self.data.len() as u64 {
+        if ino == 0 || ino >= self.data.len() as u64 {
             return Err(enoent!());
         }
 
@@ -501,7 +537,6 @@ impl RafsV5PrefetchTable {
         self.inodes.sort_unstable();
 
         let (_, data, _) = unsafe { self.inodes.align_to::<u8>() };
-
         w.write_all(data.as_ref())?;
 
         // OK. Let's see if we have to align... :-(
@@ -521,16 +556,17 @@ impl RafsV5PrefetchTable {
         &mut self,
         r: &mut RafsIoReader,
         offset: u64,
-        table_size: usize,
-    ) -> nix::Result<usize> {
-        self.inodes = vec![0u32; table_size];
+        entries: usize,
+    ) -> Result<usize> {
+        self.inodes = vec![0u32; entries];
+
         let (_, data, _) = unsafe { self.inodes.align_to_mut::<u8>() };
-        nix::sys::uio::pread(r.as_raw_fd(), data, offset as i64)
+        r.seek_to_offset(offset)?;
+        r.read_exact(data)?;
+
+        Ok(data.len())
     }
 }
-
-// A helper struct to extract blob table entries from disk.
-struct BlobEntryFrontPart(u32, u32);
 
 /// Rafs v5 blob description table.
 #[derive(Clone, Debug, Default)]
@@ -608,59 +644,44 @@ impl RafsV5BlobTable {
             return Ok(());
         }
 
+        debug!("blob table size {}", blob_table_size);
         let mut data = vec![0u8; blob_table_size as usize];
         r.read_exact(&mut data)?;
 
-        let begin_ptr = data.as_slice().as_ptr() as *const u8;
-        let mut frame = begin_ptr;
-        debug!("blob table size {}", blob_table_size);
-        loop {
-            // Each entry frame looks like:
-            // u32 | u32 | string | trailing '\0' , except that the last entry has no trailing '\0'
-            // Make clippy of 1.45 happy. Higher version of clippy won't complain about this
-            #[allow(clippy::cast_ptr_alignment)]
-            let front = unsafe { &*(frame as *const BlobEntryFrontPart) };
-            // `blob_table_size` has to be greater than zero, otherwise it access a invalid page.
-            let readahead_offset = front.0;
-            let readahead_size = front.1;
+        // Each entry frame looks like:
+        // u32 | u32 | string | trailing '\0' , except that the last entry has no trailing '\0'
+        let mut buf = data.as_mut_slice();
+        while buf.len() > 2 * size_of::<u32>() {
+            let readahead_offset =
+                unsafe { std::ptr::read_unaligned::<u32>(buf[0..4].as_ptr() as *const u32) };
+            let readahead_size =
+                unsafe { std::ptr::read_unaligned::<u32>(buf[4..8].as_ptr() as *const u32) };
 
-            // Safe because we never tried to take ownership.
-            // Make clippy of 1.45 happy. Higher version of clippy won't complain about this
-            #[allow(clippy::cast_ptr_alignment)]
-            let id_offset = unsafe { (frame as *const BlobEntryFrontPart).add(1) as *const u8 };
-            // id_end points to the byte before splitter 'b\0'
-            let id_end = Self::blob_id_tail_ptr(id_offset, begin_ptr, blob_table_size as usize);
-
-            // Excluding trailing '\0'.
-            // Note: we can't use string.len() to move pointer.
-            let bytes_len = unsafe { pointer_offset(id_offset, id_end) } + 1;
-
-            let id_bytes = unsafe { std::slice::from_raw_parts(id_offset, bytes_len) };
-
-            let blob_id = std::str::from_utf8(id_bytes).map_err(|e| einval!(e))?;
+            let mut pos = 8;
+            while pos < buf.len() && buf[pos] != 0 {
+                pos += 1;
+            }
+            let blob_id = std::str::from_utf8(&buf[8..pos])
+                .map(|v| v.to_owned())
+                .map_err(|e| einval!(e))?;
+            if pos == buf.len() {
+                buf = &mut buf[pos..];
+            } else {
+                buf = &mut buf[pos + 1..];
+            }
             debug!("blob {:?} lies on", blob_id);
-            // Move to next entry frame, including splitter 0
-            frame = unsafe { frame.add(size_of::<BlobEntryFrontPart>() + bytes_len + 1) };
 
             let index = self.entries.len();
-
-            // For compatibility concern, blob table might not associate with extended blob table.
-            let (chunk_count, blob_cache_size, compressed_blob_size) =
+            let (chunk_count, uncompressed_size, compressed_size) =
+                // For compatibility, blob table might not be associated with extended blob table.
                 if !self.extended.entries.is_empty() {
-                    // chge: Though below can hardly happen and we can do nothing meeting
-                    // this possibly due to bootstrap corruption, someone like this kind of check, make them happy.
-                    if index > self.extended.entries.len() - 1 {
-                        error!(
-                            "Extended blob table({}) is shorter than blob table",
-                            self.extended.entries.len()
-                        );
+                    let ext_len = self.extended.entries.len();
+                    if index >= ext_len {
+                        error!( "Extended blob table({}) is shorter than blob table", ext_len);
                         return Err(einval!());
                     }
-                    (
-                        self.extended.entries[index].chunk_count,
-                        self.extended.entries[index].uncompressed_size,
-                        self.extended.entries[index].compressed_size,
-                    )
+                    let entry = &self.extended.entries[index];
+                    (entry.chunk_count, entry.uncompressed_size, entry.compressed_size)
                 } else {
                     (0, 0, 0)
                 };
@@ -668,18 +689,14 @@ impl RafsV5BlobTable {
             let mut blob_info = BlobInfo::new(
                 BlobVersion::V5,
                 index as u32,
-                blob_id.to_owned(),
-                blob_cache_size,
-                compressed_blob_size,
+                blob_id,
+                uncompressed_size,
+                compressed_size,
                 chunk_count,
             );
             blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
-            self.entries.push(Arc::new(blob_info));
 
-            let ptr_offset = unsafe { pointer_offset(begin_ptr, frame) };
-            if rafsv5_align(ptr_offset) as u32 >= blob_table_size {
-                break;
-            }
+            self.entries.push(Arc::new(blob_info));
         }
 
         Ok(())
@@ -693,20 +710,6 @@ impl RafsV5BlobTable {
     /// Store the extended blob information array.
     pub fn store_extended(&self, w: &mut RafsIoWriter) -> Result<usize> {
         self.extended.store(w)
-    }
-
-    fn blob_id_tail_ptr(cur: *const u8, begin_ptr: *const u8, total_size: usize) -> *const u8 {
-        let mut id_end = cur as *mut u8;
-        loop {
-            let next_byte = unsafe { id_end.add(1) };
-            // b'\0' is the splitter
-            let ptr_offset = unsafe { pointer_offset(begin_ptr, next_byte) };
-            if unsafe { *next_byte } == 0 || ptr_offset >= total_size {
-                return id_end;
-            }
-
-            id_end = unsafe { id_end.add(1) };
-        }
     }
 }
 
@@ -828,7 +831,7 @@ impl RafsV5ExtBlobTable {
     pub fn get(&self, blob_index: u32) -> Option<Arc<RafsV5ExtBlobEntry>> {
         let len = self.entries.len();
 
-        if len == 0 || blob_index >= len as u32 {
+        if len == 0 || blob_index as usize >= len {
             None
         } else {
             Some(self.entries[blob_index as usize].clone())
@@ -865,10 +868,7 @@ impl RafsStore for RafsV5ExtBlobTable {
                 w.write_all(&u64::to_le_bytes(entry.uncompressed_size))?;
                 w.write_all(&u64::to_le_bytes(entry.compressed_size))?;
                 w.write_all(&entry.reserved2)?;
-                size += size_of::<u32>()
-                    + entry.reserved1.len()
-                    + size_of::<u64>()
-                    + entry.reserved2.len();
+                size += RAFSV5_EXT_BLOB_ENTRY_SIZE;
                 Ok(())
             })?;
 
@@ -962,11 +962,6 @@ impl RafsV5Inode {
                 as usize
     }
 
-    /// Load an inode from a reader.
-    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        r.read_exact(self.as_mut())
-    }
-
     /// Check whether the inode is a directory.
     #[inline]
     pub fn is_dir(&self) -> bool {
@@ -1003,10 +998,16 @@ impl RafsV5Inode {
         self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
     }
 
+    /// Load an inode from a reader.
+    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
+    }
+
     /// Set filename for the inode.
-    pub fn file_name(&self, r: &mut RafsIoReader) -> Result<OsString> {
+    pub fn load_file_name(&self, r: &mut RafsIoReader) -> Result<OsString> {
         let mut name_buf = vec![0u8; self.i_name_size as usize];
         r.read_exact(name_buf.as_mut_slice())?;
+        r.seek_to_next_aligned(name_buf.len(), RAFSV5_ALIGNMENT)?;
         Ok(bytes_to_os_str(&name_buf).to_os_string())
     }
 }
@@ -1031,7 +1032,6 @@ impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
         let name = self.name.as_bytes();
         w.write_all(name)?;
         size += name.len();
-
         let padding = rafsv5_align(self.inode.i_name_size as usize) - name.len();
         w.write_padding(padding)?;
         size += padding;
@@ -1461,13 +1461,6 @@ pub(crate) fn rafsv5_validate_digest(
     Ok(result)
 }
 
-// Safety: the caller must ensure `later_ptr` is bigger than `former_ptr`.
-unsafe fn pointer_offset(former_ptr: *const u8, later_ptr: *const u8) -> usize {
-    // Rust provides unsafe method `offset_from` from 1.47.0
-    // Hopefully, we can adopt it someday. For now, for compatibility, use blow trick.
-    later_ptr as usize - former_ptr as usize
-}
-
 #[cfg(test)]
 pub mod tests {
     use std::fs::OpenOptions;
@@ -1480,6 +1473,7 @@ pub mod tests {
     use super::*;
     use crate::metadata::RafsStore;
     use crate::{RafsIoRead, RafsIoReader, RafsIoWrite};
+    use std::str::FromStr;
 
     struct Entry {
         foo: u32,
@@ -1523,7 +1517,6 @@ pub mod tests {
             .write(true)
             .open(tmp_file.as_path())
             .unwrap();
-
         tmp_file.write_all(&buffer).unwrap();
         tmp_file.flush().unwrap();
 
@@ -1532,30 +1525,33 @@ pub mod tests {
 
         file.seek(SeekFrom::Start(0)).unwrap();
         blob_table.load(&mut file, buffer.len() as u32).unwrap();
-
         for b in &blob_table.entries {
             let _c = b.clone();
             trace!("{:?}", _c);
         }
 
         assert_eq!(first.bar, first.foo + 1);
-        assert_eq!(blob_table.entries[0].blob_id(), first_id);
-        assert_eq!(blob_table.entries[1].blob_id(), second_id);
-        assert_eq!(blob_table.entries[2].blob_id(), third_id);
+        assert_eq!(blob_table.size(), rafsv5_align(buffer.len()));
+        assert_eq!(blob_table.get(0).unwrap().blob_id(), first_id);
+        assert_eq!(blob_table.get(1).unwrap().blob_id(), second_id);
+        assert_eq!(blob_table.get(2).unwrap().blob_id(), third_id);
+        assert!(blob_table.get(3).is_err());
+        assert_eq!(blob_table.get_all().len(), 3);
 
         blob_table.entries.truncate(0);
-
         file.seek(SeekFrom::Start(0)).unwrap();
         blob_table.load(&mut file, 0).unwrap();
+        assert_eq!(blob_table.size(), 0);
+        assert_eq!(blob_table.entries.len(), 0);
+        assert!(blob_table.get(0).is_err());
 
         blob_table.entries.truncate(0);
-
         file.seek(SeekFrom::Start(0)).unwrap();
         blob_table
             .load(&mut file, (buffer.len() - 100) as u32)
             .unwrap();
-
         assert_eq!(blob_table.entries[0].blob_id(), first_id);
+        assert_eq!(blob_table.get_all().len(), 2);
     }
 
     #[test]
@@ -1586,6 +1582,12 @@ pub mod tests {
         let mut reader = Box::new(file) as Box<dyn RafsIoRead>;
         let mut table = RafsV5ExtBlobTable::new();
         table.load(&mut reader, 5).unwrap();
+
+        assert_eq!(table.size(), 5 * RAFSV5_EXT_BLOB_ENTRY_SIZE);
+        assert_eq!(table.entries(), 5);
+        assert!(table.get(0).is_some());
+        assert!(table.get(4).is_some());
+        assert!(table.get(5).is_none());
 
         // Check expected blob table
         for i in 0..5 {
@@ -1758,5 +1760,190 @@ pub mod tests {
         assert_eq!(rafsv5_align(7), 8);
         assert_eq!(rafsv5_align(8), 8);
         assert_eq!(rafsv5_align(9), 16);
+    }
+
+    #[test]
+    fn test_rafsv5_superflags() {
+        assert_eq!(
+            RafsV5SuperFlags::from(digest::Algorithm::Blake3),
+            RafsV5SuperFlags::DIGESTER_BLAKE3
+        );
+        assert_eq!(
+            RafsV5SuperFlags::from(digest::Algorithm::Sha256),
+            RafsV5SuperFlags::DIGESTER_SHA256
+        );
+        assert_eq!(
+            digest::Algorithm::from(RafsV5SuperFlags::DIGESTER_BLAKE3),
+            digest::Algorithm::Blake3
+        );
+        assert_eq!(
+            digest::Algorithm::from(RafsV5SuperFlags::DIGESTER_SHA256),
+            digest::Algorithm::Sha256
+        );
+
+        assert_eq!(
+            RafsV5SuperFlags::from(compress::Algorithm::GZip),
+            RafsV5SuperFlags::COMPRESS_GZIP
+        );
+        assert_eq!(
+            RafsV5SuperFlags::from(compress::Algorithm::Lz4Block),
+            RafsV5SuperFlags::COMPRESS_LZ4_BLOCK
+        );
+        assert_eq!(
+            RafsV5SuperFlags::from(compress::Algorithm::None),
+            RafsV5SuperFlags::COMPRESS_NONE
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsV5SuperFlags::COMPRESS_GZIP),
+            compress::Algorithm::GZip
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsV5SuperFlags::COMPRESS_LZ4_BLOCK),
+            compress::Algorithm::Lz4Block
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsV5SuperFlags::COMPRESS_NONE),
+            compress::Algorithm::None
+        );
+    }
+
+    #[test]
+    fn test_rafsv5_inode_table() {
+        let mut table = RafsV5InodeTable::new(1);
+        assert_eq!(table.size(), 8);
+        assert_eq!(table.len(), 2);
+
+        assert!(table.set(0, 0x2000).is_err());
+        assert!(table.set(2, 0x2000).is_err());
+        assert!(table.set(1, 0x1000).is_err());
+        assert!(table.set(1, 0x2001).is_err());
+
+        assert!(table.get(0).is_err());
+        assert!(table.get(2).is_err());
+        assert!(table.get(1).is_err());
+        table.data[1] = 0x1000;
+        assert!(table.get(1).is_err());
+        table.data[1] = 0x1 << 30;
+        assert!(table.get(1).is_err());
+        assert!(table.set(1, 0x2008).is_ok());
+        assert_eq!(table.get(1).unwrap(), 0x2008);
+    }
+
+    #[test]
+    fn test_rafsv5_prefetch_table() {
+        let mut table = RafsV5PrefetchTable::new();
+
+        assert_eq!(table.size(), 0);
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.is_empty(), true);
+        table.add_entry(0x1);
+        assert_eq!(table.size(), 8);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.is_empty(), false);
+
+        let tmp_file = TempFile::new().unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_file.as_path())
+            .unwrap();
+        let mut writer = Box::new(BufWriter::new(file)) as Box<dyn RafsIoWrite>;
+        writer.write_all(&vec![0u8; 8]).unwrap();
+        assert_eq!(table.store(&mut writer).unwrap(), 8);
+        writer.flush().unwrap();
+
+        // Load extended blob table
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_file.as_path())
+            .unwrap();
+        let mut reader = Box::new(file) as Box<dyn RafsIoRead>;
+        let mut table = RafsV5PrefetchTable::new();
+        table.load_prefetch_table_from(&mut reader, 8, 2).unwrap();
+        assert_eq!(table.size(), 8);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.is_empty(), false);
+        assert_eq!(table.inodes[0], 0x1);
+        assert_eq!(table.inodes[1], 0x0);
+    }
+
+    #[test]
+    fn test_new_inode() {
+        let mut inode = RafsV5Inode::new();
+        inode.set_name_size(3);
+        assert_eq!(inode.size(), 136);
+        assert_eq!(inode.is_symlink(), false);
+        assert_eq!(inode.is_hardlink(), false);
+        assert_eq!(inode.is_dir(), false);
+        assert_eq!(inode.is_reg(), false);
+        assert_eq!(inode.has_hole(), false);
+        assert_eq!(inode.has_xattr(), false);
+
+        let mut inode = RafsV5Inode::new();
+        inode.set_symlink_size(3);
+        assert_eq!(inode.size(), 136);
+    }
+
+    #[test]
+    fn test_inode_load_store() {
+        let mut inode = RafsV5Inode::new();
+        inode.i_size = 0x1000;
+        inode.i_blocks = 1;
+        inode.i_child_count = 10;
+        inode.i_child_index = 20;
+        inode.set_name_size(4);
+        inode.set_symlink_size(6);
+        inode.i_flags = RafsV5InodeFlags::SYMLINK;
+
+        let name = OsString::from_str("test").unwrap();
+        let symlink = OsString::from_str("/test12").unwrap();
+        let inode_wrapper = RafsV5InodeWrapper {
+            name: &name,
+            symlink: Some(&symlink),
+            inode: &inode,
+        };
+
+        let tmp_file = TempFile::new().unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_file.as_path())
+            .unwrap();
+        let mut writer = Box::new(BufWriter::new(file)) as Box<dyn RafsIoWrite>;
+        assert_eq!(inode_wrapper.store(&mut writer).unwrap(), 144);
+        writer.flush().unwrap();
+
+        // Load inode
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_file.as_path())
+            .unwrap();
+        let mut reader = Box::new(file) as Box<dyn RafsIoRead>;
+        let mut inode2 = RafsV5Inode::new();
+        inode2.load(&mut reader).unwrap();
+        assert_eq!(inode2.i_name_size, 4);
+        assert_eq!(inode2.i_symlink_size, 6);
+        assert_eq!(inode.i_size, 0x1000);
+        assert_eq!(inode.i_blocks, 1);
+        assert_eq!(inode.i_child_count, 10);
+        assert_eq!(inode.i_child_index, 20);
+
+        let filename = inode2.load_file_name(&mut reader).unwrap();
+        assert_eq!(filename, OsString::from_str("test").unwrap());
+    }
+
+    #[test]
+    fn test_rafsv5_new_xattrs() {
+        let mut xattrs = RafsV5XAttrs::new();
+        assert_eq!(xattrs.size(), 0);
+
+        xattrs.add(OsString::from("key1"), vec![0x1u8, 0x2, 0x3, 0x4]);
+        assert_eq!(xattrs.size(), 13);
+        xattrs.add(OsString::from("key21"), vec![0x1u8, 0x2, 0x3, 0x4]);
+        assert_eq!(xattrs.size(), 27);
+        xattrs.remove(&OsString::from("key1"));
+        assert_eq!(xattrs.size(), 14);
     }
 }

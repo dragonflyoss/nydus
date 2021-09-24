@@ -119,6 +119,14 @@ impl dyn RafsIoWrite {
         }
         self.write_all(&WRITE_PADDING_DATA[0..size])
     }
+
+    /// Seek the writer to the end.
+    pub fn seek_to_end(&mut self) -> Result<u64> {
+        self.seek(SeekFrom::End(0)).map_err(|e| {
+            error!("Seeking to end fails, {}", e);
+            e
+        })
+    }
 }
 
 impl dyn RafsIoRead {
@@ -153,6 +161,14 @@ impl dyn RafsIoRead {
         })
     }
 
+    /// Seek the reader to the end.
+    pub fn seek_to_end(&mut self, offset: i64) -> Result<u64> {
+        self.seek(SeekFrom::End(offset)).map_err(|e| {
+            error!("Seeking to end fails, {}", e);
+            e
+        })
+    }
+
     /// Create a reader from a file path.
     pub fn from_file(path: impl AsRef<Path>) -> RafsResult<RafsIoReader> {
         let f = File::open(&path).map_err(|e| {
@@ -181,7 +197,7 @@ mod tests {
         assert!(file.validate_alignment(8, 8).is_err());
         {
             let obj: &mut dyn RafsIoWrite = &mut file;
-            obj.write_padding(1);
+            obj.write_padding(1).unwrap();
         }
         assert!(file.validate_alignment(8, 8).is_ok());
         file.write(&[0x0u8; 1]).unwrap();

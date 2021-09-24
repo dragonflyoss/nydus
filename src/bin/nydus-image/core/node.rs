@@ -24,12 +24,12 @@ use nydus_utils::{
     div_round_up, try_round_up_4k, ByteSize,
 };
 use rafs::metadata::layout::v5::{
-    BlobChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
-    RafsV5XAttrs,
+    RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper, RafsV5XAttrs,
 };
 use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
 use rafs::RafsIoWriter;
 use storage::compress;
+use storage::device::BlobChunkFlags;
 
 use crate::core::context::{BlobContext, BuildContext};
 

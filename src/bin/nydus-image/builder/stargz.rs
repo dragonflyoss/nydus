@@ -18,10 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
-use rafs::metadata::layout::v5::{
-    BlobChunkFlags, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
-};
+use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs};
 use rafs::metadata::Inode;
+use storage::device::BlobChunkFlags;
 
 use crate::builder::Builder;
 use crate::core::bootstrap::Bootstrap;

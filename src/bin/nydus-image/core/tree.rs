@@ -23,11 +23,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::v5::{
-    BlobV5ChunkInfo, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs,
-};
+use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs};
 use rafs::metadata::layout::{bytes_to_os_str, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
+use storage::device::v5::BlobV5ChunkInfo;
 
 use crate::node::*;
 
