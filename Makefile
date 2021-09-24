@@ -86,7 +86,7 @@ static-test:
 	# For virtiofs target UT
 	cargo test --target ${ARCH}-unknown-linux-musl --features=virtiofs --release --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
 	# For fusedev target UT & integration
-	cargo test --target ${ARCH}-unknown-linux-musl --features=fusedev --release --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
+	cargo test --target ${ARCH}-unknown-linux-musl --features=fusedev --release --target-dir target-fusedev --workspace -- --nocapture --test-threads=10
 
 docker-nydus-smoke: docker-static
 	docker build -t nydus-smoke --build-arg ARCH=${ARCH} misc/nydus-smoke
