@@ -1,6 +1,5 @@
 all: build
 
-
 TEST_WORKDIR_PREFIX ?= "/tmp"
 
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
@@ -14,6 +13,9 @@ go_path := $(if $(env_go_path),$(env_go_path),"$(HOME)/go")
 # then mitigate the impact of docker hub rate limit, for example:
 # env DIND_CACHE_DIR=/path/to/host/var-lib-docker make docker-nydusify-smoke
 dind_cache_mount := $(if $(DIND_CACHE_DIR),-v $(DIND_CACHE_DIR):/var/lib/docker,)
+
+FUSEDEV_COMMON = --target-dir target-fusedev --features=fusedev --release
+VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 
 # Functions
 
@@ -33,6 +35,7 @@ define build_nydus
 endef
 
 define static_check
+	# Cargo will skip checking if it is already checked
 	cargo clippy --features=$(1) --workspace --bins --tests --target-dir target-$(1) -- -Dclippy::all
 endef
 
@@ -64,41 +67,41 @@ fusedev:
 	$(call build_nydus,$@,$@)
 	$(call static_check,$@,target-$@)
 
+PACKAGES = rafs storage
+PACKAGES += upgrade-manager
+
+# If virtiofs test must be performed, only run binary part
+# Use same traget to avoid re-compile for differnt targets like gnu and musl
 ut:
-	RUST_BACKTRACE=1 cargo test --features=fusedev --target-dir target-fusedev --workspace -- --nocapture --test-threads=15 --skip integration
-	RUST_BACKTRACE=1 cargo test --features=virtiofs --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
+	echo "Testing packages: ${PACKAGES}"
+	$(foreach var,$(PACKAGES),cargo test $(FUSEDEV_COMMON) -p $(var);)
+	RUST_BACKTRACE=1 cargo test $(FUSEDEV_COMMON) --bins -- --nocapture --test-threads=8
+ifdef NYDUS_TEST_VIRTIOFS
+# If virtiofs test must be performed, only run binary part since other package is not affected by feature - virtiofs
+# Use same traget to avoid re-compile for differnt targets like gnu and musl
+	RUST_BACKTRACE=1 cargo test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
+endif
+
+CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 
 docker-static:
 	docker build -t nydus-rs-static --build-arg ARCH=${ARCH} misc/musl-static
-	docker run --rm \
-		-v ${current_dir}:/nydus-rs \
-		--workdir /nydus-rs \
-		-v ~/.ssh/id_rsa:/root/.ssh/id_rsa \
-		-v ~/.cargo/git:/root/.cargo/git \
-		-v ~/.cargo/registry:/root/.cargo/registry \
-		nydus-rs-static
+	docker run --rm ${CARGO_BUILD_GEARS} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
 
 # Run smoke test including general integration tests and unit tests in container.
 # Nydus binaries should already be prepared.
-static-test:
-	# No clippy for virtiofs for now since it has much less updates.
-	$(call static_check,fusedev, target-fusedev)
-	# For virtiofs target UT
-	cargo test --target ${ARCH}-unknown-linux-musl --features=virtiofs --release --target-dir target-virtiofs --workspace -- --nocapture --test-threads=15 --skip integration
-	# For fusedev target UT & integration
-	cargo test --target ${ARCH}-unknown-linux-musl --features=fusedev --release --target-dir target-fusedev --workspace -- --nocapture --test-threads=15
+smoke: ut
+	# No need to involve `clippy check` here as build from target `virtiofs` or `fusedev` always does so.
+	# TODO: Put each test function into separated rs file.
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) cargo test --test '*' $(FUSEDEV_COMMON) -- --nocapture --test-threads=8
 
-docker-nydus-smoke: docker-static
+docker-nydus-smoke:
 	docker build -t nydus-smoke --build-arg ARCH=${ARCH} misc/nydus-smoke
-	docker run --rm --privileged \
+	docker run --rm --privileged ${CARGO_BUILD_GEARS} \
 		-e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) \
 		-v $(TEST_WORKDIR_PREFIX) \
 		-v ${current_dir}:/nydus-rs \
-		-v ~/.ssh/id_rsa:/root/.ssh/id_rsa \
-		-v ~/.cargo/git:/root/.cargo/git \
-		-v ~/.cargo/registry:/root/.cargo/registry \
 		nydus-smoke
-
 
 NYDUSIFY_PATH = /nydus-rs/contrib/nydusify
 # TODO: Nydusify smoke has to be time consuming for a while since it relies on musl nydusd and nydus-image.
