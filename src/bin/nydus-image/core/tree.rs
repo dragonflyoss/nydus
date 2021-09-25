@@ -38,9 +38,9 @@ fn cast_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
         blob_index: cki.blob_index(),
         flags: cki.flags(),
         compress_size: cki.compress_size(),
-        decompress_size: cki.decompress_size(),
+        uncompress_size: cki.uncompress_size(),
         compress_offset: cki.compress_offset(),
-        decompress_offset: cki.decompress_offset(),
+        uncompress_offset: cki.uncompress_offset(),
         file_offset: cki.file_offset(),
         index: cki.index(),
         reserved: 0u32,
@@ -317,7 +317,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         };
 
         for idx in 0..child_count {
-            let child = inode.get_child_by_index(idx as Inode)?;
+            let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
             let child_path = parent_path.join(child.name());
             let child = self.parse_node(child, child_path)?;

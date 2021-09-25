@@ -55,8 +55,7 @@ impl Validator {
 
         let blob_ids = rs
             .superblock
-            .get_blob_table()
-            .entries
+            .get_blob_infos()
             .iter()
             .map(|entry| entry.blob_id().to_owned())
             .collect::<Vec<String>>();

@@ -23,7 +23,7 @@
 //!    one and only one child entry having the inode number as its assigned `child index'.
 //! 5) A child index mapping table is introduced, which is used to map `child index` into offset
 //!    from the base of the super block. The formula to calculate the inode offset is:
-//!      inode_offset_from_sb = inode_table[child_index] << 3
+//!      `inode_offset_from_sb = inode_table[child_index] << 3`
 //! 6) The child index mapping table follows the super block by default.
 //!
 //! Giving above definition, we could get the inode object for an inode number or child index as:
@@ -46,7 +46,6 @@ use std::sync::Arc;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
 use storage::compress;
 use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
@@ -207,6 +206,11 @@ impl RafsV5SuperBlock {
 
     /// Check whether it's a valid Rafs v5 super block.
     pub fn detect(&self) -> bool {
+        self.is_rafs_v4v5()
+    }
+
+    /// Check whether it's super block for Rafs v4/v5.
+    pub fn is_rafs_v4v5(&self) -> bool {
         self.magic() == RAFSV5_SUPER_MAGIC
             && self.version() >= RAFS_SUPER_VERSION_V4 as u32
             && self.version() <= RAFS_SUPER_VERSION_V5 as u32
@@ -835,10 +839,10 @@ impl RafsV5ExtBlobTable {
     pub fn load(&mut self, r: &mut RafsIoReader, count: usize) -> Result<()> {
         let mut entries = Vec::<RafsV5ExtBlobEntry>::with_capacity(count);
         // Safe because it is already reserved enough space
-        unsafe {
+        let (_, mut data, _) = unsafe {
             entries.set_len(count);
-        }
-        let (_, mut data, _) = unsafe { (&mut entries).align_to_mut::<u8>() };
+            (&mut entries).align_to_mut::<u8>()
+        };
 
         r.read_exact(&mut data)?;
         self.entries = entries.to_vec().into_iter().map(Arc::new).collect();
@@ -1051,7 +1055,7 @@ impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
 pub struct RafsV5ChunkInfo {
     /// sha256(chunk), [char; RAFS_SHA256_LENGTH]
     pub block_id: RafsDigest, // 32
-    /// blob index (blob_id = blob_table[blob_index])
+    /// blob index.
     pub blob_index: u32,
     /// chunk flags
     pub flags: BlobChunkFlags, // 40
@@ -1429,7 +1433,7 @@ pub(crate) fn rafsv5_validate_digest(
         }
     } else if inode.is_dir() {
         for idx in 0..child_count {
-            let child = inode.get_child_by_index(idx as u64)?;
+            let child = inode.get_child_by_index(idx)?;
             if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
                 && !rafsv5_validate_digest(child.clone(), recursive, digester)?
             {

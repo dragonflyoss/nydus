@@ -364,10 +364,10 @@ impl StargzIndexTreeBuilder {
                     flags: BlobChunkFlags::COMPRESSED,
                     // No available data on entry
                     compress_size: 0,
-                    decompress_size: decompress_size as u32,
+                    uncompress_size: decompress_size as u32,
                     compress_offset: entry.offset as u64,
                     // No available data on entry
-                    decompress_offset: 0,
+                    uncompress_offset: 0,
                     file_offset: entry.chunk_offset as u64,
                     index: 0,
                     reserved: 0,
@@ -553,7 +553,7 @@ impl StargzBuilder {
             let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
 
             for chunk in node.chunks.iter_mut() {
-                decompressed_blob_size += chunk.decompress_size as u64;
+                decompressed_blob_size += chunk.uncompress_size as u64;
                 compressed_blob_size += chunk.compress_size as u64;
                 let chunk_index = blob_ctx.alloc_index()?;
                 (*chunk).index = chunk_index;

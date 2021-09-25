@@ -293,8 +293,8 @@ impl Node {
             if let Some((cached_chunk, from_dict)) = exist_chunk {
                 // TODO: we should also compare the actual data to avoid chunk digest confliction.
                 // hole cached_chunk can have zero decompress size
-                if cached_chunk.decompress_size == 0
-                    || cached_chunk.decompress_size == chunk_size as u32
+                if cached_chunk.uncompress_size == 0
+                    || cached_chunk.uncompress_size == chunk_size as u32
                 {
                     chunk.clone_from(&cached_chunk);
                     chunk.file_offset = file_offset;
@@ -339,7 +339,7 @@ impl Node {
                 chunk_size
             };
             chunk.compress_offset = blob_ctx.compress_offset;
-            chunk.decompress_offset = blob_ctx.decompress_offset;
+            chunk.uncompress_offset = blob_ctx.decompress_offset;
 
             blob_ctx.compress_offset += compressed_size as u64;
             blob_ctx.decompressed_blob_size = blob_ctx.decompress_offset + chunk_size;
@@ -362,7 +362,7 @@ impl Node {
             chunk.blob_index = blob_index;
             chunk.file_offset = file_offset;
             chunk.compress_size = compressed_size as u32;
-            chunk.decompress_size = chunk_size as u32;
+            chunk.uncompress_size = chunk_size as u32;
             chunk.index = blob_ctx.alloc_index()?;
 
             // Cache chunk digest info

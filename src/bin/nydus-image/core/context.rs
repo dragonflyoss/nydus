@@ -11,6 +11,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
 use sha2::{Digest, Sha256};
@@ -23,12 +24,12 @@ use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
+use storage::device::BlobInfo;
 
 use crate::core::chunk_dict::ChunkDict;
 use crate::core::layout::BlobLayout;
 use crate::core::node::*;
 use crate::core::prefetch::Prefetch;
-use std::sync::Arc;
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
@@ -308,9 +309,8 @@ impl BlobManager {
         Ok(blob_table)
     }
 
-    pub fn from_blob_table(&mut self, blob_table: &RafsV5BlobTable) {
+    pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
-            .get_all()
             .iter()
             .map(|entry| {
                 BlobContext::from(

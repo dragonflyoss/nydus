@@ -420,7 +420,8 @@ impl Rafs {
 
         let mut idx = cur_offset - 2;
         while idx < parent.get_child_count() as u64 {
-            let child = parent.get_child_by_index(idx)?;
+            debug_assert!(idx <= u32::MAX as u64);
+            let child = parent.get_child_by_index(idx as u32)?;
 
             cur_offset += 1;
             match add_entry(DirEntry {
@@ -648,7 +649,7 @@ impl FileSystem for Rafs {
         let real_size = cmp::min(size as u64, inode_size - offset);
         let real_end = offset + real_size;
         let mut result = 0;
-        let mut descs = inode.alloc_bio_desc(offset, real_size as usize, true)?;
+        let mut descs = inode.alloc_bio_vecs(offset, real_size as usize, true)?;
         let start = self.ios.latency_start();
 
         for desc in descs.iter_mut() {

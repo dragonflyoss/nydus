@@ -153,8 +153,8 @@ impl RafsSuperInodes for CachedSuperBlockV5 {
 }
 
 impl RafsSuperBlobs for CachedSuperBlockV5 {
-    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
-        self.s_blob.clone()
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
+        self.s_blob.entries.clone()
     }
 }
 
@@ -400,7 +400,7 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_child_by_index(&self, index: Inode) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInode>> {
         Ok(self.i_child[index as usize].clone())
     }
 
@@ -506,7 +506,7 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
@@ -831,14 +831,14 @@ mod cached_tests {
             .add(String::from("123333"), 0, 0, 0, 0, 0);
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
-        let desc1 = cached_inode.alloc_bio_desc(0, 100, true).unwrap();
+        let desc1 = cached_inode.alloc_bio_vecs(0, 100, true).unwrap();
         assert_eq!(desc1.bi_size, 100);
         assert_eq!(desc1.bi_vec.len(), 1);
         assert_eq!(desc1.bi_vec[0].offset, 0);
         assert_eq!(desc1.bi_vec[0].blob.blob_id, "123333");
 
         let desc2 = cached_inode
-            .alloc_bio_desc(1024 * 1024 - 100, 200, true)
+            .alloc_bio_vecs(1024 * 1024 - 100, 200, true)
             .unwrap();
         assert_eq!(desc2.bi_size, 200);
         assert_eq!(desc2.bi_vec.len(), 2);
@@ -848,7 +848,7 @@ mod cached_tests {
         assert_eq!(desc2.bi_vec[1].size, 100);
 
         let desc3 = cached_inode
-            .alloc_bio_desc(1024 * 1024 + 8192, 1024 * 1024 * 4, true)
+            .alloc_bio_vecs(1024 * 1024 + 8192, 1024 * 1024 * 4, true)
             .unwrap();
         assert_eq!(desc3.bi_size, 1024 * 1024 * 2);
         assert_eq!(desc3.bi_vec.len(), 3);

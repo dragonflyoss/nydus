@@ -373,9 +373,8 @@ impl RafsSuperInodes for DirectSuperBlockV5 {
 }
 
 impl RafsSuperBlobs for DirectSuperBlockV5 {
-    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
-        let state = self.state.load();
-        state.blob_table.clone()
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
+        self.state.load().blob_table.get_all()
     }
 }
 
@@ -625,11 +624,11 @@ impl RafsInode for OndiskInodeWrapper {
     ///
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
-    fn get_child_by_index(&self, idx: Inode) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>> {
         let state = self.state();
         let inode = self.inode(state.deref());
-        let child_count = inode.i_child_count as u64;
-        let child_index = inode.i_child_index as u64;
+        let child_count = inode.i_child_count;
+        let child_index = inode.i_child_index;
 
         if !inode.is_dir() {
             return Err(einval!("inode is not a directory"));
@@ -638,7 +637,7 @@ impl RafsInode for OndiskInodeWrapper {
             return Err(enoent!("invalid child index"));
         }
 
-        self.mapping.get_inode(idx + child_index, false)
+        self.mapping.get_inode((idx + child_index) as Inode, false)
     }
 
     fn get_child_index(&self) -> Result<u32> {
@@ -657,7 +656,7 @@ impl RafsInode for OndiskInodeWrapper {
 
     #[inline]
     fn get_chunk_count(&self) -> u32 {
-        self.get_chunk_count()
+        self.get_child_count()
     }
 
     /// Get chunk information with index `idx`
@@ -755,7 +754,7 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
