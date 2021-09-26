@@ -25,7 +25,7 @@ use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
 
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_vecs, rafsv5_validate_digest, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode,
-    RafsV5InodeFlags, RafsV5InodeOps, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
+    RafsV5InodeChunkOps, RafsV5InodeFlags, RafsV5InodeOps, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
@@ -451,7 +451,7 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
         if (idx as usize) < self.i_data.len() {
             Ok(self.i_data[idx as usize].clone())
         } else {
@@ -561,6 +561,16 @@ impl RafsInode for CachedInodeV5 {
     impl_getter!(size, i_size, u64);
     impl_getter!(rdev, i_rdev, u32);
     impl_getter!(projid, i_projid, u32);
+}
+
+impl RafsV5InodeChunkOps for CachedInodeV5 {
+    fn get_chunk_info_v5(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
+        if (idx as usize) < self.i_data.len() {
+            Ok(self.i_data[idx as usize].clone() as Arc<dyn BlobV5ChunkInfo>)
+        } else {
+            Err(einval!("invalid chunk index"))
+        }
+    }
 }
 
 impl RafsV5InodeOps for CachedInodeV5 {

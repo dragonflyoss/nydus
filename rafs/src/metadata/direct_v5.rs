@@ -35,8 +35,8 @@ use storage::utils::readahead;
 
 use crate::metadata::layout::v5::{
     rafsv5_align, rafsv5_alloc_bio_vecs, rafsv5_validate_digest, RafsV5BlobTable, RafsV5ChunkInfo,
-    RafsV5Inode, RafsV5InodeOps, RafsV5InodeTable, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
-    RAFSV5_EXT_BLOB_ENTRY_SIZE, RAFSV5_SUPERBLOCK_SIZE,
+    RafsV5Inode, RafsV5InodeChunkOps, RafsV5InodeOps, RafsV5InodeTable, RafsV5XAttrsTable,
+    RAFSV5_ALIGNMENT, RAFSV5_EXT_BLOB_ENTRY_SIZE, RAFSV5_SUPERBLOCK_SIZE,
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, MetaRange, XattrName, XattrValue,
@@ -471,6 +471,29 @@ impl OndiskInodeWrapper {
 
         Ok((xattr_data, xattr_size))
     }
+
+    fn _get_chunk_info(&self, idx: u32) -> Result<Arc<DirectChunkInfoV5>> {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+
+        if !inode.is_reg() || inode.i_child_count == 0 || idx >= inode.i_child_count {
+            return Err(enoent!("invalid chunk info"));
+        }
+
+        let mut offset = self.offset + inode.size();
+        if inode.has_xattr() {
+            unsafe {
+                let xattrs = state.base.add(offset) as *const RafsV5XAttrsTable;
+                offset += size_of::<RafsV5XAttrsTable>() + (*xattrs).aligned_size();
+            }
+        }
+        offset += size_of::<RafsV5ChunkInfo>() * idx as usize;
+
+        let chunk = state.cast_to_ref::<RafsV5ChunkInfo>(state.base, offset)?;
+        let wrapper = DirectChunkInfoV5::new(chunk, self.mapping.clone(), offset);
+
+        Ok(Arc::new(wrapper))
+    }
 }
 
 impl RafsInode for OndiskInodeWrapper {
@@ -674,27 +697,9 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     #[allow(clippy::cast_ptr_alignment)]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-
-        if !inode.is_reg() || inode.i_child_count == 0 || idx >= inode.i_child_count {
-            return Err(enoent!("invalid chunk info"));
-        }
-
-        let mut offset = self.offset + inode.size();
-        if inode.has_xattr() {
-            unsafe {
-                let xattrs = state.base.add(offset) as *const RafsV5XAttrsTable;
-                offset += size_of::<RafsV5XAttrsTable>() + (*xattrs).aligned_size();
-            }
-        }
-        offset += size_of::<RafsV5ChunkInfo>() * idx as usize;
-
-        let chunk = state.cast_to_ref::<RafsV5ChunkInfo>(state.base, offset)?;
-        let wrapper = DirectChunkInfoV5::new(chunk, self.mapping.clone(), offset);
-
-        Ok(Arc::new(wrapper))
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
+        self._get_chunk_info(idx)
+            .map(|v| v as Arc<dyn BlobChunkInfo>)
     }
 
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
@@ -776,6 +781,13 @@ impl RafsInode for OndiskInodeWrapper {
     impl_inode_getter!(projid, i_projid, u32);
     impl_inode_getter!(get_name_size, i_name_size, u16);
     impl_inode_getter!(get_symlink_size, i_symlink_size, u16);
+}
+
+impl RafsV5InodeChunkOps for OndiskInodeWrapper {
+    fn get_chunk_info_v5(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
+        self._get_chunk_info(idx)
+            .map(|v| v as Arc<dyn BlobV5ChunkInfo>)
+    }
 }
 
 impl RafsV5InodeOps for OndiskInodeWrapper {

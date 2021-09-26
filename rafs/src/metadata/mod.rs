@@ -21,11 +21,9 @@ use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use storage::compress;
-use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
-use self::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5SuperFlags};
-use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V4, RAFS_SUPER_VERSION_V5};
+use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
@@ -134,7 +132,7 @@ pub trait RafsInode {
     fn get_chunk_count(&self) -> u32;
 
     /// Get chunk info object for a chunk.
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>>;
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>>;
 
     /// Check whether the inode has extended attributes.
     fn has_xattr(&self) -> bool;
@@ -202,6 +200,42 @@ pub trait RafsStore {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize>;
 }
 
+bitflags! {
+    /// Rafs filesystem feature flags.
+    #[derive(Serialize)]
+    pub struct RafsSuperFlags: u64 {
+        /// V5: Data chunks are not compressed.
+        const COMPRESS_NONE = 0x0000_0001;
+        /// V5: Data chunks are compressed with lz4_block.
+        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
+        /// V5: Use blake3 hash algorithm to calculate digest.
+        const DIGESTER_BLAKE3 = 0x0000_0004;
+        /// V5: Use sha256 hash algorithm to calculate digest.
+        const DIGESTER_SHA256 = 0x0000_0008;
+        /// Inode has explicit uid gid fields.
+        ///
+        /// If unset, use nydusd process euid/egid for all inodes at runtime.
+        const EXPLICIT_UID_GID = 0x0000_0010;
+        /// Inode has extended attributes.
+        const HAS_XATTR = 0x0000_0020;
+        // V5: Data chunks are compressed with gzip
+        const COMPRESS_GZIP = 0x0000_0040;
+    }
+}
+
+impl Default for RafsSuperFlags {
+    fn default() -> Self {
+        RafsSuperFlags::empty()
+    }
+}
+
+impl Display for RafsSuperFlags {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        write!(f, "{}", format!("{:?}", self))?;
+        Ok(())
+    }
+}
+
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
 #[serde_as]
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -220,7 +254,7 @@ pub struct RafsSuperMeta {
     pub inodes_count: u64,
     #[serde_as(as = "DisplayFromStr")]
     /// V5: superblock flags for Rafs v5.
-    pub flags: RafsV5SuperFlags,
+    pub flags: RafsSuperFlags,
     /// Number of inode entries in inode offset table.
     pub inode_table_entries: u32,
     /// Offset of the inode offset table into the metadata blob.
@@ -256,7 +290,7 @@ impl RafsSuperMeta {
     /// Check whether the explicit UID/GID feature has been enable or not.
     pub fn explicit_uidgid(&self) -> bool {
         if self.is_v5() {
-            self.flags.contains(RafsV5SuperFlags::EXPLICIT_UID_GID)
+            self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
         } else {
             false
         }
@@ -265,7 +299,7 @@ impl RafsSuperMeta {
     /// Check whether the filesystem supports extended attribute or not.
     pub fn has_xattr(&self) -> bool {
         if self.is_v5() {
-            self.flags.contains(RafsV5SuperFlags::HAS_XATTR)
+            self.flags.contains(RafsSuperFlags::HAS_XATTR)
         } else {
             false
         }
@@ -281,7 +315,7 @@ impl Default for RafsSuperMeta {
             inodes_count: 0,
             root_inode: 0,
             chunk_size: 0,
-            flags: RafsV5SuperFlags::empty(),
+            flags: RafsSuperFlags::empty(),
             inode_table_entries: 0,
             inode_table_offset: 0,
             blob_table_size: 0,
@@ -334,7 +368,7 @@ pub struct RafsSuper {
     pub mode: RafsMode,
     /// Whether validate data read from storage backend.
     pub validate_digest: bool,
-    /// Cached metadata.
+    /// Cached metadata from on disk super block.
     pub meta: RafsSuperMeta,
     /// Rafs filesystem super block.
     pub superblock: Arc<dyn RafsSuperBlock>,
@@ -367,15 +401,6 @@ impl RafsSuper {
         Ok(rs)
     }
 
-    /// Update the filesystem metadata and storage backend.
-    pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
-        let mut sb = RafsV5SuperBlock::new();
-
-        r.read_exact(sb.as_mut())
-            .map_err(|e| RafsError::ReadMetadata(e, "Updating meta".to_string()))?;
-        self.superblock.update(r)
-    }
-
     /// Destroy the filesystem super block.
     pub fn destroy(&mut self) {
         Arc::get_mut(&mut self.superblock)
@@ -385,7 +410,22 @@ impl RafsSuper {
 
     /// Load RAFS metadata and optionally cache inodes.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        // Try to load the filesystem as Rafs v5
+        if self.try_load_v5(r)? {
+            return Ok(());
+        }
+
         Err(einval!("invalid superblock version number"))
+    }
+
+    /// Update the filesystem metadata and storage backend.
+    pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
+        if self.meta.is_v5() {
+            self.skip_v5_superblock(r)
+                .map_err(RafsError::FillSuperblock)?;
+        }
+
+        self.superblock.update(r)
     }
 
     /// Store RAFS metadata to backend storage.
@@ -599,6 +639,7 @@ impl RafsSuper {
     // The total size of all chunks carried by `desc` might exceed `expected_size`, this
     // method ensures the total size mustn't exceed `expected_size`. If it truly does,
     // just trim several trailing chunks from `desc`.
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     fn steal_chunks(desc: &mut BlobIoVec, expected_size: u32) -> Option<&mut BlobIoVec> {
         enum State {
             All,
@@ -650,7 +691,7 @@ impl RafsSuper {
         &self,
         inode: &dyn RafsInode,
         bound: u64,
-        tail_chunk: &dyn BlobV5ChunkInfo,
+        tail_chunk: &dyn BlobChunkInfo,
         expected_size: u64,
     ) -> Result<Option<BlobIoVec>> {
         let mut left = expected_size;
@@ -660,7 +701,6 @@ impl RafsSuper {
         let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
             let sz = std::cmp::min(delta, expected_size);
             let mut d = inode.alloc_bio_vecs(bound, sz as usize, false)?;
-            assert_eq!(d.len(), 1);
 
             // It is possible that read size is beyond file size, so chunks vector is zero length.
             if !d[0].bi_vec.is_empty() {

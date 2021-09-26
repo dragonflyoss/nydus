@@ -5,7 +5,7 @@
 
 use super::cached_v5::CachedSuperBlockV5;
 use super::direct_v5::DirectSuperBlockV5;
-use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5SuperFlags};
+use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock};
 use super::*;
 
 impl RafsSuperMeta {
@@ -43,7 +43,7 @@ impl RafsSuper {
         self.meta.version = sb.version();
         self.meta.sb_size = sb.sb_size();
         self.meta.chunk_size = sb.block_size();
-        self.meta.flags = RafsV5SuperFlags::from_bits(sb.flags())
+        self.meta.flags = RafsSuperFlags::from_bits(sb.flags())
             .ok_or_else(|| einval!(format!("invalid super flags {:x}", sb.flags())))?;
         info!("rafs superblock features: {}", self.meta.flags);
 
@@ -140,5 +140,11 @@ impl RafsSuper {
         fetcher(&mut head_desc);
 
         Ok(hint_entries)
+    }
+
+    pub(crate) fn skip_v5_superblock(&self, r: &mut RafsIoReader) -> Result<()> {
+        let _ = RafsV5SuperBlock::read(r)?;
+
+        Ok(())
     }
 }

@@ -45,15 +45,11 @@ use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
-use serde::Serialize;
 use storage::compress;
 use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
-use crate::metadata::layout::{
-    bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_MIN_VERSION, RAFS_SUPER_VERSION_V4,
-    RAFS_SUPER_VERSION_V5,
-};
-use crate::metadata::{Inode, RafsInode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_VERSION_V5};
+use crate::metadata::{Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
@@ -86,78 +82,47 @@ pub(crate) trait RafsV5InodeOps {
     fn cast_ondisk(&self) -> Result<RafsV5Inode>;
 }
 
-bitflags! {
-    /// Rafs filesystem feature flags.
-    #[derive(Serialize)]
-    pub struct RafsV5SuperFlags: u64 {
-        /// Data chunks are not compressed.
-        const COMPRESS_NONE = 0x0000_0001;
-        /// Data chunks are compressed with lz4_block.
-        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
-        /// Use blake3 hash algorithm to calculate digest.
-        const DIGESTER_BLAKE3 = 0x0000_0004;
-        /// Use sha256 hash algorithm to calculate digest.
-        const DIGESTER_SHA256 = 0x0000_0008;
-        /// Inode has explicit uid gid fields.
-        ///
-        /// If unset, use nydusd process euid/egid for all inodes at runtime.
-        const EXPLICIT_UID_GID = 0x0000_0010;
-        /// Inode has extended attributes.
-        const HAS_XATTR = 0x0000_0020;
-        // Data chunks are compressed with gzip
-        const COMPRESS_GZIP = 0x0000_0040;
-    }
+pub(crate) trait RafsV5InodeChunkOps {
+    /// Get chunk info object for a chunk.
+    fn get_chunk_info_v5(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>>;
 }
 
-impl Default for RafsV5SuperFlags {
-    fn default() -> Self {
-        RafsV5SuperFlags::empty()
-    }
-}
-
-impl Display for RafsV5SuperFlags {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        write!(f, "{}", format!("{:?}", self))?;
-        Ok(())
-    }
-}
-
-impl From<RafsV5SuperFlags> for digest::Algorithm {
-    fn from(flags: RafsV5SuperFlags) -> Self {
+impl From<RafsSuperFlags> for digest::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
         match flags {
-            x if x.contains(RafsV5SuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
-            x if x.contains(RafsV5SuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
+            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
+            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
             _ => digest::Algorithm::Blake3,
         }
     }
 }
 
-impl From<digest::Algorithm> for RafsV5SuperFlags {
-    fn from(d: digest::Algorithm) -> RafsV5SuperFlags {
+impl From<digest::Algorithm> for RafsSuperFlags {
+    fn from(d: digest::Algorithm) -> RafsSuperFlags {
         match d {
-            digest::Algorithm::Blake3 => RafsV5SuperFlags::DIGESTER_BLAKE3,
-            digest::Algorithm::Sha256 => RafsV5SuperFlags::DIGESTER_SHA256,
+            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
+            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
         }
     }
 }
 
-impl From<RafsV5SuperFlags> for compress::Algorithm {
-    fn from(flags: RafsV5SuperFlags) -> Self {
+impl From<RafsSuperFlags> for compress::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
         match flags {
-            x if x.contains(RafsV5SuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsV5SuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
-            x if x.contains(RafsV5SuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
+            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
+            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
             _ => compress::Algorithm::Lz4Block,
         }
     }
 }
 
-impl From<compress::Algorithm> for RafsV5SuperFlags {
-    fn from(c: compress::Algorithm) -> RafsV5SuperFlags {
+impl From<compress::Algorithm> for RafsSuperFlags {
+    fn from(c: compress::Algorithm) -> RafsSuperFlags {
         match c {
-            compress::Algorithm::None => RafsV5SuperFlags::COMPRESS_NONE,
-            compress::Algorithm::Lz4Block => RafsV5SuperFlags::COMPRESS_LZ4_BLOCK,
-            compress::Algorithm::GZip => RafsV5SuperFlags::COMPRESS_GZIP,
+            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
+            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
         }
     }
 }
@@ -225,7 +190,7 @@ impl RafsV5SuperBlock {
             return Err(einval!("invalid super block blob size"));
         } else if self.block_size() != 512 && self.block_size() != 4096 {
             return Err(einval!("invalid block size"));
-        } else if RafsV5SuperFlags::from_bits(self.flags()).is_none() {
+        } else if RafsSuperFlags::from_bits(self.flags()).is_none() {
             return Err(einval!("invalid super block flags"));
         }
 
@@ -281,35 +246,34 @@ impl RafsV5SuperBlock {
 
         Ok(())
     }
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
     /// Set compression algorithm to handle chunk of the Rafs filesystem.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
-        let c: RafsV5SuperFlags = compressor.into();
+        let c: RafsSuperFlags = compressor.into();
 
-        self.s_flags &= !RafsV5SuperFlags::COMPRESS_NONE.bits();
-        self.s_flags &= !RafsV5SuperFlags::COMPRESS_LZ4_BLOCK.bits();
-        self.s_flags &= !RafsV5SuperFlags::COMPRESS_GZIP.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
         self.s_flags |= c.bits();
     }
 
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
-        let c: RafsV5SuperFlags = digester.into();
+        let c: RafsSuperFlags = digester.into();
 
-        self.s_flags &= !RafsV5SuperFlags::DIGESTER_BLAKE3.bits();
-        self.s_flags &= !RafsV5SuperFlags::DIGESTER_SHA256.bits();
+        self.s_flags &= !RafsSuperFlags::DIGESTER_BLAKE3.bits();
+        self.s_flags &= !RafsSuperFlags::DIGESTER_SHA256.bits();
         self.s_flags |= c.bits();
     }
 
     /// Enable explicit Uid/Gid feature.
     pub fn set_explicit_uidgid(&mut self) {
-        self.s_flags |= RafsV5SuperFlags::EXPLICIT_UID_GID.bits();
+        self.s_flags |= RafsSuperFlags::EXPLICIT_UID_GID.bits();
     }
 
     /// Enable support of filesystem xattr.
     pub fn set_has_xattr(&mut self) {
-        self.s_flags |= RafsV5SuperFlags::HAS_XATTR.bits();
+        self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
     }
 
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);
@@ -365,6 +329,15 @@ impl RafsV5SuperBlock {
     /// Load a super block from a `RafsIoReader` object.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
+    }
+
+    /// Read Rafs v5 super block from a reader.
+    pub fn read(r: &mut RafsIoReader) -> Result<Self> {
+        let mut sb = RafsV5SuperBlock::new();
+
+        r.read_exact(sb.as_mut())?;
+
+        Ok(sb)
     }
 }
 
@@ -1239,7 +1212,7 @@ impl RafsStore for RafsV5XAttrs {
 ///
 /// The range `offset..ofset + size` may be backed by multiple blobs, so a group of `BlobIoVec` will
 /// be returned on success, each one covers a continuous range on a single blob.
-pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeOps>(
+pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeChunkOps + RafsV5InodeOps>(
     inode: &I,
     offset: u64,
     size: usize,
@@ -1261,7 +1234,7 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeOps>(
 
     let mut descs = Vec::with_capacity(4);
     let mut desc = BlobIoVec::new();
-    let chunk = inode.get_chunk_info(index_start)?;
+    let chunk = inode.get_chunk_info_v5(index_start)?;
     let blob = inode.get_blob_by_index(chunk.blob_index())?;
     if !add_chunk_to_bio_desc(
         &mut desc,
@@ -1275,7 +1248,7 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeOps>(
         return Err(einval!("failed to create blob io vector"));
     }
     for idx in index_start + 1..index_end {
-        let chunk = inode.get_chunk_info(idx)?;
+        let chunk = inode.get_chunk_info_v5(idx)?;
         let blob = inode.get_blob_by_index(chunk.blob_index())?;
         if blob.blob_index() != desc.bi_vec[0].blob.blob_index() {
             descs.push(desc);
@@ -1301,7 +1274,7 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeOps>(
 /// Allocate a `BlobIoVec` to handle blob io to range `offset..ofset + size`.
 ///
 /// The range `offset..ofset + size` must be backed by a single blob.
-pub(crate) fn rafsv5_alloc_bio_vec<I: RafsInode + RafsV5InodeOps>(
+pub(crate) fn rafsv5_alloc_bio_vec<I: RafsInode + RafsV5InodeChunkOps + RafsV5InodeOps>(
     inode: &I,
     offset: u64,
     size: usize,
@@ -1765,44 +1738,44 @@ pub mod tests {
     #[test]
     fn test_rafsv5_superflags() {
         assert_eq!(
-            RafsV5SuperFlags::from(digest::Algorithm::Blake3),
-            RafsV5SuperFlags::DIGESTER_BLAKE3
+            RafsSuperFlags::from(digest::Algorithm::Blake3),
+            RafsSuperFlags::DIGESTER_BLAKE3
         );
         assert_eq!(
-            RafsV5SuperFlags::from(digest::Algorithm::Sha256),
-            RafsV5SuperFlags::DIGESTER_SHA256
+            RafsSuperFlags::from(digest::Algorithm::Sha256),
+            RafsSuperFlags::DIGESTER_SHA256
         );
         assert_eq!(
-            digest::Algorithm::from(RafsV5SuperFlags::DIGESTER_BLAKE3),
+            digest::Algorithm::from(RafsSuperFlags::DIGESTER_BLAKE3),
             digest::Algorithm::Blake3
         );
         assert_eq!(
-            digest::Algorithm::from(RafsV5SuperFlags::DIGESTER_SHA256),
+            digest::Algorithm::from(RafsSuperFlags::DIGESTER_SHA256),
             digest::Algorithm::Sha256
         );
 
         assert_eq!(
-            RafsV5SuperFlags::from(compress::Algorithm::GZip),
-            RafsV5SuperFlags::COMPRESS_GZIP
+            RafsSuperFlags::from(compress::Algorithm::GZip),
+            RafsSuperFlags::COMPRESS_GZIP
         );
         assert_eq!(
-            RafsV5SuperFlags::from(compress::Algorithm::Lz4Block),
-            RafsV5SuperFlags::COMPRESS_LZ4_BLOCK
+            RafsSuperFlags::from(compress::Algorithm::Lz4Block),
+            RafsSuperFlags::COMPRESS_LZ4_BLOCK
         );
         assert_eq!(
-            RafsV5SuperFlags::from(compress::Algorithm::None),
-            RafsV5SuperFlags::COMPRESS_NONE
+            RafsSuperFlags::from(compress::Algorithm::None),
+            RafsSuperFlags::COMPRESS_NONE
         );
         assert_eq!(
-            compress::Algorithm::from(RafsV5SuperFlags::COMPRESS_GZIP),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_GZIP),
             compress::Algorithm::GZip
         );
         assert_eq!(
-            compress::Algorithm::from(RafsV5SuperFlags::COMPRESS_LZ4_BLOCK),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_LZ4_BLOCK),
             compress::Algorithm::Lz4Block
         );
         assert_eq!(
-            compress::Algorithm::from(RafsV5SuperFlags::COMPRESS_NONE),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_NONE),
             compress::Algorithm::None
         );
     }
