@@ -73,9 +73,8 @@ pub fn new(
         .write_all(config.as_bytes())
         .unwrap();
 
-    let nydusd = std::env::var("NYDUSD").unwrap_or_else(|_| {
-        String::from("./target-fusedev/x86_64-unknown-linux-musl/release/nydusd")
-    });
+    let nydusd =
+        std::env::var("NYDUSD").unwrap_or_else(|_| String::from("./target-fusedev/release/nydusd"));
 
     Nydusd {
         nydusd,
@@ -132,6 +131,7 @@ impl Nydusd {
     pub fn check(&self, expect_texture: &str, mount_path: &str) {
         let mount_path = self.work_dir.join(mount_path);
 
+        // TODO: Lower `tree` does not support option `-J`, we should check return code from here.
         let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true).unwrap();
         let md5_ret = exec(
             format!("find {:?} -type f -exec md5sum {{}} + | sort", mount_path).as_str(),

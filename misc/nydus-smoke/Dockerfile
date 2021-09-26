@@ -1,10 +1,12 @@
-FROM clux/muslrust:1.52.1
+FROM rust:1.52.1
+ARG ARCH=x86_64
 
+RUN mkdir /root/.cargo/
+RUN rustup component add rustfmt && rustup component add clippy
+
+ENV CARGO_HOME=/root/.cargo
 RUN apt update && apt install -y tree
 
 WORKDIR /nydus-rs
 
-CMD rustup component add clippy && \
-  rustup component add rustfmt && \
-  rustup target add x86_64-unknown-linux-musl && \
-  make static-test
+CMD make fusedev-release smoke

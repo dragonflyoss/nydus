@@ -50,12 +50,7 @@ env_logger = "0.8.2"
 
 [features]
 fusedev = ["nydus-utils/fusedev", "fuse-rs/fusedev"]
-virtiofs = [
-    "fuse-rs/vhost-user-fs",
-    "vm-memory/backend-mmap",
-    "vhost-rs/vhost-user-slave",
-    "vhost-user-backend",
-]
+virtiofs = ["fuse-rs/vhost-user-fs", "vm-memory/backend-mmap", "vhost-rs/vhost-user-slave", "vhost-user-backend"]
 
 [workspace]
 members = ["api", "app", "error", "rafs", "storage", "utils"]
