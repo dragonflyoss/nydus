@@ -50,7 +50,7 @@ endef
 # Targets that are exposed to developers and users.
 build: .format fusedev virtiofs
 release: .format .release_version fusedev virtiofs
-static-release: .musl_target .format .release_version fusedev virtiofs
+static-release: .musl_target .format .release_version fusedev
 fusedev-release: .format .release_version fusedev
 virtiofs-release: .format .release_version virtiofs
 
