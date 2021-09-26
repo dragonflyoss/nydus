@@ -78,7 +78,7 @@ pub struct CacheConfig {
     pub cache_validate: bool,
     /// Configuration for blob data prefetching.
     #[serde(skip_serializing, skip_deserializing)]
-    pub prefetch_worker: BlobPrefetchConfig,
+    pub prefetch_config: BlobPrefetchConfig,
 }
 
 /// Configuration information to create blob cache manager.
@@ -100,7 +100,7 @@ impl Hash for BlobCacheMgrKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.config.backend.backend_type.hash(state);
         self.config.cache.cache_type.hash(state);
-        self.config.cache.prefetch_worker.hash(state);
+        self.config.cache.prefetch_config.hash(state);
     }
 }
 

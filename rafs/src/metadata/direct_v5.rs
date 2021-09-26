@@ -40,7 +40,6 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, MetaRange, XattrName, XattrValue,
-    RAFS_ROOT_INODE,
 };
 use crate::metadata::{
     Attr, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
@@ -232,12 +231,13 @@ impl DirectSuperBlockV5 {
         let md_range = MetaRange::new(
             RAFSV5_SUPERBLOCK_SIZE as u64,
             len - RAFSV5_SUPERBLOCK_SIZE as u64,
+            true,
         )?;
 
         // Validate inode table layout
         let inode_table_start = old_state.meta.inode_table_offset;
         let inode_table_size = old_state.meta.inode_table_entries as u64 * size_of::<u32>() as u64;
-        let inode_table_range = MetaRange::new(inode_table_start, inode_table_size)?;
+        let inode_table_range = MetaRange::new(inode_table_start, inode_table_size, false)?;
         if !inode_table_range.is_subrange_of(&md_range) {
             return Err(ebadf!("invalid inode table"));
         }
@@ -245,7 +245,7 @@ impl DirectSuperBlockV5 {
         // Validate blob table layout
         let blob_table_start = old_state.meta.blob_table_offset;
         let blob_table_size = old_state.meta.blob_table_size as u64;
-        let blob_table_range = MetaRange::new(blob_table_start, blob_table_size)?;
+        let blob_table_range = MetaRange::new(blob_table_start, blob_table_size, false)?;
         if !blob_table_range.is_subrange_of(&md_range)
             || blob_table_range.intersect_with(&inode_table_range)
         {
@@ -257,7 +257,7 @@ impl DirectSuperBlockV5 {
         let extended_blob_table_size =
             old_state.meta.extended_blob_table_entries as u64 * RAFSV5_EXT_BLOB_ENTRY_SIZE as u64;
         let extended_blob_table_range =
-            MetaRange::new(extended_blob_table_offset, extended_blob_table_size)?;
+            MetaRange::new(extended_blob_table_offset, extended_blob_table_size, true)?;
         if extended_blob_table_offset > 0 && extended_blob_table_size > 0 {
             if !extended_blob_table_range.is_subrange_of(&md_range)
                 || extended_blob_table_range.intersect_with(&inode_table_range)
@@ -509,9 +509,7 @@ impl RafsInode for OndiskInodeWrapper {
         // * - name_size must be less than 255. Due to alignment, the check is not so strict.
         // * - name_size and symlink_size must be correctly aligned.
         // Should we store raw size instead of aligned size for name and symlink?
-        if inode.i_ino == RAFS_ROOT_INODE
-            || inode.i_ino > max_inode
-            || (inode.i_parent > inode.i_ino && inode.i_nlink == 1)
+        if inode.i_ino > max_inode
             || inode.i_nlink == 0
             || inode.i_name_size as usize > (RAFS_MAX_NAME + 1)
         {

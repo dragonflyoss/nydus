@@ -203,9 +203,12 @@ pub(crate) struct MetaRange {
 }
 
 impl MetaRange {
-    pub fn new(start: u64, size: u64) -> std::io::Result<Self> {
+    pub fn new(start: u64, size: u64, aligned_size: bool) -> std::io::Result<Self> {
         let mask = RAFSV5_ALIGNMENT as u64 - 1;
-        if start & mask == 0 && size & mask == 0 && size != 0 && start.checked_add(size).is_some() {
+        if start & mask == 0
+            && (!aligned_size || size & mask == 0)
+            && start.checked_add(size).is_some()
+        {
             Ok(MetaRange { start, size })
         } else {
             Err(einval!(format!(
@@ -215,10 +218,12 @@ impl MetaRange {
         }
     }
 
+    #[allow(dead_code)]
     pub fn start(&self) -> u64 {
         self.start
     }
 
+    #[allow(dead_code)]
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -307,38 +312,38 @@ mod tests {
 
     #[test]
     fn test_meta_range() {
-        assert!(MetaRange::new(u64::MAX, 1).is_err());
-        assert!(MetaRange::new(u64::MAX, 1).is_err());
-        assert!(MetaRange::new(1, 1).is_err());
-        assert!(MetaRange::new(8, 0).is_err());
-        assert!(MetaRange::new(8, 1).is_err());
-        assert_eq!(MetaRange::new(8, 8).unwrap().start(), 8);
-        assert_eq!(MetaRange::new(8, 8).unwrap().size(), 8);
-        assert_eq!(MetaRange::new(8, 8).unwrap().end(), 16);
+        assert!(MetaRange::new(u64::MAX, 1, true).is_err());
+        assert!(MetaRange::new(u64::MAX, 1, true).is_err());
+        assert!(MetaRange::new(1, 1, true).is_err());
+        assert!(MetaRange::new(8, 0, true).is_ok());
+        assert!(MetaRange::new(8, 1, true).is_err());
+        assert_eq!(MetaRange::new(8, 8, true).unwrap().start(), 8);
+        assert_eq!(MetaRange::new(8, 8, true).unwrap().size(), 8);
+        assert_eq!(MetaRange::new(8, 8, true).unwrap().end(), 16);
 
-        let range = MetaRange::new(16, 16).unwrap();
+        let range = MetaRange::new(16, 16, true).unwrap();
 
-        assert!(!MetaRange::new(0, 8).unwrap().is_subrange_of(&range));
-        assert!(!MetaRange::new(0, 16).unwrap().is_subrange_of(&range));
-        assert!(!MetaRange::new(8, 8).unwrap().is_subrange_of(&range));
-        assert!(!MetaRange::new(8, 16).unwrap().is_subrange_of(&range));
-        assert!(!MetaRange::new(8, 24).unwrap().is_subrange_of(&range));
-        assert!(MetaRange::new(16, 8).unwrap().is_subrange_of(&range));
-        assert!(MetaRange::new(16, 16).unwrap().is_subrange_of(&range));
-        assert!(MetaRange::new(24, 8).unwrap().is_subrange_of(&range));
-        assert!(!MetaRange::new(24, 16).unwrap().is_subrange_of(&range));
-        assert!(!MetaRange::new(32, 8).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(0, 8, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(0, 16, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(8, 8, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(8, 16, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(8, 24, true).unwrap().is_subrange_of(&range));
+        assert!(MetaRange::new(16, 8, true).unwrap().is_subrange_of(&range));
+        assert!(MetaRange::new(16, 16, true).unwrap().is_subrange_of(&range));
+        assert!(MetaRange::new(24, 8, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(24, 16, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(32, 8, true).unwrap().is_subrange_of(&range));
 
-        assert!(!MetaRange::new(0, 8).unwrap().intersect_with(&range));
-        assert!(!MetaRange::new(0, 16).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(0, 24).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(8, 16).unwrap().intersect_with(&range));
-        assert!(!MetaRange::new(8, 8).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(16, 8).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(16, 16).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(16, 24).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(24, 8).unwrap().intersect_with(&range));
-        assert!(MetaRange::new(24, 16).unwrap().intersect_with(&range));
-        assert!(!MetaRange::new(32, 8).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(0, 8, true).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(0, 16, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(0, 24, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(8, 16, true).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(8, 8, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(16, 8, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(16, 16, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(16, 24, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(24, 8, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(24, 16, true).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(32, 8, true).unwrap().intersect_with(&range));
     }
 }

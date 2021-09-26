@@ -4,13 +4,22 @@
 //
 // A container image Registry Acceleration File System.
 
-//! RAFS: a readonly FUSE file system designed for Cloud Native.
+//! The Rafs API layer to glue fuse, storage backend and filesystem metadata together.
+//!
+//! This module is core to glue fuse, filesystem format and storage backend. The main API provided
+//! by this module is the [Rafs](struct.Rafs.html) structures, which implements the
+//! `fuse_backend_rs::FileSystem` trait, so an instance of [Rafs] could be registered to a fuse
+//! backend server. A [Rafs] instance receives fuse requests from a fuse backend server, parsing
+//! the request and filesystem metadata, and eventually ask the storage backend to fetch requested
+//! data. There are also [FsPrefetchControl](struct.FsPrefetchControl.html) and
+//! [RafsConfig](struct.RafsConfig.html) to configure an [Rafs] instance.
 
 use std::any::Any;
 use std::cmp;
 use std::convert::TryFrom;
 use std::ffi::{CStr, OsStr};
 use std::fmt;
+use std::fs::File;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -26,14 +35,12 @@ use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 use storage::cache::BlobPrefetchConfig;
-use storage::device::{BlobDevice, BlobInfo, BlobPrefetchRequest, BlobVersion};
+use storage::device::{BlobDevice, BlobPrefetchRequest};
 use storage::factory::FactoryConfig;
-//use storage::*;
 
-use crate::metadata::{
-    layout::RAFS_ROOT_INODE, Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE,
-};
-use crate::*;
+use crate::metadata::layout::RAFS_ROOT_INODE;
+use crate::metadata::{Inode, RafsInode, RafsSuper, RafsSuperMeta, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::{RafsError, RafsIoReader, RafsResult};
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -65,27 +72,37 @@ fn default_amplify_io() -> u32 {
 /// Configuration information for filesystem data prefetch.
 #[derive(Clone, Default, Deserialize)]
 pub struct FsPrefetchControl {
+    /// Whether the filesystem layer data prefetch is enable or not.
     #[serde(default)]
-    pub enable: bool,
+    enable: bool,
+
+    /// How many working threads to prefetch data.
     #[serde(default = "default_threads_count")]
-    pub threads_count: usize,
+    threads_count: usize,
+
+    /// Window size in unit of bytes to merge request to backend.
     #[serde(default = "default_merging_size")]
-    // In unit of Bytes
-    pub merging_size: usize,
+    merging_size: usize,
+
+    /// Network bandwidth limitation for prefetching.
+    ///
+    /// In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
+    /// reduce congestion with normal user IO.
+    /// bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
+    /// bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
+    ///                        Please note that if the value is less than Rafs chunk size,
+    ///                        it will be raised to the chunk size.
     #[serde(default)]
-    // In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
-    // reduce congestion with normal user IO.
-    // bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
-    // bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
-    //                        Please note that if the value is less than Rafs chunk size,
-    //                        it will be raised to the chunk size.
     bandwidth_rate: u32,
+
+    /// Whether to prefetch all filesystem data.
     #[serde(default = "default_prefetch_all")]
     pub prefetch_all: bool,
 }
 
 impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
     type Error = RafsError;
+
     fn try_from(c: &RafsConfig) -> RafsResult<Self> {
         if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_BLOCK_SIZE {
             return Err(RafsError::Configure(
@@ -123,17 +140,24 @@ macro_rules! trim_backend_config {
 pub struct RafsConfig {
     /// Configuration for storage subsystem.
     pub device: FactoryConfig,
+    /// Filesystem working mode.
     pub mode: String,
+    /// Whether to validate data digest before use.
     #[serde(default)]
     pub digest_validate: bool,
+    /// Io statistics.
     #[serde(default)]
     pub iostats_files: bool,
+    /// Filesystem prefetching configuration.
     #[serde(default)]
     pub fs_prefetch: FsPrefetchControl,
+    /// Enable extended attributes.
     #[serde(default)]
     pub enable_xattr: bool,
+    /// Record filesystem access pattern.
     #[serde(default)]
     pub access_pattern: bool,
+    /// Record file name if file access trace log.
     #[serde(default)]
     pub latest_read_files: bool,
     // ZERO value means, amplifying user io is not enabled.
@@ -174,12 +198,17 @@ impl fmt::Display for RafsConfig {
     }
 }
 
-/// Main entrance of the RAFS readonly FUSE file system.
+/// Struct to glue fuse, storage backend and filesystem metadata together.
+///
+/// The [Rafs](struct.Rafs.html) structure implements the `fuse_backend_rs::FileSystem` trait,
+/// so an instance of [Rafs] could be registered to a fuse backend server. A [Rafs] instance
+/// receives fuse requests from a fuse backend server, parsing the request and filesystem metadata,
+/// and eventually ask the storage backend to fetch requested data.
 pub struct Rafs {
     id: String,
     device: BlobDevice,
     ios: Arc<metrics::GlobalIoStats>,
-    pub sb: Arc<RafsSuper>,
+    sb: Arc<RafsSuper>,
 
     initialized: bool,
     digest_validate: bool,
@@ -196,17 +225,15 @@ pub struct Rafs {
 }
 
 impl Rafs {
+    /// Create a new instance of `Rafs`.
     pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
-        let mut device_conf = conf.device.clone();
-        device_conf.cache.cache_validate = conf.digest_validate;
-        device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
-
+        let storage_conf = Self::prepare_storage_conf(&conf)?;
         let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
         sb.load(r).map_err(RafsError::FillSuperblock)?;
 
-        let device_conf = Arc::new(device_conf);
         let blob_infos = sb.superblock.get_blob_infos();
-        let device = BlobDevice::new(&device_conf, &blob_infos).map_err(RafsError::CreateDevice)?;
+        let device =
+            BlobDevice::new(&storage_conf, &blob_infos).map_err(RafsError::CreateDevice)?;
 
         let rafs = Rafs {
             id: id.to_string(),
@@ -237,7 +264,7 @@ impl Rafs {
         Ok(rafs)
     }
 
-    /// update backend meta and blob file.
+    /// Update storage backend for blobs.
     pub fn update(&self, r: &mut RafsIoReader, conf: RafsConfig) -> RafsResult<()> {
         info!("update");
         if !self.initialized {
@@ -245,6 +272,7 @@ impl Rafs {
             return Err(RafsError::Uninitialized);
         }
 
+        // TODO: seems no need to do self.sb.update()
         // step 1: update sb.
         // No lock is needed thanks to ArcSwap.
         self.sb.update(r).map_err(|e| {
@@ -253,16 +281,12 @@ impl Rafs {
         })?;
         info!("update sb is successful");
 
-        let mut device_conf = conf.device.clone();
-        device_conf.cache.cache_validate = conf.digest_validate;
-        device_conf.cache.prefetch_worker = TryFrom::try_from(&conf)?;
-
-        let device_conf = Arc::new(device_conf);
+        let storage_conf = Self::prepare_storage_conf(&conf)?;
         let blob_infos = self.sb.superblock.get_blob_infos();
 
         // step 2: update device (only localfs is supported)
         self.device
-            .update(&device_conf, &blob_infos)
+            .update(&storage_conf, &blob_infos)
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
@@ -278,89 +302,16 @@ impl Rafs {
         if self.initialized {
             return Err(RafsError::AlreadyMounted);
         }
-
-        // TODO
-        /*
-        // Without too much layout concern, just prefetch a certain range from backend.
-        let prefetch_vec = self
-            .sb
-            .superblock
-            .get_blobs()
-            .iter()
-            .map(|b| BlobPrefetchRequest {
-                blob_id: b.blob_id().to_owned(),
-                offset: b.readahead_offset() as u32,
-                len: b.readahead_size() as u32,
-            })
-            .collect::<Vec<BlobPrefetchRequest>>();
-
-        self.device
-            .init(&prefetch_vec)
-            .map_err(RafsError::CreateDevice)?;
-
-        // Device should be ready before any prefetch.
         if self.fs_prefetch {
-            let sb = self.sb.clone();
-            let device = self.device.clone();
-
-            let prefetch_all = self.prefetch_all;
-
-            let _ = std::thread::spawn(move || {
-                let mut reader = r;
-                let inodes = match prefetch_files {
-                    Some(files) => {
-                        let mut inodes = Vec::<Inode>::new();
-                        for f in files {
-                            if let Ok(inode) = sb.ino_from_path(f.as_path()) {
-                                inodes.push(inode);
-                            } else {
-                                continue;
-                            }
-                        }
-                        Some(inodes)
-                    }
-                    None => None,
-                };
-
-                // Prefetch procedure does not affect rafs mounting
-                sb.prefetch_hint_files(&mut reader, inodes, &|mut desc| {
-                    device.prefetch(&mut desc).unwrap_or_else(|e| {
-                        warn!("Prefetch error, {:?}", e);
-                        0
-                    });
-                })
-                .unwrap_or_else(|e| {
-                    info!("No file to be prefetched {:?}", e);
-                });
-
-                if prefetch_all {
-                    let root = vec![RAFS_ROOT_INODE];
-                    sb.prefetch_hint_files(&mut reader, Some(root), &|mut desc| {
-                        device.prefetch(&mut desc).unwrap_or_else(|e| {
-                            warn!("Prefetch error, {:?}", e);
-                            0
-                        });
-                    })
-                    .unwrap_or_else(|e| {
-                        info!("No file to be prefetched {:?}", e);
-                    })
-                }
-
-                // For now, we only have hinted prefetch. So stopping prefetch workers once
-                // it's done is Okay. But if we involve more policies someday, we have to be
-                // careful when to stop prefetch progresses.
-                device
-                    .stop_prefetch()
-                    .unwrap_or_else(|_| error!("Failed in stopping prefetch workers"));
-            });
+            // Device should be ready before any prefetch.
+            self.prefetch(r, prefetch_files)
         }
-        */
-
         self.initialized = true;
+
         Ok(())
     }
 
-    /// umount a previously mounted rafs virtual path
+    /// Umount a mounted Rafs Fuse filesystem.
     pub fn destroy(&mut self) -> Result<()> {
         info! {"Destroy rafs"}
 
@@ -373,6 +324,23 @@ impl Rafs {
         }
 
         Ok(())
+    }
+
+    /// Get id of the filesystem instance.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Get the cached file system super block metadata.
+    pub fn metadata(&self) -> &RafsSuperMeta {
+        &self.sb.meta
+    }
+
+    fn prepare_storage_conf(conf: &RafsConfig) -> RafsResult<Arc<FactoryConfig>> {
+        let mut storage_conf = conf.device.clone();
+        storage_conf.cache.cache_validate = conf.digest_validate;
+        storage_conf.cache.prefetch_config = TryFrom::try_from(conf)?;
+        Ok(Arc::new(storage_conf))
     }
 
     fn xattr_supported(&self) -> bool {
@@ -393,6 +361,7 @@ impl Rafs {
         }
 
         let mut cur_offset = offset;
+
         // offset 0 and 1 is for "." and ".." respectively.
         if cur_offset == 0 {
             cur_offset += 1;
@@ -464,6 +433,7 @@ impl Rafs {
     fn get_inode_attr(&self, ino: u64) -> Result<Attr> {
         let inode = self.sb.get_inode(ino, false)?;
         let mut attr = inode.get_attr();
+
         // override uid/gid if there is no explicit inode uid/gid
         if !self.sb.meta.explicit_uidgid() {
             attr.uid = self.i_uid;
@@ -491,14 +461,14 @@ impl Rafs {
 
     fn get_inode_entry(&self, inode: Arc<dyn RafsInode>) -> Entry {
         let mut entry = inode.get_entry();
+
         // override uid/gid if there is no explicit inode uid/gid
         if !self.sb.meta.explicit_uidgid() {
             entry.attr.st_uid = self.i_uid;
             entry.attr.st_gid = self.i_gid;
         }
 
-        // Older rafs image doesn't include mtime, in such case we use
-        // runtime timestamp.
+        // Older rafs image doesn't include mtime, in such case we use runtime timestamp.
         if entry.attr.st_mtime == 0 {
             entry.attr.st_atime = self.i_time as i64;
             entry.attr.st_ctime = self.i_time as i64;
@@ -517,13 +487,94 @@ impl Rafs {
     }
 }
 
+impl Rafs {
+    fn prefetch(&self, reader: RafsIoReader, prefetch_files: Option<Vec<PathBuf>>) {
+        let sb = self.sb.clone();
+        let device = self.device.clone();
+        let prefetch_all = self.prefetch_all;
+
+        let _ = std::thread::spawn(move || {
+            if sb.meta.is_v5() {
+                Self::do_prefetch_v5(reader, prefetch_files, prefetch_all, sb, device);
+            }
+        });
+    }
+
+    fn do_prefetch_v5(
+        mut reader: RafsIoReader,
+        prefetch_files: Option<Vec<PathBuf>>,
+        prefetch_all: bool,
+        sb: Arc<RafsSuper>,
+        device: BlobDevice,
+    ) {
+        // Without too much layout concern, just prefetch a certain range from backend.
+        let prefetches = sb
+            .superblock
+            .get_blobs()
+            .iter()
+            .map(|b| BlobPrefetchRequest {
+                blob_id: b.blob_id().to_owned(),
+                offset: b.readahead_offset() as u32,
+                len: b.readahead_size() as u32,
+            })
+            .collect::<Vec<BlobPrefetchRequest>>();
+        device.prefetch(&[], &prefetches).unwrap_or_else(|e| {
+            warn!("Prefetch error, {:?}", e);
+        });
+
+        let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
+        // Prefetch procedure does not affect rafs mounting
+        sb.prefetch_files(&mut reader, inodes, &|desc| {
+            device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                warn!("Prefetch error, {:?}", e);
+            });
+        })
+        .unwrap_or_else(|e| {
+            info!("No file to be prefetched {:?}", e);
+        });
+
+        if prefetch_all {
+            let root = vec![RAFS_ROOT_INODE];
+            // Sleeping for 2 seconds is indeed a trick to prefetch the entire rootfs.
+            // FIXME: As nydus can't give different policies different priorities, this is a
+            // workaround. Remove the sleeping when IO priority mechanism is ready.
+            sleep(Duration::from_secs(2));
+            sb.prefetch_files(&mut reader, Some(root), &|desc| {
+                device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                    warn!("Prefetch error, {:?}", e);
+                });
+            })
+            .unwrap_or_else(|e| {
+                info!("No file to be prefetched {:?}", e);
+            });
+        }
+
+        // For now, we only have hinted prefetch. So stopping prefetch workers once
+        // it's done is Okay. But if we involve more policies someday, we have to be
+        // careful when to stop prefetch progresses.
+        device.stop_prefetch();
+    }
+
+    fn convert_file_list(files: &[PathBuf], sb: &Arc<RafsSuper>) -> Vec<Inode> {
+        let mut inodes = Vec::<Inode>::with_capacity(files.len());
+
+        for f in files {
+            if let Ok(inode) = sb.ino_from_path(f.as_path()) {
+                inodes.push(inode);
+            }
+        }
+
+        inodes
+    }
+}
+
 impl BackendFileSystem for Rafs {
     fn mount(&self) -> Result<(Entry, u64)> {
         let root_inode = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
         self.ios
             .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
-        let entry = self.get_inode_entry(root_inode);
-        Ok((entry, self.sb.get_max_ino()))
+
+        Ok((self.get_inode_entry(root_inode), self.sb.get_max_ino()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -600,17 +651,18 @@ impl FileSystem for Rafs {
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
-
         let attr = self.get_inode_attr(ino).map(|r| {
             recorder.mark_success(0);
             r
         })?;
+
         Ok((attr.into(), self.sb.meta.attr_timeout))
     }
 
     fn readlink(&self, _ctx: &Context, ino: u64) -> Result<Vec<u8>> {
         let mut rec = FopRecorder::settle(Readlink, ino, &self.ios);
         let inode = self.sb.get_inode(ino, self.digest_validate)?;
+
         Ok(inode
             .get_symlink()
             .map(|r| {
@@ -653,30 +705,28 @@ impl FileSystem for Rafs {
         let start = self.ios.latency_start();
 
         for desc in descs.iter_mut() {
-            assert!(!desc.bi_vec.is_empty());
-            assert_ne!(desc.bi_size, 0);
+            debug_assert!(!desc.bi_vec.is_empty());
+            debug_assert!(desc.bi_size != 0);
 
-            /*
-            // Try to amplify user io from here, aim at better performance.
-            let all_chunks_ready = self.device.is_all_chunks_ready(&desc.bi_vec);
-            if !all_chunks_ready {
-                let ra_desc = self.sb.carry_more_until(
-                    inode.as_ref(),
-                    real_end,
-                    desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
-                    1024 * 128 - size as u64,
-                )?;
-
-                if let Some(rd) = ra_desc {
-                    desc.bi_vec.extend_from_slice(&rd.bi_vec)
-                };
+            // Try to amplify user io for Rafs v5, to improve performance.
+            if self.sb.meta.is_v5() {
+                let all_chunks_ready = self.device.is_all_chunk_ready(&desc);
+                if !all_chunks_ready {
+                    if let Some(rd) = self.sb.carry_more_until(
+                        inode.as_ref(),
+                        real_end,
+                        &desc.bi_vec.last().unwrap().chunkinfo,
+                        1024 * 128 - size as u64,
+                    )? {
+                        desc.bi_vec.extend_from_slice(&rd.bi_vec);
+                    }
+                }
             }
-            */
 
             // Avoid copying `desc`
             let r = self.device.read_to(w, desc)?;
-            recorder.mark_success(r);
             result += r;
+            recorder.mark_success(r);
             if r != desc.bi_size {
                 break;
             }
@@ -739,7 +789,6 @@ impl FileSystem for Rafs {
 
         let name = OsStr::from_bytes(name.to_bytes());
         let inode = self.sb.get_inode(inode, false)?;
-
         let value = inode.get_xattr(name)?;
         let r = match value {
             Some(value) => match size {
@@ -769,10 +818,8 @@ impl FileSystem for Rafs {
         }
 
         let inode = self.sb.get_inode(inode, false)?;
-
         let mut count = 0;
         let mut buf = Vec::new();
-
         for mut name in inode.get_xattrs()? {
             count += name.len() + 1;
             if size != 0 {
@@ -800,6 +847,7 @@ impl FileSystem for Rafs {
         add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
     ) -> Result<()> {
         let mut rec = FopRecorder::settle(Readdir, inode, &self.ios);
+
         self.do_readdir(inode, size, offset, add_entry).map(|r| {
             rec.mark_success(0);
             r
@@ -816,6 +864,7 @@ impl FileSystem for Rafs {
         add_entry: &mut dyn FnMut(DirEntry, Entry) -> Result<usize>,
     ) -> Result<()> {
         let mut rec = FopRecorder::settle(Readdirplus, ino, &self.ios);
+
         self.do_readdir(ino, size, offset, |dir_entry| {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
@@ -884,13 +933,13 @@ impl FileSystem for Rafs {
     }
 }
 
-#[cfg(test1)]
-mod tests {
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
-    use std::convert::TryInto;
+    use crate::RafsIoRead;
     use storage::RAFS_MAX_BLOCK_SIZE;
 
-    fn new_rafs_backend() -> Box<Rafs> {
+    pub fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
         {
             "device": {
@@ -1029,23 +1078,17 @@ mod tests {
         };
 
         config.fs_prefetch.enable = true;
-        assert!(config.try_into::<FsPrefetchControl>::().is_err());
+        assert!(BlobPrefetchConfig::try_from(&config).is_err());
 
         config.fs_prefetch.threads_count = 1;
-        assert!(config.try_into::<FsPrefetchControl>::().is_ok());
+        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
 
         config.fs_prefetch.merging_size = RAFS_MAX_BLOCK_SIZE as usize + 1;
-        assert!(config.try_into::<FsPrefetchControl>::().is_err());
+        assert!(BlobPrefetchConfig::try_from(&config).is_err());
 
         config.fs_prefetch.merging_size = RAFS_MAX_BLOCK_SIZE as usize;
         config.fs_prefetch.bandwidth_rate = 1;
         config.fs_prefetch.prefetch_all = true;
-
-        let p_config: FsPrefetchControl = config.try_into().unwrap();
-        assert_eq!(p_config.enable, true);
-        assert_eq!(p_config.threads_count, 1);
-        assert_eq!(p_config.bandwidth_rate, 1);
-        assert_eq!(p_config.merging_size, RAFS_MAX_BLOCK_SIZE as usize);
-        assert_eq!(p_config.prefetch_all, true);
+        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
     }
 }

@@ -281,7 +281,7 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
         let rafs = any_fs
             .downcast_ref::<Rafs>()
             .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
-        let resp = serde_json::to_string(&rafs.sb.meta).map_err(DaemonError::Serde)?;
+        let resp = serde_json::to_string(rafs.metadata()).map_err(DaemonError::Serde)?;
         Ok(resp)
     }
 

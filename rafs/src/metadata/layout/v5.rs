@@ -49,7 +49,9 @@ use storage::compress;
 use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_VERSION_V5};
-use crate::metadata::{Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::metadata::{
+    Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE,
+};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
@@ -188,7 +190,10 @@ impl RafsV5SuperBlock {
             || meta_size <= RAFSV5_SUPERBLOCK_SIZE as u64
         {
             return Err(einval!("invalid super block blob size"));
-        } else if self.block_size() != 512 && self.block_size() != 4096 {
+        } else if !self.block_size().is_power_of_two()
+            || self.block_size() < 0x1000
+            || self.block_size() as u64 > RAFS_MAX_BLOCK_SIZE
+        {
             return Err(einval!("invalid block size"));
         } else if RafsSuperFlags::from_bits(self.flags()).is_none() {
             return Err(einval!("invalid super block flags"));
@@ -197,20 +202,21 @@ impl RafsV5SuperBlock {
         let meta_range = MetaRange::new(
             RAFSV5_SUPERBLOCK_SIZE as u64,
             meta_size - RAFSV5_SUPERBLOCK_SIZE as u64,
+            true,
         )?;
 
         let inodes_count = self.inodes_count();
         let inode_table_offset = self.inode_table_offset();
         let inode_table_entries = self.inode_table_entries() as u64;
         let inode_table_size = inode_table_entries * size_of::<u32>() as u64;
-        let inode_table_range = MetaRange::new(inode_table_offset, inode_table_size)?;
+        let inode_table_range = MetaRange::new(inode_table_offset, inode_table_size, false)?;
         if inodes_count > inode_table_entries || !inode_table_range.is_subrange_of(&meta_range) {
             return Err(einval!("invalid inode table count, offset or entries."));
         }
 
         let blob_table_offset = self.blob_table_offset();
         let blob_table_size = self.blob_table_size() as u64;
-        let blob_table_range = MetaRange::new(blob_table_offset, blob_table_size)?;
+        let blob_table_range = MetaRange::new(blob_table_offset, blob_table_size, false)?;
         if !blob_table_range.is_subrange_of(&meta_range)
             || blob_table_range.intersect_with(&inode_table_range)
         {
@@ -220,7 +226,8 @@ impl RafsV5SuperBlock {
         let ext_blob_table_offset = self.extended_blob_table_offset();
         let ext_blob_table_size =
             self.extended_blob_table_entries() as u64 * RAFSV5_EXT_BLOB_ENTRY_SIZE as u64;
-        let ext_blob_table_range = MetaRange::new(ext_blob_table_offset, ext_blob_table_size)?;
+        let ext_blob_table_range =
+            MetaRange::new(ext_blob_table_offset, ext_blob_table_size, true)?;
         if ext_blob_table_size != 0 {
             if !ext_blob_table_range.is_subrange_of(&meta_range)
                 || ext_blob_table_range.intersect_with(&inode_table_range)
@@ -232,13 +239,14 @@ impl RafsV5SuperBlock {
 
         let prefetch_table_offset = self.prefetch_table_offset();
         let prefetch_table_size = self.prefetch_table_entries() as u64 * size_of::<u32>() as u64;
-        let pretech_table_range = MetaRange::new(prefetch_table_offset, prefetch_table_size)?;
+        let prefetch_table_range =
+            MetaRange::new(prefetch_table_offset, prefetch_table_size, false)?;
         if prefetch_table_size != 0 {
-            if !pretech_table_range.is_subrange_of(&meta_range)
-                || pretech_table_range.intersect_with(&inode_table_range)
-                || pretech_table_range.intersect_with(&blob_table_range)
+            if !prefetch_table_range.is_subrange_of(&meta_range)
+                || prefetch_table_range.intersect_with(&inode_table_range)
+                || prefetch_table_range.intersect_with(&blob_table_range)
                 || (ext_blob_table_size != 0
-                    && pretech_table_range.intersect_with(&ext_blob_table_range))
+                    && prefetch_table_range.intersect_with(&ext_blob_table_range))
             {
                 return Err(einval!("invalid prefetch table offset or size."));
             }
@@ -1271,6 +1279,7 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeChunkOps + RafsV5I
     Ok(descs)
 }
 
+/*
 /// Allocate a `BlobIoVec` to handle blob io to range `offset..ofset + size`.
 ///
 /// The range `offset..ofset + size` must be backed by a single blob.
@@ -1288,6 +1297,7 @@ pub(crate) fn rafsv5_alloc_bio_vec<I: RafsInode + RafsV5InodeChunkOps + RafsV5In
         Err(einval!("file range is backed by multiple blobs"))
     }
 }
+ */
 
 /// Add a new bio covering the IO range into the provided bio desc.
 ///
