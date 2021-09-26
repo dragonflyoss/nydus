@@ -68,7 +68,6 @@ fusedev:
 	$(call static_check,$@,target-$@)
 
 PACKAGES = rafs storage
-PACKAGES += upgrade-manager
 
 # If virtiofs test must be performed, only run binary part
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
