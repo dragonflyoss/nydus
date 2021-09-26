@@ -2,30 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [ "*" ]
+    branches: ["*"]
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     steps:
-    - uses: actions/checkout@v2
-    - name: Cache cargo
-      uses: actions/cache@v2
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target-fusedev
-          target-virtiofs
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo
-    - name: Smoke test
-      run: |
-        make docker-smoke
-        sudo chown -R $(id -un):$(id -gn) .
+      - uses: actions/checkout@v2
+      - name: Cache Nydus
+        uses: Swatinem/rust-cache@v1
+        with:
+          target-dir: ./target-fusedev
+          cache-on-failure: true
+      - name: Cache Docker Layers
+        uses: satackey/action-docker-layer-caching@v0.0.11
+        # Ignore the failure of a step and avoid terminating the job.
+        continue-on-error: true
+      - name: Smoke Test
+        run: |
+          echo Cargo Home: $CARGO_HOME
+          echo Running User: $(whoami)
+          make docker-smoke
