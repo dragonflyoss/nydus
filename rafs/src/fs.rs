@@ -45,6 +45,9 @@ pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
 const DOT: &str = ".";
 const DOTDOT: &str = "..";
 
+// TODO: Make this configurable from rafs configuration file
+const AMPLIFIED_SIZE: usize = 1024 * 128;
+
 fn default_threads_count() -> usize {
     8
 }
@@ -615,24 +618,24 @@ impl FileSystem for Rafs {
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
         let mut all_cached = true;
 
-        for b in &desc.bi_vec {
-            let c = b.chunkinfo.as_ref();
-            let blob = b.blob.as_ref();
-            all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
-        }
-
-        // Try to amplify user io from here, aim at better performance.
-        if !all_cached {
-            let ra_desc = self.sb.carry_more_until(
-                inode.as_ref(),
-                offset + size as u64,
-                desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
-                1024 * 128 - size as u64,
-            )?;
-
-            if let Some(rd) = ra_desc {
-                desc.bi_vec.extend_from_slice(&rd.bi_vec)
-            };
+        if let Some(d) = AMPLIFIED_SIZE.checked_sub(size as usize) {
+            for b in &desc.bi_vec {
+                let c = b.chunkinfo.as_ref();
+                let blob = b.blob.as_ref();
+                all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
+            }
+            // Try to amplify user io from here, aim at better performance.
+            if !all_cached {
+                let ra_desc = self.sb.carry_more_until(
+                    inode.as_ref(),
+                    offset + size as u64,
+                    desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
+                    d as u64,
+                )?;
+                if let Some(rd) = ra_desc {
+                    desc.bi_vec.extend_from_slice(&rd.bi_vec)
+                };
+            }
         }
 
         let start = self.ios.latency_start();
