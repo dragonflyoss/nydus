@@ -83,6 +83,9 @@ endif
 
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 
+CARGO = $(shell which cargo)
+SUDO = $(shell which sudo)
+
 docker-static:
 	docker build -t nydus-rs-static --build-arg ARCH=${ARCH} misc/musl-static
 	docker run --rm ${CARGO_BUILD_GEARS} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
@@ -92,7 +95,7 @@ docker-static:
 smoke: ut
 	# No need to involve `clippy check` here as build from target `virtiofs` or `fusedev` always does so.
 	# TODO: Put each test function into separated rs file.
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) cargo test --test '*' $(FUSEDEV_COMMON) -- --nocapture --test-threads=8
+	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(FUSEDEV_COMMON) -- --nocapture --test-threads=8
 
 docker-nydus-smoke:
 	docker build -t nydus-smoke --build-arg ARCH=${ARCH} misc/nydus-smoke
