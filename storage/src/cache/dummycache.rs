@@ -32,6 +32,7 @@ use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageError, StorageResult};
 
 struct DummyCache {
+    blob_id: String,
     reader: Arc<dyn BlobReader>,
     cached: bool,
     compressor: compress::Algorithm,
@@ -41,6 +42,10 @@ struct DummyCache {
 }
 
 impl BlobCache for DummyCache {
+    fn blob_id(&self) -> &str {
+        &self.blob_id
+    }
+
     fn blob_size(&self) -> Result<u64> {
         self.reader.blob_size().map_err(|e| eother!(e))
     }
@@ -183,12 +188,11 @@ impl BlobCacheMgr for DummyCacheMgr {
     }
 
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
-        let reader = self
-            .backend
-            .get_reader(blob_info.blob_id())
-            .map_err(|e| eother!(e))?;
+        let blob_id = blob_info.blob_id().to_owned();
+        let reader = self.backend.get_reader(&blob_id).map_err(|e| eother!(e))?;
 
         Ok(Arc::new(DummyCache {
+            blob_id,
             reader,
             cached: self.cached,
             compressor: blob_info.compressor(),

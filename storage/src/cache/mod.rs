@@ -147,6 +147,9 @@ pub struct BlobPrefetchConfig {
 /// The caller may use the `BlobCache` trait to access blob data on backend storage, with an
 /// optional intermediate cache layer to improve performance.
 pub trait BlobCache: Send + Sync {
+    /// Get id of the blob object.
+    fn blob_id(&self) -> &str;
+
     /// Get size of the blob object.
     fn blob_size(&self) -> Result<u64>;
 

@@ -424,7 +424,9 @@ impl BlobIoVec {
         if self.bi_vec.is_empty() {
             None
         } else {
-            Some(self.bi_vec[0].blob.clone())
+            let blob = &self.bi_vec[0].blob;
+            debug_assert!(self.validate(blob.blob_index()));
+            Some(blob.clone())
         }
     }
 
@@ -433,7 +435,9 @@ impl BlobIoVec {
         if self.bi_vec.is_empty() {
             None
         } else {
-            Some(self.bi_vec[0].blob.blob_index())
+            let blob_index = self.bi_vec[0].blob.blob_index();
+            debug_assert!(self.validate(blob_index));
+            Some(blob_index)
         }
     }
 
@@ -447,6 +451,19 @@ impl BlobIoVec {
         !self.bi_vec.is_empty()
             && !desc.bi_vec.is_empty()
             && self.bi_vec[0].blob.blob_index() == desc.bi_vec[0].blob.blob_index()
+    }
+
+    #[allow(dead_code)]
+    fn validate(&self, blob_index: u32) -> bool {
+        if self.bi_vec.len() > 1 {
+            for n in &self.bi_vec[1..] {
+                if n.blob.blob_index() != blob_index {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 }
 
@@ -561,6 +578,63 @@ impl BlobDevice {
         // The `off` parameter to w.write_from() is actually ignored by
         // BlobV5IoVec::read_vectored_at_volatile()
         w.write_from(&mut f, desc.bi_size, 0)
+    }
+
+    /// Try to prefetch specified blob data.
+    pub fn prefetch(
+        &self,
+        io_vecs: &[&BlobIoVec],
+        prefetches: &[BlobPrefetchRequest],
+    ) -> io::Result<()> {
+        for idx in 0..prefetches.len() {
+            if let Some(blob) = self.get_blob_by_id(&prefetches[idx].blob_id) {
+                let _ = blob
+                    .prefetch(&prefetches[idx..idx + 1], &[])
+                    .map_err(|_e| eio!("failed to prefetch blob data"));
+            }
+        }
+        for io_vec in io_vecs.iter() {
+            if let Some(blob_index) = io_vec.get_target_blob_index() {
+                let blob = self.blobs.load()[blob_index as usize].clone();
+                let _ = blob
+                    .prefetch(&[], &io_vec.bi_vec)
+                    .map_err(|_e| eio!("failed to prefetch blob data"));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop the background blob data prefetch task.
+    pub fn stop_prefetch(&self) {
+        for blob in self.blobs.load().iter() {
+            let _ = blob.stop_prefetch();
+        }
+    }
+
+    /// Check all chunks related to the blob io vector are ready.
+    pub fn is_all_chunk_ready(&self, io_vec: &BlobIoVec) -> bool {
+        if let Some(blob_index) = io_vec.get_target_blob_index() {
+            let blob = &self.blobs.load()[blob_index as usize];
+            for desc in io_vec.bi_vec.iter() {
+                if !blob.is_chunk_ready(&desc.chunkinfo) {
+                    return false;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get_blob_by_id(&self, blob_id: &str) -> Option<Arc<dyn BlobCache>> {
+        for blob in self.blobs.load().iter() {
+            if blob.blob_id() == blob_id {
+                return Some(blob.clone());
+            }
+        }
+
+        None
     }
 }
 
