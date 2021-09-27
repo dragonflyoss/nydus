@@ -22,6 +22,7 @@
 use std::cmp;
 use std::fmt::Debug;
 use std::io::{self, Error};
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -38,9 +39,12 @@ static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, un
 
 /// Version number for blob files.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
 pub enum BlobVersion {
-    /// Blob files for Rafs v5 images
+    /// Blob files for Rafs v5 images.
     V5 = 5,
+    /// Blob files for Rafs v6 images.
+    V6 = 6,
 }
 
 impl Default for BlobVersion {
@@ -79,6 +83,13 @@ pub struct BlobInfo {
     readahead_size: u32,
     /// Whether to validate blob data.
     validate_data: bool,
+
+    /// V6: Version number of the blob metadata.
+    metadata_version: u32,
+    /// V6: Offset of the blob metadata in the compressed blob.
+    metadata_offset: u64,
+    /// V6: Size of the compressed blob metadata in the compressed blob.
+    metadata_compressed_size: u64,
 }
 
 impl BlobInfo {
@@ -104,6 +115,9 @@ impl BlobInfo {
             readahead_offset: 0,
             readahead_size: 0,
             validate_data: false,
+            metadata_version: 0,
+            metadata_offset: 0,
+            metadata_compressed_size: 0,
         }
     }
 
@@ -115,6 +129,11 @@ impl BlobInfo {
     /// Check whether it's a blob for Rafs V5 image.
     pub fn is_v5(&self) -> bool {
         self.blob_version == BlobVersion::V5
+    }
+
+    /// Check whether it's a blob for Rafs V6 image.
+    pub fn is_v6(&self) -> bool {
+        self.blob_version == BlobVersion::V6
     }
 
     /// Get the blob index in the blob array.
@@ -194,6 +213,12 @@ impl BlobInfo {
     /// Enable blob data validation
     pub fn enable_data_validation(&mut self, validate: bool) {
         self.validate_data = validate;
+    }
+
+    pub fn set_blob_metadata_info(&mut self, version: u32, offset: u64, compressed_size: u64) {
+        self.metadata_version = version;
+        self.metadata_offset = offset;
+        self.metadata_compressed_size = compressed_size;
     }
 
     /// Check whether the Rafs v5 metadata blob has extended blob table.
@@ -492,6 +517,20 @@ pub struct BlobPrefetchRequest {
     pub len: u32,
 }
 
+/// Trait to provide direct access to underlying uncompressed blob file.
+pub trait BlobObject: AsRawFd {
+    /// Check whether all data of the blob object is ready.
+    fn is_all_data_ready(&self) -> bool;
+
+    /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
+    /// for use.
+    fn fetch(&self, offset: u64, size: u64) -> io::Result<usize>;
+
+    /// Read data from storage backend and make sure data range [offset, offset + size) is ready
+    /// for use.
+    fn read(&self, w: &mut dyn ZeroCopyWriter, offset: u64, size: u64) -> io::Result<usize>;
+}
+
 /// A wrapping object over an underlying [BlobCache] object.
 ///
 /// All blob Io requests are actually served by the underlying [BlobCache] object. A new method
@@ -627,6 +666,18 @@ impl BlobDevice {
         }
 
         false
+    }
+
+    /// Get a `BlobObject` instance to directly access uncompressed blob file.
+    ///
+    /// A storage backend may or may not support `BlobObject`. For example, it's non-sense
+    /// for `DummyCache` to support `BlobOject`.
+    pub fn get_blob_object(&self, blob_id: &str) -> Option<Arc<dyn BlobObject>> {
+        if let Some(blob) = self.get_blob_by_id(blob_id) {
+            blob.get_blob_object()
+        } else {
+            None
+        }
     }
 
     fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
