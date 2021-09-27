@@ -323,6 +323,39 @@ impl BlobManager {
             })
             .collect();
     }
+
+    fn get_blob_idx_by_id(&self, id: &str) -> Option<u32> {
+        for i in 0..self.blobs.len() {
+            if self.blobs[i].blob_id.eq(id) {
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
+    /// extend blobs which belong to ChunkDict and setup real_blob_idx map
+    /// should call this function after import parent bootstrap
+    /// otherwise will break blobs order
+    pub fn extend_blob_table_from_chunk_dict(&mut self) {
+        if let Some(dict) = self.chunk_dict.clone() {
+            let blobs = dict.get_blobs();
+            for blob in blobs.entries.iter() {
+                if let Some(real_idx) = self.get_blob_idx_by_id(&blob.blob_id) {
+                    dict.set_real_blob_idx(blob.blob_index, real_idx);
+                } else {
+                    let idx = self.alloc_index().unwrap();
+                    self.add(BlobContext::from(
+                        blob.blob_id.clone(),
+                        blob.chunk_count,
+                        blob.readahead_size,
+                        blob.blob_cache_size,
+                        blob.compressed_blob_size,
+                    ));
+                    dict.set_real_blob_idx(blob.blob_index, idx);
+                }
+            }
+        }
+    }
 }
 
 /// BootstrapContext is used to hold inmemory data of bootstrap during build.
@@ -386,16 +419,13 @@ impl BuildContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         blob_id: String,
-
         aligned_chunk: bool,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
-
         source_type: SourceType,
         source_path: PathBuf,
-
         prefetch: Prefetch,
         blob_storage: Option<BlobStorage>,
     ) -> Self {
