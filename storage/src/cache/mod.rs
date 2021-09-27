@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::Result;
 use std::slice;
@@ -21,33 +22,88 @@ pub mod blobcache;
 pub mod chunkmap;
 pub mod dummycache;
 
+/// A segment is always a continuous part in a single chunk, which is later copied
+/// from to user buffer memory.
+#[derive(Clone, Debug)]
+pub struct ChunkSegment {
+    // From where within a chunk user data is stored
+    offset: u32,
+    // Tht user data total length in a chunk
+    len: u32,
+}
+
+impl ChunkSegment {
+    fn new(offset: u32, len: u32) -> Self {
+        Self { offset, len }
+    }
+}
+
+/// `IoInitiator` denotes that a chunk fulfill user io or internal io.
+#[derive(Clone, Debug)]
+pub enum IoInitiator {
+    User(ChunkSegment),
+    // (Chunk index, blob/compressed offset)
+    Internal(u32, u64),
+}
+
 #[derive(Default, Clone)]
 struct MergedBackendRequest {
     // Chunks that are continuous to each other.
     pub chunks: Vec<Arc<dyn RafsChunkInfo>>,
+    pub chunk_tags: Vec<IoInitiator>,
     pub blob_offset: u64,
     pub blob_size: u32,
     pub blob_entry: Arc<RafsBlobEntry>,
 }
 
+impl Debug for MergedBackendRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("MergedBackendRequest")
+            .field("blob index", &self.blob_entry.blob_index)
+            .field("chunk tags", &self.chunk_tags)
+            .field("blob offset", &self.blob_offset)
+            .field("blob size", &self.blob_size)
+            .finish()
+    }
+}
+
 impl MergedBackendRequest {
-    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>) -> Self {
+    fn new(first_cki: Arc<dyn RafsChunkInfo>, blob: Arc<RafsBlobEntry>, bio: &RafsBio) -> Self {
         let mut chunks = Vec::<Arc<dyn RafsChunkInfo>>::new();
+        let mut tags: Vec<IoInitiator> = Vec::new();
         let blob_size = first_cki.compress_size();
         let blob_offset = first_cki.compress_offset();
+
+        let tag = if bio.user_io {
+            IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
+        } else {
+            IoInitiator::Internal(first_cki.index(), first_cki.compress_offset())
+        };
+
         chunks.push(first_cki);
+
+        tags.push(tag);
 
         MergedBackendRequest {
             blob_offset,
             blob_size,
             chunks,
+            chunk_tags: tags,
             blob_entry: blob,
         }
     }
 
-    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>) {
+    fn merge_one_chunk(&mut self, cki: Arc<dyn RafsChunkInfo>, bio: &RafsBio) {
         self.blob_size += cki.compress_size();
+
+        let tag = if bio.user_io {
+            IoInitiator::User(ChunkSegment::new(bio.offset, bio.size as u32))
+        } else {
+            IoInitiator::Internal(cki.index(), cki.compress_offset())
+        };
+
         self.chunks.push(cki);
+        self.chunk_tags.push(tag);
     }
 }
 
@@ -69,10 +125,7 @@ pub trait RafsCache {
     // TODO: Cache is indexed by each chunk's block id. When this read request can't
     // hit local cache and it spans two chunks, group more than one requests to backend
     // storage could benefit the performance.
-    fn read(&self, bio: &RafsBio, bufs: &[VolatileSlice], offset: u64) -> Result<usize>;
-
-    /// Write a chunk data through cache
-    fn write(&self, blob_id: &str, blk: &dyn RafsChunkInfo, buf: &[u8]) -> Result<usize>;
+    fn read(&self, bio: &mut [RafsBio], bufs: &[VolatileSlice]) -> Result<usize>;
 
     /// Get the size of a blob
     fn blob_size(&self, blob: &RafsBlobEntry) -> Result<u64>;
@@ -264,4 +317,6 @@ pub trait RafsCache {
 
         Ok(chunks)
     }
+
+    fn is_chunk_cached(&self, chunk: &dyn RafsChunkInfo, blob: &RafsBlobEntry) -> bool;
 }

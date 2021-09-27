@@ -555,7 +555,7 @@ impl RafsSuper {
                                 hardlinks.insert(i.ino());
                             }
                         }
-                        let mut desc = i.alloc_bio_desc(0, i.size() as usize)?;
+                        let mut desc = i.alloc_bio_desc(0, i.size() as usize, false)?;
                         head_desc.bi_vec.append(desc.bi_vec.as_mut());
                         head_desc.bi_size += desc.bi_size;
 
@@ -572,7 +572,7 @@ impl RafsSuper {
                             hardlinks.insert(inode.ino());
                         }
                     }
-                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize)?;
+                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false)?;
                     head_desc.bi_vec.append(desc.bi_vec.as_mut());
                     head_desc.bi_size += desc.bi_size;
 
@@ -632,6 +632,136 @@ impl RafsSuper {
         fetcher(&mut head_desc);
 
         Ok(())
+    }
+
+    fn steal_chunks(desc: &mut RafsBioDesc, expected_size: u32) -> Option<&mut RafsBioDesc> {
+        enum State {
+            All,
+            None,
+            Partial(usize),
+        }
+
+        let mut total = 0;
+        let mut final_index = State::All;
+        let len = desc.bi_vec.len();
+
+        for (i, b) in desc.bi_vec.iter().enumerate() {
+            let compressed_size = b.chunkinfo.compress_size();
+
+            if compressed_size + total <= expected_size {
+                total += compressed_size;
+                continue;
+            } else {
+                if i != 0 {
+                    final_index = State::Partial(i - 1);
+                } else {
+                    final_index = State::None;
+                }
+                break;
+            }
+        }
+
+        match final_index {
+            State::None => None,
+            State::All => Some(desc),
+            State::Partial(fi) => {
+                for i in (fi..len).rev() {
+                    desc.bi_size -= desc.bi_vec[i].chunkinfo.decompress_size() as usize;
+                    desc.bi_vec.remove(i as usize);
+                }
+                Some(desc)
+            }
+        }
+    }
+
+    // TODO: Add a UT for me.
+    pub fn carry_more_until(
+        &self,
+        inode: &dyn RafsInode,
+        bound: u64,
+        tail_chunk: &dyn RafsChunkInfo,
+        expected_size: u64,
+    ) -> Result<Option<RafsBioDesc>> {
+        let mut left = expected_size;
+        let inode_size = inode.size();
+        let mut ra_desc = RafsBioDesc::new();
+
+        let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
+            let sz = std::cmp::min(delta, expected_size);
+            let mut d = inode.alloc_bio_desc(bound, sz as usize, false)?;
+
+            // It is possible that read size is beyond file size, so chunks vector is zero length.
+            if !d.bi_vec.is_empty() {
+                let ck = d.bi_vec[0].chunkinfo.clone();
+                // Might be smaller than decompress size. It is user part.
+                let trimming_size = d.bi_vec[0].size;
+                let head_chunk = ck.as_ref();
+                let trimming = tail_chunk.compress_offset() == head_chunk.compress_offset();
+                // Stolen chunk bigger than expected size will involve more backend IO, thus
+                // to slow down current user IO.
+                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
+                    if trimming {
+                        ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
+                        ra_desc.bi_size += cks.bi_size;
+                        ra_desc.bi_size -= trimming_size;
+                    } else {
+                        ra_desc.bi_vec.append(&mut cks.bi_vec);
+                        ra_desc.bi_size += cks.bi_size;
+                    }
+                }
+                if delta >= expected_size {
+                    false
+                } else {
+                    left -= delta;
+                    true
+                }
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        if extra_file_needed {
+            let mut next_ino = inode.ino() + 1;
+            loop {
+                let next_inode = self.get_inode(next_ino, false);
+                if let Ok(ni) = next_inode {
+                    if !ni.is_reg() {
+                        next_ino = ni.ino() + 1;
+                        continue;
+                    }
+                    let next_size = ni.size();
+                    let sz = std::cmp::min(left, next_size);
+                    let mut d = ni.alloc_bio_desc(0, sz as usize, false)?;
+
+                    // Stolen chunk bigger than expected size will involve more backend IO, thus
+                    // to slow down current user IO.
+                    if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
+                        ra_desc.bi_vec.append(&mut cks.bi_vec);
+                        ra_desc.bi_size += cks.bi_size;
+                    } else {
+                        break;
+                    }
+
+                    // Even stolen chunks are truncated, still consume expected size.
+                    left -= sz;
+                    if left == 0 {
+                        break;
+                    }
+                    next_ino = ni.ino() + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if ra_desc.bi_size > 0 {
+            assert!(!ra_desc.bi_vec.is_empty());
+            Ok(Some(ra_desc))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -711,7 +841,7 @@ pub trait RafsInode {
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize) -> Result<RafsBioDesc>;
+    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

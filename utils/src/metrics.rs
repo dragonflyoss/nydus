@@ -570,6 +570,7 @@ pub trait Metric {
     }
     /// Returns current value of the counter.
     fn count(&self) -> usize;
+    fn dec(&self, value: usize);
 }
 
 #[derive(Default, Serialize, Debug)]
@@ -614,6 +615,10 @@ impl Metric for BasicMetric {
 
     fn count(&self) -> usize {
         self.0.load(Ordering::Relaxed)
+    }
+
+    fn dec(&self, value: usize) {
+        self.0.fetch_sub(value, Ordering::Relaxed);
     }
 }
 
@@ -694,6 +699,7 @@ pub struct BlobcacheMetrics {
     pub prefetch_total_size: BasicMetric,
     pub prefetch_mr_count: BasicMetric,
     pub prefetch_unmerged_chunks: BasicMetric,
+    pub buffered_backend_size: BasicMetric,
 }
 
 impl BlobcacheMetrics {

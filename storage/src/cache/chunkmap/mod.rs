@@ -25,6 +25,9 @@ pub trait ChunkMap {
     fn has_ready(&self, chunk: &dyn RafsChunkInfo, wait: bool) -> Result<bool>;
     fn set_ready(&self, chunk: &dyn RafsChunkInfo) -> Result<()>;
     fn finish(&self, _chunk: &dyn RafsChunkInfo) {}
+    fn has_ready_nowait(&self, _chunk: &dyn RafsChunkInfo) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// convert RafsChunkInfo to ChunkMap inner index
@@ -87,6 +90,8 @@ pub struct BlobChunkMap<C, I> {
     inflight_tracer: Mutex<HashMap<I, Arc<ChunkSlot>>>,
 }
 
+// TODO: Use chunk's compress offset a.k.a blob address as key, so we don't need
+// ChunkIndexGetter<Index = I> anymore.
 impl<C, I> BlobChunkMap<C, I>
 where
     C: ChunkMap + ChunkIndexGetter<Index = I> + NoWaitSupport,
@@ -123,7 +128,14 @@ where
                             let mut t = self.inflight_tracer.lock().unwrap();
                             t.remove(&index);
                             i.notify();
-                            warn!("Waiting for another backend IO expires. chunk index {}, tracer scale {}", index, t.len());
+                            warn!(
+                                "Waiting for another backend IO expires. chunk index {}, \
+                            compressed offset {}, tracer scale {}",
+                                index,
+                                chunk.compress_offset(),
+                                t.len()
+                            );
+                            // TODO: Take argument `true` or `false` is strange since it is not used.
                             self.c.has_ready(chunk, false)
                         }
                         _ => self.c.has_ready(chunk, false),
@@ -154,6 +166,10 @@ where
             i.done();
         }
     }
+
+    fn has_ready_nowait(&self, chunk: &dyn RafsChunkInfo) -> Result<bool> {
+        self.c.has_ready(chunk, false)
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +185,7 @@ mod tests {
     use super::*;
     use crate::cache::blobcache::blob_cache_tests::MockChunkInfo;
     use crate::device::{RafsChunkFlags, RafsChunkInfo};
+    use nydus_utils::digest::Algorithm::Blake3;
     use nydus_utils::digest::{Algorithm, RafsDigest};
     use vmm_sys_util::tempfile::TempFile;
 
@@ -339,6 +356,62 @@ mod tests {
             "IndexedChunkMap vs DigestedChunkMap: {}ms vs {}ms",
             elapsed1, elapsed2
         );
+    }
+
+    #[test]
+    fn test_inflight_tracer() {
+        let chunk_1: Arc<dyn RafsChunkInfo> = Arc::new({
+            let mut c = MockChunkInfo::new();
+            c.index = 1;
+            c.block_id = RafsDigest::from_buf("hello world".as_bytes(), Blake3);
+            c
+        });
+        let chunk_2: Arc<dyn RafsChunkInfo> = Arc::new({
+            let mut c = MockChunkInfo::new();
+            c.index = 2;
+            c.block_id = RafsDigest::from_buf("hello world 2".as_bytes(), Blake3);
+            c
+        });
+        // indexed ChunkMap
+        let tmp_file = TempFile::new().unwrap();
+        let index_map = Arc::new(BlobChunkMap::from(
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+        ));
+        index_map.has_ready(chunk_1.as_ref(), false).unwrap();
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
+        index_map.has_ready(chunk_2.as_ref(), false).unwrap();
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 2);
+        assert_eq!(index_map.has_ready(chunk_1.as_ref(), false).unwrap(), false);
+        assert_eq!(index_map.has_ready(chunk_2.as_ref(), false).unwrap(), false);
+        index_map.set_ready(chunk_1.as_ref()).unwrap();
+        assert_eq!(index_map.has_ready(chunk_1.as_ref(), false).unwrap(), true);
+        index_map.finish(chunk_2.as_ref());
+        assert_eq!(index_map.has_ready(chunk_2.as_ref(), false).unwrap(), false);
+        index_map.finish(chunk_2.as_ref());
+        assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
+        // digested ChunkMap
+        let digest_map = Arc::new(BlobChunkMap::from(DigestedChunkMap::new()));
+        digest_map.has_ready(chunk_1.as_ref(), false).unwrap();
+        assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 1);
+        digest_map.has_ready(chunk_2.as_ref(), false).unwrap();
+        assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 2);
+        assert_eq!(
+            digest_map.has_ready(chunk_1.as_ref(), false).unwrap(),
+            false
+        );
+        assert_eq!(
+            digest_map.has_ready(chunk_2.as_ref(), false).unwrap(),
+            false
+        );
+        digest_map.set_ready(chunk_1.as_ref()).unwrap();
+        assert_eq!(digest_map.has_ready(chunk_1.as_ref(), false).unwrap(), true);
+        digest_map.finish(chunk_2.as_ref());
+        assert_eq!(
+            digest_map.has_ready(chunk_2.as_ref(), false).unwrap(),
+            false
+        );
+        digest_map.finish(chunk_2.as_ref());
+        assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 0);
     }
 
     #[test]

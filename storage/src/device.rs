@@ -4,6 +4,7 @@
 
 use arc_swap::ArcSwap;
 use std::cmp;
+use std::fmt::Debug;
 use std::io;
 use std::io::Error;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, un
 // A rafs storage device
 #[derive(Clone)]
 pub struct RafsDevice {
-    rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
+    pub rw_layer: ArcSwap<Arc<dyn RafsCache + Send + Sync>>,
 }
 
 bitflags! {
@@ -111,24 +112,18 @@ impl RafsDevice {
     }
 
     /// Read a range of data from blob into the provided writer
-    pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: RafsBioDesc) -> io::Result<usize> {
-        let mut count: usize = 0;
-        for bio in desc.bi_vec.iter() {
-            let mut f = RafsBioDevice::new(bio, &self);
-            count += w.write_from(&mut f, bio.size, bio.offset as u64)?;
-        }
+    pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: &mut RafsBioDesc) -> io::Result<usize> {
+        let offset = desc.bi_vec[0].offset;
+        let size = desc.bi_size;
+        let mut f = RafsBioDevice::new(desc, self);
+        let count = w.write_from(&mut f, size, offset as u64)?;
+
         Ok(count)
     }
 
     /// Write a range of data to blob from the provided reader
-    pub fn write_from(&self, r: &mut dyn ZeroCopyReader, desc: RafsBioDesc) -> io::Result<usize> {
-        let mut count: usize = 0;
-        for bio in desc.bi_vec.iter() {
-            let mut f = RafsBioDevice::new(bio, &self);
-            let offset = bio.chunkinfo.compress_offset() + bio.offset as u64;
-            count += r.read_to(&mut f, bio.size, offset)?;
-        }
-        Ok(count)
+    pub fn write_from(&self, _r: &mut dyn ZeroCopyReader, _desc: RafsBioDesc) -> io::Result<usize> {
+        unimplemented!()
     }
 
     pub fn prefetch(&self, desc: &mut RafsBioDesc) -> StorageResult<usize> {
@@ -143,14 +138,13 @@ impl RafsDevice {
 }
 
 struct RafsBioDevice<'a> {
-    bio: &'a RafsBio,
     dev: &'a RafsDevice,
+    desc: &'a mut RafsBioDesc,
 }
 
 impl<'a> RafsBioDevice<'a> {
-    fn new(bio: &'a RafsBio, b: &'a RafsDevice) -> Self {
-        // FIXME: make sure bio is valid
-        RafsBioDevice { bio, dev: b }
+    fn new(desc: &'a mut RafsBioDesc, b: &'a RafsDevice) -> Self {
+        RafsBioDevice { desc, dev: b }
     }
 }
 
@@ -173,30 +167,21 @@ impl FileReadWriteVolatile for RafsBioDevice<'_> {
     fn read_vectored_at_volatile(
         &mut self,
         bufs: &[VolatileSlice],
-        offset: u64,
+        _offset: u64,
     ) -> Result<usize, Error> {
-        if self.bio.chunkinfo.is_hole() {
-            return self.fill_hole(bufs);
-        }
-
-        self.dev.rw_layer.load().read(&self.bio, bufs, offset)
+        self.dev.rw_layer.load().read(&mut self.desc.bi_vec, bufs)
     }
 
-    fn write_at_volatile(&mut self, slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
-        // It's safe because the virtio buffer shouldn't be accessed concurrently.
-        let buf = unsafe { std::slice::from_raw_parts_mut(slice.as_ptr(), slice.len()) };
-
-        self.dev
-            .rw_layer
-            .load()
-            .write(&self.bio.blob.blob_id, self.bio.chunkinfo.as_ref(), buf)
+    fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
+        unimplemented!()
     }
 }
 
+#[allow(dead_code)]
 impl RafsBioDevice<'_> {
-    fn fill_hole(&self, bufs: &[VolatileSlice]) -> Result<usize, Error> {
+    fn fill_hole(&self, bufs: &[VolatileSlice], size: usize) -> Result<usize, Error> {
         let mut count: usize = 0;
-        let mut remain: usize = self.bio.size;
+        let mut remain = size;
 
         for &buf in bufs.iter() {
             let mut total = cmp::min(remain, buf.len());
@@ -273,6 +258,23 @@ pub struct RafsBio {
     pub size: usize,
     /// block size to read in one shot
     pub blksize: u32,
+    /// Distinguish from a bio that is not initiated by user or fuse frontend.
+    /// It might be initiated by user io amplification. With this flag, lower device
+    /// layer is acknowledged with how to fill up user provided buffer.
+    pub user_io: bool,
+}
+
+impl Debug for RafsBio {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("RafsBio")
+            .field("blob index", &self.blob.blob_index)
+            .field("blob compress offset", &self.chunkinfo.compress_offset())
+            .field("chunk index", &self.chunkinfo.index())
+            .field("file offset", &self.offset)
+            .field("size", &self.size)
+            .field("user", &self.user_io)
+            .finish()
+    }
 }
 
 impl RafsBio {
@@ -282,6 +284,7 @@ impl RafsBio {
         offset: u32,
         size: usize,
         blksize: u32,
+        user_io: bool,
     ) -> Self {
         RafsBio {
             chunkinfo,
@@ -289,6 +292,7 @@ impl RafsBio {
             offset,
             size,
             blksize,
+            user_io,
         }
     }
 }

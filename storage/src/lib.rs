@@ -36,6 +36,9 @@ pub const RAFS_MAX_BLOCK_SIZE: u64 = 1024 * 1024;
 pub enum StorageError {
     Unsupported,
     Timeout,
+    VolatileSlice(vm_memory::VolatileMemoryError),
+    MemOverflow,
+    NotContinuous,
 }
 
 pub type StorageResult<T> = std::result::Result<T, StorageError>;

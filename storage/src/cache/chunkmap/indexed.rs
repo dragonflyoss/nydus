@@ -175,7 +175,7 @@ impl ChunkIndexGetter for IndexedChunkMap {
     type Index = u32;
 
     fn get_index(chunk: &dyn RafsChunkInfo) -> Self::Index {
-        chunk.blob_index()
+        chunk.index()
     }
 }
 

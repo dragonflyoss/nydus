@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Error;
-
 use vm_memory::VolatileSlice;
 
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
@@ -15,6 +13,7 @@ use crate::backend::oss::OssError;
 #[cfg(feature = "backend-registry")]
 use crate::backend::registry::RegistryError;
 use crate::utils::copyv;
+use crate::StorageError;
 
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
@@ -37,7 +36,7 @@ pub struct ProxyConfig {
 #[derive(Debug)]
 pub enum BackendError {
     Unsupported(String),
-    CopyData(Error),
+    CopyData(StorageError),
     #[cfg(feature = "backend-registry")]
     Registry(RegistryError),
     #[cfg(feature = "backend-localfs")]
@@ -155,7 +154,9 @@ pub trait BlobBackend {
             let data = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
 
             self.read(blob_id, data, offset)?;
-            let result = copyv(&data, bufs, offset, max_size).map_err(BackendError::CopyData);
+            let result = copyv(&[&data], bufs, offset as usize, max_size, 0, 0)
+                .map(|r| r.0)
+                .map_err(BackendError::CopyData);
 
             unsafe { std::alloc::dealloc(ptr, layout) };
 
