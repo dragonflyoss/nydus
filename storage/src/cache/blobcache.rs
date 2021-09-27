@@ -191,6 +191,13 @@ impl DataBuffer {
             self
         }
     }
+
+    fn size(&self) -> usize {
+        match self {
+            Self::Reuse(_) => 0,
+            Self::Allocated(data) => data.capacity(),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -331,7 +338,10 @@ impl BlobCache {
         let delayed_chunk = chunk_info.clone();
         let delayed_chunk_map = chunk_map.clone();
         let compressed = self.is_compressed;
+        self.metrics.buffered_backend_size.add(buffer.size());
+        let metrics = self.metrics.clone();
         self.runtime.spawn(async move {
+            metrics.buffered_backend_size.dec(buffer.size());
             match Self::persist_chunk(compressed, fd, delayed_chunk.as_ref(), buffer.slice()) {
                 Err(e) => {
                     error!(
