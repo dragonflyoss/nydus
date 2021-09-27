@@ -41,7 +41,8 @@ use nydus_api::http::start_http_thread;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 mod daemon;
-use daemon::{DaemonError, FsBackendMountCmd, FsBackendType, NydusDaemonSubscriber};
+use daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
+use nydus::FsBackendType;
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;

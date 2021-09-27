@@ -63,12 +63,12 @@ fn default_prefetch_all() -> bool {
 #[derive(Clone, Default, Deserialize)]
 pub struct FsPrefetchControl {
     #[serde(default)]
-    enable: bool,
+    pub enable: bool,
     #[serde(default = "default_threads_count")]
-    threads_count: usize,
+    pub threads_count: usize,
     #[serde(default = "default_merging_size")]
     // In unit of Bytes
-    merging_size: usize,
+    pub merging_size: usize,
     #[serde(default)]
     // In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
     // reduce congestion with normal user IO.
@@ -78,7 +78,7 @@ pub struct FsPrefetchControl {
     //                        it will be raised to the chunk size.
     bandwidth_rate: u32,
     #[serde(default = "default_prefetch_all")]
-    prefetch_all: bool,
+    pub prefetch_all: bool,
 }
 
 /// Not everything can be safely exported from configuration.

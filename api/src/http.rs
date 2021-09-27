@@ -203,7 +203,7 @@ pub fn start_http_thread(
             epoll::ctl(
                 epoll_fd,
                 epoll::ControlOptions::EPOLL_CTL_ADD,
-                server.epoll_fd(),
+                server.epoll().as_raw_fd(),
                 epoll::Event::new(epoll::Events::EPOLLIN, EVENT_UNIX_SOCKET),
             )?;
 

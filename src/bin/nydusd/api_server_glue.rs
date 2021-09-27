@@ -19,11 +19,10 @@ use nydus_api::http_endpoint::{
 };
 use nydus_utils::metrics;
 
-use crate::daemon::{
-    DaemonError, FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, NydusDaemon,
-};
+use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDaemon};
 #[cfg(fusedev)]
 use crate::fusedev::FusedevDaemon;
+use nydus::{FsBackendType, NydusError};
 
 pub struct ApiServer {
     to_http: Sender<ApiResponse>,
@@ -42,6 +41,15 @@ impl From<DaemonError> for DaemonErrorKind {
             Serde(e) => DaemonErrorKind::Serde(e),
             UnexpectedEvent(e) => DaemonErrorKind::UnexpectedEvent(format!("{:?}", e)),
             o => DaemonErrorKind::Other(o.to_string()),
+        }
+    }
+}
+
+impl From<NydusError> for DaemonError {
+    fn from(e: NydusError) -> Self {
+        use NydusError::*;
+        match e {
+            InvalidArguments(e) => DaemonError::FsTypeMismatch(e),
         }
     }
 }
@@ -238,8 +246,8 @@ impl ApiServer {
     }
 
     fn do_mount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
-        let fs_type =
-            FsBackendType::from_str(&cmd.fs_type).map_err(|e| ApiError::MountFailure(e.into()))?;
+        let fs_type = FsBackendType::from_str(&cmd.fs_type)
+            .map_err(|e| ApiError::MountFailure(DaemonError::from(e).into()))?;
         self.daemon
             .mount(FsBackendMountCmd {
                 fs_type,
@@ -253,8 +261,8 @@ impl ApiServer {
     }
 
     fn do_remount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
-        let fs_type =
-            FsBackendType::from_str(&cmd.fs_type).map_err(|e| ApiError::MountFailure(e.into()))?;
+        let fs_type = FsBackendType::from_str(&cmd.fs_type)
+            .map_err(|e| ApiError::MountFailure(DaemonError::from(e).into()))?;
         self.daemon
             .remount(FsBackendMountCmd {
                 fs_type,
