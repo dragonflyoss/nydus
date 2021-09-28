@@ -8,10 +8,11 @@
 //! This module provides a chunk state tracking driver based on a bitmap file. There's a state bit
 //! in the bitmap file for each chunk, and atomic operations are used to manipulate the bitmap.
 //! So it supports concurrent downloading.
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Result, Write};
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use nydus_utils::div_round_up;
 
@@ -67,7 +68,7 @@ pub struct IndexedChunkMap {
     chunk_count: u32,
     size: usize,
     base: *const u8,
-    all_ready: AtomicBool,
+    not_ready_count: AtomicU32,
 }
 
 impl IndexedChunkMap {
@@ -93,8 +94,10 @@ impl IndexedChunkMap {
         let file_size = file.metadata()?.len();
         let bitmap_size = div_round_up(chunk_count as u64, 8u64);
         let expected_size = HEADER_SIZE as u64 + bitmap_size;
+        let mut new_content = false;
 
         if file_size == 0 {
+            new_content = true;
             Self::write_header(&mut file, expected_size)?;
         } else if file_size != expected_size {
             // File size doesn't match, it's too risky to accept the chunk state file. Fallback to
@@ -123,7 +126,6 @@ impl IndexedChunkMap {
             return Err(ebadf!("failed to mmap blob chunk_map"));
         }
 
-        let mut all_ready = false;
         let header = unsafe { &mut *(base as *mut Header) };
         if header.magic != MAGIC1 {
             // There's race window between "file.set_len()" and "file.write(&header)". If that
@@ -139,8 +141,13 @@ impl IndexedChunkMap {
                     )));
                 }
             }
+
+            new_content = true;
             Self::write_header(&mut file, expected_size)?;
-        } else if header.version >= 1 {
+        }
+
+        let mut not_ready_count = chunk_count;
+        if header.version >= 1 {
             if header.magic2 != MAGIC2 {
                 return Err(einval!(format!(
                     "invalid blob chunk_map file header: {:?}",
@@ -148,9 +155,24 @@ impl IndexedChunkMap {
                 )));
             }
             if header.all_ready == MAGIC_ALL_READY {
-                all_ready = true;
+                not_ready_count = 0;
+            } else if new_content {
+                not_ready_count = chunk_count;
             } else {
-                // TODO: detect all ready
+                let mut ready_count = 0;
+                for idx in HEADER_SIZE..expected_size as usize {
+                    let current = unsafe { &*(base.add(idx) as *const AtomicU8) };
+                    let val = current.load(Ordering::Acquire);
+                    ready_count += val.count_ones() as u32;
+                }
+
+                if ready_count >= chunk_count {
+                    header.all_ready = MAGIC_ALL_READY;
+                    let _ = file.sync_all();
+                    not_ready_count = 0;
+                } else {
+                    not_ready_count = chunk_count - ready_count;
+                }
             }
         }
 
@@ -160,7 +182,7 @@ impl IndexedChunkMap {
             chunk_count,
             size: expected_size as usize,
             base: base as *const u8,
-            all_ready: AtomicBool::new(all_ready),
+            not_ready_count: AtomicU32::new(not_ready_count),
         })
     }
 
@@ -183,6 +205,7 @@ impl IndexedChunkMap {
         Ok(())
     }
 
+    #[inline]
     fn validate_index(&self, idx: u32) -> Result<u32> {
         if idx < self.chunk_count {
             Ok(idx)
@@ -194,6 +217,7 @@ impl IndexedChunkMap {
         }
     }
 
+    #[inline]
     fn read_u8(&self, idx: u32) -> u8 {
         let start = HEADER_SIZE + (idx as usize >> 3);
         let current = unsafe { &*(self.base.add(start) as *const AtomicU8) };
@@ -201,6 +225,7 @@ impl IndexedChunkMap {
         current.load(Ordering::Acquire)
     }
 
+    #[inline]
     fn write_u8(&self, idx: u32, current: u8) -> bool {
         let mask = Self::index_to_mask(idx);
         let expected = current | mask;
@@ -218,6 +243,7 @@ impl IndexedChunkMap {
         1 << pos
     }
 
+    #[inline]
     fn is_chunk_ready(&self, index: u32) -> (bool, u8) {
         let mask = Self::index_to_mask(index);
         let current = self.read_u8(index);
@@ -237,12 +263,25 @@ impl IndexedChunkMap {
             }
 
             if self.write_u8(index, current) {
-                // count ready
+                if self.not_ready_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    self.mark_all_ready();
+                }
                 break;
             }
         }
 
         Ok(())
+    }
+
+    fn mark_all_ready(&self) {
+        let base = self.base as *const c_void as *mut c_void;
+        unsafe {
+            if libc::msync(base, self.size, libc::MS_SYNC) == 0 {
+                let header = &mut *(self.base as *mut Header);
+                header.all_ready = MAGIC_ALL_READY;
+                let _ = libc::msync(base, HEADER_SIZE, libc::MS_SYNC);
+            }
+        }
     }
 }
 
@@ -272,8 +311,13 @@ impl ChunkMap for IndexedChunkMap {
 }
 
 impl ChunkBitmap for IndexedChunkMap {
+    #[inline]
+    fn is_bitmap_all_ready(&self) -> bool {
+        self.not_ready_count.load(Ordering::Acquire) == 0
+    }
+
     fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool> {
-        if self.all_ready.load(Ordering::Acquire) {
+        if self.is_bitmap_all_ready() {
             Ok(true)
         } else {
             let index = self.validate_index(chunk_index)?;
@@ -293,7 +337,7 @@ impl ChunkBitmap for IndexedChunkMap {
     }
 
     fn check_bitmap_ready(&self, start_index: u32, count: u32) -> Result<Option<Vec<u32>>> {
-        if self.all_ready.load(Ordering::Acquire) {
+        if self.is_bitmap_all_ready() {
             return Ok(None);
         }
 
@@ -303,7 +347,7 @@ impl ChunkBitmap for IndexedChunkMap {
 
         for index in start_index..end {
             if !self.is_chunk_ready(index).0 {
-                vec.push(start_index);
+                vec.push(index);
             }
         }
 
@@ -386,9 +430,10 @@ mod tests {
         assert_eq!(chunk.id(), 0);
 
         let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
-        assert_eq!(map.all_ready.load(Ordering::Acquire), false);
+        assert_eq!(map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_bitmap_all_ready(), false);
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
         map.set_ready(chunk.as_base()).unwrap();
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
@@ -421,9 +466,10 @@ mod tests {
         assert_eq!(chunk.id(), 0);
 
         let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
-        assert_eq!(map.all_ready.load(Ordering::Acquire), false);
+        assert_eq!(map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_bitmap_all_ready(), false);
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
         map.set_ready(chunk.as_base()).unwrap();
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
@@ -466,7 +512,7 @@ mod tests {
         assert_eq!(chunk.id(), 0);
 
         let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
-        assert_eq!(map.all_ready.load(Ordering::Acquire), true);
+        assert_eq!(map.is_bitmap_all_ready(), true);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
@@ -511,9 +557,10 @@ mod tests {
         assert_eq!(chunk.id(), 0);
 
         let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
-        assert_eq!(map.all_ready.load(Ordering::Acquire), false);
+        assert_eq!(map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
+        assert_eq!(map.is_bitmap_all_ready(), false);
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
         map.set_ready(chunk.as_base()).unwrap();
         assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);

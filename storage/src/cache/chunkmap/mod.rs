@@ -70,6 +70,9 @@ pub trait ChunkMap: Send + Sync {
 /// Its interfaces are designed to support batch operations, to improve performance by avoid
 /// frequently acquire/release locks.
 pub trait ChunkBitmap: ChunkMap {
+    /// Check whether all chunks are ready.
+    fn is_bitmap_all_ready(&self) -> bool;
+
     /// Check whether the chunk is ready for use.
     fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool>;
 
@@ -232,6 +235,10 @@ impl<C> ChunkBitmap for BlobChunkMap<C, u32>
 where
     C: ChunkBitmap + ChunkMap + ChunkIndexGetter<Index = u32> + NoWaitSupport,
 {
+    fn is_bitmap_all_ready(&self) -> bool {
+        self.c.is_bitmap_all_ready()
+    }
+
     fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool> {
         self.c.is_bitmap_ready(chunk_index)
     }
@@ -648,5 +655,28 @@ pub(crate) mod tests {
 
         map.notify_ready(chunk_4.as_ref());
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_inflight_tracer_race_bitmap() {
+        let tmp_file = TempFile::new().unwrap();
+        let map = Arc::new(BlobChunkMap::from(
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+        ));
+
+        assert_eq!(map.is_bitmap_all_ready(), false);
+        assert_eq!(map.is_bitmap_ready(0).unwrap(), false);
+        assert_eq!(map.is_bitmap_ready(9).unwrap(), false);
+        assert!(map.is_bitmap_ready(10).is_err());
+        assert_eq!(map.check_bitmap_ready(0, 2).unwrap(), Some(vec![0, 1]));
+        map.set_bitmap_ready(0, 2).unwrap();
+        assert_eq!(map.check_bitmap_ready(0, 2).unwrap(), None);
+        map.wait_for_bitmap_ready(0, 2).unwrap();
+        assert_eq!(map.check_bitmap_ready(1, 2).unwrap(), Some(vec![2]));
+        map.set_bitmap_ready(2, 1).unwrap();
+        map.set_bitmap_ready(3, 7).unwrap();
+        assert_eq!(map.is_bitmap_ready(0).unwrap(), true);
+        assert_eq!(map.is_bitmap_ready(9).unwrap(), true);
+        assert_eq!(map.is_bitmap_all_ready(), true);
     }
 }
