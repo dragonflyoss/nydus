@@ -707,6 +707,23 @@ impl RafsSuper {
                 let trimming_size = d.bi_vec[0].size;
                 let head_chunk = ck.as_ref();
                 let trimming = tail_chunk.compress_offset() == head_chunk.compress_offset();
+
+                let head_cki = if trimming {
+                    if d.bi_vec.len() == 1 {
+                        return Ok(None);
+                    }
+                    &d.bi_vec[1].chunkinfo
+                } else {
+                    &d.bi_vec[0].chunkinfo
+                };
+
+                // The first found potentially amplified chunk is not adjacent, abort!
+                if head_cki.compress_offset()
+                    != tail_chunk.compress_offset() + tail_chunk.compress_size() as u64
+                {
+                    return Ok(None);
+                }
+
                 // Stolen chunk bigger than expected size will involve more backend IO, thus
                 // to slow down current user IO.
                 // FIXME: left -> sz ?
@@ -720,6 +737,8 @@ impl RafsSuper {
                         ra_desc.bi_size += cks.bi_size;
                     }
                 }
+
+                // Even all chunks are trimmed by `steal_chunks`, we still minus delta.
                 if delta >= expected_size {
                     false
                 } else {
@@ -745,6 +764,13 @@ impl RafsSuper {
                     let next_size = ni.size();
                     let sz = std::cmp::min(left, next_size);
                     let mut d = ni.alloc_bio_desc(0, sz as usize, false)?;
+
+                    // The first found potentially amplified chunk is not adjacent, abort!
+                    if d.bi_vec[1].chunkinfo.compress_offset()
+                        != tail_chunk.compress_offset() + tail_chunk.compress_size() as u64
+                    {
+                        return Ok(None);
+                    }
 
                     // Stolen chunk bigger than expected size will involve more backend IO, thus
                     // to slow down current user IO.
