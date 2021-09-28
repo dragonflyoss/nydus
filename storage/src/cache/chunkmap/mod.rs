@@ -65,6 +65,31 @@ pub trait ChunkMap: Send + Sync {
     fn notify_ready(&self, _chunk: &dyn BlobChunkInfo) {}
 }
 
+/// Trait to track chunk readiness state using bitmap, indexed by chunk index.
+///
+/// Its interfaces are designed to support batch operations, to improve performance by avoid
+/// frequently acquire/release locks.
+pub trait ChunkBitmap: ChunkMap {
+    /// Check whether the chunk is ready for use.
+    fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool>;
+
+    /// Mark all chunks as ready for use.
+    fn set_bitmap_ready(&self, start_index: u32, count: u32) -> Result<()>;
+
+    /// Check whether all chunks are ready for use.
+    ///
+    /// This method returns chunks not ready yet, optionally marking them as inflight.
+    fn check_bitmap_ready(&self, start_index: u32, count: u32) -> Result<Option<Vec<u32>>>;
+
+    /// Wait for all chunks to be ready until timeout.
+    fn wait_for_bitmap_ready(&self, _start_index: u32, _count: u32) -> Result<bool> {
+        Err(enosys!())
+    }
+
+    /// Notify that the chunk is ready for use.
+    fn notify_bitmap_ready(&self, _start_index: u32, _count: u32) {}
+}
+
 /// Trait to convert [BlobChunkInfo](../../device/trait.BlobChunkInfo.html) to index needed by
 /// [ChunkMap]
 pub trait ChunkIndexGetter {
@@ -199,6 +224,92 @@ where
         let mut guard = self.inflight_tracer.lock().unwrap();
         if let Some(i) = guard.remove(&index) {
             i.done();
+        }
+    }
+}
+
+impl<C> ChunkBitmap for BlobChunkMap<C, u32>
+where
+    C: ChunkBitmap + ChunkMap + ChunkIndexGetter<Index = u32> + NoWaitSupport,
+{
+    fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool> {
+        self.c.is_bitmap_ready(chunk_index)
+    }
+
+    fn set_bitmap_ready(&self, start_index: u32, count: u32) -> Result<()> {
+        self.c.set_bitmap_ready(start_index, count).map(|_| {
+            self.notify_bitmap_ready(start_index, count);
+        })
+    }
+
+    fn check_bitmap_ready(&self, start_index: u32, count: u32) -> Result<Option<Vec<u32>>> {
+        let pending = match self.c.check_bitmap_ready(start_index, count) {
+            Err(e) => return Err(e),
+            Ok(None) => return Ok(None),
+            Ok(Some(v)) => {
+                if v.len() == 0 {
+                    return Ok(None);
+                }
+                v
+            }
+        };
+
+        let mut res = Vec::with_capacity(pending.len());
+        let mut guard = self.inflight_tracer.lock().unwrap();
+        for index in pending.iter() {
+            if guard.get(index).is_none() {
+                // Double check to close the window where prior slot was just removed after backend
+                // IO returned.
+                if !self.c.is_bitmap_ready(*index)? {
+                    guard.insert(*index, Arc::new(ChunkSlot::new()));
+                    res.push(*index);
+                }
+            }
+        }
+
+        Ok(Some(res))
+    }
+
+    fn wait_for_bitmap_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+        let count = std::cmp::min(count, u32::MAX - start_index);
+        let end = start_index + count;
+        let mut guard = self.inflight_tracer.lock().unwrap();
+
+        for index in start_index..end {
+            if let Some(i) = guard.get(&index).cloned() {
+                drop(guard);
+                let result =
+                    i.wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT));
+                if let Err(StorageError::Timeout) = result {
+                    // Notice that lock of tracer is already dropped.
+                    let mut t = self.inflight_tracer.lock().unwrap();
+                    t.remove(&index);
+                    i.notify();
+                    warn!(
+                        "Waiting for another backend IO expires. chunk index {}, tracer scale {}",
+                        index,
+                        t.len()
+                    );
+                };
+                if self.c.is_bitmap_ready(index)? {
+                    return Ok(false);
+                }
+                guard = self.inflight_tracer.lock().unwrap();
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn notify_bitmap_ready(&self, start_index: u32, count: u32) {
+        let count = std::cmp::min(count, u32::MAX - start_index);
+        let end = start_index + count;
+        let mut guard = self.inflight_tracer.lock().unwrap();
+
+        for index in start_index..end {
+            if let Some(i) = guard.remove(&index) {
+                i.done();
+            }
         }
     }
 }
