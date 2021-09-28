@@ -1621,6 +1621,7 @@ pub mod tests {
             self.flags.contains(BlobChunkFlags::HOLECHUNK)
         }
 
+        impl_getter!(blob_index, blob_index, u32);
         impl_getter!(compress_offset, compress_offset, u64);
         impl_getter!(compress_size, compress_size, u32);
         impl_getter!(uncompress_offset, uncompress_offset, u64);
@@ -1631,7 +1632,7 @@ pub mod tests {
         fn as_base(&self) -> &dyn BlobChunkInfo {
             self
         }
-        impl_getter!(blob_index, blob_index, u32);
+
         impl_getter!(index, index, u32);
         impl_getter!(file_offset, file_offset, u64);
         impl_getter!(flags, flags, BlobChunkFlags);

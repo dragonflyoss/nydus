@@ -684,6 +684,7 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
         self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
+    impl_getter!(blob_index, c_blob_index, u32);
     impl_getter!(compress_offset, c_compress_offset, u64);
     impl_getter!(compress_size, c_compr_size, u32);
     impl_getter!(uncompress_offset, c_uncompress_offset, u64);
@@ -695,7 +696,6 @@ impl BlobV5ChunkInfo for CachedChunkInfoV5 {
         self
     }
 
-    impl_getter!(blob_index, c_blob_index, u32);
     impl_getter!(index, c_index, u32);
     impl_getter!(file_offset, c_file_offset, u64);
     impl_getter!(flags, c_flags, BlobChunkFlags);

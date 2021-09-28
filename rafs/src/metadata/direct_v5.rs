@@ -866,6 +866,7 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
             .contains(BlobChunkFlags::HOLECHUNK)
     }
 
+    impl_chunkinfo_getter!(blob_index, u32);
     impl_chunkinfo_getter!(compress_offset, u64);
     impl_chunkinfo_getter!(compress_size, u32);
     impl_chunkinfo_getter!(uncompress_offset, u64);
@@ -877,7 +878,6 @@ impl BlobV5ChunkInfo for DirectChunkInfoV5 {
         self
     }
 
-    impl_chunkinfo_getter!(blob_index, u32);
     impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(file_offset, u64);
     impl_chunkinfo_getter!(flags, BlobChunkFlags);

@@ -244,6 +244,10 @@ pub(crate) mod tests {
             self.index
         }
 
+        fn blob_index(&self) -> u32 {
+            0
+        }
+
         fn compress_offset(&self) -> u64 {
             unimplemented!();
         }

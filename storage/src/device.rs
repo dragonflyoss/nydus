@@ -163,7 +163,7 @@ impl BlobInfo {
     }
 
     /// Set compression algorithm for the blob.
-    pub fn set_digestor(&mut self, digester: digest::Algorithm) {
+    pub fn set_digester(&mut self, digester: digest::Algorithm) {
         self.digester = digester;
     }
 
@@ -239,6 +239,9 @@ pub trait BlobChunkInfo: Sync + Send {
     /// return unique identifier for each chunk of a blob file.
     fn id(&self) -> u32;
 
+    /// Get the blob index of the blob file in the Rafs v5 metadata's blob array.
+    fn blob_index(&self) -> u32;
+
     /// Get the chunk offset in the compressed blob.
     fn compress_offset(&self) -> u64;
 
@@ -307,6 +310,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn id(&self) -> u32 {
         self.as_base().id()
+    }
+
+    fn blob_index(&self) -> u32 {
+        self.as_base().blob_index()
     }
 
     fn compress_offset(&self) -> u64 {
@@ -411,6 +418,7 @@ impl BlobIoVec {
     pub fn append(&mut self, mut desc: BlobIoVec) {
         self.bi_vec.append(desc.bi_vec.as_mut());
         self.bi_size += desc.bi_size;
+        debug_assert!(self.validate());
     }
 
     /// Reset the blob io vector.
@@ -424,9 +432,8 @@ impl BlobIoVec {
         if self.bi_vec.is_empty() {
             None
         } else {
-            let blob = &self.bi_vec[0].blob;
-            debug_assert!(self.validate(blob.blob_index()));
-            Some(blob.clone())
+            debug_assert!(self.validate());
+            Some(self.bi_vec[0].blob.clone())
         }
     }
 
@@ -435,27 +442,30 @@ impl BlobIoVec {
         if self.bi_vec.is_empty() {
             None
         } else {
-            let blob_index = self.bi_vec[0].blob.blob_index();
-            debug_assert!(self.validate(blob_index));
-            Some(blob_index)
+            debug_assert!(self.validate());
+            Some(self.bi_vec[0].blob.blob_index())
         }
     }
 
     /// Check whether the blob io vector is targeting the blob with `blob_index`
     pub fn is_target_blob(&self, blob_index: u32) -> bool {
+        debug_assert!(self.validate());
         !self.bi_vec.is_empty() && self.bi_vec[0].blob.blob_index() == blob_index
     }
 
     /// Check whether two blob io vector targets the same blob.
     pub fn has_same_blob(&self, desc: &BlobIoVec) -> bool {
+        debug_assert!(self.validate());
+        debug_assert!(desc.validate());
         !self.bi_vec.is_empty()
             && !desc.bi_vec.is_empty()
             && self.bi_vec[0].blob.blob_index() == desc.bi_vec[0].blob.blob_index()
     }
 
     #[allow(dead_code)]
-    fn validate(&self, blob_index: u32) -> bool {
+    fn validate(&self) -> bool {
         if self.bi_vec.len() > 1 {
+            let blob_index = self.bi_vec[0].blob.blob_index();
             for n in &self.bi_vec[1..] {
                 if n.blob.blob_index() != blob_index {
                     return false;
@@ -558,26 +568,20 @@ impl BlobDevice {
         // - all IOs are against a single blob.
         if desc.bi_vec.len() == 0 {
             if desc.bi_size == 0 {
-                return Ok(0);
+                Ok(0)
             } else {
-                return Err(einval!("BlobIoVec size doesn't match."));
-            };
-        } else if desc.bi_vec.len() > 1 {
-            if desc.bi_vec[0].blob.blob_index() as usize >= self.blob_count {
-                return Err(einval!("BlobIoVec has out of range blob_index."));
+                Err(einval!("BlobIoVec size doesn't match."))
             }
-            for i in 0..desc.bi_vec.len() - 1 {
-                if desc.bi_vec[i].blob.blob_index() != desc.bi_vec[i + 1].blob.blob_index() {
-                    return Err(einval!("BlobIoVec targets multiple blobs."));
-                }
-            }
+        } else if !desc.validate() {
+            Err(einval!("BlobIoVec targets multiple blobs."))
+        } else if desc.bi_vec[0].blob.blob_index() as usize >= self.blob_count {
+            Err(einval!("BlobIoVec has out of range blob_index."))
+        } else {
+            let mut f = BlobDeviceIoVec::new(self, desc);
+            // The `off` parameter to w.write_from() is actually ignored by
+            // BlobV5IoVec::read_vectored_at_volatile()
+            w.write_from(&mut f, desc.bi_size, 0)
         }
-
-        let mut f = BlobDeviceIoVec::new(self, desc);
-
-        // The `off` parameter to w.write_from() is actually ignored by
-        // BlobV5IoVec::read_vectored_at_volatile()
-        w.write_from(&mut f, desc.bi_size, 0)
     }
 
     /// Try to prefetch specified blob data.
@@ -594,8 +598,7 @@ impl BlobDevice {
             }
         }
         for io_vec in io_vecs.iter() {
-            if let Some(blob_index) = io_vec.get_target_blob_index() {
-                let blob = self.blobs.load()[blob_index as usize].clone();
+            if let Some(blob) = self.get_blob_by_iovec(io_vec) {
                 let _ = blob
                     .prefetch(&[], &io_vec.bi_vec)
                     .map_err(|_e| eio!("failed to prefetch blob data"));
@@ -614,17 +617,26 @@ impl BlobDevice {
 
     /// Check all chunks related to the blob io vector are ready.
     pub fn is_all_chunk_ready(&self, io_vec: &BlobIoVec) -> bool {
-        if let Some(blob_index) = io_vec.get_target_blob_index() {
-            let blob = &self.blobs.load()[blob_index as usize];
+        if let Some(blob) = self.get_blob_by_iovec(io_vec) {
             for desc in io_vec.bi_vec.iter() {
                 if !blob.is_chunk_ready(&desc.chunkinfo) {
                     return false;
                 }
             }
-            true
-        } else {
-            false
+            return true;
         }
+
+        false
+    }
+
+    fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
+        if let Some(blob_index) = iovec.get_target_blob_index() {
+            if (blob_index as usize) < self.blob_count {
+                return Some(self.blobs.load()[blob_index as usize].clone());
+            }
+        }
+
+        None
     }
 
     fn get_blob_by_id(&self, blob_id: &str) -> Option<Arc<dyn BlobCache>> {
@@ -728,9 +740,6 @@ pub mod v5 {
     /// A `Rafsv5ChunkInfo` object describes how a Rafs v5 chunk is located within a data blob.
     /// It is abstracted because Rafs have several ways to load metadata from metadata blob.
     pub trait BlobV5ChunkInfo: BlobChunkInfo {
-        /// Get the blob index of the blob file in the Rafs v5 metadata's blob array.
-        fn blob_index(&self) -> u32;
-
         /// Get the chunk index in the Rafs v5 metadata's chunk info array.
         fn index(&self) -> u32;
 
@@ -765,6 +774,10 @@ mod tests {
 
         fn id(&self) -> u32 {
             self.id
+        }
+
+        fn blob_index(&self) -> u32 {
+            0
         }
 
         fn compress_offset(&self) -> u64 {
