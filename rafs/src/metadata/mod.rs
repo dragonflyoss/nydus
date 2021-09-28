@@ -634,6 +634,9 @@ impl RafsSuper {
         Ok(())
     }
 
+    // The total size of all chunks carried by `desc` might exceed `expected_size`, this
+    // method ensures the total size mustn't exceed `expected_size`. If it truly does,
+    // just trim several trailing chunks from `desc`.
     fn steal_chunks(desc: &mut RafsBioDesc, expected_size: u32) -> Option<&mut RafsBioDesc> {
         enum State {
             All,
@@ -675,6 +678,13 @@ impl RafsSuper {
     }
 
     // TODO: Add a UT for me.
+    // For some kinds of storage backend, IO of size smaller than a certain size similar time.
+    // Below method tries to amplify current rafs user io by appending more non-user io.
+    // It checks whether left part of the file can fullfil `expected_size`.
+    // If not, in rafs the file whose inode number is INO and another file whose inode number
+    // is INO + 1 's are very likely to be arranged continuously. So we try to amply the user
+    // IO by merge another file into.
+    //
     pub fn carry_more_until(
         &self,
         inode: &dyn RafsInode,
@@ -699,6 +709,7 @@ impl RafsSuper {
                 let trimming = tail_chunk.compress_offset() == head_chunk.compress_offset();
                 // Stolen chunk bigger than expected size will involve more backend IO, thus
                 // to slow down current user IO.
+                // FIXME: left -> sz ?
                 if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
                     if trimming {
                         ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
