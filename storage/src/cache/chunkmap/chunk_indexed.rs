@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use nydus_utils::div_round_up;
 
 use super::ChunkMap;
-use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
+use crate::cache::chunkmap::{ChunkBitmap, ChunkIndexGetter, NoWaitSupport};
 use crate::device::BlobChunkInfo;
 use crate::utils::readahead;
 
@@ -149,6 +149,8 @@ impl IndexedChunkMap {
             }
             if header.all_ready == MAGIC_ALL_READY {
                 all_ready = true;
+            } else {
+                // TODO: detect all ready
             }
         }
 
@@ -223,6 +225,25 @@ impl IndexedChunkMap {
 
         (ready, current)
     }
+
+    fn set_chunk_ready(&self, index: u32) -> Result<()> {
+        let index = self.validate_index(index)?;
+
+        // Loop to atomically update the state bit corresponding to the chunk index.
+        loop {
+            let (ready, current) = self.is_chunk_ready(index);
+            if ready {
+                break;
+            }
+
+            if self.write_u8(index, current) {
+                // count ready
+                break;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for IndexedChunkMap {
@@ -242,26 +263,55 @@ impl NoWaitSupport for IndexedChunkMap {}
 
 impl ChunkMap for IndexedChunkMap {
     fn is_ready(&self, chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
+        self.is_bitmap_ready(chunk.id())
+    }
+
+    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
+        self.set_chunk_ready(chunk.id())
+    }
+}
+
+impl ChunkBitmap for IndexedChunkMap {
+    fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool> {
         if self.all_ready.load(Ordering::Acquire) {
             Ok(true)
         } else {
-            let index = self.validate_index(chunk.id())?;
+            let index = self.validate_index(chunk_index)?;
             Ok(self.is_chunk_ready(index).0)
         }
     }
 
-    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
-        let index = self.validate_index(chunk.id())?;
+    fn set_bitmap_ready(&self, start_index: u32, count: u32) -> Result<()> {
+        let count = std::cmp::min(count, u32::MAX - start_index);
+        let end = start_index + count;
 
-        // Loop to atomically update the state bit corresponding to the chunk index.
-        loop {
-            let (ready, current) = self.is_chunk_ready(index);
-            if ready || self.write_u8(index, current) {
-                break;
-            }
+        for index in start_index..end {
+            self.set_chunk_ready(index)?;
         }
 
         Ok(())
+    }
+
+    fn check_bitmap_ready(&self, start_index: u32, count: u32) -> Result<Option<Vec<u32>>> {
+        if self.all_ready.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+
+        let mut vec = Vec::with_capacity(count as usize);
+        let count = std::cmp::min(count, u32::MAX - start_index);
+        let end = start_index + count;
+
+        for index in start_index..end {
+            if !self.is_chunk_ready(index).0 {
+                vec.push(start_index);
+            }
+        }
+
+        if vec.len() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(vec))
+        }
     }
 }
 
