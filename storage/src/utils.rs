@@ -21,8 +21,7 @@ use crate::{StorageError, StorageResult};
 /// Just a simple wrapper for posix `preadv`. Provide a slice of `IoVec` as input.
 pub fn readv(fd: RawFd, iovec: &[IoVec<&mut [u8]>], offset: u64) -> Result<usize> {
     loop {
-        let ret = preadv(fd, iovec, offset as off64_t).map_err(|_| last_error!());
-        match ret {
+        match preadv(fd, iovec, offset as off64_t).map_err(|_| last_error!()) {
             Ok(ret) => return Ok(ret),
             // Retry if the IO is interrupted by signal.
             Err(err) if err.kind() != ErrorKind::Interrupted => return Err(err),
@@ -188,14 +187,10 @@ impl<'a> MemSliceCursor<'a> {
 /// Call libc::readahead on every 128KB range because otherwise readahead stops at kernel bdi
 /// readahead size which is 128KB by default.
 pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
-    let mut count;
     offset = round_down_4k(offset);
-    loop {
-        if offset >= end {
-            break;
-        }
+    while offset < end {
         // Kernel default 128KB readahead size
-        count = std::cmp::min(128 << 10, end - offset);
+        let count = std::cmp::min(128 << 10, end - offset);
         unsafe { libc::readahead(fd, offset as i64, count as usize) };
         offset += count;
     }

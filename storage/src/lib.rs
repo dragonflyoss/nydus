@@ -44,6 +44,8 @@ extern crate bitflags;
 #[macro_use]
 extern crate nydus_error;
 
+use std::fmt::{Display, Formatter};
+
 pub mod backend;
 pub mod cache;
 pub mod compress;
@@ -77,6 +79,18 @@ pub enum StorageError {
     VolatileSlice(vm_memory::VolatileMemoryError),
     MemOverflow,
     NotContinuous,
+}
+
+impl Display for StorageError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageError::Unsupported => write!(f, "unsupported storage operation"),
+            StorageError::Timeout => write!(f, "timeout when reading data from storage backend"),
+            StorageError::MemOverflow => write!(f, "memory overflow when doing storage backend IO"),
+            StorageError::NotContinuous => write!(f, "address ranges are not continuous"),
+            StorageError::VolatileSlice(e) => write!(f, "{}", e),
+        }
+    }
 }
 
 /// Specialized std::result::Result for storage subsystem.
