@@ -677,7 +677,6 @@ impl RafsSuper {
         }
     }
 
-    // TODO: Add a UT for me.
     // For some kinds of storage backend, IO of size smaller than a certain size similar time.
     // Below method tries to amplify current rafs user io by appending more non-user io.
     // It checks whether left part of the file can fullfil `expected_size`.

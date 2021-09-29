@@ -30,6 +30,7 @@ use std::path::Path;
 
 pub mod fs;
 pub mod metadata;
+pub mod mock;
 
 #[derive(Debug)]
 pub enum RafsError {
