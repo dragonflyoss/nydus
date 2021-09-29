@@ -6,7 +6,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::slice;
 use std::sync::Arc;
 
@@ -27,6 +27,7 @@ use crate::device::{
 };
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
+use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 
 pub(crate) struct FileCacheEntry {
     blob_info: Arc<BlobInfo>,
@@ -38,6 +39,8 @@ pub(crate) struct FileCacheEntry {
     size: u64,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    // Whether `get_blob_object()` is supported.
+    is_get_blob_object_supported: bool,
     // The compressed data instead of uncompressed data is cached if `compressed` is true.
     is_compressed: bool,
     // Whether direct chunkmap is used.
@@ -69,6 +72,8 @@ impl FileCacheEntry {
 
         // TODO: check blob size with blob.compressed_size()
         let size = Self::get_blob_size(&reader, blob_info)?;
+        let is_get_blob_object_supported =
+            !mgr.is_compressed && is_direct_chunkmap && !blob_info.is_stargz();
 
         Ok(FileCacheEntry {
             blob_info: blob_info.clone(),
@@ -80,6 +85,7 @@ impl FileCacheEntry {
             size,
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
+            is_get_blob_object_supported,
             is_compressed: mgr.is_compressed,
             is_direct_chunkmap,
             is_stargz: blob_info.is_stargz(),
@@ -153,8 +159,12 @@ impl BlobCache for FileCacheEntry {
         &*self.reader
     }
 
-    fn get_blob_object(&self) -> Option<Arc<dyn BlobObject>> {
-        todo!()
+    fn get_blob_object(&self) -> Option<&dyn BlobObject> {
+        if self.is_get_blob_object_supported {
+            Some(self)
+        } else {
+            None
+        }
     }
 
     fn is_chunk_ready(&self, chunk: &dyn BlobChunkInfo) -> bool {
@@ -192,6 +202,30 @@ impl BlobCache for FileCacheEntry {
         // TODO: Single bio optimization here? So we don't have to involve other management
         // structures.
         self.read_iter(&iovec.bi_vec, buffers)
+    }
+}
+
+impl AsRawFd for FileCacheEntry {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+impl BlobObject for FileCacheEntry {
+    fn base_offset(&self) -> u64 {
+        0
+    }
+
+    fn is_all_data_ready(&self) -> bool {
+        todo!()
+    }
+
+    fn fetch(&self, offset: u64, size: u64) -> Result<usize> {
+        todo!()
+    }
+
+    fn read(&self, w: &mut dyn ZeroCopyWriter, offset: u64, size: u64) -> Result<usize> {
+        todo!()
     }
 }
 

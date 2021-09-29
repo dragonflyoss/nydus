@@ -262,7 +262,7 @@ pub trait BlobCache: Send + Sync {
     fn reader(&self) -> &dyn BlobReader;
 
     /// Get a `BlobObject` instance to directly access uncompressed blob file.
-    fn get_blob_object(&self) -> Option<Arc<dyn BlobObject>> {
+    fn get_blob_object(&self) -> Option<&dyn BlobObject> {
         None
     }
 

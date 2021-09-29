@@ -129,23 +129,6 @@ impl BlobInfo {
         blob_info
     }
 
-    /*
-    /// Get the blob version number.
-    pub fn blob_version(&self) -> BlobVersion {
-        self.blob_version
-    }
-
-    /// Check whether it's a blob for Rafs V5 image.
-    pub fn is_v5(&self) -> bool {
-        self.blob_version == BlobVersion::V5
-    }
-
-    /// Check whether it's a blob for Rafs V6 image.
-    pub fn is_v6(&self) -> bool {
-        self.blob_version == BlobVersion::V6
-    }
-     */
-
     /// Generate feature flags according to blob configuration.
     pub fn compute_features(&mut self) {
         if self.chunk_count == 0 {
@@ -273,13 +256,6 @@ impl BlobInfo {
         self.metadata_offset = offset;
         self.metadata_compressed_size = compressed_size;
     }
-
-    /*
-    /// Check whether the Rafs v5 metadata blob has extended blob table.
-    pub fn with_v5_extended_blob_table(&self) -> bool {
-        self.blob_version == BlobVersion::V5 && self.chunk_count != 0
-    }
-     */
 }
 
 bitflags! {
@@ -583,6 +559,9 @@ pub struct BlobPrefetchRequest {
 
 /// Trait to provide direct access to underlying uncompressed blob file.
 pub trait BlobObject: AsRawFd {
+    /// Get base offset to read blob from the fd returned by `as_raw_fd()`.
+    fn base_offset(&self) -> u64;
+
     /// Check whether all data of the blob object is ready.
     fn is_all_data_ready(&self) -> bool;
 
@@ -730,18 +709,6 @@ impl BlobDevice {
         }
 
         false
-    }
-
-    /// Get a `BlobObject` instance to directly access uncompressed blob file.
-    ///
-    /// A storage backend may or may not support `BlobObject`. For example, it's non-sense
-    /// for `DummyCache` to support `BlobOject`.
-    pub fn get_blob_object(&self, blob_id: &str) -> Option<Arc<dyn BlobObject>> {
-        if let Some(blob) = self.get_blob_by_id(blob_id) {
-            blob.get_blob_object()
-        } else {
-            None
-        }
     }
 
     fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
