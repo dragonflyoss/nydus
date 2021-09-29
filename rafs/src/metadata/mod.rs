@@ -264,11 +264,9 @@ impl Default for RafsSuper {
 
 impl RafsSuper {
     pub fn new(conf: &RafsConfig) -> Result<Self> {
-        let mode = conf.mode.as_str();
-        let validate_digest = conf.digest_validate;
         let mut rs = Self::default();
 
-        match mode {
+        match conf.mode.as_str() {
             "direct" => {
                 rs.mode = RafsMode::Direct;
             }
@@ -280,7 +278,7 @@ impl RafsSuper {
             }
         }
 
-        rs.validate_digest = validate_digest;
+        rs.validate_digest = conf.digest_validate;
 
         Ok(rs)
     }
@@ -668,8 +666,11 @@ impl RafsSuper {
             State::None => None,
             State::All => Some(desc),
             State::Partial(fi) => {
-                for i in (fi..len).rev() {
-                    desc.bi_size -= desc.bi_vec[i].chunkinfo.decompress_size() as usize;
+                for i in (fi + 1..len).rev() {
+                    desc.bi_size -= std::cmp::min(
+                        desc.bi_vec[i].chunkinfo.decompress_size() as usize,
+                        desc.bi_size,
+                    );
                     desc.bi_vec.remove(i as usize);
                 }
                 Some(desc)
@@ -724,9 +725,9 @@ impl RafsSuper {
                 }
 
                 // Stolen chunk bigger than expected size will involve more backend IO, thus
-                // to slow down current user IO.
-                // FIXME: left -> sz ?
-                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
+                // to slow down current user IO. The total compressed size of chunks from `alloc_bio_desc`
+                // might exceed expected_size, so steal the necessary parts.
+                if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
                     if trimming {
                         ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
                         ra_desc.bi_size += cks.bi_size;
@@ -762,13 +763,30 @@ impl RafsSuper {
                     }
                     let next_size = ni.size();
                     let sz = std::cmp::min(left, next_size);
+                    // It is possible that a file has no contents.
+                    if sz == 0 {
+                        break;
+                    }
+
                     let mut d = ni.alloc_bio_desc(0, sz as usize, false)?;
 
-                    // The first found potentially amplified chunk is not adjacent, abort!
-                    if d.bi_vec[1].chunkinfo.compress_offset()
-                        != tail_chunk.compress_offset() + tail_chunk.compress_size() as u64
+                    if d.bi_vec.is_empty() {
+                        warn!("A desc has no chunks appended");
+                        break;
+                    }
+
+                    // Current file provides noting. The first found potentially amplified chunk is not adjacent, abort!
+                    let prior_chunk = if ra_desc.bi_vec.is_empty() {
+                        tail_chunk
+                    } else {
+                        // Safe to unwrap since already checked if empty
+                        ra_desc.bi_vec.last().unwrap().chunkinfo.as_ref()
+                    };
+
+                    if d.bi_vec[0].chunkinfo.compress_offset()
+                        != prior_chunk.compress_offset() + prior_chunk.compress_size() as u64
                     {
-                        return Ok(None);
+                        break;
                     }
 
                     // Stolen chunk bigger than expected size will involve more backend IO, thus
