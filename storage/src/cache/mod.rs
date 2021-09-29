@@ -35,7 +35,9 @@ use crate::{compress, StorageResult, RAFS_MAX_BLOCK_SIZE};
 
 //pub mod blobcache;
 pub mod chunkmap;
-pub mod dummycache;
+mod dummycache;
+
+pub use dummycache::DummyCacheMgr;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
@@ -82,7 +84,7 @@ struct ChunkIoMerged {
 
 impl Debug for ChunkIoMerged {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        f.debug_struct("MergedBackendRequest")
+        f.debug_struct("ChunkIoMerged")
             .field("blob id", &self.blob_info.blob_id())
             .field("blob offset", &self.blob_offset)
             .field("blob size", &self.blob_size)
@@ -92,42 +94,112 @@ impl Debug for ChunkIoMerged {
 }
 
 impl ChunkIoMerged {
-    pub fn new(blob_info: Arc<BlobInfo>, cki: BlobIoChunk, bio: &BlobIoDesc) -> Self {
-        let blob_size = cki.compress_size() as u64;
-        let blob_offset = cki.compress_offset();
+    fn new(bio: &BlobIoDesc, capacity: usize) -> Self {
+        let blob_size = bio.chunkinfo.compress_size() as u64;
+        let blob_offset = bio.chunkinfo.compress_offset();
+        assert!(blob_offset.checked_add(blob_size).is_some());
+
+        let mut chunks = Vec::with_capacity(capacity);
+        let mut chunk_tags = Vec::with_capacity(capacity);
         let tag = if bio.user_io {
             ChunkIoTag::User(ChunkSegment::new(bio.offset, bio.size as u32))
         } else {
-            ChunkIoTag::Internal(blob_info.clone(), cki.compress_offset())
+            ChunkIoTag::Internal(bio.blob.clone(), bio.chunkinfo.compress_offset())
         };
 
-        assert!(blob_offset.checked_add(blob_size).is_some());
+        chunk_tags.push(tag);
+        chunks.push(bio.chunkinfo.clone());
 
         ChunkIoMerged {
-            blob_info,
+            blob_info: bio.blob.clone(),
             blob_offset,
             blob_size,
-            chunks: vec![cki],
-            chunk_tags: vec![tag],
+            chunks,
+            chunk_tags,
         }
     }
 
-    pub fn merge(&mut self, cki: BlobIoChunk, bio: &BlobIoDesc) {
-        assert_eq!(
-            self.blob_offset.checked_add(self.blob_size),
-            Some(cki.compress_offset())
-        );
-        self.blob_size += cki.compress_size() as u64;
-        assert!(self.blob_offset.checked_add(self.blob_size).is_some());
-
+    fn merge(&mut self, bio: &BlobIoDesc) {
         let tag = if bio.user_io {
             ChunkIoTag::User(ChunkSegment::new(bio.offset, bio.size as u32))
         } else {
-            ChunkIoTag::Internal(self.blob_info.clone(), cki.compress_offset())
+            ChunkIoTag::Internal(self.blob_info.clone(), bio.chunkinfo.compress_offset())
         };
 
-        self.chunks.push(cki);
         self.chunk_tags.push(tag);
+        self.chunks.push(bio.chunkinfo.clone());
+        debug_assert!(
+            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compress_offset())
+        );
+        self.blob_size += bio.chunkinfo.compress_size() as u64;
+        debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
+    }
+}
+
+struct IoMergeState<'a, F: FnMut(ChunkIoMerged)> {
+    cb: F,
+    size: u32,
+    bios: Vec<&'a BlobIoDesc>,
+}
+
+impl<'a, F: FnMut(ChunkIoMerged)> IoMergeState<'a, F> {
+    /// Create a new instance of 'IoMergeState`.
+    pub fn new(bio: &'a BlobIoDesc, cb: F) -> Self {
+        let size = bio.chunkinfo.compress_size();
+
+        IoMergeState {
+            cb,
+            size,
+            bios: vec![bio],
+        }
+    }
+
+    /// Get size of pending io operations.
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.size as usize
+    }
+
+    /// Push the a new io descriptor into the pending list.
+    #[inline]
+    pub fn push(&mut self, bio: &'a BlobIoDesc) {
+        let size = bio.chunkinfo.compress_size();
+
+        debug_assert!(self.size.checked_add(size).is_some());
+        self.bios.push(bio);
+        self.size += bio.chunkinfo.compress_size();
+    }
+
+    /// Issue the pending io descriptors.
+    #[inline]
+    pub fn issue(&mut self) {
+        if !self.bios.is_empty() {
+            let mut mr = ChunkIoMerged::new(self.bios[0], self.bios.len());
+            for bio in self.bios[1..].iter() {
+                mr.merge(bio);
+            }
+            (self.cb)(mr);
+
+            self.bios.truncate(0);
+            self.size = 0;
+        }
+    }
+
+    /// Merge and issue all blob Io descriptors.
+    pub fn merge_and_issue(bios: &[BlobIoDesc], merging_size: usize, op: F) {
+        if !bios.is_empty() {
+            let mut index = 1;
+            let mut state = IoMergeState::new(&bios[0], op);
+
+            for cur_bio in &bios[1..] {
+                if !bios[index - 1].is_continuous(cur_bio) || state.size() >= merging_size {
+                    state.issue();
+                }
+                state.push(cur_bio);
+                index += 1
+            }
+            state.issue();
+        }
     }
 }
 
@@ -161,11 +233,16 @@ pub trait BlobCache: Send + Sync {
     /// Get message digest algorithm to handle chunks in the blob.
     fn digester(&self) -> digest::Algorithm;
 
+    /// Check whether need to validate the data chunk by digest value.
+    fn need_validate(&self) -> bool;
+
     /// Get the [BlobReader](../backend/trait.BlobReader.html) to read data from storage backend.
     fn reader(&self) -> &dyn BlobReader;
 
-    /// Check whether need to validate the data chunk by digest value.
-    fn need_validate(&self) -> bool;
+    /// Get a `BlobObject` instance to directly access uncompressed blob file.
+    fn get_blob_object(&self) -> Option<Arc<dyn BlobObject>> {
+        None
+    }
 
     /// Check whether data of a chunk has been cached and ready for use.
     fn is_chunk_ready(&self, chunk: &dyn BlobChunkInfo) -> bool;
@@ -180,13 +257,8 @@ pub trait BlobCache: Send + Sync {
     /// Stop prefetching blob data in background.
     fn stop_prefetch(&self) -> StorageResult<()>;
 
-    /// Get a `BlobObject` instance to directly access uncompressed blob file.
-    fn get_blob_object(&self) -> Option<Arc<dyn BlobObject>> {
-        None
-    }
-
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
-    fn read(&self, bios: &[BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize>;
+    fn read(&self, bios: &[BlobIoDesc], buffers: &[VolatileSlice]) -> Result<usize>;
 
     /// Read multiple chunks from the blob cache in batch mode.
     ///
@@ -335,9 +407,135 @@ pub trait BlobCacheMgr: Send + Sync {
     /// Tear down the blob cache manager.
     fn destroy(&self);
 
+    /// Garbage-collect unused resources.
+    fn gc(&self) {}
+
     /// Get the underlying `BlobBackend` object of the blob cache object.
     fn backend(&self) -> &(dyn BlobBackend);
 
     /// Get the blob cache to provide access to the `blob` object.
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{BlobChunkFlags, BlobVersion};
+    use crate::test::MockChunkInfo;
+
+    #[test]
+    fn test_io_merge_state_new() {
+        let blob_info = Arc::new(BlobInfo::new(
+            BlobVersion::V6,
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            512,
+        ));
+        let chunk1 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0,
+            uncompress_offset: 0,
+            file_offset: 0,
+            index: 0,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let chunk2 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x800,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let chunk3 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x1000,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+
+        let cb = |merged| {};
+        let desc1 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk1.into(),
+            offset: 0,
+            size: 0x1000,
+            chunk_size: 0x1000,
+            user_io: true,
+        };
+        let mut state = IoMergeState::new(&desc1, cb);
+        assert_eq!(state.size(), 0x800);
+        assert_eq!(state.bios.len(), 1);
+
+        let desc2 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk2.into(),
+            offset: 0,
+            size: 0x1000,
+            chunk_size: 0x1000,
+            user_io: true,
+        };
+        state.push(&desc2);
+        assert_eq!(state.size, 0x1000);
+        assert_eq!(state.bios.len(), 2);
+
+        state.issue();
+        assert_eq!(state.size(), 0x0);
+        assert_eq!(state.bios.len(), 0);
+
+        let desc3 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk3.into(),
+            offset: 0,
+            size: 0x1000,
+            chunk_size: 0x1000,
+            user_io: true,
+        };
+        state.push(&desc3);
+        assert_eq!(state.size, 0x800);
+        assert_eq!(state.bios.len(), 1);
+
+        state.issue();
+        assert_eq!(state.size(), 0x0);
+        assert_eq!(state.bios.len(), 0);
+
+        let mut count = 0;
+        IoMergeState::merge_and_issue(
+            &[desc1.clone(), desc2.clone(), desc3.clone()],
+            0x4000,
+            |_v| count += 1,
+        );
+        assert_eq!(count, 1);
+
+        let mut count = 0;
+        IoMergeState::merge_and_issue(
+            &[desc1.clone(), desc2.clone(), desc3.clone()],
+            0x1000,
+            |_v| count += 1,
+        );
+        assert_eq!(count, 2);
+
+        let mut count = 0;
+        IoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
+        assert_eq!(count, 2);
+
+        assert!(desc1.is_continuous(&desc2));
+        assert!(!desc1.is_continuous(&desc3));
+    }
 }

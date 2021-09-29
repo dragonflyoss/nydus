@@ -377,7 +377,7 @@ pub struct BlobIoDesc {
     pub offset: u32,
     /// Size of the IO operation
     pub size: usize,
-    /// Block size to read in one shot.
+    /// Size of the chunk.
     pub chunk_size: u32,
     /// Whether it's a user initiated IO, otherwise is a storage system internal IO.
     ///
@@ -417,6 +417,17 @@ impl Debug for BlobIoDesc {
             .field("size", &self.size)
             .field("user", &self.user_io)
             .finish()
+    }
+}
+
+impl BlobIoDesc {
+    /// Check whether the `other` BlobIoDesc is continuous to current one.
+    pub fn is_continuous(&self, next: &BlobIoDesc) -> bool {
+        let next_cki = &next.chunkinfo;
+        let next_offset = next_cki.compress_offset();
+        let prior_end = self.chunkinfo.compress_offset() + self.chunkinfo.compress_size() as u64;
+
+        prior_end == next_offset && self.blob.blob_index() == next.blob.blob_index()
     }
 }
 
@@ -487,8 +498,8 @@ impl BlobIoVec {
             && self.bi_vec[0].blob.blob_index() == desc.bi_vec[0].blob.blob_index()
     }
 
-    #[allow(dead_code)]
-    fn validate(&self) -> bool {
+    /// Validate the io vector.
+    pub fn validate(&self) -> bool {
         if self.bi_vec.len() > 1 {
             let blob_index = self.bi_vec[0].blob.blob_index();
             for n in &self.bi_vec[1..] {

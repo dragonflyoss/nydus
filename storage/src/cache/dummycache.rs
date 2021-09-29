@@ -58,12 +58,12 @@ impl BlobCache for DummyCache {
         self.digester
     }
 
-    fn reader(&self) -> &dyn BlobReader {
-        &*self.reader
-    }
-
     fn need_validate(&self) -> bool {
         self.validate
+    }
+
+    fn reader(&self) -> &dyn BlobReader {
+        &*self.reader
     }
 
     fn is_chunk_ready(&self, _chunk: &dyn BlobChunkInfo) -> bool {

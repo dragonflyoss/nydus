@@ -20,8 +20,12 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::value::Value;
 
-use crate::backend::*;
-use crate::cache::*;
+#[cfg(feature = "backend-oss")]
+use crate::backend::oss;
+#[cfg(feature = "backend-registry")]
+use crate::backend::registry;
+use crate::backend::{localfs, BlobBackend};
+use crate::cache::{BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr};
 use crate::device::BlobInfo;
 
 /// Configuration information for storage backend.
@@ -147,7 +151,7 @@ impl BlobFactory {
                 id,
             )?),
              */
-            _ => dummycache::DummyCacheMgr::new(config.cache.clone(), backend, false, false),
+            _ => DummyCacheMgr::new(config.cache.clone(), backend, false, false),
         }?;
 
         mgr.init()?;
