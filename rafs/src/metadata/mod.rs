@@ -667,10 +667,7 @@ impl RafsSuper {
             State::All => Some(desc),
             State::Partial(fi) => {
                 for i in (fi + 1..len).rev() {
-                    desc.bi_size -= std::cmp::min(
-                        desc.bi_vec[i].chunkinfo.decompress_size() as usize,
-                        desc.bi_size,
-                    );
+                    desc.bi_size -= std::cmp::min(desc.bi_vec[i].size, desc.bi_size);
                     desc.bi_vec.remove(i as usize);
                 }
                 Some(desc)
@@ -710,39 +707,46 @@ impl RafsSuper {
 
                 let head_cki = if trimming {
                     if d.bi_vec.len() == 1 {
-                        return Ok(None);
+                        // The first chunk is already requested by user IO. For amplification, we
+                        // must move on to next file to find more continuous chunks
+                        None
+                    } else {
+                        Some(&d.bi_vec[1].chunkinfo)
                     }
-                    &d.bi_vec[1].chunkinfo
                 } else {
-                    &d.bi_vec[0].chunkinfo
+                    Some(&d.bi_vec[0].chunkinfo)
                 };
 
-                // The first found potentially amplified chunk is not adjacent, abort!
-                if head_cki.compress_offset()
-                    != tail_chunk.compress_offset() + tail_chunk.compress_size() as u64
-                {
-                    return Ok(None);
-                }
-
-                // Stolen chunk bigger than expected size will involve more backend IO, thus
-                // to slow down current user IO. The total compressed size of chunks from `alloc_bio_desc`
-                // might exceed expected_size, so steal the necessary parts.
-                if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
-                    if trimming {
-                        ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
-                        ra_desc.bi_size += cks.bi_size;
-                        ra_desc.bi_size -= trimming_size;
-                    } else {
-                        ra_desc.bi_vec.append(&mut cks.bi_vec);
-                        ra_desc.bi_size += cks.bi_size;
+                if let Some(h) = head_cki {
+                    // The first found potentially amplified chunk is not adjacent, abort!
+                    if h.compress_offset()
+                        != tail_chunk.compress_offset() + tail_chunk.compress_size() as u64
+                    {
+                        warn!("Discontinuous");
+                        return Ok(None);
                     }
-                }
 
-                // Even all chunks are trimmed by `steal_chunks`, we still minus delta.
-                if delta >= expected_size {
-                    false
+                    // Stolen chunk bigger than expected size will involve more backend IO, thus
+                    // to slow down current user IO. The total compressed size of chunks from `alloc_bio_desc`
+                    // might exceed expected_size, so steal the necessary parts.
+                    if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
+                        if trimming {
+                            ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
+                            ra_desc.bi_size += cks.bi_size;
+                            ra_desc.bi_size -= trimming_size;
+                        } else {
+                            ra_desc.bi_vec.append(&mut cks.bi_vec);
+                            ra_desc.bi_size += cks.bi_size;
+                        }
+                    }
+                    // Even all chunks are trimmed by `steal_chunks`, we still minus delta.
+                    if delta >= expected_size {
+                        false
+                    } else {
+                        left -= delta;
+                        true
+                    }
                 } else {
-                    left -= delta;
                     true
                 }
             } else {

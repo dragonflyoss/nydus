@@ -634,10 +634,13 @@ impl FileSystem for Rafs {
                         offset + size as u64,
                         desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
                         d as u64,
-                    )?;
-                    if let Some(rd) = ra_desc {
-                        desc.bi_vec.extend_from_slice(&rd.bi_vec)
-                    };
+                    );
+                    // Event fails in amplifying, still handle this read op.
+                    match ra_desc {
+                        Ok(Some(rd)) => desc.bi_vec.extend_from_slice(&rd.bi_vec),
+                        Ok(None) => debug!("Can't append more chunks"),
+                        Err(e) => warn!("Fail in trying to amplify user ios, {:?}", e),
+                    }
                 }
             }
         }
