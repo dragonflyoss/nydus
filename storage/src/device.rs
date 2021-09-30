@@ -83,6 +83,8 @@ pub struct BlobInfo {
     readahead_size: u32,
     /// Whether to validate blob data.
     validate_data: bool,
+    /// The blob is for an stargz image.
+    stargz: bool,
 
     /// V6: Version number of the blob metadata.
     metadata_version: u32,
@@ -115,6 +117,7 @@ impl BlobInfo {
             readahead_offset: 0,
             readahead_size: 0,
             validate_data: false,
+            stargz: false,
             metadata_version: 0,
             metadata_offset: 0,
             metadata_compressed_size: 0,
@@ -215,6 +218,17 @@ impl BlobInfo {
         self.validate_data = validate;
     }
 
+    /// Check whether this blob is for an stargz image.
+    pub fn is_stargz(&self) -> bool {
+        self.stargz
+    }
+
+    /// Set whether the blob is for an stargz image.
+    pub fn set_stargz(&mut self, stargz: bool) {
+        self.stargz =  stargz;
+    }
+
+    /// Set metadata information for compressed blob.
     pub fn set_blob_metadata_info(&mut self, version: u32, offset: u64, compressed_size: u64) {
         self.metadata_version = version;
         self.metadata_offset = offset;
