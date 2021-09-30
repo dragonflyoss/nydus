@@ -60,7 +60,7 @@ func (builder *Builder) Run(option BuilderOption) error {
 		args = append(args, "--aligned-chunk")
 	}
 	if option.ChunkDict != "" {
-		args = append(args, "--chunk_dict", option.ChunkDict)
+		args = append(args, "--chunk-dict", option.ChunkDict)
 	}
 
 	args = append(
