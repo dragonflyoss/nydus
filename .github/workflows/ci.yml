@@ -2,27 +2,61 @@ name: CI
 
 on:
   push:
-    branches: ["*"]
+    branches: [ master, release-* ]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
   pull_request:
-    branches: [master]
+    branches: [ master, release-* ]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  smoke:
+  lint:
+    name: Run lint checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install Rust stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Check Rust formatting
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - name: Check clippy
+        uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all-targets -- -D warnings
+
+  smoke_tests:
+    name: Run smoke tests
     runs-on: ubuntu-18.04
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
+
       - name: Cache Nydus
         uses: Swatinem/rust-cache@v1
         with:
           target-dir: ./target-fusedev
           cache-on-failure: true
+
       - name: Cache Docker Layers
         uses: satackey/action-docker-layer-caching@v0.0.11
         # Ignore the failure of a step and avoid terminating the job.
         continue-on-error: true
+
       - name: Smoke Test
         run: |
           echo Cargo Home: $CARGO_HOME

@@ -12,78 +12,93 @@ jobs:
   build-nydus-rs:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Cache cargo
-      uses: actions/cache@v2
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target-fusedev
-          target-virtiofs
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo
-    - name: Build nydus-rs
-      run: |
-        make docker-static
-        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusd .
-        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydus-image .
-        sudo chown -R $(id -un):$(id -gn) .
-    - name: store-artifacts
-      uses: actions/upload-artifact@v2
-      with:
-        name: nydus-artifacts
-        path: |
-          nydusd
-          nydus-image
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Cache cargo
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target-fusedev
+            target-virtiofs
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo
+
+      - name: Build nydus-rs
+        run: |
+          make docker-static
+          sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusd .
+          sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydus-image .
+          sudo chown -R $(id -un):$(id -gn) .
+
+      - name: Store artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: nydus-artifacts
+          path: |
+            nydusd
+            nydus-image
+
   build-nydusify-nydus-snapshotter:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: cache go mod
-      uses: actions/cache@v2
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go
-    - name: build nydusify
-      run: |
-        make nydusify-static
-    - name: build nydus-snapshotter
-      run: |
-        make nydus-snapshotter-static
-        sudo mv contrib/nydusify/cmd/nydusify .
-        sudo mv contrib/nydus-snapshotter/bin/containerd-nydus-grpc .
-    - name: store-artifacts
-      uses: actions/upload-artifact@v2
-      with:
-        name: nydus-artifacts
-        path: |
-          nydusify
-          containerd-nydus-grpc
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Cache go mod
+        uses: actions/cache@v2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go
+
+      - name: Build nydusify
+        run: |
+          make nydusify-static
+
+      - name: Build nydus-snapshotter
+        run: |
+          make nydus-snapshotter-static
+          sudo mv contrib/nydusify/cmd/nydusify .
+          sudo mv contrib/nydus-snapshotter/bin/containerd-nydus-grpc .
+
+      - name: Store artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: nydus-artifacts
+          path: |
+            nydusify
+            containerd-nydus-grpc
+
   upload-artifacts:
     runs-on: ubuntu-latest
     needs: [build-nydus-rs, build-nydusify-nydus-snapshotter]
     steps:
-    - uses: actions/checkout@v2
-    - name: install hub
-      run: |
-        HUB_VER=$(curl -s "https://api.github.com/repos/github/hub/releases/latest" | jq -r .tag_name | sed 's/^v//')
-        wget -q -O- https://github.com/github/hub/releases/download/v$HUB_VER/hub-linux-amd64-$HUB_VER.tgz | \
-        tar xz --strip-components=2 --wildcards '*/bin/hub'
-        sudo mv hub /usr/local/bin/hub
-    - name: download artifacts
-      uses: actions/download-artifact@v2
-      with:
-        name: nydus-artifacts
-        path: nydus-static
-    - name: upload artifacts
-      run: |
-        tag=$(echo $GITHUB_REF | cut -d/ -f3-)
-        tarball="nydus-static-$tag-x86_64.tgz"
-        chmod +x nydus-static/*
-        tar cf - nydus-static | gzip > ${tarball}
-        echo "uploading ${tarball} for tag $tag ..."
-        GITHUB_TOKEN=${{ secrets.HUB_UPLOAD_TOKEN }} hub release create -m "Nydus Image Service $tag" -m "Nydus Image Service $tag release" -a "${tarball}" "$tag"
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install hub
+        run: |
+          HUB_VER=$(curl -s "https://api.github.com/repos/github/hub/releases/latest" | jq -r .tag_name | sed 's/^v//')
+          wget -q -O- https://github.com/github/hub/releases/download/v$HUB_VER/hub-linux-amd64-$HUB_VER.tgz | \
+          tar xz --strip-components=2 --wildcards '*/bin/hub'
+          sudo mv hub /usr/local/bin/hub
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: nydus-artifacts
+          path: nydus-static
+
+      - name: Upload artifacts
+        run: |
+          tag=$(echo $GITHUB_REF | cut -d/ -f3-)
+          tarball="nydus-static-$tag-x86_64.tgz"
+          chmod +x nydus-static/*
+          tar cf - nydus-static | gzip > ${tarball}
+          echo "uploading ${tarball} for tag $tag ..."
+          GITHUB_TOKEN=${{ secrets.HUB_UPLOAD_TOKEN }} hub release create -m "Nydus Image Service $tag" -m "Nydus Image Service $tag release" -a "${tarball}" "$tag"
