@@ -225,7 +225,7 @@ impl BlobInfo {
 
     /// Set whether the blob is for an stargz image.
     pub fn set_stargz(&mut self, stargz: bool) {
-        self.stargz =  stargz;
+        self.stargz = stargz;
     }
 
     /// Set metadata information for compressed blob.
@@ -729,12 +729,12 @@ impl BlobDevice {
 /// Struct to execute Io requests with a single blob.
 struct BlobDeviceIoVec<'a> {
     dev: &'a BlobDevice,
-    desc: &'a BlobIoVec,
+    iovec: &'a BlobIoVec,
 }
 
 impl<'a> BlobDeviceIoVec<'a> {
-    fn new(dev: &'a BlobDevice, desc: &'a BlobIoVec) -> Self {
-        BlobDeviceIoVec { dev, desc }
+    fn new(dev: &'a BlobDevice, iovec: &'a BlobIoVec) -> Self {
+        BlobDeviceIoVec { dev, iovec }
     }
 }
 
@@ -787,10 +787,10 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         // - bi_vec[0] is valid
         // - bi_vec[0].blob.blob_index() is valid
         // - all IOs are against a single blob.
-        let index = self.desc.bi_vec[0].blob.blob_index();
+        let index = self.iovec.bi_vec[0].blob.blob_index();
         let blobs = &self.dev.blobs.load();
 
-        blobs[index as usize].read(&self.desc.bi_vec, bufs)
+        blobs[index as usize].read(&self.iovec, bufs)
     }
 
     fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {

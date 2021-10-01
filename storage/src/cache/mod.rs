@@ -28,7 +28,7 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::device::{
-    BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobObject, BlobPrefetchRequest,
+    BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, digest_check};
 use crate::{compress, StorageResult, RAFS_MAX_BLOCK_SIZE};
@@ -258,7 +258,7 @@ pub trait BlobCache: Send + Sync {
     fn stop_prefetch(&self) -> StorageResult<()>;
 
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
-    fn read(&self, bios: &[BlobIoDesc], buffers: &[VolatileSlice]) -> Result<usize>;
+    fn read(&self, iovec: &BlobIoVec, buffers: &[VolatileSlice]) -> Result<usize>;
 
     /// Read multiple chunks from the blob cache in batch mode.
     ///

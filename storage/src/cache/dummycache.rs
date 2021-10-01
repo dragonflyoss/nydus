@@ -26,7 +26,7 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobPrefetchRequest};
+use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{compress, StorageError, StorageResult};
@@ -109,8 +109,10 @@ impl BlobCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, bios: &[BlobIoDesc], bufs: &[VolatileSlice]) -> Result<usize> {
-        if bios.is_empty() {
+    fn read(&self, iovec: &BlobIoVec, bufs: &[VolatileSlice]) -> Result<usize> {
+        let bios = &iovec.bi_vec;
+
+        if iovec.bi_size == 0 || bios.is_empty() {
             return Err(einval!("parameter `bios` is empty"));
         }
 
