@@ -42,47 +42,69 @@ pub use dummycache::DummyCacheMgr;
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
-/// A segment representing a continuous range in a chunk.
-#[derive(Clone, Debug)]
-pub struct ChunkSegment {
+/// A segment representing a continuous range for a blob IO operation.
+#[derive(Clone, Debug, Default)]
+struct BlobIoSegment {
     /// Start position of the range within the chunk
     pub offset: u32,
     /// Size of the range within the chunk
     pub len: u32,
 }
 
-impl ChunkSegment {
+impl BlobIoSegment {
     /// Create a new instance of `ChunkSegment`.
-    pub fn new(offset: u32, len: u32) -> Self {
+    fn new(offset: u32, len: u32) -> Self {
         Self { offset, len }
+    }
+
+    #[inline]
+    fn append(&mut self, _offset: u32, len: u32) {
+        debug_assert!(self.offset + self.len == _offset);
+        debug_assert!(_offset.checked_add(len).is_some());
+        debug_assert!((self.offset + self.len).checked_add(len).is_some());
+
+        self.len += len;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == 0 && self.len == 0
     }
 }
 
-/// Struct to maintain information about chunk IO operation.
+/// Struct to maintain information about blob IO operation.
 #[derive(Clone, Debug)]
-enum ChunkIoTag {
+enum BlobIoTag {
     /// Io requests to fulfill user requests.
-    User(ChunkSegment),
-    /// Io requests to fulfill internal requirements with (Chunk index, blob/compressed offset).
-    Internal(Arc<BlobInfo>, u64),
+    User(BlobIoSegment),
+    /// Io requests to fulfill internal requirements.
+    Internal(u64),
 }
 
-/// Struct to merge multiple continuous chunk IO as one storage backend request.
+impl BlobIoTag {
+    fn is_user_io(&self) -> bool {
+        match self {
+            BlobIoTag::User(_) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Struct to merge multiple continuous blob IO as one storage backend request.
 ///
 /// For network based remote storage backend, such as Registry/OS, it may have limited IOPs
 /// due to high request round-trip time, but have enough network bandwidth. In such cases,
-/// it may help to improve performance by merging multiple continuous and small chunk IO
+/// it may help to improve performance by merging multiple continuous and small blob IO
 /// requests into one big backend request.
 #[derive(Default, Clone)]
-struct ChunkIoMerged {
+struct BlobIoMerged {
     pub blob_info: Arc<BlobInfo>,
     pub blob_offset: u64,
     pub blob_size: u64,
     pub chunks: Vec<BlobIoChunk>,
-    pub chunk_tags: Vec<ChunkIoTag>,
+    pub chunk_tags: Vec<BlobIoTag>,
 }
 
-impl Debug for ChunkIoMerged {
+impl Debug for BlobIoMerged {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         f.debug_struct("ChunkIoMerged")
             .field("blob id", &self.blob_info.blob_id())
@@ -93,7 +115,7 @@ impl Debug for ChunkIoMerged {
     }
 }
 
-impl ChunkIoMerged {
+impl BlobIoMerged {
     fn new(bio: &BlobIoDesc, capacity: usize) -> Self {
         let blob_size = bio.chunkinfo.compress_size() as u64;
         let blob_offset = bio.chunkinfo.compress_offset();
@@ -101,16 +123,10 @@ impl ChunkIoMerged {
 
         let mut chunks = Vec::with_capacity(capacity);
         let mut chunk_tags = Vec::with_capacity(capacity);
-        let tag = if bio.user_io {
-            ChunkIoTag::User(ChunkSegment::new(bio.offset, bio.size as u32))
-        } else {
-            ChunkIoTag::Internal(bio.blob.clone(), bio.chunkinfo.compress_offset())
-        };
-
-        chunk_tags.push(tag);
+        chunk_tags.push(Self::tag_from_desc(bio));
         chunks.push(bio.chunkinfo.clone());
 
-        ChunkIoMerged {
+        BlobIoMerged {
             blob_info: bio.blob.clone(),
             blob_offset,
             blob_size,
@@ -120,13 +136,7 @@ impl ChunkIoMerged {
     }
 
     fn merge(&mut self, bio: &BlobIoDesc) {
-        let tag = if bio.user_io {
-            ChunkIoTag::User(ChunkSegment::new(bio.offset, bio.size as u32))
-        } else {
-            ChunkIoTag::Internal(self.blob_info.clone(), bio.chunkinfo.compress_offset())
-        };
-
-        self.chunk_tags.push(tag);
+        self.chunk_tags.push(Self::tag_from_desc(bio));
         self.chunks.push(bio.chunkinfo.clone());
         debug_assert!(
             self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compress_offset())
@@ -134,20 +144,28 @@ impl ChunkIoMerged {
         self.blob_size += bio.chunkinfo.compress_size() as u64;
         debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
     }
+
+    fn tag_from_desc(bio: &BlobIoDesc) -> BlobIoTag {
+        if bio.user_io {
+            BlobIoTag::User(BlobIoSegment::new(bio.offset, bio.size as u32))
+        } else {
+            BlobIoTag::Internal(bio.chunkinfo.compress_offset())
+        }
+    }
 }
 
-struct IoMergeState<'a, F: FnMut(ChunkIoMerged)> {
+struct BlobIoMergeState<'a, F: FnMut(BlobIoMerged)> {
     cb: F,
     size: u32,
     bios: Vec<&'a BlobIoDesc>,
 }
 
-impl<'a, F: FnMut(ChunkIoMerged)> IoMergeState<'a, F> {
+impl<'a, F: FnMut(BlobIoMerged)> BlobIoMergeState<'a, F> {
     /// Create a new instance of 'IoMergeState`.
     pub fn new(bio: &'a BlobIoDesc, cb: F) -> Self {
         let size = bio.chunkinfo.compress_size();
 
-        IoMergeState {
+        BlobIoMergeState {
             cb,
             size,
             bios: vec![bio],
@@ -174,7 +192,7 @@ impl<'a, F: FnMut(ChunkIoMerged)> IoMergeState<'a, F> {
     #[inline]
     pub fn issue(&mut self) {
         if !self.bios.is_empty() {
-            let mut mr = ChunkIoMerged::new(self.bios[0], self.bios.len());
+            let mut mr = BlobIoMerged::new(self.bios[0], self.bios.len());
             for bio in self.bios[1..].iter() {
                 mr.merge(bio);
             }
@@ -189,7 +207,7 @@ impl<'a, F: FnMut(ChunkIoMerged)> IoMergeState<'a, F> {
     pub fn merge_and_issue(bios: &[BlobIoDesc], merging_size: usize, op: F) {
         if !bios.is_empty() {
             let mut index = 1;
-            let mut state = IoMergeState::new(&bios[0], op);
+            let mut state = BlobIoMergeState::new(&bios[0], op);
 
             for cur_bio in &bios[1..] {
                 if !bios[index - 1].is_continuous(cur_bio) || state.size() >= merging_size {
@@ -431,6 +449,7 @@ mod tests {
             "test1".to_owned(),
             0x200000,
             0x100000,
+            0x100000,
             512,
         ));
         let chunk1 = Arc::new(MockChunkInfo {
@@ -476,10 +495,9 @@ mod tests {
             chunkinfo: chunk1.into(),
             offset: 0,
             size: 0x1000,
-            chunk_size: 0x1000,
             user_io: true,
         };
-        let mut state = IoMergeState::new(&desc1, cb);
+        let mut state = BlobIoMergeState::new(&desc1, cb);
         assert_eq!(state.size(), 0x800);
         assert_eq!(state.bios.len(), 1);
 
@@ -488,7 +506,6 @@ mod tests {
             chunkinfo: chunk2.into(),
             offset: 0,
             size: 0x1000,
-            chunk_size: 0x1000,
             user_io: true,
         };
         state.push(&desc2);
@@ -504,7 +521,6 @@ mod tests {
             chunkinfo: chunk3.into(),
             offset: 0,
             size: 0x1000,
-            chunk_size: 0x1000,
             user_io: true,
         };
         state.push(&desc3);
@@ -516,7 +532,7 @@ mod tests {
         assert_eq!(state.bios.len(), 0);
 
         let mut count = 0;
-        IoMergeState::merge_and_issue(
+        BlobIoMergeState::merge_and_issue(
             &[desc1.clone(), desc2.clone(), desc3.clone()],
             0x4000,
             |_v| count += 1,
@@ -524,7 +540,7 @@ mod tests {
         assert_eq!(count, 1);
 
         let mut count = 0;
-        IoMergeState::merge_and_issue(
+        BlobIoMergeState::merge_and_issue(
             &[desc1.clone(), desc2.clone(), desc3.clone()],
             0x1000,
             |_v| count += 1,
@@ -532,7 +548,7 @@ mod tests {
         assert_eq!(count, 2);
 
         let mut count = 0;
-        IoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
+        BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
         assert_eq!(count, 2);
 
         assert!(desc1.is_continuous(&desc2));
