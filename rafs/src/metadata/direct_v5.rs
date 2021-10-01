@@ -302,7 +302,7 @@ impl DirectSuperBlockV5 {
                 .load(r, meta.extended_blob_table_entries as usize)?;
         }
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
-        blob_table.load(r, meta.blob_table_size)?;
+        blob_table.load(r, meta.blob_table_size, meta.chunk_size)?;
 
         // Load(Map) inode table. Safe because we have validated the inode table layout.
         // Though we have passed *mut u32 to Vec::from_raw_parts(), it will trigger invalid memory

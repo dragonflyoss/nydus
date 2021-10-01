@@ -185,7 +185,7 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
             }
         }
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
-        blob_table.load(r, meta.blob_table_size)?;
+        blob_table.load(r, meta.blob_table_size, meta.chunk_size)?;
         self.s_blob = Arc::new(blob_table);
 
         // Load all inodes started from first inode offset.

@@ -69,6 +69,8 @@ pub struct BlobInfo {
     compressed_size: u64,
     /// Size of the uncompressed blob file, or the cache file.
     uncompressed_size: u64,
+    /// Chunk size.
+    chunk_size: u32,
     /// Number of chunks in blob file.
     /// A helper to distinguish bootstrap with extended blob table or not:
     ///     Bootstrap with extended blob table always has non-zero `chunk_count`
@@ -102,6 +104,7 @@ impl BlobInfo {
         blob_id: String,
         uncompressed_size: u64,
         compressed_size: u64,
+        chunk_size: u32,
         chunk_count: u32,
     ) -> Self {
         BlobInfo {
@@ -110,6 +113,7 @@ impl BlobInfo {
             blob_id,
             uncompressed_size,
             compressed_size,
+            chunk_size,
             chunk_count,
 
             compressor: compress::Algorithm::None,
@@ -164,7 +168,12 @@ impl BlobInfo {
         self.uncompressed_size
     }
 
-    // Get number of chunks in the blob.
+    /// Get chunk size.
+    pub fn chunk_size(&self) -> u32 {
+        self.chunk_size
+    }
+
+    /// Get number of chunks in the blob.
     pub fn chunk_count(&self) -> u32 {
         self.chunk_count
     }
@@ -391,8 +400,6 @@ pub struct BlobIoDesc {
     pub offset: u32,
     /// Size of the IO operation
     pub size: usize,
-    /// Size of the chunk.
-    pub chunk_size: u32,
     /// Whether it's a user initiated IO, otherwise is a storage system internal IO.
     ///
     /// It might be initiated by user io amplification. With this flag, lower device
@@ -407,7 +414,6 @@ impl BlobIoDesc {
         chunkinfo: BlobIoChunk,
         offset: u32,
         size: usize,
-        chunk_size: u32,
         user_io: bool,
     ) -> Self {
         BlobIoDesc {
@@ -415,7 +421,6 @@ impl BlobIoDesc {
             blob,
             offset,
             size,
-            chunk_size,
             user_io,
         }
     }
