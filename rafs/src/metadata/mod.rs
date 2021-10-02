@@ -34,7 +34,7 @@ pub mod layout;
 mod md_v5;
 mod noop;
 
-pub use storage::{RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE};
+pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 
 /// Maximum size of blob id string.
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 64;
@@ -608,7 +608,7 @@ impl RafsSuper {
             // Issue a prefetch request since target is large enough.
             // As files belonging to the same directory are arranged in adjacent,
             // it should fetch a range of blob in batch.
-            if flush || desc.bi_size >= (4 * RAFS_DEFAULT_BLOCK_SIZE) as usize {
+            if flush || desc.bi_size >= (4 * RAFS_DEFAULT_CHUNK_SIZE) as usize {
                 trace!("fetching head bio size {}", desc.bi_size);
                 fetcher(desc);
                 desc.reset();

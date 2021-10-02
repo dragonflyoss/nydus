@@ -19,7 +19,7 @@ use vmm_sys_util::tempfile::TempFile;
 
 use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use rafs::metadata::{Inode, RAFS_MAX_BLOCK_SIZE};
+use rafs::metadata::{Inode, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?
 use nydus_utils::digest::{self, RafsDigest};
@@ -203,7 +203,7 @@ impl BlobContext {
             decompress_offset: 0,
             chunk_count: 0,
             blob_layout: BlobLayout::new(),
-            chunk_data_buf: vec![0u8; RAFS_MAX_BLOCK_SIZE as usize],
+            chunk_data_buf: vec![0u8; RAFS_MAX_CHUNK_SIZE as usize],
             chunk_dict: None,
             writer,
         }

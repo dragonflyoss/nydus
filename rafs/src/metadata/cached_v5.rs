@@ -885,7 +885,7 @@ mod cached_tests {
         let mut blob_table = Arc::new(RafsV5BlobTable::new());
         Arc::get_mut(&mut blob_table)
             .unwrap()
-            .add(String::from("123333"), 0, 0, 0, 0, 0);
+            .add(String::from("123333"), 0, 0, 0, 0, 0, 0);
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         let descs = cached_inode.alloc_bio_vecs(0, 100, true).unwrap();

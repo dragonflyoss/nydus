@@ -271,7 +271,7 @@ pub mod blob_cache_tests {
     use crate::cache::BlobPrefetchConfig;
     use crate::device::BlobIoDesc;
     use crate::test::{MockBackend, MockChunkInfo};
-    use crate::RAFS_DEFAULT_BLOCK_SIZE;
+    use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
     #[test]
     fn test_blob_cache_config() {

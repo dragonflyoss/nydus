@@ -26,7 +26,7 @@ use nydus_utils::{
 use rafs::metadata::layout::v5::{
     RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper, RafsV5XAttrs,
 };
-use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_BLOCK_SIZE};
+use rafs::metadata::{Inode, RafsStore, RAFS_DEFAULT_CHUNK_SIZE};
 use rafs::RafsIoWriter;
 use storage::compress;
 use storage::device::BlobChunkFlags;
@@ -257,11 +257,11 @@ impl Node {
         for i in 0..self.inode.i_child_count {
             // FIXME: Should not assume that block size must be the default one.
             // Use the configured value instead!
-            let file_offset = i as u64 * RAFS_DEFAULT_BLOCK_SIZE;
+            let file_offset = i as u64 * RAFS_DEFAULT_CHUNK_SIZE;
             let chunk_size = if i == self.inode.i_child_count - 1 {
-                self.inode.i_size - (RAFS_DEFAULT_BLOCK_SIZE * i as u64)
+                self.inode.i_size - (RAFS_DEFAULT_CHUNK_SIZE * i as u64)
             } else {
-                RAFS_DEFAULT_BLOCK_SIZE
+                RAFS_DEFAULT_CHUNK_SIZE
             };
             let mut chunk = RafsV5ChunkInfo::new();
 
@@ -533,7 +533,7 @@ impl Node {
         if !self.is_reg() {
             return 0;
         }
-        div_round_up(self.inode.i_size, RAFS_DEFAULT_BLOCK_SIZE) as usize
+        div_round_up(self.inode.i_size, RAFS_DEFAULT_CHUNK_SIZE) as usize
     }
 
     pub fn file_type(&self) -> &str {

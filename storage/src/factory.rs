@@ -89,6 +89,7 @@ pub struct CacheConfig {
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FactoryConfig {
     /// Id of the factory.
+    #[serde(default)]
     pub id: String,
     /// Configuration for storage backend.
     pub backend: BackendConfig,

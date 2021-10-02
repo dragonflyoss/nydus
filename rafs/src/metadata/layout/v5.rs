@@ -50,7 +50,7 @@ use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_VERSION_V5};
 use crate::metadata::{
-    Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_BLOCK_SIZE, RAFS_MAX_BLOCK_SIZE,
+    Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
@@ -192,7 +192,7 @@ impl RafsV5SuperBlock {
             return Err(einval!("invalid super block blob size"));
         } else if !self.block_size().is_power_of_two()
             || self.block_size() < 0x1000
-            || self.block_size() as u64 > RAFS_MAX_BLOCK_SIZE
+            || self.block_size() as u64 > RAFS_MAX_CHUNK_SIZE
         {
             return Err(einval!("invalid block size"));
         } else if RafsSuperFlags::from_bits(self.flags()).is_none() {
@@ -364,7 +364,7 @@ impl Default for RafsV5SuperBlock {
             s_magic: u32::to_le(RAFSV5_SUPER_MAGIC as u32),
             s_fs_version: u32::to_le(RAFS_SUPER_VERSION_V5),
             s_sb_size: u32::to_le(RAFSV5_SUPERBLOCK_SIZE as u32),
-            s_block_size: u32::to_le(RAFS_DEFAULT_BLOCK_SIZE as u32),
+            s_block_size: u32::to_le(RAFS_DEFAULT_CHUNK_SIZE as u32),
             s_flags: u64::to_le(0),
             s_inodes_count: u64::to_le(0),
             s_inode_table_entries: u32::to_le(0),
@@ -1503,7 +1503,13 @@ pub mod tests {
         let mut blob_table = RafsV5BlobTable::new();
 
         file.seek(SeekFrom::Start(0)).unwrap();
-        blob_table.load(&mut file, buffer.len() as u32).unwrap();
+        blob_table
+            .load(
+                &mut file,
+                buffer.len() as u32,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+            )
+            .unwrap();
         for b in &blob_table.entries {
             let _c = b.clone();
             trace!("{:?}", _c);
@@ -1519,7 +1525,9 @@ pub mod tests {
 
         blob_table.entries.truncate(0);
         file.seek(SeekFrom::Start(0)).unwrap();
-        blob_table.load(&mut file, 0).unwrap();
+        blob_table
+            .load(&mut file, 0, RAFS_DEFAULT_CHUNK_SIZE as u32)
+            .unwrap();
         assert_eq!(blob_table.size(), 0);
         assert_eq!(blob_table.entries.len(), 0);
         assert!(blob_table.get(0).is_err());
@@ -1527,7 +1535,11 @@ pub mod tests {
         blob_table.entries.truncate(0);
         file.seek(SeekFrom::Start(0)).unwrap();
         blob_table
-            .load(&mut file, (buffer.len() - 100) as u32)
+            .load(
+                &mut file,
+                (buffer.len() - 100) as u32,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+            )
             .unwrap();
         assert_eq!(blob_table.entries[0].blob_id(), first_id);
         assert_eq!(blob_table.get_all().len(), 2);
@@ -1674,9 +1686,9 @@ pub mod tests {
                 0,
                 0,
                 0,
+                0,
             ));
-            let res =
-                add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), 100, blob, true);
+            let res = add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), blob, true);
             assert_eq!(*result, res);
             if !desc.bi_vec.is_empty() {
                 assert_eq!(desc.bi_vec.len(), 1);

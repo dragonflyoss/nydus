@@ -31,7 +31,7 @@ use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, digest_check};
-use crate::{compress, StorageResult, RAFS_MAX_BLOCK_SIZE};
+use crate::{compress, StorageResult, RAFS_MAX_CHUNK_SIZE};
 
 pub mod chunkmap;
 mod dummycache;
@@ -320,7 +320,7 @@ pub trait BlobCache: Send + Sync {
             if offset != last
                 || offset - blob_offset > usize::MAX as u64
                 || offset.checked_add(size as u64).is_none()
-                || d_size as u64 > RAFS_MAX_BLOCK_SIZE
+                || d_size as u64 > RAFS_MAX_CHUNK_SIZE
             {
                 return Err(eio!("chunks to read_chunks() is invalid"));
             }
