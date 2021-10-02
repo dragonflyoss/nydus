@@ -63,6 +63,11 @@ pub trait ChunkMap: Send + Sync {
 
     /// Notify that the chunk is ready for use.
     fn notify_ready(&self, _chunk: &dyn BlobChunkInfo) {}
+
+    /// Convert it to an `ChunkBitmap` object.
+    fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
+        None
+    }
 }
 
 /// Trait to track chunk readiness state using bitmap, indexed by chunk index.
@@ -228,6 +233,10 @@ where
         if let Some(i) = guard.remove(&index) {
             i.done();
         }
+    }
+
+    fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
+        self.c.as_bitmap()
     }
 }
 

@@ -308,6 +308,10 @@ impl ChunkMap for IndexedChunkMap {
     fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         self.set_chunk_ready(chunk.id())
     }
+
+    fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
+        Some(self)
+    }
 }
 
 impl ChunkBitmap for IndexedChunkMap {
