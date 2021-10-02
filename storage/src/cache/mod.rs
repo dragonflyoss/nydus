@@ -101,7 +101,7 @@ struct BlobIoMerged {
     pub blob_offset: u64,
     pub blob_size: u64,
     pub chunks: Vec<BlobIoChunk>,
-    pub chunk_tags: Vec<BlobIoTag>,
+    pub tags: Vec<BlobIoTag>,
 }
 
 impl Debug for BlobIoMerged {
@@ -110,7 +110,7 @@ impl Debug for BlobIoMerged {
             .field("blob id", &self.blob_info.blob_id())
             .field("blob offset", &self.blob_offset)
             .field("blob size", &self.blob_size)
-            .field("chunk tags", &self.chunk_tags)
+            .field("tags", &self.tags)
             .finish()
     }
 }
@@ -122,8 +122,8 @@ impl BlobIoMerged {
         assert!(blob_offset.checked_add(blob_size).is_some());
 
         let mut chunks = Vec::with_capacity(capacity);
-        let mut chunk_tags = Vec::with_capacity(capacity);
-        chunk_tags.push(Self::tag_from_desc(bio));
+        let mut tags = Vec::with_capacity(capacity);
+        tags.push(Self::tag_from_desc(bio));
         chunks.push(bio.chunkinfo.clone());
 
         BlobIoMerged {
@@ -131,12 +131,12 @@ impl BlobIoMerged {
             blob_offset,
             blob_size,
             chunks,
-            chunk_tags,
+            tags,
         }
     }
 
     fn merge(&mut self, bio: &BlobIoDesc) {
-        self.chunk_tags.push(Self::tag_from_desc(bio));
+        self.tags.push(Self::tag_from_desc(bio));
         self.chunks.push(bio.chunkinfo.clone());
         debug_assert!(
             self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compress_offset())
@@ -204,13 +204,13 @@ impl<'a, F: FnMut(BlobIoMerged)> BlobIoMergeState<'a, F> {
     }
 
     /// Merge and issue all blob Io descriptors.
-    pub fn merge_and_issue(bios: &[BlobIoDesc], merging_size: usize, op: F) {
+    pub fn merge_and_issue(bios: &[BlobIoDesc], max_size: usize, op: F) {
         if !bios.is_empty() {
             let mut index = 1;
             let mut state = BlobIoMergeState::new(&bios[0], op);
 
             for cur_bio in &bios[1..] {
-                if !bios[index - 1].is_continuous(cur_bio) || state.size() >= merging_size {
+                if !cur_bio.is_continuous(&bios[index - 1]) || state.size() >= max_size {
                     state.issue();
                 }
                 state.push(cur_bio);
@@ -251,6 +251,9 @@ pub trait BlobCache: Send + Sync {
     /// Get message digest algorithm to handle chunks in the blob.
     fn digester(&self) -> digest::Algorithm;
 
+    /// Check whether the cache object is for an stargz image.
+    fn is_stargz(&self) -> bool;
+
     /// Check whether need to validate the data chunk by digest value.
     fn need_validate(&self) -> bool;
 
@@ -281,17 +284,17 @@ pub trait BlobCache: Send + Sync {
     /// Read multiple chunks from the blob cache in batch mode.
     ///
     /// This is an interface to optimize chunk data fetch performance by merging multiple continuous
-    /// chunks into one backend request. Callers must ensure that chunks in `cki_set` covers a
+    /// chunks into one backend request. Callers must ensure that chunks in `chunks` covers a
     /// continuous range, and the range exactly matches [`blob_offset`..`blob_offset` + `blob_size`].
     /// Function `read_chunks()` returns one buffer containing decompressed chunk data for each
-    /// entry in the `cki_set` array in corresponding order.
+    /// entry in the `chunks` array in corresponding order.
     ///
     /// This method returns success only if all requested data are successfully fetched.
     fn read_chunks(
         &self,
         blob_offset: u64,
         blob_size: usize,
-        cki_set: &[BlobIoChunk],
+        chunks: &[BlobIoChunk],
     ) -> Result<Vec<Vec<u8>>> {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
@@ -307,64 +310,64 @@ pub trait BlobCache: Send + Sync {
         }
 
         let mut last = blob_offset;
-        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(cki_set.len());
-        for cki in cki_set {
+        let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
             // Ensure BlobIoChunk is valid and continuous.
-            let offset = cki.compress_offset();
-            let size = cki.compress_size();
-            let d_size = cki.uncompress_size() as usize;
+            let offset = chunk.compress_offset();
+            let size = chunk.compress_size();
+            let d_size = chunk.uncompress_size() as usize;
             if offset != last
                 || offset - blob_offset > usize::MAX as u64
                 || offset.checked_add(size as u64).is_none()
                 || d_size as u64 > RAFS_MAX_BLOCK_SIZE
             {
-                return Err(eio!("cki_set to read_chunks() is invalid"));
+                return Err(eio!("chunks to read_chunks() is invalid"));
             }
 
             let offset_merged = (offset - blob_offset) as usize;
             let end_merged = offset_merged + size as usize;
             let buf = &c_buf[offset_merged..end_merged];
-            let mut chunk = alloc_buf(d_size);
+            let mut buffer = alloc_buf(d_size);
 
-            self.process_raw_chunk(cki, buf, None, &mut chunk, cki.is_compressed())?;
-            chunks.push(chunk);
+            self.process_raw_chunk(chunk, buf, None, &mut buffer, chunk.is_compressed())?;
+            buffers.push(buffer);
             last = offset + size as u64;
         }
 
-        Ok(chunks)
+        Ok(buffers)
     }
 
     /// Read a whole chunk directly from the storage backend.
     ///
-    /// The fetched chunk data may be compressed or not, which depends chunk information from `cki`.
+    /// The fetched chunk data may be compressed or not, which depends chunk information from `chunk`.
     /// Moreover, chunk data from backend storage may be validated per user's configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
     /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
     fn read_raw_chunk(
         &self,
-        cki: &BlobIoChunk,
-        chunk: &mut [u8],
+        chunk: &BlobIoChunk,
+        buffer: &mut [u8],
         raw_hook: Option<&dyn Fn(&[u8])>,
     ) -> Result<usize> {
         let mut d;
-        let offset = cki.compress_offset();
-        let raw_chunk = if cki.is_compressed() {
+        let offset = chunk.compress_offset();
+        let raw_chunk = if chunk.is_compressed() {
             // Need a scratch buffer to decompress compressed data.
             let max_size = self
                 .blob_size()?
                 .checked_sub(offset)
                 .ok_or_else(|| einval!("chunk compressed offset is bigger than blob file size"))?;
             let max_size = cmp::min(max_size, usize::MAX as u64);
-            let c_size = if self.compressor() == compress::Algorithm::GZip {
-                compress::compute_compressed_gzip_size(chunk.len(), max_size as usize)
+            let c_size = if self.is_stargz() {
+                compress::compute_compressed_gzip_size(buffer.len(), max_size as usize)
             } else {
-                cki.compress_size() as usize
+                chunk.compress_size() as usize
             };
             d = alloc_buf(c_size);
             d.as_mut_slice()
         } else {
             // We have this unsafe assignment as it can directly store data into call's buffer.
-            unsafe { slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) }
+            unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) }
         };
 
         let size = self.reader().read(raw_chunk, offset).map_err(|e| eio!(e))?;
@@ -372,13 +375,19 @@ pub trait BlobCache: Send + Sync {
             return Err(eio!("storage backend returns less data than requested"));
         }
 
-        self.process_raw_chunk(cki.as_base(), raw_chunk, None, chunk, cki.is_compressed())
-            .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
+        self.process_raw_chunk(
+            chunk.as_base(),
+            raw_chunk,
+            None,
+            buffer,
+            chunk.is_compressed(),
+        )
+        .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
         if let Some(hook) = raw_hook {
             hook(raw_chunk)
         }
 
-        Ok(chunk.len())
+        Ok(buffer.len())
     }
 
     /// Hook point to post-process data received from storage backend.
@@ -387,26 +396,28 @@ pub trait BlobCache: Send + Sync {
     /// data cached on local disk.
     fn process_raw_chunk(
         &self,
-        cki: &dyn BlobChunkInfo,
-        raw_chunk: &[u8],
+        chunk: &dyn BlobChunkInfo,
+        raw_buffer: &[u8],
         raw_stream: Option<File>,
-        chunk: &mut [u8],
+        buffer: &mut [u8],
         need_decompress: bool,
     ) -> Result<usize> {
         if need_decompress {
-            compress::decompress(raw_chunk, raw_stream, chunk, self.compressor()).map_err(|e| {
-                error!("failed to decompress chunk: {}", e);
-                e
-            })?;
-        } else if raw_chunk.as_ptr() != chunk.as_ptr() {
+            compress::decompress(raw_buffer, raw_stream, buffer, self.compressor()).map_err(
+                |e| {
+                    error!("failed to decompress chunk: {}", e);
+                    e
+                },
+            )?;
+        } else if raw_buffer.as_ptr() != buffer.as_ptr() {
             // raw_chunk and chunk may point to the same buffer, so only copy data when needed.
-            chunk.copy_from_slice(raw_chunk);
+            buffer.copy_from_slice(raw_buffer);
         }
 
-        let d_size = cki.uncompress_size() as usize;
-        if chunk.len() != d_size {
+        let d_size = chunk.uncompress_size() as usize;
+        if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
-        } else if self.need_validate() && !digest_check(chunk, cki.chunk_id(), self.digester()) {
+        } else if self.need_validate() && !digest_check(buffer, chunk.chunk_id(), self.digester()) {
             Err(eio!("data digest value doesn't match"))
         } else {
             Ok(d_size)
@@ -551,7 +562,7 @@ mod tests {
         BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
         assert_eq!(count, 2);
 
-        assert!(desc1.is_continuous(&desc2));
-        assert!(!desc1.is_continuous(&desc3));
+        assert!(desc2.is_continuous(&desc1));
+        assert!(!desc3.is_continuous(&desc1));
     }
 }

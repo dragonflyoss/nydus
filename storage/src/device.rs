@@ -441,12 +441,14 @@ impl Debug for BlobIoDesc {
 
 impl BlobIoDesc {
     /// Check whether the `other` BlobIoDesc is continuous to current one.
-    pub fn is_continuous(&self, next: &BlobIoDesc) -> bool {
-        let next_cki = &next.chunkinfo;
-        let next_offset = next_cki.compress_offset();
-        let prior_end = self.chunkinfo.compress_offset() + self.chunkinfo.compress_size() as u64;
-
-        prior_end == next_offset && self.blob.blob_index() == next.blob.blob_index()
+    pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
+        let offset = self.chunkinfo.compress_offset();
+        let prev_size = prev.chunkinfo.compress_size() as u64;
+        if let Some(prev_end) = prev.chunkinfo.compress_offset().checked_add(prev_size) {
+            prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
+        } else {
+            false
+        }
     }
 }
 
@@ -785,17 +787,21 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
     // The default read_vectored_at_volatile only read to the first slice, so we have to overload it.
     fn read_vectored_at_volatile(
         &mut self,
-        bufs: &[VolatileSlice],
+        buffers: &[VolatileSlice],
         _offset: u64,
     ) -> Result<usize, Error> {
         // BlobDevice::read_to() has validated that:
         // - bi_vec[0] is valid
         // - bi_vec[0].blob.blob_index() is valid
         // - all IOs are against a single blob.
-        let index = self.iovec.bi_vec[0].blob.blob_index();
-        let blobs = &self.dev.blobs.load();
+        if let Some(index) = self.iovec.get_target_blob_index() {
+            let blobs = &self.dev.blobs.load();
+            if (index as usize) < blobs.len() {
+                return blobs[index as usize].read(&self.iovec, buffers);
+            }
+        }
 
-        blobs[index as usize].read(&self.iovec, bufs)
+        Err(einval!("can not get blob index"))
     }
 
     fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {

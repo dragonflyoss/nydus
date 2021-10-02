@@ -37,6 +37,7 @@ struct DummyCache {
     cached: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
+    is_stargz: bool,
     prefetch: bool,
     validate: bool,
 }
@@ -56,6 +57,10 @@ impl BlobCache for DummyCache {
 
     fn digester(&self) -> digest::Algorithm {
         self.digester
+    }
+
+    fn is_stargz(&self) -> bool {
+        self.is_stargz
     }
 
     fn need_validate(&self) -> bool {
@@ -199,6 +204,7 @@ impl BlobCacheMgr for DummyCacheMgr {
             cached: self.cached,
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
+            is_stargz: blob_info.is_stargz(),
             prefetch: self.prefetch,
             validate: self.validate,
         }))
