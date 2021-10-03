@@ -217,7 +217,11 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn is_all_data_ready(&self) -> bool {
-        todo!()
+        if let Some(b) = self.chunk_map.as_bitmap() {
+            b.is_bitmap_all_ready()
+        } else {
+            false
+        }
     }
 
     fn fetch(&self, offset: u64, size: u64) -> Result<usize> {
