@@ -51,6 +51,7 @@ pub mod cache;
 pub mod compress;
 pub mod device;
 pub mod factory;
+pub mod meta;
 #[cfg(test)]
 pub(crate) mod test;
 pub mod utils;

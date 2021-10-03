@@ -72,6 +72,8 @@ impl FileCacheEntry {
 
         // TODO: check blob size with blob.compressed_size()
         let size = Self::get_blob_size(&reader, blob_info)?;
+        // TODO: prepare compression
+
         let is_get_blob_object_supported =
             !mgr.is_compressed && is_direct_chunkmap && !blob_info.is_stargz();
 

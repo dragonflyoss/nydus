@@ -87,11 +87,13 @@ pub struct BlobInfo {
     stargz: bool,
 
     /// V6: Version number of the blob metadata.
-    metadata_version: u32,
-    /// V6: Offset of the blob metadata in the compressed blob.
-    metadata_offset: u64,
-    /// V6: Size of the compressed blob metadata in the compressed blob.
-    metadata_compressed_size: u64,
+    meta_flags: u32,
+    /// V6: Offset of the chunk information array in the compressed blob.
+    meta_ci_offset: u64,
+    /// V6: Size of the compressed chunk information array.
+    meta_ci_compressed_size: u64,
+    /// V6: Size of the uncompressed chunk information array.
+    meta_ci_uncompressed_size: u64,
 }
 
 impl BlobInfo {
@@ -119,9 +121,10 @@ impl BlobInfo {
             readahead_size: 0,
             validate_data: false,
             stargz: false,
-            metadata_version: 0,
-            metadata_offset: 0,
-            metadata_compressed_size: 0,
+            meta_flags: 0,
+            meta_ci_offset: 0,
+            meta_ci_compressed_size: 0,
+            meta_ci_uncompressed_size: 0,
         };
 
         blob_info.compute_features();
@@ -250,11 +253,41 @@ impl BlobInfo {
         self.stargz = stargz;
     }
 
-    /// Set metadata information for compressed blob.
-    pub fn set_blob_metadata_info(&mut self, version: u32, offset: u64, compressed_size: u64) {
-        self.metadata_version = version;
-        self.metadata_offset = offset;
-        self.metadata_compressed_size = compressed_size;
+    /// Set metadata information for a blob.
+    ///
+    /// The compressed blobs are laid out as:
+    /// `[compressed chunk data], [compressed metadata], [uncompressed header]`.
+    pub fn set_blob_meta_info(
+        &mut self,
+        flags: u32,
+        offset: u64,
+        compressed_size: u64,
+        uncompressed_size: u64,
+    ) {
+        self.meta_flags = flags;
+        self.meta_ci_offset = offset;
+        self.meta_ci_compressed_size = compressed_size;
+        self.meta_ci_uncompressed_size = uncompressed_size;
+    }
+
+    /// Get blob metadata flags.
+    pub fn meta_flags(&self) -> u32 {
+        self.meta_flags
+    }
+
+    /// Get offset of chunk information array in the compressed blob.
+    pub fn meta_ci_offset(&self) -> u64 {
+        self.meta_ci_offset
+    }
+
+    /// Get size of the compressed chunk information array.
+    pub fn meta_ci_compressed_size(&self) -> u64 {
+        self.meta_ci_compressed_size
+    }
+
+    /// Get the uncompressed size of the chunk information array.
+    pub fn meta_ci_uncompressed_size(&self) -> u64 {
+        self.meta_ci_uncompressed_size
     }
 }
 
