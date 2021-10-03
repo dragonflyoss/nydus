@@ -25,7 +25,7 @@ use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_BLOCK_SIZE};
 
 pub(crate) struct FileCacheEntry {
     blob_info: Arc<BlobInfo>,
@@ -207,7 +207,7 @@ impl FileCacheEntry {
         debug!("bios {:?}", bios);
         // Merge requests with continuous blob addresses.
         let requests = self
-            .merge_requests_for_user(bios, RAFS_DEFAULT_CHUNK_SIZE as usize * 2)
+            .merge_requests_for_user(bios, RAFS_DEFAULT_BLOCK_SIZE as usize * 2)
             .ok_or_else(|| einval!("Empty bios list"))?;
         let mut state = FileIoMergeState::new();
         let mut cursor = MemSliceCursor::new(buffers);
