@@ -450,13 +450,12 @@ pub trait BlobCacheMgr: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{BlobChunkFlags, BlobVersion};
+    use crate::device::BlobChunkFlags;
     use crate::test::MockChunkInfo;
 
     #[test]
     fn test_io_merge_state_new() {
         let blob_info = Arc::new(BlobInfo::new(
-            BlobVersion::V6,
             1,
             "test1".to_owned(),
             0x200000,
@@ -501,7 +500,7 @@ mod tests {
             reserved: 0,
         }) as Arc<dyn BlobChunkInfo>;
 
-        let cb = |merged| {};
+        let cb = |_merged| {};
         let desc1 = BlobIoDesc {
             blob: blob_info.clone(),
             chunkinfo: chunk1.into(),

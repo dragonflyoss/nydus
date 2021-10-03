@@ -46,7 +46,7 @@ use std::sync::Arc;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use storage::compress;
-use storage::device::{BlobIoDesc, BlobIoVec, BlobVersion};
+use storage::device::{BlobIoDesc, BlobIoVec};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_VERSION_V5};
 use crate::metadata::{
@@ -594,7 +594,6 @@ impl RafsV5BlobTable {
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         let mut blob_info = BlobInfo::new(
-            BlobVersion::V5,
             blob_index,
             blob_id,
             uncompressed_size,
@@ -675,7 +674,6 @@ impl RafsV5BlobTable {
                 };
 
             let mut blob_info = BlobInfo::new(
-                BlobVersion::V5,
                 index as u32,
                 blob_id,
                 uncompressed_size,
@@ -730,6 +728,7 @@ impl RafsStore for RafsV5BlobTable {
 }
 
 /// Rafs v5 extended blob information on disk metadata.
+///
 /// RafsV5ExtDBlobEntry is appended to the tail of bootstrap,
 /// can be used as an extended table for the original blob table.
 // This disk structure is well defined and rafs aligned.
@@ -1679,15 +1678,7 @@ pub mod tests {
 
         for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
             let mut desc = BlobIoVec::new();
-            let blob = Arc::new(BlobInfo::new(
-                BlobVersion::V5,
-                0,
-                String::from("blobid"),
-                0,
-                0,
-                0,
-                0,
-            ));
+            let blob = Arc::new(BlobInfo::new(0, String::from("blobid"), 0, 0, 0, 0));
             let res = add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), blob, true);
             assert_eq!(*result, res);
             if !desc.bi_vec.is_empty() {

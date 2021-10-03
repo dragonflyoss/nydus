@@ -37,19 +37,17 @@ use crate::factory::{FactoryConfig, BLOB_FACTORY};
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
-/// Version number for blob files.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum BlobVersion {
-    /// Blob files for Rafs v5 images.
-    V5 = 5,
-    /// Blob files for Rafs v6 images.
-    V6 = 6,
+bitflags! {
+    /// Features bits for blob management.
+    pub struct BlobFeatures: u32 {
+        /// Rafs V5 image without extended blob table.
+        const V5_NO_EXT_BLOB_TABLE = 0x0000_0001;
+    }
 }
 
-impl Default for BlobVersion {
+impl Default for BlobFeatures {
     fn default() -> Self {
-        BlobVersion::V5
+        BlobFeatures::empty()
     }
 }
 
@@ -59,12 +57,12 @@ impl Default for BlobVersion {
 /// and serve blob IO requests for clients.
 #[derive(Clone, Debug, Default)]
 pub struct BlobInfo {
-    /// Version of the Rafs filesystem.
-    blob_version: BlobVersion,
     /// The index of blob in RAFS blob table.
     blob_index: u32,
     /// A sha256 hex string generally.
     blob_id: String,
+    /// Feature bits for blob management.
+    blob_features: BlobFeatures,
     /// Size of the compressed blob file.
     compressed_size: u64,
     /// Size of the uncompressed blob file, or the cache file.
@@ -99,7 +97,6 @@ pub struct BlobInfo {
 impl BlobInfo {
     /// Create a new instance of `BlobInfo`.
     pub fn new(
-        blob_version: BlobVersion,
         blob_index: u32,
         blob_id: String,
         uncompressed_size: u64,
@@ -107,10 +104,10 @@ impl BlobInfo {
         chunk_size: u32,
         chunk_count: u32,
     ) -> Self {
-        BlobInfo {
-            blob_version,
+        let mut blob_info = BlobInfo {
             blob_index,
             blob_id,
+            blob_features: BlobFeatures::empty(),
             uncompressed_size,
             compressed_size,
             chunk_size,
@@ -125,9 +122,14 @@ impl BlobInfo {
             metadata_version: 0,
             metadata_offset: 0,
             metadata_compressed_size: 0,
-        }
+        };
+
+        blob_info.compute_features();
+
+        blob_info
     }
 
+    /*
     /// Get the blob version number.
     pub fn blob_version(&self) -> BlobVersion {
         self.blob_version
@@ -141,6 +143,34 @@ impl BlobInfo {
     /// Check whether it's a blob for Rafs V6 image.
     pub fn is_v6(&self) -> bool {
         self.blob_version == BlobVersion::V6
+    }
+     */
+
+    /// Generate feature flags according to blob configuration.
+    pub fn compute_features(&mut self) {
+        if self.chunk_count == 0 {
+            self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
+        }
+    }
+
+    /// Get blob feature bits.
+    pub fn get_features(&self) -> BlobFeatures {
+        self.blob_features
+    }
+
+    /// Check whether the requested features are available.
+    pub fn has_feature(&self, features: BlobFeatures) -> bool {
+        self.blob_features.bits() & features.bits() == features.bits()
+    }
+
+    /// Set blob feature bits.
+    pub fn set_features(&mut self, features: BlobFeatures) {
+        self.blob_features |= features;
+    }
+
+    /// Reset blob feature bits.
+    pub fn reset_features(&mut self) {
+        self.blob_features = BlobFeatures::empty();
     }
 
     /// Get the blob index in the blob array.
@@ -244,10 +274,12 @@ impl BlobInfo {
         self.metadata_compressed_size = compressed_size;
     }
 
+    /*
     /// Check whether the Rafs v5 metadata blob has extended blob table.
     pub fn with_v5_extended_blob_table(&self) -> bool {
         self.blob_version == BlobVersion::V5 && self.chunk_count != 0
     }
+     */
 }
 
 bitflags! {

@@ -22,10 +22,11 @@ use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedCh
 use crate::cache::filecache::FileCacheMgr;
 use crate::cache::{BlobCache, BlobIoMergeState, BlobIoMerged, BlobIoSegment, BlobIoTag};
 use crate::device::{
-    BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject, BlobPrefetchRequest,
+    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject,
+    BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
 
 pub(crate) struct FileCacheEntry {
     blob_info: Arc<BlobInfo>,
@@ -97,7 +98,7 @@ impl FileCacheEntry {
         // need downgrade to use DigestedChunkMap as a compatible solution.
         let chunk_map: Arc<dyn ChunkMap> = if mgr.disable_indexed_map
             || blob_info.is_stargz()
-            || (blob_info.is_v5() && !blob_info.with_v5_extended_blob_table())
+            || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
         {
             direct_chunkmap = false;
             Arc::new(BlobChunkMap::from(DigestedChunkMap::new()))
@@ -207,7 +208,7 @@ impl FileCacheEntry {
         debug!("bios {:?}", bios);
         // Merge requests with continuous blob addresses.
         let requests = self
-            .merge_requests_for_user(bios, RAFS_DEFAULT_BLOCK_SIZE as usize * 2)
+            .merge_requests_for_user(bios, RAFS_DEFAULT_CHUNK_SIZE as usize * 2)
             .ok_or_else(|| einval!("Empty bios list"))?;
         let mut state = FileIoMergeState::new();
         let mut cursor = MemSliceCursor::new(buffers);
@@ -778,7 +779,7 @@ mod tests {
     #[test]
     fn test_data_buffer() {
         let mut buf1 = vec![0x1u8; 8];
-        let mut buf2 = unsafe { DataBuffer::from_mut_slice(buf1.as_mut_slice()) };
+        let buf2 = unsafe { DataBuffer::from_mut_slice(buf1.as_mut_slice()) };
 
         assert_eq!(buf2.slice()[1], 0x1);
         let mut buf2 = buf2.to_owned();
@@ -869,21 +870,27 @@ mod tests {
             offset: 0x1800,
             len: 0x1800,
         });
-        state.push(RegionType::CacheFast, 0x1000, 0x2000, tag, None);
+        state
+            .push(RegionType::CacheFast, 0x1000, 0x2000, tag, None)
+            .unwrap();
         assert_eq!(state.regions.len(), 1);
 
         let tag = BlobIoTag::User(BlobIoSegment {
             offset: 0x3000,
             len: 0x2000,
         });
-        state.push(RegionType::CacheFast, 0x3000, 0x2000, tag, None);
+        state
+            .push(RegionType::CacheFast, 0x3000, 0x2000, tag, None)
+            .unwrap();
         assert_eq!(state.regions.len(), 1);
 
         let tag = BlobIoTag::User(BlobIoSegment {
             offset: 0x5000,
             len: 0x2000,
         });
-        state.push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None);
+        state
+            .push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None)
+            .unwrap();
         assert_eq!(state.regions.len(), 2);
     }
 }
