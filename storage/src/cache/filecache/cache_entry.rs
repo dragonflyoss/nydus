@@ -25,13 +25,14 @@ use crate::device::{
     BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject,
     BlobPrefetchRequest,
 };
+use crate::meta::BlobMetaInfo;
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
-use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 
 pub(crate) struct FileCacheEntry {
     blob_info: Arc<BlobInfo>,
     chunk_map: Arc<dyn ChunkMap>,
+    meta: Option<Arc<BlobMetaInfo>>,
     metrics: Arc<BlobcacheMetrics>,
     reader: Arc<dyn BlobReader>,
     runtime: Arc<Runtime>,
@@ -76,10 +77,20 @@ impl FileCacheEntry {
 
         let is_get_blob_object_supported =
             !mgr.is_compressed && is_direct_chunkmap && !blob_info.is_stargz();
+        let meta = if is_get_blob_object_supported {
+            Some(Arc::new(BlobMetaInfo::new(
+                &blob_file_path,
+                blob_info,
+                Some(&reader),
+            )?))
+        } else {
+            None
+        };
 
         Ok(FileCacheEntry {
             blob_info: blob_info.clone(),
             chunk_map,
+            meta,
             metrics: mgr.metrics.clone(),
             reader,
             runtime,
@@ -227,11 +238,53 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn fetch(&self, offset: u64, size: u64) -> Result<usize> {
-        todo!()
-    }
+        let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
+        let bitmap = self.chunk_map.as_bitmap().ok_or_else(|| einval!())?;
 
-    fn read(&self, w: &mut dyn ZeroCopyWriter, offset: u64, size: u64) -> Result<usize> {
-        todo!()
+        // TODO: read amplify the range to naturally aligned 2M?
+        let chunks = meta.get_chunks(offset, size)?;
+        debug_assert!(chunks.len() > 0);
+        let chunk_index = chunks[0].id();
+        // Get chunks not ready yet, also marking them as inflight.
+        let ready = match bitmap.check_bitmap_ready(chunk_index, chunks.len() as u32)? {
+            None => return Ok(0),
+            Some(v) => {
+                if v.len() == 0 {
+                    return Ok(0);
+                }
+                v
+            }
+        };
+
+        let mut total_size = 0;
+        let mut start = 0;
+        while start < ready.len() {
+            let mut end = start + 1;
+            while end < ready.len() && ready[end] == ready[end - 1] + 1 {
+                end += 1;
+            }
+
+            let start_idx = (ready[start] - chunk_index) as usize;
+            let end_idx = start_idx + (end - start) - 1;
+            let blob_offset = chunks[start_idx].compress_offset();
+            let blob_end =
+                chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
+            let blob_size = (blob_end - blob_offset) as usize;
+            match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
+                Ok(l) => {
+                    total_size += blob_size;
+                    bitmap.set_bitmap_ready(ready[start], (end - start) as u32)?;
+                }
+                Err(e) => {
+                    bitmap.notify_bitmap_ready(ready[start], (end - start) as u32);
+                    return Err(e);
+                }
+            }
+
+            start = end;
+        }
+
+        Ok(total_size)
     }
 }
 

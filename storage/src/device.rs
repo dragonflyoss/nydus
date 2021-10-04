@@ -601,10 +601,6 @@ pub trait BlobObject: AsRawFd {
     /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
     /// for use.
     fn fetch(&self, offset: u64, size: u64) -> io::Result<usize>;
-
-    /// Read data from storage backend and make sure data range [offset, offset + size) is ready
-    /// for use.
-    fn read(&self, w: &mut dyn ZeroCopyWriter, offset: u64, size: u64) -> io::Result<usize>;
 }
 
 /// A wrapping object over an underlying [BlobCache] object.
