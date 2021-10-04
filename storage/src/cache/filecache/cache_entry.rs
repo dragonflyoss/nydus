@@ -8,6 +8,7 @@ use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::slice;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nix::sys::uio;
@@ -20,6 +21,9 @@ use vm_memory::VolatileSlice;
 use crate::backend::BlobReader;
 use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::filecache::FileCacheMgr;
+use crate::cache::worker::{
+    AsyncPrefetchConfig, AsyncRequestMessage, AsyncRequestState, AsyncWorkerMgr,
+};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
     BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment,
@@ -32,12 +36,15 @@ use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
 pub(crate) struct FileCacheEntry {
     blob_info: Arc<BlobInfo>,
     chunk_map: Arc<dyn ChunkMap>,
+    file: Arc<File>,
     meta: Option<Arc<BlobMetaInfo>>,
     metrics: Arc<BlobcacheMetrics>,
+    prefetch_state: Arc<AtomicU32>,
     reader: Arc<dyn BlobReader>,
     runtime: Arc<Runtime>,
-    file: Arc<File>,
-    size: u64,
+    workers: Arc<AsyncWorkerMgr>,
+
+    blob_size: u64,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
     // Whether `get_blob_object()` is supported.
@@ -50,13 +57,16 @@ pub(crate) struct FileCacheEntry {
     is_stargz: bool,
     // Data from the file cache should be validated before use.
     need_validate: bool,
+    prefetch_config: Arc<AsyncPrefetchConfig>,
 }
 
 impl FileCacheEntry {
     pub fn new(
         mgr: &FileCacheMgr,
-        blob_info: &Arc<BlobInfo>,
+        blob_info: Arc<BlobInfo>,
+        prefetch_config: Arc<AsyncPrefetchConfig>,
         runtime: Arc<Runtime>,
+        workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
         let file = OpenOptions::new()
@@ -65,22 +75,23 @@ impl FileCacheEntry {
             .read(true)
             .open(&blob_file_path)?;
         let (chunk_map, is_direct_chunkmap) =
-            Self::create_chunk_map(mgr, blob_info, &blob_file_path)?;
+            Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
         let reader = mgr
             .backend
             .get_reader(blob_info.blob_id())
             .map_err(|_e| eio!("failed to get blob reader"))?;
 
         // TODO: check blob size with blob.compressed_size()
-        let size = Self::get_blob_size(&reader, blob_info)?;
-        // TODO: prepare compression
-
+        let blob_size = Self::get_blob_size(&reader, &blob_info)?;
+        let compressor = blob_info.compressor();
+        let digester = blob_info.digester();
+        let is_stargz = blob_info.is_stargz();
         let is_get_blob_object_supported =
             !mgr.is_compressed && is_direct_chunkmap && !blob_info.is_stargz();
         let meta = if is_get_blob_object_supported {
             Some(Arc::new(BlobMetaInfo::new(
                 &blob_file_path,
-                blob_info,
+                &blob_info,
                 Some(&reader),
             )?))
         } else {
@@ -88,21 +99,25 @@ impl FileCacheEntry {
         };
 
         Ok(FileCacheEntry {
-            blob_info: blob_info.clone(),
+            blob_info,
             chunk_map,
+            file: Arc::new(file),
             meta,
             metrics: mgr.metrics.clone(),
+            prefetch_state: Arc::new(AtomicU32::new(AsyncRequestState::Init as u32)),
             reader,
             runtime,
-            file: Arc::new(file),
-            size,
-            compressor: blob_info.compressor(),
-            digester: blob_info.digester(),
+            workers,
+
+            blob_size,
+            compressor,
+            digester,
             is_get_blob_object_supported,
             is_compressed: mgr.is_compressed,
             is_direct_chunkmap,
-            is_stargz: blob_info.is_stargz(),
+            is_stargz,
             need_validate: mgr.validate,
+            prefetch_config,
         })
     }
 
@@ -149,7 +164,7 @@ impl BlobCache for FileCacheEntry {
     }
 
     fn blob_size(&self) -> Result<u64> {
-        Ok(self.size)
+        Ok(self.blob_size)
     }
 
     fn compressor(&self) -> compress::Algorithm {
@@ -190,28 +205,135 @@ impl BlobCache for FileCacheEntry {
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
-        todo!()
+        self.metrics.prefetch_unmerged_chunks.add(bios.len());
+        let mut bios = bios.to_vec();
+        bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
+
+        // Enable data prefetching
+        self.prefetch_state
+            .store(AsyncRequestState::Pending as u32, Ordering::Release);
+
+        // Handle blob prefetch request first, it may help performance.
+        for req in prefetches {
+            let msg = AsyncRequestMessage::new_blob_prefetch(
+                blob_cache.clone(),
+                self.prefetch_state.clone(),
+                req.offset as u64,
+                req.len as u64,
+            );
+            let _ = self.workers.send(msg);
+        }
+
+        // Then handle fs prefetch
+        let merging_size = self.prefetch_config.merging_size;
+        BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
+            let msg = AsyncRequestMessage::new_fs_prefetch(
+                blob_cache.clone(),
+                self.prefetch_state.clone(),
+                req,
+            );
+            let _ = self.workers.send(msg);
+        });
+
+        Ok(0)
     }
 
     fn stop_prefetch(&self) -> StorageResult<()> {
-        todo!()
+        self.prefetch_state
+            .store(AsyncRequestState::Cancelled as u32, Ordering::Release);
+
+        Ok(())
+    }
+
+    fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {
+        let mut pending = Vec::with_capacity(range.chunks.len());
+        if !self.chunk_map.is_persist() {
+            let mut d_size = 0;
+            for c in range.chunks.iter() {
+                d_size = std::cmp::max(d_size, c.uncompress_size() as usize);
+            }
+            let mut buf = alloc_buf(d_size);
+
+            for c in range.chunks.iter() {
+                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_base()) {
+                    // The chunk is ready, so skip it.
+                    continue;
+                }
+
+                // For digested chunk map, we must check whether the cached data is valid because
+                // the digested chunk map cannot persist readiness state.
+                let d_size = c.uncompress_size() as usize;
+                match self.read_raw_chunk(c, &mut buf[0..d_size], true, None) {
+                    Ok(_v) => {
+                        // The cached data is valid, set the chunk as ready.
+                        let _ = self
+                            .chunk_map
+                            .set_ready_and_clear_pending(c.as_base())
+                            .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
+                    }
+                    Err(_e) => {
+                        // The cached data is invalid, queue the chunk for reading from backend.
+                        pending.push(c.clone());
+                    }
+                }
+            }
+        } else {
+            for c in range.chunks.iter() {
+                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_base()) {
+                    // The chunk is ready, so skip it.
+                    continue;
+                } else {
+                    pending.push(c.clone());
+                }
+            }
+        }
+
+        let mut total_size = 0;
+        let mut start = 0;
+        while start < pending.len() {
+            let mut end = start + 1;
+            while end < pending.len() && pending[end].id() == pending[end - 1].id() + 1 {
+                end += 1;
+            }
+
+            // Find a range with continuous chunk id
+            let blob_offset = pending[start].compress_offset();
+            let blob_end = pending[end].compress_offset() + pending[end].compress_size() as u64;
+            let blob_size = (blob_end - blob_offset) as usize;
+            match self.read_chunks(blob_offset, blob_size, &pending[start..end]) {
+                Ok(v) => {
+                    total_size += blob_size;
+                    for idx in start..end {
+                        let offset = if self.is_compressed {
+                            pending[idx].compress_offset()
+                        } else {
+                            pending[idx].uncompress_offset()
+                        };
+                        match Self::persist_chunk(self.file.clone(), offset, &v[idx - start]) {
+                            Ok(_) => {
+                                let _ = self.chunk_map.set_ready_and_clear_pending(&pending[idx]);
+                            }
+                            Err(_) => self.chunk_map.clear_pending(&pending[idx]),
+                        }
+                    }
+                }
+                Err(_e) => {
+                    for idx in start..end {
+                        self.chunk_map.clear_pending(&pending[idx]);
+                    }
+                }
+            }
+
+            start = end;
+        }
+
+        Ok(total_size)
     }
 
     fn read(&self, iovec: &BlobIoVec, buffers: &[VolatileSlice]) -> Result<usize> {
         debug_assert!(iovec.validate());
         self.metrics.total.inc();
-
-        /*
-        // Try to get rid of effect from prefetch.
-        if self.prefetch_ctx.is_working() {
-            if let Some(ref limiter) = self.limiter {
-                if let Some(v) = NonZeroU32::new(bufs.len() as u32) {
-                    // Even fails in getting tokens, continue to read
-                    limiter.check_n(v).unwrap_or(());
-                }
-            }
-        }
-         */
+        self.workers.consume_prefetch_budget(buffers);
 
         // TODO: Single bio optimization here? So we don't have to involve other management
         // structures.
@@ -296,7 +418,7 @@ impl FileCacheEntry {
                 chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
             match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
-                Ok(l) => {
+                Ok(_v) => {
                     total_size += blob_size;
                     bitmap
                         .set_bitmap_ready_and_clear_pending(pending[start], (end - start) as u32)?;
@@ -671,37 +793,6 @@ impl FileCacheEntry {
 
         Ok(())
     }
-
-    /*
-    fn generate_merged_requests_for_prefetch(
-        &self,
-        bios: &mut [BlobIoDesc],
-        tx: &mut spmc::Sender<MergedBackendRequest>,
-        merging_size: usize,
-    ) {
-        let limiter = |merged_size: u32| {
-            if let Some(ref limiter) = self.limiter {
-                let cells = NonZeroU32::new(merged_size).unwrap();
-                if let Err(e) = limiter
-                    .check_n(cells)
-                    .or_else(|_| block_on(limiter.until_n_ready(cells)))
-                {
-                    // `InsufficientCapacity` is the only possible error
-                    // Have to give up to avoid dead-loop
-                    error!("{}: give up rate-limiting", e);
-                }
-            }
-        };
-
-            bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
-
-        self.merge_and_issue(bios, merging_size, true, &mut |mr: MergedBackendRequest| {
-            limiter(mr.blob_size);
-            // Safe to unwrap because channel won't be closed.
-            tx.send(mr).unwrap();
-        })
-    }
-    */
 
     fn merge_requests_for_user(
         &self,

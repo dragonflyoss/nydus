@@ -12,14 +12,13 @@ use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
 
 use self::cache_entry::FileCacheEntry;
-use self::prefetch::PrefetchContext;
 use crate::backend::BlobBackend;
+use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::BlobInfo;
 use crate::factory::CacheConfig;
 
 mod cache_entry;
-mod prefetch;
 
 fn default_work_dir() -> String {
     ".".to_string()
@@ -65,8 +64,9 @@ pub struct FileCacheMgr {
     blobs: Arc<RwLock<HashMap<String, Arc<FileCacheEntry>>>>,
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
-    prefetch_ctx: Arc<PrefetchContext>,
+    prefetch_config: Arc<AsyncPrefetchConfig>,
     runtime: Arc<Runtime>,
+    worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
     validate: bool,
     disable_indexed_map: bool,
@@ -85,13 +85,16 @@ impl FileCacheMgr {
         let work_dir = blob_config.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
         let runtime = Arc::new(Runtime::new().map_err(|e| eother!(e))?);
+        let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
+        let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         Ok(FileCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
             backend,
             metrics,
-            prefetch_ctx: Arc::new(config.prefetch_config.into()),
+            prefetch_config,
             runtime,
+            worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             disable_indexed_map: blob_config.disable_indexed_map,
             validate: config.cache_validate,
@@ -115,7 +118,13 @@ impl FileCacheMgr {
             return Ok(entry);
         }
 
-        let entry = FileCacheEntry::new(&self, blob, self.runtime.clone())?;
+        let entry = FileCacheEntry::new(
+            &self,
+            blob.clone(),
+            self.prefetch_config.clone(),
+            self.runtime.clone(),
+            self.worker_mgr.clone(),
+        )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
         if let Some(entry) = guard.get(blob.blob_id()) {
@@ -134,10 +143,11 @@ impl FileCacheMgr {
 
 impl BlobCacheMgr for FileCacheMgr {
     fn init(&self) -> Result<()> {
-        Ok(())
+        AsyncWorkerMgr::start(self.worker_mgr.clone())
     }
 
     fn destroy(&self) {
+        self.worker_mgr.stop();
         self.backend().shutdown();
         self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
     }
@@ -175,64 +185,6 @@ impl BlobCacheMgr for FileCacheMgr {
     }
 }
 
-/*
-mod v5 {
-    use super::*;
-    use crate::cache::v5::{BlobV5Cache, MergedBackendRequest};
-    use crate::device::v5::BlobV5ChunkInfo;
-
-    impl BlobV5Cache for FileCacheMgr {
-        fn is_chunk_cached(&self, chunk: &dyn BlobV5ChunkInfo, blob: &BlobInfo) -> bool {
-            let cache_guard = self.cache.read().unwrap();
-            if let Some(entry) = cache_guard.get(blob) {
-                entry
-                    .chunk_map
-                    .is_ready_nowait(chunk.as_base())
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        }
-
-        //<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        fn prefetch(&self, bios: &mut [BlobIoDesc]) -> StorageResult<usize> {
-            panic!("todo");
-            /*
-            let merging_size = self.prefetch_ctx.merging_size;
-            self.metrics.prefetch_unmerged_chunks.add(bios.len());
-
-            if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
-                self.generate_merged_requests_for_prefetch(bios, mr_sender, merging_size);
-            }
-
-            Ok(0)
-             */
-        }
-
-        fn stop_prefetch(&self) -> StorageResult<()> {
-            if let Some(s) = self.mr_sender.lock().unwrap().take() {
-                drop(s);
-            }
-
-            let mut guard = self
-                .prefetch_ctx
-                .prefetch_threads
-                .lock()
-                .expect("Not expect poisoned lock");
-            let threads = guard.deref_mut();
-
-            while let Some(t) = threads.pop() {
-                t.join()
-                    .unwrap_or_else(|e| error!("Thread might panic, {:?}", e));
-            }
-
-            Ok(())
-        }
-        //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    }
-}
- */
-
 #[cfg(test)]
 pub mod blob_cache_tests {
     /*
@@ -258,20 +210,10 @@ pub mod blob_cache_tests {
     };
     */
 
-    use std::alloc::Layout;
-    use std::slice::from_raw_parts;
-
-    use nydus_utils::digest::RafsDigest;
-    use nydus_utils::metrics::BackendMetrics;
-    use vm_memory::VolatileSlice;
     use vmm_sys_util::tempdir::TempDir;
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
-    use crate::cache::BlobPrefetchConfig;
-    use crate::device::BlobIoDesc;
-    use crate::test::{MockBackend, MockChunkInfo};
-    use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
     #[test]
     fn test_blob_cache_config() {

@@ -548,11 +548,6 @@ impl Rafs {
                 info!("No file to be prefetched {:?}", e);
             });
         }
-
-        // For now, we only have hinted prefetch. So stopping prefetch workers once
-        // it's done is Okay. But if we involve more policies someday, we have to be
-        // careful when to stop prefetch progresses.
-        device.stop_prefetch();
     }
 
     fn convert_file_list(files: &[PathBuf], sb: &Arc<RafsSuper>) -> Vec<Inode> {
