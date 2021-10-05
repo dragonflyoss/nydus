@@ -245,18 +245,18 @@ impl BlobObject for FileCacheEntry {
         let chunks = meta.get_chunks(offset, size)?;
         debug_assert!(chunks.len() > 0);
         let chunk_index = chunks[0].id();
+        let count = chunks.len() as u32;
 
         // Get chunks not ready yet, also marking them as inflight.
-        let ready =
-            match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, chunks.len() as u32)? {
-                None => return Ok(0),
-                Some(v) => {
-                    if v.len() == 0 {
-                        return Ok(0);
-                    }
-                    v
+        let ready = match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, count)? {
+            None => return Ok(0),
+            Some(v) => {
+                if v.len() == 0 {
+                    return Ok(0);
                 }
-            };
+                v
+            }
+        };
 
         let mut total_size = 0;
         let mut start = 0;
@@ -287,7 +287,11 @@ impl BlobObject for FileCacheEntry {
             start = end;
         }
 
-        Ok(total_size)
+        if !bitmap.wait_for_bitmap_ready(chunk_index, count)? {
+            Err(eio!("failed to read data from storage backend"))
+        } else {
+            Ok(total_size)
+        }
     }
 }
 
