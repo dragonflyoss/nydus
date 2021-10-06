@@ -27,6 +27,7 @@ use nydus_utils::digest;
 use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
+use crate::cache::chunkmap::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
@@ -96,6 +97,8 @@ impl BlobIoTag {
 /// due to high request round-trip time, but have enough network bandwidth. In such cases,
 /// it may help to improve performance by merging multiple continuous and small blob IO
 /// requests into one big backend request.
+///
+/// A `BlobIoMerged` request targets a continuous range of a single blob.
 #[derive(Default, Clone)]
 struct BlobIoMerged {
     pub blob_info: Arc<BlobInfo>,
@@ -261,13 +264,13 @@ pub trait BlobCache: Send + Sync {
     /// Get the [BlobReader](../backend/trait.BlobReader.html) to read data from storage backend.
     fn reader(&self) -> &dyn BlobReader;
 
+    /// Get the underlying `ChunkMap` object.
+    fn get_chunk_map(&self) -> &Arc<dyn ChunkMap>;
+
     /// Get a `BlobObject` instance to directly access uncompressed blob file.
     fn get_blob_object(&self) -> Option<&dyn BlobObject> {
         None
     }
-
-    /// Check whether data of a chunk has been cached and ready for use.
-    fn is_chunk_ready(&self, chunk: &dyn BlobChunkInfo) -> bool;
 
     /// Start to prefetch requested data in background.
     fn prefetch(
@@ -449,9 +452,10 @@ pub trait BlobCacheMgr: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::device::BlobChunkFlags;
     use crate::test::MockChunkInfo;
+
+    use super::*;
 
     #[test]
     fn test_io_merge_state_new() {

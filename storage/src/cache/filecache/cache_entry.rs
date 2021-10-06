@@ -172,16 +172,16 @@ impl BlobCache for FileCacheEntry {
         &*self.reader
     }
 
+    fn get_chunk_map(&self) -> &Arc<dyn ChunkMap> {
+        &self.chunk_map
+    }
+
     fn get_blob_object(&self) -> Option<&dyn BlobObject> {
         if self.is_get_blob_object_supported {
             Some(self)
         } else {
             None
         }
-    }
-
-    fn is_chunk_ready(&self, chunk: &dyn BlobChunkInfo) -> bool {
-        self.chunk_map.is_ready(chunk).unwrap_or(false)
     }
 
     fn prefetch(

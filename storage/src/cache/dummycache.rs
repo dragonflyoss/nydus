@@ -25,6 +25,7 @@ use nydus_utils::digest;
 use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
+use crate::cache::chunkmap::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
 use crate::factory::CacheConfig;
@@ -33,6 +34,7 @@ use crate::{compress, StorageError, StorageResult};
 
 struct DummyCache {
     blob_id: String,
+    chunk_map: Arc<dyn ChunkMap>,
     reader: Arc<dyn BlobReader>,
     cached: bool,
     compressor: compress::Algorithm,
@@ -71,8 +73,8 @@ impl BlobCache for DummyCache {
         &*self.reader
     }
 
-    fn is_chunk_ready(&self, _chunk: &dyn BlobChunkInfo) -> bool {
-        self.cached
+    fn get_chunk_map(&self) -> &Arc<dyn ChunkMap> {
+        &self.chunk_map
     }
 
     fn prefetch(
@@ -200,6 +202,7 @@ impl BlobCacheMgr for DummyCacheMgr {
 
         Ok(Arc::new(DummyCache {
             blob_id,
+            chunk_map: Arc::new(NoopChunkMap::new(self.cached)),
             reader,
             cached: self.cached,
             compressor: blob_info.compressor(),
