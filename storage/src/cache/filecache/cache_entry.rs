@@ -181,7 +181,7 @@ impl BlobCache for FileCacheEntry {
     }
 
     fn is_chunk_ready(&self, chunk: &dyn BlobChunkInfo) -> bool {
-        self.chunk_map.is_ready_nowait(chunk).unwrap_or(false)
+        self.chunk_map.is_ready(chunk).unwrap_or(false)
     }
 
     fn prefetch(
@@ -245,16 +245,18 @@ impl BlobObject for FileCacheEntry {
         let chunks = meta.get_chunks(offset, size)?;
         debug_assert!(chunks.len() > 0);
         let chunk_index = chunks[0].id();
+
         // Get chunks not ready yet, also marking them as inflight.
-        let ready = match bitmap.check_bitmap_ready(chunk_index, chunks.len() as u32)? {
-            None => return Ok(0),
-            Some(v) => {
-                if v.len() == 0 {
-                    return Ok(0);
+        let ready =
+            match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, chunks.len() as u32)? {
+                None => return Ok(0),
+                Some(v) => {
+                    if v.len() == 0 {
+                        return Ok(0);
+                    }
+                    v
                 }
-                v
-            }
-        };
+            };
 
         let mut total_size = 0;
         let mut start = 0;
@@ -273,10 +275,11 @@ impl BlobObject for FileCacheEntry {
             match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
                 Ok(l) => {
                     total_size += blob_size;
-                    bitmap.set_bitmap_ready(ready[start], (end - start) as u32)?;
+                    bitmap
+                        .set_bitmap_ready_and_clear_pending(ready[start], (end - start) as u32)?;
                 }
                 Err(e) => {
-                    bitmap.notify_bitmap_ready(ready[start], (end - start) as u32);
+                    bitmap.clear_bitmap_pending(ready[start], (end - start) as u32);
                     return Err(e);
                 }
             }
@@ -310,7 +313,9 @@ impl FileCacheEntry {
         for req in requests {
             debug!("A merged request {:?}", req);
             for (i, chunk) in req.chunks.iter().enumerate() {
-                let is_ready = self.chunk_map.is_ready(chunk.as_base(), true)?;
+                let is_ready = self
+                    .chunk_map
+                    .check_ready_and_mark_pending(chunk.as_base())?;
 
                 // Directly read data from the file cache into the user buffer iff:
                 // - the chunk is ready in the file cache
@@ -344,7 +349,7 @@ impl FileCacheEntry {
                         )?;
                     } else {
                         // On slow path, don't try to handle internal(read amplification) IO.
-                        self.chunk_map.notify_ready(chunk.as_base());
+                        self.chunk_map.clear_pending(chunk.as_base());
                     }
                 } else {
                     let tag = if let BlobIoTag::User(ref s) = req.tags[i] {
@@ -408,7 +413,7 @@ impl FileCacheEntry {
         if !region.has_user_io() {
             debug!("No user data");
             for c in &region.chunks {
-                self.chunk_map.notify_ready(c.as_base());
+                self.chunk_map.clear_pending(c.as_base());
             }
             return Ok(0);
         } else if region.chunks.len() == 0 {
@@ -463,7 +468,7 @@ impl FileCacheEntry {
         self.runtime.spawn(async move {
             match Self::persist_chunk(file, offset, buffer.slice()) {
                 Ok(_) => delayed_chunk_map
-                    .set_ready(chunk_info.as_base())
+                    .set_ready_and_clear_pending(chunk_info.as_base())
                     .unwrap_or_else(|e| {
                         error!(
                             "Failed change caching state for chunk of offset {}, {:?}",
@@ -477,7 +482,7 @@ impl FileCacheEntry {
                         chunk_info.compress_offset(),
                         e
                     );
-                    delayed_chunk_map.notify_ready(chunk_info.as_base())
+                    delayed_chunk_map.clear_pending(chunk_info.as_base())
                 }
             }
         });
@@ -523,12 +528,15 @@ impl FileCacheEntry {
         let buffer_holder;
         let d_size = chunk.uncompress_size() as usize;
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
-        let is_ready = self.chunk_map.is_ready(chunk.as_base(), false)?;
+        let is_ready = self
+            .chunk_map
+            .check_ready_and_mark_pending(chunk.as_base())?;
         let try_cache = self.is_stargz || !self.is_direct_chunkmap || is_ready;
 
         let buffer = if try_cache && self.read_file_cache(chunk, d.mut_slice()).is_ok() {
             self.metrics.whole_hits.inc();
-            self.chunk_map.set_ready(chunk.as_base())?;
+            self.chunk_map
+                .set_ready_and_clear_pending(chunk.as_base())?;
             trace!(
                 "recover blob cache {} {} offset {} size {}",
                 chunk.id(),
@@ -550,12 +558,12 @@ impl FileCacheEntry {
                 |buffer: &[u8]| match Self::persist_chunk(file.clone(), offset, buffer) {
                     Ok(_) => {
                         delayed_chunk_map
-                            .set_ready(chunk.as_base())
+                            .set_ready_and_clear_pending(chunk.as_base())
                             .unwrap_or_else(|e| error!("set ready failed, {}", e));
                     }
                     Err(e) => {
                         error!("Failed in writing compressed blob cache index, {}", e);
-                        delayed_chunk_map.notify_ready(chunk.as_base())
+                        delayed_chunk_map.clear_pending(chunk.as_base())
                     }
                 };
             self.read_raw_chunk(chunk, d.mut_slice(), Some(&persist_compressed))?;
@@ -679,7 +687,6 @@ impl FileCacheEntry {
         }
     }
 }
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 /// An enum to reuse existing buffers for IO operations, and CoW on demand.
 #[allow(dead_code)]

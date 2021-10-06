@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use nydus_utils::div_round_up;
 
-use super::ChunkMap;
-use crate::cache::chunkmap::{ChunkBitmap, ChunkIndexGetter, NoWaitSupport};
+use crate::cache::chunkmap::{ChunkBitmap, ChunkIndexGetter, ChunkMap};
 use crate::device::BlobChunkInfo;
 use crate::utils::readahead;
 
@@ -298,14 +297,17 @@ unsafe impl Send for IndexedChunkMap {}
 
 unsafe impl Sync for IndexedChunkMap {}
 
-impl NoWaitSupport for IndexedChunkMap {}
-
 impl ChunkMap for IndexedChunkMap {
-    fn is_ready(&self, chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
-        self.is_bitmap_ready(chunk.id())
+    fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
+        if self.is_bitmap_all_ready() {
+            Ok(true)
+        } else {
+            let index = self.validate_index(chunk.id())?;
+            Ok(self.is_chunk_ready(index).0)
+        }
     }
 
-    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
+    fn set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         self.set_chunk_ready(chunk.id())
     }
 
@@ -320,27 +322,25 @@ impl ChunkBitmap for IndexedChunkMap {
         self.not_ready_count.load(Ordering::Acquire) == 0
     }
 
-    fn is_bitmap_ready(&self, chunk_index: u32) -> Result<bool> {
-        if self.is_bitmap_all_ready() {
-            Ok(true)
-        } else {
-            let index = self.validate_index(chunk_index)?;
-            Ok(self.is_chunk_ready(index).0)
-        }
-    }
-
-    fn set_bitmap_ready(&self, start_index: u32, count: u32) -> Result<()> {
-        let count = std::cmp::min(count, u32::MAX - start_index);
-        let end = start_index + count;
-
-        for index in start_index..end {
-            self.set_chunk_ready(index)?;
+    fn is_bitmap_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+        if !self.is_bitmap_all_ready() {
+            for idx in 0..count {
+                let index =
+                    self.validate_index(start_index.checked_add(idx).ok_or_else(|| einval!())?)?;
+                if !self.is_chunk_ready(index).0 {
+                    return Ok(false);
+                }
+            }
         }
 
-        Ok(())
+        Ok(true)
     }
 
-    fn check_bitmap_ready(&self, start_index: u32, count: u32) -> Result<Option<Vec<u32>>> {
+    fn check_bitmap_ready_and_mark_pending(
+        &self,
+        start_index: u32,
+        count: u32,
+    ) -> Result<Option<Vec<u32>>> {
         if self.is_bitmap_all_ready() {
             return Ok(None);
         }
@@ -360,6 +360,17 @@ impl ChunkBitmap for IndexedChunkMap {
         } else {
             Ok(Some(vec))
         }
+    }
+
+    fn set_bitmap_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
+        let count = std::cmp::min(count, u32::MAX - start_index);
+        let end = start_index + count;
+
+        for index in start_index..end {
+            self.set_chunk_ready(index)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -438,9 +449,9 @@ mod tests {
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
         assert_eq!(map.is_bitmap_all_ready(), false);
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
-        map.set_ready(chunk.as_base()).unwrap();
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), false);
+        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
     }
 
     #[test]
@@ -474,9 +485,9 @@ mod tests {
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
         assert_eq!(map.is_bitmap_all_ready(), false);
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
-        map.set_ready(chunk.as_base()).unwrap();
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), false);
+        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
     }
 
     #[test]
@@ -519,9 +530,9 @@ mod tests {
         assert_eq!(map.is_bitmap_all_ready(), true);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
-        map.set_ready(chunk.as_base()).unwrap();
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
+        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
     }
 
     #[test]
@@ -565,8 +576,8 @@ mod tests {
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
         assert_eq!(map.is_bitmap_all_ready(), false);
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), false);
-        map.set_ready(chunk.as_base()).unwrap();
-        assert_eq!(map.is_ready_nowait(chunk.as_base()).unwrap(), true);
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), false);
+        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
     }
 }

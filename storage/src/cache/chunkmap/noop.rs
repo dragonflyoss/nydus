@@ -8,7 +8,7 @@
 //! as always ready to use. It may be used to support disk based backend storage.
 use std::io::Result;
 
-use super::{ChunkIndexGetter, ChunkMap, NoWaitSupport};
+use crate::cache::chunkmap::{ChunkIndexGetter, ChunkMap};
 use crate::device::BlobChunkInfo;
 
 /// A dummy implementation of [ChunkMap](../trait.ChunkMap.html).
@@ -16,26 +16,26 @@ use crate::device::BlobChunkInfo;
 /// The `NoopChunkMap` is an dummy implementation of [ChunkMap](../trait.ChunkMap.html), which just
 /// reports every chunk as always ready to use. It may be used to support disk based backend
 /// storage.
-pub struct NoopChunkMap {}
+pub struct NoopChunkMap {
+    cached: bool,
+}
 
 impl NoopChunkMap {
     /// Create a new instance of `NoopChunkMap`.
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(cached: bool) -> Self {
+        Self { cached }
     }
 }
 
 impl ChunkMap for NoopChunkMap {
-    fn is_ready(&self, _chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
-        Ok(true)
+    fn is_ready(&self, _chunk: &dyn BlobChunkInfo) -> Result<bool> {
+        Ok(self.cached)
     }
 
-    fn set_ready(&self, _chunk: &dyn BlobChunkInfo) -> Result<()> {
+    fn set_ready_and_clear_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<()> {
         Ok(())
     }
 }
-
-impl NoWaitSupport for NoopChunkMap {}
 
 impl ChunkIndexGetter for NoopChunkMap {
     type Index = u32;

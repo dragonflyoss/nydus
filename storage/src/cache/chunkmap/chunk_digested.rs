@@ -15,8 +15,7 @@ use std::sync::RwLock;
 
 use nydus_utils::digest::RafsDigest;
 
-use super::ChunkMap;
-use crate::cache::chunkmap::{ChunkIndexGetter, NoWaitSupport};
+use crate::cache::chunkmap::{ChunkIndexGetter, ChunkMap};
 use crate::device::BlobChunkInfo;
 
 /// An implementation of [ChunkMap](../trait.ChunkMap.html) to support chunk state tracking by using
@@ -42,19 +41,16 @@ impl DigestedChunkMap {
 }
 
 impl ChunkMap for DigestedChunkMap {
-    fn is_ready(&self, chunk: &dyn BlobChunkInfo, _wait: bool) -> Result<bool> {
-        // Do not expect poisoned lock.
+    fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
         Ok(self.cache.read().unwrap().contains(chunk.chunk_id()))
     }
 
-    fn set_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
+    fn set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         // Do not expect poisoned lock.
         self.cache.write().unwrap().insert(*chunk.chunk_id());
         Ok(())
     }
 }
-
-impl NoWaitSupport for DigestedChunkMap {}
 
 impl ChunkIndexGetter for DigestedChunkMap {
     type Index = RafsDigest;
