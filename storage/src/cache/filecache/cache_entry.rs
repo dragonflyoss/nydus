@@ -237,18 +237,40 @@ impl BlobObject for FileCacheEntry {
         }
     }
 
-    fn fetch(&self, offset: u64, size: u64) -> Result<usize> {
+    fn fetch_range(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
-        let bitmap = self.chunk_map.as_bitmap().ok_or_else(|| einval!())?;
 
         // TODO: read amplify the range to naturally aligned 2M?
         let chunks = meta.get_chunks(offset, size)?;
         debug_assert!(chunks.len() > 0);
+
+        self.do_fetch_chunks(&chunks)
+    }
+
+    fn fetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
+        let chunks = &range.chunks;
+        if chunks.len() == 0 {
+            return Ok(0);
+        }
+
+        for idx in 1..chunks.len() {
+            if chunks[idx - 1].id() + 1 != chunks[idx].id() {
+                return Err(einval!("chunks for fetch_chunks() must be continuous"));
+            }
+        }
+
+        self.do_fetch_chunks(&chunks)
+    }
+}
+
+impl FileCacheEntry {
+    fn do_fetch_chunks(&self, chunks: &[BlobIoChunk]) -> Result<usize> {
+        let bitmap = self.chunk_map.as_bitmap().ok_or_else(|| einval!())?;
         let chunk_index = chunks[0].id();
         let count = chunks.len() as u32;
 
         // Get chunks not ready yet, also marking them as inflight.
-        let ready = match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, count)? {
+        let pending = match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, count)? {
             None => return Ok(0),
             Some(v) => {
                 if v.len() == 0 {
@@ -260,13 +282,13 @@ impl BlobObject for FileCacheEntry {
 
         let mut total_size = 0;
         let mut start = 0;
-        while start < ready.len() {
+        while start < pending.len() {
             let mut end = start + 1;
-            while end < ready.len() && ready[end] == ready[end - 1] + 1 {
+            while end < pending.len() && pending[end] == pending[end - 1] + 1 {
                 end += 1;
             }
 
-            let start_idx = (ready[start] - chunk_index) as usize;
+            let start_idx = (pending[start] - chunk_index) as usize;
             let end_idx = start_idx + (end - start) - 1;
             let blob_offset = chunks[start_idx].compress_offset();
             let blob_end =
@@ -276,10 +298,10 @@ impl BlobObject for FileCacheEntry {
                 Ok(l) => {
                     total_size += blob_size;
                     bitmap
-                        .set_bitmap_ready_and_clear_pending(ready[start], (end - start) as u32)?;
+                        .set_bitmap_ready_and_clear_pending(pending[start], (end - start) as u32)?;
                 }
                 Err(e) => {
-                    bitmap.clear_bitmap_pending(ready[start], (end - start) as u32);
+                    bitmap.clear_bitmap_pending(pending[start], (end - start) as u32);
                     return Err(e);
                 }
             }
