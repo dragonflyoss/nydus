@@ -20,7 +20,7 @@
 //!   one or more blob IO descriptors
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
 use std::cmp;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::io::{self, Error};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -572,6 +572,123 @@ impl BlobIoVec {
         }
 
         true
+    }
+}
+
+/// A segment representing a continuous range for a blob IO operation.
+#[derive(Clone, Debug, Default)]
+pub struct BlobIoSegment {
+    /// Start position of the range within the chunk
+    pub offset: u32,
+    /// Size of the range within the chunk
+    pub len: u32,
+}
+
+impl BlobIoSegment {
+    /// Create a new instance of `ChunkSegment`.
+    pub fn new(offset: u32, len: u32) -> Self {
+        Self { offset, len }
+    }
+
+    #[inline]
+    pub fn append(&mut self, _offset: u32, len: u32) {
+        debug_assert!(self.offset + self.len == _offset);
+        debug_assert!(_offset.checked_add(len).is_some());
+        debug_assert!((self.offset + self.len).checked_add(len).is_some());
+
+        self.len += len;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.offset == 0 && self.len == 0
+    }
+}
+
+/// Struct to maintain information about blob IO operation.
+#[derive(Clone, Debug)]
+pub enum BlobIoTag {
+    /// Io requests to fulfill user requests.
+    User(BlobIoSegment),
+    /// Io requests to fulfill internal requirements.
+    Internal(u64),
+}
+
+impl BlobIoTag {
+    /// Check whether the tag is a user issued io request.
+    pub fn is_user_io(&self) -> bool {
+        match self {
+            BlobIoTag::User(_) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Struct to representing multiple continuous blob IO as one storage backend request.
+///
+/// For network based remote storage backend, such as Registry/OS, it may have limited IOPs
+/// due to high request round-trip time, but have enough network bandwidth. In such cases,
+/// it may help to improve performance by merging multiple continuous and small blob IO
+/// requests into one big backend request.
+///
+/// A `BlobIoMerged` request targets a continuous range of a single blob.
+#[derive(Default, Clone)]
+pub struct BlobIoRange {
+    pub blob_info: Arc<BlobInfo>,
+    pub blob_offset: u64,
+    pub blob_size: u64,
+    pub chunks: Vec<BlobIoChunk>,
+    pub tags: Vec<BlobIoTag>,
+}
+
+impl Debug for BlobIoRange {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        f.debug_struct("ChunkIoMerged")
+            .field("blob id", &self.blob_info.blob_id())
+            .field("blob offset", &self.blob_offset)
+            .field("blob size", &self.blob_size)
+            .field("tags", &self.tags)
+            .finish()
+    }
+}
+
+impl BlobIoRange {
+    /// Create a new instance of `BlobIoRange`.
+    pub fn new(bio: &BlobIoDesc, capacity: usize) -> Self {
+        let blob_size = bio.chunkinfo.compress_size() as u64;
+        let blob_offset = bio.chunkinfo.compress_offset();
+        assert!(blob_offset.checked_add(blob_size).is_some());
+
+        let mut chunks = Vec::with_capacity(capacity);
+        let mut tags = Vec::with_capacity(capacity);
+        tags.push(Self::tag_from_desc(bio));
+        chunks.push(bio.chunkinfo.clone());
+
+        BlobIoRange {
+            blob_info: bio.blob.clone(),
+            blob_offset,
+            blob_size,
+            chunks,
+            tags,
+        }
+    }
+
+    /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
+    pub fn merge(&mut self, bio: &BlobIoDesc) {
+        self.tags.push(Self::tag_from_desc(bio));
+        self.chunks.push(bio.chunkinfo.clone());
+        debug_assert!(
+            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compress_offset())
+        );
+        self.blob_size += bio.chunkinfo.compress_size() as u64;
+        debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
+    }
+
+    fn tag_from_desc(bio: &BlobIoDesc) -> BlobIoTag {
+        if bio.user_io {
+            BlobIoTag::User(BlobIoSegment::new(bio.offset, bio.size as u32))
+        } else {
+            BlobIoTag::Internal(bio.chunkinfo.compress_offset())
+        }
     }
 }
 

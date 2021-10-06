@@ -20,10 +20,10 @@ use vm_memory::VolatileSlice;
 use crate::backend::BlobReader;
 use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::filecache::FileCacheMgr;
-use crate::cache::{BlobCache, BlobIoMergeState, BlobIoMerged, BlobIoSegment, BlobIoTag};
+use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
-    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec, BlobObject,
-    BlobPrefetchRequest,
+    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment,
+    BlobIoTag, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::meta::BlobMetaInfo;
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
@@ -684,10 +684,10 @@ impl FileCacheEntry {
         &self,
         bios: &[BlobIoDesc],
         merging_size: usize,
-    ) -> Option<Vec<BlobIoMerged>> {
-        let mut requests: Vec<BlobIoMerged> = Vec::with_capacity(bios.len());
+    ) -> Option<Vec<BlobIoRange>> {
+        let mut requests: Vec<BlobIoRange> = Vec::with_capacity(bios.len());
 
-        BlobIoMergeState::merge_and_issue(bios, merging_size, |mr: BlobIoMerged| {
+        BlobIoMergeState::merge_and_issue(bios, merging_size, |mr: BlobIoRange| {
             requests.push(mr);
         });
 
