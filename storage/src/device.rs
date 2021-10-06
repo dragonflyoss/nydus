@@ -830,14 +830,14 @@ impl BlobDevice {
         for idx in 0..prefetches.len() {
             if let Some(blob) = self.get_blob_by_id(&prefetches[idx].blob_id) {
                 let _ = blob
-                    .prefetch(&prefetches[idx..idx + 1], &[])
+                    .prefetch(blob.clone(), &prefetches[idx..idx + 1], &[])
                     .map_err(|_e| eio!("failed to prefetch blob data"));
             }
         }
         for io_vec in io_vecs.iter() {
             if let Some(blob) = self.get_blob_by_iovec(io_vec) {
                 let _ = blob
-                    .prefetch(&[], &io_vec.bi_vec)
+                    .prefetch(blob.clone(), &[], &io_vec.bi_vec)
                     .map_err(|_e| eio!("failed to prefetch blob data"));
             }
         }

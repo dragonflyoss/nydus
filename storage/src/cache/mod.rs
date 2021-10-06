@@ -17,7 +17,6 @@
 //!   configuration.
 
 use std::cmp;
-use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::Result;
 use std::slice;
@@ -162,6 +161,7 @@ pub trait BlobCache: Send + Sync {
     /// Start to prefetch requested data in background.
     fn prefetch(
         &self,
+        cache: Arc<dyn BlobCache>,
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize>;

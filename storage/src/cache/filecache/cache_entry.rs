@@ -186,6 +186,7 @@ impl BlobCache for FileCacheEntry {
 
     fn prefetch(
         &self,
+        blob_cache: Arc<dyn BlobCache>,
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {

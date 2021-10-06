@@ -79,11 +79,13 @@ impl BlobCache for DummyCache {
 
     fn prefetch(
         &self,
+        _blob_cache: Arc<dyn BlobCache>,
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
         if self.prefetch {
             let mut cnt = 0usize;
+            // TODO: check the logic below
             for p in prefetches.iter() {
                 if self
                     .reader
