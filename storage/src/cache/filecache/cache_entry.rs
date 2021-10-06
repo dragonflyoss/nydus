@@ -550,7 +550,7 @@ impl FileCacheEntry {
             );
             &d
         } else if !self.is_compressed {
-            self.read_raw_chunk(chunk, d.mut_slice(), None)?;
+            self.read_raw_chunk(chunk, d.mut_slice(), false, None)?;
             buffer_holder = Arc::new(d.to_owned());
             self.delay_persist(chunk.clone(), buffer_holder.clone());
             buffer_holder.as_ref()
@@ -570,7 +570,7 @@ impl FileCacheEntry {
                         delayed_chunk_map.clear_pending(chunk.as_base())
                     }
                 };
-            self.read_raw_chunk(chunk, d.mut_slice(), Some(&persist_compressed))?;
+            self.read_raw_chunk(chunk, d.mut_slice(), false, Some(&persist_compressed))?;
             &d
         };
 
@@ -637,7 +637,14 @@ impl FileCacheEntry {
         }
 
         // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(chunk, raw_buffer, raw_stream, buffer, self.is_compressed)?;
+        self.process_raw_chunk(
+            chunk,
+            raw_buffer,
+            raw_stream,
+            buffer,
+            self.is_compressed,
+            false,
+        )?;
 
         Ok(())
     }

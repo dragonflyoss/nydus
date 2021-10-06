@@ -133,7 +133,7 @@ impl BlobCache for DummyCache {
                 return Ok(0);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
-            return self.read_raw_chunk(&bios[0].chunkinfo, buf, None);
+            return self.read_raw_chunk(&bios[0].chunkinfo, buf, false, None);
         }
 
         let mut user_size = 0;
@@ -141,7 +141,7 @@ impl BlobCache for DummyCache {
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompress_size() as usize);
-                self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), None)?;
+                self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), false, None)?;
                 buffer_holder.push(d);
                 user_size += bio.size;
             }

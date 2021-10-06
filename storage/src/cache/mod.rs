@@ -333,7 +333,7 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
 
-            self.process_raw_chunk(chunk, buf, None, &mut buffer, chunk.is_compressed())?;
+            self.process_raw_chunk(chunk, buf, None, &mut buffer, chunk.is_compressed(), false)?;
             buffers.push(buffer);
             last = offset + size as u64;
         }
@@ -351,6 +351,7 @@ pub trait BlobCache: Send + Sync {
         &self,
         chunk: &BlobIoChunk,
         buffer: &mut [u8],
+        force_validation: bool,
         raw_hook: Option<&dyn Fn(&[u8])>,
     ) -> Result<usize> {
         let mut d;
@@ -385,6 +386,7 @@ pub trait BlobCache: Send + Sync {
             None,
             buffer,
             chunk.is_compressed(),
+            force_validation,
         )
         .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
         if let Some(hook) = raw_hook {
@@ -405,6 +407,7 @@ pub trait BlobCache: Send + Sync {
         raw_stream: Option<File>,
         buffer: &mut [u8],
         need_decompress: bool,
+        force_validation: bool,
     ) -> Result<usize> {
         if need_decompress {
             compress::decompress(raw_buffer, raw_stream, buffer, self.compressor()).map_err(
@@ -421,7 +424,9 @@ pub trait BlobCache: Send + Sync {
         let d_size = chunk.uncompress_size() as usize;
         if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
-        } else if self.need_validate() && !digest_check(buffer, chunk.chunk_id(), self.digester()) {
+        } else if (self.need_validate() || force_validation)
+            && !digest_check(buffer, chunk.chunk_id(), self.digester())
+        {
             Err(eio!("data digest value doesn't match"))
         } else {
             Ok(d_size)
