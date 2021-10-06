@@ -591,6 +591,13 @@ pub struct BlobPrefetchRequest {
 }
 
 /// Trait to provide direct access to underlying uncompressed blob file.
+///
+/// The suggested flow to make use of an `BlobObject` is as below:
+/// - call `is_all_data_ready()` to check all blob data has already been cached. If true, skip
+///   next step.
+/// - call `fetch()` to ensure blob range [offset, offset + size) has been cached.
+/// - call `as_raw_fd()` to get the underlying file descriptor for direct access.
+/// - call File::read(buf, offset + `base_offset()`, size) to read data from underlying cache file.
 pub trait BlobObject: AsRawFd {
     /// Get base offset to read blob from the fd returned by `as_raw_fd()`.
     fn base_offset(&self) -> u64;

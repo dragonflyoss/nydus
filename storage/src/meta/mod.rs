@@ -17,6 +17,7 @@
 use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
+use std::ops::{Add, BitAnd, Not};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
@@ -25,8 +26,6 @@ use nydus_utils::digest::RafsDigest;
 use crate::backend::BlobReader;
 use crate::compress;
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk};
-use nydus_utils::round_down_4k;
-use std::ops::{Add, BitAnd, Not};
 
 const BLOB_METADATA_MAX_CHUNKS: u32 = 0xf_ffff;
 const BLOB_METADATA_MAX_SIZE: u64 = 0x100_0000u64;
@@ -58,7 +57,7 @@ pub struct BlobMetaHeaderOndisk {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BlobChunkInfoOndisk {
-    // size: 20bits, offset: 32bits, reserved: 12bits
+    // size: 20bits, offset: 32bits, reserved(available for use): 12bits
     uncomp_info: u64,
     // size: 20bits, reserved: 4bits, offset: 40bits
     comp_info: u64,
@@ -138,6 +137,11 @@ impl BlobMetaInfo {
         blob_info: &BlobInfo,
         reader: Option<&Arc<dyn BlobReader>>,
     ) -> Result<Self> {
+        assert_eq!(
+            size_of::<BlobMetaHeaderOndisk>() as u64,
+            BLOB_METADTAT_HEADER_SIZE
+        );
+        assert_eq!(size_of::<BlobChunkInfoOndisk>(), 16);
         let chunk_count = blob_info.chunk_count();
         if chunk_count == 0 || chunk_count > BLOB_METADATA_MAX_CHUNKS {
             return Err(einval!("chunk count should be greater than 0"));
@@ -224,7 +228,7 @@ impl BlobMetaInfo {
         let state = Arc::new(BlobMetaState {
             blob_index: blob_info.blob_index(),
             ci_compressed_size: blob_info.compressed_size(),
-            ci_uncompressed_size: round_down_4k(blob_info.uncompressed_size()),
+            ci_uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_count,
             chunks: chunk_infos,
         });
@@ -412,7 +416,6 @@ fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<
     (val + T::from(0xfff)) & !T::from(0xfff)
 }
 
-//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +521,14 @@ mod tests {
         assert!(info.get_chunks(0x102000, 0xffff_ffff_ffff_ffff).is_err());
         assert!(info.get_chunks(0x104000, 0x1).is_err());
     }
+
+    #[test]
+    fn test_round_up_4k() {
+        assert_eq!(round_up_4k(0), 0x0u32);
+        assert_eq!(round_up_4k(1), 0x1000u32);
+        assert_eq!(round_up_4k(0xfff), 0x1000u32);
+        assert_eq!(round_up_4k(0x1000), 0x1000u32);
+        assert_eq!(round_up_4k(0x1001), 0x2000u32);
+        assert_eq!(round_up_4k(0x1fff), 0x2000u64);
+    }
 }
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
