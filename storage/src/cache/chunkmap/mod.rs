@@ -73,6 +73,11 @@ pub trait ChunkMap: Any + Send + Sync {
     fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
         None
     }
+
+    /// Check whether the chunk map implementation store chunk state persistently.
+    fn is_persist(&self) -> bool {
+        false
+    }
 }
 
 /// Trait to track chunk readiness state using bitmap, indexed by chunk index.
@@ -271,6 +276,10 @@ where
         } else {
             None
         }
+    }
+
+    fn is_persist(&self) -> bool {
+        self.c.is_persist()
     }
 }
 

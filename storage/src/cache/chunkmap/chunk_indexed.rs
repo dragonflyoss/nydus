@@ -314,6 +314,10 @@ impl ChunkMap for IndexedChunkMap {
     fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
         Some(self)
     }
+
+    fn is_persist(&self) -> bool {
+        true
+    }
 }
 
 impl ChunkBitmap for IndexedChunkMap {
