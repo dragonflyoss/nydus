@@ -648,17 +648,6 @@ impl BlobBackend for Registry {
             metrics: self.metrics.clone(),
         }))
     }
-
-    fn prefetch_blob_data_range(
-        &self,
-        _blob_id: &str,
-        _ra_offset: u32,
-        _ra_size: u32,
-    ) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Registry backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
 }
 
 impl Drop for Registry {

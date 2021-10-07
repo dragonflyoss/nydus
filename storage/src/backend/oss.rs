@@ -315,17 +315,6 @@ impl BlobBackend for Oss {
             ))
         }
     }
-
-    fn prefetch_blob_data_range(
-        &self,
-        _blob_id: &str,
-        _blob_readahead_offset: u32,
-        _blob_readahead_size: u32,
-    ) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
 }
 
 impl Drop for Oss {
@@ -377,7 +366,6 @@ mod tests {
         let oss = Oss::new(json, Some("test-image")).unwrap();
 
         oss.metrics();
-        assert!(oss.prefetch_blob_data_range("test", 0, 0x1000).is_err());
 
         let reader = oss.get_reader("test").unwrap();
         assert_eq!(reader.retry_limit(), 5);

@@ -199,58 +199,6 @@ pub trait BlobBackend: Send + Sync {
 
     /// Get a blob reader object to access blod `blob_id`.
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>>;
-
-    /// Get size of the blob file.
-    fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
-        self.get_reader(blob_id)?.blob_size()
-    }
-
-    /// Try to read a range of data from the blob file into the provided buffer.
-    ///
-    /// Try to read data of range [offset, offset + buf.len()) from the blob file, and returns:
-    /// - bytes of data read, which may be smaller than buf.len()
-    /// - error code if error happens
-    fn try_read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        self.get_reader(blob_id)?.try_read(buf, offset)
-    }
-
-    /// Read a range of data from the blob file into the provided buffer.
-    ///
-    /// Read data of range [offset, offset + buf.len()) from the blob file, and returns:
-    /// - bytes of data read, which may be smaller than buf.len()
-    /// - error code if error happens
-    ///
-    /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
-    /// read data.
-    fn read(&self, blob_id: &str, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        self.get_reader(blob_id)?.read(buf, offset)
-    }
-
-    /// Read a range of data from the blob file into the provided buffers.
-    ///
-    /// Read data of range [offset, offset + max_size) from the blob file, and returns:
-    /// - bytes of data read, which may be smaller than max_size
-    /// - error code if error happens
-    ///
-    /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
-    /// read data.
-    fn readv(
-        &self,
-        blob_id: &str,
-        bufs: &[VolatileSlice],
-        offset: u64,
-        max_size: usize,
-    ) -> BackendResult<usize> {
-        self.get_reader(blob_id)?.readv(bufs, offset, max_size)
-    }
-
-    /// Give hints to prefetch blob data range.
-    fn prefetch_blob_data_range(
-        &self,
-        blob_id: &str,
-        ra_offset: u32,
-        ra_size: u32,
-    ) -> BackendResult<()>;
 }
 
 #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]

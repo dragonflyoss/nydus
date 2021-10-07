@@ -64,15 +64,6 @@ impl BlobBackend for MockBackend {
             metrics: self.metrics.clone(),
         }))
     }
-
-    fn prefetch_blob_data_range(
-        &self,
-        _blob_id: &str,
-        _ra_offset: u32,
-        _ra_size: u32,
-    ) -> BackendResult<()> {
-        todo!()
-    }
 }
 
 #[derive(Default, Clone)]

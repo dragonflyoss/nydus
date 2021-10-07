@@ -5,7 +5,7 @@
 //! Storage backend driver to access blobs on local filesystems.
 
 use std::collections::HashMap;
-use std::fs::{self, remove_file, File, OpenOptions};
+use std::fs::{remove_file, File, OpenOptions};
 use std::io::{Error, Result};
 use std::mem::{size_of, ManuallyDrop};
 use std::os::unix::io::AsRawFd;
@@ -73,6 +73,7 @@ struct LocalFsEntry {
     path: PathBuf,
     file: File,
     metrics: Arc<BackendMetrics>,
+    readahead: bool,
     trace: Arc<LocalFsTracer>,
     trace_sec: u32,
     trace_condvar: Arc<(Mutex<bool>, Condvar)>,
@@ -117,6 +118,10 @@ impl BlobReader for LocalFsEntry {
     }
 
     fn prefetch_blob_data_range(&self, ra_offset: u32, ra_size: u32) -> BackendResult<()> {
+        if !self.readahead {
+            return Ok(());
+        }
+
         let blob_size = self.blob_size()?;
         let prefix = self
             .path
@@ -263,6 +268,7 @@ impl LocalFs {
                 path: blob_file_path,
                 file,
                 metrics: self.metrics.clone(),
+                readahead: self.readahead,
                 trace: Arc::new(LocalFsTracer::new()),
                 trace_sec: self.readahead_sec,
                 trace_condvar: Arc::new((Mutex::new(false), Condvar::new())),
@@ -288,28 +294,6 @@ impl BlobBackend for LocalFs {
 
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
         self.get_blob(blob_id).map_err(|e| e.into())
-    }
-
-    fn blob_size(&self, blob_id: &str) -> BackendResult<u64> {
-        let blob_file_path = self.get_blob_path(blob_id)?;
-
-        fs::metadata(blob_file_path)
-            .map(|meta| meta.len())
-            .map_err(|e| LocalFsError::BlobFile(e).into())
-    }
-
-    fn prefetch_blob_data_range(
-        &self,
-        blob_id: &str,
-        ra_offset: u32,
-        ra_size: u32,
-    ) -> BackendResult<()> {
-        if !self.readahead {
-            return Ok(());
-        }
-
-        self.get_reader(blob_id)?
-            .prefetch_blob_data_range(ra_offset, ra_size)
     }
 }
 
@@ -605,7 +589,8 @@ mod tests {
         assert_eq!(buf3[0], 0x3);
 
         assert_eq!(blob2.blob_size().unwrap(), 4);
-        assert_eq!(fs.blob_size(filename).unwrap(), 4);
+        let blob4 = fs.get_blob(filename).unwrap();
+        assert_eq!(blob4.blob_size().unwrap(), 4);
     }
 
     #[test]
@@ -629,7 +614,11 @@ mod tests {
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some(filename)).unwrap();
-        fs.prefetch_blob_data_range(filename, 0x0, 0x1).unwrap();
+
+        fs.get_reader(filename)
+            .unwrap()
+            .prefetch_blob_data_range(0x0, 0x1)
+            .unwrap();
 
         let blob1 = fs.get_reader(filename).unwrap();
         let blob2 = fs.get_reader(filename).unwrap();

@@ -81,27 +81,20 @@ impl BlobCache for DummyCache {
         &self,
         _blob_cache: Arc<dyn BlobCache>,
         prefetches: &[BlobPrefetchRequest],
-        bios: &[BlobIoDesc],
+        _bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
         if self.prefetch {
             let mut cnt = 0usize;
-            // TODO: check the logic below
             for p in prefetches.iter() {
-                if self
-                    .reader
-                    .prefetch_blob_data_range(p.offset, p.len)
-                    .is_ok()
-                {
-                    cnt += 1;
-                }
-            }
-            for b in bios {
-                if self
-                    .reader
-                    .prefetch_blob_data_range(b.offset, b.size as u32)
-                    .is_ok()
-                {
-                    cnt += 1;
+                if p.blob_id == self.blob_id {
+                    if self
+                        .reader
+                        .prefetch_blob_data_range(p.offset, p.len)
+                        .is_ok()
+                    {
+                        cnt += 1;
+                        break;
+                    }
                 }
             }
             Ok(cnt)
