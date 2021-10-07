@@ -335,9 +335,17 @@ impl BlobCache for FileCacheEntry {
         self.metrics.total.inc();
         self.workers.consume_prefetch_budget(buffers);
 
-        // TODO: Single bio optimization here? So we don't have to involve other management
-        // structures.
-        self.read_iter(&iovec.bi_vec, buffers)
+        if iovec.bi_vec.len() == 0 {
+            Ok(0)
+        } else if iovec.bi_vec.len() == 1 {
+            let mut state = FileIoMergeState::new();
+            let mut cursor = MemSliceCursor::new(buffers);
+            let req = BlobIoRange::new(&iovec.bi_vec[0], 1);
+
+            self.dispatch_one_range(&req, &mut cursor, &mut state)
+        } else {
+            self.read_iter(&iovec.bi_vec, buffers)
+        }
     }
 }
 
@@ -460,74 +468,86 @@ impl FileCacheEntry {
         let mut total_read: usize = 0;
 
         for req in requests {
-            debug!("A merged request {:?}", req);
-            for (i, chunk) in req.chunks.iter().enumerate() {
-                let is_ready = self
-                    .chunk_map
-                    .check_ready_and_mark_pending(chunk.as_base())?;
+            total_read += self.dispatch_one_range(&req, &mut cursor, &mut state)?;
+            state.reset();
+        }
 
-                // Directly read data from the file cache into the user buffer iff:
-                // - the chunk is ready in the file cache
-                // - the data in the file cache is uncompressed.
-                // - data validation is disabled
-                if is_ready && !self.is_compressed && !self.need_validate {
-                    // Silently drop prefetch requests.
-                    if req.tags[i].is_user_io() {
-                        state.push(
-                            RegionType::CacheFast,
-                            chunk.uncompress_offset(),
-                            chunk.uncompress_size(),
-                            req.tags[i].clone(),
-                            None,
-                        )?;
-                    }
-                } else if self.is_stargz || !self.is_direct_chunkmap || is_ready {
-                    // Case to try loading data from cache
-                    // - chunk is ready but data validation is needed.
-                    // - direct chunk map is not used, so there may be data in the file cache but
-                    //   the readiness flag has been lost.
-                    // - special path for stargz blobs. An stargz blob is abstracted as a compressed
-                    //   file cache always need validation.
-                    if req.tags[i].is_user_io() {
-                        state.push(
-                            RegionType::CacheSlow,
-                            chunk.uncompress_offset(),
-                            chunk.uncompress_size(),
-                            req.tags[i].clone(),
-                            Some(req.chunks[i].clone()),
-                        )?;
-                    } else {
-                        // On slow path, don't try to handle internal(read amplification) IO.
-                        self.chunk_map.clear_pending(chunk.as_base());
-                    }
-                } else {
-                    let tag = if let BlobIoTag::User(ref s) = req.tags[i] {
-                        BlobIoTag::User(s.clone())
-                    } else {
-                        BlobIoTag::Internal(chunk.compress_offset())
-                    };
-                    // NOTE: Only this request region can steak more chunks from backend with user io.
+        Ok(total_read)
+    }
+
+    fn dispatch_one_range(
+        &self,
+        req: &BlobIoRange,
+        cursor: &mut MemSliceCursor,
+        state: &mut FileIoMergeState,
+    ) -> Result<usize> {
+        let mut total_read: usize = 0;
+
+        debug!("dispatch a blob io range {:?}", req);
+        for (i, chunk) in req.chunks.iter().enumerate() {
+            let is_ready = self
+                .chunk_map
+                .check_ready_and_mark_pending(chunk.as_base())?;
+
+            // Directly read data from the file cache into the user buffer iff:
+            // - the chunk is ready in the file cache
+            // - the data in the file cache is uncompressed.
+            // - data validation is disabled
+            if is_ready && !self.is_compressed && !self.need_validate {
+                // Silently drop prefetch requests.
+                if req.tags[i].is_user_io() {
                     state.push(
-                        RegionType::Backend,
-                        chunk.compress_offset(),
-                        chunk.compress_size(),
-                        tag,
-                        Some(chunk.clone()),
+                        RegionType::CacheFast,
+                        chunk.uncompress_offset(),
+                        chunk.uncompress_size(),
+                        req.tags[i].clone(),
+                        None,
                     )?;
                 }
-            }
-
-            for r in &state.regions {
-                use RegionType::*;
-
-                total_read += match r.r#type {
-                    CacheFast => self.dispatch_cache_fast(&mut cursor, r)?,
-                    CacheSlow => self.dispatch_cache_slow(&mut cursor, r)?,
-                    Backend => self.dispatch_backend(&mut cursor, r)?,
+            } else if self.is_stargz || !self.is_direct_chunkmap || is_ready {
+                // Case to try loading data from cache
+                // - chunk is ready but data validation is needed.
+                // - direct chunk map is not used, so there may be data in the file cache but
+                //   the readiness flag has been lost.
+                // - special path for stargz blobs. An stargz blob is abstracted as a compressed
+                //   file cache always need validation.
+                if req.tags[i].is_user_io() {
+                    state.push(
+                        RegionType::CacheSlow,
+                        chunk.uncompress_offset(),
+                        chunk.uncompress_size(),
+                        req.tags[i].clone(),
+                        Some(req.chunks[i].clone()),
+                    )?;
+                } else {
+                    // On slow path, don't try to handle internal(read amplification) IO.
+                    self.chunk_map.clear_pending(chunk.as_base());
                 }
+            } else {
+                let tag = if let BlobIoTag::User(ref s) = req.tags[i] {
+                    BlobIoTag::User(s.clone())
+                } else {
+                    BlobIoTag::Internal(chunk.compress_offset())
+                };
+                // NOTE: Only this request region can steak more chunks from backend with user io.
+                state.push(
+                    RegionType::Backend,
+                    chunk.compress_offset(),
+                    chunk.compress_size(),
+                    tag,
+                    Some(chunk.clone()),
+                )?;
             }
+        }
 
-            state.reset();
+        for r in &state.regions {
+            use RegionType::*;
+
+            total_read += match r.r#type {
+                CacheFast => self.dispatch_cache_fast(cursor, r)?,
+                CacheSlow => self.dispatch_cache_slow(cursor, r)?,
+                Backend => self.dispatch_backend(cursor, r)?,
+            }
         }
 
         Ok(total_read)
