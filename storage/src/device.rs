@@ -630,7 +630,7 @@ impl BlobIoTag {
 /// it may help to improve performance by merging multiple continuous and small blob IO
 /// requests into one big backend request.
 ///
-/// A `BlobIoMerged` request targets a continuous range of a single blob.
+/// A `BlobIoRange` request targets a continuous range of a single blob.
 #[derive(Default, Clone)]
 pub struct BlobIoRange {
     pub blob_info: Arc<BlobInfo>,
@@ -681,6 +681,36 @@ impl BlobIoRange {
         );
         self.blob_size += bio.chunkinfo.compress_size() as u64;
         debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
+    }
+
+    /// Check the `BlobIoRange` object is valid.
+    pub fn validate(&self) -> bool {
+        let blob_end = self.blob_info.uncompressed_size;
+        if self.blob_offset >= blob_end || self.blob_size > blob_end {
+            return false;
+        }
+        match self.blob_offset.checked_add(self.blob_size) {
+            None => return false,
+            Some(end) => {
+                if end > blob_end {
+                    return false;
+                }
+            }
+        }
+
+        if self.chunks.len() != self.tags.len() {
+            return false;
+        }
+
+        if self.chunks.len() > 1 {
+            for idx in 1..self.chunks.len() {
+                if self.chunks[idx - 1].id() != self.chunks[idx].id() {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     fn tag_from_desc(bio: &BlobIoDesc) -> BlobIoTag {

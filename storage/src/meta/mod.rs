@@ -152,7 +152,7 @@ impl BlobMetaInfo {
         let file = OpenOptions::new()
             .read(true)
             .write(enable_write)
-            .create(true)
+            .create(enable_write)
             .open(&meta_path)
             .map_err(|err| {
                 einval!(format!(

@@ -52,6 +52,7 @@ pub mod compress;
 pub mod device;
 pub mod factory;
 pub mod meta;
+pub mod remote;
 #[cfg(test)]
 pub(crate) mod test;
 pub mod utils;

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use nydus_utils::div_round_up;
 
 use crate::cache::chunkmap::{ChunkBitmap, ChunkIndexGetter, ChunkMap};
-use crate::device::BlobChunkInfo;
+use crate::device::{BlobChunkInfo, BlobInfo};
 use crate::utils::readahead;
 
 /// The magic number of blob chunk_map file, it's ASCII hex of string "BMAP".
@@ -73,6 +73,17 @@ pub struct IndexedChunkMap {
 impl IndexedChunkMap {
     /// Create a new instance of `IndexedChunkMap`.
     pub fn new(blob_path: &str, chunk_count: u32) -> Result<Self> {
+        Self::do_open(blob_path, chunk_count, true)
+    }
+
+    /// Create a new instance of `IndexedChunkMap` from an existing chunk map file.
+    pub fn open(blob_info: &BlobInfo, workdir: &str) -> Result<Self> {
+        let blob_path = format!("{}/{}", workdir, blob_info.blob_id());
+
+        Self::do_open(&blob_path, blob_info.chunk_count(), false)
+    }
+
+    fn do_open(blob_path: &str, chunk_count: u32, create: bool) -> Result<Self> {
         if chunk_count == 0 {
             return Err(einval!("chunk count should be greater than 0"));
         }
@@ -80,8 +91,8 @@ impl IndexedChunkMap {
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         let mut file = OpenOptions::new()
             .read(true)
-            .write(true)
-            .create(true)
+            .write(create)
+            .create(create)
             .open(&cache_path)
             .map_err(|err| {
                 einval!(format!(
@@ -96,6 +107,10 @@ impl IndexedChunkMap {
         let mut new_content = false;
 
         if file_size == 0 {
+            if !create {
+                return Err(enoent!());
+            }
+
             new_content = true;
             Self::write_header(&mut file, expected_size)?;
         } else if file_size != expected_size {
@@ -127,6 +142,10 @@ impl IndexedChunkMap {
 
         let header = unsafe { &mut *(base as *mut Header) };
         if header.magic != MAGIC1 {
+            if !create {
+                return Err(enoent!());
+            }
+
             // There's race window between "file.set_len()" and "file.write(&header)". If that
             // happens, all file content should be zero. Detect the race window and write out
             // header again to fix it.
