@@ -243,14 +243,14 @@ impl BlobMetaInfo {
     /// - `start` is bigger than blob size.
     /// - some portion of the range [start, start + size) is not covered by chunks.
     /// - the blob metadata is invalid.
-    pub fn get_chunks(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
+    pub fn get_chunks_uncompressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.ci_uncompressed_size {
             return Err(einval!());
         }
 
         let infos = &*self.state.chunks;
-        let mut index = self.state.get_chunk_index_nocheck(start)?;
+        let mut index = self.state.get_chunk_index_nocheck(start, false)?;
         debug_assert!(index < infos.len());
         let entry = &infos[index];
         self.validate_chunk(entry)?;
@@ -274,6 +274,51 @@ impl BlobMetaInfo {
 
                 vec.push(BlobMetaChunk::new(index, &self.state));
                 last_end = entry.get_aligned_uncompressed_end();
+                if last_end >= end {
+                    return Ok(vec);
+                }
+            }
+
+            Err(einval!())
+        }
+    }
+
+    /// Get blob chunks covering compressed data range [start, start + size).
+    ///
+    /// The method returns error if any of following condition is true:
+    /// - range [start, start + size) is invalid.
+    /// - `start` is bigger than blob size.
+    /// - some portion of the range [start, start + size) is not covered by chunks.
+    /// - the blob metadata is invalid.
+    pub fn get_chunks_compressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
+        let end = start.checked_add(size).ok_or_else(|| einval!())?;
+        if end > self.state.ci_compressed_size {
+            return Err(einval!());
+        }
+
+        let infos = &*self.state.chunks;
+        let mut index = self.state.get_chunk_index_nocheck(start, true)?;
+        debug_assert!(index < infos.len());
+        let entry = &infos[index];
+        self.validate_chunk(entry)?;
+
+        let mut vec = Vec::with_capacity(512);
+        vec.push(BlobMetaChunk::new(index, &self.state));
+
+        let mut last_end = entry.get_compressed_end();
+        if last_end >= end {
+            Ok(vec)
+        } else {
+            while index + 1 < infos.len() {
+                index += 1;
+                let entry = &infos[index];
+                self.validate_chunk(entry)?;
+                if entry.get_compressed_start() != last_end {
+                    return Err(einval!());
+                }
+
+                vec.push(BlobMetaChunk::new(index, &self.state));
+                last_end = entry.get_compressed_end();
                 if last_end >= end {
                     return Ok(vec);
                 }
@@ -330,7 +375,7 @@ struct BlobMetaState {
 }
 
 impl BlobMetaState {
-    fn get_chunk_index_nocheck(&self, addr: u64) -> Result<usize> {
+    fn get_chunk_index_nocheck(&self, addr: u64, compressed: bool) -> Result<usize> {
         let chunks = &self.chunks;
         let mut size = self.chunk_count as usize;
         let mut left = 0;
@@ -342,10 +387,15 @@ impl BlobMetaState {
             // - `mid >= 0`
             // - `mid < size`: `mid` is limited by `[left; right)` bound.
             let entry = unsafe { chunks.get_unchecked(mid) };
+            let (start, end) = if compressed {
+                (entry.get_compressed_start(), entry.get_compressed_end())
+            } else {
+                (entry.get_uncompressed_start(), entry.get_uncompressed_end())
+            };
 
-            if entry.get_uncompressed_start() > addr {
+            if start > addr {
                 right = mid;
-            } else if entry.get_uncompressed_end() <= addr {
+            } else if end <= addr {
                 left = mid + 1;
             } else {
                 return Ok(mid);
@@ -439,13 +489,13 @@ mod tests {
             ]),
         };
 
-        assert_eq!(state.get_chunk_index_nocheck(0).unwrap(), 0);
-        assert_eq!(state.get_chunk_index_nocheck(0x1fff).unwrap(), 0);
-        assert_eq!(state.get_chunk_index_nocheck(0x100000).unwrap(), 1);
-        assert_eq!(state.get_chunk_index_nocheck(0x101fff).unwrap(), 1);
-        state.get_chunk_index_nocheck(0x2000).unwrap_err();
-        state.get_chunk_index_nocheck(0xfffff).unwrap_err();
-        state.get_chunk_index_nocheck(0x102000).unwrap_err();
+        assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
+        assert_eq!(state.get_chunk_index_nocheck(0x1fff, false).unwrap(), 0);
+        assert_eq!(state.get_chunk_index_nocheck(0x100000, false).unwrap(), 1);
+        assert_eq!(state.get_chunk_index_nocheck(0x101fff, false).unwrap(), 1);
+        state.get_chunk_index_nocheck(0x2000, false).unwrap_err();
+        state.get_chunk_index_nocheck(0xfffff, false).unwrap_err();
+        state.get_chunk_index_nocheck(0x102000, false).unwrap_err();
     }
 
     #[test]
@@ -482,7 +532,7 @@ mod tests {
             state: Arc::new(state),
         };
 
-        let vec = info.get_chunks(0x0, 0x1001).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x1001).unwrap();
         assert_eq!(vec.len(), 1);
         assert_eq!(vec[0].blob_index(), 1);
         assert_eq!(vec[0].id(), 0);
@@ -493,7 +543,7 @@ mod tests {
         assert_eq!(vec[0].is_compressed(), true);
         assert_eq!(vec[0].is_hole(), false);
 
-        let vec = info.get_chunks(0x0, 0x4000).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x4000).unwrap();
         assert_eq!(vec.len(), 2);
         assert_eq!(vec[1].blob_index(), 1);
         assert_eq!(vec[1].id(), 1);
@@ -504,22 +554,24 @@ mod tests {
         assert_eq!(vec[1].is_compressed(), false);
         assert_eq!(vec[1].is_hole(), false);
 
-        let vec = info.get_chunks(0x0, 0x4001).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x4001).unwrap();
         assert_eq!(vec.len(), 3);
 
-        let vec = info.get_chunks(0x100000, 0x2000).unwrap();
+        let vec = info.get_chunks_uncompressed(0x100000, 0x2000).unwrap();
         assert_eq!(vec.len(), 1);
 
-        assert!(info.get_chunks(0x0, 0x6001).is_err());
-        assert!(info.get_chunks(0x0, 0xfffff).is_err());
-        assert!(info.get_chunks(0x0, 0x100000).is_err());
-        assert!(info.get_chunks(0x0, 0x104000).is_err());
-        assert!(info.get_chunks(0x0, 0x104001).is_err());
-        assert!(info.get_chunks(0x100000, 0x2001).is_err());
-        assert!(info.get_chunks(0x100000, 0x4000).is_err());
-        assert!(info.get_chunks(0x100000, 0x4001).is_err());
-        assert!(info.get_chunks(0x102000, 0xffff_ffff_ffff_ffff).is_err());
-        assert!(info.get_chunks(0x104000, 0x1).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x6001).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0xfffff).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x100000).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x104000).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x104001).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x2001).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x4000).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x4001).is_err());
+        assert!(info
+            .get_chunks_uncompressed(0x102000, 0xffff_ffff_ffff_ffff)
+            .is_err());
+        assert!(info.get_chunks_uncompressed(0x104000, 0x1).is_err());
     }
 
     #[test]

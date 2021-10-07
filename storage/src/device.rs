@@ -722,10 +722,14 @@ pub trait BlobObject: AsRawFd {
     /// Check whether all data of the blob object is ready.
     fn is_all_data_ready(&self) -> bool;
 
+    /// Fetch data from storage backend covering compressed blob range [offset, offset + size).
+    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+
     /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
     /// for use.
-    fn fetch_range(&self, offset: u64, size: u64) -> io::Result<usize>;
+    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<usize>;
 
+    /// Fetch data for specified chunks from storage backend.
     fn fetch_chunks(&self, range: &BlobIoRange) -> io::Result<usize>;
 }
 

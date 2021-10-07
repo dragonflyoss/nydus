@@ -368,11 +368,19 @@ impl BlobObject for FileCacheEntry {
         }
     }
 
-    fn fetch_range(&self, offset: u64, size: u64) -> Result<usize> {
+    fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
+        let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
+        let chunks = meta.get_chunks_compressed(offset, size)?;
+        debug_assert!(chunks.len() > 0);
+
+        self.do_fetch_chunks(&chunks)
+    }
+
+    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
 
         // TODO: read amplify the range to naturally aligned 2M?
-        let chunks = meta.get_chunks(offset, size)?;
+        let chunks = meta.get_chunks_uncompressed(offset, size)?;
         debug_assert!(chunks.len() > 0);
 
         self.do_fetch_chunks(&chunks)
