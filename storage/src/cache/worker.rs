@@ -248,10 +248,12 @@ impl AsyncWorkerMgr {
                     }
                     self.busy_workers.fetch_sub(1, Ordering::Relaxed);
                 }
-                AsyncRequestMessage::BlobPrefetch(_state, _blob_cache, _offset, _size) => {
+                AsyncRequestMessage::BlobPrefetch(state, blob_cache, offset, size) => {
                     self.busy_workers.fetch_add(1, Ordering::Relaxed);
-                    todo!();
-                    //self.busy_workers.fetch_sub(1, Ordering::Relaxed);
+                    if state.load(Ordering::Acquire) == AsyncRequestState::Pending as u32 {
+                        let _ = self.handle_blob_prefetch_request(&blob_cache, offset, size);
+                    }
+                    self.busy_workers.fetch_sub(1, Ordering::Relaxed);
                 }
                 AsyncRequestMessage::Exit => return,
             }
@@ -262,6 +264,44 @@ impl AsyncWorkerMgr {
         }
     }
 
+    fn handle_blob_prefetch_request(
+        &self,
+        cache: &Arc<dyn BlobCache>,
+        offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        trace!(
+            "Prefetch blob {} offset {} size {}",
+            cache.blob_id(),
+            offset,
+            size
+        );
+        if size == 0 {
+            return Ok(());
+        }
+
+        if let Some(obj) = cache.get_blob_object() {
+            if let Err(e) = obj.fetch_range_compressed(offset, size) {
+                warn!(
+                    "Failed to prefetch data from blob {}, offset {}, size {}, {}",
+                    cache.blob_id(),
+                    offset,
+                    size,
+                    e
+                );
+            }
+        } else {
+            if offset < u32::MAX as u64 && size < u32::MAX as u64 {
+                let _ = cache.reader().prefetch_blob_data_range(
+                    offset as u32,
+                    std::cmp::min(size as u32, u32::MAX - offset as u32),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn handle_fs_prefetch_request(
         &self,
         cache: &Arc<dyn BlobCache>,
@@ -270,8 +310,8 @@ impl AsyncWorkerMgr {
         let blob_offset = req.blob_offset;
         let blob_size = req.blob_size;
         trace!(
-            "Merged req id {} offset {} size {}",
-            req.blob_info.blob_id(),
+            "prefetch fs data from blob {} offset {} size {}",
+            cache.blob_id(),
             blob_offset,
             blob_size
         );
