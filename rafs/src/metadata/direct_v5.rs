@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::any::Any;
 /// A bootstrap driver to directly use on disk bootstrap as runtime in-memory bootstrap.
 ///
 /// To reduce memory footprint and speed up filesystem initialization, the V5 on disk bootstrap
@@ -864,6 +865,10 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
         self.chunk(self.state().deref())
             .flags
             .contains(BlobChunkFlags::HOLECHUNK)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     impl_chunkinfo_getter!(blob_index, u32);

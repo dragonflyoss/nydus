@@ -1451,6 +1451,7 @@ pub mod tests {
     use super::*;
     use crate::metadata::RafsStore;
     use crate::{RafsIoRead, RafsIoReader, RafsIoWrite};
+    use std::any::Any;
     use std::str::FromStr;
 
     struct Entry {
@@ -1626,6 +1627,10 @@ pub mod tests {
 
         fn is_hole(&self) -> bool {
             self.flags.contains(BlobChunkFlags::HOLECHUNK)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
 
         impl_getter!(blob_index, blob_index, u32);

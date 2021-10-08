@@ -20,6 +20,7 @@ use rafs::metadata::layout::v5::{
 };
 use rafs::metadata::RafsSuperFlags;
 use rafs::{RafsIoRead, RafsIoReader};
+use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 pub(crate) struct RafsInspector {
     request_mode: bool,
@@ -98,7 +99,11 @@ impl RafsInspector {
 
         f.seek_to_offset(rafs_meta.blob_table_offset)?;
         let mut blobs_table = RafsV5BlobTable::new();
-        blobs_table.load(&mut f, rafs_meta.blob_table_size)?;
+        blobs_table.load(
+            &mut f,
+            rafs_meta.blob_table_size,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+        )?;
 
         // Load extended blob table if the bootstrap including
         // extended blob table.

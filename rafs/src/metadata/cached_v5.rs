@@ -8,6 +8,7 @@
 //! All file system metadata will be loaded, validated and cached into memory when loading the
 //! file system. And currently the cache layer only supports readonly file systems.
 
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::io::SeekFrom;
@@ -682,6 +683,10 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
 
     fn is_hole(&self) -> bool {
         self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     impl_getter!(blob_index, c_blob_index, u32);

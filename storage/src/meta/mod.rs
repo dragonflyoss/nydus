@@ -26,6 +26,7 @@ use nydus_utils::digest::RafsDigest;
 use crate::backend::BlobReader;
 use crate::compress;
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk};
+use std::any::Any;
 
 const BLOB_METADATA_MAX_CHUNKS: u32 = 0xf_ffff;
 const BLOB_METADATA_MAX_SIZE: u64 = 0x100_0000u64;
@@ -459,6 +460,10 @@ impl BlobChunkInfo for BlobMetaChunk {
 
     fn is_hole(&self) -> bool {
         false
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

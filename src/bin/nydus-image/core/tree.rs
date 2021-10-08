@@ -23,6 +23,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use nydus_utils::digest::RafsDigest;
+use rafs::metadata::cached_v5::CachedChunkInfoV5;
+use rafs::metadata::direct_v5::DirectChunkInfoV5;
 use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5XAttrs};
 use rafs::metadata::layout::{bytes_to_os_str, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
@@ -353,7 +355,13 @@ impl<'a> MetadataTreeBuilder<'a> {
             let chunk_count = child_count;
             for i in 0..chunk_count {
                 let cki = inode.get_chunk_info(i)?;
-                let chunk = cast_rafsv5_chunk_info(cki.as_ref());
+                let chunk = if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
+                    cast_rafsv5_chunk_info(cki_v5)
+                } else if let Some(cki_v5) = cki.as_any().downcast_ref::<DirectChunkInfoV5>() {
+                    cast_rafsv5_chunk_info(cki_v5)
+                } else {
+                    panic!("unkown chunk information struct");
+                };
                 chunks.push(chunk);
             }
         }

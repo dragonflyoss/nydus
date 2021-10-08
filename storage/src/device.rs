@@ -19,6 +19,7 @@
 //! - [BlobIoVec](struct.BlobIoVec.html): a scatter/gather list for blob IO operation, containing
 //!   one or more blob IO descriptors
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
+use std::any::Any;
 use std::cmp;
 use std::fmt::{Debug, Formatter};
 use std::io::{self, Error};
@@ -318,7 +319,7 @@ impl Default for BlobChunkFlags {
 /// This trait may be extended to provide additional information for a specific Rafs filesystem
 /// version, for example `BlobV5ChunkInfo` provides Rafs v5 filesystem related information about
 /// a chunk.
-pub trait BlobChunkInfo: Sync + Send {
+pub trait BlobChunkInfo: Any + Sync + Send {
     /// Get the message digest value of the chunk, which acts as an identifier for the chunk.
     fn chunk_id(&self) -> &RafsDigest;
 
@@ -351,6 +352,8 @@ pub trait BlobChunkInfo: Sync + Send {
 
     /// Check whether the chunk is a hole, containing all zeros.
     fn is_hole(&self) -> bool;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// An enumeration to encapsulate different [BlobChunkInfo] implementations for [BlobIoDesc].
@@ -427,6 +430,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn is_hole(&self) -> bool {
         self.as_base().is_hole()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self.as_base().as_any()
     }
 }
 
@@ -1078,6 +1085,10 @@ mod tests {
 
         fn is_hole(&self) -> bool {
             false
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 

@@ -12,6 +12,7 @@ use super::impl_getter;
 use crate::backend::{BackendResult, BlobBackend, BlobReader};
 use crate::device::v5::BlobV5ChunkInfo;
 use crate::device::{BlobChunkFlags, BlobChunkInfo};
+use std::any::Any;
 
 pub(crate) struct MockBackend {
     pub metrics: Arc<BackendMetrics>,
@@ -98,6 +99,10 @@ impl BlobChunkInfo for MockChunkInfo {
     }
     fn is_hole(&self) -> bool {
         self.flags.contains(BlobChunkFlags::HOLECHUNK)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     impl_getter!(blob_index, blob_index, u32);

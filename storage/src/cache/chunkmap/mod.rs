@@ -449,6 +449,10 @@ pub(crate) mod tests {
         fn is_hole(&self) -> bool {
             unimplemented!();
         }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
     }
 
     #[test]
