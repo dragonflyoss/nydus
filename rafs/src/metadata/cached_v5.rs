@@ -355,6 +355,7 @@ impl CachedInodeV5 {
 }
 
 impl RafsInode for CachedInodeV5 {
+    #[allow(clippy::collapsible_if)]
     fn validate(&self, max_inode: u64, chunk_size: u64) -> Result<()> {
         if self.i_ino == RAFS_ROOT_INODE
             || self.i_parent > max_inode
@@ -411,11 +412,25 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
+    #[inline]
     fn get_symlink(&self) -> Result<OsString> {
         if !self.is_symlink() {
             Err(einval!("inode is not a symlink"))
         } else {
             Ok(self.i_target.clone())
+        }
+    }
+
+    #[inline]
+    fn get_symlink_size(&self) -> u16 {
+        if self.is_symlink() {
+            self.i_target.byte_size() as u16
+        } else {
+            0
         }
     }
 
@@ -437,13 +452,13 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_child_index(&self) -> Result<u32> {
-        Ok(self.i_child_idx)
+    fn get_child_count(&self) -> u32 {
+        self.i_child_cnt
     }
 
     #[inline]
-    fn get_child_count(&self) -> u32 {
-        self.i_child_cnt
+    fn get_child_index(&self) -> Result<u32> {
+        Ok(self.i_child_idx)
     }
 
     #[inline]
@@ -541,20 +556,6 @@ impl RafsInode for CachedInodeV5 {
 
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
-    }
-
-    #[inline]
-    fn get_name_size(&self) -> u16 {
-        self.i_name.byte_size() as u16
-    }
-
-    #[inline]
-    fn get_symlink_size(&self) -> u16 {
-        if self.is_symlink() {
-            self.i_target.byte_size() as u16
-        } else {
-            0
-        }
     }
 
     impl_getter!(ino, i_ino, u64);
@@ -774,9 +775,11 @@ mod cached_tests {
         xattr.store(&mut writer).unwrap();
 
         f.seek(Start(0)).unwrap();
-        let mut md = RafsSuperMeta::default();
-        md.inodes_count = 100;
-        md.chunk_size = 1024 * 1024;
+        let md = RafsSuperMeta {
+            inodes_count: 100,
+            chunk_size: 1024 * 1024,
+            ..Default::default()
+        };
         let meta = Arc::new(md);
         let blob_table = Arc::new(RafsV5BlobTable::new());
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());

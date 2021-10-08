@@ -271,11 +271,9 @@ where
 
     fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
         let any = self as &dyn Any;
-        if let Some(v) = any.downcast_ref::<BlobChunkMap<IndexedChunkMap, u32>>() {
-            Some(v as &dyn ChunkBitmap)
-        } else {
-            None
-        }
+
+        any.downcast_ref::<BlobChunkMap<IndexedChunkMap, u32>>()
+            .map(|v| v as &dyn ChunkBitmap)
     }
 
     fn is_persist(&self) -> bool {
@@ -304,7 +302,7 @@ impl ChunkBitmap for BlobChunkMap<IndexedChunkMap, u32> {
             Err(e) => return Err(e),
             Ok(None) => return Ok(None),
             Ok(Some(v)) => {
-                if v.len() == 0 {
+                if v.is_empty() {
                     return Ok(None);
                 }
                 v

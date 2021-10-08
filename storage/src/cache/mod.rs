@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(state.bios.len(), 0);
 
         let desc3 = BlobIoDesc {
-            blob: blob_info.clone(),
+            blob: blob_info,
             chunkinfo: chunk3.into(),
             offset: 0,
             size: 0x1000,

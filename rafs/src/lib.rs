@@ -193,14 +193,14 @@ mod tests {
         assert!(file.validate_alignment(9, 8).is_err());
         assert!(file.validate_alignment(8, 8).is_ok());
 
-        file.write(&[0x0u8; 7]).unwrap();
+        file.write_all(&[0x0u8; 7]).unwrap();
         assert!(file.validate_alignment(8, 8).is_err());
         {
             let obj: &mut dyn RafsIoWrite = &mut file;
             obj.write_padding(1).unwrap();
         }
         assert!(file.validate_alignment(8, 8).is_ok());
-        file.write(&[0x0u8; 1]).unwrap();
+        file.write_all(&[0x0u8; 1]).unwrap();
         assert!(file.validate_alignment(8, 8).is_err());
 
         let obj: &mut dyn RafsIoRead = &mut file;

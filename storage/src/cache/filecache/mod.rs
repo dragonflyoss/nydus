@@ -104,11 +104,7 @@ impl FileCacheMgr {
 
     // Get the file cache entry for the specified blob object.
     fn get(&self, blob: &Arc<BlobInfo>) -> Option<Arc<FileCacheEntry>> {
-        self.blobs
-            .read()
-            .unwrap()
-            .get(blob.blob_id())
-            .map(|v| v.clone())
+        self.blobs.read().unwrap().get(blob.blob_id()).cloned()
     }
 
     // Create a file cache entry for the specified blob object if not present, otherwise
@@ -181,7 +177,7 @@ impl BlobCacheMgr for FileCacheMgr {
 
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         self.get_or_create_cache_entry(blob_info)
-            .map(|v| v.clone() as Arc<dyn BlobCache>)
+            .map(|v| v as Arc<dyn BlobCache>)
     }
 }
 

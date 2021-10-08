@@ -318,8 +318,8 @@ impl BlobCache for FileCacheEntry {
                     }
                 }
                 Err(_e) => {
-                    for idx in start..end {
-                        self.chunk_map.clear_pending(&pending[idx]);
+                    for chunk in pending.iter().take(end).skip(start) {
+                        self.chunk_map.clear_pending(chunk);
                     }
                 }
             }
@@ -335,7 +335,7 @@ impl BlobCache for FileCacheEntry {
         self.metrics.total.inc();
         self.workers.consume_prefetch_budget(buffers);
 
-        if iovec.bi_vec.len() == 0 {
+        if iovec.bi_vec.is_empty() {
             Ok(0)
         } else if iovec.bi_vec.len() == 1 {
             let mut state = FileIoMergeState::new();
@@ -371,7 +371,7 @@ impl BlobObject for FileCacheEntry {
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_compressed(offset, size)?;
-        debug_assert!(chunks.len() > 0);
+        debug_assert!(!chunks.is_empty());
 
         self.do_fetch_chunks(&chunks)
     }
@@ -381,14 +381,14 @@ impl BlobObject for FileCacheEntry {
 
         // TODO: read amplify the range to naturally aligned 2M?
         let chunks = meta.get_chunks_uncompressed(offset, size)?;
-        debug_assert!(chunks.len() > 0);
+        debug_assert!(!chunks.is_empty());
 
         self.do_fetch_chunks(&chunks)
     }
 
     fn fetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
         let chunks = &range.chunks;
-        if chunks.len() == 0 {
+        if chunks.is_empty() {
             return Ok(0);
         }
 
@@ -412,7 +412,7 @@ impl FileCacheEntry {
         let pending = match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, count)? {
             None => return Ok(0),
             Some(v) => {
-                if v.len() == 0 {
+                if v.is_empty() {
                     return Ok(0);
                 }
                 v
@@ -593,7 +593,7 @@ impl FileCacheEntry {
                 self.chunk_map.clear_pending(c.as_base());
             }
             return Ok(0);
-        } else if region.chunks.len() == 0 {
+        } else if region.chunks.is_empty() {
             return Ok(0);
         }
 
@@ -724,7 +724,7 @@ impl FileCacheEntry {
             &d
         } else if !self.is_compressed {
             self.read_raw_chunk(chunk, d.mut_slice(), false, None)?;
-            buffer_holder = Arc::new(d.to_owned());
+            buffer_holder = Arc::new(d.convert_to_owned_buffer());
             self.delay_persist(chunk.clone(), buffer_holder.clone());
             buffer_holder.as_ref()
         } else {
@@ -864,7 +864,7 @@ impl DataBuffer {
     }
 
     /// Make sure it owns the underlying memory buffer.
-    fn to_owned(self) -> Self {
+    fn convert_to_owned_buffer(self) -> Self {
         if let DataBuffer::Reuse(data) = self {
             DataBuffer::Allocated((*data).to_vec())
         } else {
@@ -1002,7 +1002,7 @@ impl FileIoMergeState {
         tag: BlobIoTag,
         chunk: Option<BlobIoChunk>,
     ) -> Result<()> {
-        if self.regions.len() == 0 || !self.joinable(region_type) {
+        if self.regions.is_empty() || !self.joinable(region_type) {
             self.regions.push(Region::new(region_type));
         }
 
@@ -1018,7 +1018,7 @@ impl FileIoMergeState {
 
     #[inline]
     fn joinable(&self, region_type: RegionType) -> bool {
-        debug_assert!(self.regions.len() > 0);
+        debug_assert!(!self.regions.is_empty());
         let idx = self.regions.len() - 1;
 
         self.regions[idx].r#type.joinable(region_type)
@@ -1035,7 +1035,7 @@ mod tests {
         let buf2 = unsafe { DataBuffer::from_mut_slice(buf1.as_mut_slice()) };
 
         assert_eq!(buf2.slice()[1], 0x1);
-        let mut buf2 = buf2.to_owned();
+        let mut buf2 = buf2.convert_to_owned_buffer();
         buf2.mut_slice()[1] = 0x2;
         assert_eq!(buf1[1], 0x1);
     }

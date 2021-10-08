@@ -465,8 +465,8 @@ impl BlobIoDesc {
         user_io: bool,
     ) -> Self {
         BlobIoDesc {
-            chunkinfo,
             blob,
+            chunkinfo,
             offset,
             size,
             user_io,
@@ -623,10 +623,7 @@ pub enum BlobIoTag {
 impl BlobIoTag {
     /// Check whether the tag is a user issued io request.
     pub fn is_user_io(&self) -> bool {
-        match self {
-            BlobIoTag::User(_) => true,
-            _ => false,
-        }
+        matches!(self, BlobIoTag::User(_))
     }
 }
 
@@ -844,7 +841,7 @@ impl BlobDevice {
         // - bi_vec[0] is valid
         // - bi_vec[0].blob.blob_index() is valid
         // - all IOs are against a single blob.
-        if desc.bi_vec.len() == 0 {
+        if desc.bi_vec.is_empty() {
             if desc.bi_size == 0 {
                 Ok(0)
             } else {

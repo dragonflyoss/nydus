@@ -416,6 +416,7 @@ struct BlobMetaChunk {
 }
 
 impl BlobMetaChunk {
+    #[allow(clippy::new_ret_no_self)]
     fn new(chunk_index: usize, meta: &Arc<BlobMetaState>) -> BlobIoChunk {
         debug_assert!(chunk_index <= u32::MAX as usize);
         BlobIoChunk::Base(Arc::new(BlobMetaChunk {

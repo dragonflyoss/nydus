@@ -36,7 +36,6 @@ struct DummyCache {
     blob_id: String,
     chunk_map: Arc<dyn ChunkMap>,
     reader: Arc<dyn BlobReader>,
-    cached: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
     is_stargz: bool,
@@ -86,15 +85,14 @@ impl BlobCache for DummyCache {
         if self.prefetch {
             let mut cnt = 0usize;
             for p in prefetches.iter() {
-                if p.blob_id == self.blob_id {
-                    if self
+                if p.blob_id == self.blob_id
+                    && self
                         .reader
                         .prefetch_blob_data_range(p.offset, p.len)
                         .is_ok()
-                    {
-                        cnt += 1;
-                        break;
-                    }
+                {
+                    cnt += 1;
+                    break;
                 }
             }
             Ok(cnt)
@@ -199,7 +197,6 @@ impl BlobCacheMgr for DummyCacheMgr {
             blob_id,
             chunk_map: Arc::new(NoopChunkMap::new(self.cached)),
             reader,
-            cached: self.cached,
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
             is_stargz: blob_info.is_stargz(),

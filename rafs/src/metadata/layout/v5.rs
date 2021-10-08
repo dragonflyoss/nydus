@@ -228,28 +228,26 @@ impl RafsV5SuperBlock {
             self.extended_blob_table_entries() as u64 * RAFSV5_EXT_BLOB_ENTRY_SIZE as u64;
         let ext_blob_table_range =
             MetaRange::new(ext_blob_table_offset, ext_blob_table_size, true)?;
-        if ext_blob_table_size != 0 {
-            if !ext_blob_table_range.is_subrange_of(&meta_range)
+        if ext_blob_table_size != 0
+            && (!ext_blob_table_range.is_subrange_of(&meta_range)
                 || ext_blob_table_range.intersect_with(&inode_table_range)
-                || ext_blob_table_range.intersect_with(&blob_table_range)
-            {
-                return Err(einval!("invalid extended blob table offset or size."));
-            }
+                || ext_blob_table_range.intersect_with(&blob_table_range))
+        {
+            return Err(einval!("invalid extended blob table offset or size."));
         }
 
         let prefetch_table_offset = self.prefetch_table_offset();
         let prefetch_table_size = self.prefetch_table_entries() as u64 * size_of::<u32>() as u64;
         let prefetch_table_range =
             MetaRange::new(prefetch_table_offset, prefetch_table_size, false)?;
-        if prefetch_table_size != 0 {
-            if !prefetch_table_range.is_subrange_of(&meta_range)
+        if prefetch_table_size != 0
+            && (!prefetch_table_range.is_subrange_of(&meta_range)
                 || prefetch_table_range.intersect_with(&inode_table_range)
                 || prefetch_table_range.intersect_with(&blob_table_range)
                 || (ext_blob_table_size != 0
-                    && prefetch_table_range.intersect_with(&ext_blob_table_range))
-            {
-                return Err(einval!("invalid prefetch table offset or size."));
-            }
+                    && prefetch_table_range.intersect_with(&ext_blob_table_range)))
+        {
+            return Err(einval!("invalid prefetch table offset or size."));
         }
 
         Ok(())
@@ -582,6 +580,7 @@ impl RafsV5BlobTable {
     }
 
     /// Add information for new blob into the blob information table.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         blob_id: String,
@@ -1836,7 +1835,7 @@ pub mod tests {
             .open(tmp_file.as_path())
             .unwrap();
         let mut writer = Box::new(BufWriter::new(file)) as Box<dyn RafsIoWrite>;
-        writer.write_all(&vec![0u8; 8]).unwrap();
+        writer.write_all(&[0u8; 8]).unwrap();
         assert_eq!(table.store(&mut writer).unwrap(), 8);
         writer.flush().unwrap();
 

@@ -23,6 +23,7 @@ enum RequestStatus {
     Finished,
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 enum RequestResult {
     None,
@@ -134,6 +135,7 @@ impl RemoteConnection {
         }
     }
 
+    #[allow(dead_code)]
     fn handle_result(&self, tag: u64, result: RequestResult) {
         let requests = self.requests.lock().unwrap();
 
@@ -243,7 +245,7 @@ impl BlobObject for RemoteBlob {
 
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
         if let Ok(v) = self.meta.get_chunks_compressed(offset, size) {
-            if v.len() == 0 {
+            if v.is_empty() {
                 Ok(0)
             } else if let Ok(true) = self.chunk_map.is_bitmap_ready(v[0].id(), v.len() as u32) {
                 Ok(0)
@@ -257,7 +259,7 @@ impl BlobObject for RemoteBlob {
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
         if let Ok(v) = self.meta.get_chunks_uncompressed(offset, size) {
-            if v.len() == 0 {
+            if v.is_empty() {
                 Ok(0)
             } else if let Ok(true) = self.chunk_map.is_bitmap_ready(v[0].id(), v.len() as u32) {
                 Ok(0)
@@ -271,7 +273,7 @@ impl BlobObject for RemoteBlob {
 
     fn fetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
         debug_assert!(range.validate());
-        if range.chunks.len() == 0 {
+        if range.chunks.is_empty() {
             Ok(0)
         } else if let Ok(true) = self
             .chunk_map

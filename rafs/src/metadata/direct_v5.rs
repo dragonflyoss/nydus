@@ -259,13 +259,13 @@ impl DirectSuperBlockV5 {
             old_state.meta.extended_blob_table_entries as u64 * RAFSV5_EXT_BLOB_ENTRY_SIZE as u64;
         let extended_blob_table_range =
             MetaRange::new(extended_blob_table_offset, extended_blob_table_size, true)?;
-        if extended_blob_table_offset > 0 && extended_blob_table_size > 0 {
-            if !extended_blob_table_range.is_subrange_of(&md_range)
+        if extended_blob_table_offset > 0
+            && extended_blob_table_size > 0
+            && (!extended_blob_table_range.is_subrange_of(&md_range)
                 || extended_blob_table_range.intersect_with(&inode_table_range)
-                || extended_blob_table_range.intersect_with(&blob_table_range)
-            {
-                return Err(ebadf!("invalid extended blob table"));
-            }
+                || extended_blob_table_range.intersect_with(&blob_table_range))
+        {
+            return Err(ebadf!("invalid extended blob table"));
         }
 
         // Prefetch the bootstrap file
@@ -498,6 +498,7 @@ impl OndiskInodeWrapper {
 }
 
 impl RafsInode for OndiskInodeWrapper {
+    #[allow(clippy::collapsible_if)]
     fn validate(&self, _max_inode: u64, chunk_size: u64) -> Result<()> {
         // TODO: please help to review/enhance this and all other validate(), otherwise there's
         // always security risks because the image bootstrap may be provided by untrusted parties.

@@ -103,6 +103,7 @@ struct BlobCacheMgrKey {
     config: Arc<FactoryConfig>,
 }
 
+#[allow(clippy::derive_hash_xor_eq)]
 impl Hash for BlobCacheMgrKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.config.backend.backend_type.hash(state);
@@ -160,7 +161,7 @@ impl BlobFactory {
         let mut guard = self.mgrs.lock().unwrap();
         let mgr = guard.entry(key).or_insert_with(|| mgr);
 
-        return mgr.get_blob_cache(blob_info);
+        mgr.get_blob_cache(blob_info)
     }
 
     /// Garbage-collect unused blob cache managers and blob caches.
@@ -194,6 +195,12 @@ impl BlobFactory {
                 config.backend_type
             ))),
         }
+    }
+}
+
+impl Default for BlobFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

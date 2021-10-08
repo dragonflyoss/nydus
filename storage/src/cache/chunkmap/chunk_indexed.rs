@@ -378,7 +378,7 @@ impl ChunkBitmap for IndexedChunkMap {
             }
         }
 
-        if vec.len() == 0 {
+        if vec.is_empty() {
             Ok(None)
         } else {
             Ok(Some(vec))
