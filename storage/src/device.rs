@@ -1040,67 +1040,21 @@ pub mod v5 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct MockChunk {
-        digest: RafsDigest,
-        id: u32,
-        compressed_offset: u64,
-        compressed_size: u32,
-        uncompressed_offset: u64,
-        uncompressed_size: u32,
-    }
-
-    impl BlobChunkInfo for MockChunk {
-        fn chunk_id(&self) -> &RafsDigest {
-            &self.digest
-        }
-
-        fn id(&self) -> u32 {
-            self.id
-        }
-
-        fn blob_index(&self) -> u32 {
-            0
-        }
-
-        fn compress_offset(&self) -> u64 {
-            self.compressed_offset
-        }
-
-        fn compress_size(&self) -> u32 {
-            self.compressed_size
-        }
-
-        fn uncompress_offset(&self) -> u64 {
-            self.uncompressed_offset
-        }
-
-        fn uncompress_size(&self) -> u32 {
-            self.uncompressed_size
-        }
-
-        fn is_compressed(&self) -> bool {
-            true
-        }
-
-        fn is_hole(&self) -> bool {
-            false
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
+    use crate::test::MockChunkInfo;
 
     #[test]
     fn test_blob_io_chunk() {
-        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunk {
-            digest: Default::default(),
-            id: 3,
-            compressed_offset: 0x1000,
-            compressed_size: 0x100,
-            uncompressed_offset: 0x2000,
-            uncompressed_size: 0x200,
+        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 0,
+            flags: Default::default(),
+            compress_size: 0x100,
+            uncompress_size: 0x200,
+            compress_offset: 0x1000,
+            uncompress_offset: 0x2000,
+            file_offset: 0,
+            index: 3,
+            reserved: 0,
         });
         let iochunk: BlobIoChunk = chunk.clone().into();
 
@@ -1109,7 +1063,7 @@ mod tests {
         assert_eq!(iochunk.compress_size(), 0x100);
         assert_eq!(iochunk.uncompress_offset(), 0x2000);
         assert_eq!(iochunk.uncompress_size(), 0x200);
-        assert_eq!(iochunk.is_compressed(), true);
+        assert_eq!(iochunk.is_compressed(), false);
         assert_eq!(iochunk.is_hole(), false);
     }
 }
