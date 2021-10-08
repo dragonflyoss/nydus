@@ -16,6 +16,23 @@ type CommandParams = HashMap<String, String>;
 
 pub(crate) struct CommandBlobcache {}
 
+macro_rules! items_map(
+    { $($key:expr => $value:expr),+ } => {
+        {
+            let mut m: HashMap<String, String> = HashMap::new();
+            $(
+                m.insert($key.to_string(), $value.to_string());
+            )+
+            m
+        }
+     };
+);
+
+lazy_static! {
+    pub static ref CONFIGURE_ITEMS_MAP: HashMap<String, String> =
+        items_map!("log-level" => "log_level");
+}
+
 impl CommandBlobcache {
     pub async fn execute(
         &self,
@@ -160,7 +177,20 @@ impl CommandDaemon {
         params: Option<CommandParams>,
     ) -> Result<()> {
         if let Some(p) = params {
-            let data = serde_json::to_string(&p)?;
+            let mut real = HashMap::<String, String>::new();
+
+            // Map user provided configured item key to the one nydusd accepts.
+            for (k, v) in p.into_iter() {
+                real.insert(
+                    CONFIGURE_ITEMS_MAP
+                        .get(&k)
+                        .ok_or_else(|| anyhow!("illegal item input"))?
+                        .clone(),
+                    v,
+                );
+            }
+
+            let data = serde_json::to_string(&real)?;
             client.put("daemon", Some(data)).await?;
         } else {
             let info = client.get("daemon").await?;
