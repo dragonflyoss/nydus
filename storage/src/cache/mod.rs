@@ -216,7 +216,8 @@ pub trait BlobCache: Send + Sync {
             if offset != last
                 || offset - blob_offset > usize::MAX as u64
                 || offset.checked_add(size as u64).is_none()
-                || d_size as u64 > RAFS_MAX_CHUNK_SIZE
+                || ((!self.is_stargz() && d_size as u64 > RAFS_MAX_CHUNK_SIZE)
+                    || (self.is_stargz() && d_size > 4 << 20))
             {
                 return Err(eio!("chunks to read_chunks() is invalid"));
             }
@@ -251,12 +252,12 @@ pub trait BlobCache: Send + Sync {
         let offset = chunk.compress_offset();
         let raw_chunk = if chunk.is_compressed() {
             // Need a scratch buffer to decompress compressed data.
-            let max_size = self
-                .blob_size()?
-                .checked_sub(offset)
-                .ok_or_else(|| einval!("chunk compressed offset is bigger than blob file size"))?;
-            let max_size = cmp::min(max_size, usize::MAX as u64);
             let c_size = if self.is_stargz() {
+                let blob_size = self.blob_size()?;
+                let max_size = blob_size.checked_sub(offset).ok_or_else(|| {
+                    einval!("chunk compressed offset is bigger than blob file size")
+                })?;
+                let max_size = cmp::min(max_size, usize::MAX as u64);
                 compress::compute_compressed_gzip_size(buffer.len(), max_size as usize)
             } else {
                 chunk.compress_size() as usize
@@ -280,8 +281,7 @@ pub trait BlobCache: Send + Sync {
             buffer,
             chunk.is_compressed(),
             force_validation,
-        )
-        .map_err(|e| eio!(format!("fail to read from backend: {}", e)))?;
+        )?;
         if let Some(hook) = raw_hook {
             hook(raw_chunk)
         }
@@ -320,7 +320,7 @@ pub trait BlobCache: Send + Sync {
         } else if (self.need_validate() || force_validation)
             && !digest_check(buffer, chunk.chunk_id(), self.digester())
         {
-            Err(eio!("data digest value doesn't match"))
+            Err(eio!())
         } else {
             Ok(d_size)
         }
@@ -350,7 +350,7 @@ pub trait BlobCacheMgr: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use crate::device::BlobChunkFlags;
+    use crate::device::{BlobChunkFlags, BlobFeatures};
     use crate::test::MockChunkInfo;
 
     use super::*;
@@ -364,6 +364,7 @@ mod tests {
             0x100000,
             0x100000,
             512,
+            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
         ));
         let chunk1 = Arc::new(MockChunkInfo {
             block_id: Default::default(),

@@ -12,7 +12,9 @@ use std::str::FromStr;
 use sha2::digest::Digest;
 use sha2::Sha256;
 
+/// Size in bytes of chunk digest value.
 pub const RAFS_DIGEST_LENGTH: usize = 32;
+
 type DigestData = [u8; RAFS_DIGEST_LENGTH];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

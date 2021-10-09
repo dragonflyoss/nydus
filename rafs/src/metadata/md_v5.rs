@@ -149,6 +149,8 @@ impl RafsSuper {
     }
 
     // TODO: Add a UT for me.
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    /*
     pub(crate) fn carry_more_until(
         &self,
         inode: &dyn RafsInode,
@@ -276,4 +278,6 @@ impl RafsSuper {
             }
         }
     }
+     */
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }

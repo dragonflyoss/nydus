@@ -94,8 +94,9 @@ impl CachedSuperBlockV5 {
             }
         }
 
-        for ino in dir_ino_set {
-            self.add_into_parent(self.get_node(ino)?);
+        // Add directories to its parent in reverse order.
+        for ino in dir_ino_set.iter().rev() {
+            self.add_into_parent(self.get_node(*ino)?);
         }
         debug!("all {} inodes loaded", self.s_inodes.len());
 
@@ -117,7 +118,10 @@ impl CachedSuperBlockV5 {
 
         if inode.is_hardlink() {
             if let Some(i) = self.s_inodes.get(&inode.i_ino) {
-                return Ok(i.clone());
+                // Keep it as is, directory digest algorithm has dependency on it.
+                if !i.i_data.is_empty() {
+                    return Ok(inode);
+                }
             }
         }
         self.s_inodes.insert(inode.ino(), inode.clone());
@@ -127,9 +131,7 @@ impl CachedSuperBlockV5 {
 
     fn add_into_parent(&mut self, child_inode: Arc<CachedInodeV5>) {
         if let Ok(parent_inode) = self.get_node_mut(child_inode.parent()) {
-            Arc::get_mut(parent_inode)
-                .unwrap()
-                .add_child(child_inode.clone());
+            Arc::get_mut(parent_inode).unwrap().add_child(child_inode);
         }
     }
 }
@@ -181,12 +183,9 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
             blob_table
                 .extended
                 .load(r, meta.extended_blob_table_entries as usize)?;
-            if blob_table.extended.entries.len() != blob_table.entries.len() {
-                return Err(einval!("blob table and extended blob table doesn't match"));
-            }
         }
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
-        blob_table.load(r, meta.blob_table_size, meta.chunk_size)?;
+        blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
         self.s_blob = Arc::new(blob_table);
 
         // Load all inodes started from first inode offset.
@@ -356,12 +355,8 @@ impl CachedInodeV5 {
 
 impl RafsInode for CachedInodeV5 {
     #[allow(clippy::collapsible_if)]
-    fn validate(&self, max_inode: u64, chunk_size: u64) -> Result<()> {
-        if self.i_ino == RAFS_ROOT_INODE
-            || self.i_parent > max_inode
-            || self.i_name.len() > RAFS_MAX_NAME
-            || self.i_nlink == 0
-        {
+    fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
+        if self.i_ino == 0 || self.i_name.len() > RAFS_MAX_NAME || self.i_nlink == 0 {
             return Err(einval!("invalid inode"));
         }
         if self.is_reg() {
@@ -370,7 +365,7 @@ impl RafsInode for CachedInodeV5 {
                 return Err(einval!("invalid chunk count"));
             }
         } else if self.is_dir() {
-            if (self.i_child_idx as Inode) < self.i_ino || self.i_child_cnt as u64 >= max_inode {
+            if (self.i_child_idx as Inode) < self.i_ino {
                 return Err(einval!("invalid directory"));
             }
         } else if self.is_symlink() {
@@ -726,6 +721,7 @@ mod cached_tests {
     use std::sync::Arc;
 
     use nydus_utils::ByteSize;
+    use storage::device::BlobFeatures;
 
     use crate::metadata::cached_v5::{CachedInodeV5, CachedSuperBlockV5};
     use crate::metadata::layout::v5::{
@@ -891,9 +887,17 @@ mod cached_tests {
         let mut meta = Arc::new(RafsSuperMeta::default());
         Arc::get_mut(&mut meta).unwrap().chunk_size = 1024 * 1024;
         let mut blob_table = Arc::new(RafsV5BlobTable::new());
-        Arc::get_mut(&mut blob_table)
-            .unwrap()
-            .add(String::from("123333"), 0, 0, 0, 0, 0, 0);
+        Arc::get_mut(&mut blob_table).unwrap().add(
+            String::from("123333"),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+            meta.flags,
+        );
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
         let descs = cached_inode.alloc_bio_vecs(0, 100, true).unwrap();

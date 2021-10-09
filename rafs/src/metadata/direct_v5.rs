@@ -303,7 +303,7 @@ impl DirectSuperBlockV5 {
                 .load(r, meta.extended_blob_table_entries as usize)?;
         }
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
-        blob_table.load(r, meta.blob_table_size, meta.chunk_size)?;
+        blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
 
         // Load(Map) inode table. Safe because we have validated the inode table layout.
         // Though we have passed *mut u32 to Vec::from_raw_parts(), it will trigger invalid memory
@@ -499,12 +499,12 @@ impl OndiskInodeWrapper {
 
 impl RafsInode for OndiskInodeWrapper {
     #[allow(clippy::collapsible_if)]
-    fn validate(&self, _max_inode: u64, chunk_size: u64) -> Result<()> {
+    fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
         // TODO: please help to review/enhance this and all other validate(), otherwise there's
         // always security risks because the image bootstrap may be provided by untrusted parties.
         let state = self.state();
         let inode = self.inode(state.deref());
-        let max_inode = std::cmp::min(state.inode_table.len() as u64, _max_inode);
+        let max_inode = state.inode_table.len() as u64;
 
         // * - parent inode number must be less than child inode number unless child is a hardlink.
         // * - inode link count must not be zero.
@@ -529,7 +529,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         if inode.is_reg() {
             let chunks = (inode.i_size + chunk_size - 1) / chunk_size;
-            if !inode.has_hole() && chunks != inode.i_child_index as u64 {
+            if !inode.has_hole() && chunks != inode.i_child_count as u64 {
                 return Err(einval!("invalid chunk count"));
             }
             let size = inode.size()
@@ -539,7 +539,6 @@ impl RafsInode for OndiskInodeWrapper {
         } else if inode.is_dir() {
             if (inode.i_child_index as Inode) < inode.i_ino
                 || inode.i_child_count as u64 >= max_inode
-                || inode.i_child_index as Inode + inode.i_child_count as Inode > max_inode
             {
                 return Err(einval!("invalid directory"));
             }

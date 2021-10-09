@@ -46,7 +46,7 @@ use std::sync::Arc;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use storage::compress;
-use storage::device::{BlobIoDesc, BlobIoVec};
+use storage::device::{BlobFeatures, BlobIoDesc, BlobIoVec};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_VERSION_V5};
 use crate::metadata::{
@@ -192,8 +192,9 @@ impl RafsV5SuperBlock {
             return Err(einval!("invalid super block blob size"));
         } else if !self.block_size().is_power_of_two()
             || self.block_size() < 0x1000
-            || self.block_size() as u64 > RAFS_MAX_CHUNK_SIZE
+            || (self.block_size() as u64 > RAFS_MAX_CHUNK_SIZE && self.block_size() != 4 << 20)
         {
+            // Stargz has a special chunk size of 4MB.
             return Err(einval!("invalid block size"));
         } else if RafsSuperFlags::from_bits(self.flags()).is_none() {
             return Err(einval!("invalid super block flags"));
@@ -422,7 +423,7 @@ impl RafsV5InodeTable {
 
     /// Set inode offset in the metadata blob for an inode.
     pub fn set(&mut self, ino: Inode, offset: u32) -> Result<()> {
-        if ino == 0 || ino >= self.data.len() as u64 {
+        if ino == 0 || ino > self.data.len() as u64 {
             return Err(einval!("invalid inode number"));
         } else if offset as usize <= RAFSV5_SUPERBLOCK_SIZE || offset & 0x7 != 0 {
             return Err(einval!("invalid inode offset"));
@@ -437,7 +438,7 @@ impl RafsV5InodeTable {
 
     /// Get inode offset in the metadata blob of an inode.
     pub fn get(&self, ino: Inode) -> Result<u32> {
-        if ino == 0 || ino >= self.data.len() as u64 {
+        if ino == 0 || ino > self.data.len() as u64 {
             return Err(enoent!());
         }
 
@@ -590,6 +591,8 @@ impl RafsV5BlobTable {
         chunk_count: u32,
         uncompressed_size: u64,
         compressed_size: u64,
+        blob_features: BlobFeatures,
+        flags: RafsSuperFlags,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         let mut blob_info = BlobInfo::new(
@@ -599,10 +602,13 @@ impl RafsV5BlobTable {
             compressed_size,
             chunk_size,
             chunk_count,
+            blob_features,
         );
 
+        blob_info.set_compressor(flags.into());
+        blob_info.set_digester(flags.into());
         blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
-        blob_info.set_blob_index(blob_index);
+
         self.entries.push(Arc::new(blob_info));
         self.extended
             .add(chunk_count, uncompressed_size, compressed_size);
@@ -625,6 +631,7 @@ impl RafsV5BlobTable {
         r: &mut RafsIoReader,
         blob_table_size: u32,
         chunk_size: u32,
+        flags: RafsSuperFlags,
     ) -> Result<()> {
         if blob_table_size == 0 {
             return Ok(());
@@ -658,7 +665,7 @@ impl RafsV5BlobTable {
             debug!("blob {:?} lies on", blob_id);
 
             let index = self.entries.len();
-            let (chunk_count, uncompressed_size, compressed_size) =
+            let (chunk_count, uncompressed_size, compressed_size, blob_features) =
                 // For compatibility, blob table might not be associated with extended blob table.
                 if !self.extended.entries.is_empty() {
                     let ext_len = self.extended.entries.len();
@@ -667,9 +674,9 @@ impl RafsV5BlobTable {
                         return Err(einval!());
                     }
                     let entry = &self.extended.entries[index];
-                    (entry.chunk_count, entry.uncompressed_size, entry.compressed_size)
+                    (entry.chunk_count, entry.uncompressed_size, entry.compressed_size, BlobFeatures::empty())
                 } else {
-                    (0, 0, 0)
+                    (0, 0, 0, BlobFeatures::V5_NO_EXT_BLOB_TABLE)
                 };
 
             let mut blob_info = BlobInfo::new(
@@ -679,7 +686,11 @@ impl RafsV5BlobTable {
                 compressed_size,
                 chunk_size,
                 chunk_count,
+                blob_features,
             );
+
+            blob_info.set_compressor(flags.into());
+            blob_info.set_digester(flags.into());
             blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
 
             self.entries.push(Arc::new(blob_info));
@@ -1251,6 +1262,9 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeChunkOps + RafsV5I
         index_end,
         inode.get_child_count()
     );
+    if size == 0 || index_start >= inode.get_chunk_count() {
+        return Ok(vec![]);
+    }
 
     let mut descs = Vec::with_capacity(4);
     let mut desc = BlobIoVec::new();
@@ -1507,6 +1521,7 @@ pub mod tests {
                 &mut file,
                 buffer.len() as u32,
                 RAFS_DEFAULT_CHUNK_SIZE as u32,
+                RafsSuperFlags::empty(),
             )
             .unwrap();
         for b in &blob_table.entries {
@@ -1525,7 +1540,12 @@ pub mod tests {
         blob_table.entries.truncate(0);
         file.seek(SeekFrom::Start(0)).unwrap();
         blob_table
-            .load(&mut file, 0, RAFS_DEFAULT_CHUNK_SIZE as u32)
+            .load(
+                &mut file,
+                0,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+                RafsSuperFlags::empty(),
+            )
             .unwrap();
         assert_eq!(blob_table.size(), 0);
         assert_eq!(blob_table.entries.len(), 0);
@@ -1538,6 +1558,7 @@ pub mod tests {
                 &mut file,
                 (buffer.len() - 100) as u32,
                 RAFS_DEFAULT_CHUNK_SIZE as u32,
+                RafsSuperFlags::empty(),
             )
             .unwrap();
         assert_eq!(blob_table.entries[0].blob_id(), first_id);
@@ -1682,7 +1703,15 @@ pub mod tests {
 
         for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
             let mut desc = BlobIoVec::new();
-            let blob = Arc::new(BlobInfo::new(0, String::from("blobid"), 0, 0, 0, 0));
+            let blob = Arc::new(BlobInfo::new(
+                0,
+                String::from("blobid"),
+                0,
+                0,
+                0,
+                0,
+                BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+            ));
             let res = add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), blob, true);
             assert_eq!(*result, res);
             if !desc.bi_vec.is_empty() {

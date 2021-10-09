@@ -106,11 +106,12 @@ impl BlobInfo {
         compressed_size: u64,
         chunk_size: u32,
         chunk_count: u32,
+        blob_features: BlobFeatures,
     ) -> Self {
         let mut blob_info = BlobInfo {
             blob_index,
             blob_id,
-            blob_features: BlobFeatures::empty(),
+            blob_features,
             uncompressed_size,
             compressed_size,
             chunk_size,
@@ -137,6 +138,9 @@ impl BlobInfo {
     pub fn compute_features(&mut self) {
         if self.chunk_count == 0 {
             self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
+        }
+        if self.compressor == compress::Algorithm::GZip {
+            self.stargz = true;
         }
     }
 
@@ -203,6 +207,7 @@ impl BlobInfo {
     /// Set compression algorithm for the blob.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         self.compressor = compressor;
+        self.compute_features();
     }
 
     /// Get the message digest algorithm for the blob.
@@ -289,6 +294,13 @@ impl BlobInfo {
     /// Get the uncompressed size of the chunk information array.
     pub fn meta_ci_uncompressed_size(&self) -> u64 {
         self.meta_ci_uncompressed_size
+    }
+
+    /// Check whether compression metadata is available.
+    pub fn meta_ci_is_valid(&self) -> bool {
+        self.meta_ci_offset != 0
+            && self.meta_ci_compressed_size != 0
+            && self.meta_ci_uncompressed_size != 0
     }
 }
 
@@ -867,9 +879,7 @@ impl BlobDevice {
     ) -> io::Result<()> {
         for idx in 0..prefetches.len() {
             if let Some(blob) = self.get_blob_by_id(&prefetches[idx].blob_id) {
-                let _ = blob
-                    .prefetch(blob.clone(), &prefetches[idx..idx + 1], &[])
-                    .map_err(|_e| eio!("failed to prefetch blob data"));
+                let _ = blob.prefetch(blob.clone(), &prefetches[idx..idx + 1], &[]);
             }
         }
         for io_vec in io_vecs.iter() {

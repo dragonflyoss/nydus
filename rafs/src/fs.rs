@@ -694,15 +694,17 @@ impl FileSystem for Rafs {
         }
 
         let real_size = cmp::min(size as u64, inode_size - offset);
-        let real_end = offset + real_size;
+        //let real_end = offset + real_size;
         let mut result = 0;
         let mut descs = inode.alloc_bio_vecs(offset, real_size as usize, true)?;
         let start = self.ios.latency_start();
 
         for desc in descs.iter_mut() {
+            debug_assert!(desc.validate());
             debug_assert!(!desc.bi_vec.is_empty());
             debug_assert!(desc.bi_size != 0);
 
+            /*
             // Try to amplify user io for Rafs v5, to improve performance.
             if self.sb.meta.is_v5() {
                 let all_chunks_ready = self.device.is_all_chunk_ready(&desc);
@@ -717,6 +719,7 @@ impl FileSystem for Rafs {
                     }
                 }
             }
+             */
 
             // Avoid copying `desc`
             let r = self.device.read_to(w, desc)?;

@@ -52,6 +52,7 @@ pub(crate) struct RafsMeta {
     blob_table_size: u32,
     extended_blob_table_offset: u64,
     extended_blob_table_entries: u32,
+    flags: RafsSuperFlags,
 }
 
 impl From<&RafsV5SuperBlock> for RafsMeta {
@@ -65,6 +66,7 @@ impl From<&RafsV5SuperBlock> for RafsMeta {
             prefetch_table_entries: sb.prefetch_table_entries(),
             extended_blob_table_offset: sb.extended_blob_table_offset(),
             extended_blob_table_entries: sb.extended_blob_table_entries(),
+            flags: RafsSuperFlags::from_bits_truncate(sb.flags()),
         }
     }
 }
@@ -103,6 +105,7 @@ impl RafsInspector {
             &mut f,
             rafs_meta.blob_table_size,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            rafs_meta.flags,
         )?;
 
         // Load extended blob table if the bootstrap including

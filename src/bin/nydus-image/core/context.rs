@@ -19,12 +19,12 @@ use vmm_sys_util::tempfile::TempFile;
 
 use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
+use rafs::metadata::{Inode, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWriter};
 // FIXME: Must image tool depend on storage backend?
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
-use storage::device::BlobInfo;
+use storage::device::{BlobFeatures, BlobInfo};
 
 use crate::core::chunk_dict::ChunkDict;
 use crate::core::layout::BlobLayout;
@@ -297,6 +297,14 @@ impl BlobManager {
             let chunk_count = ctx.chunk_count;
             let decompressed_blob_size = ctx.decompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
+            let blob_features = if blob_table.extended.entries.is_empty() {
+                BlobFeatures::V5_NO_EXT_BLOB_TABLE
+            } else {
+                BlobFeatures::empty()
+            };
+            // TODO: get digest and compression algorithms from context.
+            let flags = RafsSuperFlags::DIGESTER_BLAKE3 | RafsSuperFlags::COMPRESS_LZ4_BLOCK;
+
             blob_table.add(
                 blob_id,
                 0,
@@ -305,6 +313,8 @@ impl BlobManager {
                 chunk_count,
                 decompressed_blob_size,
                 compressed_blob_size,
+                blob_features,
+                flags,
             );
         }
         Ok(blob_table)
