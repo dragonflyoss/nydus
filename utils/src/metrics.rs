@@ -686,18 +686,18 @@ pub struct BlobcacheMetrics {
     // Cache hit percentage = (partial_hits + whole_hits) / total
     pub partial_hits: BasicMetric,
     pub whole_hits: BasicMetric,
+    // How many `read` requests are processed by the blobcache instance.
+    // This metric will be helpful when comparing with cache hits times.
     pub total: BasicMetric,
     // Scale of blobcache. Blobcache does not evict entries.
     // Means the number of chunks in ready status.
     pub entries_count: BasicMetric,
-    // In unit of Bytes
-    pub prefetch_data_amount: BasicMetric,
-    pub prefetch_workers: AtomicUsize,
-    pub prefetch_policy: Mutex<HashSet<String>>,
     // Together with below two fields, we can figure out average merging size thus
     // to estimate the possibility to merge backend IOs.
-    pub prefetch_total_size: BasicMetric,
+    // In unit of Bytes
+    pub prefetch_data_amount: BasicMetric,
     pub prefetch_mr_count: BasicMetric,
+    pub prefetch_workers: AtomicUsize,
     pub prefetch_unmerged_chunks: BasicMetric,
     pub buffered_backend_size: BasicMetric,
 }
