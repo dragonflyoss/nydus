@@ -14,6 +14,21 @@ use rafs::fs::RafsConfig;
 
 type CommandParams = HashMap<String, String>;
 
+fn load_param_interval(params: &Option<CommandParams>) -> Result<Option<u32>> {
+    if let Some(p) = params {
+        if let Some(interval) = p.get("interval") {
+            interval
+                .parse()
+                .map(Some)
+                .map_err(|e| anyhow!("Invalid interval input. {}", e))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) struct CommandBlobcache {}
 
 macro_rules! items_map(
@@ -76,15 +91,8 @@ impl CommandBackend {
     ) -> Result<()> {
         let metrics = client.get("metrics/backend").await?;
 
-        let interval: Option<Result<u32>> =
-            params.and_then(|p| p.get("interval").cloned()).map(|i| {
-                i.parse()
-                    .map_err(|e| anyhow!("Invalid interval input. {}", e))
-            });
-
-        if let Some(Err(e)) = interval {
-            return Err(e);
-        } else if let Some(Ok(i)) = interval {
+        let interval = load_param_interval(&params)?;
+        if let Some(i) = interval {
             let mut last_record = metrics;
             loop {
                 sleep(Duration::from_secs(i as u64));
