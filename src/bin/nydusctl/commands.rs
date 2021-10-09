@@ -63,16 +63,31 @@ impl CommandBlobcache {
         } else {
             print!(
                 r#"
-Partial Hits:       {partial_hits}
-Whole Hits:         {whole_hits}
-Total Read:         {total_read}
-Prefetch Amount:    {prefetch_amount} = {prefetch_amount_kb}KB
+Partial Hits:           {partial_hits}
+Whole Hits:             {whole_hits}
+Total Read:             {total_read}
+Directory:              {directory}
+Files:                  {files}
+Prefetch Workers:       {workers}
+Prefetch Amount:        {prefetch_amount} = {prefetch_amount_kb} KB
+Prefetch Requests:      {requests}
+Prefetch Average Size:  {avg_prefetch_size} Bytes
+Prefetch Unmerged:      {unmerged_blocks}
+Persister Buffer:       {buffered}
 "#,
                 partial_hits = m["partial_hits"],
                 whole_hits = m["whole_hits"],
                 total_read = m["total"],
                 prefetch_amount = m["prefetch_data_amount"],
                 prefetch_amount_kb = m["prefetch_data_amount"].as_u64().unwrap() / 1024,
+                files = m["underlying_files"],
+                directory = m["store_path"],
+                requests = m["prefetch_mr_count"],
+                avg_prefetch_size = m["prefetch_data_amount"].as_u64().unwrap()
+                    / m["prefetch_mr_count"].as_u64().unwrap(),
+                workers = m["prefetch_workers"],
+                unmerged_blocks = m["prefetch_unmerged_chunks"],
+                buffered = m["buffered_backend_size"],
             );
         }
 
