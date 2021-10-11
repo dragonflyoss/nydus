@@ -351,13 +351,14 @@ impl RafsSuper {
             }
             // The left chunks whose size is smaller than 4MB will be fetched here.
             fetcher(&mut head_desc);
+            Ok(())
         } else if self.meta.is_v4_v5() {
-            self.prefetch_v4v5(r, fetcher)?;
+            self.prefetch_v4v5(r, fetcher)
+        } else {
+            Err(RafsError::Prefetch(
+                "Unknown filesystem version, prefetch disabled".to_string(),
+            ))
         }
-
-        Err(RafsError::Prefetch(
-            "Unknown filesystem version, prefetch disabled".to_string(),
-        ))
     }
 
     pub fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
