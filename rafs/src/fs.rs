@@ -49,6 +49,8 @@ pub type Handle = u64;
 pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
+/// Default window size of read amplification.
+pub const READ_AMPLIFY_WINDOW_SIZE: u64 = 128 * 1024;
 
 const DOT: &str = ".";
 const DOTDOT: &str = "..";
@@ -694,32 +696,31 @@ impl FileSystem for Rafs {
         }
 
         let real_size = cmp::min(size as u64, inode_size - offset);
-        //let real_end = offset + real_size;
         let mut result = 0;
         let mut descs = inode.alloc_bio_vecs(offset, real_size as usize, true)?;
-        let start = self.ios.latency_start();
+        debug_assert!(!descs.is_empty() && !descs[0].bi_vec.is_empty());
 
+        // Try to amplify user io for Rafs v5, to improve performance.
+        if self.sb.meta.is_v5() && (size as u64) < READ_AMPLIFY_WINDOW_SIZE {
+            let all_chunks_ready = self.device.is_all_chunk_ready(&descs);
+            if !all_chunks_ready {
+                let chunk_size = self.metadata().chunk_size as u64;
+                let next_chunk_base = (offset + (size as u64) + chunk_size) & !chunk_size;
+                let window_base = std::cmp::min(next_chunk_base, inode_size);
+                let actual_size = window_base - (offset & !chunk_size);
+                if actual_size < READ_AMPLIFY_WINDOW_SIZE {
+                    let window_size = READ_AMPLIFY_WINDOW_SIZE - actual_size;
+                    self.sb
+                        .amplify_io(&mut descs, &inode, window_base, window_size)?;
+                }
+            }
+        }
+
+        let start = self.ios.latency_start();
         for desc in descs.iter_mut() {
             debug_assert!(desc.validate());
             debug_assert!(!desc.bi_vec.is_empty());
             debug_assert!(desc.bi_size != 0);
-
-            /*
-            // Try to amplify user io for Rafs v5, to improve performance.
-            if self.sb.meta.is_v5() {
-                let all_chunks_ready = self.device.is_all_chunk_ready(&desc);
-                if !all_chunks_ready {
-                    if let Some(rd) = self.sb.carry_more_until(
-                        inode.as_ref(),
-                        real_end,
-                        &desc.bi_vec.last().unwrap().chunkinfo,
-                        1024 * 128 - size as u64,
-                    )? {
-                        desc.bi_vec.extend_from_slice(&rd.bi_vec);
-                    }
-                }
-            }
-             */
 
             // Avoid copying `desc`
             let r = self.device.read_to(w, desc)?;

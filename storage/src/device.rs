@@ -901,18 +901,21 @@ impl BlobDevice {
     }
 
     /// Check all chunks related to the blob io vector are ready.
-    pub fn is_all_chunk_ready(&self, io_vec: &BlobIoVec) -> bool {
-        if let Some(blob) = self.get_blob_by_iovec(io_vec) {
-            let chunk_map = blob.get_chunk_map();
-            for desc in io_vec.bi_vec.iter() {
-                if !chunk_map.is_ready(&desc.chunkinfo).unwrap_or(false) {
-                    return false;
+    pub fn is_all_chunk_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
+        for io_vec in io_vecs.iter() {
+            if let Some(blob) = self.get_blob_by_iovec(io_vec) {
+                let chunk_map = blob.get_chunk_map();
+                for desc in io_vec.bi_vec.iter() {
+                    if !chunk_map.is_ready(&desc.chunkinfo).unwrap_or(false) {
+                        return false;
+                    }
                 }
+            } else {
+                return false;
             }
-            return true;
         }
 
-        false
+        true
     }
 
     fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
@@ -1072,5 +1075,10 @@ mod tests {
         assert_eq!(iochunk.uncompress_size(), 0x200);
         assert_eq!(iochunk.is_compressed(), false);
         assert_eq!(iochunk.is_hole(), false);
+    }
+
+    #[test]
+    fn test_is_all_chunk_ready() {
+        // TODO
     }
 }

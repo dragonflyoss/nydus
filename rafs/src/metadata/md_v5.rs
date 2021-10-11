@@ -7,6 +7,7 @@ use super::cached_v5::CachedSuperBlockV5;
 use super::direct_v5::DirectSuperBlockV5;
 use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock};
 use super::*;
+use crate::fs::READ_AMPLIFY_WINDOW_SIZE;
 
 impl RafsSuperMeta {
     /// V5: get compression algorithm to handle chunk data for the filesystem.
@@ -149,135 +150,57 @@ impl RafsSuper {
     }
 
     // TODO: Add a UT for me.
-    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    /*
-    pub(crate) fn carry_more_until(
+    pub(crate) fn amplify_io(
         &self,
-        inode: &dyn RafsInode,
-        bound: u64,
-        tail_chunk: &dyn BlobChunkInfo,
-        expected_size: u64,
-    ) -> Result<Option<BlobIoVec>> {
-        let mut left = expected_size;
+        descs: &mut Vec<BlobIoVec>,
+        inode: &Arc<dyn RafsInode>,
+        window_base: u64,
+        mut window_size: u64,
+    ) -> Result<()> {
         let inode_size = inode.size();
-        let mut ra_desc = BlobIoVec::new();
 
-        let extra_file_needed = if let Some(delta) = inode_size.checked_sub(bound) {
-            let sz = std::cmp::min(delta, expected_size);
-            let mut d = inode.alloc_bio_vecs(bound, sz as usize, false)?;
-
-            // It is possible that read size is beyond file size, so chunks vector is zero length.
-            if !d[0].bi_vec.is_empty() {
-                let ck = d[0].bi_vec[0].chunkinfo.clone();
-                // Might be smaller than uncompressed size. It is user part.
-                let trimming_size = d[0].bi_vec[0].size;
-                let trimming = tail_chunk.compress_offset() == ck.compress_offset();
-                // Stolen chunk bigger than expected size will involve more backend IO, thus
-                // to slow down current user IO.
-                if let Some(cks) = Self::steal_chunks(&mut d[0], left as u32) {
-                    if trimming {
-                        ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
-                        ra_desc.bi_size += cks.bi_size;
-                        ra_desc.bi_size -= trimming_size;
-                    } else {
-                        ra_desc.bi_vec.append(&mut cks.bi_vec);
-                        ra_desc.bi_size += cks.bi_size;
-                    }
-                }
-                if delta >= expected_size {
-                    false
-                } else {
-                    left -= delta;
-                    true
-                }
-            } else {
-                true
+        // Read left content of current file.
+        if window_base < inode_size {
+            let size = inode_size - window_base;
+            let sz = std::cmp::min(size, window_size);
+            let mut d = inode.alloc_bio_vecs(window_base, sz as usize, false)?;
+            debug_assert!(!d.is_empty() && !d[0].bi_vec.is_empty());
+            descs.append(&mut d);
+            window_size -= sz;
+            if window_size == 0 {
+                return Ok(());
             }
-        } else {
-            true
-        };
+        }
 
-        if extra_file_needed {
-            let mut next_ino = inode.ino() + 1;
-            loop {
-                let next_inode = self.get_inode(next_ino, false);
-                if let Ok(ni) = next_inode {
-                    if !ni.is_reg() {
-                        next_ino = ni.ino() + 1;
-                        continue;
-                    }
+        // Read more small files.
+        let mut next_ino = inode.ino();
+        while window_size > 0 {
+            next_ino += 1;
+            if let Ok(ni) = self.get_inode(next_ino, false) {
+                if ni.is_reg() {
                     let next_size = ni.size();
-                    let sz = std::cmp::min(left, next_size);
+                    if next_size > READ_AMPLIFY_WINDOW_SIZE {
+                        break;
+                    }
+
+                    let sz = std::cmp::min(window_size, next_size);
                     let mut d = ni.alloc_bio_vecs(0, sz as usize, false)?;
-
-                    // Stolen chunk bigger than expected size will involve more backend IO, thus
-                    // to slow down current user IO.
-                    if let Some(cks) = Self::steal_chunks(&mut d[0], sz as u32) {
-                        ra_desc.bi_vec.append(&mut cks.bi_vec);
-                        ra_desc.bi_size += cks.bi_size;
-                    } else {
-                        break;
-                    }
-
-                    // Even stolen chunks are truncated, still consume expected size.
-                    left -= sz;
-                    if left == 0 {
-                        break;
-                    }
-                    next_ino = ni.ino() + 1;
-                } else {
-                    break;
+                    debug_assert!(!d.is_empty() && !d[0].bi_vec.is_empty());
+                    descs.append(&mut d);
+                    window_size -= sz;
                 }
-            }
-        }
-
-        if ra_desc.bi_size > 0 {
-            assert!(!ra_desc.bi_vec.is_empty());
-            Ok(Some(ra_desc))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn steal_chunks(desc: &mut BlobIoVec, expected_size: u32) -> Option<&mut BlobIoVec> {
-        enum State {
-            All,
-            None,
-            Partial(usize),
-        }
-
-        let mut total = 0;
-        let mut final_index = State::All;
-        let len = desc.bi_vec.len();
-
-        for (i, b) in desc.bi_vec.iter().enumerate() {
-            let compressed_size = b.chunkinfo.compress_size();
-
-            if compressed_size + total <= expected_size {
-                total += compressed_size;
-                continue;
             } else {
-                if i != 0 {
-                    final_index = State::Partial(i - 1);
-                } else {
-                    final_index = State::None;
-                }
                 break;
             }
         }
 
-        match final_index {
-            State::None => None,
-            State::All => Some(desc),
-            State::Partial(fi) => {
-                for i in (fi..len).rev() {
-                    desc.bi_size -= desc.bi_vec[i].chunkinfo.uncompress_size() as usize;
-                    desc.bi_vec.remove(i as usize);
-                }
-                Some(desc)
-            }
-        }
+        Ok(())
     }
-     */
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // TODO: add unit test cases for RafsSuper::{try_load_v5, amplify_io}
 }
