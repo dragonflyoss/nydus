@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Drop};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -156,6 +156,7 @@ pub struct AccessPattern {
     nr_read: AtomicUsize,
     /// In unit of seconds.
     first_access_time: AtomicU64,
+    first_access_time_nanos: AtomicU32,
 }
 
 pub trait InodeStatsCounter {
@@ -297,13 +298,12 @@ impl GlobalIoStats {
                 Some(r) => {
                     r.nr_read.fetch_add(1, Ordering::Relaxed);
                     if r.first_access_time.load(Ordering::Relaxed) == 0 {
-                        r.first_access_time.store(
-                            SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
-                            Ordering::Relaxed,
-                        );
+                        let t = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap();
+                        r.first_access_time.store(t.as_secs(), Ordering::Relaxed);
+                        r.first_access_time_nanos
+                            .store(t.subsec_nanos(), Ordering::Relaxed);
                     }
                 }
                 None => warn!("No pattern record for file {}", ino),
