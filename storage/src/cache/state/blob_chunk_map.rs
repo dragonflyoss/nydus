@@ -156,28 +156,30 @@ where
         self.c.is_persist()
     }
 
-    fn as_range_map(&self) -> Option<&dyn RangeMap> {
+    fn as_range_map(&self) -> Option<&dyn RangeMap<I = u32>> {
         let any = self as &dyn Any;
 
         any.downcast_ref::<BlobChunkMap<IndexedChunkMap, u32>>()
-            .map(|v| v as &dyn RangeMap)
+            .map(|v| v as &dyn RangeMap<I = u32>)
     }
 }
 
 impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
+    type I = u32;
+
     fn is_range_all_ready(&self) -> bool {
         self.c.is_range_all_ready()
     }
 
-    fn is_range_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+    fn is_range_ready(&self, start_index: Self::I, count: Self::I) -> Result<bool> {
         self.c.is_range_ready(start_index, count)
     }
 
     fn check_range_ready_and_mark_pending(
         &self,
-        start_index: u32,
-        count: u32,
-    ) -> Result<Option<Vec<u32>>> {
+        start_index: Self::I,
+        count: Self::I,
+    ) -> Result<Option<Vec<Self::I>>> {
         let pending = match self
             .c
             .check_range_ready_and_mark_pending(start_index, count)
@@ -208,13 +210,17 @@ impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
         Ok(Some(res))
     }
 
-    fn set_range_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
+    fn set_range_ready_and_clear_pending(
+        &self,
+        start_index: Self::I,
+        count: Self::I,
+    ) -> Result<()> {
         let res = self.c.set_range_ready_and_clear_pending(start_index, count);
         self.clear_range_pending(start_index, count);
         res
     }
 
-    fn clear_range_pending(&self, start_index: u32, count: u32) {
+    fn clear_range_pending(&self, start_index: Self::I, count: Self::I) {
         let count = std::cmp::min(count, u32::MAX - start_index);
         let end = start_index + count;
         let mut guard = self.inflight_tracer.lock().unwrap();
@@ -226,7 +232,7 @@ impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
         }
     }
 
-    fn wait_for_range_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+    fn wait_for_range_ready(&self, start_index: Self::I, count: Self::I) -> Result<bool> {
         let count = std::cmp::min(count, u32::MAX - start_index);
         let end = start_index + count;
         if self.is_range_ready(start_index, count)? {

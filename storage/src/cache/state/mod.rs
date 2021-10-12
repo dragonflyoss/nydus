@@ -42,6 +42,7 @@ mod blob_chunk_map;
 mod digested_chunk_map;
 mod indexed_chunk_map;
 mod noop_chunk_map;
+mod persist_map;
 
 /// Trait to track chunk readiness state.
 pub trait ChunkMap: Any + Send + Sync {
@@ -75,7 +76,7 @@ pub trait ChunkMap: Any + Send + Sync {
     }
 
     /// Convert the objet to an [RangeMap](trait.RangeMap.html) object.
-    fn as_range_map(&self) -> Option<&dyn RangeMap> {
+    fn as_range_map(&self) -> Option<&dyn RangeMap<I = u32>> {
         None
     }
 }
@@ -86,13 +87,15 @@ pub trait ChunkMap: Any + Send + Sync {
 /// data address. The trait methods are designed to support batch operations for improving
 /// performance by avoid frequently acquire/release locks.
 pub trait RangeMap: Send + Sync {
+    type I;
+
     /// Check whether all chunks or data managed by the `RangeMap` object are ready.
     fn is_range_all_ready(&self) -> bool {
         false
     }
 
     /// Check whether all chunks or data in the range are ready for use.
-    fn is_range_ready(&self, _start_index: u32, _count: u32) -> Result<bool> {
+    fn is_range_ready(&self, _start_index: Self::I, _count: Self::I) -> Result<bool> {
         Err(enosys!())
     }
 
@@ -108,22 +111,26 @@ pub trait RangeMap: Send + Sync {
     ///   data or chunks marked as pending by other threads.
     fn check_range_ready_and_mark_pending(
         &self,
-        _start_index: u32,
-        _count: u32,
-    ) -> Result<Option<Vec<u32>>> {
+        _start_index: Self::I,
+        _count: Self::I,
+    ) -> Result<Option<Vec<Self::I>>> {
         Err(enosys!())
     }
 
     /// Mark all chunks or data in the range as ready for use.
-    fn set_range_ready_and_clear_pending(&self, _start_index: u32, _count: u32) -> Result<()> {
+    fn set_range_ready_and_clear_pending(
+        &self,
+        _start_index: Self::I,
+        _count: Self::I,
+    ) -> Result<()> {
         Err(enosys!())
     }
 
     /// Clear the pending state for all chunks or data in the range.
-    fn clear_range_pending(&self, _start_index: u32, _count: u32) {}
+    fn clear_range_pending(&self, _start_index: Self::I, _count: Self::I) {}
 
     /// Wait for all chunks or data in the range to be ready until timeout.
-    fn wait_for_range_ready(&self, _start_index: u32, _count: u32) -> Result<bool> {
+    fn wait_for_range_ready(&self, _start_index: Self::I, _count: Self::I) -> Result<bool> {
         Err(enosys!())
     }
 }
