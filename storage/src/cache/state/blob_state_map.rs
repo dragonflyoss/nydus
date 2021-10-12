@@ -11,7 +11,7 @@ use std::io::Result;
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::time::Duration;
 
-use crate::cache::state::{ChunkIndexGetter, ChunkMap, IndexedChunkMap, RangeMap};
+use crate::cache::state::{BlobRangeMap, ChunkIndexGetter, ChunkMap, IndexedChunkMap, RangeMap};
 use crate::cache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
 use crate::device::BlobChunkInfo;
 use crate::{StorageError, StorageResult};
@@ -22,14 +22,14 @@ enum Status {
     Complete,
 }
 
-struct ChunkSlot {
+struct Slot {
     state: Mutex<Status>,
     condvar: Condvar,
 }
 
-impl ChunkSlot {
+impl Slot {
     fn new() -> Self {
-        ChunkSlot {
+        Slot {
             state: Mutex::new(Status::Inflight),
             condvar: Condvar::new(),
         }
@@ -68,14 +68,14 @@ impl ChunkSlot {
 ///
 /// A base [ChunkMap], such as [IndexedChunkMap](../chunk_indexed/struct.IndexedChunkMap.html), only
 /// tracks chunk readiness state, but doesn't support concurrent manipulating of the chunk readiness
-/// state. The `BlobChunkMap` structure acts as an adapter to enable concurrent chunk readiness
+/// state. The `BlobStateMap` structure acts as an adapter to enable concurrent chunk readiness
 /// state manipulation.
-pub struct BlobChunkMap<C, I> {
+pub struct BlobStateMap<C, I> {
     c: C,
-    inflight_tracer: Mutex<HashMap<I, Arc<ChunkSlot>>>,
+    inflight_tracer: Mutex<HashMap<I, Arc<Slot>>>,
 }
 
-impl<C, I> From<C> for BlobChunkMap<C, I>
+impl<C, I> From<C> for BlobStateMap<C, I>
 where
     C: ChunkMap + ChunkIndexGetter<Index = I>,
     I: Eq + Hash + Display,
@@ -88,7 +88,7 @@ where
     }
 }
 
-impl<C, I> ChunkMap for BlobChunkMap<C, I>
+impl<C, I> ChunkMap for BlobStateMap<C, I>
 where
     C: ChunkMap + ChunkIndexGetter<Index = I>,
     I: Eq + Hash + Display + Send + 'static,
@@ -132,7 +132,7 @@ where
             if self.c.is_ready(chunk)? {
                 ready = true;
             } else {
-                guard.insert(index, Arc::new(ChunkSlot::new()));
+                guard.insert(index, Arc::new(Slot::new()));
             }
             Ok(ready)
         }
@@ -159,31 +159,28 @@ where
     fn as_range_map(&self) -> Option<&dyn RangeMap<I = u32>> {
         let any = self as &dyn Any;
 
-        any.downcast_ref::<BlobChunkMap<IndexedChunkMap, u32>>()
+        any.downcast_ref::<BlobStateMap<IndexedChunkMap, u32>>()
             .map(|v| v as &dyn RangeMap<I = u32>)
     }
 }
 
-impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
+impl RangeMap for BlobStateMap<IndexedChunkMap, u32> {
     type I = u32;
 
     fn is_range_all_ready(&self) -> bool {
         self.c.is_range_all_ready()
     }
 
-    fn is_range_ready(&self, start_index: Self::I, count: Self::I) -> Result<bool> {
-        self.c.is_range_ready(start_index, count)
+    fn is_range_ready(&self, start: Self::I, count: Self::I) -> Result<bool> {
+        self.c.is_range_ready(start, count)
     }
 
     fn check_range_ready_and_mark_pending(
         &self,
-        start_index: Self::I,
+        start: Self::I,
         count: Self::I,
     ) -> Result<Option<Vec<Self::I>>> {
-        let pending = match self
-            .c
-            .check_range_ready_and_mark_pending(start_index, count)
-        {
+        let pending = match self.c.check_range_ready_and_mark_pending(start, count) {
             Err(e) => return Err(e),
             Ok(None) => return Ok(None),
             Ok(Some(v)) => {
@@ -201,7 +198,7 @@ impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
                 // Double check to close the window where prior slot was just removed after backend
                 // IO returned.
                 if !self.c.is_range_ready(*index, 1)? {
-                    guard.insert(*index, Arc::new(ChunkSlot::new()));
+                    guard.insert(*index, Arc::new(Slot::new()));
                     res.push(*index);
                 }
             }
@@ -210,37 +207,33 @@ impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
         Ok(Some(res))
     }
 
-    fn set_range_ready_and_clear_pending(
-        &self,
-        start_index: Self::I,
-        count: Self::I,
-    ) -> Result<()> {
-        let res = self.c.set_range_ready_and_clear_pending(start_index, count);
-        self.clear_range_pending(start_index, count);
+    fn set_range_ready_and_clear_pending(&self, start: Self::I, count: Self::I) -> Result<()> {
+        let res = self.c.set_range_ready_and_clear_pending(start, count);
+        self.clear_range_pending(start, count);
         res
     }
 
-    fn clear_range_pending(&self, start_index: Self::I, count: Self::I) {
-        let count = std::cmp::min(count, u32::MAX - start_index);
-        let end = start_index + count;
+    fn clear_range_pending(&self, start: Self::I, count: Self::I) {
+        let count = std::cmp::min(count, u32::MAX - start);
+        let end = start + count;
         let mut guard = self.inflight_tracer.lock().unwrap();
 
-        for index in start_index..end {
+        for index in start..end {
             if let Some(i) = guard.remove(&index) {
                 i.done();
             }
         }
     }
 
-    fn wait_for_range_ready(&self, start_index: Self::I, count: Self::I) -> Result<bool> {
-        let count = std::cmp::min(count, u32::MAX - start_index);
-        let end = start_index + count;
-        if self.is_range_ready(start_index, count)? {
+    fn wait_for_range_ready(&self, start: Self::I, count: Self::I) -> Result<bool> {
+        let count = std::cmp::min(count, u32::MAX - start);
+        let end = start + count;
+        if self.is_range_ready(start, count)? {
             return Ok(true);
         }
 
         let mut guard = self.inflight_tracer.lock().unwrap();
-        for index in start_index..end {
+        for index in start..end {
             if let Some(i) = guard.get(&index).cloned() {
                 drop(guard);
                 let result =
@@ -262,7 +255,118 @@ impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
             }
         }
 
-        self.is_range_ready(start_index, count)
+        self.is_range_ready(start, count)
+    }
+}
+
+impl RangeMap for BlobStateMap<BlobRangeMap, u64> {
+    type I = u64;
+
+    fn is_range_all_ready(&self) -> bool {
+        self.c.is_range_all_ready()
+    }
+
+    fn is_range_ready(&self, start: Self::I, count: Self::I) -> Result<bool> {
+        self.c.is_range_ready(start, count)
+    }
+
+    fn check_range_ready_and_mark_pending(
+        &self,
+        start: Self::I,
+        count: Self::I,
+    ) -> Result<Option<Vec<Self::I>>> {
+        let pending = match self.c.check_range_ready_and_mark_pending(start, count) {
+            Err(e) => return Err(e),
+            Ok(None) => return Ok(None),
+            Ok(Some(v)) => {
+                if v.is_empty() {
+                    return Ok(None);
+                }
+                v
+            }
+        };
+
+        let mut res = Vec::with_capacity(pending.len());
+        let mut guard = self.inflight_tracer.lock().unwrap();
+        for index in pending.iter() {
+            if guard.get(index).is_none() {
+                // Double check to close the window where prior slot was just removed after backend
+                // IO returned.
+                if !self.c.is_range_ready(*index, 1)? {
+                    guard.insert(*index, Arc::new(Slot::new()));
+                    res.push(*index);
+                }
+            }
+        }
+
+        Ok(Some(res))
+    }
+
+    fn set_range_ready_and_clear_pending(&self, start: Self::I, count: Self::I) -> Result<()> {
+        let res = self.c.set_range_ready_and_clear_pending(start, count);
+        self.clear_range_pending(start, count);
+        res
+    }
+
+    fn clear_range_pending(&self, start: Self::I, count: Self::I) {
+        let (start_index, end_index) = match self.c.get_range(start, count) {
+            Ok(v) => v,
+            Err(_) => {
+                debug_assert!(false);
+                return;
+            }
+        };
+
+        let mut guard = self.inflight_tracer.lock().unwrap();
+        for index in start_index..end_index {
+            let idx = (index as u64) << self.c.shift;
+            if let Some(i) = guard.remove(&idx) {
+                i.done();
+            }
+        }
+    }
+
+    fn wait_for_range_ready(&self, start: Self::I, count: Self::I) -> Result<bool> {
+        if self.c.is_range_ready(start, count)? {
+            return Ok(true);
+        }
+
+        let (start_index, end_index) = self.c.get_range(start, count)?;
+        let mut guard = self.inflight_tracer.lock().unwrap();
+        for index in start_index..end_index {
+            let idx = (index as u64) << self.c.shift;
+            if let Some(i) = guard.get(&idx).cloned() {
+                drop(guard);
+                let result =
+                    i.wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT));
+                if let Err(StorageError::Timeout) = result {
+                    /*
+                    // Notice that lock of tracer is already dropped.
+                    let mut t = self.inflight_tracer.lock().unwrap();
+                    t.remove(&index);
+                    i.notify();
+                     */
+                    warn!("Waiting for backend IO expires. chunk index {}", index,);
+                    break;
+                };
+                if !self.c.is_range_ready(idx, 1)? {
+                    return Ok(false);
+                }
+                guard = self.inflight_tracer.lock().unwrap();
+            }
+        }
+
+        self.c.is_range_ready(start, count)
+    }
+}
+
+impl BlobStateMap<BlobRangeMap, u64> {
+    /// Create a new instance of `BlobStateMap` from a `BlobRangeMap` object.
+    pub fn from_range_map(map: BlobRangeMap) -> Self {
+        Self {
+            c: map,
+            inflight_tracer: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -349,13 +453,13 @@ pub(crate) mod tests {
         let chunk_count = 1000000;
         let skip_index = 77;
 
-        let indexed_chunk_map1 = Arc::new(BlobChunkMap::from(
+        let indexed_chunk_map1 = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(&blob_path, chunk_count).unwrap(),
         ));
-        let indexed_chunk_map2 = Arc::new(BlobChunkMap::from(
+        let indexed_chunk_map2 = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(&blob_path, chunk_count).unwrap(),
         ));
-        let indexed_chunk_map3 = Arc::new(BlobChunkMap::from(
+        let indexed_chunk_map3 = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(&blob_path, chunk_count).unwrap(),
         ));
 
@@ -446,12 +550,12 @@ pub(crate) mod tests {
         }
 
         let indexed_chunk_map =
-            BlobChunkMap::from(IndexedChunkMap::new(&blob_path, chunk_count).unwrap());
+            BlobStateMap::from(IndexedChunkMap::new(&blob_path, chunk_count).unwrap());
         let now = Instant::now();
         iterate(&chunks, &indexed_chunk_map as &dyn ChunkMap, chunk_count);
         let elapsed1 = now.elapsed().as_millis();
 
-        let digested_chunk_map = BlobChunkMap::from(DigestedChunkMap::new());
+        let digested_chunk_map = BlobStateMap::from(DigestedChunkMap::new());
         let now = Instant::now();
         iterate(&chunks, &digested_chunk_map as &dyn ChunkMap, chunk_count);
         let elapsed2 = now.elapsed().as_millis();
@@ -478,7 +582,7 @@ pub(crate) mod tests {
         });
         // indexed ChunkMap
         let tmp_file = TempFile::new().unwrap();
-        let index_map = Arc::new(BlobChunkMap::from(
+        let index_map = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
         index_map
@@ -531,7 +635,7 @@ pub(crate) mod tests {
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
 
         // digested ChunkMap
-        let digest_map = Arc::new(BlobChunkMap::from(DigestedChunkMap::new()));
+        let digest_map = Arc::new(BlobStateMap::from(DigestedChunkMap::new()));
         digest_map
             .check_ready_and_mark_pending(chunk_1.as_ref())
             .unwrap();
@@ -569,7 +673,7 @@ pub(crate) mod tests {
     #[test]
     fn test_inflight_tracer_race() {
         let tmp_file = TempFile::new().unwrap();
-        let map = Arc::new(BlobChunkMap::from(
+        let map = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
@@ -637,7 +741,7 @@ pub(crate) mod tests {
     ///     After timeout, no slot is left in inflight tracer.
     fn test_inflight_tracer_timeout() {
         let tmp_file = TempFile::new().unwrap();
-        let map = Arc::new(BlobChunkMap::from(
+        let map = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
@@ -681,7 +785,7 @@ pub(crate) mod tests {
     #[test]
     fn test_inflight_tracer_race_bitmap() {
         let tmp_file = TempFile::new().unwrap();
-        let map = Arc::new(BlobChunkMap::from(
+        let map = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
@@ -705,5 +809,72 @@ pub(crate) mod tests {
         assert_eq!(map.is_range_ready(0, 1).unwrap(), true);
         assert_eq!(map.is_range_ready(9, 1).unwrap(), true);
         assert_eq!(map.is_range_all_ready(), true);
+    }
+
+    #[test]
+    fn test_range_map() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+        let range_count = 1000000;
+        let skip_index = 77;
+
+        let map1 = Arc::new(BlobStateMap::from_range_map(
+            BlobRangeMap::new(&blob_path, range_count, 12).unwrap(),
+        ));
+        let map2 = Arc::new(BlobStateMap::from_range_map(
+            BlobRangeMap::new(&blob_path, range_count, 12).unwrap(),
+        ));
+        let map3 = Arc::new(BlobStateMap::from_range_map(
+            BlobRangeMap::new(&blob_path, range_count, 12).unwrap(),
+        ));
+
+        let now = Instant::now();
+
+        let h1 = thread::spawn(move || {
+            for idx in 0..range_count {
+                if idx % skip_index != 0 {
+                    let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+                    map1.set_range_ready_and_clear_pending(addr, 1).unwrap();
+                }
+            }
+        });
+
+        let h2 = thread::spawn(move || {
+            for idx in 0..range_count {
+                if idx % skip_index != 0 {
+                    let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+                    map2.set_range_ready_and_clear_pending(addr, 1).unwrap();
+                }
+            }
+        });
+
+        h1.join()
+            .map_err(|e| {
+                error!("Join error {:?}", e);
+                e
+            })
+            .unwrap();
+        h2.join()
+            .map_err(|e| {
+                error!("Join error {:?}", e);
+                e
+            })
+            .unwrap();
+
+        println!("BlobRangeMap Concurrency: {}ms", now.elapsed().as_millis());
+
+        for idx in 0..range_count {
+            let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+
+            let is_ready = map3.is_range_ready(addr, 1).unwrap();
+            if idx % skip_index == 0 {
+                if is_ready {
+                    panic!("indexed chunk map: index {} shouldn't be ready", idx);
+                }
+            } else if !is_ready {
+                panic!("indexed chunk map: index {} should be ready", idx);
+            }
+        }
     }
 }

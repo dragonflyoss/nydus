@@ -20,7 +20,7 @@ use vm_memory::VolatileSlice;
 
 use crate::backend::BlobReader;
 use crate::cache::filecache::FileCacheMgr;
-use crate::cache::state::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
+use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::worker::{
     AsyncPrefetchConfig, AsyncRequestMessage, AsyncRequestState, AsyncWorkerMgr,
 };
@@ -136,9 +136,9 @@ impl FileCacheEntry {
             || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
         {
             direct_chunkmap = false;
-            Arc::new(BlobChunkMap::from(DigestedChunkMap::new()))
+            Arc::new(BlobStateMap::from(DigestedChunkMap::new()))
         } else {
-            Arc::new(BlobChunkMap::from(IndexedChunkMap::new(
+            Arc::new(BlobStateMap::from(IndexedChunkMap::new(
                 blob_file,
                 blob_info.chunk_count(),
             )?))

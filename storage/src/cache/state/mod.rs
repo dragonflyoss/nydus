@@ -8,22 +8,26 @@
 //! To cache data from remote backend storage onto local storage, a cache state tracking mechanism
 //! is needed to track whether a specific chunk or data is ready on local storage and to cooperate
 //! on concurrent data downloading. The [ChunkMap](trait.ChunkMap.html) trait is the main mechanism
-//! to track chunk state. And [BlobChunkMap](struct.BlobChunkMap.html) is an adapter structure of
+//! to track chunk state. And [BlobStateMap](struct.BlobStateMap.html) is an adapter structure of
 //! [ChunkMap] to support concurrent data downloading, which is based on a base [ChunkMap]
 //! implementation to track chunk readiness state. And [RangeMap](trait.RangeMap.html) objects are
 //! used to track readiness for a range of chunks or data, with support of batch operation.
 //!
-//! There are several implementation of the [ChunkMap] trait to track chunk readiness state:
-//! - [BlobChunkMap](struct.BlobChunkMap.html): an adapter structure to enable concurrent
-//!   manipulation of readiness state, based on an underlying base [ChunkMap] object.
+//! There are several implementation of the [ChunkMap] and [RangeMap] trait to track chunk and data
+//! readiness state:
+//! - [BlobStateMap](struct.BlobStateMap.html): an adapter structure to enable concurrent
+//!   synchronization manipulation of readiness state, based on an underlying base [ChunkMap] or
+//!   [RangeMap] object.
+//! - [BlobRangeMap](struct.BlobRangeMap.html): a data state tracking driver using a bitmap file
+//!   to persist state, indexed by data address range.
 //! - [DigestedChunkMap](struct.DigestedChunkMap.html): a chunk state tracking driver
 //!   for legacy Rafs images without chunk array, which uses chunk digest as the id to track chunk
 //!   readiness state. The [DigestedChunkMap] is not optimal in case of performance and memory
 //!   consumption.
 //! - [IndexedChunkMap](struct.IndexedChunkMap.html): a chunk state tracking driver using a bitmap
-//!   file to persist state. There's a state bit in the bitmap file for each chunk, and atomic
-//!   operations are used to manipulate the bitmap for concurrent state manipulating. It's the
-//!   recommended state tracking driver.
+//!   file to persist state, indexed by chunk index. There's a state bit in the bitmap file for each
+//!   chunk, and atomic operations are used to manipulate the bitmap for concurrent state
+//!   manipulating. It's the recommended state tracking driver.
 //! - [NoopChunkMap](struct.NoopChunkMap.html): a no-operation chunk state tracking driver,
 //!   which just reports every chunk as always ready to use or not. It may be used to support disk
 //!   based backend storage or dummy cache.
@@ -33,16 +37,18 @@ use std::io::Result;
 
 use crate::device::BlobChunkInfo;
 
-pub use blob_chunk_map::BlobChunkMap;
+pub use blob_state_map::BlobStateMap;
 pub use digested_chunk_map::DigestedChunkMap;
 pub use indexed_chunk_map::IndexedChunkMap;
 pub use noop_chunk_map::NoopChunkMap;
+pub use range_map::BlobRangeMap;
 
-mod blob_chunk_map;
+mod blob_state_map;
 mod digested_chunk_map;
 mod indexed_chunk_map;
 mod noop_chunk_map;
 mod persist_map;
+mod range_map;
 
 /// Trait to track chunk readiness state.
 pub trait ChunkMap: Any + Send + Sync {
@@ -87,7 +93,7 @@ pub trait ChunkMap: Any + Send + Sync {
 /// data address. The trait methods are designed to support batch operations for improving
 /// performance by avoid frequently acquire/release locks.
 pub trait RangeMap: Send + Sync {
-    type I;
+    type I: Send + Sync;
 
     /// Check whether all chunks or data managed by the `RangeMap` object are ready.
     fn is_range_all_ready(&self) -> bool {
@@ -95,11 +101,11 @@ pub trait RangeMap: Send + Sync {
     }
 
     /// Check whether all chunks or data in the range are ready for use.
-    fn is_range_ready(&self, _start_index: Self::I, _count: Self::I) -> Result<bool> {
+    fn is_range_ready(&self, _start: Self::I, _count: Self::I) -> Result<bool> {
         Err(enosys!())
     }
 
-    /// Check whether all chunks or data in the range [start_index, start_index + count) are ready.
+    /// Check whether all chunks or data in the range [start, start + count) are ready.
     ///
     /// This function checks readiness of a range of chunks or data. If a chunk or data is both not
     /// ready and not pending(inflight), it will be marked as pending and returned. Following
@@ -111,26 +117,22 @@ pub trait RangeMap: Send + Sync {
     ///   data or chunks marked as pending by other threads.
     fn check_range_ready_and_mark_pending(
         &self,
-        _start_index: Self::I,
+        _start: Self::I,
         _count: Self::I,
     ) -> Result<Option<Vec<Self::I>>> {
         Err(enosys!())
     }
 
     /// Mark all chunks or data in the range as ready for use.
-    fn set_range_ready_and_clear_pending(
-        &self,
-        _start_index: Self::I,
-        _count: Self::I,
-    ) -> Result<()> {
+    fn set_range_ready_and_clear_pending(&self, _start: Self::I, _count: Self::I) -> Result<()> {
         Err(enosys!())
     }
 
     /// Clear the pending state for all chunks or data in the range.
-    fn clear_range_pending(&self, _start_index: Self::I, _count: Self::I) {}
+    fn clear_range_pending(&self, _start: Self::I, _count: Self::I) {}
 
     /// Wait for all chunks or data in the range to be ready until timeout.
-    fn wait_for_range_ready(&self, _start_index: Self::I, _count: Self::I) -> Result<bool> {
+    fn wait_for_range_ready(&self, _start: Self::I, _count: Self::I) -> Result<bool> {
         Err(enosys!())
     }
 }
