@@ -63,9 +63,12 @@ pub(crate) enum AsyncRequestState {
 }
 
 /// Asynchronous service request message.
+#[allow(dead_code)]
 pub(crate) enum AsyncRequestMessage {
     /// Notify the working threads to exit.
     Exit,
+    /// Ping for test.
+    Ping,
     /// Asynchronous file-system layer prefetch request.
     FsPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, BlobIoRange),
     /// Asynchronous blob layer prefetch request with (offset, size) of blob on storage backend.
@@ -99,6 +102,7 @@ pub(crate) struct AsyncWorkerMgr {
     sender: Mutex<Sender<AsyncRequestMessage>>,
     workers: AtomicU32,
     busy_workers: AtomicU32,
+    pings: AtomicU32,
     exiting: AtomicBool,
 
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -131,6 +135,7 @@ impl AsyncWorkerMgr {
             sender: Mutex::new(sender),
             workers: AtomicU32::new(0),
             busy_workers: AtomicU32::new(0),
+            pings: AtomicU32::new(0),
             exiting: AtomicBool::new(false),
 
             prefetch_config,
@@ -190,7 +195,10 @@ impl AsyncWorkerMgr {
             AsyncRequestMessage::FsPrefetch(_, _, req) => {
                 if let Some(ref limiter) = self.prefetch_limiter {
                     let size = std::cmp::min(req.blob_size, u32::MAX as u64) as u32;
-                    let cells = NonZeroU32::new(size).unwrap();
+                    let cells = match NonZeroU32::new(size) {
+                        Some(v) => v,
+                        None => return Ok(()),
+                    };
                     if let Err(e) = limiter
                         .check_n(cells)
                         .or_else(|_| block_on(limiter.until_n_ready(cells)))
@@ -204,7 +212,10 @@ impl AsyncWorkerMgr {
             AsyncRequestMessage::BlobPrefetch(_, _, _, size) => {
                 if let Some(ref limiter) = self.prefetch_limiter {
                     let size = std::cmp::min(*size, u32::MAX as u64) as u32;
-                    let cells = NonZeroU32::new(size).unwrap();
+                    let cells = match NonZeroU32::new(size) {
+                        Some(v) => v,
+                        None => return Ok(()),
+                    };
                     if let Err(e) = limiter
                         .check_n(cells)
                         .or_else(|_| block_on(limiter.until_n_ready(cells)))
@@ -254,6 +265,9 @@ impl AsyncWorkerMgr {
                         let _ = self.handle_blob_prefetch_request(&blob_cache, offset, size);
                     }
                     self.busy_workers.fetch_sub(1, Ordering::Relaxed);
+                }
+                AsyncRequestMessage::Ping => {
+                    let _ = self.pings.fetch_add(1, Ordering::Relaxed);
                 }
                 AsyncRequestMessage::Exit => return,
             }
@@ -359,8 +373,13 @@ mod tests {
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
         AsyncWorkerMgr::start(mgr.clone()).unwrap();
+        assert_eq!(mgr.pings.load(Ordering::Relaxed), 0);
+        mgr.send(AsyncRequestMessage::Ping).unwrap();
+        mgr.send(AsyncRequestMessage::Ping).unwrap();
+        mgr.send(AsyncRequestMessage::Ping).unwrap();
         thread::sleep(Duration::from_secs(1));
         assert_eq!(mgr.workers.load(Ordering::Relaxed), 2);
+        assert_eq!(mgr.pings.load(Ordering::Relaxed), 3);
         mgr.stop();
         assert_eq!(mgr.workers.load(Ordering::Relaxed), 0);
     }
