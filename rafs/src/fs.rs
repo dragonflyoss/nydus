@@ -15,7 +15,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
 use nix::unistd::{getegid, geteuid};
