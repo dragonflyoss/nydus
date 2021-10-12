@@ -200,7 +200,5 @@ impl RafsSuper {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // TODO: add unit test cases for RafsSuper::{try_load_v5, amplify_io}
 }

@@ -25,7 +25,7 @@ use nydus_utils::digest;
 use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
-use crate::cache::chunkmap::{ChunkMap, NoopChunkMap};
+use crate::cache::state::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
 use crate::factory::CacheConfig;

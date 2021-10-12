@@ -22,11 +22,14 @@ use std::io::Result;
 use std::slice;
 use std::sync::Arc;
 
-use nydus_utils::digest;
 use vm_memory::VolatileSlice;
 
+pub use dummycache::DummyCacheMgr;
+pub use filecache::FileCacheMgr;
+use nydus_utils::digest;
+
 use crate::backend::{BlobBackend, BlobReader};
-use crate::cache::chunkmap::ChunkMap;
+use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject,
     BlobPrefetchRequest,
@@ -34,12 +37,9 @@ use crate::device::{
 use crate::utils::{alloc_buf, digest_check};
 use crate::{compress, StorageResult, RAFS_MAX_CHUNK_SIZE};
 
-pub use dummycache::DummyCacheMgr;
-pub use filecache::FileCacheMgr;
-
-pub mod chunkmap;
 mod dummycache;
 mod filecache;
+pub mod state;
 mod worker;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.

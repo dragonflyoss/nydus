@@ -3,28 +3,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Chunk readiness state tracking drivers.
-//!
-//! To cache data from remote backend storage onto local storage, a chunk state tracking mechanism
-//! is needed to track whether a specific chunk is ready on local storage and to cooperate on
-//! concurrent data downloading. The [ChunkMap](trait.ChunkMap.html) is the main interface to
-//! track chunk state. And [BlobChunkMap](struct.BlobChunkMap.html) is a wrapper implementation of
-//! [ChunkMap] to support concurrent data downloading, which is based on a base [ChunkMap]
-//! implementation to track chunk readiness state.
-//!
-//! There are several base implementation of the [ChunkMap] trait to track chunk readiness state:
-//! - [DigestedChunkMap](chunk_digested/struct.DigestedChunkMap.html): a chunk state tracking driver
-//!   for legacy Rafs images without chunk array, which uses chunk digest as the id to track chunk
-//!   readiness state. The [DigestedChunkMap] is not optimal in case of performance and memory
-//!   consumption.
-//! - [IndexedChunkMap](chunk_indexed/struct.IndexedChunkMap.html): a chunk state tracking driver
-//!   based on a bitmap file. There's a state bit in the bitmap file for each chunk, and atomic
-//!   operations are used to manipulate the bitmap. So it supports concurrent downloading. It's the
-//!   recommended state tracking driver.
-//! - [NoopChunkMap](noop/struct.NoopChunkMap.html): a no-operation chunk state tracking driver,
-//!   which just reports every chunk as always ready to use. It may be used to support disk based
-//!   backend storage.
-
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -33,107 +11,10 @@ use std::io::Result;
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::time::Duration;
 
+use crate::cache::state::{ChunkIndexGetter, ChunkMap, IndexedChunkMap, RangeMap};
 use crate::cache::SINGLE_INFLIGHT_WAIT_TIMEOUT;
 use crate::device::BlobChunkInfo;
 use crate::{StorageError, StorageResult};
-
-mod chunk_digested;
-mod chunk_indexed;
-mod noop;
-
-pub use chunk_digested::DigestedChunkMap;
-pub use chunk_indexed::IndexedChunkMap;
-pub use noop::NoopChunkMap;
-
-/// Trait to query and manage chunk readiness state.
-pub trait ChunkMap: Any + Send + Sync {
-    /// Check whether the chunk is ready for use without waiting.
-    fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool>;
-
-    /// Check whether the chunk is ready for use.
-    ///
-    /// The function returns:
-    /// - Err if timeout
-    /// - Ok(true) if the the chunk is ready.
-    /// - Ok(false) and also marks the chunk as pending, either set_ready() or clear_pending() must
-    ///   be called to clear the pending state.
-    fn check_ready_and_mark_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<bool> {
-        panic!("no support of check_ready_and_mark_pending()");
-    }
-
-    /// Set chunk to ready state and clear pending state.
-    fn set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()>;
-
-    /// Clear the pending(inflight) state of the chunk.
-    fn clear_pending(&self, _chunk: &dyn BlobChunkInfo) {
-        panic!("no support of clear_pending()");
-    }
-
-    /// Convert it to an `ChunkBitmap` object.
-    fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
-        None
-    }
-
-    /// Check whether the chunk map implementation store chunk state persistently.
-    fn is_persist(&self) -> bool {
-        false
-    }
-}
-
-/// Trait to track chunk readiness state using bitmap, indexed by chunk index.
-///
-/// Its interfaces are designed to support batch operations, to improve performance by avoid
-/// frequently acquire/release locks.
-pub trait ChunkBitmap: Send + Sync {
-    /// Check whether all chunks are ready.
-    fn is_bitmap_all_ready(&self) -> bool {
-        false
-    }
-
-    /// Check whether the chunk is ready for use.
-    fn is_bitmap_ready(&self, _start_index: u32, _count: u32) -> Result<bool> {
-        Err(enosys!())
-    }
-
-    /// Check whether chunks in range [start_index, start_index + count) is ready or not.
-    ///
-    /// This function checks readiness of a range of chunks. If a chunk is both not ready and not
-    /// pending(inflight), it will be marked as pending and returned. Following actions should be:
-    /// - call set_bitmap_ready_and_clear_pending() to mark chunks as ready and clear pending state.
-    /// - clear_bitmap_pending() to clear the pending state without marking chunk as ready.
-    /// - wait_for_bitmap_ready() to wait for all chunks to clear pending state, including chunks
-    ///   marked as pending by other threads.
-    fn check_bitmap_ready_and_mark_pending(
-        &self,
-        _start_index: u32,
-        _count: u32,
-    ) -> Result<Option<Vec<u32>>> {
-        Err(enosys!())
-    }
-
-    /// Mark all chunks as ready for use.
-    fn set_bitmap_ready_and_clear_pending(&self, _start_index: u32, _count: u32) -> Result<()> {
-        Err(enosys!())
-    }
-
-    /// Notify that the chunk is ready for use.
-    fn clear_bitmap_pending(&self, _start_index: u32, _count: u32) {}
-
-    /// Wait for all chunks to be ready until timeout.
-    fn wait_for_bitmap_ready(&self, _start_index: u32, _count: u32) -> Result<bool> {
-        Err(enosys!())
-    }
-}
-
-/// Trait to convert [BlobChunkInfo](../../device/trait.BlobChunkInfo.html) to index needed by
-/// [ChunkMap]
-pub trait ChunkIndexGetter {
-    /// Type of index needed by [ChunkMap].
-    type Index;
-
-    /// Get the chunk's id/key for state tracking.
-    fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index;
-}
 
 #[derive(PartialEq, Copy, Clone)]
 enum Status {
@@ -142,14 +23,14 @@ enum Status {
 }
 
 struct ChunkSlot {
-    on_trip: Mutex<Status>,
+    state: Mutex<Status>,
     condvar: Condvar,
 }
 
 impl ChunkSlot {
     fn new() -> Self {
         ChunkSlot {
-            on_trip: Mutex::new(Status::Inflight),
+            state: Mutex::new(Status::Inflight),
             condvar: Condvar::new(),
         }
     }
@@ -160,33 +41,35 @@ impl ChunkSlot {
 
     fn done(&self) {
         // Not expect poisoned lock here
-        *self.on_trip.lock().unwrap() = Status::Complete;
+        *self.state.lock().unwrap() = Status::Complete;
         self.notify();
     }
 
     fn wait_for_inflight(&self, timeout: Duration) -> StorageResult<Status> {
-        let mut inflight = self.on_trip.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let mut tor: WaitTimeoutResult;
 
-        while *inflight == Status::Inflight {
+        while *state == Status::Inflight {
             // Do not expect poisoned lock, so unwrap here.
-            let r = self.condvar.wait_timeout(inflight, timeout).unwrap();
-            inflight = r.0;
+            let r = self.condvar.wait_timeout(state, timeout).unwrap();
+            state = r.0;
             tor = r.1;
             if tor.timed_out() {
                 return Err(StorageError::Timeout);
             }
         }
 
-        Ok(*inflight)
+        Ok(*state)
     }
 }
 
-/// Struct to enable concurrent downloading based on a base implementation of [ChunkMap].
+/// Adapter structure to enable concurrent chunk readiness manipulating based on a base [ChunkMap]
+/// object.
 ///
-/// The base implementation of [ChunkMap] needs to support chunk state tacking, and `BlobChunkMap`
-/// add concurrent downloading over the base implementation. Internally, `BlobChunkMap` uses
-/// an in memory inflight chunk tracker using `Mutex<HashMap>`.
+/// A base [ChunkMap], such as [IndexedChunkMap](../chunk_indexed/struct.IndexedChunkMap.html), only
+/// tracks chunk readiness state, but doesn't support concurrent manipulating of the chunk readiness
+/// state. The `BlobChunkMap` structure acts as an adapter to enable concurrent chunk readiness
+/// state manipulation.
 pub struct BlobChunkMap<C, I> {
     c: C,
     inflight_tracer: Mutex<HashMap<I, Arc<ChunkSlot>>>,
@@ -269,35 +152,35 @@ where
         }
     }
 
-    fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
-        let any = self as &dyn Any;
-
-        any.downcast_ref::<BlobChunkMap<IndexedChunkMap, u32>>()
-            .map(|v| v as &dyn ChunkBitmap)
-    }
-
     fn is_persist(&self) -> bool {
         self.c.is_persist()
     }
+
+    fn as_range_map(&self) -> Option<&dyn RangeMap> {
+        let any = self as &dyn Any;
+
+        any.downcast_ref::<BlobChunkMap<IndexedChunkMap, u32>>()
+            .map(|v| v as &dyn RangeMap)
+    }
 }
 
-impl ChunkBitmap for BlobChunkMap<IndexedChunkMap, u32> {
-    fn is_bitmap_all_ready(&self) -> bool {
-        self.c.is_bitmap_all_ready()
+impl RangeMap for BlobChunkMap<IndexedChunkMap, u32> {
+    fn is_range_all_ready(&self) -> bool {
+        self.c.is_range_all_ready()
     }
 
-    fn is_bitmap_ready(&self, start_index: u32, count: u32) -> Result<bool> {
-        self.c.is_bitmap_ready(start_index, count)
+    fn is_range_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+        self.c.is_range_ready(start_index, count)
     }
 
-    fn check_bitmap_ready_and_mark_pending(
+    fn check_range_ready_and_mark_pending(
         &self,
         start_index: u32,
         count: u32,
     ) -> Result<Option<Vec<u32>>> {
         let pending = match self
             .c
-            .check_bitmap_ready_and_mark_pending(start_index, count)
+            .check_range_ready_and_mark_pending(start_index, count)
         {
             Err(e) => return Err(e),
             Ok(None) => return Ok(None),
@@ -315,7 +198,7 @@ impl ChunkBitmap for BlobChunkMap<IndexedChunkMap, u32> {
             if guard.get(index).is_none() {
                 // Double check to close the window where prior slot was just removed after backend
                 // IO returned.
-                if !self.c.is_bitmap_ready(*index, 1)? {
+                if !self.c.is_range_ready(*index, 1)? {
                     guard.insert(*index, Arc::new(ChunkSlot::new()));
                     res.push(*index);
                 }
@@ -325,15 +208,13 @@ impl ChunkBitmap for BlobChunkMap<IndexedChunkMap, u32> {
         Ok(Some(res))
     }
 
-    fn set_bitmap_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
-        let res = self
-            .c
-            .set_bitmap_ready_and_clear_pending(start_index, count);
-        self.clear_bitmap_pending(start_index, count);
+    fn set_range_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
+        let res = self.c.set_range_ready_and_clear_pending(start_index, count);
+        self.clear_range_pending(start_index, count);
         res
     }
 
-    fn clear_bitmap_pending(&self, start_index: u32, count: u32) {
+    fn clear_range_pending(&self, start_index: u32, count: u32) {
         let count = std::cmp::min(count, u32::MAX - start_index);
         let end = start_index + count;
         let mut guard = self.inflight_tracer.lock().unwrap();
@@ -345,10 +226,10 @@ impl ChunkBitmap for BlobChunkMap<IndexedChunkMap, u32> {
         }
     }
 
-    fn wait_for_bitmap_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+    fn wait_for_range_ready(&self, start_index: u32, count: u32) -> Result<bool> {
         let count = std::cmp::min(count, u32::MAX - start_index);
         let end = start_index + count;
-        if self.is_bitmap_ready(start_index, count)? {
+        if self.is_range_ready(start_index, count)? {
             return Ok(true);
         }
 
@@ -368,14 +249,14 @@ impl ChunkBitmap for BlobChunkMap<IndexedChunkMap, u32> {
                     warn!("Waiting for backend IO expires. chunk index {}", index,);
                     break;
                 };
-                if !self.c.is_bitmap_ready(index, 1)? {
+                if !self.c.is_range_ready(index, 1)? {
                     return Ok(false);
                 }
                 guard = self.inflight_tracer.lock().unwrap();
             }
         }
 
-        self.is_bitmap_ready(start_index, count)
+        self.is_range_ready(start_index, count)
     }
 }
 
@@ -391,6 +272,7 @@ pub(crate) mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
+    use crate::cache::state::DigestedChunkMap;
     use crate::device::BlobChunkInfo;
     use crate::test::MockChunkInfo;
 
@@ -797,25 +679,25 @@ pub(crate) mod tests {
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
         ));
 
-        assert_eq!(map.is_bitmap_all_ready(), false);
-        assert_eq!(map.is_bitmap_ready(0, 1).unwrap(), false);
-        assert_eq!(map.is_bitmap_ready(9, 1).unwrap(), false);
-        assert!(map.is_bitmap_ready(10, 1).is_err());
+        assert_eq!(map.is_range_all_ready(), false);
+        assert_eq!(map.is_range_ready(0, 1).unwrap(), false);
+        assert_eq!(map.is_range_ready(9, 1).unwrap(), false);
+        assert!(map.is_range_ready(10, 1).is_err());
         assert_eq!(
-            map.check_bitmap_ready_and_mark_pending(0, 2).unwrap(),
+            map.check_range_ready_and_mark_pending(0, 2).unwrap(),
             Some(vec![0, 1])
         );
-        map.set_bitmap_ready_and_clear_pending(0, 2).unwrap();
-        assert_eq!(map.check_bitmap_ready_and_mark_pending(0, 2).unwrap(), None);
-        map.wait_for_bitmap_ready(0, 2).unwrap();
+        map.set_range_ready_and_clear_pending(0, 2).unwrap();
+        assert_eq!(map.check_range_ready_and_mark_pending(0, 2).unwrap(), None);
+        map.wait_for_range_ready(0, 2).unwrap();
         assert_eq!(
-            map.check_bitmap_ready_and_mark_pending(1, 2).unwrap(),
+            map.check_range_ready_and_mark_pending(1, 2).unwrap(),
             Some(vec![2])
         );
-        map.set_bitmap_ready_and_clear_pending(2, 1).unwrap();
-        map.set_bitmap_ready_and_clear_pending(3, 7).unwrap();
-        assert_eq!(map.is_bitmap_ready(0, 1).unwrap(), true);
-        assert_eq!(map.is_bitmap_ready(9, 1).unwrap(), true);
-        assert_eq!(map.is_bitmap_all_ready(), true);
+        map.set_range_ready_and_clear_pending(2, 1).unwrap();
+        map.set_range_ready_and_clear_pending(3, 7).unwrap();
+        assert_eq!(map.is_range_ready(0, 1).unwrap(), true);
+        assert_eq!(map.is_range_ready(9, 1).unwrap(), true);
+        assert_eq!(map.is_range_all_ready(), true);
     }
 }

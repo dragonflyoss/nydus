@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use nydus_utils::div_round_up;
 
-use crate::cache::chunkmap::{ChunkBitmap, ChunkIndexGetter, ChunkMap};
+use crate::cache::state::{ChunkIndexGetter, ChunkMap, RangeMap};
 use crate::device::{BlobChunkInfo, BlobInfo};
 use crate::utils::readahead;
 
@@ -52,13 +52,13 @@ impl Header {
     }
 }
 
-/// An implementation of [ChunkMap](../trait.ChunkMap.html) to support chunk state tracking by using
-/// a bitmap file.
+/// An implementation of [ChunkMap] to support chunk state tracking by using a bitmap file.
 ///
 /// The `IndexedChunkMap` is an implementation of [ChunkMap] which uses a bitmap file and atomic
-/// bitmap operations to track chunk state. It creates or opens a file with the name
+/// bitmap operations to track readiness state. It creates or opens a file with the name
 /// `$blob_id.chunk_map` to record whether a chunk has been cached by the blob cache, and atomic
-/// bitmap operations are used to manipulate the state bit.
+/// bitmap operations are used to manipulate the state bit. The bitmap file will be persisted to
+/// disk.
 ///
 /// This approach can be used to share chunk ready state between multiple nydusd instances.
 /// For example: the bitmap file layout is [0b00000000, 0b00000000], when blobcache calls
@@ -318,7 +318,7 @@ unsafe impl Sync for IndexedChunkMap {}
 
 impl ChunkMap for IndexedChunkMap {
     fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
-        if self.is_bitmap_all_ready() {
+        if self.is_range_all_ready() {
             Ok(true)
         } else {
             let index = self.validate_index(chunk.id())?;
@@ -330,7 +330,7 @@ impl ChunkMap for IndexedChunkMap {
         self.set_chunk_ready(chunk.id())
     }
 
-    fn as_bitmap(&self) -> Option<&dyn ChunkBitmap> {
+    fn as_range_map(&self) -> Option<&dyn RangeMap> {
         Some(self)
     }
 
@@ -339,14 +339,14 @@ impl ChunkMap for IndexedChunkMap {
     }
 }
 
-impl ChunkBitmap for IndexedChunkMap {
+impl RangeMap for IndexedChunkMap {
     #[inline]
-    fn is_bitmap_all_ready(&self) -> bool {
+    fn is_range_all_ready(&self) -> bool {
         self.not_ready_count.load(Ordering::Acquire) == 0
     }
 
-    fn is_bitmap_ready(&self, start_index: u32, count: u32) -> Result<bool> {
-        if !self.is_bitmap_all_ready() {
+    fn is_range_ready(&self, start_index: u32, count: u32) -> Result<bool> {
+        if !self.is_range_all_ready() {
             for idx in 0..count {
                 let index =
                     self.validate_index(start_index.checked_add(idx).ok_or_else(|| einval!())?)?;
@@ -359,12 +359,12 @@ impl ChunkBitmap for IndexedChunkMap {
         Ok(true)
     }
 
-    fn check_bitmap_ready_and_mark_pending(
+    fn check_range_ready_and_mark_pending(
         &self,
         start_index: u32,
         count: u32,
     ) -> Result<Option<Vec<u32>>> {
-        if self.is_bitmap_all_ready() {
+        if self.is_range_all_ready() {
             return Ok(None);
         }
 
@@ -385,7 +385,7 @@ impl ChunkBitmap for IndexedChunkMap {
         }
     }
 
-    fn set_bitmap_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
+    fn set_range_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
         let count = std::cmp::min(count, u32::MAX - start_index);
         let end = start_index + count;
 
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
-        assert_eq!(map.is_bitmap_all_ready(), false);
+        assert_eq!(map.is_range_all_ready(), false);
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), false);
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
-        assert_eq!(map.is_bitmap_all_ready(), false);
+        assert_eq!(map.is_range_all_ready(), false);
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), false);
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
@@ -550,7 +550,7 @@ mod tests {
         assert_eq!(chunk.id(), 0);
 
         let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
-        assert_eq!(map.is_bitmap_all_ready(), true);
+        assert_eq!(map.is_range_all_ready(), true);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.chunk_count, 1);
         assert_eq!(map.size, 0x1001);
-        assert_eq!(map.is_bitmap_all_ready(), false);
+        assert_eq!(map.is_range_all_ready(), false);
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), false);
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
         assert_eq!(map.is_ready(chunk.as_base()).unwrap(), true);

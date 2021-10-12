@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::time::Duration;
 
-use crate::cache::chunkmap::{ChunkBitmap, IndexedChunkMap};
+use crate::cache::state::{IndexedChunkMap, RangeMap};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoRange, BlobObject};
 use crate::meta::BlobMetaInfo;
 
@@ -240,14 +240,14 @@ impl BlobObject for RemoteBlob {
     }
 
     fn is_all_data_ready(&self) -> bool {
-        self.chunk_map.is_bitmap_all_ready()
+        self.chunk_map.is_range_all_ready()
     }
 
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
         if let Ok(v) = self.meta.get_chunks_compressed(offset, size) {
             if v.is_empty() {
                 Ok(0)
-            } else if let Ok(true) = self.chunk_map.is_bitmap_ready(v[0].id(), v.len() as u32) {
+            } else if let Ok(true) = self.chunk_map.is_range_ready(v[0].id(), v.len() as u32) {
                 Ok(0)
             } else {
                 self.conn.call_fetch_chunks(v[0].id(), v.len() as u32)
@@ -261,7 +261,7 @@ impl BlobObject for RemoteBlob {
         if let Ok(v) = self.meta.get_chunks_uncompressed(offset, size) {
             if v.is_empty() {
                 Ok(0)
-            } else if let Ok(true) = self.chunk_map.is_bitmap_ready(v[0].id(), v.len() as u32) {
+            } else if let Ok(true) = self.chunk_map.is_range_ready(v[0].id(), v.len() as u32) {
                 Ok(0)
             } else {
                 self.conn.call_fetch_chunks(v[0].id(), v.len() as u32)
@@ -277,7 +277,7 @@ impl BlobObject for RemoteBlob {
             Ok(0)
         } else if let Ok(true) = self
             .chunk_map
-            .is_bitmap_ready(range.chunks[0].id(), range.chunks.len() as u32)
+            .is_range_ready(range.chunks[0].id(), range.chunks.len() as u32)
         {
             Ok(0)
         } else {

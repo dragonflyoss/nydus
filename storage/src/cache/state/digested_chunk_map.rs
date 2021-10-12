@@ -15,13 +15,13 @@ use std::sync::RwLock;
 
 use nydus_utils::digest::RafsDigest;
 
-use crate::cache::chunkmap::{ChunkIndexGetter, ChunkMap};
+use crate::cache::state::{ChunkIndexGetter, ChunkMap};
 use crate::device::BlobChunkInfo;
 
-/// An implementation of [ChunkMap](../trait.ChunkMap.html) to support chunk state tracking by using
+/// An implementation of [ChunkMap](trait.ChunkMap.html) to support chunk state tracking by using
 /// `HashSet<RafsDigest>`.
 ///
-/// The `DigestedChunkMap` is an implementation of `ChunkMap` which uses a hash set
+/// The `DigestedChunkMap` is an implementation of [ChunkMap] which uses a hash set
 /// (HashSet<chunk_digest>) to record whether a chunk has already been cached by the blob cache.
 /// The implementation is memory and computation heavy, so it is used only to keep backward
 /// compatibility with the previous old nydus bootstrap format. For new clients, please use other

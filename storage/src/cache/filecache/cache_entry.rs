@@ -19,8 +19,8 @@ use tokio::runtime::Runtime;
 use vm_memory::VolatileSlice;
 
 use crate::backend::BlobReader;
-use crate::cache::chunkmap::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::filecache::FileCacheMgr;
+use crate::cache::state::{BlobChunkMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::worker::{
     AsyncPrefetchConfig, AsyncRequestMessage, AsyncRequestState, AsyncWorkerMgr,
 };
@@ -362,8 +362,8 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn is_all_data_ready(&self) -> bool {
-        if let Some(b) = self.chunk_map.as_bitmap() {
-            b.is_bitmap_all_ready()
+        if let Some(b) = self.chunk_map.as_range_map() {
+            b.is_range_all_ready()
         } else {
             false
         }
@@ -405,12 +405,12 @@ impl BlobObject for FileCacheEntry {
 
 impl FileCacheEntry {
     fn do_fetch_chunks(&self, chunks: &[BlobIoChunk]) -> Result<usize> {
-        let bitmap = self.chunk_map.as_bitmap().ok_or_else(|| einval!())?;
+        let bitmap = self.chunk_map.as_range_map().ok_or_else(|| einval!())?;
         let chunk_index = chunks[0].id();
         let count = chunks.len() as u32;
 
         // Get chunks not ready yet, also marking them as inflight.
-        let pending = match bitmap.check_bitmap_ready_and_mark_pending(chunk_index, count)? {
+        let pending = match bitmap.check_range_ready_and_mark_pending(chunk_index, count)? {
             None => return Ok(0),
             Some(v) => {
                 if v.is_empty() {
@@ -438,10 +438,10 @@ impl FileCacheEntry {
                 Ok(_v) => {
                     total_size += blob_size;
                     bitmap
-                        .set_bitmap_ready_and_clear_pending(pending[start], (end - start) as u32)?;
+                        .set_range_ready_and_clear_pending(pending[start], (end - start) as u32)?;
                 }
                 Err(e) => {
-                    bitmap.clear_bitmap_pending(pending[start], (end - start) as u32);
+                    bitmap.clear_range_pending(pending[start], (end - start) as u32);
                     return Err(e);
                 }
             }
@@ -449,7 +449,7 @@ impl FileCacheEntry {
             start = end;
         }
 
-        if !bitmap.wait_for_bitmap_ready(chunk_index, count)? {
+        if !bitmap.wait_for_range_ready(chunk_index, count)? {
             Err(eio!("failed to read data from storage backend"))
         } else {
             Ok(total_size)
