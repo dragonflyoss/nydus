@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Drop};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
@@ -155,7 +155,7 @@ pub struct AccessPattern {
     file_path: PathBuf,
     nr_read: AtomicUsize,
     /// In unit of seconds.
-    first_access_time: AtomicUsize,
+    first_access_time: AtomicU64,
 }
 
 pub trait InodeStatsCounter {
@@ -297,13 +297,11 @@ impl GlobalIoStats {
                 Some(r) => {
                     r.nr_read.fetch_add(1, Ordering::Relaxed);
                     if r.first_access_time.load(Ordering::Relaxed) == 0 {
-                        // FIXME: Conversion from `u64` to `usize` on 32-bit platform
-                        // is not reliable. Fix this by using AtomicU64 instead.
                         r.first_access_time.store(
                             SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)
                                 .unwrap()
-                                .as_secs() as usize,
+                                .as_secs(),
                             Ordering::Relaxed,
                         );
                     }
