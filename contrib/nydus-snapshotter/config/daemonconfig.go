@@ -82,7 +82,8 @@ type DeviceConfig struct {
 		CacheType  string `json:"type"`
 		Compressed bool   `json:"compressed,omitempty"`
 		Config     struct {
-			WorkDir string `json:"work_dir"`
+			WorkDir           string `json:"work_dir"`
+			DisableIndexedMap bool `json:"disable_indexed_map"`
 		} `json:"config"`
 	} `json:"cache"`
 }

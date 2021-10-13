@@ -59,6 +59,13 @@ func WithLogDir(dir string) NewDaemonOpt {
 	}
 }
 
+func WithLogToStdout(logToStdout bool) NewDaemonOpt {
+	return func(d *Daemon) error {
+		d.LogToStdout = logToStdout
+		return nil
+	}
+}
+
 func WithLogLevel(logLevel string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		if logLevel == "" {

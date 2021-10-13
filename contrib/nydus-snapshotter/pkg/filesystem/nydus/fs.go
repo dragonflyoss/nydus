@@ -35,11 +35,14 @@ type filesystem struct {
 	manager          *process.Manager
 	cacheMgr         *cache.Manager
 	verifier         *signature.Verifier
+	sharedDaemon     *daemon.Daemon
 	daemonCfg        config.DaemonConfig
 	vpcRegistry      bool
 	nydusdBinaryPath string
 	mode             fspkg.FSMode
 	logLevel         string
+	logDir           string
+	logToStdout      bool
 }
 
 // NewFileSystem initialize Filesystem instance
@@ -65,6 +68,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
 		if err == nil && d != nil {
 			log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
+			fs.sharedDaemon = d
 			return &fs, nil
 		}
 
@@ -91,6 +95,7 @@ func NewFileSystem(ctx context.Context, opt ...NewFSOpt) (_ fspkg.FileSystem, re
 				return nil, errors.Wrap(err, "failed to wait shared daemon")
 			}
 		}
+		fs.sharedDaemon = d
 	}
 
 	return &fs, nil
@@ -107,9 +112,10 @@ func (fs *filesystem) newSharedDaemon() (*daemon.Daemon, error) {
 		daemon.WithSnapshotID(daemon.SharedNydusDaemonID),
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithLogDir(fs.logDir),
 		daemon.WithRootMountPoint(filepath.Join(fs.RootDir, "mnt")),
 		daemon.WithLogLevel(fs.logLevel),
+		daemon.WithLogToStdout(fs.logToStdout),
 		modeOpt,
 	)
 	if err != nil {
@@ -317,6 +323,15 @@ func (fs *filesystem) newDaemon(snapshotID string, imageID string) (*daemon.Daem
 	return fs.createNewDaemon(snapshotID, imageID)
 }
 
+// Find saved sharedDaemon first, if not found then find it in db
+func (fs *filesystem) getSharedDaemon() (*daemon.Daemon, error) {
+	if fs.sharedDaemon != nil {
+		return fs.sharedDaemon, nil
+	} else {
+		return fs.manager.GetByID(daemon.SharedNydusDaemonID)
+	}
+}
+
 // createNewDaemon create new nydus daemon by snapshotID and imageID
 func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemon.Daemon, error) {
 	var (
@@ -329,9 +344,10 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		daemon.WithSocketDir(fs.SocketRoot()),
 		daemon.WithConfigDir(fs.ConfigRoot()),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithLogDir(fs.logDir),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
+		daemon.WithLogToStdout(fs.logToStdout),
 	); err != nil {
 		return nil, err
 	}
@@ -350,19 +366,21 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		d            *daemon.Daemon
 		err          error
 	)
-	if sharedDaemon, err = fs.manager.GetByID(daemon.SharedNydusDaemonID); err != nil {
+
+	sharedDaemon, err = fs.getSharedDaemon()
+	if err != nil {
 		return nil, err
 	}
-
 	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithRootMountPoint(*sharedDaemon.RootMountPoint),
 		daemon.WithSnapshotDir(fs.SnapshotRoot()),
 		daemon.WithAPISock(sharedDaemon.APISock()),
 		daemon.WithConfigDir(fs.ConfigRoot()),
-		daemon.WithLogDir(fs.LogRoot()),
+		daemon.WithLogDir(fs.logDir),
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
+		daemon.WithLogToStdout(fs.logToStdout),
 	); err != nil {
 		return nil, err
 	}

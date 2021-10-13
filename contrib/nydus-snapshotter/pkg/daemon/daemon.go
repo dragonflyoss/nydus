@@ -32,6 +32,7 @@ type Daemon struct {
 	SocketDir      string
 	LogDir         string
 	LogLevel       string
+	LogToStdout    bool
 	SnapshotDir    string
 	Pid            int
 	ImageID        string
