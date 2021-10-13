@@ -46,9 +46,24 @@ pub enum IoStatsError {
 
 type IoStatsResult<T> = Result<T, IoStatsError>;
 
-/// Block size separated counters.
-/// 1K; 4K; 16K; 64K, 128K, 512K, 1M
-const BLOCK_READ_COUNT_MAX: usize = 8;
+// Block size separated counters.
+// 1K; 4K; 16K; 64K, 128K, 512K, 1M
+const BLOCK_READ_SIZES_MAX: usize = 8;
+// <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
+const READ_LATENCY_RANGE_MAX: usize = 8;
+
+fn latency_range_index(elapsed: u64) -> usize {
+    match elapsed {
+        _ if elapsed <= 1 => 0,
+        _ if elapsed <= 20 => 1,
+        _ if elapsed <= 50 => 2,
+        _ if elapsed <= 100 => 3,
+        _ if elapsed <= 500 => 4,
+        _ if elapsed <= 1000 => 5,
+        _ if elapsed <= 2000 => 6,
+        _ => 7,
+    }
+}
 
 fn request_size_index(size: usize) -> usize {
     let ceil = (size >> 10).leading_zeros();
@@ -56,9 +71,6 @@ fn request_size_index(size: usize) -> usize {
 
     (0x0112_2334_5567u64 >> shift) as usize & 0xf
 }
-
-/// <=200us, <=500us, <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, >500ms
-const READ_LATENCY_RANGE_MAX: usize = 8;
 
 // Defining below global static metrics set so that a specific metrics counter can
 // be found as per the rafs backend mountpoint/id. Remind that nydusd can have
@@ -96,7 +108,7 @@ pub struct GlobalIoStats {
     // Total bytes read against the filesystem.
     data_read: BasicMetric,
     // Cumulative bytes for different block size.
-    block_count_read: [BasicMetric; BLOCK_READ_COUNT_MAX],
+    block_count_read: [BasicMetric; BLOCK_READ_SIZES_MAX],
     // Counters for successful various file operations.
     fop_hits: [BasicMetric; StatsFop::Max as usize],
     // Counters for failed file operations.
@@ -126,7 +138,7 @@ pub struct InodeIoStats {
     total_fops: BasicMetric,
     data_read: BasicMetric,
     // Cumulative bytes for different block size.
-    block_count_read: [BasicMetric; BLOCK_READ_COUNT_MAX],
+    block_count_read: [BasicMetric; BLOCK_READ_SIZES_MAX],
     fop_hits: [BasicMetric; StatsFop::Max as usize],
     fop_errors: [BasicMetric; StatsFop::Max as usize],
 }
@@ -201,20 +213,6 @@ pub fn new(id: &str) -> Arc<GlobalIoStats> {
     IOS_SET.write().unwrap().insert(id.to_string(), c.clone());
     c.init();
     c
-}
-
-/// <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
-fn latency_range_index(elapsed: u64) -> usize {
-    match elapsed {
-        _ if elapsed <= 1000 => 0,
-        _ if elapsed <= 20_000 => 1,
-        _ if elapsed <= 50_000 => 2,
-        _ if elapsed <= 100_000 => 3,
-        _ if elapsed <= 500_000 => 4,
-        _ if elapsed <= 1_000_000 => 5,
-        _ if elapsed <= 2_000_000 => 6,
-        _ => 7,
-    }
 }
 
 macro_rules! impl_iostat_option {
@@ -588,8 +586,10 @@ pub struct BackendMetrics {
     read_amount_total: BasicMetric,
     // In unit of millisecond
     read_cumulative_latency_millis_total: BasicMetric,
+    read_cumulative_latency_millis_dist: [BasicMetric; BLOCK_READ_SIZES_MAX],
+    read_count_block_size_dist: [BasicMetric; BLOCK_READ_SIZES_MAX],
     // Categorize metrics as per their latency and request size
-    read_latency_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_COUNT_MAX],
+    read_latency_hits_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_SIZES_MAX],
 }
 
 impl Metric for BasicMetric {
@@ -671,7 +671,9 @@ impl BackendMetrics {
             self.read_amount_total.add(size as u64);
             let lat_idx = latency_range_index(elapsed);
             let size_idx = request_size_index(size);
-            self.read_latency_dist[size_idx][lat_idx].inc();
+            self.read_cumulative_latency_millis_dist[size_idx].add(elapsed);
+            self.read_count_block_size_dist[size_idx].inc();
+            self.read_latency_hits_dist[size_idx][lat_idx].inc();
         }
     }
 
