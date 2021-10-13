@@ -269,6 +269,13 @@ fn main() -> Result<()> {
                         .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
                         .takes_value(true)
                 )
+                .arg(
+                    Arg::with_name("chunk_dict")
+                        .long("chunk_dict")
+                        .help("specify a chunk dictionary file in bootstrap/db format for chunk deduplication.")
+                        .takes_value(true)
+                )
+
         )
         .subcommand(
             SubCommand::with_name("check")

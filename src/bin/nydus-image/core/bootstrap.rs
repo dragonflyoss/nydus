@@ -11,6 +11,7 @@ use nydus_utils::digest::{DigestHasher, RafsDigest};
 use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
+use rafs::metadata::layout::v6::{lookup_nid, RafsV6SuperBlock, EROFS_BLKSIZE, EROFS_SLOTSIZE};
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperFlags};
 use storage::device::BlobFeatures;
@@ -68,9 +69,13 @@ impl Bootstrap {
             vec![tree.node.index],
         );
 
+        // indicates where v6's meta_addr starts
+        let root_offset = bootstrap_ctx.offset;
         let mut nodes = Vec::with_capacity(0x10000);
         nodes.push(tree.node.clone());
         self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes);
+
+        self.update_dirents(&mut nodes, tree, root_offset);
         bootstrap_ctx.nodes = nodes;
     }
 
@@ -121,16 +126,24 @@ impl Bootstrap {
     ) {
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
+
         parent.inode.set_child_index(index);
         parent.inode.set_child_count(tree.children.len() as u32);
+
+        // Sort children list by name, so that we can improve performance in fs read_dir using
+        // binary search.
+        tree.children
+            .sort_by_key(|child| child.node.name().to_os_string());
+
+        parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree));
+        tree.node.offset = parent.offset;
+        // alignment for inode, which is 32 bytes;
+        bootstrap_ctx.align_offset(EROFS_SLOTSIZE as u64);
 
         // Cache dir tree for BFS walk
         let mut dirs: Vec<&mut Tree> = Vec::new();
         let parent_ino = parent.inode.ino();
 
-        // Sort children list by name to improve performance by using binary search.
-        tree.children
-            .sort_by_key(|child| child.node.name().to_os_string());
         for child in tree.children.iter_mut() {
             let index = nodes.len() as u64 + 1;
             child.node.index = index;
@@ -162,6 +175,13 @@ impl Bootstrap {
                     (child.node.src_ino, child.node.src_dev),
                     vec![child.node.index],
                 );
+            }
+
+            // update bootstrap_ctx.offset for rafs v6.
+            if child.node.is_reg() || child.node.is_symlink() {
+                child.node.set_v6_offset(bootstrap_ctx);
+                bootstrap_ctx.align_offset(EROFS_SLOTSIZE as u64);
+                // println!("ctx.offset {}", bootstrap_ctx.offset);
             }
 
             // Store node for bootstrap & blob dump.
@@ -215,6 +235,44 @@ impl Bootstrap {
 
         for dir in dirs {
             self.build_rafs(ctx, bootstrap_ctx, dir, nodes);
+        }
+    }
+
+    /// Rafsv6 update offset
+    fn update_dirents(&self, nodes: &mut Vec<Node>, tree: &mut Tree, parent_offset: u64) {
+        let node = &mut nodes[tree.node.index as usize - 1];
+        if !node.is_dir() {
+            return;
+        }
+
+        // dot & dotdot
+        node.dirents
+            .push((node.offset, OsString::from("."), libc::S_IFDIR));
+        node.dirents
+            .push((parent_offset, OsString::from(".."), libc::S_IFDIR));
+
+        let mut dirs: Vec<&mut Tree> = Vec::new();
+        for child in tree.children.iter_mut() {
+            trace!(
+                "{:?} child {:?} offset {}, mode {}",
+                tree.node.name(),
+                child.node.name(),
+                child.node.offset,
+                child.node.inode.mode()
+            );
+            node.dirents.push((
+                child.node.offset,
+                child.node.name().to_os_string(),
+                child.node.inode.mode(),
+            ));
+
+            if child.node.is_dir() {
+                dirs.push(child);
+            }
+        }
+
+        for dir in dirs {
+            self.update_dirents(nodes, dir, tree.node.offset);
         }
     }
 
@@ -443,6 +501,54 @@ impl Bootstrap {
 
         Ok((blob_ids, blob_size))
     }
+
+    /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
+    pub fn dump_rafsv6(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        _blob_mgr: &mut BlobManager,
+    ) -> Result<(Vec<String>, u64)> {
+        let meta_addr = bootstrap_ctx.nodes[0].offset;
+        let root_nid = lookup_nid(bootstrap_ctx.nodes[0].offset, meta_addr);
+        // Dump superblock
+        let mut sb = RafsV6SuperBlock::new();
+        sb.s_inos = u64::to_le(bootstrap_ctx.nodes.len() as u64);
+        // FIXME
+        sb.s_blocks = 0;
+        sb.s_root_nid = u16::to_le(root_nid as u16);
+        sb.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLKSIZE as u64) as u32);
+        // only support one extra device.
+        sb.s_extra_devices = u16::to_le(1);
+
+        // bootstrap_ctx
+        //     .f_bootstrap
+        //     .seek(SeekFrom::Start(EROFS_SUPER_OFFSET as u64))
+        //     .context("failed seek for EROFS_SUPER_OFFSET")?;
+        sb.store(&mut bootstrap_ctx.f_bootstrap)
+            .context("failed to store SB")?;
+
+        // Dump bootstrap
+        timing_tracer!(
+            {
+                for node in &mut bootstrap_ctx.nodes {
+                    node.dump_bootstrap_v6(&mut bootstrap_ctx.f_bootstrap, meta_addr, ctx)
+                        .context("failed to dump bootstrap")?;
+                }
+
+                Ok(())
+            },
+            "dump_bootstrap",
+            Result<()>
+        )?;
+
+        // Flush remaining data in BufWriter to file
+        bootstrap_ctx.f_bootstrap.flush()?;
+
+        let blob_ids: Vec<String> = Vec::new();
+        let blob_size = 0;
+        Ok((blob_ids, blob_size))
+    }
 }
 
 impl BlobManager {
@@ -480,5 +586,165 @@ impl BlobManager {
         }
 
         Ok(blob_table)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::bootstrap::Bootstrap;
+    use crate::core::context::{BootstrapContext, BuildContext, SourceType, BUF_WRITER_CAPACITY};
+    use crate::core::node::{Node, Overlay, WhiteoutSpec};
+    use crate::core::prefetch::{Prefetch, PrefetchPolicy};
+    use crate::core::tree::Tree;
+    use nydus_utils::digest;
+    use rafs::metadata::layout::v6::RafsV6Dirent;
+    use rafs::metadata::layout::RAFS_ROOT_INODE;
+    use rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
+    use std::fs::{self, OpenOptions};
+    use std::io::BufWriter;
+    use std::path::Path;
+    use storage::compress;
+    use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
+
+    #[test]
+    fn test_build_rafs_v6() {
+        let src = TempDir::new().unwrap();
+        // /pa/aa,  /pc_long_name
+        let long_name = "c".repeat(200);
+        let prefix = src.as_path().join(long_name);
+
+        let pa = TempDir::new_with_prefix(&prefix).unwrap();
+        let pa_aa = TempFile::new_in(pa.as_path()).unwrap();
+
+        let root_node = Node::new(
+            RafsVersion::V5,
+            src.as_path().to_path_buf(),
+            src.as_path().to_path_buf(),
+            Overlay::UpperAddition,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            false,
+        )
+        .unwrap();
+        let mut tree = Tree::new(root_node);
+
+        let mut child = Tree::new(
+            Node::new(
+                RafsVersion::V5,
+                src.as_path().to_path_buf(),
+                pa.as_path().to_path_buf(),
+                Overlay::UpperAddition,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+                false,
+            )
+            .unwrap(),
+        );
+        let sub_child = Tree::new(
+            Node::new(
+                RafsVersion::V5,
+                src.as_path().to_path_buf(),
+                pa_aa.as_path().to_path_buf(),
+                Overlay::UpperAddition,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+                false,
+            )
+            .unwrap(),
+        );
+        child.children.push(sub_child);
+        tree.children.push(child);
+
+        // create another 18 files and a symlink file linked to the
+        // 1st created file.
+        let mut symlink = true;
+        for _i in 0..17 {
+            let p = TempFile::new_with_prefix(&prefix).unwrap();
+            let n = Node::new(
+                RafsVersion::V5,
+                src.as_path().to_path_buf(),
+                p.as_path().to_path_buf(),
+                Overlay::UpperAddition,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+                false,
+            )
+            .unwrap();
+
+            let child = Tree::new(n);
+            tree.children.push(child);
+
+            if symlink {
+                symlink = false;
+                let sympath = Path::new(&prefix);
+                std::os::unix::fs::symlink(p.as_path(), &sympath).unwrap();
+                let n = Node::new(
+                    RafsVersion::V5,
+                    src.as_path().to_path_buf(),
+                    sympath.to_path_buf(),
+                    Overlay::UpperAddition,
+                    RAFS_DEFAULT_CHUNK_SIZE as u32,
+                    false,
+                )
+                .unwrap();
+
+                println!("symsize {}", n.inode.symlink_size());
+
+                let child = Tree::new(n);
+                tree.children.push(child);
+            }
+        }
+
+        let index = RAFS_ROOT_INODE;
+        tree.node.index = index;
+        tree.node.inode.set_ino(index);
+
+        let prefetch = Prefetch::new(PrefetchPolicy::None).unwrap();
+        let mut build_ctx = BuildContext::new(
+            String::new(),
+            false,
+            compress::Algorithm::None,
+            digest::Algorithm::Sha256,
+            false,
+            WhiteoutSpec::default(),
+            SourceType::default(),
+            src.as_path().to_path_buf(),
+            prefetch,
+            None,
+        );
+
+        let bootstrap_path = TempFile::new().unwrap();
+        let f_bootstrap = Box::new(BufWriter::with_capacity(
+            BUF_WRITER_CAPACITY,
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(bootstrap_path.as_path())
+                .unwrap(),
+        ));
+
+        let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, None);
+
+        let mut bootstrap = Bootstrap::new().unwrap();
+
+        let mut nodes = vec![tree.node.clone()];
+        bootstrap.build_rafs(&mut build_ctx, &mut bootstrap_ctx, &mut tree, &mut nodes);
+
+        // validate parent's (dirent, nameoff)
+        let root = &nodes[index as usize - 1];
+
+        assert_eq!(
+            root.inode.size(),
+            (4096 + 206 + size_of::<RafsV6Dirent>() as u16) as u64
+        );
+        assert_eq!(root.offset, EROFS_BLKSIZE as u64);
+
+        let symnode = &nodes[(index + 1) as usize - 1];
+        println!("symlink name {:?}", symnode.name());
+        assert_eq!(symnode.offset, 12512);
+
+        let n = &nodes[(index + 2) as usize - 1];
+        println!("name {:?}", n.name());
+        assert_eq!(n.offset, 12800);
+
+        fs::remove_file(prefix).unwrap();
     }
 }

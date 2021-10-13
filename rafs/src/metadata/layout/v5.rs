@@ -965,6 +965,24 @@ impl RafsV5Inode {
                 as usize
     }
 
+    /// Get the uid and the gid of the inode.
+    #[inline]
+    pub fn uidgid(&self) -> (u32, u32) {
+        (self.i_uid, self.i_gid)
+    }
+
+    /// Get the uid and the gid of the inode.
+    #[inline]
+    pub fn mtime(&self) -> (u64, u32) {
+        (self.i_mtime, self.i_mtime_nsec)
+    }
+
+    /// Get the mode of the inode.
+    #[inline]
+    pub fn mode(&self) -> u32 {
+        self.i_mode
+    }
+
     /// Check whether the inode is a directory.
     #[inline]
     pub fn is_dir(&self) -> bool {

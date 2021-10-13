@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
 use nydus_utils::digest;
+use nydus_utils::div_round_up;
+use rafs::metadata::layout::v6::EROFS_BLKSIZE;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWriter};
 use sha2::{Digest, Sha256};
@@ -460,6 +462,8 @@ pub struct BootstrapContext {
     pub upper_inode_map: HashMap<(Inode, u64), Vec<u64>>,
     /// Store all nodes in ascendant ordor, indexed by (node.index - 1).
     pub nodes: Vec<Node>,
+    /// current position to write in f_bootstrap
+    pub offset: u64,
 }
 
 impl BootstrapContext {
@@ -470,6 +474,13 @@ impl BootstrapContext {
             lower_inode_map: HashMap::new(),
             upper_inode_map: HashMap::new(),
             nodes: Vec::new(),
+            offset: EROFS_BLKSIZE as u64,
+        }
+    }
+
+    pub fn align_offset(&mut self, align_size: u64) {
+        if self.offset % align_size > 0 {
+            self.offset = div_round_up(self.offset, align_size) * align_size;
         }
     }
 }

@@ -16,6 +16,7 @@
 //! - Traverse the merged tree (OverlayTree) to dump bootstrap and data blobs.
 
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -344,6 +345,9 @@ impl<'a> MetadataTreeBuilder<'a> {
             symlink,
             xattrs,
             ctime: 0,
+            offset: 0,
+            dirents: Vec::<(u64, OsString, u32)>::new(),
+            v6_datalayout: 0,
         })
     }
 }

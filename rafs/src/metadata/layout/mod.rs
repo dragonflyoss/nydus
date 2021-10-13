@@ -32,6 +32,7 @@ pub type XattrName = Vec<u8>;
 pub type XattrValue = Vec<u8>;
 
 pub mod v5;
+pub mod v6;
 
 #[doc(hidden)]
 #[macro_export]

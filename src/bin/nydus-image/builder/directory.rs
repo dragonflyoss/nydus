@@ -157,7 +157,7 @@ impl Builder for DirectoryBuilder {
         // Dump bootstrap file
         match ctx.fs_version {
             RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr),
-            RafsVersion::V6 => todo!(),
+            RafsVersion::V6 => bootstrap.dump_rafsv6(ctx, bootstrap_ctx, blob_mgr),
         }
     }
 }

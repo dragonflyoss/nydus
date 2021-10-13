@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -542,6 +543,9 @@ impl StargzIndexTreeBuilder {
             symlink,
             xattrs,
             ctime: 0,
+            offset: 0,
+            dirents: Vec::<(u64, OsString, u32)>::new(),
+            v6_datalayout: 0,
         })
     }
 }
