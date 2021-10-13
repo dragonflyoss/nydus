@@ -341,7 +341,7 @@ impl BlobCache {
         self.metrics.buffered_backend_size.add(buffer.size() as u64);
         let metrics = self.metrics.clone();
         self.runtime.spawn(async move {
-            metrics.buffered_backend_size.dec(buffer.size() as u64);
+            metrics.buffered_backend_size.sub(buffer.size() as u64);
             match Self::persist_chunk(compressed, fd, delayed_chunk.as_ref(), buffer.slice()) {
                 Err(e) => {
                     error!(

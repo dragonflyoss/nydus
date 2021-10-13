@@ -395,16 +395,10 @@ components:
             type: integer
         nr_opens:
           type: integer
-        nr_max_opens:
-          type: integer
-        last_fop_tp:
-          type: integer
     RafsFilesMetrics:
       type: object
       properties:
         nr_open:
-          type: integer
-        nr_max_opens:
           type: integer
         total_fops:
           type: integer
