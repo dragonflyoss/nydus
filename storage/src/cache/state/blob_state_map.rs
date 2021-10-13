@@ -783,7 +783,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_inflight_tracer_race_bitmap() {
+    fn test_inflight_tracer_race_range() {
         let tmp_file = TempFile::new().unwrap();
         let map = Arc::new(BlobStateMap::from(
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
@@ -809,72 +809,5 @@ pub(crate) mod tests {
         assert_eq!(map.is_range_ready(0, 1).unwrap(), true);
         assert_eq!(map.is_range_ready(9, 1).unwrap(), true);
         assert_eq!(map.is_range_all_ready(), true);
-    }
-
-    #[test]
-    fn test_range_map() {
-        let dir = TempDir::new().unwrap();
-        let blob_path = dir.as_path().join("blob-1");
-        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
-        let range_count = 1000000;
-        let skip_index = 77;
-
-        let map1 = Arc::new(BlobStateMap::from_range_map(
-            BlobRangeMap::new(&blob_path, range_count, 12).unwrap(),
-        ));
-        let map2 = Arc::new(BlobStateMap::from_range_map(
-            BlobRangeMap::new(&blob_path, range_count, 12).unwrap(),
-        ));
-        let map3 = Arc::new(BlobStateMap::from_range_map(
-            BlobRangeMap::new(&blob_path, range_count, 12).unwrap(),
-        ));
-
-        let now = Instant::now();
-
-        let h1 = thread::spawn(move || {
-            for idx in 0..range_count {
-                if idx % skip_index != 0 {
-                    let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-                    map1.set_range_ready_and_clear_pending(addr, 1).unwrap();
-                }
-            }
-        });
-
-        let h2 = thread::spawn(move || {
-            for idx in 0..range_count {
-                if idx % skip_index != 0 {
-                    let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-                    map2.set_range_ready_and_clear_pending(addr, 1).unwrap();
-                }
-            }
-        });
-
-        h1.join()
-            .map_err(|e| {
-                error!("Join error {:?}", e);
-                e
-            })
-            .unwrap();
-        h2.join()
-            .map_err(|e| {
-                error!("Join error {:?}", e);
-                e
-            })
-            .unwrap();
-
-        println!("BlobRangeMap Concurrency: {}ms", now.elapsed().as_millis());
-
-        for idx in 0..range_count {
-            let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-
-            let is_ready = map3.is_range_ready(addr, 1).unwrap();
-            if idx % skip_index == 0 {
-                if is_ready {
-                    panic!("indexed chunk map: index {} shouldn't be ready", idx);
-                }
-            } else if !is_ready {
-                panic!("indexed chunk map: index {} should be ready", idx);
-            }
-        }
     }
 }
