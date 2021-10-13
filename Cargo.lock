@@ -424,7 +424,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "377fa591135fbe23396a18e2655a6d5481bf7c5823cdfa3cc81b01a229cbe640"
 dependencies = [
  "libc",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -492,7 +492,7 @@ name = "fuse-backend-rs"
 version = "0.1.2"
 source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac#5a4b2ac1971cb0ec7a1e06459bd9d520f4fc15ee"
 dependencies = [
- "arc-swap 0.4.6",
+ "arc-swap 1.5.0",
  "bitflags",
  "caps",
  "libc",
@@ -501,7 +501,7 @@ dependencies = [
  "vhost",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -986,7 +986,7 @@ version = "0.2.0"
 source = "git+https://github.com/cloud-hypervisor/micro-http.git?branch=master#f4405cb5afb092e86204c26d589e8c9448721bf0"
 dependencies = [
  "libc",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -1153,7 +1153,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "url",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -1234,7 +1234,7 @@ dependencies = [
  "virtio-bindings",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
  "xattr",
 ]
 
@@ -1459,7 +1459,7 @@ dependencies = [
  "storage",
  "url",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -1875,7 +1875,7 @@ dependencies = [
  "tokio",
  "url",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.8.0",
 ]
 
 [[package]]
@@ -2158,7 +2158,7 @@ dependencies = [
  "bitflags",
  "libc",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -2173,7 +2173,7 @@ dependencies = [
  "virtio-bindings",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -2189,7 +2189,7 @@ source = "git+https://github.com/rust-vmm/vm-virtio?rev=6013dd9#6013dd91b2e6eb77
 dependencies = [
  "log",
  "vm-memory",
- "vmm-sys-util",
+ "vmm-sys-util 0.9.0",
 ]
 
 [[package]]
@@ -2201,6 +2201,16 @@ dependencies = [
  "arc-swap 1.5.0",
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "vmm-sys-util"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01cf11afbc4ebc0d5c7a7748a77d19e2042677fc15faa2f4ccccb27c18a60605"
+dependencies = [
+ "bitflags",
+ "libc",
 ]
 
 [[package]]

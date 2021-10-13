@@ -5,166 +5,60 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Result;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
-use std::time::Duration;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::{Arc, Mutex};
 
-use crate::cache::state::{IndexedChunkMap, RangeMap};
-use crate::device::{BlobChunkInfo, BlobInfo, BlobIoRange, BlobObject};
-use crate::meta::BlobMetaInfo;
+use self::client::Client;
+use crate::cache::state::{BlobRangeMap, RangeMap};
+use crate::device::{BlobInfo, BlobIoRange, BlobObject};
+
+pub use server::Server;
+
+mod client;
+mod connection;
+mod message;
+mod server;
 
 const REQUEST_TIMEOUT_SEC: u64 = 4;
+const RANGE_MAP_SHIFT: u64 = 18;
+const RANGE_MAP_MASK: u64 = (1 << RANGE_MAP_SHIFT) - 1;
 
-#[derive(Eq, PartialEq)]
-enum RequestStatus {
-    Waiting,
-    Timeout,
-    Finished,
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-enum RequestResult {
-    None,
-    GetBlob(RawFd, u64),
-    FetchChunks(u64),
-}
-
-struct Request {
-    tag: u64,
-    condvar: Condvar,
-    state: Mutex<(RequestStatus, RequestResult)>,
-}
-
-impl Request {
-    fn wait_for_result(&self) {
-        let mut tor: WaitTimeoutResult;
-        let mut guard = self.state.lock().unwrap();
-
-        while guard.0 == RequestStatus::Waiting {
-            let res = self
-                .condvar
-                .wait_timeout(guard, Duration::from_secs(REQUEST_TIMEOUT_SEC))
-                .unwrap();
-
-            tor = res.1;
-            guard = res.0;
-            if guard.0 == RequestStatus::Finished {
-                return;
-            } else if tor.timed_out() {
-                guard.0 = RequestStatus::Timeout;
-            }
-        }
-    }
-
-    fn set_result(&self, result: RequestResult) {
-        let mut guard = self.state.lock().unwrap();
-
-        match guard.0 {
-            RequestStatus::Waiting | RequestStatus::Timeout => {
-                guard.1 = result;
-                guard.0 = RequestStatus::Finished;
-                self.condvar.notify_all();
-            }
-            RequestStatus::Finished => {
-                debug!("received duplicated reply");
-            }
-        }
-    }
-}
-
-/// Struct to maintain state for a connection to remote blob manager.
-pub struct RemoteConnection {
-    tag: AtomicU64,
-    requests: Mutex<HashMap<u64, Arc<Request>>>,
-}
-
-impl RemoteConnection {
-    fn call_fetch_chunks(&self, _start: u32, _count: u32) -> Result<usize> {
-        let req = self.create_request();
-
-        // TODO: send message to remote server
-
-        match self.wait_for_result(req)? {
-            RequestResult::FetchChunks(size) => Ok(size as usize),
-            _ => Err(eother!()),
-        }
-    }
-
-    fn call_get_blob(&self, _blob_info: &Arc<BlobInfo>) -> Result<(File, u64)> {
-        let req = self.create_request();
-
-        // TODO: send message to remote server
-
-        match self.wait_for_result(req)? {
-            RequestResult::GetBlob(fd, base) => {
-                let file = unsafe { File::from_raw_fd(fd) };
-                Ok((file, base))
-            }
-            _ => Err(eother!()),
-        }
-    }
-
-    fn create_request(&self) -> Arc<Request> {
-        let tag = self.get_next_tag();
-        let request = Arc::new(Request {
-            tag,
-            condvar: Condvar::new(),
-            state: Mutex::new((RequestStatus::Waiting, RequestResult::None)),
-        });
-
-        self.requests.lock().unwrap().insert(tag, request.clone());
-
-        request
-    }
-
-    fn wait_for_result(&self, request: Arc<Request>) -> Result<RequestResult> {
-        request.wait_for_result();
-
-        match self.requests.lock().unwrap().remove(&request.tag) {
-            None => Err(enoent!()),
-            Some(entry) => {
-                let guard = entry.state.lock().unwrap();
-                match guard.0 {
-                    RequestStatus::Waiting => panic!("should not happen"),
-                    RequestStatus::Timeout => Err(enoent!()),
-                    RequestStatus::Finished => Ok(guard.1.clone()),
-                }
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn handle_result(&self, tag: u64, result: RequestResult) {
-        let requests = self.requests.lock().unwrap();
-
-        match requests.get(&tag) {
-            None => debug!("no request for tag {} found, may have timed out", tag),
-            Some(request) => request.set_result(result),
-        }
-    }
-
-    fn get_next_tag(&self) -> u64 {
-        self.tag.fetch_add(1, Ordering::AcqRel)
-    }
-}
-
-/// Manager to create and cache remote blob object.
+/// Manager to access and cache blob objects managed by remote blob manager.
+///
+/// A `RemoteBlobMgr` object may be used to access services from a remote blob manager, and cache
+/// blob information to improve performance.
 pub struct RemoteBlobMgr {
     blobs: Mutex<HashMap<String, Arc<RemoteBlob>>>,
-    conn: Arc<RemoteConnection>,
+    conn: Arc<Client>,
     workdir: String,
 }
 
 impl RemoteBlobMgr {
     /// Create a new instance of `RemoteBlobMgr`.
-    pub fn new(conn: Arc<RemoteConnection>, workdir: String) -> Result<Self> {
+    pub fn new(workdir: String, sock: &str) -> Result<Self> {
+        let conn = Client::new(sock);
+
         Ok(RemoteBlobMgr {
             blobs: Mutex::new(HashMap::new()),
-            conn,
+            conn: Arc::new(conn),
             workdir,
         })
+    }
+
+    /// Connect to remote blob manager.
+    pub fn connect(&self) -> Result<()> {
+        self.conn.connect().map(|_| ())
+    }
+
+    /// Start to handle communication messages.
+    pub fn start(&self) -> Result<()> {
+        Client::start(self.conn.clone())
+    }
+
+    /// Shutdown the `RemoteblogMgr` instance.
+    pub fn shudown(&self) {
+        self.conn.close();
+        self.blobs.lock().unwrap().clear();
     }
 
     /// Get an `BlobObject` trait object to access the specified blob.
@@ -175,9 +69,16 @@ impl RemoteBlobMgr {
         }
         drop(guard);
 
-        let (file, base) = self.conn.call_get_blob(blob_info)?;
+        let (file, base, token) = self.conn.call_get_blob(blob_info)?;
         let file = Arc::new(file);
-        let blob = RemoteBlob::new(blob_info, self.conn.clone(), file, base, &self.workdir)?;
+        let blob = RemoteBlob::new(
+            blob_info,
+            self.conn.clone(),
+            file,
+            base,
+            token,
+            &self.workdir,
+        )?;
         let blob = Arc::new(blob);
 
         let mut guard = self.blobs.lock().unwrap();
@@ -190,40 +91,43 @@ impl RemoteBlobMgr {
     }
 }
 
-/// Struct to cache and access blob object managed by remote blob manager.
+/// Struct to access and cache blob object managed by remote blob manager.
 ///
 /// The `RemoteBlob` structure acts as a proxy to access a blob managed by remote blob manager.
-/// It has a separate data plane and control plane. A file descriptor will be sent from the remote
-/// blob manager, so all data access requests will be served by directly access the file descriptor.
-/// And a communication channel will be used to communicate control message between the client and
-/// the remote blob manager. To improve control plane performance, it caches blob metadata and chunk
-/// map to avoid unnecessary control messages.
+/// It has a separate data plane and control plane. A file descriptor will be received from the
+/// remote blob manager, so all data access requests will be served by directly access the file
+/// descriptor. And a communication channel will be used to communicate control message between
+/// the client and the remote blob manager. To improve control plane performance, it may cache
+/// blob metadata and chunk map to avoid unnecessary control messages.
 struct RemoteBlob {
-    chunk_map: Arc<IndexedChunkMap>,
-    conn: Arc<RemoteConnection>,
-    meta: Arc<BlobMetaInfo>,
+    conn: Arc<Client>,
+    map: Arc<BlobRangeMap>,
     file: Arc<File>,
     base: u64,
+    token: u64,
 }
 
 impl RemoteBlob {
     /// Create a new instance of `RemoteBlob`.
     fn new(
         blob_info: &Arc<BlobInfo>,
-        conn: Arc<RemoteConnection>,
+        conn: Arc<Client>,
         file: Arc<File>,
         base: u64,
+        token: u64,
         work_dir: &str,
     ) -> Result<Self> {
-        let meta = BlobMetaInfo::new(work_dir, blob_info, None)?;
-        let chunk_map = IndexedChunkMap::open(blob_info, work_dir)?;
+        let blob_path = format!("{}/{}", work_dir, blob_info.blob_id());
+        let count = (blob_info.uncompressed_size() + RANGE_MAP_MASK) >> RANGE_MAP_SHIFT;
+        let map = BlobRangeMap::new(&blob_path, count as u32, RANGE_MAP_SHIFT as u32)?;
+        debug_assert!(count <= u32::MAX as u64);
 
         Ok(RemoteBlob {
-            chunk_map: Arc::new(chunk_map),
+            map: Arc::new(map),
             conn,
-            meta: Arc::new(meta),
             file,
             base,
+            token,
         })
     }
 }
@@ -240,10 +144,12 @@ impl BlobObject for RemoteBlob {
     }
 
     fn is_all_data_ready(&self) -> bool {
-        self.chunk_map.is_range_all_ready()
+        self.map.is_range_all_ready()
     }
 
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
+    fn fetch_range_compressed(&self, _offset: u64, _size: u64) -> Result<usize> {
+        Err(enosys!())
+        /*
         if let Ok(v) = self.meta.get_chunks_compressed(offset, size) {
             if v.is_empty() {
                 Ok(0)
@@ -255,34 +161,26 @@ impl BlobObject for RemoteBlob {
         } else {
             Err(enoent!("failed to get chunks for compressed range"))
         }
+         */
     }
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
-        if let Ok(v) = self.meta.get_chunks_uncompressed(offset, size) {
-            if v.is_empty() {
-                Ok(0)
-            } else if let Ok(true) = self.chunk_map.is_range_ready(v[0].id(), v.len() as u32) {
-                Ok(0)
-            } else {
-                self.conn.call_fetch_chunks(v[0].id(), v.len() as u32)
-            }
-        } else {
-            Err(enoent!("failed to get chunks for uncompressed range"))
+        match self.map.is_range_ready(offset, size) {
+            Ok(true) => Ok(0),
+            _ => self.conn.call_fetch_range(self.token, offset, size),
         }
     }
 
-    fn fetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
+    fn fetch_chunks(&self, _range: &BlobIoRange) -> Result<usize> {
+        Err(enosys!())
+        /*
         debug_assert!(range.validate());
         if range.chunks.is_empty() {
-            Ok(0)
-        } else if let Ok(true) = self
-            .chunk_map
-            .is_range_ready(range.chunks[0].id(), range.chunks.len() as u32)
-        {
             Ok(0)
         } else {
             self.conn
                 .call_fetch_chunks(range.chunks[0].id(), range.chunks.len() as u32)
         }
+         */
     }
 }
