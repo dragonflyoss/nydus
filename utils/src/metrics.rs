@@ -9,7 +9,7 @@ use std::ops::{Deref, Drop};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use nydus_error::logger::ErrorHolder;
 use serde_json::Error as SerdeError;
@@ -153,9 +153,9 @@ pub struct InodeIoStats {
 #[derive(Default, Debug, Serialize)]
 pub struct AccessPattern {
     file_path: PathBuf,
-    nr_read: AtomicUsize,
+    nr_read: AtomicU64,
     /// In unit of seconds.
-    first_access_time: AtomicU64,
+    first_access_time_secs: AtomicU64,
     first_access_time_nanos: AtomicU32,
 }
 
@@ -206,7 +206,7 @@ pub fn new(id: &str) -> Arc<GlobalIoStats> {
 }
 
 /// <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
-fn latency_range_index(elapsed: usize) -> usize {
+fn latency_range_index(elapsed: u64) -> usize {
     match elapsed {
         _ if elapsed <= 1000 => 0,
         _ if elapsed <= 20_000 => 1,
@@ -297,11 +297,12 @@ impl GlobalIoStats {
             match records.get(&ino) {
                 Some(r) => {
                     r.nr_read.fetch_add(1, Ordering::Relaxed);
-                    if r.first_access_time.load(Ordering::Relaxed) == 0 {
+                    if r.first_access_time_secs.load(Ordering::Relaxed) == 0 {
                         let t = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
                             .unwrap();
-                        r.first_access_time.store(t.as_secs(), Ordering::Relaxed);
+                        r.first_access_time_secs
+                            .store(t.as_secs(), Ordering::Relaxed);
                         r.first_access_time_nanos
                             .store(t.subsec_nanos(), Ordering::Relaxed);
                     }
@@ -366,7 +367,7 @@ impl GlobalIoStats {
         if let Some(start) = start {
             if let Ok(d) = SystemTime::elapsed(start) {
                 // Converting u128 to u64 here is safe since it's delta.
-                let elapsed = d.as_micros() as usize;
+                let elapsed = saturating_duration_millis(&d);
                 self.read_latency_dist[latency_range_index(elapsed)]
                     .fetch_add(1, Ordering::Relaxed);
                 self.fop_cumulative_latency_total[fop as usize]
@@ -561,18 +562,18 @@ pub fn export_events() -> IoStatsResult<String> {
 
 pub trait Metric {
     /// Adds `value` to the current counter.
-    fn add(&self, value: usize);
+    fn add(&self, value: u64);
     /// Increments by 1 unit the current counter.
     fn inc(&self) {
         self.add(1);
     }
     /// Returns current value of the counter.
-    fn count(&self) -> usize;
-    fn dec(&self, value: usize);
+    fn count(&self) -> u64;
+    fn dec(&self, value: u64);
 }
 
 #[derive(Default, Serialize, Debug)]
-pub struct BasicMetric(AtomicUsize);
+pub struct BasicMetric(AtomicU64);
 
 /*
 Exported backend metrics look like:
@@ -601,22 +602,35 @@ pub struct BackendMetrics {
     // Cumulative amount of data from to backend in unit of Byte. External tools
     // are responsible for calculating BPS from this field.
     read_amount_total: BasicMetric,
-    read_cumulative_latency_total: BasicMetric,
+    // In unit of millisecond
+    read_cumulative_latency_millis_total: BasicMetric,
     // Categorize metrics as per their latency and request size
     read_latency_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_COUNT_MAX],
 }
 
 impl Metric for BasicMetric {
-    fn add(&self, value: usize) {
+    fn add(&self, value: u64) {
         self.0.fetch_add(value, Ordering::Relaxed);
     }
 
-    fn count(&self) -> usize {
+    fn count(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
 
-    fn dec(&self, value: usize) {
+    fn dec(&self, value: u64) {
         self.0.fetch_sub(value, Ordering::Relaxed);
+    }
+}
+
+// This function assumes that the counted duration won't be too long.
+fn saturating_duration_millis(d: &Duration) -> u64 {
+    let d_secs = d.as_secs();
+    if d_secs == 0 {
+        d.subsec_millis() as u64
+    } else {
+        d_secs
+            .saturating_mul(1000)
+            .saturating_add(d.subsec_millis() as u64)
     }
 }
 
@@ -651,17 +665,15 @@ impl BackendMetrics {
 
     pub fn end(&self, begin: &SystemTime, size: usize, error: bool) {
         if let Ok(d) = SystemTime::elapsed(begin) {
-            // Below conversion from u128 to usize is acceptable since elapsed
-            // is a short duration.
-            let elapsed = d.as_micros() as usize;
-            self.read_count.inc();
-            self.read_cumulative_latency_total.add(elapsed);
-            self.read_amount_total.add(size);
+            let elapsed = saturating_duration_millis(&d);
 
+            self.read_count.inc();
             if error {
                 self.read_errors.inc();
             }
 
+            self.read_cumulative_latency_millis_total.add(elapsed);
+            self.read_amount_total.add(size as u64);
             let lat_idx = latency_range_index(elapsed);
             let size_idx = request_size_index(size);
             self.read_latency_dist[size_idx][lat_idx].inc();
