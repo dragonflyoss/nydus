@@ -480,12 +480,6 @@ components:
           type: integer
         prefetch_workers:
           type: integer
-        prefetch_policy:
-          type: array
-          items:
-            type: string
-        prefetch_total_size:
-          type: integer
         prefetch_mr_count:
           type: integer
         prefetch_unmerged_chunks:

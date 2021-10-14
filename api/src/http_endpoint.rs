@@ -174,6 +174,13 @@ struct ErrorMessage {
     message: String,
 }
 
+impl From<ErrorMessage> for Vec<u8> {
+    fn from(msg: ErrorMessage) -> Self {
+        // Safe to unwrap since `ErrorMessage` must succeed in serialization
+        serde_json::to_vec(&msg).unwrap()
+    }
+}
+
 pub fn error_response(error: HttpError, status: StatusCode) -> Response {
     let mut response = Response::new(Version::Http11, status);
 
@@ -181,8 +188,7 @@ pub fn error_response(error: HttpError, status: StatusCode) -> Response {
         code: "UNDEFINED".to_string(),
         message: format!("{:?}", error),
     };
-    response.set_body(Body::new(serde_json::to_string(&err_msg).unwrap()));
-
+    response.set_body(Body::new(err_msg));
     response
 }
 

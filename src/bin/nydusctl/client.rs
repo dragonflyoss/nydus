@@ -58,9 +58,10 @@ impl NydusdClient {
         let response = client.request(req).await?;
         let sc = response.status().as_u16();
         let buf = hyper::body::to_bytes(response).await?;
-        let b = serde_json::from_slice(&buf).map_err(|e| anyhow!("deserialize: {}", e))?;
 
         if sc >= 400 {
+            let b: serde_json::Value =
+                serde_json::from_slice(&buf).map_err(|e| anyhow!("deserialize: {}", e))?;
             bail!("Request failed. {:?}", b);
         }
 

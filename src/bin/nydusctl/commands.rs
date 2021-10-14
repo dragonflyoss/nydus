@@ -14,7 +14,39 @@ use rafs::fs::RafsConfig;
 
 type CommandParams = HashMap<String, String>;
 
+fn load_param_interval(params: &Option<CommandParams>) -> Result<Option<u32>> {
+    if let Some(p) = params {
+        if let Some(interval) = p.get("interval") {
+            interval
+                .parse()
+                .map(Some)
+                .map_err(|e| anyhow!("Invalid interval input. {}", e))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) struct CommandBlobcache {}
+
+macro_rules! items_map(
+    { $($key:expr => $value:expr),+ } => {
+        {
+            let mut m: HashMap<String, String> = HashMap::new();
+            $(
+                m.insert($key.to_string(), $value.to_string());
+            )+
+            m
+        }
+     };
+);
+
+lazy_static! {
+    pub static ref CONFIGURE_ITEMS_MAP: HashMap<String, String> =
+        items_map!("log-level" => "log_level");
+}
 
 impl CommandBlobcache {
     pub async fn execute(
@@ -31,16 +63,31 @@ impl CommandBlobcache {
         } else {
             print!(
                 r#"
-Partial Hits:       {partial_hits}
-Whole Hits:         {whole_hits}
-Total Read:         {total_read}
-Prefetch Amount:    {prefetch_amount} = {prefetch_amount_kb}KB
+Partial Hits:           {partial_hits}
+Whole Hits:             {whole_hits}
+Total Read:             {total_read}
+Directory:              {directory}
+Files:                  {files}
+Prefetch Workers:       {workers}
+Prefetch Amount:        {prefetch_amount} = {prefetch_amount_kb} KB
+Prefetch Requests:      {requests}
+Prefetch Average Size:  {avg_prefetch_size} Bytes
+Prefetch Unmerged:      {unmerged_blocks}
+Persister Buffer:       {buffered}
 "#,
                 partial_hits = m["partial_hits"],
                 whole_hits = m["whole_hits"],
                 total_read = m["total"],
                 prefetch_amount = m["prefetch_data_amount"],
                 prefetch_amount_kb = m["prefetch_data_amount"].as_u64().unwrap() / 1024,
+                files = m["underlying_files"],
+                directory = m["store_path"],
+                requests = m["prefetch_mr_count"],
+                avg_prefetch_size = m["prefetch_data_amount"].as_u64().unwrap()
+                    / m["prefetch_mr_count"].as_u64().unwrap(),
+                workers = m["prefetch_workers"],
+                unmerged_blocks = m["prefetch_unmerged_chunks"],
+                buffered = m["buffered_backend_size"],
             );
         }
 
@@ -59,15 +106,8 @@ impl CommandBackend {
     ) -> Result<()> {
         let metrics = client.get("metrics/backend").await?;
 
-        let interval: Option<Result<u32>> =
-            params.and_then(|p| p.get("interval").cloned()).map(|i| {
-                i.parse()
-                    .map_err(|e| anyhow!("Invalid interval input. {}", e))
-            });
-
-        if let Some(Err(e)) = interval {
-            return Err(e);
-        } else if let Some(Ok(i)) = interval {
+        let interval = load_param_interval(&params)?;
+        if let Some(i) = interval {
             let mut last_record = metrics;
             loop {
                 sleep(Duration::from_secs(i as u64));
@@ -160,7 +200,20 @@ impl CommandDaemon {
         params: Option<CommandParams>,
     ) -> Result<()> {
         if let Some(p) = params {
-            let data = serde_json::to_string(&p)?;
+            let mut real = HashMap::<String, String>::new();
+
+            // Map user provided configured item key to the one nydusd accepts.
+            for (k, v) in p.into_iter() {
+                real.insert(
+                    CONFIGURE_ITEMS_MAP
+                        .get(&k)
+                        .ok_or_else(|| anyhow!("illegal item input"))?
+                        .clone(),
+                    v,
+                );
+            }
+
+            let data = serde_json::to_string(&real)?;
             client.put("daemon", Some(data)).await?;
         } else {
             let info = client.get("daemon").await?;

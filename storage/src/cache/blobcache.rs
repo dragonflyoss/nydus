@@ -1050,19 +1050,6 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         continue;
                     }
 
-                    if continuous_chunks.len() > 2 {
-                        blobcache
-                            .metrics
-                            .prefetch_total_size
-                            .add(blob_size as usize);
-                        blobcache.metrics.prefetch_mr_count.inc();
-                    }
-
-                    blobcache
-                        .metrics
-                        .prefetch_data_amount
-                        .add(blob_size as usize);
-
                     issue_batch = false;
                     // An immature trick here to detect if chunk already resides in
                     // blob cache file. Hopefully, we can have a more clever and agile
@@ -1130,6 +1117,15 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                         }
                         continue 'wait_mr;
                     }
+
+                    // Record how much prefetch data is requested from storage backend.
+                    // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
+                    // We can measure merging possibility by this.
+                    blobcache.metrics.prefetch_mr_count.inc();
+                    blobcache
+                        .metrics
+                        .prefetch_data_amount
+                        .add(blob_size as usize);
 
                     if let Ok(chunks) = blobcache.read_chunks(
                         blob_id,
@@ -1253,11 +1249,9 @@ impl RafsCache for BlobCache {
     fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
         let merging_size = self.prefetch_ctx.merging_size;
         self.metrics.prefetch_unmerged_chunks.add(bios.len());
-
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
             self.generate_merged_requests_for_prefetch(bios, mr_sender, merging_size);
         }
-
         Ok(0)
     }
 

@@ -6,6 +6,8 @@
 extern crate clap;
 #[macro_use]
 extern crate anyhow;
+#[macro_use]
+extern crate lazy_static;
 
 use std::collections::HashMap;
 
@@ -37,15 +39,21 @@ async fn main() -> Result<()> {
                 .takes_value(false)
                 .global(false),
         )
-        .subcommand(SubCommand::with_name("info").help("Get nydusd working status"))
+        .subcommand(SubCommand::with_name("info").about("Get nydusd working status"))
         .subcommand(
             SubCommand::with_name("set")
-                .help("Configure nydusd")
+                .about(
+                    "Configure nydusd parameters in format: set KIND VALUE where KIND can be \"log-level\"",
+                )
+                .help(
+                    r#"Acceptable Items:
+        log-level: trace, debug, info, warn, error"#,
+                )
                 .arg(
                     Arg::with_name("KIND")
                         .help("what item to configure")
                         .required(true)
-                        .possible_values(&["log_level"])
+                        .possible_values(&["log-level"])
                         .takes_value(true)
                         .index(1),
                 )
@@ -59,7 +67,9 @@ async fn main() -> Result<()> {
         )
         .subcommand(
             SubCommand::with_name("metrics")
-                .help("Configure nydusd")
+                .about(
+                    "Query nydus metrics. Possible metrics category: fsstats; blobcache; backend",
+                )
                 .arg(
                     Arg::with_name("category")
                         .help("Show the category of metrics: blobcache, backend, fsstats")
