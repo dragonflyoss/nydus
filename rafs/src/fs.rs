@@ -15,7 +15,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
 use nix::unistd::{getegid, geteuid};
@@ -45,9 +44,6 @@ pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
 const DOT: &str = ".";
 const DOTDOT: &str = "..";
 
-// TODO: Make this configurable from rafs configuration file
-const AMPLIFIED_SIZE: usize = 1024 * 128;
-
 fn default_threads_count() -> usize {
     8
 }
@@ -58,6 +54,10 @@ fn default_merging_size() -> usize {
 
 fn default_prefetch_all() -> bool {
     true
+}
+
+fn default_amplify_io() -> u32 {
+    128 * 1024
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -110,6 +110,9 @@ pub struct RafsConfig {
     pub access_pattern: bool,
     #[serde(default)]
     pub latest_read_files: bool,
+    // ZERO value means, amplifying user io is not enabled.
+    #[serde(default = "default_amplify_io")]
+    pub amplify_io: u32,
 }
 
 impl FromStr for RafsConfig {
@@ -154,6 +157,7 @@ pub struct Rafs {
     initialized: bool,
     xattr_enabled: bool,
     ios: Arc<metrics::GlobalIoStats>,
+    amplify_io: u32,
     // static inode attributes
     i_uid: u32,
     i_gid: u32,
@@ -202,6 +206,7 @@ impl Rafs {
             ios: metrics::new(id),
             digest_validate: conf.digest_validate,
             fs_prefetch: conf.fs_prefetch.enable,
+            amplify_io: conf.amplify_io,
             prefetch_all: conf.fs_prefetch.prefetch_all,
             xattr_enabled: conf.enable_xattr,
             i_uid: geteuid().into(),
@@ -319,10 +324,6 @@ impl Rafs {
 
                 if prefetch_all {
                     let root = vec![RAFS_ROOT_INODE];
-                    // Sleeping for 2 seconds is indeed a trick to prefetch the entire rootfs.
-                    // FIXME: As nydus can't give different policies different priorities, this is a
-                    // workaround. Remove the sleeping when IO priority mechanism is ready.
-                    sleep(Duration::from_secs(2));
                     sb.prefetch_hint_files(&mut reader, Some(root), &|mut desc| {
                         device.prefetch(&mut desc).unwrap_or_else(|e| {
                             warn!("Prefetch error, {:?}", e);
@@ -618,23 +619,28 @@ impl FileSystem for Rafs {
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
         let mut all_cached = true;
 
-        if let Some(d) = AMPLIFIED_SIZE.checked_sub(size as usize) {
-            for b in &desc.bi_vec {
-                let c = b.chunkinfo.as_ref();
-                let blob = b.blob.as_ref();
-                all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
-            }
-            // Try to amplify user io from here, aim at better performance.
-            if !all_cached {
-                let ra_desc = self.sb.carry_more_until(
-                    inode.as_ref(),
-                    offset + size as u64,
-                    desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
-                    d as u64,
-                )?;
-                if let Some(rd) = ra_desc {
-                    desc.bi_vec.extend_from_slice(&rd.bi_vec)
-                };
+        if self.amplify_io != 0 {
+            if let Some(d) = self.amplify_io.checked_sub(size) {
+                for b in &desc.bi_vec {
+                    let c = b.chunkinfo.as_ref();
+                    let blob = b.blob.as_ref();
+                    all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
+                }
+                // Try to amplify user io from here, aim at better performance.
+                if !all_cached {
+                    let ra_desc = self.sb.carry_more_until(
+                        inode.as_ref(),
+                        offset + size as u64,
+                        desc.bi_vec.last().unwrap().chunkinfo.as_ref(),
+                        d as u64,
+                    );
+                    // Event fails in amplifying, still handle this read op.
+                    match ra_desc {
+                        Ok(Some(rd)) => desc.bi_vec.extend_from_slice(&rd.bi_vec),
+                        Ok(None) => debug!("Can't append more chunks"),
+                        Err(e) => warn!("Fail in trying to amplify user ios, {:?}", e),
+                    }
+                }
             }
         }
 

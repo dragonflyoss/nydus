@@ -12,7 +12,7 @@
 //!
 //! The metadata blob are pre-loaded when mounting the filesystem, and data blobs may be loaded
 //! on demand when the data is actually accessed.
-
+#![deny(warnings)]
 #[macro_use]
 extern crate log;
 #[macro_use]
@@ -30,6 +30,7 @@ use std::path::Path;
 
 pub mod fs;
 pub mod metadata;
+pub mod mock;
 
 #[derive(Debug)]
 pub enum RafsError {

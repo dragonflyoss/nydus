@@ -264,11 +264,9 @@ impl Default for RafsSuper {
 
 impl RafsSuper {
     pub fn new(conf: &RafsConfig) -> Result<Self> {
-        let mode = conf.mode.as_str();
-        let validate_digest = conf.digest_validate;
         let mut rs = Self::default();
 
-        match mode {
+        match conf.mode.as_str() {
             "direct" => {
                 rs.mode = RafsMode::Direct;
             }
@@ -280,7 +278,7 @@ impl RafsSuper {
             }
         }
 
-        rs.validate_digest = validate_digest;
+        rs.validate_digest = conf.digest_validate;
 
         Ok(rs)
     }
@@ -634,6 +632,9 @@ impl RafsSuper {
         Ok(())
     }
 
+    // The total size of all chunks carried by `desc` might exceed `expected_size`, this
+    // method ensures the total size mustn't exceed `expected_size`. If it truly does,
+    // just trim several trailing chunks from `desc`.
     fn steal_chunks(desc: &mut RafsBioDesc, expected_size: u32) -> Option<&mut RafsBioDesc> {
         enum State {
             All,
@@ -665,8 +666,8 @@ impl RafsSuper {
             State::None => None,
             State::All => Some(desc),
             State::Partial(fi) => {
-                for i in (fi..len).rev() {
-                    desc.bi_size -= desc.bi_vec[i].chunkinfo.decompress_size() as usize;
+                for i in (fi + 1..len).rev() {
+                    desc.bi_size -= std::cmp::min(desc.bi_vec[i].size, desc.bi_size);
                     desc.bi_vec.remove(i as usize);
                 }
                 Some(desc)
@@ -674,7 +675,13 @@ impl RafsSuper {
         }
     }
 
-    // TODO: Add a UT for me.
+    // For some kinds of storage backend, IO of size smaller than a certain size similar time.
+    // Below method tries to amplify current rafs user io by appending more non-user io.
+    // It checks whether left part of the file can fullfil `expected_size`.
+    // If not, in rafs the file whose inode number is INO and another file whose inode number
+    // is INO + 1 's are very likely to be arranged continuously. So we try to amply the user
+    // IO by merge another file into.
+    //
     pub fn carry_more_until(
         &self,
         inode: &dyn RafsInode,
@@ -697,22 +704,49 @@ impl RafsSuper {
                 let trimming_size = d.bi_vec[0].size;
                 let head_chunk = ck.as_ref();
                 let trimming = tail_chunk.compress_offset() == head_chunk.compress_offset();
-                // Stolen chunk bigger than expected size will involve more backend IO, thus
-                // to slow down current user IO.
-                if let Some(cks) = Self::steal_chunks(&mut d, left as u32) {
-                    if trimming {
-                        ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
-                        ra_desc.bi_size += cks.bi_size;
-                        ra_desc.bi_size -= trimming_size;
+
+                let head_cki = if trimming {
+                    if d.bi_vec.len() == 1 {
+                        // The first chunk is already requested by user IO. For amplification, we
+                        // must move on to next file to find more continuous chunks
+                        None
                     } else {
-                        ra_desc.bi_vec.append(&mut cks.bi_vec);
-                        ra_desc.bi_size += cks.bi_size;
+                        Some(&d.bi_vec[1].chunkinfo)
                     }
-                }
-                if delta >= expected_size {
-                    false
                 } else {
-                    left -= delta;
+                    Some(&d.bi_vec[0].chunkinfo)
+                };
+
+                if let Some(h) = head_cki {
+                    // The first found potentially amplified chunk is not adjacent, abort!
+                    if h.compress_offset()
+                        != tail_chunk.compress_offset() + tail_chunk.compress_size() as u64
+                    {
+                        warn!("Discontinuous");
+                        return Ok(None);
+                    }
+
+                    // Stolen chunk bigger than expected size will involve more backend IO, thus
+                    // to slow down current user IO. The total compressed size of chunks from `alloc_bio_desc`
+                    // might exceed expected_size, so steal the necessary parts.
+                    if let Some(cks) = Self::steal_chunks(&mut d, sz as u32) {
+                        if trimming {
+                            ra_desc.bi_vec.extend_from_slice(&cks.bi_vec[1..]);
+                            ra_desc.bi_size += cks.bi_size;
+                            ra_desc.bi_size -= trimming_size;
+                        } else {
+                            ra_desc.bi_vec.append(&mut cks.bi_vec);
+                            ra_desc.bi_size += cks.bi_size;
+                        }
+                    }
+                    // Even all chunks are trimmed by `steal_chunks`, we still minus delta.
+                    if delta >= expected_size {
+                        false
+                    } else {
+                        left -= delta;
+                        true
+                    }
+                } else {
                     true
                 }
             } else {
@@ -733,7 +767,31 @@ impl RafsSuper {
                     }
                     let next_size = ni.size();
                     let sz = std::cmp::min(left, next_size);
+                    // It is possible that a file has no contents.
+                    if sz == 0 {
+                        break;
+                    }
+
                     let mut d = ni.alloc_bio_desc(0, sz as usize, false)?;
+
+                    if d.bi_vec.is_empty() {
+                        warn!("A desc has no chunks appended");
+                        break;
+                    }
+
+                    // Current file provides noting. The first found potentially amplified chunk is not adjacent, abort!
+                    let prior_chunk = if ra_desc.bi_vec.is_empty() {
+                        tail_chunk
+                    } else {
+                        // Safe to unwrap since already checked if empty
+                        ra_desc.bi_vec.last().unwrap().chunkinfo.as_ref()
+                    };
+
+                    if d.bi_vec[0].chunkinfo.compress_offset()
+                        != prior_chunk.compress_offset() + prior_chunk.compress_size() as u64
+                    {
+                        break;
+                    }
 
                     // Stolen chunk bigger than expected size will involve more backend IO, thus
                     // to slow down current user IO.

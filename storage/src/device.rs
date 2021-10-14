@@ -227,7 +227,7 @@ impl RafsBlobEntry {
 }
 
 // Rafs device blob IO descriptor
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct RafsBioDesc {
     // Blob IO flags
     pub bi_flags: u32,

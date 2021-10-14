@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#![deny(warnings)]
 #[macro_use(crate_authors, crate_version)]
 extern crate clap;
 #[macro_use]
