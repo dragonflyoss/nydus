@@ -9,13 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/containerd/containerd/reference/docker"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
@@ -112,6 +115,15 @@ type Converter struct {
 	storageBackend backend.Backend
 }
 
+func imageRepository(ref string) (string, error) {
+	named, err := docker.ParseDockerRef(ref)
+	if err != nil {
+		return "", errors.Wrapf(err, "parse image reference %s", ref)
+	}
+
+	return docker.TagNameOnly(named).Name(), nil
+}
+
 func New(opt Opt) (*Converter, error) {
 	// TODO: Add parameters sanity check here
 	// Built layer has to go somewhere. Storage backend is the media holing layer blob.
@@ -153,6 +165,8 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "Pull cache image")
 	}
+
+	start := time.Now()
 
 	// BuildWorkflow builds nydus blob/bootstrap layer by layer
 	bootstrapsDir := filepath.Join(cvt.WorkDir, "bootstraps")
@@ -309,9 +323,24 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	}
 	pushDone(nil)
 
+	repo, err := imageRepository(cvt.Source)
+	if err != nil {
+		logrus.Warnf("parse image reference %v", err)
+	}
+
+	if repo != "" {
+		metrics.ConversionDuration(repo, len(sourceLayers), start)
+		metrics.ConversionCount(repo)
+	}
+
+	start = time.Now()
 	// Push Nydus cache image to remote registry
 	if err := cg.Export(ctx, buildLayers); err != nil {
-		return errors.Wrap(err, "Get cache record")
+		return errors.Wrap(err, "export cache records")
+	}
+
+	if repo != "" {
+		metrics.StoreCacheDuration(repo, start)
 	}
 
 	logrus.Infof("Converted to %s", cvt.TargetRemote.Ref)

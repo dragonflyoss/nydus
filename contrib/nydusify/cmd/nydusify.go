@@ -24,6 +24,8 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics/file_exporter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
@@ -262,6 +264,8 @@ func main() {
 					return err
 				}
 
+				metrics.Register(file_exporter.New(filepath.Join(opt.WorkDir, "conversion_metrics.prom")))
+
 				return cvt.Convert(context.Background())
 			},
 		},
@@ -333,4 +337,6 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		logrus.Fatal(err)
 	}
+
+	metrics.Export()
 }
