@@ -76,13 +76,14 @@ func (d *Database) initDatabase() error {
 		if _, err := tx.CreateBucketIfNotExists(daemonsBucketName); err != nil {
 			return err
 		}
-		if _, err := tx.CreateBucketIfNotExists(cachesBucketName); err != nil {
+		cbkt, err := tx.CreateBucketIfNotExists(cachesBucketName)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.CreateBucketIfNotExists(snapshotBucketName); err != nil {
+		if _, err := cbkt.CreateBucketIfNotExists(snapshotBucketName); err != nil {
 			return err
 		}
-		if _, err := tx.CreateBucketIfNotExists(blobBucketName); err != nil {
+		if _, err := cbkt.CreateBucketIfNotExists(blobBucketName); err != nil {
 			return err
 		}
 		return nil
