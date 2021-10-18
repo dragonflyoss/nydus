@@ -52,7 +52,7 @@ const BLOCK_READ_SIZES_MAX: usize = 8;
 // <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
 const READ_LATENCY_RANGE_MAX: usize = 8;
 
-fn latency_range_index(elapsed: u64) -> usize {
+fn latency_millis_range_index(elapsed: u64) -> usize {
     match elapsed {
         _ if elapsed <= 1 => 0,
         _ if elapsed <= 20 => 1,
@@ -61,6 +61,20 @@ fn latency_range_index(elapsed: u64) -> usize {
         _ if elapsed <= 500 => 4,
         _ if elapsed <= 1000 => 5,
         _ if elapsed <= 2000 => 6,
+        _ => 7,
+    }
+}
+
+// <=200us, <=1ms, <=20ms, <=50ms, <=500ms, <=1s, <=2s, >2s
+fn latency_micros_range_index(elapsed: u64) -> usize {
+    match elapsed {
+        _ if elapsed <= 200 => 0,
+        _ if elapsed <= 1_000 => 1,
+        _ if elapsed <= 20_000 => 2,
+        _ if elapsed <= 50_000 => 3,
+        _ if elapsed <= 500_000 => 4,
+        _ if elapsed <= 1_000_000 => 5,
+        _ if elapsed <= 2_000_000 => 6,
         _ => 7,
     }
 }
@@ -232,9 +246,7 @@ macro_rules! impl_iostat_option {
 impl GlobalIoStats {
     pub fn init(&self) {
         self.files_account_enabled.store(false, Ordering::Relaxed);
-        // TODO(chge): disable measuring latency by default most read requests should be
-        // fulfilled from local blobcache. Make this configurable later.
-        self.measure_latency.store(false, Ordering::Relaxed);
+        self.measure_latency.store(true, Ordering::Relaxed);
     }
 
     impl_iostat_option!(files_enabled, toggle_files_recording, files_account_enabled);
@@ -349,7 +361,7 @@ impl GlobalIoStats {
         if let Some(start) = start {
             if let Ok(d) = SystemTime::elapsed(start) {
                 let elapsed = saturating_duration_micros(&d);
-                self.read_latency_dist[latency_range_index(elapsed)].inc();
+                self.read_latency_dist[latency_micros_range_index(elapsed)].inc();
                 self.fop_cumulative_latency_total[fop as usize].add(elapsed);
             }
         }
@@ -669,7 +681,7 @@ impl BackendMetrics {
 
             self.read_cumulative_latency_millis_total.add(elapsed);
             self.read_amount_total.add(size as u64);
-            let lat_idx = latency_range_index(elapsed);
+            let lat_idx = latency_millis_range_index(elapsed);
             let size_idx = request_size_index(size);
             self.read_cumulative_latency_millis_dist[size_idx].add(elapsed);
             self.read_count_block_size_dist[size_idx].inc();
