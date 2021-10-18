@@ -47,8 +47,18 @@ pub enum IoStatsError {
 type IoStatsResult<T> = Result<T, IoStatsError>;
 
 // Block size separated counters.
-// 1K; 4K; 16K; 64K, 128K, 512K, 1M
+// [0-3]: <1K;1K~;4K~;16K~;
+// [5-7]: 64K~;128K~;512K~;1M~
 const BLOCK_READ_SIZES_MAX: usize = 8;
+
+#[inline]
+fn request_size_index(size: usize) -> usize {
+    let ceil = (size >> 10).leading_zeros();
+    let shift = (std::cmp::max(ceil, 53) - 53) << 2;
+
+    (0x0112_2334_5567u64 >> shift) as usize & 0xf
+}
+
 // <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
 const READ_LATENCY_RANGE_MAX: usize = 8;
 
@@ -77,13 +87,6 @@ fn latency_micros_range_index(elapsed: u64) -> usize {
         _ if elapsed <= 2_000_000 => 6,
         _ => 7,
     }
-}
-
-fn request_size_index(size: usize) -> usize {
-    let ceil = (size >> 10).leading_zeros();
-    let shift = (std::cmp::max(ceil, 53) - 53) << 2;
-
-    (0x0112_2334_5567u64 >> shift) as usize & 0xf
 }
 
 // Defining below global static metrics set so that a specific metrics counter can
@@ -319,20 +322,12 @@ impl GlobalIoStats {
     }
 
     fn global_update(&self, fop: StatsFop, value: usize, success: bool) {
-        // We put block count into 5 catagories e.g. 1K; 4K; 16K; 64K, 128K.
+        // Linux kernel no longer splits IO into sizes smaller than 128K.
+        // So 512K and 1M is added.
+        // We put block count into 5 catagories e.g. 1K; 4K; 16K; 64K; 128K; 512K; 1M
         if fop == StatsFop::Read {
-            match value {
-                // <=1K
-                _ if value >> 10 == 0 => self.block_count_read[0].inc(),
-                // <=4K
-                _ if value >> 12 == 0 => self.block_count_read[1].inc(),
-                // <=16K
-                _ if value >> 14 == 0 => self.block_count_read[2].inc(),
-                // <=64K
-                _ if value >> 16 == 0 => self.block_count_read[3].inc(),
-                // >64K
-                _ => self.block_count_read[4].inc(),
-            };
+            let idx = request_size_index(value);
+            self.block_count_read[idx].inc()
         }
 
         if success {
