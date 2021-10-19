@@ -8,6 +8,7 @@ package process
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -201,8 +202,10 @@ func (m *Manager) DestroyDaemon(d *daemon.Daemon) error {
 			return err
 		}
 		_, err = p.Wait()
-		if err != nil {
-			return err
+		// if nydus-snapshotter restart, it will break the relationship between nydusd and
+		// nydus-snapshotter, p.Wait() will return err, so here should exclude this case
+		if err != nil && !stderrors.Is(err, syscall.ECHILD) {
+			log.L.Errorf("failed to process wait, %v", err)
 		}
 	}
 	if err := m.mounter.Umount(d.MountPoint()); err != nil && err != syscall.EINVAL {
