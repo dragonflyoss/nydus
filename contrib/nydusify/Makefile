@@ -13,5 +13,8 @@ build:
 static-release:
 	@CGO_ENABLED=0 ${PROXY} GOOS=linux go build -ldflags '-X main.versionGitCommit=${GIT_COMMIT} -X main.versionBuildTime=${BUILD_TIME}' -o ./cmd ./cmd/nydusify.go
 
-build-smoke:
-	@CGO_ENABLED=0 ${PROXY} GOOS=linux go test -v -c -o ./nydusify-smoke ./tests
+ut:
+	@go test -count=1 -v -timeout 20m -race ./pkg/...
+
+build-smoke: ut
+	@CGO_ENABLED=0 ${PROXY} GOOS=linux go test -race -v -c -o ./nydusify-smoke ./tests
