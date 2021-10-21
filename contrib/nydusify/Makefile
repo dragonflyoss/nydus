@@ -20,4 +20,4 @@ ut:
 	@go test -count=1 -v -timeout 20m -race ./pkg/...
 
 build-smoke: ut
-	@CGO_ENABLED=0 ${PROXY} GOOS=linux go test -race -v -c -o ./nydusify-smoke ./tests
+	${PROXY} GOOS=linux go test -race -v -c -o ./nydusify-smoke ./tests
