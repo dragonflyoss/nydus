@@ -113,7 +113,8 @@ impl Builder for DirectoryBuilder {
         let mut tree = self.build_tree_from_fs(ctx, bootstrap_ctx)?;
         let mut bootstrap = Bootstrap::new()?;
         if bootstrap_ctx.f_parent_bootstrap.is_some() {
-            // Merge with lower layer if there's one.
+            // Merge with lower layer if there's one, do not prepare `prefetch` list during merging.
+            ctx.prefetch.disable();
             bootstrap.build(ctx, bootstrap_ctx, &mut tree);
             tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
         }
