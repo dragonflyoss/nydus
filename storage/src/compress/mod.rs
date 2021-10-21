@@ -83,9 +83,10 @@ pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
     if (COMPRESSION_MINIMUM_RATIO == 100 && compressed.len() >= src_size)
         || ((100 * compressed.len() / src_size) >= COMPRESSION_MINIMUM_RATIO)
     {
-        return Ok((Cow::Borrowed(src), false));
+        Ok((Cow::Borrowed(src), false))
+    } else {
+        Ok((Cow::Owned(compressed), true))
     }
-    Ok((Cow::Owned(compressed), true))
 }
 
 /// Decompress a source slice or file stream into destination slice, with provided compression algorithm.

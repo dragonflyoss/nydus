@@ -5,14 +5,17 @@
 
 //! Rafs filesystem metadata layout and data structures.
 
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::metadata::layout::v5::RAFSV5_ALIGNMENT;
 use fuse_backend_rs::abi::linux_abi::ROOT_ID;
+use nydus_utils::ByteSize;
+
+use crate::metadata::layout::v5::RAFSV5_ALIGNMENT;
 
 /// Version number for Rafs v4.
 pub const RAFS_SUPER_VERSION_V4: u32 = 0x400;
@@ -195,6 +198,55 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
     })?;
 
     Ok(value)
+}
+
+/// Rafs inode extended attributes.
+///
+/// An extended attribute is a (String, String) pair associated with a inode.
+#[derive(Clone, Default)]
+pub struct RafsXAttrs {
+    pairs: HashMap<OsString, XattrValue>,
+}
+
+impl RafsXAttrs {
+    /// Create a new instance of `RafsV5Xattrs`.
+    pub fn new() -> Self {
+        Self {
+            pairs: HashMap::new(),
+        }
+    }
+
+    /// Get size needed to store the extended attributes.
+    pub fn size(&self) -> usize {
+        let mut size: usize = 0;
+
+        for (key, value) in self.pairs.iter() {
+            size += size_of::<u32>();
+            size += key.byte_size() + 1 + value.len();
+        }
+
+        size
+    }
+
+    /// Get extended attribute with  key `name`.
+    pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
+        self.pairs.get(name)
+    }
+
+    /// Add or update an extended attribute.
+    pub fn add(&mut self, name: OsString, value: XattrValue) {
+        self.pairs.insert(name, value);
+    }
+
+    /// Remove an extended attribute
+    pub fn remove(&mut self, name: &OsStr) {
+        self.pairs.remove(name);
+    }
+
+    /// Check whether there's any extended attribute.
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
 }
 
 pub(crate) struct MetaRange {

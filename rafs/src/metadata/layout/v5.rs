@@ -34,7 +34,6 @@
 //! both v4 and v5 metadata.
 
 use std::cmp;
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
@@ -48,7 +47,7 @@ use nydus_utils::ByteSize;
 use storage::compress;
 use storage::device::{BlobFeatures, BlobIoDesc, BlobIoVec};
 
-use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrValue, RAFS_SUPER_VERSION_V5};
+use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER_VERSION_V5};
 use crate::metadata::{
     Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
@@ -1145,63 +1144,14 @@ impl RafsV5XAttrsTable {
 
 impl_bootstrap_converter!(RafsV5XAttrsTable);
 
-/// Rafs v5 extended attributes.
-///
-/// An extended attribute is a (String, String) pair associated with a inode.
-#[derive(Clone, Default)]
-pub struct RafsV5XAttrs {
-    pairs: HashMap<OsString, XattrValue>,
-}
-
-impl RafsV5XAttrs {
-    /// Create a new instance of `RafsV5Xattrs`.
-    pub fn new() -> Self {
-        Self {
-            pairs: HashMap::new(),
-        }
-    }
-
-    /// Get size needed to store the extended attributes.
-    pub fn size(&self) -> usize {
-        let mut size: usize = 0;
-
-        for (key, value) in self.pairs.iter() {
-            size += size_of::<u32>();
-            size += key.byte_size() + 1 + value.len();
-        }
-
-        size
-    }
-
-    /// Get aligned size needed to store the extended attributes.
+impl RafsXAttrs {
+    /// Get aligned content size of the extended attribute table.
     #[inline]
-    pub fn aligned_size(&self) -> usize {
+    pub fn aligned_size_v5(&self) -> usize {
         rafsv5_align(self.size())
     }
 
-    /// Get extended attribute with  key `name`.
-    pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
-        self.pairs.get(name)
-    }
-
-    /// Add or update an extended attribute.
-    pub fn add(&mut self, name: OsString, value: XattrValue) {
-        self.pairs.insert(name, value);
-    }
-
-    /// Remove an extended attribute
-    pub fn remove(&mut self, name: &OsStr) {
-        self.pairs.remove(name);
-    }
-
-    /// Check whether there's any extended attribute.
-    pub fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
-    }
-}
-
-impl RafsStore for RafsV5XAttrs {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub fn store_v5(&self, w: &mut RafsIoWriter) -> Result<usize> {
         let mut size = 0;
 
         if !self.pairs.is_empty() {
@@ -1952,7 +1902,7 @@ pub mod tests {
 
     #[test]
     fn test_rafsv5_new_xattrs() {
-        let mut xattrs = RafsV5XAttrs::new();
+        let mut xattrs = RafsXAttrs::new();
         assert_eq!(xattrs.size(), 0);
 
         xattrs.add(OsString::from("key1"), vec![0x1u8, 0x2, 0x3, 0x4]);

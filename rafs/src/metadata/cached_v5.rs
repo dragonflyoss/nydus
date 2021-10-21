@@ -726,9 +726,8 @@ mod cached_tests {
     use crate::metadata::cached_v5::{CachedInodeV5, CachedSuperBlockV5};
     use crate::metadata::layout::v5::{
         rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper,
-        RafsV5XAttrs,
     };
-    use crate::metadata::layout::RAFS_ROOT_INODE;
+    use crate::metadata::layout::{RafsXAttrs, RAFS_ROOT_INODE};
     use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
     use crate::{RafsIoReader, RafsIoWriter};
 
@@ -746,7 +745,7 @@ mod cached_tests {
 
         let mut ondisk_inode = RafsV5Inode::new();
         let file_name = OsString::from("c_inode_1");
-        let mut xattr = RafsV5XAttrs::default();
+        let mut xattr = RafsXAttrs::default();
         xattr.add(OsString::from("k1"), vec![1u8, 2u8, 3u8, 4u8]);
         xattr.add(OsString::from("k2"), vec![10u8, 11u8, 12u8]);
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
@@ -768,7 +767,7 @@ mod cached_tests {
         };
         inode.store(&mut writer).unwrap();
         chunk.store(&mut writer).unwrap();
-        xattr.store(&mut writer).unwrap();
+        xattr.store_v5(&mut writer).unwrap();
 
         f.seek(Start(0)).unwrap();
         let md = RafsSuperMeta {
