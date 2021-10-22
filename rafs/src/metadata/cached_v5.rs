@@ -553,6 +553,10 @@ impl RafsInode for CachedInodeV5 {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     impl_getter!(ino, i_ino, u64);
     impl_getter!(parent, i_parent, u64);
     impl_getter!(size, i_size, u64);

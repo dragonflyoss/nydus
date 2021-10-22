@@ -34,6 +34,7 @@ pub mod layout;
 mod md_v5;
 mod noop;
 
+use std::any::Any;
 pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 
 /// Maximum size of blob id string.
@@ -94,7 +95,7 @@ pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes + Send + Sync {
 ///
 /// The RAFS filesystem is a readonly filesystem, so does its inodes. The `RafsInode` trait acts
 /// as field accessors for those readonly inodes, to hide implementation details.
-pub trait RafsInode {
+pub trait RafsInode: Any {
     /// Validate the node for data integrity.
     ///
     /// The inode object may be transmuted from a raw buffer, read from an external file, so the
@@ -192,6 +193,8 @@ pub trait RafsInode {
 
     /// Allocate blob io vectors to read file data in range [offset, offset + size).
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

@@ -768,6 +768,10 @@ impl RafsInode for OndiskInodeWrapper {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     impl_inode_wrapper!(is_dir, bool);
     impl_inode_wrapper!(is_reg, bool);
     impl_inode_wrapper!(is_symlink, bool);
