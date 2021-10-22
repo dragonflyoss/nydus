@@ -2,11 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod blob;
-pub mod bootstrap;
-pub mod chunk_dict;
-pub mod context;
-pub mod layout;
-pub mod node;
-pub mod prefetch;
-pub mod tree;
+pub(crate) mod blob;
+pub(crate) mod bootstrap;
+pub(crate) mod chunk_dict;
+pub(crate) mod context;
+pub(crate) mod layout;
+pub(crate) mod node;
+pub(crate) mod prefetch;
+pub(crate) mod tree;

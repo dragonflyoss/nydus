@@ -14,7 +14,11 @@ impl BlobLayout {
         BlobLayout {}
     }
 
-    pub fn layout_blob_simple(prefetch: &Prefetch, nodes: &[Node]) -> Result<(Vec<usize>, usize)> {
+    pub fn layout_blob_simple(
+        &mut self,
+        prefetch: &Prefetch,
+        nodes: &[Node],
+    ) -> Result<(Vec<usize>, usize)> {
         let mut inodes = Vec::with_capacity(nodes.len());
 
         // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
@@ -33,13 +37,10 @@ impl BlobLayout {
         let prefetch_entries = inodes.len();
 
         // Dump other normal nodes
-        for (index, _) in nodes.iter().enumerate() {
-            let node = &nodes[index];
-            if !prefetch.contains(node) {
-                // Ignore lower layer node when dump blob
-                if Self::should_dump_node(node) {
-                    inodes.push(index);
-                }
+        for (index, node) in nodes.iter().enumerate() {
+            // Ignore lower layer node when dump blob
+            if !prefetch.contains(node) && Self::should_dump_node(node) {
+                inodes.push(index);
             }
         }
 

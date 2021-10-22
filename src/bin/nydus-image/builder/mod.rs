@@ -2,14 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod directory;
-pub mod stargz;
-
 use anyhow::Result;
 
 use crate::core::context::{BlobManager, BootstrapContext, BuildContext};
 
-pub trait Builder {
+pub(crate) use directory::DirectoryBuilder;
+pub(crate) use stargz::StargzBuilder;
+
+mod directory;
+mod stargz;
+
+pub(crate) trait Builder {
     fn build(
         &mut self,
         build_ctx: &mut BuildContext,

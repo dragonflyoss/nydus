@@ -4,10 +4,10 @@
 
 //! Validator for RAFS format
 
-use anyhow::{Context, Result};
 use std::fs::OpenOptions;
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use rafs::metadata::{RafsMode, RafsSuper};
 use rafs::RafsIoReader;
 
@@ -30,6 +30,7 @@ impl Validator {
                     bootstrap_path
                 ))?,
         );
+
         Ok(Self { f_bootstrap })
     }
 
@@ -42,7 +43,7 @@ impl Validator {
         };
         rs.load(&mut self.f_bootstrap).context(err)?;
 
-        let tree = Tree::from_bootstrap(&rs, None).context(err)?;
+        let tree = Tree::from_bootstrap(&rs, &mut ()).context(err)?;
         tree.iterate(&mut |node| {
             if verbosity {
                 info!("{}", node);

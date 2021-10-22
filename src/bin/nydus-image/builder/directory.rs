@@ -2,16 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Result};
-
 use std::fs;
 use std::fs::DirEntry;
+
+use anyhow::{Context, Result};
 
 use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext};
-use crate::core::node::*;
+use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext, RafsVersion};
+use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
 
 struct FilesystemTreeBuilder {}
@@ -29,34 +29,33 @@ impl FilesystemTreeBuilder {
         parent: &mut Node,
     ) -> Result<Vec<Tree>> {
         let mut result = Vec::new();
-
         if !parent.is_dir() {
             return Ok(result);
         }
 
         let layered = bootstrap_ctx.f_parent_bootstrap.is_some();
-        let children = fs::read_dir(&parent.path)
-            .with_context(|| format!("failed to read dir {:?}", parent.path))?;
+        let children = fs::read_dir(parent.path())
+            .with_context(|| format!("failed to read dir {:?}", parent.path()))?;
         let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
 
         event_tracer!("load_from_directory", +children.len());
-
         for child in children {
             let path = child.path();
-
             let child = Node::new(
+                ctx.fs_version,
                 ctx.source_path.clone(),
                 path.clone(),
                 Overlay::UpperAddition,
+                ctx.chunk_size,
                 parent.explicit_uidgid,
             )
             .with_context(|| format!("failed to create node {:?}", path))?;
 
             // as per OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
-            if child.whiteout_type(ctx.whiteout_spec).is_some()
+            if !layered
+                && child.whiteout_type(ctx.whiteout_spec).is_some()
                 && !child.is_overlayfs_opaque(ctx.whiteout_spec)
-                && !layered
             {
                 continue;
             }
@@ -70,7 +69,7 @@ impl FilesystemTreeBuilder {
     }
 }
 
-pub struct DirectoryBuilder {}
+pub(crate) struct DirectoryBuilder {}
 
 impl DirectoryBuilder {
     pub fn new() -> Self {
@@ -83,15 +82,16 @@ impl DirectoryBuilder {
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
     ) -> Result<Tree> {
-        let tree_builder = FilesystemTreeBuilder::new();
-
         let node = Node::new(
+            ctx.fs_version,
             ctx.source_path.clone(),
             ctx.source_path.clone(),
             Overlay::UpperAddition,
+            ctx.chunk_size,
             ctx.explicit_uidgid,
         )?;
         let mut tree = Tree::new(node);
+        let tree_builder = FilesystemTreeBuilder::new();
 
         tree.children = timing_tracer!(
             { tree_builder.load_children(ctx, bootstrap_ctx, &mut tree.node) },
@@ -109,24 +109,19 @@ impl Builder for DirectoryBuilder {
         bootstrap_ctx: &mut BootstrapContext,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
-        let mut blob = Blob::new();
-        let mut bootstrap = Bootstrap::new()?;
-
-        // Build tree from source
+        // Scan source directory to build upper layer tree.
         let mut tree = self.build_tree_from_fs(ctx, bootstrap_ctx)?;
-
-        // Build bootstrap from source
+        let mut bootstrap = Bootstrap::new()?;
         if bootstrap_ctx.f_parent_bootstrap.is_some() {
+            // Merge with lower layer if there's one.
             bootstrap.build(ctx, bootstrap_ctx, &mut tree);
-            // Apply to parent bootstrap for layered build
-            let mut tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
-            timing_tracer!(
-                { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
-                "build_bootstrap"
-            );
-        } else {
-            bootstrap.build(ctx, bootstrap_ctx, &mut tree);
+            tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
         }
+        // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
+        timing_tracer!(
+            { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+            "build_bootstrap"
+        );
 
         // Dump blob file
         let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone())?;
@@ -134,7 +129,9 @@ impl Builder for DirectoryBuilder {
             blob_ctx.set_chunk_dict(dict);
             blob_mgr.extend_blob_table_from_chunk_dict();
         }
+        blob_ctx.set_chunk_size(ctx.chunk_size);
         let blob_index = blob_mgr.alloc_index()?;
+        let mut blob = Blob::new();
         timing_tracer!(
             {
                 blob.dump(
@@ -142,7 +139,7 @@ impl Builder for DirectoryBuilder {
                     &mut blob_ctx,
                     blob_index,
                     &mut bootstrap_ctx.nodes,
-                    &mut blob_mgr.chunk_cache,
+                    &mut blob_mgr.chunk_dict_cache,
                 )
             },
             "dump_blob"
@@ -155,6 +152,9 @@ impl Builder for DirectoryBuilder {
         }
 
         // Dump bootstrap file
-        bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr)
+        match ctx.fs_version {
+            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr),
+            RafsVersion::V6 => todo!(),
+        }
     }
 }

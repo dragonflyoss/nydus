@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
-
 use rafs::metadata::layout::v5::RafsV5PrefetchTable;
 
-use crate::node::*;
+use crate::node::Node;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
@@ -116,11 +115,11 @@ impl Prefetch {
 
     pub fn insert_if_need(&mut self, node: &Node) {
         let path = node.target();
-        let inode = node.inode.i_ino;
+        let inode = node.inode.ino();
         let index = node.index;
         let mut remove_node = false;
 
-        if self.policy == PrefetchPolicy::None || node.inode.i_size == 0 {
+        if self.policy == PrefetchPolicy::None || node.inode.size() == 0 {
             return;
         }
 

@@ -37,12 +37,11 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{getegid, geteuid};
 use serde::Serialize;
 
-use crate::builder::directory::DirectoryBuilder;
-use crate::builder::stargz::StargzBuilder;
-use crate::builder::Builder;
+use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
 
 use crate::core::context::{
-    BlobManager, BlobStorage, BootstrapContext, BuildContext, SourceType, BUF_WRITER_CAPACITY,
+    BlobManager, BlobStorage, BootstrapContext, BuildContext, RafsVersion, SourceType,
+    BUF_WRITER_CAPACITY,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
@@ -52,7 +51,7 @@ use crate::core::chunk_dict::import_chunk_dict;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
 use rafs::RafsIoReader;
-use storage::compress;
+use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
 use trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use validator::Validator;
 
@@ -450,6 +449,8 @@ fn main() -> Result<()> {
             prefetch,
             blob_stor,
         );
+        build_ctx.set_fs_version(RafsVersion::V5);
+        build_ctx.set_chunk_size(RAFS_DEFAULT_CHUNK_SIZE as u32);
 
         let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, f_parent_bootstrap);
         let mut blob_mgr = BlobManager::new();

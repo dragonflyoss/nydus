@@ -14,25 +14,34 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
+use nydus_utils::digest;
+use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
+use rafs::{RafsIoReader, RafsIoWriter};
 use sha2::{Digest, Sha256};
+use storage::compress;
+use storage::device::BlobInfo;
 use vmm_sys_util::tempfile::TempFile;
 
-use rafs::metadata::layout::v5::RafsV5BlobTable;
-use rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use rafs::metadata::{Inode, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
-use rafs::{RafsIoReader, RafsIoWriter};
-// FIXME: Must image tool depend on storage backend?
-use nydus_utils::digest::{self, RafsDigest};
-use storage::compress;
-use storage::device::{BlobFeatures, BlobInfo};
-
-use crate::core::chunk_dict::ChunkDict;
-use crate::core::layout::BlobLayout;
-use crate::core::node::*;
-use crate::core::prefetch::Prefetch;
+use super::chunk_dict::{ChunkDict, HashChunkDict};
+use super::layout::BlobLayout;
+use super::node::{Node, WhiteoutSpec};
+use super::prefetch::Prefetch;
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RafsVersion {
+    V5,
+    V6,
+}
+
+impl Default for RafsVersion {
+    fn default() -> Self {
+        RafsVersion::V5
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SourceType {
@@ -168,6 +177,8 @@ pub struct BlobContext {
     pub blob_id: String,
     pub blob_hash: Sha256,
     pub blob_readahead_size: u64,
+    /// Blob data layout manager
+    pub blob_layout: BlobLayout,
 
     /// Final compressed blob file size.
     pub compressed_blob_size: u64,
@@ -180,55 +191,54 @@ pub struct BlobContext {
 
     /// The number of counts in a blob by the index of blob table.
     pub chunk_count: u32,
-    /// Blob data layout manager
-    pub blob_layout: BlobLayout,
+    /// Chunk slice size.
+    pub chunk_size: u32,
     /// Scratch data buffer for reading from/writing to disk files.
     pub chunk_data_buf: Vec<u8>,
     /// ChunkDict which would be loaded when builder start
-    pub chunk_dict: Option<Arc<dyn ChunkDict>>,
+    pub chunk_dict: Arc<dyn ChunkDict>,
 
     // Blob writer for writing to disk file.
     pub writer: Option<BlobBufferWriter>,
 }
 
 impl BlobContext {
-    pub fn new_with_writer(blob_id: String, writer: Option<BlobBufferWriter>) -> Self {
-        Self {
-            blob_id,
-            blob_hash: Sha256::new(),
-            blob_readahead_size: 0,
-            compressed_blob_size: 0,
-            compress_offset: 0,
-            decompressed_blob_size: 0,
-            decompress_offset: 0,
-            chunk_count: 0,
-            blob_layout: BlobLayout::new(),
-            chunk_data_buf: vec![0u8; RAFS_MAX_CHUNK_SIZE as usize],
-            chunk_dict: None,
-            writer,
-        }
-    }
-
-    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
-        self.chunk_dict = Some(dict);
-    }
-
     pub fn new(blob_id: String, blob_stor: Option<BlobStorage>) -> Result<Self> {
         let writer = if let Some(blob_stor) = blob_stor {
             Some(BlobBufferWriter::new(blob_stor)?)
         } else {
             None
         };
+
         Ok(Self::new_with_writer(blob_id, writer))
     }
 
-    /// Allocate a count index sequentially in a blob.
-    pub fn alloc_index(&mut self) -> Result<u32> {
-        let index = self.chunk_count;
-        self.chunk_count = index
-            .checked_add(1)
-            .ok_or_else(|| Error::msg("the number of chunks in blob exceeds the u32 limit"))?;
-        Ok(index)
+    pub fn new_with_writer(blob_id: String, writer: Option<BlobBufferWriter>) -> Self {
+        let size = if writer.is_some() {
+            RAFS_MAX_CHUNK_SIZE as usize
+        } else {
+            0
+        };
+
+        Self {
+            blob_id,
+            blob_hash: Sha256::new(),
+            blob_readahead_size: 0,
+            blob_layout: BlobLayout::new(),
+
+            compressed_blob_size: 0,
+            decompressed_blob_size: 0,
+
+            compress_offset: 0,
+            decompress_offset: 0,
+
+            chunk_count: 0,
+            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
+            chunk_data_buf: vec![0u8; size],
+            chunk_dict: Arc::new(()),
+
+            writer,
+        }
     }
 
     pub fn from(
@@ -239,39 +249,76 @@ impl BlobContext {
         compressed_blob_size: u64,
     ) -> Self {
         let mut blob = Self::new_with_writer(blob_id, None);
-        blob.chunk_count = chunk_count;
+
         blob.blob_readahead_size = readahead_size as u64;
         blob.chunk_count = chunk_count;
         blob.decompressed_blob_size = blob_cache_size;
         blob.compressed_blob_size = compressed_blob_size;
+
         blob
+    }
+
+    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
+        self.chunk_dict = dict;
+    }
+
+    pub fn set_chunk_size(&mut self, chunk_size: u32) {
+        self.chunk_size = chunk_size;
+    }
+
+    /// Allocate a count index sequentially in a blob.
+    pub fn alloc_index(&mut self) -> Result<u32> {
+        let index = self.chunk_count;
+        self.chunk_count = index
+            .checked_add(1)
+            .ok_or_else(|| Error::msg("the number of chunks in blob exceeds the u32 limit"))?;
+
+        // TODO: check index is less than supported chunk number
+
+        Ok(index)
     }
 }
 
 /// BlobManager stores all blob related information during build,
 /// the vector index will be as the blob index.
 pub struct BlobManager {
-    blobs: Vec<BlobContext>,
-    chunk_dict: Option<Arc<dyn ChunkDict>>,
-    /// Store all chunk digest for chunk deduplicate during build.
-    pub chunk_cache: HashMap<RafsDigest, RafsV5ChunkInfo>,
+    pub blobs: Vec<BlobContext>,
+    /// Chunk dictionary from reference image or base layer.
+    pub chunk_dict_ref: Arc<dyn ChunkDict>,
+    /// Chunk dictionary to hold new chunks from the upper layer.
+    pub chunk_dict_cache: HashChunkDict,
 }
 
 impl BlobManager {
     pub fn new() -> Self {
         Self {
             blobs: Vec::new(),
-            chunk_dict: None,
-            chunk_cache: HashMap::new(),
+            chunk_dict_ref: Arc::new(()),
+            chunk_dict_cache: HashChunkDict::default(),
         }
     }
 
-    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
-        self.chunk_dict = Some(dict)
+    pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
+        self.blobs = blob_table
+            .iter()
+            .map(|entry| {
+                BlobContext::from(
+                    entry.blob_id().to_owned(),
+                    entry.chunk_count(),
+                    entry.readahead_size() as u32,
+                    entry.uncompressed_size(),
+                    entry.compressed_size(),
+                )
+            })
+            .collect();
     }
 
-    pub fn get_chunk_dict(&self) -> Option<Arc<dyn ChunkDict>> {
-        self.chunk_dict.clone()
+    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
+        self.chunk_dict_ref = dict
+    }
+
+    pub fn get_chunk_dict(&self) -> Arc<dyn ChunkDict> {
+        self.chunk_dict_ref.clone()
     }
 
     /// Get blob context for current layer
@@ -411,6 +458,10 @@ pub struct BuildContext {
     pub explicit_uidgid: bool,
     /// whiteout spec: overlayfs or oci
     pub whiteout_spec: WhiteoutSpec,
+    /// Chunk slice size.
+    pub chunk_size: u32,
+    /// Version number of output metadata and data blob.
+    pub fs_version: RafsVersion,
 
     /// Type of source to build the image from.
     pub source_type: SourceType,
@@ -448,11 +499,22 @@ impl BuildContext {
             explicit_uidgid,
             whiteout_spec,
 
+            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
+            fs_version: RafsVersion::default(),
+
             source_type,
             source_path,
 
             prefetch,
             blob_storage,
         }
+    }
+
+    pub fn set_fs_version(&mut self, fs_version: RafsVersion) {
+        self.fs_version = fs_version;
+    }
+
+    pub fn set_chunk_size(&mut self, chunk_size: u32) {
+        self.chunk_size = chunk_size;
     }
 }

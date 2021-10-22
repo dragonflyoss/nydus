@@ -5,9 +5,11 @@
 
 //! Structs and Traits for RAFS file system meta data management.
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fs::OpenOptions;
 use std::io::{Error, Result};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -34,7 +36,6 @@ pub mod layout;
 mod md_v5;
 mod noop;
 
-use std::any::Any;
 pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 
 /// Maximum size of blob id string.
@@ -409,6 +410,22 @@ impl RafsSuper {
         Arc::get_mut(&mut self.superblock)
             .expect("Inodes are no longer used.")
             .destroy();
+    }
+
+    /// Load Rafs super block from a metadata file.
+    pub fn load_from_metadata(path: &str, mode: RafsMode, validate_digest: bool) -> Result<Self> {
+        // open bootstrap file
+        let file = OpenOptions::new().read(true).write(false).open(path)?;
+        let mut rs = RafsSuper {
+            mode,
+            validate_digest,
+            ..Default::default()
+        };
+        let mut reader = Box::new(file) as RafsIoReader;
+
+        rs.load(&mut reader)?;
+
+        Ok(rs)
     }
 
     /// Load RAFS metadata and optionally cache inodes.
