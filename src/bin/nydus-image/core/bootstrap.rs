@@ -15,7 +15,7 @@ use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperFlags};
 use storage::device::BlobFeatures;
 
-use super::context::{BlobManager, BootstrapContext, BuildContext, SourceType};
+use super::context::{BlobManager, BootstrapContext, BuildContext, RafsVersion, SourceType};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::prefetch::PrefetchPolicy;
 use super::tree::Tree;
@@ -324,7 +324,7 @@ impl Bootstrap {
             };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
-        let blob_table = blob_mgr.to_blob_table_v5()?;
+        let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
         let prefetch_table_offset = super_block_size + inode_table_size;
         let blob_table_offset = prefetch_table_offset + prefetch_table_size;
         let blob_table_size = blob_table.size();
@@ -445,7 +445,7 @@ impl Bootstrap {
 }
 
 impl BlobManager {
-    pub fn to_blob_table_v5(&self) -> Result<RafsV5BlobTable> {
+    pub fn to_blob_table_v5(&self, build_ctx: &BuildContext) -> Result<RafsV5BlobTable> {
         let mut blob_table = RafsV5BlobTable::new();
 
         for ctx in &self.blobs {
@@ -455,8 +455,15 @@ impl BlobManager {
             let decompressed_blob_size = ctx.decompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
             let blob_features = BlobFeatures::empty();
-            // TODO: get digest and compression algorithms from context.
-            let flags = RafsSuperFlags::DIGESTER_BLAKE3 | RafsSuperFlags::COMPRESS_LZ4_BLOCK;
+
+            let mut flags = RafsSuperFlags::empty();
+            match build_ctx.fs_version {
+                RafsVersion::V5 => {
+                    flags |= RafsSuperFlags::from(build_ctx.compressor);
+                    flags |= RafsSuperFlags::from(build_ctx.digester);
+                }
+                RafsVersion::V6 => todo!(),
+            }
 
             blob_table.add(
                 blob_id,

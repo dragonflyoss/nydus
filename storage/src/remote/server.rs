@@ -283,6 +283,7 @@ mod tests {
         assert_eq!(server.state.active_workers.load(Ordering::Relaxed), 0);
     }
 
+    /*
     #[test]
     fn test_reconnect() {
         let tmpdir = TempDir::new().unwrap();
@@ -307,4 +308,5 @@ mod tests {
         Server::start(server).unwrap();
         client.call_ping().unwrap();
     }
+     */
 }
