@@ -58,6 +58,16 @@ impl Bootstrap {
         // user to pass the source root as prefetch hint. Check it here.
         ctx.prefetch.insert_if_need(&tree.node);
 
+        let inode_map = if tree.node.overlay.is_lower_layer() {
+            &mut bootstrap_ctx.lower_inode_map
+        } else {
+            &mut bootstrap_ctx.upper_inode_map
+        };
+        inode_map.insert(
+            (tree.node.src_ino, tree.node.src_dev),
+            vec![tree.node.index],
+        );
+
         let mut nodes = Vec::with_capacity(0x10000);
         nodes.push(tree.node.clone());
         self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes);
@@ -109,18 +119,6 @@ impl Bootstrap {
         tree: &mut Tree,
         nodes: &mut Vec<Node>,
     ) {
-        // TODO: fix bug in inode_map.insert()
-        // FIX: Insert parent inode to inode map to keep correct inodes count in superblock.
-        let inode_map = if tree.node.overlay.is_lower_layer() {
-            &mut bootstrap_ctx.lower_inode_map
-        } else {
-            &mut bootstrap_ctx.upper_inode_map
-        };
-        inode_map.insert(
-            (tree.node.src_ino, tree.node.src_dev),
-            vec![tree.node.index],
-        );
-
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
         parent.inode.set_child_index(index);
