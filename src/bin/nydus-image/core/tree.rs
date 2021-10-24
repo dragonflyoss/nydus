@@ -104,9 +104,9 @@ impl Tree {
             }
         }
 
-        let target_paths = target.path_vec();
+        let target_paths = target.target_vec();
         let target_paths_len = target_paths.len();
-        let depth = self.node.path_vec().len();
+        let depth = self.node.target_vec().len();
 
         // Handle root node modification
         if target.path() == &PathBuf::from("/") {
@@ -166,9 +166,9 @@ impl Tree {
         origin_name: Option<&OsStr>,
         parent_name: Option<&OsStr>,
     ) -> Result<bool> {
-        let target_paths = target.path_vec();
+        let target_paths = target.target_vec();
         let target_paths_len = target_paths.len();
-        let node_paths = self.node.path_vec();
+        let node_paths = self.node.target_vec();
         let depth = node_paths.len();
 
         // Don't continue to search if current path not matched with target path or recursive depth
@@ -326,7 +326,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         let inode_wrapper = InodeWraper::from_inode_info(&inode);
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
-        let path_vec = Node::generate_path_vec(&target);
+        let target_vec = Node::generate_target_vec(&target);
 
         Ok(Node {
             index: 0,
@@ -338,7 +338,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             source,
             target,
             path,
-            path_vec,
+            target_vec,
             inode: inode_wrapper,
             chunks,
             symlink,

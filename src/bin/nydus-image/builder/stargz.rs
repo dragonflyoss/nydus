@@ -524,7 +524,7 @@ impl StargzIndexTreeBuilder {
         let path = entry.path()?;
         let source = PathBuf::from_str("/").unwrap();
         let target = Node::generate_target(&path, &source);
-        let path_vec = Node::generate_path_vec(&target);
+        let target_vec = Node::generate_target_vec(&target);
 
         Ok(Node {
             index: 0,
@@ -536,7 +536,7 @@ impl StargzIndexTreeBuilder {
             source,
             target,
             path,
-            path_vec,
+            target_vec,
             inode,
             chunks,
             symlink,

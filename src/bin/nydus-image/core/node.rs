@@ -171,12 +171,12 @@ pub struct Node {
 
     /// Absolute path of the source root directory.
     pub(crate) source: PathBuf,
-    /// Absolute path within the target RAFS filesystem.
-    pub(crate) target: PathBuf,
     /// Absolute path of the source file/directory.
     pub(crate) path: PathBuf,
-    /// Parsed version of `path`.
-    pub(crate) path_vec: Vec<OsString>,
+    /// Absolute path within the target RAFS filesystem.
+    pub(crate) target: PathBuf,
+    /// Parsed version of `target`.
+    pub(crate) target_vec: Vec<OsString>,
 }
 
 impl Display for Node {
@@ -212,7 +212,7 @@ impl Node {
         explicit_uidgid: bool,
     ) -> Result<Node> {
         let target = Self::generate_target(&path, &source);
-        let path_vec = Self::generate_path_vec(&target);
+        let target_vec = Self::generate_target_vec(&target);
 
         let mut node = Node {
             index: 0,
@@ -222,7 +222,7 @@ impl Node {
             source,
             target,
             path,
-            path_vec,
+            target_vec,
             overlay,
             inode: InodeWraper::new(version),
             chunks: Vec::new(),
@@ -550,7 +550,7 @@ impl Node {
     }
 
     /// Generate cached components of the target file path.
-    pub fn generate_path_vec(target: &Path) -> Vec<OsString> {
+    pub fn generate_target_vec(target: &Path) -> Vec<OsString> {
         target
             .components()
             .map(|comp| match comp {
@@ -562,8 +562,8 @@ impl Node {
     }
 
     /// Get cached components of the target file path.
-    pub fn path_vec(&self) -> &[OsString] {
-        &self.path_vec
+    pub fn target_vec(&self) -> &[OsString] {
+        &self.target_vec
     }
 
     /// Generate target path by stripping the `root` prefix.
