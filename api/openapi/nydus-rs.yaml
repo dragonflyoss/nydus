@@ -395,16 +395,10 @@ components:
             type: integer
         nr_opens:
           type: integer
-        nr_max_opens:
-          type: integer
-        last_fop_tp:
-          type: integer
     RafsFilesMetrics:
       type: object
       properties:
         nr_open:
-          type: integer
-        nr_max_opens:
           type: integer
         total_fops:
           type: integer
@@ -437,7 +431,7 @@ components:
         nr_read:
           type: integer
           description: How many times a file is read regardless of io block size and request offset
-        first_access_time:
+        first_access_time_secs:
           type: integer
           description: First time point at which this file is read. It's wall-time in unit of seconds
     RafsBackend:

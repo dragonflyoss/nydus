@@ -95,6 +95,23 @@ Persister Buffer:       {buffered}
     }
 }
 
+fn metric_delta(old: &serde_json::Value, new: &serde_json::Value, label: &str) -> u64 {
+    new[label].as_u64().unwrap() - old[label].as_u64().unwrap()
+}
+
+fn metric_vec_delta(old: &serde_json::Value, new: &serde_json::Value, label: &str) -> Vec<u64> {
+    let new_array = new[label].as_array().unwrap();
+    let old_array = old[label].as_array().unwrap();
+    assert_eq!(new_array.len(), old_array.len());
+    let mut r = Vec::new();
+
+    for i in 0..new_array.len() {
+        r.push(new_array[i].as_u64().unwrap() - old_array[i].as_u64().unwrap());
+    }
+
+    r
+}
+
 pub(crate) struct CommandBackend {}
 
 impl CommandBackend {
@@ -108,25 +125,72 @@ impl CommandBackend {
 
         let interval = load_param_interval(&params)?;
         if let Some(i) = interval {
-            let mut last_record = metrics;
+            let mut last = metrics;
             loop {
                 sleep(Duration::from_secs(i as u64));
+                let current = client.get("metrics/backend").await?;
 
-                let newest = client.get("metrics/backend").await?;
+                let delta_data = metric_delta(&last, &current, "read_amount_total");
+                let delta_requests = metric_delta(&last, &current, "read_count");
+                let delta_latency =
+                    metric_delta(&last, &current, "read_cumulative_latency_millis_total");
+                // Block size separated counters.
+                // 1K; 4K; 16K; 64K, 128K, 512K, 1M
+                // <=1ms, <=20ms, <=50ms, <=100ms, <=500ms, <=1s, <=2s, >2s
 
-                let delta = newest["read_amount_total"].as_u64().unwrap()
-                    - last_record["read_amount_total"].as_u64().unwrap();
-                let bw = delta / i as u64 / 1024;
+                // TODO: Also add 256k
+                let latency_cumulative_dist =
+                    metric_vec_delta(&last, &current, "read_cumulative_latency_millis_dist");
+                let latency_block_hits =
+                    metric_vec_delta(&last, &current, "read_count_block_size_dist");
 
-                println!("Backend read bandwidth {}KB/S", bw);
+                let sizes = vec!["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
 
-                last_record = newest;
+                print!(
+                    r#"
+>>> >>> >>> >>> >>>
+Backend Read Bandwidth:     {} KB/S
+Backend Average IO Size:    {} Bytes
+Backend Average Latency:    {} millis
+
+Block Sizes/millis:
+{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}
+"#,
+                    delta_data.checked_div(i as u64 * 1024).unwrap_or_default(),
+                    delta_data.checked_div(delta_requests).unwrap_or_default(),
+                    delta_latency
+                        .checked_div(delta_requests)
+                        .unwrap_or_default(),
+                    sizes[0],
+                    sizes[1],
+                    sizes[2],
+                    sizes[3],
+                    sizes[4],
+                    sizes[5],
+                    sizes[6],
+                    sizes[7]
+                );
+
+                for (i, _) in sizes.iter().enumerate() {
+                    print!(
+                        "{:<8}",
+                        latency_cumulative_dist[i]
+                            .checked_div(latency_block_hits[i])
+                            .unwrap_or_default()
+                    );
+                }
+
+                println!();
+                println!("<<< <<< <<< <<< <<<");
+
+                last = current;
             }
         }
 
         if raw {
             println!("{}", metrics.to_string());
         } else {
+            let sizes = vec!["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
             let m = metrics.as_object().unwrap();
             print!(
                 r#"
@@ -141,6 +205,43 @@ Read Errors:        {read_errors}
                 read_count_mb = m["read_amount_total"].as_f64().unwrap() / 1024.0 / 1024.0,
                 read_errors = m["read_errors"],
             );
+
+            println!(
+                r#"
+Block Sizes/millis:
+{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
+                sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], sizes[5], sizes[6], sizes[7]
+            );
+
+            let latency_cumulative_dist =
+                m["read_cumulative_latency_millis_dist"].as_array().unwrap();
+            let latency_block_hits = m["read_count_block_size_dist"].as_array().unwrap();
+
+            for (i, _) in sizes.iter().enumerate() {
+                print!(
+                    "{:<8}",
+                    latency_cumulative_dist[i]
+                        .as_u64()
+                        .unwrap()
+                        .checked_div(latency_block_hits[i].as_u64().unwrap())
+                        .unwrap_or_default()
+                );
+            }
+
+            println!();
+
+            println!(
+                r#"
+Block Sizes:
+{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
+                sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], sizes[5], sizes[6], sizes[7]
+            );
+
+            for (i, _) in sizes.iter().enumerate() {
+                print!("{:<8}", latency_block_hits[i].as_u64().unwrap());
+            }
+
+            println!();
         }
 
         Ok(())

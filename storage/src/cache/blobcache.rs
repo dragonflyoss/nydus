@@ -338,10 +338,10 @@ impl BlobCache {
         let delayed_chunk = chunk_info.clone();
         let delayed_chunk_map = chunk_map.clone();
         let compressed = self.is_compressed;
-        self.metrics.buffered_backend_size.add(buffer.size());
+        self.metrics.buffered_backend_size.add(buffer.size() as u64);
         let metrics = self.metrics.clone();
         self.runtime.spawn(async move {
-            metrics.buffered_backend_size.dec(buffer.size());
+            metrics.buffered_backend_size.sub(buffer.size() as u64);
             match Self::persist_chunk(compressed, fd, delayed_chunk.as_ref(), buffer.slice()) {
                 Err(e) => {
                     error!(
@@ -1122,10 +1122,7 @@ fn kick_prefetch_workers(cache: Arc<BlobCache>) {
                     // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
                     // We can measure merging possibility by this.
                     blobcache.metrics.prefetch_mr_count.inc();
-                    blobcache
-                        .metrics
-                        .prefetch_data_amount
-                        .add(blob_size as usize);
+                    blobcache.metrics.prefetch_data_amount.add(blob_size as u64);
 
                     if let Ok(chunks) = blobcache.read_chunks(
                         blob_id,
@@ -1248,7 +1245,7 @@ impl RafsCache for BlobCache {
 
     fn prefetch(&self, bios: &mut [RafsBio]) -> StorageResult<usize> {
         let merging_size = self.prefetch_ctx.merging_size;
-        self.metrics.prefetch_unmerged_chunks.add(bios.len());
+        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         if let Some(mr_sender) = self.mr_sender.lock().unwrap().as_mut() {
             self.generate_merged_requests_for_prefetch(bios, mr_sender, merging_size);
         }
