@@ -265,6 +265,7 @@ func main() {
 				}
 
 				metrics.Register(file_exporter.New(filepath.Join(opt.WorkDir, "conversion_metrics.prom")))
+				defer metrics.Export()
 
 				return cvt.Convert(context.Background())
 			},
@@ -337,6 +338,4 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		logrus.Fatal(err)
 	}
-
-	metrics.Export()
 }

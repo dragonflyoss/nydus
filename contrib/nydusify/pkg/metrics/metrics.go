@@ -74,7 +74,10 @@ func Register(exp Exporter) {
 }
 
 func Export() {
-	exporter.Export()
+	// In case no exporter was ever registered.
+	if exporter != nil {
+		exporter.Export()
+	}
 }
 
 func ConversionDuration(ref string, layers int, start time.Time) {
