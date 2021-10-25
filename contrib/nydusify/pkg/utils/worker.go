@@ -20,7 +20,7 @@ type RJob interface {
 // puts some jobs to the pool by a fixed order and then wait all
 // jobs finish by the previous order
 type QueueWorkerPool struct {
-	err  error
+	err  atomic.Value
 	jobs chan RJob
 	rets []chan RJob
 }
@@ -60,7 +60,7 @@ func NewQueueWorkerPool(worker, total uint) *QueueWorkerPool {
 				err := job.Do()
 				pool.rets[index] <- job
 				if err != nil {
-					pool.err = err
+					pool.err.Store(err)
 					break
 				}
 			}
@@ -71,12 +71,12 @@ func NewQueueWorkerPool(worker, total uint) *QueueWorkerPool {
 }
 
 func (pool *QueueWorkerPool) Put(_job RJob) error {
-	if pool.err != nil {
-		return pool.err
+	e := pool.err.Load()
+	if e != nil {
+		return e.(error)
 	}
 
 	pool.jobs <- _job
-
 	return nil
 }
 
