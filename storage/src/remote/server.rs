@@ -283,7 +283,6 @@ mod tests {
         assert_eq!(server.state.active_workers.load(Ordering::Relaxed), 0);
     }
 
-    /*
     #[test]
     fn test_reconnect() {
         let tmpdir = TempDir::new().unwrap();
@@ -294,13 +293,13 @@ mod tests {
 
         let client = Client::new(&server.sock);
         client.connect().unwrap();
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(4));
         let client = Arc::new(client);
         Client::start(client.clone()).unwrap();
         client.call_ping().unwrap();
 
         server.stop();
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(4));
         assert_eq!(server.state.active_workers.load(Ordering::Relaxed), 0);
         drop(server);
 
@@ -308,5 +307,4 @@ mod tests {
         Server::start(server).unwrap();
         client.call_ping().unwrap();
     }
-     */
 }
