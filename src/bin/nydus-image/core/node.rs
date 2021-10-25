@@ -279,18 +279,18 @@ impl Node {
             let exist_chunk = {
                 if let Some(chunk_dict) = blob_ctx.chunk_dict.as_ref() {
                     if let Some(c) = chunk_dict.get_chunk(&chunk.block_id) {
-                        Some(c)
+                        Some((c, true))
                     } else {
-                        chunk_cache.get(&chunk.block_id)
+                        chunk_cache.get(&chunk.block_id).map(|c| (c, false))
                     }
                 } else {
                     // get from build chunk cache
-                    chunk_cache.get(&chunk.block_id)
+                    chunk_cache.get(&chunk.block_id).map(|c| (c, false))
                 }
             };
 
             // Check whether we already have the same chunk data by matching chunk digest.
-            if let Some(cached_chunk) = exist_chunk {
+            if let Some((cached_chunk, from_dict)) = exist_chunk {
                 // TODO: we should also compare the actual data to avoid chunk digest confliction.
                 // hole cached_chunk can have zero decompress size
                 if cached_chunk.decompress_size == 0
@@ -298,6 +298,14 @@ impl Node {
                 {
                     chunk.clone_from(&cached_chunk);
                     chunk.file_offset = file_offset;
+                    if from_dict {
+                        // set real blob_idx
+                        chunk.blob_index = blob_ctx
+                            .chunk_dict
+                            .as_ref()
+                            .unwrap()
+                            .get_real_blob_idx(chunk.blob_index);
+                    }
                     self.chunks.push(chunk);
                     trace!(
                         "\t\tbuilding duplicated chunk: {} compressor {}",

@@ -229,8 +229,8 @@ fn main() -> Result<()> {
                         .takes_value(true)
                 )
                 .arg(
-                    Arg::with_name("chunk_dict")
-                        .long("chunk_dict")
+                    Arg::with_name("chunk-dict")
+                        .long("chunk-dict")
                         .help("specify a chunk dictionary file in bootstrap/db format for chunk deduplication.")
                         .takes_value(true)
                 )
@@ -454,7 +454,7 @@ fn main() -> Result<()> {
         let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, f_parent_bootstrap);
         let mut blob_mgr = BlobManager::new();
 
-        if let Some(chunk_dict_arg) = matches.value_of("chunk_dict") {
+        if let Some(chunk_dict_arg) = matches.value_of("chunk-dict") {
             blob_mgr.set_chunk_dict(timing_tracer!(
                 { import_chunk_dict(chunk_dict_arg) },
                 "import_chunk_dict"

@@ -5,12 +5,12 @@
 use crate::core::tree::Tree;
 use anyhow::{Context, Result};
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::v5::RafsV5ChunkInfo;
+use rafs::metadata::layout::v5::{RafsV5BlobTable, RafsV5ChunkInfo};
 use rafs::metadata::{RafsMode, RafsSuper};
 use rafs::RafsIoReader;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// type=path
 /// if no type, use bootstrap
@@ -40,15 +40,37 @@ pub fn import_chunk_dict(arg: &str) -> Result<Arc<dyn ChunkDict>> {
 
 pub trait ChunkDict {
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&RafsV5ChunkInfo>;
+    fn get_blobs(&self) -> Arc<RafsV5BlobTable>;
+    fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
+    fn get_real_blob_idx(&self, inner_idx: u32) -> u32;
 }
 
 pub struct BootstrapChunkDict {
     m: HashMap<RafsDigest, RafsV5ChunkInfo>,
+    blobs: Arc<RafsV5BlobTable>,
+    blob_idx_m: Mutex<BTreeMap<u32, u32>>,
 }
 
 impl ChunkDict for BootstrapChunkDict {
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&RafsV5ChunkInfo> {
         self.m.get(digest)
+    }
+
+    fn get_blobs(&self) -> Arc<RafsV5BlobTable> {
+        self.blobs.clone()
+    }
+
+    fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32) {
+        self.blob_idx_m.lock().unwrap().insert(inner_idx, out_idx);
+    }
+
+    fn get_real_blob_idx(&self, inner_idx: u32) -> u32 {
+        *self
+            .blob_idx_m
+            .lock()
+            .unwrap()
+            .get(&inner_idx)
+            .unwrap_or(&inner_idx)
     }
 }
 
@@ -69,6 +91,10 @@ impl BootstrapChunkDict {
         let mut reader = Box::new(file) as RafsIoReader;
         rs.load(&mut reader)?;
         Tree::from_bootstrap(&rs, Some(&mut m)).context("failed to build tree from bootstrap")?;
-        Ok(Self { m })
+        Ok(Self {
+            m,
+            blobs: rs.superblock.get_blob_table(),
+            blob_idx_m: Mutex::new(BTreeMap::new()),
+        })
     }
 }

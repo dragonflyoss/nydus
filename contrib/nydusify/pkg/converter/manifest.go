@@ -27,6 +27,7 @@ import (
 // manifestManager merges OCI and Nydus manifest, pushes them to
 // remote registry
 type manifestManager struct {
+	referenceBlobs []string
 	sourceProvider provider.SourceProvider
 	backend        backend.Backend
 	remote         *remote.Remote
@@ -163,7 +164,8 @@ func (mm *manifestManager) CloneSourcePlatform(ctx context.Context, additionalOS
 
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
 	layers := []ocispec.Descriptor{}
-	blobListInAnnotation := []string{}
+	// add reference blobs to annotation
+	blobListInAnnotation := mm.referenceBlobs
 
 	for idx, _layer := range buildLayers {
 		record := _layer.GetCacheRecord()
@@ -173,6 +175,7 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 			blobListInAnnotation = append(blobListInAnnotation, record.NydusBlobDesc.Digest.Hex())
 			// For registry backend, we need to write the blob layer to
 			// manifest to prevent them from being deleted by registry GC.
+			// todo: add reference blobs layer to manifest
 			if mm.backend.Type() == backend.RegistryBackend {
 				layers = append(layers, *record.NydusBlobDesc)
 			}
