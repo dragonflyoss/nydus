@@ -131,6 +131,8 @@ impl Builder for DirectoryBuilder {
             blob_mgr.extend_blob_table_from_chunk_dict();
         }
         blob_ctx.set_chunk_size(ctx.chunk_size);
+        blob_ctx.set_meta_info_enabled(true);
+
         let blob_index = blob_mgr.alloc_index()?;
         let mut blob = Blob::new();
         timing_tracer!(

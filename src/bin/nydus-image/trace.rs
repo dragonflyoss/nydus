@@ -260,10 +260,16 @@ macro_rules! event_tracer {
 pub mod tests {
 
     use super::{EventTracerClass, TraceClass};
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     #[test]
     fn test_event_trace() {
+        let barrier = Arc::new(Barrier::new(4));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+        let b3 = barrier.clone();
+
         //register_tracer!(TraceClass::Timing, TimingTracerClass);
         register_tracer!(TraceClass::Event, EventTracerClass);
 
@@ -273,6 +279,7 @@ pub mod tests {
                     event_tracer!("event_1", +2);
                     event_tracer!("event_2", +3);
                 }
+                b1.wait();
             })
             .unwrap();
 
@@ -282,6 +289,7 @@ pub mod tests {
                     event_tracer!("event_1", +2);
                     event_tracer!("event_2", +3);
                 }
+                b2.wait();
             })
             .unwrap();
 
@@ -291,9 +299,11 @@ pub mod tests {
                     event_tracer!("event_1", +2);
                     event_tracer!("event_2", +3);
                 }
+                b3.wait();
             })
             .unwrap();
 
+        barrier.wait();
         t1.join().unwrap();
         t2.join().unwrap();
         t3.join().unwrap();

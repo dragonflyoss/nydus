@@ -47,8 +47,10 @@ pub struct BlobMetaHeaderOndisk {
     s_magic: u32,
     /// Blob metadata feature flags.
     s_features: u32,
+    /// Compression algorithm for chunk information array.
+    s_ci_compressor: u32,
     /// Number of entries in chunk information array.
-    s_ci_entires: u64,
+    s_ci_entires: u32,
     /// Offset of compressed chunk information array in the compressed blob.
     s_ci_offset: u64,
     /// Size of compressed chunk information array
@@ -65,6 +67,7 @@ impl Default for BlobMetaHeaderOndisk {
         BlobMetaHeaderOndisk {
             s_magic: BLOB_METADATA_MAGIC,
             s_features: 0,
+            s_ci_compressor: compress::Algorithm::Lz4Block as u32,
             s_ci_entires: 0,
             s_ci_offset: 0,
             s_ci_compressed_size: 0,
@@ -76,13 +79,28 @@ impl Default for BlobMetaHeaderOndisk {
 }
 
 impl BlobMetaHeaderOndisk {
+    /// Get compression algorithm for chunk information array.
+    pub fn ci_compressor(&self) -> compress::Algorithm {
+        if self.s_ci_compressor == compress::Algorithm::Lz4Block as u32 {
+            compress::Algorithm::Lz4Block
+        } else if self.s_ci_compressor == compress::Algorithm::GZip as u32 {
+            compress::Algorithm::GZip
+        } else {
+            compress::Algorithm::None
+        }
+    }
+
+    pub fn set_ci_compressor(&mut self, algo: compress::Algorithm) {
+        self.s_ci_compressor = algo as u32;
+    }
+
     /// Get number of entries in chunk information array.
-    pub fn ci_entires(&self) -> u64 {
+    pub fn ci_entries(&self) -> u32 {
         self.s_ci_entires
     }
 
     /// Set number of entries in chunk information array.
-    pub fn set_ci_entries(&mut self, entries: u64) {
+    pub fn set_ci_entries(&mut self, entries: u32) {
         self.s_ci_entires = entries;
     }
 

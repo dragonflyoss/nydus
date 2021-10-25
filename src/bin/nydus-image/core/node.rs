@@ -369,6 +369,7 @@ impl Node {
                 chunk,
                 ctx.compressor,
             );
+            blob_ctx.add_chunk_meta_info(&chunk)?;
             chunk_dict.add_chunk(chunk.clone());
             self.chunks.push(chunk);
             blob_size += compressed_size as u64;

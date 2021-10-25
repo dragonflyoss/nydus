@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -20,11 +20,12 @@ use rafs::{RafsIoReader, RafsIoWriter};
 use sha2::{Digest, Sha256};
 use storage::compress;
 use storage::device::BlobInfo;
+use storage::meta::BlobChunkInfoOndisk;
 use vmm_sys_util::tempfile::TempFile;
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::layout::BlobLayout;
-use super::node::{Node, WhiteoutSpec};
+use super::node::{ChunkWrapper, Node, WhiteoutSpec};
 use super::prefetch::Prefetch;
 
 // TODO: select BufWriter capacity by performance testing.
@@ -126,6 +127,12 @@ impl BlobBufferWriter {
         self.file.write_all(buf).map_err(|e| anyhow!(e))
     }
 
+    pub fn get_pos(&mut self) -> Result<u64> {
+        let pos = self.file.seek(SeekFrom::Current(0))?;
+
+        Ok(pos)
+    }
+
     pub fn release(self, name: Option<&str>) -> Result<()> {
         let mut f = self.file.into_inner()?;
         f.flush()?;
@@ -179,6 +186,10 @@ pub struct BlobContext {
     pub blob_readahead_size: u64,
     /// Blob data layout manager
     pub blob_layout: BlobLayout,
+    /// Data chunks stored in the data blob, for v6.
+    pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
+    /// Whether to generate blob metadata information.
+    pub blob_meta_info_enabled: bool,
 
     /// Final compressed blob file size.
     pub compressed_blob_size: u64,
@@ -225,6 +236,8 @@ impl BlobContext {
             blob_hash: Sha256::new(),
             blob_readahead_size: 0,
             blob_layout: BlobLayout::new(),
+            blob_meta_info_enabled: false,
+            blob_meta_info: Vec::new(),
 
             compressed_blob_size: 0,
             decompressed_blob_size: 0,
@@ -264,6 +277,24 @@ impl BlobContext {
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
+    }
+
+    pub fn set_meta_info_enabled(&mut self, enable: bool) {
+        self.blob_meta_info_enabled = enable;
+    }
+
+    pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper) -> Result<()> {
+        if self.blob_meta_info_enabled {
+            debug_assert!(chunk.index() as usize == self.blob_meta_info.len());
+            let mut meta = BlobChunkInfoOndisk::default();
+            meta.set_compressed_offset(chunk.compressed_offset());
+            meta.set_compressed_size(chunk.compressed_size());
+            meta.set_uncompressed_offset(chunk.uncompressed_offset());
+            meta.set_uncompressed_size(chunk.uncompressed_size());
+            self.blob_meta_info.push(meta);
+        }
+
+        Ok(())
     }
 
     /// Allocate a count index sequentially in a blob.
