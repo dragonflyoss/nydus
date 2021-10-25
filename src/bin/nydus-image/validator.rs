@@ -4,46 +4,31 @@
 
 //! Validator for RAFS format
 
-use std::fs::OpenOptions;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use rafs::metadata::{RafsMode, RafsSuper};
-use rafs::RafsIoReader;
 
 use crate::tree::Tree;
 
 pub struct Validator {
-    /// Bootstrap file reader.
-    f_bootstrap: RafsIoReader,
+    sb: RafsSuper,
 }
 
 impl Validator {
     pub fn new(bootstrap_path: &Path) -> Result<Self> {
-        let f_bootstrap = Box::new(
-            OpenOptions::new()
-                .read(true)
-                .write(false)
-                .open(bootstrap_path)
-                .context(format!(
-                    "failed to open bootstrap file {:?} for validator",
-                    bootstrap_path
-                ))?,
-        );
+        let path = bootstrap_path
+            .to_str()
+            .ok_or_else(|| Error::msg("bootstrap path is invalid"))?;
+        let sb = RafsSuper::load_from_metadata(path, RafsMode::Direct, true)?;
 
-        Ok(Self { f_bootstrap })
+        Ok(Self { sb })
     }
 
     pub fn check(&mut self, verbosity: bool) -> Result<Vec<String>> {
         let err = "failed to load bootstrap for validator";
-        let mut rs = RafsSuper {
-            mode: RafsMode::Direct,
-            validate_digest: true,
-            ..Default::default()
-        };
-        rs.load(&mut self.f_bootstrap).context(err)?;
+        let tree = Tree::from_bootstrap(&self.sb, &mut ()).context(err)?;
 
-        let tree = Tree::from_bootstrap(&rs, &mut ()).context(err)?;
         tree.iterate(&mut |node| {
             if verbosity {
                 info!("{}", node);
@@ -54,7 +39,8 @@ impl Validator {
             true
         })?;
 
-        let blob_ids = rs
+        let blob_ids = self
+            .sb
             .superblock
             .get_blob_infos()
             .iter()
