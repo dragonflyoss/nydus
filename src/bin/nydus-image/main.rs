@@ -49,8 +49,7 @@ mod core;
 mod inspect;
 mod validator;
 
-// TODO: 255?
-const BLOB_ID_MAXIMUM_LENGTH: usize = 1024;
+const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 
 #[derive(Serialize, Default)]
 pub struct ResultOutput {
