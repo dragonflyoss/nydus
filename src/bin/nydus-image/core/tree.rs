@@ -24,7 +24,7 @@ use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use super::chunk_dict::ChunkDict;
-use super::node::{ChunkWrapper, InodeWraper, Node, Overlay, WhiteoutSpec, WhiteoutType};
+use super::node::{ChunkWrapper, InodeWrapper, Node, Overlay, WhiteoutSpec, WhiteoutType};
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
@@ -323,7 +323,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         // to avoid breaking hardlink detecting logic.
         let src_dev = u64::MAX;
 
-        let inode_wrapper = InodeWraper::from_inode_info(&inode);
+        let inode_wrapper = InodeWrapper::from_inode_info(&inode);
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
         let target_vec = Node::generate_target_vec(&target);

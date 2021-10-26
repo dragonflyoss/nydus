@@ -157,7 +157,7 @@ pub struct Node {
     /// Device ID for special files, describing the device that this inode represents.
     pub rdev: u64,
     /// Define a disk inode structure to persist to disk.
-    pub inode: InodeWraper,
+    pub inode: InodeWrapper,
     /// Chunks info list of regular file
     pub chunks: Vec<ChunkWrapper>,
     /// Extended attributes.
@@ -224,7 +224,7 @@ impl Node {
             path,
             target_vec,
             overlay,
-            inode: InodeWraper::new(version),
+            inode: InodeWrapper::new(version),
             chunks: Vec::new(),
             symlink: None,
             xattrs: RafsXAttrs::default(),
@@ -383,7 +383,7 @@ impl Node {
 
     pub fn dump_bootstrap_v5(&mut self, f_bootstrap: &mut RafsIoWriter) -> Result<usize> {
         let mut node_size = 0;
-        let InodeWraper::V5(raw_inode) = &self.inode;
+        let InodeWrapper::V5(raw_inode) = &self.inode;
 
         // Dump inode info
         let name = self.name();
@@ -663,23 +663,23 @@ impl Node {
 }
 
 #[derive(Clone, Debug)]
-pub enum InodeWraper {
+pub enum InodeWrapper {
     V5(RafsV5Inode),
 }
 
-impl InodeWraper {
+impl InodeWrapper {
     pub fn new(version: RafsVersion) -> Self {
         match version {
-            RafsVersion::V5 => InodeWraper::V5(RafsV5Inode::new()),
+            RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode::new()),
             RafsVersion::V6 => todo!(),
         }
     }
 
     pub fn from_inode_info(inode: &Arc<dyn RafsInode>) -> Self {
         if let Some(inode) = inode.as_any().downcast_ref::<CachedInodeV5>() {
-            InodeWraper::V5(to_rafsv5_inode(inode))
+            InodeWrapper::V5(to_rafsv5_inode(inode))
         } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapper>() {
-            InodeWraper::V5(to_rafsv5_inode(inode))
+            InodeWrapper::V5(to_rafsv5_inode(inode))
         } else {
             panic!("unknown chunk information struct");
         }
@@ -687,49 +687,49 @@ impl InodeWraper {
 
     pub fn inode_size(&self) -> usize {
         match self {
-            InodeWraper::V5(i) => i.size(),
+            InodeWrapper::V5(i) => i.size(),
         }
     }
 
     pub fn is_dir(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.is_dir(),
+            InodeWrapper::V5(i) => i.is_dir(),
         }
     }
 
     pub fn is_reg(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.is_reg(),
+            InodeWrapper::V5(i) => i.is_reg(),
         }
     }
 
     pub fn is_hardlink(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.is_hardlink(),
+            InodeWrapper::V5(i) => i.is_hardlink(),
         }
     }
 
     pub fn is_symlink(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.is_symlink(),
+            InodeWrapper::V5(i) => i.is_symlink(),
         }
     }
 
     pub fn is_chrdev(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFCHR,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFCHR,
         }
     }
 
     pub fn is_blkdev(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFBLK,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFBLK,
         }
     }
 
     pub fn is_fifo(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFIFO,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFIFO,
         }
     }
 
@@ -739,13 +739,13 @@ impl InodeWraper {
 
     pub fn has_xattr(&self) -> bool {
         match self {
-            InodeWraper::V5(i) => i.has_xattr(),
+            InodeWrapper::V5(i) => i.has_xattr(),
         }
     }
 
     pub fn set_has_xattr(&mut self, enable: bool) {
         match self {
-            InodeWraper::V5(i) => {
+            InodeWrapper::V5(i) => {
                 if enable {
                     i.i_flags |= RafsV5InodeFlags::XATTR;
                 } else {
@@ -757,87 +757,123 @@ impl InodeWraper {
 
     pub fn ino(&self) -> Inode {
         match self {
-            InodeWraper::V5(i) => i.i_ino,
+            InodeWrapper::V5(i) => i.i_ino,
         }
     }
 
     pub fn set_ino(&mut self, ino: Inode) {
         match self {
-            InodeWraper::V5(i) => i.i_ino = ino,
+            InodeWrapper::V5(i) => i.i_ino = ino,
         }
     }
 
     pub fn parent(&self) -> Inode {
         match self {
-            InodeWraper::V5(i) => i.i_parent,
+            InodeWrapper::V5(i) => i.i_parent,
         }
     }
 
     pub fn set_parent(&mut self, parent: Inode) {
         match self {
-            InodeWraper::V5(i) => i.i_parent = parent,
+            InodeWrapper::V5(i) => i.i_parent = parent,
         }
     }
 
     pub fn size(&self) -> u64 {
         match self {
-            InodeWraper::V5(i) => i.i_size,
+            InodeWrapper::V5(i) => i.i_size,
         }
     }
 
     pub fn set_size(&mut self, size: u64) {
         match self {
-            InodeWraper::V5(i) => i.i_size = size,
+            InodeWrapper::V5(i) => i.i_size = size,
+        }
+    }
+
+    pub fn mode(&self) -> u32 {
+        match self {
+            InodeWrapper::V5(i) => i.i_mode,
+        }
+    }
+
+    pub fn uid(&self) -> u32 {
+        match self {
+            InodeWrapper::V5(i) => i.i_uid,
+        }
+    }
+
+    pub fn gid(&self) -> u32 {
+        match self {
+            InodeWrapper::V5(i) => i.i_gid,
+        }
+    }
+
+    pub fn mtime(&self) -> u64 {
+        match self {
+            InodeWrapper::V5(i) => i.i_mtime,
+        }
+    }
+
+    pub fn mtime_nsec(&self) -> u32 {
+        match self {
+            InodeWrapper::V5(i) => i.i_mtime_nsec,
+        }
+    }
+
+    pub fn blocks(&self) -> u64 {
+        match self {
+            InodeWrapper::V5(i) => i.i_blocks,
         }
     }
 
     pub fn nlink(&self) -> u32 {
         match self {
-            InodeWraper::V5(i) => i.i_nlink,
+            InodeWrapper::V5(i) => i.i_nlink,
         }
     }
 
     pub fn set_nlink(&mut self, nlink: u32) {
         match self {
-            InodeWraper::V5(i) => i.i_nlink = nlink,
+            InodeWrapper::V5(i) => i.i_nlink = nlink,
         }
     }
 
     pub fn digest(&self) -> &RafsDigest {
         match self {
-            InodeWraper::V5(i) => &i.i_digest,
+            InodeWrapper::V5(i) => &i.i_digest,
         }
     }
 
     pub fn set_digest(&mut self, digest: RafsDigest) {
         match self {
-            InodeWraper::V5(i) => i.i_digest = digest,
+            InodeWrapper::V5(i) => i.i_digest = digest,
         }
     }
 
     pub fn name_size(&self) -> u16 {
         match self {
-            InodeWraper::V5(i) => i.i_name_size,
+            InodeWrapper::V5(i) => i.i_name_size,
         }
     }
 
     fn set_name_size(&mut self, size: usize) {
         debug_assert!(size < u16::MAX as usize);
         match self {
-            InodeWraper::V5(i) => i.i_name_size = size as u16,
+            InodeWrapper::V5(i) => i.i_name_size = size as u16,
         }
     }
 
     pub fn symlink_size(&self) -> u16 {
         match self {
-            InodeWraper::V5(i) => i.i_symlink_size,
+            InodeWrapper::V5(i) => i.i_symlink_size,
         }
     }
 
     pub fn set_symlink_size(&mut self, size: usize) {
         debug_assert!(size <= u16::MAX as usize);
         match self {
-            InodeWraper::V5(i) => {
+            InodeWrapper::V5(i) => {
                 i.i_flags |= RafsV5InodeFlags::SYMLINK;
                 i.i_symlink_size = size as u16;
             }
@@ -846,25 +882,25 @@ impl InodeWraper {
 
     pub fn child_index(&self) -> u32 {
         match self {
-            InodeWraper::V5(i) => i.i_child_index,
+            InodeWrapper::V5(i) => i.i_child_index,
         }
     }
 
     pub fn set_child_index(&mut self, index: u32) {
         match self {
-            InodeWraper::V5(i) => i.i_child_index = index,
+            InodeWrapper::V5(i) => i.i_child_index = index,
         }
     }
 
     pub fn child_count(&self) -> u32 {
         match self {
-            InodeWraper::V5(i) => i.i_child_count,
+            InodeWrapper::V5(i) => i.i_child_count,
         }
     }
 
     pub fn set_child_count(&mut self, count: u32) {
         match self {
-            InodeWraper::V5(i) => i.i_child_count = count,
+            InodeWrapper::V5(i) => i.i_child_count = count,
         }
     }
 
@@ -875,7 +911,7 @@ impl InodeWraper {
         explicit_uidgid: bool,
     ) {
         match self {
-            InodeWraper::V5(i) => {
+            InodeWrapper::V5(i) => {
                 i.i_mode = meta.st_mode();
                 if explicit_uidgid {
                     i.i_uid = meta.st_uid();
@@ -901,7 +937,7 @@ impl InodeWraper {
 
     fn create_chunk(&self) -> ChunkWrapper {
         match self {
-            InodeWraper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
+            InodeWrapper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
         }
     }
 }

@@ -26,7 +26,7 @@ use storage::device::BlobChunkFlags;
 use crate::builder::Builder;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext, RafsVersion};
-use crate::core::node::{ChunkWrapper, InodeWraper, Node, Overlay};
+use crate::core::node::{ChunkWrapper, InodeWrapper, Node, Overlay};
 use crate::core::tree::Tree;
 
 type RcTocEntry = Rc<RefCell<TocEntry>>;
@@ -495,7 +495,7 @@ impl StargzIndexTreeBuilder {
         // Parse inode info
         let inode = match version {
             RafsVersion::V5 => {
-                InodeWraper::V5(RafsV5Inode {
+                InodeWrapper::V5(RafsV5Inode {
                     i_digest: RafsDigest::default(),
                     i_parent: 0,
                     i_ino: ino,
