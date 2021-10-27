@@ -347,6 +347,7 @@ impl Bootstrap {
         super_block.set_prefetch_table_entries(prefetch_table_entries);
         super_block.set_compressor(ctx.compressor);
         super_block.set_digester(ctx.digester);
+        super_block.set_chunk_size(ctx.chunk_size);
         if ctx.explicit_uidgid {
             super_block.set_explicit_uidgid();
         }

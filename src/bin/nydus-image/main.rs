@@ -147,6 +147,15 @@ fn main() -> Result<()> {
                         .takes_value(true),
                 )
                 .arg(
+                    Arg::with_name("chunk-size")
+                        .long("chunk-size")
+                        .short("S")
+                        .help("size of nydus image data chunk, must be power of two and between 0x1000-0x100000:")
+                        .default_value("0x100000")
+                        .required(false)
+                        .takes_value(true),
+                )
+                .arg(
                     Arg::with_name("compressor")
                         .long("compressor")
                         .short("c")
@@ -337,6 +346,7 @@ impl Command {
         let aligned_chunk = matches.is_present("aligned-chunk");
         let blob_id = Self::get_blob_id(&matches)?;
         let bootstrap_path = Self::get_bootstrap(&matches)?;
+        let chunk_size = Self::get_chunk_size(&matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(&matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let extra_paths: Vec<PathBuf> = matches
@@ -411,7 +421,7 @@ impl Command {
             blob_stor,
         );
         build_ctx.set_fs_version(RafsVersion::V5);
-        build_ctx.set_chunk_size(RAFS_DEFAULT_CHUNK_SIZE as u32);
+        build_ctx.set_chunk_size(chunk_size);
 
         let mut blob_mgr = BlobManager::new();
 
@@ -591,5 +601,23 @@ impl Command {
         }
 
         Ok(())
+    }
+
+    fn get_chunk_size(matches: &clap::ArgMatches) -> Result<u32> {
+        match matches.value_of("chunk-size") {
+            None => Ok(RAFS_DEFAULT_CHUNK_SIZE as u32),
+            Some(v) => {
+                let param = v.trim_start_matches("0x").trim_end_matches("0X");
+                let chunk_size =
+                    u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
+                if chunk_size as u64 > RAFS_DEFAULT_CHUNK_SIZE
+                    || chunk_size < 0x1000
+                    || !chunk_size.is_power_of_two()
+                {
+                    bail!("invalid chunk size: {}", chunk_size);
+                }
+                Ok(chunk_size)
+            }
+        }
     }
 }

@@ -118,6 +118,7 @@ impl Blob {
             header.set_ci_compressed_offset(pos);
             header.set_ci_compressed_size(buf.len() as u64);
             header.set_ci_uncompressed_size(data.len() as u64);
+            header.set_4k_aligned(true);
 
             writer.write_all(&buf)?;
             writer.write_all(header.as_bytes())?;

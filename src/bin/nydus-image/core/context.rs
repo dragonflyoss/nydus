@@ -291,7 +291,7 @@ impl BlobContext {
             let mut meta = BlobChunkInfoOndisk::default();
             meta.set_compressed_offset(chunk.compressed_offset());
             meta.set_compressed_size(chunk.compressed_size());
-            meta.set_uncompressed_offset(chunk.uncompressed_offset());
+            meta.set_uncompressed_offset(chunk.uncompressed_offset(), self.blob_meta_info_enabled);
             meta.set_uncompressed_size(chunk.uncompressed_size());
             self.blob_meta_info.push(meta);
         }

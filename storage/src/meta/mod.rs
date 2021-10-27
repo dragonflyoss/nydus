@@ -38,6 +38,7 @@ const BLOB_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
 const BLOB_CHUNK_SIZE_MASK: u64 = 0xf_ffff;
 const BLOB_CHUNK_SIZE_SHIFT: u64 = 44;
 const FILE_SUFFIX: &str = "blob.meta";
+const BLOB_FEATURE_4K_ALIGNED: u32 = 0x1;
 
 /// Blob metadata on disk format.
 #[repr(C)]
@@ -134,6 +135,21 @@ impl BlobMetaHeaderOndisk {
         self.s_ci_uncompressed_size = size;
     }
 
+    /// Check whether the uncompressed data chunk is 4k aligned.
+    pub fn is_4k_aligned(&self) -> bool {
+        self.s_features & BLOB_FEATURE_4K_ALIGNED != 0
+    }
+
+    /// Set whether the uncompressed data chunk is 4k aligned.
+    pub fn set_4k_aligned(&mut self, aligned: bool) {
+        if aligned {
+            self.s_features |= BLOB_FEATURE_4K_ALIGNED;
+        } else {
+            self.s_features &= !BLOB_FEATURE_4K_ALIGNED;
+        }
+    }
+
+    /// Convert the header as an `&[u8]`.
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
             std::slice::from_raw_parts(
@@ -198,10 +214,16 @@ impl BlobChunkInfoOndisk {
 
     /// Set uncompressed offset of the chunk.
     #[inline]
-    pub fn set_uncompressed_offset(&mut self, offset: u64) {
-        debug_assert!(offset & !BLOB_CHUNK_UNCOMP_OFFSET_MASK == 0);
-        self.uncomp_info &= !BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-        self.uncomp_info |= offset & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
+    pub fn set_uncompressed_offset(&mut self, offset: u64, aligned_4k: bool) {
+        if aligned_4k {
+            debug_assert!(offset & !BLOB_CHUNK_UNCOMP_OFFSET_MASK == 0);
+            self.uncomp_info &= !BLOB_CHUNK_UNCOMP_OFFSET_MASK;
+            self.uncomp_info |= offset & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
+        } else {
+            debug_assert!(offset & !BLOB_CHUNK_COMP_OFFSET_MASK == 0);
+            self.uncomp_info &= !BLOB_CHUNK_COMP_OFFSET_MASK;
+            self.uncomp_info |= offset & BLOB_CHUNK_COMP_OFFSET_MASK;
+        }
     }
 
     /// Get uncompressed end of the chunk.
@@ -646,7 +668,7 @@ mod tests {
         assert_eq!(chunk.compressed_offset(), 0x1000);
         assert_eq!(chunk.compressed_size(), 0x100);
         assert_eq!(chunk.compressed_end(), 0x1100);
-        chunk.set_uncompressed_offset(0x2000);
+        chunk.set_uncompressed_offset(0x2000, false);
         chunk.set_uncompressed_size(0x100);
         assert_eq!(chunk.uncompressed_offset(), 0x2000);
         assert_eq!(chunk.uncompressed_size(), 0x100);

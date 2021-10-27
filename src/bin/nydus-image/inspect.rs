@@ -55,6 +55,7 @@ struct RafsMeta {
     extended_blob_table_offset: u64,
     extended_blob_table_entries: u32,
     fs_version: u32,
+    chunk_size: u32,
     flags: RafsSuperFlags,
     version: RafsVersion,
 }
@@ -71,6 +72,7 @@ impl From<&RafsV5SuperBlock> for RafsMeta {
             prefetch_table_entries: sb.prefetch_table_entries(),
             extended_blob_table_offset: sb.extended_blob_table_offset(),
             extended_blob_table_entries: sb.extended_blob_table_entries(),
+            chunk_size: sb.block_size(),
             flags: RafsSuperFlags::from_bits_truncate(sb.flags()),
             fs_version: sb.version(),
             version: RafsVersion::V5,
@@ -574,9 +576,11 @@ Blocks:             {blocks}"#,
                 r#"
     Version:            {version}
     Inodes Count:       {inodes_count}
+    Chunk Size:         {chunk_size}
     Flags:              {flags}"#,
                 version = meta.fs_version,
                 inodes_count = meta.inodes_count,
+                chunk_size = meta.chunk_size,
                 flags = meta.flags,
             );
 

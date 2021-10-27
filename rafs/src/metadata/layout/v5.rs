@@ -253,6 +253,12 @@ impl RafsV5SuperBlock {
         Ok(())
     }
 
+    /// Set chunk size.
+    pub fn set_chunk_size(&mut self, chunk_size: u32) {
+        debug_assert!(chunk_size.is_power_of_two());
+        self.s_block_size = chunk_size;
+    }
+
     /// Set compression algorithm to handle chunk of the Rafs filesystem.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         let c: RafsSuperFlags = compressor.into();
