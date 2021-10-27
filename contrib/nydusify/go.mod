@@ -7,7 +7,7 @@ require (
 	github.com/aliyun/aliyun-oss-go-sdk v2.1.5+incompatible
 	github.com/baiyubin/aliyun-sts-go-sdk v0.0.0-20180326062324-cfa1a18b161f // indirect
 	github.com/containerd/cgroups v0.0.0-20200710171044-318312a37340 // indirect
-	github.com/containerd/containerd v1.4.8
+	github.com/containerd/containerd v1.4.11
 	github.com/containerd/continuity v0.0.0-20200928162600-f2cc35102c2a // indirect
 	github.com/containerd/ttrpc v1.0.1 // indirect
 	github.com/containerd/typeurl v1.0.1 // indirect
@@ -27,7 +27,6 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/xattr v0.4.3
 	github.com/prometheus/client_golang v1.11.0
-	github.com/prometheus/common v0.26.0
 	github.com/satori/go.uuid v1.2.0 // indirect
 	github.com/sirupsen/logrus v1.7.0
 	github.com/stretchr/testify v1.5.1
@@ -41,7 +40,6 @@ require (
 	google.golang.org/genproto v0.0.0-20200527145253-8367513e4ece // indirect
 	google.golang.org/grpc v1.29.1 // indirect
 	gopkg.in/check.v1 v1.0.0-20200227125254-8fa46927fb4f // indirect
-	gopkg.in/yaml.v2 v2.3.0 // indirect
 	gotest.tools/v3 v3.0.2 // indirect
 	lukechampine.com/blake3 v1.1.5
 )
