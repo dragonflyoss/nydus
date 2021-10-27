@@ -176,6 +176,15 @@ fn main() -> Result<()> {
                         .possible_values(&["blake3", "sha256"]),
                 )
                 .arg(
+                    Arg::with_name("fs-version")
+                        .long("fs-version")
+                        .short("v")
+                        .help("version number of nydus image format:")
+                        .required(true)
+                        .default_value("5")
+                        .possible_values(&["5", "6"]),
+                )
+                .arg(
                     Arg::with_name("parent-bootstrap")
                         .long("parent-bootstrap")
                         .short("p")
@@ -356,6 +365,7 @@ impl Command {
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
         let blob_stor = Self::get_blob_storage(&matches, source_type)?;
         let repeatable = matches.is_present("repeatable");
+        let version = Self::get_fs_version(&matches)?;
         let whiteout_spec: WhiteoutSpec = matches
             .value_of("whiteout-spec")
             .unwrap_or_default()
@@ -420,7 +430,7 @@ impl Command {
             prefetch,
             blob_stor,
         );
-        build_ctx.set_fs_version(RafsVersion::V5);
+        build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
 
         let mut blob_mgr = BlobManager::new();
@@ -617,6 +627,22 @@ impl Command {
                     bail!("invalid chunk size: {}", chunk_size);
                 }
                 Ok(chunk_size)
+            }
+        }
+    }
+
+    fn get_fs_version(matches: &clap::ArgMatches) -> Result<RafsVersion> {
+        match matches.value_of("fs-version") {
+            None => Ok(RafsVersion::V6),
+            Some(v) => {
+                let version: u32 = v.parse().context(format!("invalid fs-version: {}", v))?;
+                if version == 5 {
+                    Ok(RafsVersion::V5)
+                } else if version == 6 {
+                    Ok(RafsVersion::V6)
+                } else {
+                    bail!("invalid fs-version: {}", v);
+                }
             }
         }
     }
