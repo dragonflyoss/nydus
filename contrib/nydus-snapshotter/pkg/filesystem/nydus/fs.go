@@ -344,7 +344,7 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		d   *daemon.Daemon
 		err error
 	)
-
+	customMountPoint := filepath.Join(fs.SnapshotRoot(), snapshotID, "mnt")
 	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
 		daemon.WithSocketDir(fs.SocketRoot()),
@@ -354,6 +354,7 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		daemon.WithImageID(imageID),
 		daemon.WithLogLevel(fs.logLevel),
 		daemon.WithLogToStdout(fs.logToStdout),
+		daemon.WithCustomMountPoint(customMountPoint),
 	); err != nil {
 		return nil, err
 	}

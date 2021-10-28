@@ -87,6 +87,16 @@ func WithRootMountPoint(rootMountPoint string) NewDaemonOpt {
 	}
 }
 
+func WithCustomMountPoint(customMountPoint string) NewDaemonOpt {
+	return func(d *Daemon) error {
+		if err := os.MkdirAll(customMountPoint, 0755); err != nil {
+			return errors.Wrapf(err, "failed to create customMountPoint %s", customMountPoint)
+		}
+		d.CustomMountPoint = &customMountPoint
+		return nil
+	}
+}
+
 func WithSnapshotDir(dir string) NewDaemonOpt {
 	return func(d *Daemon) error {
 		d.SnapshotDir = dir

@@ -47,6 +47,7 @@ type Args struct {
 	MetricsFile          string
 	EnableStargz         bool
 	DisableCacheManager  bool
+	EnableNydusOverlayFS bool
 }
 
 type Flags struct {
@@ -168,6 +169,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Usage:       "whether to disable blob cache manager",
 			Destination: &args.DisableCacheManager,
 		},
+		&cli.BoolFlag{
+			Name:        "enable-nydus-overlayfs",
+			Value:       false,
+			Usage:       "whether to disable nydus-overlayfs to mount",
+			Destination: &args.EnableNydusOverlayFS,
+		},
 	}
 }
 
@@ -218,6 +225,7 @@ func Validate(args *Args, cfg *config.Config) error {
 	cfg.MetricsFile = args.MetricsFile
 	cfg.EnableStargz = args.EnableStargz
 	cfg.DisableCacheManager = args.DisableCacheManager
+	cfg.EnableNydusOverlayFS = args.EnableNydusOverlayFS
 
 	d, err := time.ParseDuration(args.GCPeriod)
 	if err != nil {
