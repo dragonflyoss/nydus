@@ -142,14 +142,21 @@ nydus-snapshotter-static:
 
 CTR-REMOTE_PATH = /nydus-rs/contrib/ctr-remote
 ctr-remote:
-	$(call build_golang,${REMOTE_PATH},make)
+	$(call build_golang,${CTR-REMOTE_PATH},make)
 
 ctr-remote-static:
-	$(call build_golang,${REMOTE_PATH},make static-release)
+	$(call build_golang,${CTR-REMOTE_PATH},make static-release)
+
+NYDUS-OVERLAYFS_PATH = /nydus-rs/contrib/nydus-overlayfs
+nydus-overlayfs:
+	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make)
+
+nydus-overlayfs-static:
+	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make static-release)
 
 # Run integration smoke test in docker-in-docker container. It requires some special settings,
 # refer to `misc/example/README.md` for details.
-all-static-release: docker-static nydusify-static nydus-snapshotter-static ctr-remote-static
+all-static-release: docker-static nydusify-static nydus-snapshotter-static ctr-remote-static nydus-overlayfs-static
 
 # https://www.gnu.org/software/make/manual/html_node/One-Shell.html
 .ONESHELL:
