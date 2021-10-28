@@ -58,7 +58,7 @@ func main() {
 		}
 	}
 	if err := app.Run(os.Args); err != nil {
-		fmt.Fprintf(os.Stderr, "ctr: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ctr-remote: %v\n", err)
 		os.Exit(1)
 	}
 }
