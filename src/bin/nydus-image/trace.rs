@@ -263,7 +263,6 @@ pub mod tests {
 
     #[test]
     fn test_event_trace() {
-        //register_tracer!(TraceClass::Timing, TimingTracerClass);
         register_tracer!(TraceClass::Event, EventTracerClass);
 
         let t1 = thread::Builder::new()

@@ -116,7 +116,6 @@ impl BootstrapChunkDict {
 mod tests {
     use super::*;
     use crate::core::context::RafsVersion;
-    use crate::{EventTracerClass, TimingTracerClass, TraceClass};
     use std::path::PathBuf;
 
     #[test]
@@ -130,9 +129,6 @@ mod tests {
 
     #[test]
     fn test_chunk_dict() {
-        register_tracer!(TraceClass::Timing, TimingTracerClass);
-        register_tracer!(TraceClass::Event, EventTracerClass);
-
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
         source_path.push("tests/texture/bootstrap/image_v2.boot");
