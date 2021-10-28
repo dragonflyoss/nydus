@@ -107,7 +107,11 @@ pub struct BuildRootTracer {
 impl BuildRootTracer {
     pub fn register(&self, class: TraceClass, tracer: Arc<dyn TracerClass>) {
         let mut guard = self.tracers.write().unwrap();
-        guard.insert(class, tracer);
+        // In case a certain class is registered multiple times, e.g. from several
+        // concurrently running test cases.
+        if guard.get(&class).is_none() {
+            guard.insert(class, tracer);
+        }
     }
 
     pub fn tracer(&self, class: TraceClass) -> Arc<dyn TracerClass> {
