@@ -36,7 +36,7 @@ Nydus offers a powerful tool that converts an OCI image into a nydus image easil
 Use a command like the following to start the registry container:
 
 ```bash
-$ docker run -d -p 5000:5000 --restart=always --name registry registry:2
+$ sudo docker run -d -p 5000:5000 --restart=always --name registry registry:2
 ```
 
 The registry is now ready to use. Please refer to [docker document](https://docs.docker.com/registry/deploying) for more details.
@@ -47,7 +47,7 @@ You can pull an image from Docker Hub and push it to your local registry. The fo
 
 ```bash
 # workdir: nydus-rs/contrib/nydusify
-  $ sudo nydusify convert \
+$ sudo nydusify convert \
   --nydus-image /path/to/nydus-image \
   --source ubuntu:16.04 \
   --target localhost:5000/ubuntu:16.04-nydus
@@ -93,7 +93,7 @@ The Nydus image is converted layer by layer automatically under the `tmp` direct
 
 ```bash
 # workdir: nydus-rs/contrib/nydusify
-$sudo tree tmp -L 4
+$ sudo tree tmp -L 4
 tmp
 ├── blobs
 │   ├── 00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd
@@ -111,14 +111,11 @@ tmp
 └── source
 ```
 
-Tips: The local registry is an http server, therefore, we set the `target-insecure=true`. Otherwise, we will meet a FATA with `http: server gave HTTP response to HTTPS client`.
-
 After you have converted the image format, we could use `nydusd` to parse it and expose a FUSE mount point for containers to access.
 
-The `Nydusd` runs with a container image registry as a storage backend. Therefore, the registry backend is configured with the following json file.
+The `Nydusd` runs with a container image registry as a storage backend. Therefore, the registry backend is configured with the following json file(`registry.json`).
 
 ```json
-$ cat registry.json
 {
   "device": {
     "backend": {
@@ -159,33 +156,13 @@ $ sudo ls  ./mnt/
 bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
 
-To verify your `Nydusd` setup, try accessing a file in the mounted directory.
-
-```bash
-# workdir: nydus-rs
-$ sudo cat  ./mnt/etc/bash.bashrc
-# System-wide .bashrc file for interactive bash(1) shells.
-
-# To enable the settings / commands in this file for login shells as well,
-# this file has to be sourced in /etc/profile.
-
-# If not running interactively, don't do anything
-[ -z "$PS1" ] && return
-
-# check the window size after each command and, if necessary,
-# update the values of LINES and COLUMNS.
-shopt -s checkwinsize
-...
-
-```
-
 ## Build Nydus Image From Directory Source
 
 Nydus also offers a `nydus-image` tool to convert an unpacked container image into a Nydus format image. For multiple layers of an image, you need to manually and recursively convert them from the lowest layer, one layer at a time.
 The layers of an image could be rendered by the following command.
 
 ```bash
-$ docker inspect ubuntu:16.04
+$ sudo docker inspect ubuntu:16.04
 ...
 "GraphDriver": {
             "Data": {
