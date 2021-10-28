@@ -223,7 +223,7 @@ impl Display for Node {
 
 impl Node {
     pub fn new(
-        version: RafsVersion,
+        _version: RafsVersion,
         source: PathBuf,
         path: PathBuf,
         overlay: Overlay,
@@ -243,7 +243,8 @@ impl Node {
             path,
             target_vec,
             overlay,
-            inode: InodeWrapper::new(version),
+            // liubo: for now, we use rafs v5 inode to build the whole tree.
+            inode: InodeWrapper::new(RafsVersion::V5),
             chunks: Vec::new(),
             symlink: None,
             xattrs: RafsXAttrs::default(),
