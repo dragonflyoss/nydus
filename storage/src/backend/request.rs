@@ -196,6 +196,7 @@ impl Request {
         client: &Client,
         method: Method,
         url: &str,
+        query: &Option<Vec<(&str, &str)>>,
         data: Option<ReqBody<R>>,
         headers: HeaderMap,
         catch_status: bool,
@@ -214,7 +215,10 @@ impl Request {
             data.is_some(),
         );
 
-        let rb = client.request(method, url).headers(headers);
+        let mut rb = client.request(method, url).headers(headers);
+        if let Some(q) = query.as_ref() {
+            rb = rb.query(q);
+        }
 
         let ret;
         if let Some(data) = data {
@@ -249,6 +253,7 @@ impl Request {
         &self,
         method: Method,
         url: &str,
+        query: Option<Vec<(&str, &str)>>,
         data: Option<ReqBody<R>>,
         headers: HeaderMap,
         catch_status: bool,
@@ -264,6 +269,7 @@ impl Request {
                     &proxy.client,
                     method.clone(),
                     url,
+                    &query,
                     data_cloned,
                     headers.clone(),
                     catch_status,
@@ -292,6 +298,7 @@ impl Request {
             &self.client,
             method,
             url,
+            &query,
             data,
             headers,
             catch_status,

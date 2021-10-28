@@ -147,6 +147,7 @@ struct BearerAuth {
     realm: String,
     service: String,
     scope: String,
+    header: Option<HeaderValue>,
 }
 
 #[derive(Debug)]
@@ -245,22 +246,38 @@ impl Registry {
 
     /// Request registry authentication server to get bearer token
     fn get_token(&self, auth: BearerAuth) -> Result<String> {
-        let mut query = HashMap::new();
+        // The information needed for getting token needs to be placed both in
+        // the query and in the body to be compatible with different registry
+        // implementations, which have been tested on these platforms:
+        // docker hub, harbor, github ghcr, aliyun acr.
 
-        query.insert(String::from("service"), auth.service);
-        query.insert(String::from("scope"), auth.scope);
-        query.insert(String::from("grant_type"), String::from("password"));
-        query.insert(String::from("username"), self.username.clone());
-        query.insert(String::from("password"), self.password.clone());
-        query.insert(String::from("client_id"), String::from(REGISTRY_CLIENT_ID));
+        let query = vec![
+            ("service", auth.service.as_str()),
+            ("scope", auth.scope.as_str()),
+            ("grant_type", "password"),
+            ("username", self.username.as_str()),
+            ("password", self.password.as_str()),
+            ("client_id", REGISTRY_CLIENT_ID),
+        ];
+
+        let mut form = HashMap::new();
+        for (k, v) in &query {
+            form.insert(k.to_string(), v.to_string());
+        }
+
+        let mut headers = HeaderMap::new();
+        if let Some(auth_header) = &auth.header {
+            headers.insert(HEADER_AUTHORIZATION, auth_header.clone());
+        }
 
         let token_resp = self
             .request
             .call::<&[u8]>(
-                Method::POST,
+                Method::GET,
                 auth.realm.as_str(),
-                Some(ReqBody::Form(query)),
-                HeaderMap::new(),
+                Some(query),
+                Some(ReqBody::Form(form)),
+                headers,
                 true,
             )
             .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
@@ -325,10 +342,17 @@ impl Registry {
                 {
                     return None;
                 }
+
+                let header = self
+                    .auth
+                    .as_ref()
+                    .map(|auth| HeaderValue::from_str(&format!("Basic {}", auth)).unwrap());
+
                 Some(Auth::Bearer(BearerAuth {
                     realm: (*paras.get("realm").unwrap()).to_string(),
                     service: (*paras.get("service").unwrap()).to_string(),
                     scope: (*paras.get("scope").unwrap()).to_string(),
+                    header,
                 }))
             }
             _ => None,
@@ -385,14 +409,14 @@ impl Registry {
         if let Some(data) = data {
             return self
                 .request
-                .call(method, url, Some(data), headers, catch_status)
+                .call(method, url, None, Some(data), headers, catch_status)
                 .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
         let resp = self
             .request
-            .call::<&[u8]>(method.clone(), url, None, headers.clone(), false)
+            .call::<&[u8]>(method.clone(), url, None, None, headers.clone(), false)
             .map_err(RegistryError::Request)?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
@@ -410,7 +434,7 @@ impl Registry {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .request
-                        .call(method, url, data, headers, catch_status)
+                        .call(method, url, None, data, headers, catch_status)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -465,7 +489,14 @@ impl Registry {
         if let Some(cached_redirect) = cached_redirect {
             resp = self
                 .request
-                .call::<&[u8]>(Method::GET, cached_redirect.as_str(), None, headers, false)
+                .call::<&[u8]>(
+                    Method::GET,
+                    cached_redirect.as_str(),
+                    None,
+                    None,
+                    headers,
+                    false,
+                )
                 .map_err(RegistryError::Request)?;
 
             // The request has expired or has been denied, need to re-request
@@ -516,7 +547,7 @@ impl Registry {
                     }
                     let resp_ret = self
                         .request
-                        .call::<&[u8]>(Method::GET, location.as_str(), None, headers, true)
+                        .call::<&[u8]>(Method::GET, location.as_str(), None, None, headers, true)
                         .map_err(RegistryError::Request);
                     match resp_ret {
                         Ok(_resp) => {

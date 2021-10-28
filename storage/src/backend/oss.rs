@@ -202,7 +202,7 @@ impl BlobBackend for Oss {
 
         let resp = self
             .request
-            .call::<&[u8]>(Method::HEAD, url.as_str(), None, headers, true)
+            .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
 
         let content_length = resp
@@ -239,7 +239,7 @@ impl BlobBackend for Oss {
         // Safe because the the call() is a synchronous operation.
         let mut resp = self
             .request
-            .call::<&[u8]>(Method::GET, url.as_str(), None, headers, true)
+            .call::<&[u8]>(Method::GET, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
 
         Ok(resp
@@ -259,7 +259,7 @@ impl BlobBackend for Oss {
 
         // Safe because the the call() is a synchronous operation.
         self.request
-            .call::<&[u8]>(Method::POST, url.as_str(), None, headers, true)
+            .call::<&[u8]>(Method::POST, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
 
         Ok(buf.len())
