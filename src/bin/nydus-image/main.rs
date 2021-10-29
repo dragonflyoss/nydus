@@ -15,8 +15,7 @@ extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
 
-use std::fs::metadata;
-use std::fs::OpenOptions;
+use std::fs::{self, metadata, DirEntry, OpenOptions};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +46,7 @@ mod trace;
 mod builder;
 mod core;
 mod inspect;
+mod stat;
 mod validator;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
@@ -316,6 +316,41 @@ fn main() -> Result<()> {
                         .takes_value(true),
                 )
         )
+        .subcommand(
+            SubCommand::with_name("stat")
+                .about("Generate statistics information for a synthesised base image from a group of nydus images")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .short("B")
+                        .help("Generate stats information for base image from the specified metadata blob")
+                        .required(false)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("blob-dir")
+                        .long("blob-dir")
+                        .short("D")
+                        .help("Generate stats information for base image from the all metadata blobs in the directory")
+                        .required(false)
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("target")
+                        .long("target")
+                        .short("T")
+                        .help("Generate stats information for target image from the specified metadata blob, deduplicating all chunks existing in the base image")
+                        .required(false)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("output-json")
+                        .long("output-json")
+                        .short("J")
+                        .help("path to JSON output file")
+                        .takes_value(true)
+                )
+        )
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
@@ -342,6 +377,8 @@ fn main() -> Result<()> {
         Command::check(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
         Command::inspect(matches)
+    } else if let Some(matches) = cmd.subcommand_matches("stat") {
+        Command::stat(matches)
     } else {
         println!("{}", cmd.usage());
         Ok(())
@@ -507,6 +544,53 @@ impl Command {
         Ok(())
     }
 
+    fn stat(matches: &clap::ArgMatches) -> Result<()> {
+        let mut stat = stat::ImageStat::new();
+
+        if let Some(blob) = matches.value_of("bootstrap").map(PathBuf::from) {
+            stat.stat(&blob, true)?;
+        } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
+            if !d.exists() {
+                bail!("Directory holding blobs does not exist")
+            }
+
+            stat.dedup_enabled = true;
+
+            let children = fs::read_dir(d.as_path())
+                .with_context(|| format!("failed to read dir {:?}", d.as_path()))?;
+            let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
+            for child in children {
+                let path = child.path();
+                if path.is_file() {
+                    if let Err(e) = stat.stat(&path, true) {
+                        error!(
+                            "failed to process {}, {}",
+                            path.to_str().unwrap_or_default(),
+                            e
+                        );
+                    };
+                }
+            }
+        } else {
+            bail!("one of `--bootstrap` and `--blob-dir` must be specified");
+        }
+
+        if let Some(blob) = matches.value_of("target").map(PathBuf::from) {
+            stat.target_enabled = true;
+            stat.stat(&blob, false)?;
+        }
+
+        stat.finalize();
+
+        if let Some(path) = matches.value_of("output-json").map(PathBuf::from) {
+            stat.dump_json(&path)?;
+        } else {
+            stat.dump();
+        }
+
+        Ok(())
+    }
+
     fn get_bootstrap<'a>(matches: &'a clap::ArgMatches) -> Result<&'a Path> {
         match matches.value_of("bootstrap") {
             None => bail!("missing parameter `bootstrap`"),
@@ -532,7 +616,7 @@ impl Command {
                 Some(p)
             } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
                 if !d.exists() {
-                    bail!("Directory holding blobs is not existed")
+                    bail!("Directory holding blobs does not exist")
                 }
                 Some(BlobStorage::BlobsDir(d))
             } else {

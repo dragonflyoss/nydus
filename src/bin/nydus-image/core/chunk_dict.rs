@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 use nydus_utils::digest::RafsDigest;
@@ -32,18 +33,23 @@ impl ChunkDict for () {
 
 #[derive(Default)]
 pub struct HashChunkDict {
-    m: HashMap<RafsDigest, ChunkWrapper>,
+    pub m: HashMap<RafsDigest, (ChunkWrapper, AtomicU32)>,
     blobs: Arc<RafsV5BlobTable>,
     blob_idx_m: Mutex<BTreeMap<u32, u32>>,
 }
 
 impl ChunkDict for HashChunkDict {
     fn add_chunk(&mut self, chunk: ChunkWrapper) {
-        self.m.insert(chunk.id().to_owned(), chunk);
+        if let Some(e) = self.m.get(chunk.id()) {
+            e.1.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.m
+                .insert(chunk.id().to_owned(), (chunk, AtomicU32::new(1)));
+        }
     }
 
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&ChunkWrapper> {
-        self.m.get(digest)
+        self.m.get(digest).map(|e| &e.0)
     }
 
     fn get_blobs(&self) -> Arc<RafsV5BlobTable> {
@@ -106,10 +112,6 @@ pub(crate) fn import_chunk_dict(arg: &str) -> Result<Arc<dyn ChunkDict>> {
         _ => Err(std::io::Error::from_raw_os_error(libc::EINVAL))
             .with_context(|| format!("invalid chunk dict type {}", file_type)),
     }
-}
-
-<<<<<<< HEAD
-impl BootstrapChunkDict {
 }
 
 #[cfg(test)]
