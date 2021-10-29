@@ -48,6 +48,7 @@ type Args struct {
 	EnableStargz         bool
 	DisableCacheManager  bool
 	EnableNydusOverlayFS bool
+	LogToStdout          bool
 }
 
 type Flags struct {
@@ -173,7 +174,12 @@ func buildFlags(args *Args) []cli.Flag {
 			Name:        "enable-nydus-overlayfs",
 			Value:       false,
 			Usage:       "whether to disable nydus-overlayfs to mount",
-			Destination: &args.EnableNydusOverlayFS,
+			Destination: &args.EnableNydusOverlayFS},
+		&cli.BoolFlag{
+			Name:        "log-to-stdout",
+			Value:       false,
+			Usage:       "Print logs to standard out rather than files.",
+			Destination: &args.LogToStdout,
 		},
 	}
 }
@@ -206,6 +212,8 @@ func Validate(args *Args, cfg *config.Config) error {
 		cfg.CacheDir = filepath.Join(cfg.RootDir, "cache")
 	}
 	cfg.LogDir = args.LogDir
+	// Always let options from CLI override those from configuration file.
+	cfg.LogToStdout = args.LogToStdout
 	if len(cfg.LogDir) == 0 {
 		cfg.LogDir = filepath.Join(cfg.RootDir, "logs")
 	}
