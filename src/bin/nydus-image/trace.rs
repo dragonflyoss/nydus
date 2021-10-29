@@ -81,17 +81,22 @@ impl TracerClass for TimingTracerClass {
     }
 }
 
-pub fn trace_timing<F: FnOnce() -> T, T>(point: &str, tracer: &TimingTracerClass, f: F) -> T {
+pub fn trace_timing<F: FnOnce() -> T, T>(
+    point: &str,
+    tracer: Option<&TimingTracerClass>,
+    f: F,
+) -> T {
     let begin = SystemTime::now();
     let r = f();
     let elapsed = SystemTime::now().duration_since(begin).unwrap();
 
     // Not expect poisoned lock.
-    tracer
-        .records
-        .lock()
-        .unwrap()
-        .insert(point.to_string(), elapsed.as_secs_f32());
+    if let Some(t) = tracer {
+        t.records
+            .lock()
+            .unwrap()
+            .insert(point.to_string(), elapsed.as_secs_f32());
+    }
 
     r
 }
@@ -107,13 +112,17 @@ pub struct BuildRootTracer {
 impl BuildRootTracer {
     pub fn register(&self, class: TraceClass, tracer: Arc<dyn TracerClass>) {
         let mut guard = self.tracers.write().unwrap();
-        guard.insert(class, tracer);
+        // In case a certain class is registered multiple times, e.g. from several
+        // concurrently running test cases.
+        if guard.get(&class).is_none() {
+            guard.insert(class, tracer);
+        }
     }
 
-    pub fn tracer(&self, class: TraceClass) -> Arc<dyn TracerClass> {
+    pub fn tracer(&self, class: TraceClass) -> Option<Arc<dyn TracerClass>> {
         let g = self.tracers.read().unwrap();
         // Safe to unwrap because tracers should always be enabled
-        (&g).get(&class).unwrap().clone()
+        (&g).get(&class).cloned()
     }
 
     pub fn dump_summary_map(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
@@ -166,9 +175,12 @@ macro_rules! timing_tracer {
     () => {
         root_tracer!()
             .tracer($crate::trace::TraceClass::Timing)
-            .as_any()
-            .downcast_ref::<$crate::trace::TimingTracerClass>()
-            .unwrap()
+            .as_ref()
+            .map(|t| {
+                t.as_any()
+                    .downcast_ref::<$crate::trace::TimingTracerClass>()
+                    .unwrap()
+            })
     };
     ($f:block, $key:expr) => {
         $crate::trace::trace_timing($key, timing_tracer!(), || $f)
@@ -190,9 +202,12 @@ macro_rules! event_tracer {
     () => {
         root_tracer!()
             .tracer($crate::trace::TraceClass::Event)
-            .as_any()
-            .downcast_ref::<$crate::trace::EventTracerClass>()
-            .unwrap()
+            .as_ref()
+            .map(|t| {
+                t.as_any()
+                    .downcast_ref::<$crate::trace::EventTracerClass>()
+                    .unwrap()
+            })
     };
     ($event:expr, $desc:expr) => {
         event_tracer!().events.write().unwrap().insert(
@@ -202,36 +217,41 @@ macro_rules! event_tracer {
     };
     ($event:expr, +$value:expr) => {
         let mut new: bool = true;
-        if let Some($crate::trace::TraceEvent::Counter(ref e)) =
-            event_tracer!().events.read().unwrap().get($event)
-        {
-            e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
-            new = false;
-        }
 
-        if new {
-            // Double check to close the race that another thread has already inserted.
-            // Cast integer to u64 should be reliable for most cases.
-            if let Ok(ref mut guard) = event_tracer!().events.write() {
-                if let Some($crate::trace::TraceEvent::Counter(ref e)) = guard.get($event) {
-                    e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    guard.insert(
-                        $event.to_string(),
-                        $crate::trace::TraceEvent::Counter(std::sync::atomic::AtomicU64::new(
-                            $value as u64,
-                        )),
-                    );
+        if let Some(t) = event_tracer!() {
+            if let Some($crate::trace::TraceEvent::Counter(ref e)) =
+                t.events.read().unwrap().get($event)
+            {
+                e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
+                new = false;
+            }
+
+            if new {
+                // Double check to close the race that another thread has already inserted.
+                // Cast integer to u64 should be reliable for most cases.
+                if let Ok(ref mut guard) = t.events.write() {
+                    if let Some($crate::trace::TraceEvent::Counter(ref e)) = guard.get($event) {
+                        e.fetch_add($value as u64, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        guard.insert(
+                            $event.to_string(),
+                            $crate::trace::TraceEvent::Counter(std::sync::atomic::AtomicU64::new(
+                                $value as u64,
+                            )),
+                        );
+                    }
                 }
             }
         }
     };
     ($event:expr, $format:expr, $value:expr) => {
-        if let Ok(ref mut guard) = event_tracer!().events.write() {
-            guard.insert(
-                $event.to_string(),
-                $crate::trace::TraceEvent::Desc(format!($format, $value)),
-            );
+        if let Some(t) = event_tracer!() {
+            if let Ok(ref mut guard) = t.events.write() {
+                guard.insert(
+                    $event.to_string(),
+                    $crate::trace::TraceEvent::Desc(format!($format, $value)),
+                );
+            }
         }
     };
 }
