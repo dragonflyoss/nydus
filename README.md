@@ -10,10 +10,10 @@ The following benchmarking result shows the performance improvement compared wit
 
 Nydus' key features include:
 
-- Container images are downloaded on demand in chunks to boost container startup
-- Chunk level data de-duplication among layers in a single repository to reduce storage cost
+- Container images may be downloaded on demand in chunks to boost container startup
+- Chunk level data de-duplication among layers in a single repository to reduce storage, transport and memory cost
 - Flatten image metadata and data to remove all intermediate layers
-- Deleted(whiteout) files in certain layer aren't packed into nydus image, therefore, image size can be reduced
+- Deleted(whiteout) files in certain layer aren't packed into nydus image, therefore, image size may be reduced
 - E2E image data integrity check. So security issues like "Supply Chain Attach" can be avoided and detected at runtime
 - Compatible with the OCI artifacts spec and distribution spec, so nydus image can be stored in a regular container registry
 - Integrated with CNCF incubating project Dragonfly to distribute container images in P2P fashion and mitigate the pressure on container registries
