@@ -172,6 +172,12 @@ impl BlobBufferWriter {
     }
 }
 
+impl Seek for BlobBufferWriter {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
 impl Write for BlobBufferWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.file.write(buf)
