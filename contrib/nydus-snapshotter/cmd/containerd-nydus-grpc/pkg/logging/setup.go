@@ -19,8 +19,9 @@ func SetUp(logLevel string) error {
 		return err
 	}
 	logrus.SetLevel(lvl)
-	logrus.SetFormatter(&logrus.JSONFormatter{
+	logrus.SetFormatter(&logrus.TextFormatter{
 		TimestampFormat: log.RFC3339NanoFixed,
+		FullTimestamp:   true,
 	})
 	return nil
 }
