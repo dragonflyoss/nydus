@@ -502,6 +502,11 @@ impl Rafs {
         });
     }
 
+    /// for blobfs
+    pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> Result<()> {
+        self.device.fetch_range_synchronous(prefetches)
+    }
+
     fn do_prefetch_v5(
         mut reader: RafsIoReader,
         prefetch_files: Option<Vec<PathBuf>>,

@@ -953,6 +953,42 @@ impl BlobDevice {
 
         None
     }
+
+    /// fetch specified blob data in a synchronous way.
+    pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
+        for req in prefetches {
+            if req.len == 0 {
+                continue;
+            }
+            if let Some(cache) = self.get_blob_by_id(&req.blob_id) {
+                trace!(
+                    "fetch blob {} offset {} size {}",
+                    req.blob_id,
+                    req.offset,
+                    req.len
+                );
+                if let Some(obj) = cache.get_blob_object() {
+                    let _ = obj
+                        .fetch_range_uncompressed(req.offset as u64, req.len as u64)
+                        .map_err(|e| {
+                            warn!(
+                                "Failed to prefetch data from blob {}, offset {}, size {}, {}",
+                                cache.blob_id(),
+                                req.offset,
+                                req.len,
+                                e
+                            );
+                            e
+                        });
+                } else {
+                    error!("No support for fetching uncompressed blob data");
+                    return Err(einval!("No support for fetching uncompressed blob data"));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Struct to execute Io requests with a single blob.

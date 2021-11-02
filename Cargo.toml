@@ -56,6 +56,7 @@ nydus-error = "0.1"
 nydus-utils = { path = "utils" }
 rafs = { path = "rafs", features = ["backend-registry", "backend-oss"] }
 storage = { path = "storage" }
+blobfs = { path = "blobfs", features = ["virtiofs"], optional = true }
 
 [dev-dependencies]
 sendfd = "0.3.3"
@@ -64,7 +65,7 @@ env_logger = "0.8.2"
 
 [features]
 fusedev = ["nydus-utils/fusedev", "fuse-backend-rs/fusedev"]
-virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings"]
+virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings", "blobfs/virtiofs"]
 
 [workspace]
-members = ["api", "app", "error", "rafs", "storage", "utils"]
+members = ["api", "app", "error", "rafs", "storage", "utils", "blobfs"]
