@@ -22,7 +22,7 @@ use rafs::{RafsIoReader, RafsIoWriter};
 use sha2::{Digest, Sha256};
 use storage::compress;
 use storage::device::BlobInfo;
-use storage::meta::BlobChunkInfoOndisk;
+use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use vmm_sys_util::tempfile::TempFile;
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
@@ -194,6 +194,8 @@ pub struct BlobContext {
     pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
+    /// Blob metadata header stored in the data blob, for v6
+    pub blob_meta_header: BlobMetaHeaderOndisk,
 
     /// Final compressed blob file size.
     pub compressed_blob_size: u64,
@@ -242,6 +244,7 @@ impl BlobContext {
             blob_layout: BlobLayout::new(),
             blob_meta_info_enabled: false,
             blob_meta_info: Vec::new(),
+            blob_meta_header: BlobMetaHeaderOndisk::default(),
 
             compressed_blob_size: 0,
             decompressed_blob_size: 0,

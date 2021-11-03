@@ -4,6 +4,7 @@
 
 use std::convert::TryFrom;
 use std::ffi::OsString;
+use std::io::SeekFrom;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
@@ -11,7 +12,11 @@ use nydus_utils::digest::{DigestHasher, RafsDigest};
 use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
-use rafs::metadata::layout::v6::{calculate_nid, RafsV6SuperBlock, EROFS_INODE_SLOT_SIZE};
+use rafs::metadata::layout::v6::{
+    align_offset, calculate_nid, RafsV6BlobTable, RafsV6SuperBlock, EROFS_BLKSIZE,
+    EROFS_INODE_SLOT_SIZE,
+};
+
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperFlags};
 use storage::device::BlobFeatures;
@@ -508,8 +513,36 @@ impl Bootstrap {
         bootstrap_ctx: &mut BootstrapContext,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
-        let meta_addr = bootstrap_ctx.nodes[0].offset;
-        let root_nid = calculate_nid(bootstrap_ctx.nodes[0].offset, meta_addr);
+        // Rafs v6 disk layout
+        //
+        // EROFS_SUPER_OFFSET
+        //     |
+        //     |
+        //  +--+------+-------------------+---------------------------------------------+
+        //  |  | super|  blob table       |  inodes                                     |
+        //  |1k| block|                   |                                             |
+        //  |  |      |                   |                                             |
+        //  |  |      |                   |                                             |
+        //  +--+------+-------------------+---------------------------------------------+
+
+        let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
+        let blob_table_size = blob_table.size() as u64;
+        let blob_table_offset = EROFS_BLKSIZE as u64;
+        let blob_table_entries = blob_table.entries.len();
+
+        let orig_meta_addr = bootstrap_ctx.nodes[0].offset;
+
+        let meta_addr = if blob_table_size > 0 {
+            align_offset(blob_table_offset + blob_table_size, EROFS_BLKSIZE as u64)
+        } else {
+            orig_meta_addr
+        };
+
+        let root_nid = calculate_nid(
+            bootstrap_ctx.nodes[0].offset - orig_meta_addr + meta_addr,
+            meta_addr,
+        );
+
         // Dump superblock
         let mut sb = RafsV6SuperBlock::new();
         sb.set_inos(bootstrap_ctx.nodes.len() as u64);
@@ -518,7 +551,7 @@ impl Bootstrap {
         sb.set_root_nid(root_nid as u16);
         sb.set_meta_addr(meta_addr);
         // only support one extra device.
-        sb.set_extra_devices(1);
+        sb.set_extra_devices(blob_table_entries as u16);
 
         // bootstrap_ctx
         //     .f_bootstrap
@@ -527,12 +560,26 @@ impl Bootstrap {
         sb.store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store SB")?;
 
+        // Dump blob table
+        bootstrap_ctx
+            .f_bootstrap
+            .seek(SeekFrom::Start(blob_table_offset as u64))
+            .context("failed seek for extended blob table offset")?;
+        blob_table
+            .store(&mut bootstrap_ctx.f_bootstrap)
+            .context("failed to store extended blob table")?;
+
         // Dump bootstrap
         timing_tracer!(
             {
                 for node in &mut bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v6(&mut bootstrap_ctx.f_bootstrap, meta_addr, ctx)
-                        .context("failed to dump bootstrap")?;
+                    node.dump_bootstrap_v6(
+                        &mut bootstrap_ctx.f_bootstrap,
+                        orig_meta_addr,
+                        meta_addr,
+                        ctx,
+                    )
+                    .context("failed to dump bootstrap")?;
                 }
 
                 Ok(())
@@ -588,6 +635,43 @@ impl BlobManager {
                 compressed_blob_size,
                 blob_features,
                 flags,
+            );
+        }
+
+        Ok(blob_table)
+    }
+
+    pub fn to_blob_table_v6(&self, build_ctx: &BuildContext) -> Result<RafsV6BlobTable> {
+        let mut blob_table = RafsV6BlobTable::new();
+
+        for ctx in &self.blobs {
+            let blob_id = ctx.blob_id.clone();
+            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
+            let chunk_count = ctx.chunk_count;
+            let decompressed_blob_size = ctx.decompressed_blob_size;
+            let compressed_blob_size = ctx.compressed_blob_size;
+            let blob_features = BlobFeatures::empty();
+
+            let mut flags = RafsSuperFlags::empty();
+            match build_ctx.fs_version {
+                RafsVersion::V5 => todo!(),
+                RafsVersion::V6 => {
+                    flags |= RafsSuperFlags::from(build_ctx.compressor);
+                    flags |= RafsSuperFlags::from(build_ctx.digester);
+                }
+            }
+
+            blob_table.add(
+                blob_id,
+                0,
+                blob_readahead_size,
+                ctx.chunk_size,
+                chunk_count,
+                decompressed_blob_size,
+                compressed_blob_size,
+                blob_features,
+                flags,
+                ctx.blob_meta_header,
             );
         }
 

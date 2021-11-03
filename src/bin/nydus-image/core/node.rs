@@ -450,6 +450,7 @@ impl Node {
     pub fn dump_bootstrap_v6(
         &mut self,
         f_bootstrap: &mut RafsIoWriter,
+        orig_meta_addr: u64,
         meta_addr: u64,
         ctx: &BuildContext,
     ) -> Result<usize> {
@@ -463,6 +464,8 @@ impl Node {
         inode.set_mode(self.inode.mode() as u16);
         inode.set_data_layout(self.v6_datalayout);
 
+        // update all the inodes's offset according to the new 'meta_addr'.
+        self.offset = self.offset - orig_meta_addr + meta_addr;
         if self.is_dir() {
             // the 1st 4k block after dir inode.
             let mut dirent_off = align_offset(
@@ -527,7 +530,7 @@ impl Node {
                     RafsV6Dirent::file_type(*file_type)
                 );
                 let entry = RafsV6Dirent::new(
-                    calculate_nid(*offset, meta_addr),
+                    calculate_nid(*offset - orig_meta_addr + meta_addr, meta_addr),
                     0,
                     RafsV6Dirent::file_type(*file_type),
                 );

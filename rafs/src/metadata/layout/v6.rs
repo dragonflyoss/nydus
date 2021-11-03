@@ -7,11 +7,15 @@ use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::io::{Read, Result};
 use std::mem::size_of;
+use std::sync::Arc;
 
 use nydus_utils::round_up;
 
-use crate::metadata::RafsStore;
+use crate::metadata::layout::v5::{rafsv5_align, RAFSV5_ALIGNMENT};
+use crate::metadata::{RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, RafsIoReader, RafsIoWriter};
+use storage::device::{BlobFeatures, BlobInfo};
+use storage::meta::BlobMetaHeaderOndisk;
 
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
@@ -754,5 +758,215 @@ mod tests {
         device2.load(&mut reader).unwrap();
         assert_eq!(device2.blocks(), 0x1234);
         assert_eq!(device.blob_id(), &id);
+    }
+}
+
+/// Rafs v6 blob description table.
+#[derive(Clone, Debug, Default)]
+pub struct RafsV6BlobTable {
+    /// Base blob information array.
+    pub entries: Vec<Arc<BlobInfo>>,
+}
+
+impl RafsV6BlobTable {
+    /// Create a new instance of `RafsV6BlobTable`.
+    pub fn new() -> Self {
+        RafsV6BlobTable {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Get blob table size, aligned with RAFS_ALIGNMENT bytes
+    pub fn size(&self) -> usize {
+        if self.entries.is_empty() {
+            return 0;
+        }
+        // Blob entry split with '\0'
+        rafsv5_align(
+            self.entries.iter().fold(0usize, |size, entry| {
+                // meta_ci info + blob id.
+                let entry_size =
+                    size_of::<u32>() * 2 + size_of::<u64>() * 3 + entry.blob_id().len();
+                size + entry_size + 1
+            }) - 1,
+        )
+    }
+
+    /// Add information for new blob into the blob information table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add(
+        &mut self,
+        blob_id: String,
+        readahead_offset: u32,
+        readahead_size: u32,
+        chunk_size: u32,
+        chunk_count: u32,
+        uncompressed_size: u64,
+        compressed_size: u64,
+        blob_features: BlobFeatures,
+        flags: RafsSuperFlags,
+        header: BlobMetaHeaderOndisk,
+    ) -> u32 {
+        let blob_index = self.entries.len() as u32;
+        let mut blob_info = BlobInfo::new(
+            blob_index,
+            blob_id,
+            uncompressed_size,
+            compressed_size,
+            chunk_size,
+            chunk_count,
+            blob_features,
+        );
+
+        blob_info.set_compressor(flags.into());
+        blob_info.set_digester(flags.into());
+        // TODO: readahead may not be needed anymore.
+        blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+
+        blob_info.set_blob_meta_info(
+            header.meta_flags(),
+            header.ci_compressed_offset(),
+            header.ci_compressed_size(),
+            header.ci_uncompressed_size(),
+            header.ci_compressor() as u32,
+        );
+
+        self.entries.push(Arc::new(blob_info));
+
+        blob_index
+    }
+
+    /// Get base information for a blob.
+    #[inline]
+    pub fn get(&self, blob_index: u32) -> Result<Arc<BlobInfo>> {
+        if blob_index >= self.entries.len() as u32 {
+            return Err(enoent!("blob not found"));
+        }
+        Ok(self.entries[blob_index as usize].clone())
+    }
+
+    /// Load blob information table from a reader.
+    pub fn load(
+        &mut self,
+        r: &mut RafsIoReader,
+        blob_table_size: u32,
+        chunk_size: u32,
+        flags: RafsSuperFlags,
+    ) -> Result<()> {
+        if blob_table_size == 0 {
+            return Ok(());
+        }
+
+        debug!("blob table size {}", blob_table_size);
+        let mut data = vec![0u8; blob_table_size as usize];
+        r.read_exact(&mut data)?;
+
+        // Each entry frame looks like:
+        // u32 * 2 | u64 * 3 | u32 | u64 * 2 | string | trailing '\0' , except that the last entry has no trailing '\0'
+        let mut buf = data.as_mut_slice();
+        let field_size =
+            2 * size_of::<u32>() + 3 * size_of::<u64>() + size_of::<u32>() + 2 * size_of::<u64>();
+        while buf.len() > field_size {
+            let ci_compressor =
+                unsafe { std::ptr::read_unaligned::<u32>(buf[0..4].as_ptr() as *const u32) };
+            let ci_features =
+                unsafe { std::ptr::read_unaligned::<u32>(buf[4..8].as_ptr() as *const u32) };
+            let ci_offset =
+                unsafe { std::ptr::read_unaligned::<u64>(buf[8..16].as_ptr() as *const u64) };
+            let ci_compressed_size =
+                unsafe { std::ptr::read_unaligned::<u64>(buf[16..24].as_ptr() as *const u64) };
+            let ci_uncompressed_size =
+                unsafe { std::ptr::read_unaligned::<u64>(buf[24..32].as_ptr() as *const u64) };
+            let chunk_count =
+                unsafe { std::ptr::read_unaligned::<u32>(buf[32..36].as_ptr() as *const u32) };
+            let uncompressed_size =
+                unsafe { std::ptr::read_unaligned::<u64>(buf[36..44].as_ptr() as *const u64) };
+            let compressed_size =
+                unsafe { std::ptr::read_unaligned::<u64>(buf[44..52].as_ptr() as *const u64) };
+
+            let orig_pos = 52;
+            let mut pos = orig_pos;
+            while pos < buf.len() && buf[pos] != 0 {
+                pos += 1;
+            }
+            let blob_id = std::str::from_utf8(&buf[orig_pos..pos])
+                .map(|v| v.to_owned())
+                .map_err(|e| einval!(e))?;
+            if pos == buf.len() {
+                buf = &mut buf[pos..];
+            } else {
+                buf = &mut buf[pos + 1..];
+            }
+            debug!("blob {:?} lies on", blob_id);
+
+            let index = self.entries.len();
+            let mut blob_info = BlobInfo::new(
+                index as u32,
+                blob_id,
+                uncompressed_size,
+                compressed_size,
+                chunk_size,
+                chunk_count,
+                BlobFeatures::empty(),
+            );
+
+            blob_info.set_compressor(flags.into());
+            blob_info.set_digester(flags.into());
+            // blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+            blob_info.set_blob_meta_info(
+                ci_features as u32,
+                ci_offset as u64,
+                ci_compressed_size as u64,
+                ci_uncompressed_size as u64,
+                ci_compressor as u32,
+            );
+
+            self.entries.push(Arc::new(blob_info));
+        }
+
+        Ok(())
+    }
+
+    /// Get the base blob information array.
+    pub fn get_all(&self) -> Vec<Arc<BlobInfo>> {
+        self.entries.clone()
+    }
+}
+
+impl RafsStore for RafsV6BlobTable {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+        let mut size = 0;
+        self.entries
+            .iter()
+            .enumerate()
+            .try_for_each::<_, Result<()>>(|(idx, entry)| {
+                w.write_all(&u32::to_le_bytes(entry.meta_ci_compressor() as u32))?;
+                w.write_all(&u32::to_le_bytes(entry.meta_flags() as u32))?;
+                w.write_all(&u64::to_le_bytes(entry.meta_ci_offset() as u64))?;
+                w.write_all(&u64::to_le_bytes(entry.meta_ci_compressed_size() as u64))?;
+                w.write_all(&u64::to_le_bytes(entry.meta_ci_uncompressed_size() as u64))?;
+                w.write_all(&u32::to_le_bytes(entry.chunk_count() as u32))?;
+                w.write_all(&u64::to_le_bytes(entry.uncompressed_size() as u64))?;
+                w.write_all(&u64::to_le_bytes(entry.compressed_size() as u64))?;
+                w.write_all(entry.blob_id().as_bytes())?;
+
+                let field_size = 2 * size_of::<u32>()
+                    + 3 * size_of::<u64>()
+                    + size_of::<u32>()
+                    + 2 * size_of::<u64>();
+                if idx != self.entries.len() - 1 {
+                    size += field_size + entry.blob_id().len() + 1;
+                    w.write_all(&[b'\0'])?;
+                } else {
+                    size += field_size + entry.blob_id().len();
+                }
+                Ok(())
+            })?;
+
+        let padding = rafsv5_align(size) - size;
+        w.write_padding(padding)?;
+        size += padding;
+
+        w.validate_alignment(size, RAFSV5_ALIGNMENT)
     }
 }
