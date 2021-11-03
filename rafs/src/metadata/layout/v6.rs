@@ -6,7 +6,6 @@
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::io::Result;
-use std::io::SeekFrom;
 use std::mem::size_of;
 
 use crate::metadata::RafsStore;
