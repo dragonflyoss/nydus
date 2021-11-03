@@ -435,25 +435,10 @@ impl FileCacheEntry {
                 chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
             match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
-                Ok(v) => {
-                    trace!("missing persist_chunks");
+                Ok(_v) => {
                     total_size += blob_size;
-                    for idx in start..end {
-                        let offset = if self.is_compressed {
-                            chunks[idx].compress_offset()
-                        } else {
-                            chunks[idx].uncompress_offset()
-                        };
-                        match Self::persist_chunk(&self.file, offset, &v[idx - start]) {
-                            Ok(_) => {
-                                let _ = self.chunk_map.set_ready_and_clear_pending(&chunks[idx]);
-                            }
-                            Err(_) => self.chunk_map.clear_pending(&chunks[idx]),
-                        }
-                    }
-
-                    // bitmap
-                    //     .set_range_ready_and_clear_pending(pending[start], (end - start) as u32)?;
+                    bitmap
+                        .set_range_ready_and_clear_pending(pending[start], (end - start) as u32)?;
                 }
                 Err(e) => {
                     bitmap.clear_range_pending(pending[start], (end - start) as u32);
@@ -513,7 +498,6 @@ impl FileCacheEntry {
                 .chunk_map
                 .check_ready_and_mark_pending(chunk.as_base())?;
 
-            trace!("is_ready {}", is_ready);
             // Directly read data from the file cache into the user buffer iff:
             // - the chunk is ready in the file cache
             // - the data in the file cache is uncompressed.
@@ -605,7 +589,6 @@ impl FileCacheEntry {
 
     fn dispatch_backend(&self, mem_cursor: &mut MemSliceCursor, region: &Region) -> Result<usize> {
         if region.chunks.is_empty() {
-            trace!("no chunks");
             return Ok(0);
         } else if !region.has_user_io() {
             debug!("No user data");
