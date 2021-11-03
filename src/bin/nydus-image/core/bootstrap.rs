@@ -507,7 +507,7 @@ impl Bootstrap {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
-        _blob_mgr: &mut BlobManager,
+        blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
         let meta_addr = bootstrap_ctx.nodes[0].offset;
         let root_nid = lookup_nid(bootstrap_ctx.nodes[0].offset, meta_addr);
@@ -545,8 +545,15 @@ impl Bootstrap {
         // Flush remaining data in BufWriter to file
         bootstrap_ctx.f_bootstrap.flush()?;
 
-        let blob_ids: Vec<String> = Vec::new();
-        let blob_size = 0;
+        let mut blob_size = 0;
+        let mut blob_ids = Vec::new();
+        for blob in &blob_mgr.blobs {
+            blob_ids.push(blob.blob_id.clone());
+        }
+        if let Some(blob) = blob_mgr.current() {
+            blob_size = blob.compressed_blob_size;
+        }
+
         Ok((blob_ids, blob_size))
     }
 }

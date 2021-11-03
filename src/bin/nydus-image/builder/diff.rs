@@ -55,7 +55,9 @@ use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
-use crate::core::context::{BlobContext, BlobManager, BlobStorage, BootstrapContext, BuildContext};
+use crate::core::context::{
+    BlobContext, BlobManager, BlobStorage, BootstrapContext, BuildContext, RafsVersion,
+};
 use crate::core::node::{ChunkWrapper, Node, Overlay};
 use crate::core::tree::Tree;
 use nydus_utils::digest::RafsDigest;
@@ -436,8 +438,11 @@ impl DiffBuilder {
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(ctx, bootstrap_ctx, &mut tree);
 
-        // Dump bootstrap
-        bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr)
+        // Dump bootstrap file
+        match ctx.fs_version {
+            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr),
+            RafsVersion::V6 => bootstrap.dump_rafsv6(ctx, bootstrap_ctx, blob_mgr),
+        }
     }
 
     fn build_with_hint(
