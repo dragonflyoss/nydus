@@ -323,6 +323,11 @@ impl BlobMetaInfo {
             return Err(einval!("blob metadata size is too big!"));
         }
 
+        let file_size = file.metadata()?.len();
+        if file_size == 0 && enable_write {
+            file.set_len(expected_size as u64)?;
+        }
+
         let fd = file.as_raw_fd();
         let base = unsafe {
             libc::mmap(
