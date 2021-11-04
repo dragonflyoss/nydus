@@ -120,6 +120,8 @@ impl Blob {
             header.set_ci_uncompressed_size(data.len() as u64);
             header.set_4k_aligned(true);
 
+            blob_ctx.blob_meta_header = header;
+
             writer.write_all(&buf)?;
             writer.write_all(header.as_bytes())?;
             blob_ctx.blob_hash.update(&buf);

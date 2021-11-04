@@ -9,11 +9,12 @@ use std::io::{Read, Result};
 use std::mem::size_of;
 use std::sync::Arc;
 
-use nydus_utils::round_up;
+use nydus_utils::{digest, round_up};
 
 use crate::metadata::layout::v5::{rafsv5_align, RAFSV5_ALIGNMENT};
 use crate::metadata::{RafsStore, RafsSuperFlags};
-use crate::{impl_bootstrap_converter, RafsIoReader, RafsIoWriter};
+use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
+use storage::compress;
 use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::BlobMetaHeaderOndisk;
 
@@ -100,6 +101,12 @@ pub struct RafsV6SuperBlock {
     s_extra_devices: u16,
     /// Offset of the device table, `startoff = s_devt_slotoff * devt_slotsize`.
     s_devt_slotoff: u16,
+    /// chunk size
+    pub s_chunk_size: u32,
+    /// superblock flags
+    pub s_flags: u64,
+    /// superblock flags
+    pub s_blob_table_size: u32,
     /// Padding.
     s_reserved: [u8; 38],
 }
@@ -115,12 +122,13 @@ impl RafsV6SuperBlock {
     /// Load a `RafsV6SuperBlock` from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         let mut buf1 = [0u8; EROFS_SUPER_OFFSET as usize];
-        let mut buf2 = [0u8; (EROFS_BLOCK_SIZE as usize
-            - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)];
 
         r.read_exact(&mut buf1)?;
-        r.read_exact(self.as_mut())?;
-        r.read_exact(&mut buf2)
+        r.read_exact(self.as_mut())
+        // we need to leave this to 2nd sb read.
+        // let mut buf2 = [0u8; (EROFS_BLOCK_SIZE as usize
+        //     - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)];
+        // r.read_exact(&mut buf2)
     }
 
     /// Get maximum ino.
@@ -147,6 +155,49 @@ impl RafsV6SuperBlock {
     pub fn set_extra_devices(&mut self, count: u16) {
         self.s_extra_devices = count.to_le();
     }
+
+    /// Check whether it's super block for Rafs v6.
+    pub fn is_rafs_v6(&self) -> bool {
+        self.magic() == EROFS_SUPER_MAGIC_V1
+    }
+
+    /// Validate the Rafs v6 super block.
+    pub fn validate(&self, meta_size: u64) -> Result<()> {
+        // TODO:
+        Ok(())
+    }
+
+    pub fn blob_table_offset(&self) -> u64 {
+        EROFS_BLKSIZE as u64
+    }
+
+    pub fn meta_addr(&self) -> usize {
+        u32::from_le(self.s_meta_blkaddr) as usize * EROFS_BLKSIZE
+    }
+
+    /// Set compression algorithm to handle chunk of the Rafs filesystem.
+    pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
+        let c: RafsSuperFlags = compressor.into();
+
+        self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
+        self.s_flags |= c.bits();
+    }
+
+    /// Set message digest algorithm to handle chunk of the Rafs filesystem.
+    pub fn set_digester(&mut self, digester: digest::Algorithm) {
+        let c: RafsSuperFlags = digester.into();
+
+        self.s_flags &= !RafsSuperFlags::DIGESTER_BLAKE3.bits();
+        self.s_flags &= !RafsSuperFlags::DIGESTER_SHA256.bits();
+        self.s_flags |= c.bits();
+    }
+
+    impl_pub_getter_setter!(magic, set_magic, s_magic, u32);
+    impl_pub_getter_setter!(chunk_size, set_chunk_size, s_chunk_size, u32);
+    impl_pub_getter_setter!(flags, set_flags, s_flags, u64);
+    impl_pub_getter_setter!(blob_table_size, set_blob_table_size, s_blob_table_size, u32);
 }
 
 impl RafsStore for RafsV6SuperBlock {
@@ -186,7 +237,10 @@ impl Default for RafsV6SuperBlock {
             s_u: u16::to_le(0),
             s_extra_devices: u16::to_le(0),
             s_devt_slotoff: u16::to_le(0),
-            s_reserved: [0u8; 38],
+            s_chunk_size: u32::to_le(0),
+            s_flags: u64::to_le(0),
+            s_blob_table_size: u32::to_le(0),
+            s_reserved: [0u8; 22],
         }
     }
 }
@@ -920,6 +974,7 @@ impl RafsV6BlobTable {
                 ci_uncompressed_size as u64,
                 ci_compressor as u32,
             );
+            trace!("ci_offset {}", ci_offset);
 
             self.entries.push(Arc::new(blob_info));
         }

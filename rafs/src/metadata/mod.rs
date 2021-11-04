@@ -32,6 +32,7 @@ use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
 
 pub mod cached_v5;
 pub mod direct_v5;
+pub mod direct_v6;
 pub mod layout;
 mod md_v5;
 mod noop;
@@ -432,6 +433,10 @@ impl RafsSuper {
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         // Try to load the filesystem as Rafs v5
         if self.try_load_v5(r)? {
+            return Ok(());
+        }
+
+        if self.try_load_v6(r)? {
             return Ok(());
         }
 

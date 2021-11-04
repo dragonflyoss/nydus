@@ -550,8 +550,12 @@ impl Bootstrap {
         sb.set_blocks(0);
         sb.set_root_nid(root_nid as u16);
         sb.set_meta_addr(meta_addr);
-        // only support one extra device.
+
         sb.set_extra_devices(blob_table_entries as u16);
+        sb.set_compressor(ctx.compressor);
+        sb.set_digester(ctx.digester);
+        sb.set_chunk_size(ctx.chunk_size);
+        sb.set_blob_table_size(blob_table_size as u32);
 
         // bootstrap_ctx
         //     .f_bootstrap
