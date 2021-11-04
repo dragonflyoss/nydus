@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                 .arg(
                     Arg::with_name("diff-overlay-hint")
                         .long("diff-overlay-hint")
-                        .help("Enable to specify each upper directory paths of layer in overlayfs for speeding up diff build")
+                        .help("enable to specify each upper directory paths of layer in overlayfs for speeding up diff build")
                         .takes_value(false)
                 )
                 .arg(
@@ -196,7 +196,7 @@ fn main() -> Result<()> {
                     Arg::with_name("prefetch-policy")
                         .long("prefetch-policy")
                         .short("P")
-                        .help("Prefetch policy:")
+                        .help("prefetch policy:")
                         .takes_value(true)
                         .required(false)
                         .default_value("none")
@@ -206,14 +206,14 @@ fn main() -> Result<()> {
                     Arg::with_name("repeatable")
                         .long("repeatable")
                         .short("R")
-                        .help("Generate reproducible nydus image")
+                        .help("generate reproducible nydus image")
                         .takes_value(false)
                         .required(false),
                 )
                 .arg(
                     Arg::with_name("disable-check")
                         .long("disable-check")
-                        .help("Disable validation of metadata after building")
+                        .help("disable validation of metadata after building")
                         .takes_value(false)
                         .required(false)
                 )
@@ -221,7 +221,7 @@ fn main() -> Result<()> {
                     Arg::with_name("whiteout-spec")
                         .long("whiteout-spec")
                         .short("W")
-                        .help("Type of whiteout specification:")
+                        .help("type of whiteout specification:")
                         .takes_value(true)
                         .required(true)
                         .default_value("oci")
@@ -245,7 +245,7 @@ fn main() -> Result<()> {
                     Arg::with_name("blob-dir")
                         .long("blob-dir")
                         .short("D")
-                        .help("Directory to store nydus image's metadata and data blob")
+                        .help("directory to store nydus image's metadata and data blob")
                         .takes_value(true)
                 )
                 .arg(
@@ -269,13 +269,6 @@ fn main() -> Result<()> {
                         .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
                         .takes_value(true)
                 )
-                .arg(
-                    Arg::with_name("chunk_dict")
-                        .long("chunk_dict")
-                        .help("specify a chunk dictionary file in bootstrap/db format for chunk deduplication.")
-                        .takes_value(true)
-                )
-
         )
         .subcommand(
             SubCommand::with_name("check")
@@ -318,7 +311,7 @@ fn main() -> Result<()> {
                     Arg::with_name("request")
                         .long("request")
                         .short("R")
-                        .help("Inspect nydus image's filesystem metadata in request mode")
+                        .help("inspect nydus image's filesystem metadata in request mode")
                         .required(false)
                         .takes_value(true),
                 )
@@ -330,7 +323,7 @@ fn main() -> Result<()> {
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .short("B")
-                        .help("Generate stats information for base image from the specified metadata blob")
+                        .help("generate stats information for base image from the specified metadata blob")
                         .required(false)
                         .takes_value(true),
                 )
@@ -346,7 +339,7 @@ fn main() -> Result<()> {
                     Arg::with_name("target")
                         .long("target")
                         .short("T")
-                        .help("Generate stats information for target image from the specified metadata blob, deduplicating all chunks existing in the base image")
+                        .help("generate stats information for target image from the specified metadata blob, deduplicating all chunks existing in the base image")
                         .required(false)
                         .takes_value(true),
                 )
