@@ -23,8 +23,18 @@ pub mod inode_bitmap;
 pub mod metrics;
 pub mod types;
 
+/// Round up and divide the value `n` by `d`.
 pub fn div_round_up(n: u64, d: u64) -> u64 {
+    debug_assert!(d != 0);
+    debug_assert!(d.is_power_of_two());
     (n + d - 1) / d
+}
+
+/// Round up the value `n` to by `d`.
+pub fn round_up(n: u64, d: u64) -> u64 {
+    debug_assert!(d != 0);
+    debug_assert!(d.is_power_of_two());
+    (n + d - 1) / d * d
 }
 
 /// Overflow can fail this rounder if the base value is large enough with 4095 added.

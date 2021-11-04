@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Error, Result};
 use nydus_utils::digest;
 use nydus_utils::div_round_up;
-use rafs::metadata::layout::v6::EROFS_BLKSIZE;
+use rafs::metadata::layout::v6::EROFS_BLOCK_SIZE;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWriter};
 use sha2::{Digest, Sha256};
@@ -480,7 +480,7 @@ impl BootstrapContext {
             lower_inode_map: HashMap::new(),
             upper_inode_map: HashMap::new(),
             nodes: Vec::new(),
-            offset: EROFS_BLKSIZE as u64,
+            offset: EROFS_BLOCK_SIZE,
         }
     }
 

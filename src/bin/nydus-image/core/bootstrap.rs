@@ -11,7 +11,7 @@ use nydus_utils::digest::{DigestHasher, RafsDigest};
 use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
-use rafs::metadata::layout::v6::{lookup_nid, RafsV6SuperBlock, EROFS_BLKSIZE, EROFS_SLOTSIZE};
+use rafs::metadata::layout::v6::{calculate_nid, RafsV6SuperBlock, EROFS_INODE_SLOT_SIZE};
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperFlags};
 use storage::device::BlobFeatures;
@@ -138,7 +138,7 @@ impl Bootstrap {
         parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree));
         tree.node.offset = parent.offset;
         // alignment for inode, which is 32 bytes;
-        bootstrap_ctx.align_offset(EROFS_SLOTSIZE as u64);
+        bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
 
         // Cache dir tree for BFS walk
         let mut dirs: Vec<&mut Tree> = Vec::new();
@@ -180,8 +180,7 @@ impl Bootstrap {
             // update bootstrap_ctx.offset for rafs v6.
             if child.node.is_reg() || child.node.is_symlink() {
                 child.node.set_v6_offset(bootstrap_ctx);
-                bootstrap_ctx.align_offset(EROFS_SLOTSIZE as u64);
-                // println!("ctx.offset {}", bootstrap_ctx.offset);
+                bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
             }
 
             // Store node for bootstrap & blob dump.
@@ -510,16 +509,16 @@ impl Bootstrap {
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
         let meta_addr = bootstrap_ctx.nodes[0].offset;
-        let root_nid = lookup_nid(bootstrap_ctx.nodes[0].offset, meta_addr);
+        let root_nid = calculate_nid(bootstrap_ctx.nodes[0].offset, meta_addr);
         // Dump superblock
         let mut sb = RafsV6SuperBlock::new();
-        sb.s_inos = u64::to_le(bootstrap_ctx.nodes.len() as u64);
+        sb.set_inos(bootstrap_ctx.nodes.len() as u64);
         // FIXME
-        sb.s_blocks = 0;
-        sb.s_root_nid = u16::to_le(root_nid as u16);
-        sb.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLKSIZE as u64) as u32);
+        sb.set_blocks(0);
+        sb.set_root_nid(root_nid as u16);
+        sb.set_meta_addr(meta_addr);
         // only support one extra device.
-        sb.s_extra_devices = u16::to_le(1);
+        sb.set_extra_devices(1);
 
         // bootstrap_ctx
         //     .f_bootstrap
