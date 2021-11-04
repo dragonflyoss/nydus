@@ -370,24 +370,16 @@ impl Node {
             } else {
                 chunk_size
             };
-
-            blob_ctx.decompress_offset += aligned_chunk_size as u64;
+            blob_ctx.compress_offset += compressed_size as u64;
             blob_ctx.decompressed_blob_size = blob_ctx.decompress_offset + chunk_size as u64;
-            if ctx.compressor == compress::Algorithm::None && ctx.aligned_chunk {
-                blob_ctx.compress_offset = blob_ctx.decompress_offset;
-            } else {
-                blob_ctx.compress_offset += compressed_size as u64;
-            };
-
             blob_ctx.compressed_blob_size += compressed_size as u64;
-
+            blob_ctx.decompress_offset += aligned_chunk_size as u64;
             blob_ctx.blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
             event_tracer!("blob_decompressed_size", +chunk_size);
             event_tracer!("blob_compressed_size", +compressed_size);
             if let Some(writer) = &mut blob_ctx.writer {
-                writer.seek(SeekFrom::Start(chunk.compressed_offset()))?;
                 writer
                     .write_all(&compressed)
                     .context("failed to write blob")?;
