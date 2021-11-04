@@ -219,7 +219,8 @@ pub trait BlobCache: Send + Sync {
                 || ((!self.is_stargz() && d_size as u64 > RAFS_MAX_CHUNK_SIZE)
                     || (self.is_stargz() && d_size > 4 << 20))
             {
-                return Err(eio!("chunks to read_chunks() is invalid"));
+                return Err(eio!(format!("chunks to read_chunks() is invalid, offset {} last {} blob_offset {} d_size {}",
+                                        offset, last, blob_offset, d_size)));
             }
 
             let offset_merged = (offset - blob_offset) as usize;
