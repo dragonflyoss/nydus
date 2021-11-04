@@ -483,6 +483,14 @@ impl Rafs {
             entry.attr.st_mtime = self.i_time as i64;
         }
 
+        // Only touch permissions bits. This trick is some sort of workaround
+        // since nydusify gives root directory permission of 0o750 and fuse mount
+        // options `rootmode=` does not affect root directory's permission bits, ending
+        // up with preventing other users from accessing the container rootfs.
+        if entry.inode == ROOT_ID {
+            entry.attr.st_mode = entry.attr.st_mode & !0o777 | 0o755;
+        }
+
         entry
     }
 }
