@@ -435,8 +435,27 @@ impl FileCacheEntry {
                 chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
             match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
-                Ok(_v) => {
+                Ok(v) => {
                     total_size += blob_size;
+                    trace!(
+                        "range persist chunk start {} {} pending {} {}",
+                        start,
+                        end,
+                        start_idx,
+                        end_idx
+                    );
+                    for idx in start_idx..=end_idx {
+                        let offset = if self.is_compressed {
+                            chunks[idx].compress_offset()
+                        } else {
+                            chunks[idx].uncompress_offset()
+                        };
+                        trace!("persist_chunk idx {}", idx);
+                        Self::persist_chunk(&self.file, offset, &v[idx - start_idx]).map_err(
+                            |e| eio!(format!("do_fetch_chunk failed to persist {:?}", e)),
+                        )?;
+                    }
+
                     bitmap
                         .set_range_ready_and_clear_pending(pending[start], (end - start) as u32)?;
                 }
