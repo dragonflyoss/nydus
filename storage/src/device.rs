@@ -87,6 +87,8 @@ pub struct BlobInfo {
     /// The blob is for an stargz image.
     stargz: bool,
 
+    /// V6: compressor that is used for compressing chunk info array.
+    meta_ci_compressor: u32,
     /// V6: Version number of the blob metadata.
     meta_flags: u32,
     /// V6: Offset of the chunk information array in the compressed blob.
@@ -123,6 +125,7 @@ impl BlobInfo {
             readahead_size: 0,
             validate_data: false,
             stargz: false,
+            meta_ci_compressor: 0,
             meta_flags: 0,
             meta_ci_offset: 0,
             meta_ci_compressed_size: 0,
@@ -269,11 +272,24 @@ impl BlobInfo {
         offset: u64,
         compressed_size: u64,
         uncompressed_size: u64,
+        compressor: u32,
     ) {
+        self.meta_ci_compressor = compressor;
         self.meta_flags = flags;
         self.meta_ci_offset = offset;
         self.meta_ci_compressed_size = compressed_size;
         self.meta_ci_uncompressed_size = uncompressed_size;
+    }
+
+    /// Get compression algorithm for chunk information array.
+    pub fn meta_ci_compressor(&self) -> compress::Algorithm {
+        if self.meta_ci_compressor == compress::Algorithm::Lz4Block as u32 {
+            compress::Algorithm::Lz4Block
+        } else if self.meta_ci_compressor == compress::Algorithm::GZip as u32 {
+            compress::Algorithm::GZip
+        } else {
+            compress::Algorithm::None
+        }
     }
 
     /// Get blob metadata flags.

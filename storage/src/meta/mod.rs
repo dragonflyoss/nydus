@@ -149,6 +149,10 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    pub fn meta_flags(&self) -> u32 {
+        self.s_features
+    }
+
     /// Convert the header as an `&[u8]`.
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
@@ -504,7 +508,7 @@ impl BlobMetaInfo {
             return Err(eio!("failed to read blob metadata from backend"));
         }
 
-        compress::decompress(&buf, None, buffer, blob_info.compressor()).map_err(|e| {
+        compress::decompress(&buf, None, buffer, blob_info.meta_ci_compressor()).map_err(|e| {
             error!("failed to decompress metadata: {}", e);
             e
         })?;
