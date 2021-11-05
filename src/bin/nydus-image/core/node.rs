@@ -305,7 +305,6 @@ impl Node {
                 chunk_size
             };
 
-            let chunk_index = blob_ctx.alloc_index()?;
             let mut chunk_data = &mut blob_ctx.chunk_data_buf[0..chunk_size as usize];
             file.read_exact(&mut chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
@@ -329,11 +328,6 @@ impl Node {
                 if cached_chunk.uncompressed_size() == 0
                     || cached_chunk.uncompressed_size() == chunk_size
                 {
-                    trace!(
-                        "\t\tbuilding duplicated chunk: {} compressor {}",
-                        chunk,
-                        ctx.compressor
-                    );
                     // The chunks of hardlink should be always deduplicated.
                     if !self.is_hardlink() {
                         event_tracer!("dedup_decompressed_size", +chunk_size);
@@ -342,6 +336,12 @@ impl Node {
 
                     chunk.copy_from(cached_chunk);
                     chunk.set_file_offset(file_offset);
+                    trace!(
+                        "\t\tbuilding duplicated chunk: {} compressor {}",
+                        chunk,
+                        ctx.compressor
+                    );
+
                     self.chunks.push(chunk);
                     continue;
                 }
@@ -352,17 +352,6 @@ impl Node {
                 .with_context(|| format!("failed to compress node file {:?}", self.path))?;
             let compressed_size = compressed.len();
 
-            chunk.set_chunk_info(
-                blob_index,
-                chunk_index,
-                file_offset,
-                blob_ctx.decompress_offset,
-                blob_ctx.compress_offset,
-                compressed_size,
-                chunk_size,
-                is_compressed,
-            )?;
-
             // Move cursor to offset of next chunk
             let aligned_chunk_size = if ctx.aligned_chunk {
                 // Safe to unwrap because `chunk_size` is much less than u32::MAX.
@@ -370,6 +359,10 @@ impl Node {
             } else {
                 chunk_size
             };
+
+            let pre_decompress_offset = blob_ctx.decompress_offset;
+            let pre_compress_offset = blob_ctx.compress_offset;
+
             blob_ctx.compress_offset += compressed_size as u64;
             blob_ctx.decompressed_blob_size = blob_ctx.decompress_offset + chunk_size as u64;
             blob_ctx.compressed_blob_size += compressed_size as u64;
@@ -385,11 +378,23 @@ impl Node {
                     .context("failed to write blob")?;
             }
 
+            let chunk_index = blob_ctx.alloc_index()?;
+            chunk.set_chunk_info(
+                blob_index,
+                chunk_index,
+                file_offset,
+                pre_decompress_offset,
+                pre_compress_offset,
+                compressed_size,
+                chunk_size,
+                is_compressed,
+            )?;
             trace!(
                 "\t\tbuilding chunk: {} compressor {}",
                 chunk,
                 ctx.compressor,
             );
+
             blob_ctx.add_chunk_meta_info(&chunk)?;
             chunk_dict.add_chunk(chunk.clone());
             self.chunks.push(chunk);
