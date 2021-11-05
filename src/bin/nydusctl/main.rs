@@ -9,6 +9,8 @@ extern crate clap;
 extern crate anyhow;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate serde_json;
 
 use std::collections::HashMap;
 
@@ -18,11 +20,13 @@ use clap::{App, Arg, SubCommand};
 mod client;
 mod commands;
 
-use commands::{CommandBackend, CommandBlobcache, CommandDaemon, CommandFsStats};
+use commands::{
+    CommandBackend, CommandBlobcache, CommandDaemon, CommandFsStats, CommandMount, CommandUmount,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cmd = App::new("A client to query and configure nydusd")
+    let app = App::new("A client to query and configure nydusd")
         .version(crate_version!())
         .author(crate_authors!())
         .arg(
@@ -86,8 +90,52 @@ async fn main() -> Result<()> {
                         .required(false)
                         .takes_value(true),
                 ),
+        );
+
+    let app = app
+        .subcommand(
+            SubCommand::with_name("mount")
+                .about("Attach a file system backend")
+                .arg(
+                    Arg::with_name("source")
+                        .help("From what to attach the file system backend")
+                        .long("source")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("config")
+                        .help("File system backend configuration file")
+                        .long("config")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("mountpoint")
+                        .long("mountpoint")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("type")
+                        .possible_values(&["rafs", "passthrough_fs"])
+                        .long("type")
+                        .required(true)
+                        .takes_value(true),
+                ),
         )
-        .get_matches();
+        .subcommand(
+            SubCommand::with_name("umount")
+                .about("Detach a file system backend")
+                .arg(
+                    Arg::with_name("mountpoint")
+                        .required(true)
+                        .takes_value(true)
+                        .index(1),
+                ),
+        );
+
+    let cmd = app.get_matches();
 
     // Safe to unwrap because it is required by Clap
     let sock = cmd.value_of("sock").unwrap();
@@ -113,7 +161,6 @@ async fn main() -> Result<()> {
     if let Some(matches) = cmd.subcommand_matches("metrics") {
         // Safe to unwrap as it is required by clap
         let category = matches.value_of("category").unwrap();
-
         let mut context = HashMap::new();
 
         matches
@@ -135,6 +182,44 @@ async fn main() -> Result<()> {
             }
             _ => println!("Illegal category"),
         }
+    }
+
+    if let Some(matches) = cmd.subcommand_matches("mount") {
+        // Safe to unwrap as it is required by clap
+        let mut context = HashMap::new();
+
+        context.insert(
+            "source".to_string(),
+            matches.value_of("source").unwrap().to_string(),
+        );
+        context.insert(
+            "mountpoint".to_string(),
+            matches.value_of("mountpoint").unwrap().to_string(),
+        );
+        context.insert(
+            "config".to_string(),
+            matches.value_of("config").unwrap().to_string(),
+        );
+        context.insert(
+            "type".to_string(),
+            matches.value_of("type").unwrap().to_string(),
+        );
+
+        let cmd = CommandMount {};
+        cmd.execute(raw, &client, Some(context)).await?
+    }
+
+    if let Some(matches) = cmd.subcommand_matches("umount") {
+        // Safe to unwrap as it is required by clap
+        let mut context = HashMap::new();
+
+        context.insert(
+            "mountpoint".to_string(),
+            matches.value_of("mountpoint").unwrap().to_string(),
+        );
+
+        let cmd = CommandUmount {};
+        cmd.execute(raw, &client, Some(context)).await?
     }
 
     Ok(())

@@ -356,3 +356,41 @@ Prefetch Merging Size:  {merging_size}
         Ok(())
     }
 }
+
+pub(crate) struct CommandMount {}
+
+impl CommandMount {
+    pub async fn execute(
+        &self,
+        _raw: bool,
+        client: &NydusdClient,
+        params: Option<CommandParams>,
+    ) -> Result<()> {
+        let p = params.unwrap();
+        let (source, mountpoint, fs_type) = (&p["source"], &p["mountpoint"], &p["type"]);
+        let config = std::fs::read_to_string(&p["config"]).unwrap();
+        let cmd = json!({"source": source, "fs_type": fs_type, "config": config}).to_string();
+
+        client
+            .post("mount", Some(cmd), Some(vec![("mountpoint", mountpoint)]))
+            .await
+    }
+}
+
+pub(crate) struct CommandUmount {}
+
+impl CommandUmount {
+    pub async fn execute(
+        &self,
+        _raw: bool,
+        client: &NydusdClient,
+        params: Option<CommandParams>,
+    ) -> Result<()> {
+        let p = params.unwrap();
+        let mountpoint = &p["mountpoint"];
+
+        client
+            .delete("mount", None, Some(vec![("mountpoint", &mountpoint)]))
+            .await
+    }
+}
