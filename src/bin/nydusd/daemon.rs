@@ -22,33 +22,35 @@ use std::sync::{
 use std::thread;
 use std::{error, fmt, io};
 
+use chrono::{self, DateTime, Local};
 use event_manager::{EventOps, EventSubscriber, Events};
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use fuse_backend_rs::transport::Error as FuseTransportError;
 use fuse_backend_rs::Error as FuseError;
-
-use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
-
-use rust_fsm::*;
-use serde::{self, Deserialize, Serialize};
-use serde_json::Error as SerdeError;
-
 use nydus::FsBackendType;
 use nydus_app::BuildTimeInfo;
 use rafs::{
     fs::{Rafs, RafsConfig},
     trim_backend_config, RafsError, RafsIoRead,
 };
+use rust_fsm::*;
+use serde::{self, Deserialize, Serialize};
+use serde_json::Error as SerdeError;
+use serde_with::{serde_as, DisplayFromStr};
+use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
 use crate::EVENT_MANAGER_RUN;
 use nydus::FsBackendDesc;
 
+<<<<<<< HEAD
 //TODO: Try to public below type from fuse-rs thus no need to redefine it here.
 type BackFileSystem = Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>;
 
 #[allow(dead_code)]
+=======
+>>>>>>> nydusd: add more tests for daemon
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Hash, PartialEq, Eq, Serialize)]
 pub enum DaemonState {
@@ -79,13 +81,6 @@ impl From<i32> for DaemonState {
     }
 }
 
-impl From<RafsError> for DaemonError {
-    fn from(error: RafsError) -> Self {
-        DaemonError::Rafs(error)
-    }
-}
-
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum DaemonError {
     /// Invalid arguments provided.
@@ -166,6 +161,12 @@ impl From<VfsError> for DaemonError {
     }
 }
 
+impl From<RafsError> for DaemonError {
+    fn from(error: RafsError) -> Self {
+        DaemonError::Rafs(error)
+    }
+}
+
 pub type DaemonResult<T> = std::result::Result<T, DaemonError>;
 
 /// Used to export daemon working state
@@ -198,20 +199,23 @@ pub struct FsBackendCollection(HashMap<String, FsBackendDesc>);
 impl FsBackendCollection {
     fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> DaemonResult<()> {
         // We only wash Rafs backend now.
-        let fs_config = if cmd.fs_type == FsBackendType::Rafs {
-            let mut config: serde_json::Value =
-                serde_json::from_str(&cmd.config).map_err(DaemonError::Serde)?;
-            trim_backend_config!(
-                config,
-                "access_key_id",
-                "access_key_secret",
-                "auth",
-                "token"
-            );
-            config
-        } else {
-            // Passthrough Fs has no config ever input.
-            serde_json::Value::Null
+        let fs_config = match cmd.fs_type {
+            FsBackendType::Rafs => {
+                let mut config: serde_json::Value =
+                    serde_json::from_str(&cmd.config).map_err(DaemonError::Serde)?;
+                trim_backend_config!(
+                    config,
+                    "access_key_id",
+                    "access_key_secret",
+                    "auth",
+                    "token"
+                );
+                config
+            }
+            FsBackendType::PassthroughFs => {
+                // Passthrough Fs has no config ever input.
+                serde_json::Value::Null
+            }
         };
 
         let desc = FsBackendDesc {
@@ -352,6 +356,8 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
     }
 }
 
+/// Validate prefetch file list command line parameter.
+///
 /// A string including multiple directories and regular files should be separated by white-spaces, e.g.
 ///      <path1> <path2> <path3>
 /// And each path should be relative to rafs root, e.g.
@@ -372,8 +378,10 @@ fn input_prefetch_files_verify(input: &Option<Vec<String>>) -> DaemonResult<Opti
 
     Ok(prefetch_files)
 }
+
 fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
     let prefetch_files = input_prefetch_files_verify(&cmd.prefetch_files)?;
+
     match cmd.fs_type {
         FsBackendType::Rafs => {
             let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
@@ -457,32 +465,22 @@ impl EventSubscriber for NydusDaemonSubscriber {
     }
 }
 
-pub type Trigger = Sender<DaemonStateMachineInput>;
-
-//FIXME: This does not precisely describe how state machine work anymore.
-/// Nydus daemon workflow is controlled by this state-machine.
-/// `Init` means nydusd is just started and potentially configured well but not
-/// yet negotiate with kernel the capabilities of both sides. It even does not try
-/// to set up fuse session by mounting `/fuse/dev`(in case of `fusedev` backend).
-/// `Running` means nydusd has successfully prepared all the stuff needed to work as a
-/// user-space fuse filesystem, however, the essential capabilities negotiation might not be
-/// done yet. It relies on `fuse-rs` to tell if capability negotiation is done.
-/// Nydusd can as well transit to `Upgrade` state from `Running` when getting started, which
-/// only happens during live upgrade progress. Then we don't have to do kernel mount again
-/// to set up a session but try to reuse a fuse fd from somewhere else. In this state, we
-/// try to push `Successful` event to state machine to trigger state transition.
-/// `Interrupt` state means nydusd has shutdown fuse server, which means no more message will
-/// be read from kernel and handled and no pending and in-flight fuse message exists. But the
-/// nydusd daemon should be alive and wait for coming events.
-/// `Die` state means the whole nydusd process is going to die.
-pub struct DaemonStateMachineContext {
-    sm: StateMachine<DaemonStateMachine>,
-    daemon: Arc<dyn NydusDaemon + Send + Sync>,
-    event_collector: Receiver<DaemonStateMachineInput>,
-    result_sender: Sender<DaemonResult<()>>,
-    pid: u32,
-}
-
+// State machine for Nydus daemon workflow.
+//
+// Valid states:
+// - `Init` means nydusd is just started and potentially configured well but not
+//    yet negotiate with kernel the capabilities of both sides. It even does not try
+//    to set up fuse session by mounting `/fuse/dev`(in case of `fusedev` backend).
+// - `Running` means nydusd has successfully prepared all the stuff needed to work as a
+//   user-space fuse filesystem, however, the essential capabilities negotiation might not be
+//   done yet. It relies on `fuse-rs` to tell if capability negotiation is done.
+// - `Upgrading` state means the nydus daemon is being live-upgraded. There's no need
+//   to do kernel mount again to set up a session but try to reuse a fuse fd from somewhere else.
+//   In this state, we try to push `Successful` event to state machine to trigger state transition.
+// - `Interrupt` state means nydusd has shutdown fuse server, which means no more message will
+//    be read from kernel and handled and no pending and in-flight fuse message exists. But the
+//    nydusd daemon should be alive and wait for coming events.
+// - `Die` state means the whole nydusd process is going to die.
 state_machine! {
     derive(Debug, Clone)
     pub DaemonStateMachine(Init)
@@ -503,8 +501,12 @@ state_machine! {
     Interrupted(Stop) => Die,
 }
 
-pub trait DaemonStateMachineSubscriber {
-    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()>;
+pub struct DaemonStateMachineContext {
+    sm: StateMachine<DaemonStateMachine>,
+    daemon: Arc<dyn NydusDaemon + Send + Sync>,
+    event_collector: Receiver<DaemonStateMachineInput>,
+    result_sender: Sender<DaemonResult<()>>,
+    pid: u32,
 }
 
 impl DaemonStateMachineContext {
@@ -598,19 +600,40 @@ impl DaemonStateMachineContext {
     }
 }
 
+pub trait DaemonStateMachineSubscriber {
+    /// Event handler for state transition events.
+    ///
+    /// It should be invoked in single-thread context.
+    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()>;
+}
+
+pub type Trigger = Sender<DaemonStateMachineInput>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn it_should_convert_int_to_daemonstate() {
         let stat = DaemonState::from(1);
         assert_eq!(stat, DaemonState::INIT);
+
+        let stat = DaemonState::from(6);
+        assert_eq!(stat, DaemonState::UNKNOWN);
+
+        let stat = DaemonState::from(7);
+        assert_eq!(stat, DaemonState::UNKNOWN);
     }
 
     #[test]
     fn it_should_convert_str_to_fsbackendtype() {
         let backend_type: FsBackendType = "rafs".parse().unwrap();
         assert!(backend_type == FsBackendType::Rafs);
+
+        let backend_type: FsBackendType = "passthrough_fs".parse().unwrap();
+        assert!(backend_type == FsBackendType::PassthroughFs);
+
+        "xxxxxxxxxxxxx".parse::<FsBackendType>().unwrap_err();
     }
 
     #[test]
