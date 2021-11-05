@@ -89,8 +89,8 @@ pub type HttpResult = std::result::Result<Response, HttpError>;
 pub enum ApiRequest {
     DaemonInfo,
     Events,
-    Mount((String, ApiMountCmd)),
-    Remount((String, ApiMountCmd)),
+    Mount(String, ApiMountCmd),
+    Remount(String, ApiMountCmd),
     Umount(String),
     ConfigureDaemon(DaemonConf),
     ExportGlobalMetrics(Option<String>),
@@ -285,12 +285,12 @@ impl EndpointHandler for MountHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Post, Some(body)) => {
                 let cmd = parse_body(body)?;
-                let r = kicker(ApiRequest::Mount((mountpoint, cmd)));
+                let r = kicker(ApiRequest::Mount(mountpoint, cmd));
                 Ok(convert_to_response(r, HttpError::Mount))
             }
             (Method::Put, Some(body)) => {
                 let cmd = parse_body(body)?;
-                let r = kicker(ApiRequest::Remount((mountpoint, cmd)));
+                let r = kicker(ApiRequest::Remount(mountpoint, cmd));
                 Ok(convert_to_response(r, HttpError::Mount))
             }
             (Method::Delete, None) => {
