@@ -90,6 +90,14 @@ impl FileCacheEntry {
         let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap && !is_stargz;
 
         let meta = if is_get_blob_object_supported && blob_info.meta_ci_is_valid() {
+            // Set cache file to its expected size.
+            let file_size = file.metadata()?.len();
+            if file_size == 0 {
+                file.set_len(blob_info.uncompressed_size())?;
+            } else {
+                assert_eq!(file_size, blob_info.uncompressed_size());
+            }
+
             Some(Arc::new(BlobMetaInfo::new(
                 &blob_file_path,
                 &blob_info,
