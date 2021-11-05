@@ -24,11 +24,6 @@ use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDae
 use crate::fusedev::FusedevDaemon;
 use nydus::{FsBackendType, NydusError};
 
-pub struct ApiServer {
-    to_http: Sender<ApiResponse>,
-    daemon: Arc<dyn NydusDaemon>,
-}
-
 type Result<T> = ApiResult<T>;
 
 impl From<DaemonError> for DaemonErrorKind {
@@ -54,6 +49,11 @@ impl From<NydusError> for DaemonError {
     }
 }
 
+pub struct ApiServer {
+    to_http: Sender<ApiResponse>,
+    daemon: Arc<dyn NydusDaemon>,
+}
+
 impl ApiServer {
     pub fn new(
         to_http: Sender<ApiResponse>,
@@ -69,11 +69,15 @@ impl ApiServer {
 
         let resp = match request {
             ApiRequest::DaemonInfo => self.daemon_info(),
-            ApiRequest::Events => Self::events(),
-            ApiRequest::Mount(mountpoint, info) => self.do_mount(mountpoint, info),
-            ApiRequest::Remount(mountpoint, info) => self.do_remount(mountpoint, info),
-            ApiRequest::Umount(mountpoint) => self.do_umount(mountpoint),
+            ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
             ApiRequest::ConfigureDaemon(conf) => self.configure_daemon(conf),
+            ApiRequest::Exit => self.do_exit(),
+
+            ApiRequest::Mount((mountpoint, info)) => self.do_mount(mountpoint, info),
+            ApiRequest::Remount((mountpoint, info)) => self.do_remount(mountpoint, info),
+            ApiRequest::Umount(mountpoint) => self.do_umount(mountpoint),
+
+            ApiRequest::Events => Self::events(),
             ApiRequest::ExportGlobalMetrics(id) => Self::export_global_metrics(id),
             ApiRequest::ExportFilesMetrics(id, latest_read_files) => {
                 Self::export_files_metrics(id, latest_read_files)
@@ -82,10 +86,9 @@ impl ApiServer {
             ApiRequest::ExportBackendMetrics(id) => Self::export_backend_metrics(id),
             ApiRequest::ExportBlobcacheMetrics(id) => Self::export_blobcache_metrics(id),
             ApiRequest::ExportInflightMetrics => self.export_inflight_metrics(),
-            ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
+
             ApiRequest::SendFuseFd => self.send_fuse_fd(),
             ApiRequest::Takeover => self.do_takeover(),
-            ApiRequest::Exit => self.do_exit(),
         };
 
         self.respond(resp);
@@ -107,11 +110,6 @@ impl ApiServer {
         Ok(ApiResponsePayload::DaemonInfo(info))
     }
 
-    fn events() -> ApiResponse {
-        let events = metrics::export_events().map_err(|e| ApiError::Events(format!("{:?}", e)))?;
-        Ok(ApiResponsePayload::Events(events))
-    }
-
     fn backend_info(&self, mountpoint: &str) -> ApiResponse {
         let d = self.daemon.as_ref();
         let info = d
@@ -131,6 +129,11 @@ impl ApiServer {
                 log::set_max_level(v);
                 ApiResponsePayload::Empty
             })
+    }
+
+    fn events() -> ApiResponse {
+        let events = metrics::export_events().map_err(|e| ApiError::Events(format!("{:?}", e)))?;
+        Ok(ApiResponsePayload::Events(events))
     }
 
     fn export_global_metrics(id: Option<String>) -> ApiResponse {
@@ -203,27 +206,6 @@ impl ApiServer {
         }
     }
 
-    fn send_fuse_fd(&self) -> ApiResponse {
-        let d = self.daemon.as_ref();
-
-        d.save()
-            .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
-    }
-
-    /// External supervisor wants this instance to fetch `/dev/fuse` fd. Before
-    /// invoking this method, supervisor should already listens on a Unix socket and
-    /// waits for connection from this instance. Then supervisor should send the *fd*
-    /// back. Note, the http response does not mean this process already finishes Takeover
-    /// procedure. Supervisor has to continuously query the state of Nydusd until it gets
-    /// to *RUNNING*, which means new Nydusd has successfully served as a fuse server.
-    fn do_takeover(&self) -> ApiResponse {
-        let d = self.daemon.as_ref();
-        d.trigger_takeover()
-            .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
-    }
-
     /// External supervisor wants this instance to exit. But it can't just die leave
     /// some pending or in-flight fuse messages un-handled. So this method guarantees
     /// all fuse messages read from kernel are handled and replies are sent back.
@@ -280,6 +262,27 @@ impl ApiServer {
             .umount(FsBackendUmountCmd { mountpoint })
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::MountFailure(e.into()))
+    }
+
+    fn send_fuse_fd(&self) -> ApiResponse {
+        let d = self.daemon.as_ref();
+
+        d.save()
+            .map(|_| ApiResponsePayload::Empty)
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
+    }
+
+    /// External supervisor wants this instance to fetch `/dev/fuse` fd. Before
+    /// invoking this method, supervisor should already listens on a Unix socket and
+    /// waits for connection from this instance. Then supervisor should send the *fd*
+    /// back. Note, the http response does not mean this process already finishes Takeover
+    /// procedure. Supervisor has to continuously query the state of Nydusd until it gets
+    /// to *RUNNING*, which means new Nydusd has successfully served as a fuse server.
+    fn do_takeover(&self) -> ApiResponse {
+        let d = self.daemon.as_ref();
+        d.trigger_takeover()
+            .map(|_| ApiResponsePayload::Empty)
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
     }
 }
 
