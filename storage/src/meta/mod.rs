@@ -508,7 +508,7 @@ impl BlobMetaInfo {
 
         let size = reader
             .read(&mut buf, blob_info.meta_ci_offset())
-            .map_err(|_e| eio!("failed to read metadata from backend"))?;
+            .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
         if size as u64 != compressed_size {
             return Err(eio!("failed to read blob metadata from backend"));
         }
