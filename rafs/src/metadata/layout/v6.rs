@@ -56,6 +56,8 @@ const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 /// Multi-devices, incompatible with EROFS versions prior to Linux kernel 5.16.
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 
+pub const BLOB_SHA256_LEN: usize = 64;
+
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
 /// The structure is designed to be compatible with EROFS superblock, so the in kernel EROFS file
@@ -830,6 +832,10 @@ impl RafsV6BlobTable {
         }
     }
 
+    fn field_size(&self) -> usize {
+        2 * size_of::<u32>() + 3 * size_of::<u64>() + size_of::<u32>() + 2 * size_of::<u64>()
+    }
+
     /// Get blob table size, aligned with RAFS_ALIGNMENT bytes
     pub fn size(&self) -> usize {
         if self.entries.is_empty() {
@@ -839,8 +845,7 @@ impl RafsV6BlobTable {
         rafsv5_align(
             self.entries.iter().fold(0usize, |size, entry| {
                 // meta_ci info + blob id.
-                let entry_size =
-                    size_of::<u32>() * 2 + size_of::<u64>() * 3 + entry.blob_id().len();
+                let entry_size = self.field_size() + entry.blob_id().len();
                 size + entry_size + 1
             }) - 1,
         )
@@ -918,9 +923,7 @@ impl RafsV6BlobTable {
         // Each entry frame looks like:
         // u32 * 2 | u64 * 3 | u32 | u64 * 2 | string | trailing '\0' , except that the last entry has no trailing '\0'
         let mut buf = data.as_mut_slice();
-        let field_size =
-            2 * size_of::<u32>() + 3 * size_of::<u64>() + size_of::<u32>() + 2 * size_of::<u64>();
-        while buf.len() > field_size {
+        while buf.len() > self.field_size() {
             let ci_compressor =
                 unsafe { std::ptr::read_unaligned::<u32>(buf[0..4].as_ptr() as *const u32) };
             let ci_features =
@@ -952,6 +955,9 @@ impl RafsV6BlobTable {
                 buf = &mut buf[pos + 1..];
             }
             debug!("blob {:?} lies on", blob_id);
+            if blob_id.len() != BLOB_SHA256_LEN {
+                return Err(einval!(format!("invalid blob id len {}", blob_id.len())));
+            }
 
             let index = self.entries.len();
             let mut blob_info = BlobInfo::new(
@@ -1005,15 +1011,11 @@ impl RafsStore for RafsV6BlobTable {
                 w.write_all(&u64::to_le_bytes(entry.compressed_size() as u64))?;
                 w.write_all(entry.blob_id().as_bytes())?;
 
-                let field_size = 2 * size_of::<u32>()
-                    + 3 * size_of::<u64>()
-                    + size_of::<u32>()
-                    + 2 * size_of::<u64>();
                 if idx != self.entries.len() - 1 {
-                    size += field_size + entry.blob_id().len() + 1;
+                    size += self.field_size() + entry.blob_id().len() + 1;
                     w.write_all(&[b'\0'])?;
                 } else {
-                    size += field_size + entry.blob_id().len();
+                    size += self.field_size() + entry.blob_id().len();
                 }
                 Ok(())
             })?;
