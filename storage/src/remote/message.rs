@@ -233,24 +233,31 @@ impl MsgValidator for MsgHeader {
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub(crate) struct GetBlobRequest {
+    pub generation: u32,
     pub id: [u8; 256],
 }
 
 impl Default for GetBlobRequest {
     fn default() -> Self {
-        Self { id: [0u8; 256] }
+        Self {
+            generation: 0,
+            id: [0u8; 256],
+        }
     }
 }
 
 impl GetBlobRequest {
     /// Create a new instance.
-    pub fn new(id: &str) -> Self {
+    pub fn new(generation: u32, id: &str) -> Self {
         debug_assert!(id.len() < 256);
         let mut buf = [0x0u8; 256];
 
         buf.copy_from_slice(id.as_bytes());
 
-        GetBlobRequest { id: buf }
+        GetBlobRequest {
+            generation,
+            id: buf,
+        }
     }
 }
 
@@ -310,6 +317,13 @@ impl FetchRangeRequest {
 unsafe impl ByteValued for FetchRangeRequest {}
 
 impl MsgValidator for FetchRangeRequest {}
+
+#[repr(u32)]
+pub enum FetchRangeResult {
+    Success = 0,
+    Failure = 1,
+    GenerationMismatch = 2,
+}
 
 #[repr(C, packed)]
 #[derive(Copy, Clone, Default)]
