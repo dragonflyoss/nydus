@@ -1113,21 +1113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nydus-app"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91166e11340319bb872baba7546649218eb2454db54cb9c1b9f9ec922c66e390"
-dependencies = [
- "built",
- "flexi_logger",
- "libc",
- "log",
- "nix",
- "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
 name = "nydus-error"
 version = "0.1.0"
 dependencies = [
@@ -1173,7 +1158,7 @@ dependencies = [
  "log",
  "nix",
  "nydus-api",
- "nydus-app 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nydus-app",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "openssl",

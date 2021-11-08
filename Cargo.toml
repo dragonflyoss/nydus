@@ -49,7 +49,7 @@ tokio = { version = "1.9.0", features = ["macros"] }
 hyper = "0.14.11"
 
 nydus-api = { path = "api" }
-nydus-app = "0.1"
+nydus-app = { path = "app" }
 nydus-error = "0.1"
 nydus-utils = { path = "utils" }
 rafs = { path = "rafs", features = ["backend-registry", "backend-oss"] }
