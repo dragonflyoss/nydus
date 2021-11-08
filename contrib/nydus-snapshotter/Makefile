@@ -25,6 +25,9 @@ clear:
 vet:
 	go vet $(PACKAGES)
 
+check: vet
+	golangci-lint run
+
 .PHONY: test
 test: vet
 	go test -v -mod=mod -cover ${PACKAGES}
