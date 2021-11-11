@@ -14,8 +14,8 @@ use std::thread;
 
 use libc::EFD_NONBLOCK;
 
-use fuse_rs::api::{server::Server, Vfs};
-use fuse_rs::transport::{FsCacheReqHandler, Reader, Writer};
+use fuse_backend_rs::api::{server::Server, Vfs};
+use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, Writer};
 
 use vhost_rs::vhost_user::{message::*, Listener, SlaveFsCacheReq};
 use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring};

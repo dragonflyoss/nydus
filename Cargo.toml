@@ -41,7 +41,7 @@ chrono = "0.4.19"
 openssl = { version = "0.10.35", features = ["vendored"] }
 
 event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "v0.2.0" }
-fuse-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca" }
+fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca", package = "fuse-rs" }
 vhost-rs = { git = "https://github.com/cloud-hypervisor/vhost.git", branch = "dragonball", package = "vhost", optional = true }
 vhost-user-backend = { git = "https://github.com/cloud-hypervisor/vhost-user-backend.git", package = "vhost_user_backend", rev = "78757bfa", optional = true }
 hyperlocal = "0.8.0"
@@ -61,8 +61,8 @@ vmm-sys-util = "0.6.0"
 env_logger = "0.8.2"
 
 [features]
-fusedev = ["nydus-utils/fusedev", "fuse-rs/fusedev"]
-virtiofs = ["fuse-rs/vhost-user-fs", "vm-memory/backend-mmap", "vhost-rs/vhost-user-slave", "vhost-user-backend"]
+fusedev = ["nydus-utils/fusedev", "fuse-backend-rs/fusedev"]
+virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory/backend-mmap", "vhost-rs/vhost-user-slave", "vhost-user-backend"]
 
 [workspace]
 members = ["api", "app", "error", "rafs", "storage", "utils"]

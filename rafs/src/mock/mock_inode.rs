@@ -9,8 +9,8 @@ use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use fuse_rs::abi::linux_abi;
-use fuse_rs::api::filesystem::Entry;
+use fuse_backend_rs::abi::linux_abi;
+use fuse_backend_rs::api::filesystem::Entry;
 
 use storage::device::RafsBioDesc;
 

@@ -20,9 +20,9 @@ use std::time::{Duration, SystemTime};
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
-use fuse_rs::abi::linux_abi::Attr;
-use fuse_rs::api::filesystem::*;
-use fuse_rs::api::BackendFileSystem;
+use fuse_backend_rs::abi::linux_abi::Attr;
+use fuse_backend_rs::api::filesystem::*;
+use fuse_backend_rs::api::BackendFileSystem;
 
 use crate::metadata::{
     layout::RAFS_ROOT_INODE, Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE,

@@ -23,11 +23,11 @@ use std::thread;
 use std::{error, fmt, io};
 
 use event_manager::{EventOps, EventSubscriber, Events};
-use fuse_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
-use fuse_rs::passthrough::{Config, PassthroughFs};
+use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
+use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 #[cfg(feature = "virtiofs")]
-use fuse_rs::transport::Error as FuseTransportError;
-use fuse_rs::Error as VhostUserFsError;
+use fuse_backend_rs::transport::Error as FuseTransportError;
+use fuse_backend_rs::Error as VhostUserFsError;
 
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 

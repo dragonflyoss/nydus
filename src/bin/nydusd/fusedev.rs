@@ -23,12 +23,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nix::sys::stat::{major, minor};
 use serde::Serialize;
 
-use fuse_rs::api::{
+use fuse_backend_rs::api::{
     server::{MetricsHook, Server},
     Vfs,
 };
 
-use fuse_rs::abi::linux_abi::{InHeader, OutHeader};
+use fuse_backend_rs::abi::linux_abi::{InHeader, OutHeader};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
@@ -100,7 +100,7 @@ impl FuseServer {
                     .handle_message(reader, writer, None, Some(metrics_hook))
                 {
                     match e {
-                        fuse_rs::Error::EncodeMessage(_ebadf) => {
+                        fuse_backend_rs::Error::EncodeMessage(_ebadf) => {
                             return Err(eio!("fuse session has been shut down"));
                         }
                         _ => {

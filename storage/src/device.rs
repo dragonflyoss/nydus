@@ -9,8 +9,8 @@ use std::io;
 use std::io::Error;
 use std::sync::Arc;
 
-use fuse_rs::api::filesystem::{ZeroCopyReader, ZeroCopyWriter};
-use fuse_rs::transport::FileReadWriteVolatile;
+use fuse_backend_rs::api::filesystem::{ZeroCopyReader, ZeroCopyWriter};
+use fuse_backend_rs::transport::FileReadWriteVolatile;
 use vm_memory::{Bytes, VolatileSlice};
 
 use crate::cache::RafsCache;
