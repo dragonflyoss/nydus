@@ -159,10 +159,23 @@ func New(opt Opt) (*Converter, error) {
 	}, nil
 }
 
-func (cvt *Converter) convert(ctx context.Context) error {
+func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 	logger = cvt.Logger
 
 	logrus.Infof("Converting to %s", cvt.TargetRemote.Ref)
+
+	repo, err := imageRepository(cvt.Source)
+	if err != nil {
+		logrus.Warnf("parse image reference %v", err)
+	}
+
+	defer func() {
+		if retErr != nil {
+			if repo != "" {
+				metrics.ConversionFailureCount(repo, "unknown")
+			}
+		}
+	}()
 
 	// Try to pull Nydus cache image from remote registry
 	cg, err := newCacheGlue(
@@ -341,14 +354,8 @@ func (cvt *Converter) convert(ctx context.Context) error {
 	}
 	pushDone(nil)
 
-	repo, err := imageRepository(cvt.Source)
-	if err != nil {
-		logrus.Warnf("parse image reference %v", err)
-	}
-
 	if repo != "" {
 		metrics.ConversionDuration(repo, len(sourceLayers), start)
-		metrics.ConversionCount(repo)
 	}
 
 	start = time.Now()
@@ -359,6 +366,7 @@ func (cvt *Converter) convert(ctx context.Context) error {
 
 	if repo != "" {
 		metrics.StoreCacheDuration(repo, start)
+		metrics.ConversionSuccessCount(repo)
 	}
 
 	logrus.Infof("Converted to %s", cvt.TargetRemote.Ref)

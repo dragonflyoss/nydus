@@ -17,11 +17,12 @@ type Exporter interface {
 }
 
 const (
-	convertDurationKey    = "convert_duration_key"
-	convertCountKey       = "convert_count_key"
-	storeCacheDurationKey = "store_cache_duration"
-	namespace             = "nydusify"
-	subsystem             = "convert"
+	convertDurationKey     = "convert_duration_key"
+	convertSuccessCountKey = "convert_success_count_key"
+	convertFailureCountKey = "convert_failure_count_key"
+	storeCacheDurationKey  = "store_cache_duration"
+	namespace              = "nydusify"
+	subsystem              = "convert"
 )
 
 var (
@@ -35,14 +36,24 @@ var (
 		[]string{"source_reference", "layers_count"},
 	)
 
-	convertCount = prometheus.NewCounterVec(
+	convertSuccessCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
-			Name:      convertCountKey,
-			Help:      "The total converting times. Broken down by source references.",
+			Name:      convertSuccessCountKey,
+			Help:      "The total converting success times. Broken down by source references.",
 		},
 		[]string{"source_reference"},
+	)
+
+	convertFailureCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      convertFailureCountKey,
+			Help:      "The total converting failure times. Broken down by source references.",
+		},
+		[]string{"source_reference", "reason"},
 	)
 
 	storeCacheDuration = prometheus.NewCounterVec(
@@ -68,7 +79,7 @@ func sinceInSeconds(start time.Time) float64 {
 func Register(exp Exporter) {
 	register.Do(func() {
 		Registry = prometheus.NewRegistry()
-		Registry.MustRegister(convertDuration, convertCount, storeCacheDuration)
+		Registry.MustRegister(convertDuration, convertSuccessCount, convertFailureCount, storeCacheDuration)
 		exporter = exp
 	})
 }
@@ -84,8 +95,12 @@ func ConversionDuration(ref string, layers int, start time.Time) {
 	convertDuration.WithLabelValues(ref, strconv.Itoa(layers)).Add(sinceInSeconds(start))
 }
 
-func ConversionCount(ref string) {
-	convertCount.WithLabelValues(ref).Inc()
+func ConversionSuccessCount(ref string) {
+	convertSuccessCount.WithLabelValues(ref).Inc()
+}
+
+func ConversionFailureCount(ref string, reason string) {
+	convertFailureCount.WithLabelValues(ref, reason).Inc()
 }
 
 func StoreCacheDuration(ref string, start time.Time) {
