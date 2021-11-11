@@ -33,7 +33,7 @@ use nix::sys::signal;
 use rlimit::{rlim, Resource};
 
 use clap::{App, Arg};
-use fuse_rs::api::{Vfs, VfsOptions};
+use fuse_backend_rs::api::{Vfs, VfsOptions};
 
 use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use vmm_sys_util::eventfd::EventFd;

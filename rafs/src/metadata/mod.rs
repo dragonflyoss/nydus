@@ -18,8 +18,8 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 
-use fuse_rs::abi::linux_abi::Attr;
-use fuse_rs::api::filesystem::{Entry, ROOT_ID};
+use fuse_backend_rs::abi::linux_abi::Attr;
+use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
 use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};

@@ -16,8 +16,8 @@ use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use fuse_rs::abi::linux_abi;
-use fuse_rs::api::filesystem::Entry;
+use fuse_backend_rs::abi::linux_abi;
+use fuse_backend_rs::api::filesystem::Entry;
 
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_desc, rafsv5_validate_digest, RafsBlobEntry, RafsChunkFlags, RafsChunkInfo,

@@ -9,7 +9,7 @@ use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 
-use fuse_rs::abi::linux_abi::ROOT_ID;
+use fuse_backend_rs::abi::linux_abi::ROOT_ID;
 
 pub const RAFS_SUPER_VERSION_V4: u32 = 0x400;
 pub const RAFS_SUPER_VERSION_V5: u32 = 0x500;
