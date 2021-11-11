@@ -908,31 +908,7 @@ impl Node {
             bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
             self.v6_datalayout = EROFS_INODE_FLAT_CHUNK_BASED;
         } else if self.is_symlink() {
-            // TODO: add 'xattr_size' to 'inode_size'.
-            let inode_size = self.inode.size_with_xattr() as u64;
-            let tail = self.inode.size() % EROFS_BLOCK_SIZE;
-
-            self.offset = bootstrap_ctx.offset;
-            bootstrap_ctx.offset += inode_size;
-            let avail: u64 = EROFS_BLOCK_SIZE - bootstrap_ctx.offset % EROFS_BLOCK_SIZE;
-
-            self.v6_datalayout = if tail == 0 {
-                EROFS_INODE_FLAT_PLAIN
-            } else if avail >= tail {
-                bootstrap_ctx.offset += tail;
-                if self.inode.size() as u64 > tail {
-                    // add remained bytes of symlink size in a new 4k.
-                    bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-                }
-                bootstrap_ctx.offset += self.inode.size() as u64 - tail;
-                EROFS_INODE_FLAT_INLINE
-            } else {
-                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-                bootstrap_ctx.offset += self.inode.size() as u64;
-                // plain datalayout
-                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-                EROFS_INODE_FLAT_PLAIN
-            };
+            self.set_v6_offset_with_tail(bootstrap_ctx, self.inode.size());
         } else {
             todo!()
         }
@@ -957,7 +933,12 @@ impl Node {
     pub fn dir_set_v6_offset(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
         // Dir isize is the total bytes of 'dirents + names'.
         self.inode.set_size(d_size);
+        self.set_v6_offset_with_tail(bootstrap_ctx, d_size);
+    }
 
+    // For DIR inode, size is the total bytes of 'dirents + names'.
+    // For symlink, size is the length of symlink name.
+    fn set_v6_offset_with_tail(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
         self.offset = bootstrap_ctx.offset;
 
         // TODO: a hashmap of non-full blocks
@@ -973,6 +954,14 @@ impl Node {
         // |        |inode      | free |   dirents+names       | | tail    | free        |
         // |        |           |    | |                       | |         |             |
         // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        //
+        //
+        //          |    avail       |
+        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        // |        |     inode      + |   dirents+names       | | tail    | free        |
+        // |        |                | |                       | |         |             |
+        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        //
         //
         //          |    avail       |
         // +--------+----------------+ +--------------+--------+ +-----------------------+
@@ -996,7 +985,7 @@ impl Node {
         let avail: u64 = EROFS_BLOCK_SIZE - bootstrap_ctx.offset % EROFS_BLOCK_SIZE;
         let tail: u64 = d_size % EROFS_BLOCK_SIZE;
         self.v6_datalayout = if tail > 0 {
-            if avail >= tail {
+            if avail >= tail && bootstrap_ctx.offset % EROFS_BLOCK_SIZE as u64 > 0 {
                 bootstrap_ctx.offset += tail;
                 if d_size > tail {
                     // add remained bytes of 'd_size' in a new 4k.
@@ -1608,6 +1597,13 @@ mod tests {
         .unwrap();
 
         // inode+tail <= avail, inline if tail > 0, otherwise plain
+
+        // tail = 64, avail = 0
+        bootstrap_ctx.offset = 4096 - 64;
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64);
+        assert_eq!(bootstrap_ctx.offset, 8192);
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+
         // tail = 64, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
         dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64);
