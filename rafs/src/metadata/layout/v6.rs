@@ -33,6 +33,8 @@ pub const EROFS_INODE_FLAT_CHUNK_BASED: u16 = 4;
 const EROFS_SUPER_OFFSET: u16 = 1024;
 // Size of EROFS super block.
 const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
+// Size of extended super block, used for rafs v6 specific fields
+const EROFS_EXT_SUPER_BLOCK_SIZE: u16 = 256;
 // Magic number for EROFS super block.
 const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
 // Bits of EROFS logical block size.
@@ -103,12 +105,6 @@ pub struct RafsV6SuperBlock {
     s_extra_devices: u16,
     /// Offset of the device table, `startoff = s_devt_slotoff * devt_slotsize`.
     s_devt_slotoff: u16,
-    /// chunk size
-    pub s_chunk_size: u32,
-    /// superblock flags
-    pub s_flags: u64,
-    /// superblock flags
-    pub s_blob_table_size: u32,
     /// Padding.
     s_reserved: [u8; 38],
 }
@@ -169,37 +165,11 @@ impl RafsV6SuperBlock {
         Ok(())
     }
 
-    pub fn blob_table_offset(&self) -> u64 {
-        EROFS_BLKSIZE as u64
-    }
-
     pub fn meta_addr(&self) -> usize {
-        u32::from_le(self.s_meta_blkaddr) as usize * EROFS_BLKSIZE
-    }
-
-    /// Set compression algorithm to handle chunk of the Rafs filesystem.
-    pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
-        let c: RafsSuperFlags = compressor.into();
-
-        self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
-        self.s_flags |= c.bits();
-    }
-
-    /// Set message digest algorithm to handle chunk of the Rafs filesystem.
-    pub fn set_digester(&mut self, digester: digest::Algorithm) {
-        let c: RafsSuperFlags = digester.into();
-
-        self.s_flags &= !RafsSuperFlags::DIGESTER_BLAKE3.bits();
-        self.s_flags &= !RafsSuperFlags::DIGESTER_SHA256.bits();
-        self.s_flags |= c.bits();
+        u32::from_le(self.s_meta_blkaddr) as usize * EROFS_BLOCK_SIZE
     }
 
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);
-    impl_pub_getter_setter!(chunk_size, set_chunk_size, s_chunk_size, u32);
-    impl_pub_getter_setter!(flags, set_flags, s_flags, u64);
-    impl_pub_getter_setter!(blob_table_size, set_blob_table_size, s_blob_table_size, u32);
 }
 
 impl RafsStore for RafsV6SuperBlock {
@@ -239,10 +209,96 @@ impl Default for RafsV6SuperBlock {
             s_u: u16::to_le(0),
             s_extra_devices: u16::to_le(0),
             s_devt_slotoff: u16::to_le(0),
-            s_chunk_size: u32::to_le(0),
+            s_reserved: [0u8; 38],
+        }
+    }
+}
+
+/// Extended superblock, 256 bytes
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RafsV6SuperBlockExt {
+    /// superblock flags
+    pub s_flags: u64,
+    /// where on disk blob table starts
+    pub s_blob_table_offset: u64,
+    /// blob table size
+    pub s_blob_table_size: u32,
+    /// chunk size
+    pub s_chunk_size: u32,
+    /// Reserved
+    pub s_reserved: [u8; 232],
+}
+
+impl_bootstrap_converter!(RafsV6SuperBlockExt);
+
+impl RafsV6SuperBlockExt {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
+        r.read_exact(self.as_mut())
+    }
+
+    /// Validate the Rafs v6 super block.
+    pub fn validate(&self, meta_size: u64) -> Result<()> {
+        // TODO:
+        Ok(())
+    }
+
+    /// Set compression algorithm to handle chunk of the Rafs filesystem.
+    pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
+        let c: RafsSuperFlags = compressor.into();
+
+        self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
+        self.s_flags |= c.bits();
+    }
+
+    /// Set message digest algorithm to handle chunk of the Rafs filesystem.
+    pub fn set_digester(&mut self, digester: digest::Algorithm) {
+        let c: RafsSuperFlags = digester.into();
+
+        self.s_flags &= !RafsSuperFlags::DIGESTER_BLAKE3.bits();
+        self.s_flags &= !RafsSuperFlags::DIGESTER_SHA256.bits();
+        self.s_flags |= c.bits();
+    }
+
+    impl_pub_getter_setter!(chunk_size, set_chunk_size, s_chunk_size, u32);
+    impl_pub_getter_setter!(flags, set_flags, s_flags, u64);
+    impl_pub_getter_setter!(
+        blob_table_offset,
+        set_blob_table_offset,
+        s_blob_table_offset,
+        u64
+    );
+    impl_pub_getter_setter!(blob_table_size, set_blob_table_size, s_blob_table_size, u32);
+}
+
+impl RafsStore for RafsV6SuperBlockExt {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+        w.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
+        w.write_all(self.as_ref())?;
+        w.write_all(
+            &[0u8; (EROFS_BLOCK_SIZE
+                - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE)
+                    as usize)],
+        )?;
+        Ok(self.as_ref().len())
+    }
+}
+
+impl Default for RafsV6SuperBlockExt {
+    fn default() -> Self {
+        Self {
             s_flags: u64::to_le(0),
+            s_blob_table_offset: u64::to_le(0),
             s_blob_table_size: u32::to_le(0),
-            s_reserved: [0u8; 22],
+            s_chunk_size: u32::to_le(0),
+            s_reserved: [0u8; 232],
         }
     }
 }

@@ -13,8 +13,8 @@ use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
 use rafs::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6BlobTable, RafsV6SuperBlock, EROFS_BLKSIZE,
-    EROFS_INODE_SLOT_SIZE,
+    align_offset, calculate_nid, RafsV6BlobTable, RafsV6SuperBlock, RafsV6SuperBlockExt,
+    EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE,
 };
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
@@ -516,24 +516,24 @@ impl Bootstrap {
         // Rafs v6 disk layout
         //
         // EROFS_SUPER_OFFSET
-        //     |
-        //     |
-        //  +--+------+-------------------+---------------------------------------------+
-        //  |  | super|  blob table       |  inodes                                     |
-        //  |1k| block|                   |                                             |
-        //  |  |      |                   |                                             |
-        //  |  |      |                   |                                             |
-        //  +--+------+-------------------+---------------------------------------------+
+        //
+        //      |
+        //   +--|------+--------|----------+---------------------------------------------+
+        //   |  | super|extended|          |  inodes                                     |
+        //   |1k| block|super   |blob table|                                             |
+        //   |  |      |block   |          |                                             |
+        //   |  |      |        |          |                                             |
+        //   +--+------+--------|----------+---------------------------------------------+
 
         let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
         let blob_table_size = blob_table.size() as u64;
-        let blob_table_offset = EROFS_BLKSIZE as u64;
+        let blob_table_offset = EROFS_BLOCK_SIZE as u64;
         let blob_table_entries = blob_table.entries.len();
 
         let orig_meta_addr = bootstrap_ctx.nodes[0].offset;
 
         let meta_addr = if blob_table_size > 0 {
-            align_offset(blob_table_offset + blob_table_size, EROFS_BLKSIZE as u64)
+            align_offset(blob_table_offset + blob_table_size, EROFS_BLOCK_SIZE as u64)
         } else {
             orig_meta_addr
         };
@@ -552,17 +552,20 @@ impl Bootstrap {
         sb.set_meta_addr(meta_addr);
 
         sb.set_extra_devices(blob_table_entries as u16);
-        sb.set_compressor(ctx.compressor);
-        sb.set_digester(ctx.digester);
-        sb.set_chunk_size(ctx.chunk_size);
-        sb.set_blob_table_size(blob_table_size as u32);
 
-        // bootstrap_ctx
-        //     .f_bootstrap
-        //     .seek(SeekFrom::Start(EROFS_SUPER_OFFSET as u64))
-        //     .context("failed seek for EROFS_SUPER_OFFSET")?;
         sb.store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store SB")?;
+
+        let mut ext_sb = RafsV6SuperBlockExt::new();
+        ext_sb.set_compressor(ctx.compressor);
+        ext_sb.set_digester(ctx.digester);
+        ext_sb.set_chunk_size(ctx.chunk_size);
+        ext_sb.set_blob_table_offset(blob_table_offset);
+        ext_sb.set_blob_table_size(blob_table_size as u32);
+
+        ext_sb
+            .store(&mut bootstrap_ctx.f_bootstrap)
+            .context("failed to store extended SB")?;
 
         // Dump blob table
         bootstrap_ctx

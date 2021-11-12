@@ -127,6 +127,14 @@ impl dyn RafsIoWrite {
             e
         })
     }
+
+    /// Seek the writer to the `offset`.
+    pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
+        self.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!("Seeking to offset {} from start fails, {}", offset, e);
+            e
+        })
+    }
 }
 
 impl dyn RafsIoRead {
