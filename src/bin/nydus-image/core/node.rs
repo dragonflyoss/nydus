@@ -33,8 +33,8 @@ use rafs::metadata::layout::v5::{
 };
 use rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6InodeExtended, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-    EROFS_INODE_FLAT_PLAIN,
+    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInodeTrait, EROFS_BLOCK_SIZE,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
 };
 use rafs::metadata::layout::RafsXAttrs;
 use rafs::metadata::{Inode, RafsInode, RafsStore};
@@ -175,6 +175,10 @@ pub struct Node {
     pub symlink: Option<OsString>,
     /// Overlay type for layered build
     pub overlay: Overlay,
+    /// Whether it's a compact inode or an extended inode.
+    pub v6_compact_inode: bool,
+    /// Whether it forcely uses an extended inode.
+    pub v6_force_extended_inode: bool,
     /// Whether the explicit UID/GID feature is enabled or not.
     pub explicit_uidgid: bool,
     /// Absolute path of the source root directory.
@@ -249,6 +253,8 @@ impl Node {
             offset: 0,
             dirents: Vec::new(),
             v6_datalayout: EROFS_INODE_FLAT_PLAIN,
+            v6_force_extended_inode: false,
+            v6_compact_inode: false,
         };
 
         node.build_inode(chunk_size)
@@ -456,6 +462,23 @@ impl Node {
         }
     }
 
+    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInodeTrait> {
+        if self.v6_force_extended_inode
+            || self.inode.uid() > std::u16::MAX as u32
+            || self.inode.gid() > std::u16::MAX as u32
+            || self.inode.nlink() > std::u16::MAX as u32
+            || self.inode.size() > std::u32::MAX as u64
+            || self.path.extension() == Some(OsStr::new("pyc"))
+        // TODO: add a filter
+        {
+            self.v6_compact_inode = false;
+            Box::new(RafsV6InodeExtended::new())
+        } else {
+            self.v6_compact_inode = true;
+            Box::new(RafsV6InodeCompact::new())
+        }
+    }
+
     pub fn dump_bootstrap_v6(
         &mut self,
         f_bootstrap: &mut RafsIoWriter,
@@ -463,7 +486,8 @@ impl Node {
         meta_addr: u64,
         ctx: &BuildContext,
     ) -> Result<usize> {
-        let mut inode = RafsV6InodeExtended::new();
+        let mut inode = self.new_rafsv6_inode();
+
         inode.set_size(self.inode.size());
         // FIXME
         inode.set_ino(self.inode.ino() as u32);
@@ -867,7 +891,11 @@ impl Node {
             // this is not used by v5, put a dummy one.
             InodeWrapper::V5(_i) => 0,
             InodeWrapper::V6(_i) => {
-                size_of::<RafsV6InodeExtended>() + self.xattrs.aligned_size_v6()
+                (if self.v6_compact_inode {
+                    size_of::<RafsV6InodeCompact>()
+                } else {
+                    size_of::<RafsV6InodeExtended>()
+                }) + self.xattrs.aligned_size_v6()
             }
         }
     }
