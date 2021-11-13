@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::fmt::Debug;
 use std::io::{Read, Result};
 use std::mem::size_of;
@@ -28,6 +29,9 @@ pub const EROFS_INODE_FLAT_PLAIN: u16 = 0;
 pub const EROFS_INODE_FLAT_INLINE: u16 = 2;
 /// EROFS chunked inode.
 pub const EROFS_INODE_FLAT_CHUNK_BASED: u16 = 4;
+/// EROFS device table offset.
+pub const EROFS_DEVTABLE_OFFSET: u16 =
+    EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE;
 
 // Offset of EROFS super block.
 const EROFS_SUPER_OFFSET: u16 = 1024;
@@ -59,6 +63,8 @@ const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 
 pub const BLOB_SHA256_LEN: usize = 64;
+
+const WRITE_PADDING_DATA: [u8; 64] = [0u8; 64];
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
@@ -208,7 +214,7 @@ impl Default for RafsV6SuperBlock {
             ),
             s_u: u16::to_le(0),
             s_extra_devices: u16::to_le(0),
-            s_devt_slotoff: u16::to_le(0),
+            s_devt_slotoff: u16::to_le(EROFS_DEVTABLE_OFFSET / size_of::<RafsV6Device>() as u16),
             s_reserved: [0u8; 38],
         }
     }
@@ -650,6 +656,14 @@ pub struct RafsV6Device {
     /// Mapping start address.
     mapped_blkaddr: u32,
     reserved2: [u8; 56],
+    // =======
+    // pub struct RafsV6DeviceSlot {
+    //     // blob digest (sha256)
+    //     pub digest: [u8; 64],
+    //     pub blocks: u32,
+    //     pub mapped_blkaddr: u32,
+    //     pub reserved: [u8; 56],
+    // >>>>>>> patched
 }
 
 impl Default for RafsV6Device {
@@ -658,6 +672,9 @@ impl Default for RafsV6Device {
             uuid: [0u8; 16],
             blob_id: [0u8; 32],
             reserved1: [0u8; 16],
+            // =======
+            //             digest: [0u8; 64],
+            // >>>>>>> patched
             blocks: u32::to_le(0),
             mapped_blkaddr: u32::to_le(0),
             reserved2: [0u8; 56],
@@ -695,6 +712,8 @@ impl RafsV6Device {
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
     }
+
+    impl_pub_getter_setter!(mapped_blkaddr, set_mapped_blkaddr, mapped_blkaddr, u32);
 }
 
 impl_bootstrap_converter!(RafsV6Device);

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::mem::size_of;
@@ -13,8 +14,8 @@ use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
 use rafs::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6BlobTable, RafsV6SuperBlock, RafsV6SuperBlockExt,
-    EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE,
+    align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
+    RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
@@ -27,6 +28,7 @@ use super::prefetch::PrefetchPolicy;
 use super::tree::Tree;
 
 pub(crate) const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
+const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
 
 pub(crate) struct Bootstrap {}
 
@@ -515,23 +517,43 @@ impl Bootstrap {
     ) -> Result<(Vec<String>, u64)> {
         // Rafs v6 disk layout
         //
-        // EROFS_SUPER_OFFSET
-        //
-        //      |
-        //   +--|------+--------|----------+---------------------------------------------+
-        //   |  | super|extended|          |  inodes                                     |
-        //   |1k| block|super   |blob table|                                             |
-        //   |  |      |block   |          |                                             |
-        //   |  |      |        |          |                                             |
-        //   +--+------+--------|----------+---------------------------------------------+
+        //  EROFS_SUPER_OFFSET
+        //     |
+        // +---+---------+------------+-------------+-------------------------------------------------------------------+
+        // |   |         |            |             |                                                                   |
+        // |1k |super    |extended    | blob table  | inodes                                                            |
+        // |   |block    |superblock+ |             |                                                                   |
+        // |   |         |devslot     |             |                                                                   |
+        // +---+---------+------------+-------------+-------------------------------------------------------------------+
 
         let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
         let blob_table_size = blob_table.size() as u64;
-        let blob_table_offset = EROFS_BLOCK_SIZE as u64;
+
+        // get devt_slotoff
+        let mut devtable: Vec<RafsV6Device> = Vec::new();
+        for entry in blob_table.entries.iter() {
+            let mut devslot = RafsV6Device::new();
+            debug_assert!(entry.blob_id().len() == 32);
+            devslot.set_blob_id(entry.blob_id().as_bytes()[0..32].try_into().unwrap());
+            devslot.set_blocks(entry.uncompressed_size() as u32);
+            devslot.set_mapped_blkaddr(0);
+            devtable.push(devslot);
+        }
+
+        let devtable_len = devtable.len() * size_of::<RafsV6Device>();
+        let blob_table_offset = align_offset(
+            (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
+            EROFS_BLOCK_SIZE as u64,
+        );
+        trace!(
+            "devtable len {} blob table offset {}",
+            devtable_len,
+            blob_table_offset
+        );
+
         let blob_table_entries = blob_table.entries.len();
 
         let orig_meta_addr = bootstrap_ctx.nodes[0].offset;
-
         let meta_addr = if blob_table_size > 0 {
             align_offset(blob_table_offset + blob_table_size, EROFS_BLOCK_SIZE as u64)
         } else {
@@ -556,6 +578,7 @@ impl Bootstrap {
         sb.store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store SB")?;
 
+        // Dump extended superblock
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.set_compressor(ctx.compressor);
         ext_sb.set_digester(ctx.digester);
@@ -567,10 +590,20 @@ impl Bootstrap {
             .store(&mut bootstrap_ctx.f_bootstrap)
             .context("failed to store extended SB")?;
 
+        // dump devtslot
+        bootstrap_ctx
+            .f_bootstrap
+            .seek_to_offset(EROFS_DEVTABLE_OFFSET as u64)
+            .context("failed to seek to devtslot")?;
+        for slot in devtable.iter() {
+            slot.store(&mut bootstrap_ctx.f_bootstrap)
+                .context("failed to store device slot")?;
+        }
+
         // Dump blob table
         bootstrap_ctx
             .f_bootstrap
-            .seek(SeekFrom::Start(blob_table_offset as u64))
+            .seek_to_offset(blob_table_offset as u64)
             .context("failed seek for extended blob table offset")?;
         blob_table
             .store(&mut bootstrap_ctx.f_bootstrap)
@@ -596,7 +629,23 @@ impl Bootstrap {
         )?;
 
         // Flush remaining data in BufWriter to file
-        bootstrap_ctx.f_bootstrap.flush()?;
+        bootstrap_ctx
+            .f_bootstrap
+            .flush()
+            .context("failed to flush bootstrap")?;
+        let pos = bootstrap_ctx
+            .f_bootstrap
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end")?;
+        debug!(
+            "align bootstrap to 4k {}",
+            align_offset(pos, EROFS_BLOCK_SIZE as u64)
+        );
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        bootstrap_ctx
+            .f_bootstrap
+            .write_all(&WRITE_PADDING_DATA[0..padding as usize])
+            .context("failed to write 0 to padding of bootstrap's end")?;
 
         let mut blob_size = 0;
         let mut blob_ids = Vec::new();
