@@ -592,15 +592,10 @@ impl Node {
             let mut chunks: Vec<u8> = Vec::new();
             for chunk in self.chunks.iter() {
                 let mut v6_chunk = RafsV6InodeChunkAddr::new();
-                // only one device is supported for now
-                // TODO:
-                v6_chunk.set_blob_index(1);
+                // for erofs, bump id by 1 since device id 0 is bootstrap.
+                v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
                 v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
-                trace!(
-                    "name {:?} decomp {}",
-                    self.name(),
-                    chunk.uncompressed_offset()
-                );
+                trace!("name {:?} chunk {}", self.name(), chunk);
 
                 chunks.extend(v6_chunk.as_ref());
             }
