@@ -17,24 +17,22 @@
 /// The bootstrap file may be provided by untrusted parties, so we must ensure strong validations
 /// before making use of any bootstrap, especially we are using them in memory-mapped mode. The
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
-use std::any::Any;
 use std::fs::File;
 use std::io::{Result, SeekFrom};
-use std::mem::{size_of, ManuallyDrop};
+// use std::mem::size_of;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::sync::Arc;
 
-use arc_swap::{ArcSwap, Guard};
+use arc_swap::ArcSwap;
 
 use crate::metadata::layout::v6::RafsV6BlobTable;
-use crate::metadata::layout::MetaRange;
+// use crate::metadata::layout::MetaRange;
 use crate::metadata::{
-    Attr, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
-    RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
+    Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
-use nydus_utils::digest::{Algorithm, RafsDigest};
-use storage::device::{BlobFeatures, BlobInfo};
+use nydus_utils::digest::Algorithm;
+use storage::device::BlobInfo;
 use storage::utils::readahead;
 
 /// The underlying struct to maintain memory mapped bootstrap for a file system.
@@ -68,34 +66,34 @@ impl DirectMappingState {
         }
     }
 
-    /// Mmap to bootstrap ondisk data directly.
-    fn cast_to_ref<T>(&self, base: *const u8, offset: usize) -> Result<&T> {
-        let start = base.wrapping_add(offset);
-        let end = start.wrapping_add(size_of::<T>());
+    // /// Mmap to bootstrap ondisk data directly.
+    // fn cast_to_ref<T>(&self, base: *const u8, offset: usize) -> Result<&T> {
+    //     let start = base.wrapping_add(offset);
+    //     let end = start.wrapping_add(size_of::<T>());
 
-        if start > end
-            || start < self.base
-            || end < self.base
-            || end > self.end
-            || start as usize & (std::mem::align_of::<T>() - 1) != 0
-        {
-            return Err(einval!("invalid mmap offset"));
-        }
+    //     if start > end
+    //         || start < self.base
+    //         || end < self.base
+    //         || end > self.end
+    //         || start as usize & (std::mem::align_of::<T>() - 1) != 0
+    //     {
+    //         return Err(einval!("invalid mmap offset"));
+    //     }
 
-        Ok(unsafe { &*(start as *const T) })
-    }
+    //     Ok(unsafe { &*(start as *const T) })
+    // }
 
-    #[inline]
-    fn validate_range(&self, offset: usize, size: usize) -> Result<()> {
-        let start = self.base.wrapping_add(offset);
-        let end = start.wrapping_add(size);
+    // #[inline]
+    // fn validate_range(&self, offset: usize, size: usize) -> Result<()> {
+    //     let start = self.base.wrapping_add(offset);
+    //     let end = start.wrapping_add(size);
 
-        if start > end || start < self.base || end < self.base || end > self.end {
-            return Err(einval!("invalid range"));
-        }
+    //     if start > end || start < self.base || end < self.base || end > self.end {
+    //         return Err(einval!("invalid range"));
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
 
 impl Drop for DirectMappingState {
@@ -165,9 +163,10 @@ impl DirectSuperBlockV6 {
         // )?;
 
         // Validate blob table layout
-        let blob_table_start = old_state.meta.blob_table_offset;
-        let blob_table_size = old_state.meta.blob_table_size as u64;
-        let blob_table_range = MetaRange::new(blob_table_start, blob_table_size, false)?;
+        // let blob_table_size = old_state.meta.blob_table_size as u64;
+
+        // let blob_table_start = old_state.meta.blob_table_offset;
+        // let blob_table_range = MetaRange::new(blob_table_start, blob_table_size, false)?;
         // if !blob_table_range.is_subrange_of(&md_range)
         //     || blob_table_range.intersect_with(&inode_table_range)
         // {
@@ -231,15 +230,15 @@ impl RafsSuperInodes for DirectSuperBlockV6 {
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
-    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
+    fn get_inode(&self, _ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
         todo!()
     }
 
     fn validate_digest(
         &self,
-        inode: Arc<dyn RafsInode>,
-        recursive: bool,
-        digester: Algorithm,
+        _inode: Arc<dyn RafsInode>,
+        _recursive: bool,
+        _digester: Algorithm,
     ) -> Result<bool> {
         todo!()
     }

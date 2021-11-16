@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::fmt::Debug;
 use std::io::{Read, Result};
 use std::mem::size_of;
@@ -62,9 +61,7 @@ const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 /// Multi-devices, incompatible with EROFS versions prior to Linux kernel 5.16.
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 
-pub const BLOB_SHA256_LEN: usize = 64;
-
-const WRITE_PADDING_DATA: [u8; 64] = [0u8; 64];
+const BLOB_SHA256_LEN: usize = 64;
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
@@ -166,13 +163,9 @@ impl RafsV6SuperBlock {
     }
 
     /// Validate the Rafs v6 super block.
-    pub fn validate(&self, meta_size: u64) -> Result<()> {
+    pub fn validate(&self, _meta_size: u64) -> Result<()> {
         // TODO:
         Ok(())
-    }
-
-    pub fn meta_addr(&self) -> usize {
-        u32::from_le(self.s_meta_blkaddr) as usize * EROFS_BLOCK_SIZE
     }
 
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);
@@ -249,7 +242,7 @@ impl RafsV6SuperBlockExt {
     }
 
     /// Validate the Rafs v6 super block.
-    pub fn validate(&self, meta_size: u64) -> Result<()> {
+    pub fn validate(&self, _meta_size: u64) -> Result<()> {
         // TODO:
         Ok(())
     }
@@ -289,7 +282,7 @@ impl RafsStore for RafsV6SuperBlockExt {
         w.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         w.write_all(self.as_ref())?;
         w.write_all(
-            &[0u8; (EROFS_BLOCK_SIZE
+            &[0u8; (EROFS_BLOCK_SIZE as usize
                 - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE)
                     as usize)],
         )?;
@@ -1055,7 +1048,7 @@ impl RafsV6BlobTable {
                 ci_uncompressed_size as u64,
                 ci_compressor as u32,
             );
-            trace!("ci_offset {}", ci_offset);
+            trace!("load blob_info {:?}", blob_info);
 
             self.entries.push(Arc::new(blob_info));
         }
@@ -1084,6 +1077,7 @@ impl RafsStore for RafsV6BlobTable {
                 w.write_all(&u32::to_le_bytes(entry.chunk_count() as u32))?;
                 w.write_all(&u64::to_le_bytes(entry.uncompressed_size() as u64))?;
                 w.write_all(&u64::to_le_bytes(entry.compressed_size() as u64))?;
+                trace!("store blob_info {:?}", entry);
                 w.write_all(entry.blob_id().as_bytes())?;
 
                 if idx != self.entries.len() - 1 {

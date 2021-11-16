@@ -301,6 +301,7 @@ impl BlobMetaInfo {
         }
 
         let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        trace!("meta_path {:?}", meta_path);
         let enable_write = reader.is_some();
         let file = OpenOptions::new()
             .read(true)
@@ -506,6 +507,11 @@ impl BlobMetaInfo {
         let mut buf = Vec::with_capacity(compressed_size as usize);
         unsafe { buf.set_len(compressed_size as usize) };
 
+        trace!(
+            "blob_info compressor {} ci_compressor {}",
+            blob_info.compressor(),
+            blob_info.meta_ci_compressor()
+        );
         let size = reader
             .read(&mut buf, blob_info.meta_ci_offset())
             .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;

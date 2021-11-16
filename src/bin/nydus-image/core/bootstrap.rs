@@ -5,7 +5,6 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
-use std::io::SeekFrom;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
