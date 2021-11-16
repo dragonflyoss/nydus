@@ -58,6 +58,6 @@ func TestLoadConfig(t *testing.T) {
 	require.Equal(t, cfg.FSPrefetch.Enable, true)
 	require.Equal(t, cfg.FSPrefetch.MergingSize, 131072)
 	require.Equal(t, cfg.FSPrefetch.ThreadsCount, 10)
-	require.Equal(t, cfg.Device.Backend.Config.BlobUrlScheme, "http")
+	require.Equal(t, cfg.Device.Backend.Config.BlobURLScheme, "http")
 	require.Equal(t, cfg.Device.Backend.Config.Proxy.CheckInterval, 5)
 }

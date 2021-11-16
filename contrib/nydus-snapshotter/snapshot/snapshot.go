@@ -128,7 +128,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
 	}
 
-	var stargzFs fspkg.FileSystem = nil
+	var stargzFs fspkg.FileSystem
 	if cfg.EnableStargz {
 		if hasDaemon {
 			stargzFs, err = stargz.NewFileSystem(
@@ -282,7 +282,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		}
 	}
 
-	logCtx.Infof("prepare key %s parent %s labels", key, parent)
+	logCtx.Infof("Preparing. Key=%s, Parent=%s, Labels %v", key, parent, base.Labels)
 	if target, ok := base.Labels[label.TargetSnapshotLabel]; ok {
 		// check if image layer is nydus layer
 		if o.fs.Support(ctx, base.Labels) {

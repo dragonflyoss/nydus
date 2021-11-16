@@ -306,7 +306,7 @@ func (fs *filesystem) newDaemon(ctx context.Context, snapshotID string, imageID 
 				log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
 			}
 		} else {
-			d, err = fs.initSharedDaemon(ctx)
+			_, err = fs.initSharedDaemon(ctx)
 			if err != nil {
 				// AlreadyExists means someone else has initialized shared daemon.
 				if !errdefs.IsAlreadyExists(err) {
@@ -332,10 +332,10 @@ func (fs *filesystem) newDaemon(ctx context.Context, snapshotID string, imageID 
 func (fs *filesystem) getSharedDaemon() (*daemon.Daemon, error) {
 	if fs.sharedDaemon != nil {
 		return fs.sharedDaemon, nil
-	} else {
-		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
-		return d, err
 	}
+
+	d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
+	return d, err
 }
 
 // createNewDaemon create new nydus daemon by snapshotID and imageID
