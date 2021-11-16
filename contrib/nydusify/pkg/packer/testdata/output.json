@@ -1,0 +1,26 @@
+{
+  "version": "1.7.0-44dd2c425152e433c58f20575803d4d6fd5a3ea5",
+  "blobs": [
+    "3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090"
+  ],
+  "trace": {
+    "consumed_time": {
+      "dump_blob": 0.00003558300159056671,
+      "dump_bootstrap": 8.193000212486368e-6,
+      "load_from_directory": 0.00003673899846035056,
+      "load_from_parent_bootstrap": 0.000011576000360946637,
+      "total_build": 0.00021919599385000765,
+      "validate_bootstrap": 0.00004726599945570342
+    },
+    "registered_events": {
+      "blob_compressed_size": 7,
+      "blob_decompressed_size": 7,
+      "dedup_chunks": 1,
+      "dedup_decompressed_size": 7,
+      "egid": "100",
+      "euid": "127824",
+      "load_from_directory": 2,
+      "load_from_parent_bootstrap": 2
+    }
+  }
+}

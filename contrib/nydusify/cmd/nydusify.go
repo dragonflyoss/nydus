@@ -26,6 +26,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics/fileexporter"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
@@ -334,6 +335,117 @@ func main() {
 				}
 
 				return checker.Check(context.Background())
+			},
+		},
+		{
+			Name:  "pack",
+			Usage: "Pack a directory to rafs meta and blob",
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:    "log-level",
+					Aliases: []string{"l"},
+					Value:   "info",
+					Usage:   "Set log level (panic, fatal, error, warn, info, debug, trace)",
+					EnvVars: []string{"LOG_LEVEL"},
+				},
+				&cli.StringFlag{
+					Name:     "target-dir",
+					Required: true,
+					Usage:    "The directory of build target",
+					EnvVars:  []string{"TARGET_DIR"},
+				},
+				&cli.StringFlag{
+					Name:     "output-dir",
+					Aliases:  []string{"o"},
+					Required: false,
+					Usage:    "Output dir of build artifact",
+					EnvVars:  []string{"OUTPUT_DIR"},
+				},
+				&cli.BoolFlag{
+					Name:    "backend-push",
+					Value:   false,
+					Usage:   "Push Nydus blob to storage backend",
+					EnvVars: []string{"BACKEND_PUSH"},
+				},
+				&cli.StringFlag{
+					Name:        "backend-type",
+					Value:       "oss",
+					DefaultText: "oss",
+					Usage:       "Specify Nydus blob storage backend type",
+					EnvVars:     []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:     "meta",
+					Required: true,
+					Usage:    "Specify Nydus meta file name",
+					EnvVars:  []string{"META"},
+				},
+				&cli.StringFlag{
+					Name:      "backend-config-file",
+					TakesFile: true,
+					Usage:     "Specify Nydus blob storage backend config from path",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "The nydus-image binary path, if unset, search in PATH environment",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
+			},
+			Before: func(ctx *cli.Context) error {
+				targetPath := ctx.String("target-dir")
+				fi, err := os.Stat(targetPath)
+				if err != nil {
+					return errors.Wrapf(err, "failed to stat target path %s", targetPath)
+				}
+				if !fi.IsDir() {
+					return errors.Errorf("%s is not a directory", targetPath)
+				}
+				return nil
+			},
+			Action: func(c *cli.Context) error {
+				var (
+					p             *packer.Packer
+					res           packer.PackResult
+					backendConfig *packer.BackendConfig
+					err           error
+				)
+
+				// if backend-push is specified, we should make sure backend-config-file exists
+				if c.Bool("backend-push") {
+					backendConfigFile := c.String("backend-config-file")
+					if strings.TrimSpace(backendConfigFile) == "" {
+						return errors.New("backend-config-file is required when specify --backend-push")
+					}
+					if _, err = os.Stat(backendConfigFile); err != nil {
+						return errors.Errorf("can not find backend-config-file %s", backendConfigFile)
+					}
+					cfg, err := packer.ParseBackendConfig(backendConfigFile)
+					if err != nil {
+						return errors.Errorf("failed to parse backend-config-file %s", backendConfigFile)
+					}
+					backendConfig = &cfg
+				}
+
+				if p, err = packer.New(packer.Opt{
+					LogLevel:       c.String("log-level"),
+					NydusImagePath: c.String("nydus-image"),
+					OutputDir:      c.String("output-dir"),
+					BackendConfig:  backendConfig,
+				}); err != nil {
+					return err
+				}
+
+				if res, err = p.Pack(context.Background(), packer.PackRequest{
+					TargetDir: c.String("target-dir"),
+					Meta:      c.String("meta"),
+					PushBlob:  c.Bool("backend-push"),
+				}); err != nil {
+					return err
+				}
+				logrus.Infof("successfully pack meta %s, blob %s", res.Meta, res.Blob)
+				return nil
 			},
 		},
 	}
