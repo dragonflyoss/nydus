@@ -828,6 +828,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rafs_v6_chunk_header() {
+        let chunk_size: u32 = 1024 * 1024;
+        let header = RafsV6InodeChunkHeader::new(chunk_size);
+        let target = EROFS_CHUNK_FORMAT_INDEXES_FLAG | (20 - 12) as u16;
+        assert_eq!(u16::from_le(header.format), target);
+    }
+
+    #[test]
     fn test_rafs_v6_chunk_addr() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
