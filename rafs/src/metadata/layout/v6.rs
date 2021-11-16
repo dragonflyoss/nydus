@@ -531,7 +531,7 @@ impl RafsV6InodeChunkHeader {
     /// Create a new instance of `RafsV6InodeChunkHeader`.
     pub fn new(chunk_size: u32) -> Self {
         debug_assert!(chunk_size.is_power_of_two());
-        let chunk_bits = 32 - chunk_size.leading_zeros() as u16;
+        let chunk_bits = chunk_size.trailing_zeros() as u16;
         debug_assert!(chunk_bits >= EROFS_BLOCK_BITS as u16);
         let chunk_bits = chunk_bits - EROFS_BLOCK_BITS as u16;
         debug_assert!(chunk_bits <= EROFS_CHUNK_FORMAT_SIZE_MASK);
