@@ -27,7 +27,7 @@ pub const EROFS_INODE_FLAT_PLAIN: u16 = 0;
 /// EROFS inline inode.
 pub const EROFS_INODE_FLAT_INLINE: u16 = 2;
 /// EROFS chunked inode.
-pub const EROFS_INODE_FLAT_CHUNK_BASED: u16 = 4;
+pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
 /// EROFS device table offset.
 pub const EROFS_DEVTABLE_OFFSET: u16 =
     EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE;
@@ -423,20 +423,19 @@ impl RafsV6InodeExtended {
     /// Set inode data layout format to be PLAIN.
     #[inline]
     pub fn set_inline_plain_layout(&mut self) {
-        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_PLAIN << 1));
+        self.set_data_layout(EROFS_INODE_FLAT_PLAIN);
     }
 
     /// Set inode data layout format to be INLINE.
     #[inline]
     pub fn set_inline_inline_layout(&mut self) {
-        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_INLINE << 1));
+        self.set_data_layout(EROFS_INODE_FLAT_INLINE);
     }
 
     /// Set inode data layout format to be CHUNKED.
     #[inline]
     pub fn set_chunk_based_layout(&mut self) {
-        self.i_format =
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_CHUNK_BASED << 1));
+        self.set_data_layout(EROFS_INODE_CHUNK_BASED);
     }
 
     /// Load a `RafsV6InodeExtended` from a reader.
@@ -809,7 +808,7 @@ mod tests {
         inode.set_chunk_based_layout();
         assert_eq!(
             inode.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_CHUNK_BASED << 1))
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_CHUNK_BASED << 1))
         );
         inode.set_uidgid(1, 2);
         inode.set_mtime(3, 4);
@@ -823,7 +822,7 @@ mod tests {
         assert_eq!(inode2.i_mtime_nsec, 4u32.to_le());
         assert_eq!(
             inode2.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_CHUNK_BASED << 1))
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_CHUNK_BASED << 1))
         );
     }
 

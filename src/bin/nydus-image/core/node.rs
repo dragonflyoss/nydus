@@ -33,7 +33,7 @@ use rafs::metadata::layout::v5::{
 };
 use rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6InodeExtended, EROFS_BLOCK_SIZE, EROFS_INODE_FLAT_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    RafsV6InodeExtended, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
     EROFS_INODE_FLAT_PLAIN,
 };
 use rafs::metadata::layout::RafsXAttrs;
@@ -905,7 +905,7 @@ impl Node {
             bootstrap_ctx.offset += size;
             bootstrap_ctx.align_offset(unit);
             bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
-            self.v6_datalayout = EROFS_INODE_FLAT_CHUNK_BASED;
+            self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
         } else if self.is_symlink() {
             self.set_v6_offset_with_tail(bootstrap_ctx, self.inode.size());
         } else {
@@ -1513,7 +1513,7 @@ fn to_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
 mod tests {
     use super::*;
     use crate::core::context::{BootstrapContext, BUF_WRITER_CAPACITY};
-    use rafs::metadata::layout::v6::EROFS_INODE_FLAT_CHUNK_BASED;
+    use rafs::metadata::layout::v6::EROFS_INODE_CHUNK_BASED;
     use rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     use std::fs::OpenOptions;
     use std::io::BufWriter;
@@ -1553,7 +1553,7 @@ mod tests {
         // it's always aligned to 32 bytes.
         node.set_v6_offset(&mut bootstrap_ctx);
         assert_eq!(node.offset, 1);
-        assert_eq!(node.v6_datalayout, EROFS_INODE_FLAT_CHUNK_BASED);
+        assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
         assert_eq!(bootstrap_ctx.offset, 72);
 
         // symlink
