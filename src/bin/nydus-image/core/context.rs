@@ -261,23 +261,6 @@ impl BlobContext {
         }
     }
 
-    pub fn from(
-        blob_id: String,
-        chunk_count: u32,
-        readahead_size: u32,
-        blob_cache_size: u64,
-        compressed_blob_size: u64,
-    ) -> Self {
-        let mut blob = Self::new_with_writer(blob_id, None);
-
-        blob.blob_readahead_size = readahead_size as u64;
-        blob.chunk_count = chunk_count;
-        blob.decompressed_blob_size = blob_cache_size;
-        blob.compressed_blob_size = compressed_blob_size;
-
-        blob
-    }
-
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
         self.chunk_dict = dict;
     }
@@ -307,13 +290,29 @@ impl BlobContext {
     /// Allocate a count index sequentially in a blob.
     pub fn alloc_index(&mut self) -> Result<u32> {
         let index = self.chunk_count;
-        self.chunk_count = index
-            .checked_add(1)
-            .ok_or_else(|| Error::msg("the number of chunks in blob exceeds the u32 limit"))?;
 
-        // TODO: check index is less than supported chunk number
+        // Rafs v6 only supports 24 bit chunk id.
+        if index >= 0xff_ffff {
+            Err(Error::msg(
+                "the number of chunks in blob exceeds the u32 limit",
+            ))
+        } else {
+            self.chunk_count += 1;
+            Ok(index)
+        }
+    }
+}
 
-        Ok(index)
+impl From<&BlobInfo> for BlobContext {
+    fn from(blob: &BlobInfo) -> Self {
+        let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None);
+
+        ctx.blob_readahead_size = blob.readahead_size();
+        ctx.chunk_count = blob.chunk_count();
+        ctx.decompressed_blob_size = blob.uncompressed_size();
+        ctx.compressed_blob_size = blob.compressed_size();
+
+        ctx
     }
 }
 
@@ -349,12 +348,19 @@ impl BlobManager {
         self.blobs.last_mut()
     }
 
-    /// Allocate a blob index sequentially
+    /// Allocate a blob index sequentially.
+    ///
+    /// This should be paired with Self::add() and keep in consistence.
     pub fn alloc_index(&self) -> Result<u32> {
-        u32::try_from(self.blobs.len()).with_context(|| Error::msg("too many blobs"))
+        // Rafs v6 only supports 256 blobs.
+        u8::try_from(self.blobs.len())
+            .map(|v| v as u32)
+            .with_context(|| Error::msg("too many blobs"))
     }
 
     /// Add a blob context to manager
+    ///
+    /// This should be paired with Self::alloc_index() and keep in consistence.
     pub fn add(&mut self, blob_ctx: BlobContext) {
         self.blobs.push(blob_ctx);
     }
@@ -362,15 +368,7 @@ impl BlobManager {
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
             .iter()
-            .map(|entry| {
-                BlobContext::from(
-                    entry.blob_id().to_owned(),
-                    entry.chunk_count(),
-                    entry.readahead_size() as u32,
-                    entry.uncompressed_size(),
-                    entry.compressed_size(),
-                )
-            })
+            .map(|entry| BlobContext::from(entry.as_ref()))
             .collect();
     }
 
@@ -386,7 +384,7 @@ impl BlobManager {
     /// extend blobs which belong to ChunkDict and setup real_blob_idx map
     /// should call this function after import parent bootstrap
     /// otherwise will break blobs order
-    pub fn extend_blob_table_from_chunk_dict(&mut self) {
+    pub fn extend_blob_table_from_chunk_dict(&mut self) -> Result<()> {
         let blobs = self.chunk_dict_ref.get_blobs();
 
         for blob in blobs.iter() {
@@ -394,18 +392,14 @@ impl BlobManager {
                 self.chunk_dict_ref
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
-                let idx = self.alloc_index().unwrap();
-                self.add(BlobContext::from(
-                    blob.blob_id().to_owned(),
-                    blob.chunk_count(),
-                    blob.readahead_size() as u32,
-                    blob.uncompressed_size(),
-                    blob.compressed_size(),
-                ));
+                let idx = self.alloc_index()?;
+                self.add(BlobContext::from(blob.as_ref()));
                 self.chunk_dict_ref
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
         }
+
+        Ok(())
     }
 }
 
