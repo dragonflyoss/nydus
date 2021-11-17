@@ -220,9 +220,9 @@ impl BlobCache for FileCacheEntry {
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
-        self.metrics.prefetch_unmerged_chunks.add(bios.len());
         let mut bios = bios.to_vec();
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
+        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
 
         // Enable data prefetching
         self.prefetch_state
@@ -675,8 +675,11 @@ impl FileCacheEntry {
         } else {
             chunk_info.uncompress_offset()
         };
+        let metrics = self.metrics.clone();
 
+        metrics.buffered_backend_size.add(buffer.size() as u64);
         self.runtime.spawn(async move {
+            metrics.buffered_backend_size.sub(buffer.size() as u64);
             match Self::persist_chunk(&file, offset, buffer.slice()) {
                 Ok(_) => delayed_chunk_map
                     .set_ready_and_clear_pending(chunk_info.as_base())
@@ -896,6 +899,13 @@ impl DataBuffer {
         match self {
             Self::Reuse(ref mut data) => data.as_mut_slice(),
             Self::Allocated(ref mut data) => data.as_mut_slice(),
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            Self::Reuse(_) => 0,
+            Self::Allocated(data) => data.capacity(),
         }
     }
 

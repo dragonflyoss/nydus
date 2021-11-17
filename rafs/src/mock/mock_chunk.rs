@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use nydus_utils::digest::RafsDigest;
-
-use crate::metadata::layout::v5::{RafsChunkFlags, RafsChunkInfo};
+use std::any::Any;
+use storage::device::v5::BlobV5ChunkInfo;
+use storage::device::{BlobChunkFlags, BlobChunkInfo};
 
 /// Cached information about an Rafs Data Chunk.
 #[derive(Clone, Default, Debug)]
@@ -26,7 +27,7 @@ pub struct MockChunkInfo {
     // size of the block, compressed
     c_compr_size: u32,
     c_decompress_size: u32,
-    c_flags: RafsChunkFlags,
+    c_flags: BlobChunkFlags,
 }
 
 impl MockChunkInfo {
@@ -48,25 +49,48 @@ impl MockChunkInfo {
     }
 }
 
-impl RafsChunkInfo for MockChunkInfo {
-    fn block_id(&self) -> &RafsDigest {
-        &self.c_block_id
-    }
-
+impl BlobChunkInfo for MockChunkInfo {
     fn is_compressed(&self) -> bool {
-        self.c_flags.contains(RafsChunkFlags::COMPRESSED)
+        self.c_flags.contains(BlobChunkFlags::COMPRESSED)
     }
 
     fn is_hole(&self) -> bool {
-        self.c_flags.contains(RafsChunkFlags::HOLECHUNK)
+        self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
     impl_getter!(blob_index, c_blob_index, u32);
-    impl_getter!(index, c_index, u32);
     impl_getter!(compress_offset, c_compress_offset, u64);
     impl_getter!(compress_size, c_compr_size, u32);
-    impl_getter!(decompress_offset, c_decompress_offset, u64);
-    impl_getter!(decompress_size, c_decompress_size, u32);
-    impl_getter!(file_offset, c_file_offset, u64);
-    impl_getter!(flags, c_flags, RafsChunkFlags);
+    impl_getter!(uncompress_offset, c_decompress_offset, u64);
+    impl_getter!(uncompress_size, c_decompress_size, u32);
+
+    fn chunk_id(&self) -> &RafsDigest {
+        &self.c_block_id
+    }
+
+    fn id(&self) -> u32 {
+        self.c_index
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl BlobV5ChunkInfo for MockChunkInfo {
+    fn index(&self) -> u32 {
+        self.c_index
+    }
+
+    fn file_offset(&self) -> u64 {
+        self.c_file_offset
+    }
+
+    fn flags(&self) -> BlobChunkFlags {
+        self.c_flags
+    }
+
+    fn as_base(&self) -> &dyn BlobChunkInfo {
+        self
+    }
 }

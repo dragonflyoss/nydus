@@ -580,11 +580,14 @@ impl RafsSuper {
             }
             // Flush the pending prefetch requests.
             fetcher(&mut head_desc);
+            Ok(())
         } else if self.meta.is_v5() {
-            self.prefetch_data_v5(r, fetcher)?;
+            self.prefetch_data_v5(r, fetcher).map(|_| ())
+        } else {
+            Err(RafsError::Prefetch(
+                "Unknown filesystem version, prefetch disabled".to_string(),
+            ))
         }
-
-        Ok(())
     }
 
     #[inline]

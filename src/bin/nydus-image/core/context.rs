@@ -336,21 +336,6 @@ impl BlobManager {
         }
     }
 
-    pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
-        self.blobs = blob_table
-            .iter()
-            .map(|entry| {
-                BlobContext::from(
-                    entry.blob_id().to_owned(),
-                    entry.chunk_count(),
-                    entry.readahead_size() as u32,
-                    entry.uncompressed_size(),
-                    entry.compressed_size(),
-                )
-            })
-            .collect();
-    }
-
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
         self.chunk_dict_ref = dict
     }
@@ -372,37 +357,6 @@ impl BlobManager {
     /// Add a blob context to manager
     pub fn add(&mut self, blob_ctx: BlobContext) {
         self.blobs.push(blob_ctx);
-    }
-
-    pub fn to_blob_table(&self) -> Result<RafsV5BlobTable> {
-        let mut blob_table = RafsV5BlobTable::new();
-        for ctx in &self.blobs {
-            let blob_id = ctx.blob_id.clone();
-            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
-            let chunk_count = ctx.chunk_count;
-            let decompressed_blob_size = ctx.decompressed_blob_size;
-            let compressed_blob_size = ctx.compressed_blob_size;
-            let blob_features = if blob_table.extended.entries.is_empty() {
-                BlobFeatures::V5_NO_EXT_BLOB_TABLE
-            } else {
-                BlobFeatures::empty()
-            };
-            // TODO: get digest and compression algorithms from context.
-            let flags = RafsSuperFlags::DIGESTER_BLAKE3 | RafsSuperFlags::COMPRESS_LZ4_BLOCK;
-
-            blob_table.add(
-                blob_id,
-                0,
-                blob_readahead_size,
-                RAFS_DEFAULT_CHUNK_SIZE as u32,
-                chunk_count,
-                decompressed_blob_size,
-                compressed_blob_size,
-                blob_features,
-                flags,
-            );
-        }
-        Ok(blob_table)
     }
 
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
@@ -433,22 +387,23 @@ impl BlobManager {
     /// should call this function after import parent bootstrap
     /// otherwise will break blobs order
     pub fn extend_blob_table_from_chunk_dict(&mut self) {
-        if let Some(dict) = self.chunk_dict.clone() {
-            let blobs = dict.get_blobs();
-            for blob in blobs.entries.iter() {
-                if let Some(real_idx) = self.get_blob_idx_by_id(&blob.blob_id) {
-                    dict.set_real_blob_idx(blob.blob_index, real_idx);
-                } else {
-                    let idx = self.alloc_index().unwrap();
-                    self.add(BlobContext::from(
-                        blob.blob_id.clone(),
-                        blob.chunk_count,
-                        blob.readahead_size,
-                        blob.blob_cache_size,
-                        blob.compressed_blob_size,
-                    ));
-                    dict.set_real_blob_idx(blob.blob_index, idx);
-                }
+        let blobs = self.chunk_dict_ref.get_blobs();
+
+        for blob in blobs.iter() {
+            if let Some(real_idx) = self.get_blob_idx_by_id(blob.blob_id()) {
+                self.chunk_dict_ref
+                    .set_real_blob_idx(blob.blob_index(), real_idx);
+            } else {
+                let idx = self.alloc_index().unwrap();
+                self.add(BlobContext::from(
+                    blob.blob_id().to_owned(),
+                    blob.chunk_count(),
+                    blob.readahead_size() as u32,
+                    blob.uncompressed_size(),
+                    blob.compressed_size(),
+                ));
+                self.chunk_dict_ref
+                    .set_real_blob_idx(blob.blob_index(), idx);
             }
         }
     }

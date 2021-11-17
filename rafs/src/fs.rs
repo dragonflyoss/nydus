@@ -76,15 +76,15 @@ fn default_amplify_io() -> u32 {
 pub struct FsPrefetchControl {
     /// Whether the filesystem layer data prefetch is enable or not.
     #[serde(default)]
-    enable: bool,
+    pub enable: bool,
 
     /// How many working threads to prefetch data.
     #[serde(default = "default_threads_count")]
-    threads_count: usize,
+    pub threads_count: usize,
 
     /// Window size in unit of bytes to merge request to backend.
     #[serde(default = "default_merging_size")]
-    merging_size: usize,
+    pub merging_size: usize,
 
     /// Network bandwidth limitation for prefetching.
     ///
@@ -95,7 +95,7 @@ pub struct FsPrefetchControl {
     ///                        Please note that if the value is less than Rafs chunk size,
     ///                        it will be raised to the chunk size.
     #[serde(default)]
-    bandwidth_rate: u32,
+    pub bandwidth_rate: u32,
 
     /// Whether to prefetch all filesystem data.
     #[serde(default = "default_prefetch_all")]
@@ -217,7 +217,6 @@ pub struct Rafs {
     fs_prefetch: bool,
     prefetch_all: bool,
     xattr_enabled: bool,
-    ios: Arc<metrics::GlobalIoStats>,
     amplify_io: u32,
 
     // static inode attributes
@@ -542,10 +541,6 @@ impl Rafs {
 
         if prefetch_all {
             let root = vec![RAFS_ROOT_INODE];
-            // Sleeping for 2 seconds is indeed a trick to prefetch the entire rootfs.
-            // FIXME: As nydus can't give different policies different priorities, this is a
-            // workaround. Remove the sleeping when IO priority mechanism is ready.
-            sleep(Duration::from_secs(2));
             sb.prefetch_files(&mut reader, Some(root), &|desc| {
                 device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                     warn!("Prefetch error, {:?}", e);

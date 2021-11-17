@@ -224,35 +224,6 @@ impl BlobReader for OssReader {
     }
 }
 
-struct OssWriter {
-    blob_id: String,
-    connection: Arc<Connection>,
-    state: Arc<OssState>,
-}
-
-impl BlobWrite for OssWriter {
-    fn retry_limit(&self) -> u8 {
-        self.state.retry_limit
-    }
-
-    fn write(&self, buf: &[u8], offset: u64) -> BackendResult<usize> {
-        let position = format!("position={}", offset);
-        let query = &["append", position.as_str()];
-        let (resource, url) = self.state.url(&self.blob_id, query);
-        let mut headers = HeaderMap::new();
-
-        self.state
-            .sign(Method::POST, &mut headers, resource.as_str())
-            .map_err(OssError::Auth)?;
-        // Safe because the the call() is a synchronous operation.
-        self.connection
-            .call::<&[u8]>(Method::POST, url.as_str(), None, None, headers, true)
-            .map_err(OssError::Request)?;
-
-        Ok(buf.len())
-    }
-}
-
 /// Storage backend to access data stored in OSS.
 #[derive(Debug)]
 pub struct Oss {

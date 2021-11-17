@@ -331,11 +331,11 @@ impl AsyncWorkerMgr {
             return Ok(());
         }
 
-        if req.chunks.len() > 1 {
-            self.metrics.prefetch_total_size.add(blob_size as usize);
-            self.metrics.prefetch_mr_count.inc();
-        }
-        self.metrics.prefetch_data_amount.add(blob_size as usize);
+        // Record how much prefetch data is requested from storage backend.
+        // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
+        // We can measure merging possibility by this.
+        self.metrics.prefetch_mr_count.inc();
+        self.metrics.prefetch_data_amount.add(blob_size);
 
         if let Some(obj) = cache.get_blob_object() {
             obj.fetch_chunks(req)?;

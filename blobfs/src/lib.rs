@@ -16,7 +16,7 @@ extern crate log;
 
 use std::any::Any;
 use std::collections::{btree_map, BTreeMap};
-use std::ffi::{CStr, CString, OsString};
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
@@ -722,6 +722,7 @@ impl BlobFs {
             inode,
             generation: 0,
             attr: st,
+            attr_flags: 0,
             attr_timeout: self.cfg.attr_timeout,
             entry_timeout: self.cfg.entry_timeout,
         })

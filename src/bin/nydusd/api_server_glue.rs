@@ -73,8 +73,8 @@ impl ApiServer {
             ApiRequest::ConfigureDaemon(conf) => self.configure_daemon(conf),
             ApiRequest::Exit => self.do_exit(),
 
-            ApiRequest::Mount((mountpoint, info)) => self.do_mount(mountpoint, info),
-            ApiRequest::Remount((mountpoint, info)) => self.do_remount(mountpoint, info),
+            ApiRequest::Mount(mountpoint, info) => self.do_mount(mountpoint, info),
+            ApiRequest::Remount(mountpoint, info) => self.do_remount(mountpoint, info),
             ApiRequest::Umount(mountpoint) => self.do_umount(mountpoint),
 
             ApiRequest::Events => Self::events(),

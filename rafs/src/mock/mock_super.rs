@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::io::Result;
 use std::sync::Arc;
 
-use crate::metadata::layout::v5::RafsV5BlobTable;
+use nydus_utils::digest;
+use storage::device::BlobInfo;
+
 use crate::metadata::{Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes};
 use crate::{RafsIoReader, RafsResult};
-use nydus_utils::digest;
 
 pub struct MockSuperBlock {
     pub inodes: HashMap<Inode, Arc<dyn RafsInode + Send + Sync>>,
@@ -54,7 +55,7 @@ impl RafsSuperInodes for MockSuperBlock {
 }
 
 impl RafsSuperBlobs for MockSuperBlock {
-    fn get_blob_table(&self) -> Arc<RafsV5BlobTable> {
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         unimplemented!()
     }
 }
@@ -67,4 +68,7 @@ impl RafsSuperBlock for MockSuperBlock {
         unimplemented!()
     }
     fn destroy(&mut self) {}
+    fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
+        unimplemented!()
+    }
 }

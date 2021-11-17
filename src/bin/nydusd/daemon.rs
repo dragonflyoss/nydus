@@ -22,7 +22,6 @@ use std::sync::{
 use std::thread;
 use std::{error, fmt, io};
 
-use chrono::{self, DateTime, Local};
 use event_manager::{EventOps, EventSubscriber, Events};
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
@@ -37,7 +36,6 @@ use rafs::{
 use rust_fsm::*;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
-use serde_with::{serde_as, DisplayFromStr};
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
@@ -633,7 +631,7 @@ mod tests {
         let backend_type: FsBackendType = "passthrough_fs".parse().unwrap();
         assert!(backend_type == FsBackendType::PassthroughFs);
 
-        "xxxxxxxxxxxxx".parse::<FsBackendType>().unwrap_err();
+        assert!("xxxxxxxxxxxxx".parse::<FsBackendType>().is_err());
     }
 
     #[test]

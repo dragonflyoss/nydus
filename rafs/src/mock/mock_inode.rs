@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Result;
@@ -11,24 +12,21 @@ use std::sync::Arc;
 
 use fuse_backend_rs::abi::linux_abi;
 use fuse_backend_rs::api::filesystem::Entry;
-
-use storage::device::RafsBioDesc;
-
-use crate::metadata::{
-    layout::{
-        v5::{
-            rafsv5_alloc_bio_desc, RafsBlobEntry, RafsChunkInfo, RafsV5BlobTable, RafsV5Inode,
-            RafsV5InodeFlags, RafsV5InodeOps,
-        },
-        XattrName, XattrValue,
-    },
-    Inode, RafsInode, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
-};
-
 use nydus_utils::{digest::RafsDigest, ByteSize};
+
+use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
 use super::mock_chunk::MockChunkInfo;
 use super::mock_super::CHUNK_SIZE;
+use crate::metadata::layout::v5::{
+    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5Inode, RafsV5InodeChunkOps, RafsV5InodeFlags,
+    RafsV5InodeOps,
+};
+use crate::metadata::{
+    layout::{XattrName, XattrValue},
+    Inode, RafsInode, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
+};
+use storage::device::v5::BlobV5ChunkInfo;
 
 #[derive(Default, Clone, Debug)]
 pub struct MockInode {
@@ -67,7 +65,7 @@ impl MockInode {
             i_child_cnt: chunks.len() as u32,
             i_data: chunks,
             // Ignore other bits for now.
-            i_mode: libc::S_IFREG,
+            i_mode: libc::S_IFREG as u32,
             // It can't be changed yet.
             i_blksize: CHUNK_SIZE,
             ..Default::default()
@@ -76,7 +74,7 @@ impl MockInode {
 }
 
 impl RafsInode for MockInode {
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, _max_inode: Inode, _chunk_size: u64) -> Result<()> {
         if self.is_symlink() && self.i_target.is_empty() {
             return Err(einval!("invalid inode"));
         }
@@ -109,11 +107,23 @@ impl RafsInode for MockInode {
         }
     }
 
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
     fn get_symlink(&self) -> Result<OsString> {
         if !self.is_symlink() {
             Err(einval!("inode is not a symlink"))
         } else {
             Ok(self.i_target.clone())
+        }
+    }
+
+    fn get_symlink_size(&self) -> u16 {
+        if self.is_symlink() {
+            self.i_target.byte_size() as u16
+        } else {
+            0
         }
     }
 
@@ -126,12 +136,8 @@ impl RafsInode for MockInode {
     }
 
     #[inline]
-    fn get_child_by_index(&self, index: Inode) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInode>> {
         Ok(self.i_child[index as usize].clone())
-    }
-
-    fn get_child_index(&self) -> Result<u32> {
-        Ok(self.i_child_idx)
     }
 
     #[inline]
@@ -139,8 +145,16 @@ impl RafsInode for MockInode {
         self.i_child_cnt
     }
 
+    fn get_child_index(&self) -> Result<u32> {
+        Ok(self.i_child_idx)
+    }
+
+    fn get_chunk_count(&self) -> u32 {
+        self.get_child_count()
+    }
+
     #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn RafsChunkInfo>> {
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
         Ok(self.i_data[idx as usize].clone())
     }
 
@@ -218,20 +232,12 @@ impl RafsInode for MockInode {
         Ok(0)
     }
 
-    fn alloc_bio_desc(&self, offset: u64, size: usize, user_io: bool) -> Result<RafsBioDesc> {
-        rafsv5_alloc_bio_desc(self, offset, size, user_io)
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+        rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
-    fn get_name_size(&self) -> u16 {
-        self.i_name.byte_size() as u16
-    }
-
-    fn get_symlink_size(&self) -> u16 {
-        if self.is_symlink() {
-            self.i_target.byte_size() as u16
-        } else {
-            0
-        }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     impl_getter!(ino, i_ino, u64);
@@ -241,12 +247,18 @@ impl RafsInode for MockInode {
     impl_getter!(projid, i_projid, u32);
 }
 
+impl RafsV5InodeChunkOps for MockInode {
+    fn get_chunk_info_v5(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>> {
+        Ok(self.i_data[idx as usize].clone())
+    }
+}
+
 impl RafsV5InodeOps for MockInode {
-    fn get_blob_by_index(&self, _idx: u32) -> Result<Arc<RafsBlobEntry>> {
-        Ok(Arc::new(RafsBlobEntry::default()))
+    fn get_blob_by_index(&self, _idx: u32) -> Result<Arc<BlobInfo>> {
+        Ok(Arc::new(BlobInfo::default()))
     }
 
-    fn get_blocksize(&self) -> u32 {
+    fn get_chunk_size(&self) -> u32 {
         CHUNK_SIZE
     }
 

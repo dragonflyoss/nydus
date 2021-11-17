@@ -3,14 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::OpenOptions;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::v5::{RafsV5BlobTable, RafsV5ChunkInfo};
 use rafs::metadata::{RafsMode, RafsSuper};
+use storage::device::BlobInfo;
 
 use crate::core::node::ChunkWrapper;
 use crate::core::tree::Tree;
@@ -18,7 +17,7 @@ use crate::core::tree::Tree;
 pub trait ChunkDict: Sync + Send + 'static {
     fn add_chunk(&mut self, chunk: ChunkWrapper);
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&ChunkWrapper>;
-    fn get_blobs(&self) -> Arc<RafsV5BlobTable>;
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
     fn get_real_blob_idx(&self, inner_idx: u32) -> u32;
 }
@@ -29,12 +28,24 @@ impl ChunkDict for () {
     fn get_chunk(&self, _digest: &RafsDigest) -> Option<&ChunkWrapper> {
         None
     }
+
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
+        Vec::new()
+    }
+
+    fn set_real_blob_idx(&self, _inner_idx: u32, _out_idx: u32) {
+        panic!("()::set_real_blob_idx() should not be invoked");
+    }
+
+    fn get_real_blob_idx(&self, inner_idx: u32) -> u32 {
+        inner_idx
+    }
 }
 
 #[derive(Default)]
 pub struct HashChunkDict {
     pub m: HashMap<RafsDigest, (ChunkWrapper, AtomicU32)>,
-    blobs: Arc<RafsV5BlobTable>,
+    blobs: Vec<Arc<BlobInfo>>,
     blob_idx_m: Mutex<BTreeMap<u32, u32>>,
 }
 
@@ -52,7 +63,7 @@ impl ChunkDict for HashChunkDict {
         self.m.get(digest).map(|e| &e.0)
     }
 
-    fn get_blobs(&self) -> Arc<RafsV5BlobTable> {
+    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         self.blobs.clone()
     }
 
@@ -76,7 +87,7 @@ impl HashChunkDict {
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
             m: HashMap::new(),
-            blobs: rs.superblock.get_blob_table(),
+            blobs: rs.superblock.get_blob_infos(),
             blob_idx_m: Mutex::new(BTreeMap::new()),
         };
 
@@ -127,6 +138,8 @@ mod tests {
         let chunk = ChunkWrapper::new(RafsVersion::V5);
         dict.add_chunk(chunk.clone());
         assert!(dict.get_chunk(chunk.id()).is_none());
+        assert_eq!(dict.get_blobs().len(), 0);
+        assert_eq!(dict.get_real_blob_idx(5), 5);
     }
 
     #[test]
@@ -138,5 +151,9 @@ mod tests {
         let dict = import_chunk_dict(path).unwrap();
 
         assert!(dict.get_chunk(&RafsDigest::default()).is_none());
+        assert_eq!(dict.get_blobs().len(), 18);
+        dict.set_real_blob_idx(0, 10);
+        assert_eq!(dict.get_real_blob_idx(0), 10);
+        assert_eq!(dict.get_real_blob_idx(1), 1);
     }
 }

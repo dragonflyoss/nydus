@@ -184,7 +184,7 @@ impl BlobCacheMgr for FileCacheMgr {
 #[cfg(test)]
 pub mod blob_cache_tests {
     /*
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{alloc_zeroed, Layout};
     use std::slice::from_raw_parts;
     use std::sync::Arc;
 
@@ -309,7 +309,7 @@ pub mod blob_cache_tests {
            // read from cache
            let r1 = unsafe {
                let layout = Layout::from_size_align(50, 1).unwrap();
-               let ptr = alloc(layout);
+               let ptr = alloc_zeroed(layout);
                let vs = VolatileSlice::new(ptr, 50);
                blob_cache.read(&mut [bio.clone()], &[vs]).unwrap();
                Vec::from(from_raw_parts(ptr, 50))
@@ -317,7 +317,7 @@ pub mod blob_cache_tests {
 
            let r2 = unsafe {
                let layout = Layout::from_size_align(50, 1).unwrap();
-               let ptr = alloc(layout);
+               let ptr = alloc_zeroed(layout);
                let vs = VolatileSlice::new(ptr, 50);
                blob_cache.read(&mut [bio], &[vs]).unwrap();
                Vec::from(from_raw_parts(ptr, 50))
@@ -672,126 +672,6 @@ pub mod blob_cache_tests {
            let mr = recv.recv().unwrap();
            assert_eq!(mr.blob_offset, chunk3.compress_offset());
            assert_eq!(mr.blob_size, chunk3.compress_size());
-       }
-
-       #[test]
-       // This test deletes the blobcache file without deleting its corresponding
-       // chunkmap file. The expected result is that newly created blobcache
-       // instance will read corrupt blob data, but old blobcache instance
-       // should not be affected, and reading blob data should not be affected
-       // if only the chunkmap file is deleted but not the blobcache file.
-       fn test_chunk_map_corrupted() {
-           let tmp_dir = TempDir::new().unwrap();
-           let cache_dir = tmp_dir.as_path().to_path_buf().join("cache");
-           let s = format!(
-               r###"
-           {{
-               "work_dir": {:?}
-           }}
-           "###,
-               cache_dir,
-           );
-
-           let cache_config = CacheConfig {
-               cache_validate: false,
-               cache_compressed: false,
-               cache_type: String::from("blobcache"),
-               cache_config: serde_json::from_str(&s).unwrap(),
-               prefetch_worker: BlobPrefetchConfig::default(),
-           };
-
-           // Create blobcache instance 1.
-           let blob_cache1 = filecache::new(
-               cache_config.clone(),
-               Arc::new(MockBackend {
-                   metrics: BackendMetrics::new("id", "mock"),
-               }) as Arc<dyn BlobBackend + Send + Sync>,
-               compress::Algorithm::Lz4Block,
-               digest::Algorithm::Blake3,
-               "id",
-           )
-           .unwrap();
-
-           // Generate blobcache and blobcache.chunk_map file.
-           let mut expect = vec![1u8; 100];
-           let blob_id = "blobcache";
-           blob_cache1
-               .backend
-               .read(blob_id, expect.as_mut(), 0)
-               .unwrap();
-
-           // Generate chunkinfo and bio.
-           let mut chunk = MockChunkInfo::new();
-           chunk.block_id = RafsDigest::from_buf(&expect, digest::Algorithm::Blake3);
-           chunk.file_offset = 0;
-           chunk.compress_offset = 0;
-           chunk.compress_size = 100;
-           chunk.decompress_offset = 0;
-           chunk.decompress_size = 100;
-           chunk.index = 0;
-           let bio = BlobIoDesc::new(
-               Arc::new(chunk),
-               Arc::new(BlobInfo {
-                   chunk_count: 1,
-                   readahead_offset: 0,
-                   readahead_size: 0,
-                   blob_id: blob_id.to_string(),
-                   blob_index: 0,
-                   blob_decompressed_size: 0,
-                   blob_compressed_size: 0,
-               }),
-               50,
-               50,
-               RAFS_DEFAULT_BLOCK_SIZE as u32,
-               true,
-           );
-
-           // Read from blobcache instance 1.
-           let r1 = unsafe {
-               let layout = Layout::from_size_align(50, 1).unwrap();
-               let ptr = alloc(layout);
-               let vs = VolatileSlice::new(ptr, 50);
-               blob_cache1.read(&mut [bio.clone()], &[vs]).unwrap();
-               Vec::from(from_raw_parts(ptr, 50))
-           };
-
-           assert_eq!(r1, &expect[50..]);
-
-           // Only remove blobcache file, keep blobcache.chunk_map.
-           std::fs::remove_file(cache_dir.join("blobcache")).unwrap();
-
-           // Create blobcache instance 2.
-           let blob_cache2 = filecache::new(
-               cache_config,
-               Arc::new(MockBackend {
-                   metrics: BackendMetrics::new("id", "mock"),
-               }) as Arc<dyn BlobBackend + Send + Sync>,
-               compress::Algorithm::Lz4Block,
-               digest::Algorithm::Blake3,
-               "id",
-           )
-           .unwrap();
-
-           // Read from blobcache instance 2, the data should be corrupted
-           // if disable `cache_validate` option.
-           let r2 = unsafe {
-               let layout = Layout::from_size_align(50, 1).unwrap();
-               let ptr = alloc(layout);
-               let vs = VolatileSlice::new(ptr, 50);
-               blob_cache2.read(&mut [bio.clone()], &[vs]).unwrap();
-               Vec::from(from_raw_parts(ptr, 50))
-           };
-           assert_ne!(r2, &expect[50..]);
-
-           // Read from blobcache instance 1, the data should be corrected.
-           let r3 = unsafe {
-               let layout = Layout::from_size_align(50, 1).unwrap();
-               let ptr = alloc(layout);
-               let vs = VolatileSlice::new(ptr, 50);
-               blob_cache1.read(&mut [bio], &[vs]).unwrap();
-               Vec::from(from_raw_parts(ptr, 50))
-           };
-           assert_eq!(r3, &expect[50..]);
        }
     */
 }

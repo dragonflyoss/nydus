@@ -87,10 +87,10 @@ pub struct BlobInfo {
     /// The blob is for an stargz image.
     stargz: bool,
 
-    /// V6: compressor that is used for compressing chunk info array.
-    meta_ci_compressor: u32,
     /// V6: Version number of the blob metadata.
     meta_flags: u32,
+    /// V6: compressor that is used for compressing chunk info array.
+    meta_ci_compressor: u32,
     /// V6: Offset of the chunk information array in the compressed blob.
     meta_ci_offset: u64,
     /// V6: Size of the compressed chunk information array.

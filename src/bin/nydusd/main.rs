@@ -39,7 +39,7 @@ use rlimit::{rlim, Resource};
 use vmm_sys_util::eventfd::EventFd;
 
 use api_server_glue::{ApiServer, ApiSeverSubscriber};
-use daemon::{DaemonError, FsBackendMountCmd, FsBackendType, NydusDaemonSubscriber};
+use daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;

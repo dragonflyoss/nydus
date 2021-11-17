@@ -240,7 +240,7 @@ impl RegistryState {
 
     /// Parse `www-authenticate` response header respond from registry server
     /// The header format like: `Bearer realm="https://auth.my-registry.com/token",service="my-registry.com",scope="repository:test/repo:pull,push"`
-    fn parse_auth(source: &HeaderValue) -> Option<Auth> {
+    fn parse_auth(source: &HeaderValue, auth: &Option<String>) -> Option<Auth> {
         let source = source.to_str().unwrap();
         let source: Vec<&str> = source.splitn(2, ' ').collect();
         if source.len() < 2 {
@@ -277,8 +277,7 @@ impl RegistryState {
                     return None;
                 }
 
-                let header = self
-                    .auth
+                let header = auth
                     .as_ref()
                     .map(|auth| HeaderValue::from_str(&format!("Basic {}", auth)).unwrap());
 
@@ -364,7 +363,7 @@ impl RegistryReader {
         if resp.status() == StatusCode::UNAUTHORIZED {
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
                 // Get token from registry authorization server
-                if let Some(auth) = RegistryState::parse_auth(resp_auth_header) {
+                if let Some(auth) = RegistryState::parse_auth(resp_auth_header, &self.state.auth) {
                     let auth_header = self
                         .state
                         .get_auth_header(auth, &self.connection)
@@ -733,7 +732,7 @@ mod tests {
     fn test_parse_auth() {
         let str = "Bearer realm=\"https://auth.my-registry.com/token\",service=\"my-registry.com\",scope=\"repository:test/repo:pull,push\"";
         let header = HeaderValue::from_str(str).unwrap();
-        let auth = RegistryState::parse_auth(&header).unwrap();
+        let auth = RegistryState::parse_auth(&header, &None).unwrap();
         match auth {
             Auth::Bearer(auth) => {
                 assert_eq!(&auth.realm, "https://auth.my-registry.com/token");
@@ -745,7 +744,7 @@ mod tests {
 
         let str = "Basic realm=\"https://auth.my-registry.com/token\"";
         let header = HeaderValue::from_str(str).unwrap();
-        let auth = RegistryState::parse_auth(&header).unwrap();
+        let auth = RegistryState::parse_auth(&header, &None).unwrap();
         match auth {
             Auth::Basic(auth) => assert_eq!(&auth.realm, "https://auth.my-registry.com/token"),
             _ => panic!("failed to pase `Bearer` authentication header"),
@@ -753,7 +752,7 @@ mod tests {
 
         let str = "Base realm=\"https://auth.my-registry.com/token\"";
         let header = HeaderValue::from_str(str).unwrap();
-        assert!(RegistryState::parse_auth(&header).is_none());
+        assert!(RegistryState::parse_auth(&header, &None).is_none());
     }
 
     #[test]

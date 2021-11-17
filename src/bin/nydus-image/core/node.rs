@@ -318,11 +318,11 @@ impl Node {
             chunk.set_id(chunk_id);
 
             // Check whether we already have the same chunk data by matching chunk digest.
-            let exist_chunk = blob_ctx
-                .chunk_dict
-                .get_chunk(&chunk_id)
-                .or_else(|| chunk_dict.get_chunk(&chunk_id));
-            if let Some(cached_chunk) = exist_chunk {
+            let exist_chunk = match blob_ctx.chunk_dict.get_chunk(&chunk_id) {
+                Some(v) => Some((v, true)),
+                None => chunk_dict.get_chunk(&chunk_id).map(|v| (v, false)),
+            };
+            if let Some((cached_chunk, from_dict)) = exist_chunk {
                 // TODO: we should also compare the actual data to avoid chunk digest conflicts.
                 // hole cached_chunk may have zero uncompressed size
                 if cached_chunk.uncompressed_size() == 0
@@ -336,6 +336,10 @@ impl Node {
 
                     chunk.copy_from(cached_chunk);
                     chunk.set_file_offset(file_offset);
+                    if from_dict {
+                        let idx = blob_ctx.chunk_dict.get_real_blob_idx(chunk.blob_index());
+                        chunk.set_blob_index(idx);
+                    }
                     trace!(
                         "\t\tbuilding duplicated chunk: {} compressor {}",
                         chunk,
