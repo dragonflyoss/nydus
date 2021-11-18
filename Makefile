@@ -1,6 +1,7 @@
 all: build
 
 TEST_WORKDIR_PREFIX ?= "/tmp"
+DOCKER ?= "true"
 
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 ARCH := $(shell uname -p)
@@ -25,7 +26,11 @@ VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 #	$(2): How to build the golang project
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
-	docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir $(1) golang:1.15 $(2)
+	if [ $(DOCKER) =  "true" ]; then
+		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.15 $(2)
+	else
+		$(2) -C $(1)
+	fi
 endef
 
 # Build nydus respecting different features
@@ -105,7 +110,7 @@ docker-nydus-smoke:
 		-v ${current_dir}:/nydus-rs \
 		nydus-smoke
 
-NYDUSIFY_PATH = /nydus-rs/contrib/nydusify
+NYDUSIFY_PATH = contrib/nydusify
 # TODO: Nydusify smoke has to be time consuming for a while since it relies on musl nydusd and nydus-image.
 # So musl compliation must be involved.
 # And docker-in-docker deployment invovles image buiding?
@@ -133,21 +138,21 @@ nydusify:
 nydusify-static:
 	$(call build_golang,${NYDUSIFY_PATH},make static-release)
 
-SNAPSHOTTER_PATH = /nydus-rs/contrib/nydus-snapshotter
+SNAPSHOTTER_PATH = contrib/nydus-snapshotter
 nydus-snapshotter:
 	$(call build_golang,${SNAPSHOTTER_PATH},make static-release build test)
 
 nydus-snapshotter-static:
 	$(call build_golang,${SNAPSHOTTER_PATH},make static-release)
 
-CTR-REMOTE_PATH = /nydus-rs/contrib/ctr-remote
+CTR-REMOTE_PATH = contrib/ctr-remote
 ctr-remote:
 	$(call build_golang,${CTR-REMOTE_PATH},make)
 
 ctr-remote-static:
 	$(call build_golang,${CTR-REMOTE_PATH},make static-release)
 
-NYDUS-OVERLAYFS_PATH = /nydus-rs/contrib/nydus-overlayfs
+NYDUS-OVERLAYFS_PATH = contrib/nydus-overlayfs
 nydus-overlayfs:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make)
 
