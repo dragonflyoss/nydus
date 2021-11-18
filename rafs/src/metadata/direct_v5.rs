@@ -528,6 +528,7 @@ impl RafsInode for OndiskInodeWrapper {
             attr: self.get_attr().into(),
             inode: inode.i_ino,
             generation: 0,
+            attr_flags: 0,
             attr_timeout: state.meta.attr_timeout,
             entry_timeout: state.meta.entry_timeout,
         }

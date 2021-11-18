@@ -25,9 +25,8 @@ use std::{error, fmt, io};
 use event_manager::{EventOps, EventSubscriber, Events};
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
-#[cfg(feature = "virtiofs")]
 use fuse_backend_rs::transport::Error as FuseTransportError;
-use fuse_backend_rs::Error as VhostUserFsError;
+use fuse_backend_rs::Error as FuseError;
 
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
@@ -99,11 +98,12 @@ pub enum DaemonError {
     HandleEventUnknownEvent,
     /// No memory configured.
     NoMemoryConfigured,
+    /// Fail to walk descriptor chain
+    IterateQueue,
     /// Invalid Virtio descriptor chain.
-    #[cfg(feature = "virtiofs")]
     InvalidDescriptorChain(FuseTransportError),
     /// Processing queue failed.
-    ProcessQueue(VhostUserFsError),
+    ProcessQueue(FuseError),
     /// Cannot create epoll context.
     Epoll(io::Error),
     /// Cannot clone event fd.
@@ -136,7 +136,7 @@ pub enum DaemonError {
     ServiceStop,
     /// Wait daemon failure
     WaitDaemon(io::Error),
-    SessionShutdown(io::Error),
+    SessionShutdown(FuseTransportError),
     Downcast(String),
     FsTypeMismatch(String),
 }
