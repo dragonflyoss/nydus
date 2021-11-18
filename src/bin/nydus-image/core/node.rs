@@ -262,7 +262,7 @@ impl Node {
     pub fn remove_xattr(&mut self, key: &OsStr) {
         self.xattrs.remove(key);
         if self.xattrs.is_empty() {
-            self.inode.set_as_xattr(false);
+            self.inode.set_has_xattr(false);
         }
     }
 
@@ -672,7 +672,7 @@ impl Node {
         }
 
         if !self.xattrs.is_empty() {
-            self.inode.set_as_xattr(true);
+            self.inode.set_has_xattr(true);
         }
 
         Ok(())
@@ -1114,7 +1114,7 @@ impl InodeWrapper {
         }
     }
 
-    pub fn set_as_xattr(&mut self, enable: bool) {
+    pub fn set_has_xattr(&mut self, enable: bool) {
         match self {
             InodeWrapper::V5(i) => {
                 if enable {
