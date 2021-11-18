@@ -120,10 +120,15 @@ func NewDaemonConfig(cfg DaemonConfig, imageID string, vpcRegistry bool, labels 
 			registryHost = registry.ConvertToVPCHost(registryHost)
 		}
 		keyChain := auth.FromLabels(labels)
-		if keyChain.TokenBase() {
-			cfg.Device.Backend.Config.RegistryToken = keyChain.Password
-		} else {
-			cfg.Device.Backend.Config.Auth = keyChain.ToBase64()
+		// If no auth is provided, don't touch auth from provided nydusd configuration file.
+		// We don't validate the original nydusd auth from configuration file since it can be empty
+		// when repository is public.
+		if keyChain != nil {
+			if keyChain.TokenBase() {
+				cfg.Device.Backend.Config.RegistryToken = keyChain.Password
+			} else {
+				cfg.Device.Backend.Config.Auth = keyChain.ToBase64()
+			}
 		}
 		cfg.Device.Backend.Config.Host = registryHost
 		cfg.Device.Backend.Config.Repo = image.Repo
