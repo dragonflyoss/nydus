@@ -32,23 +32,24 @@ use clap::{App, Arg};
 use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
 use nix::sys::signal;
-use nydus::FsBackendType;
-use nydus_api::http::start_http_thread;
-use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 use rlimit::{rlim, Resource};
 use vmm_sys_util::eventfd::EventFd;
 
-use api_server_glue::{ApiServer, ApiSeverSubscriber};
-use daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
+use nydus::FsBackendType;
+use nydus_api::http::start_http_thread;
+use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
+
+use self::api_server_glue::{ApiServer, ApiSeverSubscriber};
+use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
 #[cfg(feature = "virtiofs")]
-use virtiofs::create_nydus_daemon;
+use self::virtiofs::create_nydus_daemon;
 #[cfg(feature = "fusedev")]
 mod fusedev;
 #[cfg(feature = "fusedev")]
-use fusedev::create_nydus_daemon;
+use self::fusedev::create_nydus_daemon;
 
 mod api_server_glue;
 mod daemon;

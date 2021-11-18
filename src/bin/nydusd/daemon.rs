@@ -27,28 +27,25 @@ use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use fuse_backend_rs::transport::Error as FuseTransportError;
 use fuse_backend_rs::Error as FuseError;
-use nydus::FsBackendType;
-use nydus_app::BuildTimeInfo;
-use rafs::{
-    fs::{Rafs, RafsConfig},
-    trim_backend_config, RafsError, RafsIoRead,
-};
 use rust_fsm::*;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
+use nydus::{FsBackendDesc, FsBackendType};
+use nydus_app::BuildTimeInfo;
+use rafs::{
+    fs::{Rafs, RafsConfig},
+    trim_backend_config, RafsError, RafsIoRead,
+};
+
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
 use crate::EVENT_MANAGER_RUN;
-use nydus::FsBackendDesc;
 
-<<<<<<< HEAD
 //TODO: Try to public below type from fuse-rs thus no need to redefine it here.
 type BackFileSystem = Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>;
 
 #[allow(dead_code)]
-=======
->>>>>>> nydusd: add more tests for daemon
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Hash, PartialEq, Eq, Serialize)]
 pub enum DaemonState {

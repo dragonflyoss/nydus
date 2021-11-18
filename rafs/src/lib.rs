@@ -45,6 +45,7 @@ use std::path::Path;
 
 pub mod fs;
 pub mod metadata;
+#[cfg(test)]
 pub mod mock;
 
 /// Error codes for rafs related operations.

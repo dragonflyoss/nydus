@@ -3,10 +3,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::any::Any;
 use std::sync::Arc;
 
 use nydus_utils::digest::RafsDigest;
-use std::any::Any;
 use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkFlags, BlobChunkInfo};
 
@@ -58,12 +58,6 @@ impl BlobChunkInfo for MockChunkInfo {
         self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
-    impl_getter!(blob_index, c_blob_index, u32);
-    impl_getter!(compress_offset, c_compress_offset, u64);
-    impl_getter!(compress_size, c_compr_size, u32);
-    impl_getter!(uncompress_offset, c_decompress_offset, u64);
-    impl_getter!(uncompress_size, c_decompress_size, u32);
-
     fn chunk_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
@@ -75,6 +69,12 @@ impl BlobChunkInfo for MockChunkInfo {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    impl_getter!(blob_index, c_blob_index, u32);
+    impl_getter!(compress_offset, c_compress_offset, u64);
+    impl_getter!(compress_size, c_compr_size, u32);
+    impl_getter!(uncompress_offset, c_decompress_offset, u64);
+    impl_getter!(uncompress_size, c_decompress_size, u32);
 }
 
 impl BlobV5ChunkInfo for MockChunkInfo {

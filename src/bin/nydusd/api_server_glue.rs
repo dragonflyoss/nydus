@@ -13,6 +13,7 @@ use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
+use nydus::{FsBackendType, NydusError};
 use nydus_api::http_endpoint::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
     DaemonErrorKind, MetricsErrorKind,
@@ -22,7 +23,6 @@ use nydus_utils::metrics;
 use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDaemon};
 #[cfg(fusedev)]
 use crate::fusedev::FusedevDaemon;
-use nydus::{FsBackendType, NydusError};
 
 type Result<T> = ApiResult<T>;
 

@@ -185,7 +185,6 @@ impl RegistryState {
         // the query and in the body to be compatible with different registry
         // implementations, which have been tested on these platforms:
         // docker hub, harbor, github ghcr, aliyun acr.
-
         let query = vec![
             ("service", auth.service.as_str()),
             ("scope", auth.scope.as_str()),
