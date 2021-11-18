@@ -33,7 +33,7 @@ Currently the repository includes following tools:
 | nydusify                 | It pulls OCI image down and unpack it, invokes `nydus-image` to convert image and then pushes the converted image back to registry and data storage |
 | containerd-nydus-grpc    | Works as a `containerd` remote snapshotter to help setup container rootfs with nydus images                                                         |
 | nydusctl                 | Nydusd CLI client, query daemon's working status/metrics and configure it                                                                           |
-| ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd ` ctr                                                                       |
+| ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                       |
 | nydus-docker-graphdriver | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                 |
 
 To try nydus image service:
@@ -52,6 +52,10 @@ make release
 # build static binary with docker
 make docker-static
 ```
+
+## Quick Start with Kubernetes and Containerd
+
+For more details on how to lazily start a container with `nydus-snapshotter` and nydus image on Kubernetes nodes or locally use `nerdctl` rather than CRI, please refer to [Nydus Setup](./docs/containerd-env-setup.md)
 
 ## Build Nydus Image
 
