@@ -112,7 +112,11 @@ impl RafsDevice {
     }
 
     /// Read a range of data from blob into the provided writer
-    pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: &mut RafsBioDesc) -> io::Result<usize> {
+    pub fn read_to(
+        &self,
+        w: &mut dyn ZeroCopyWriter<S = ()>,
+        desc: &mut RafsBioDesc,
+    ) -> io::Result<usize> {
         let offset = desc.bi_vec[0].offset;
         let size = desc.bi_size;
         let mut f = RafsBioDevice::new(desc, self);
@@ -122,7 +126,11 @@ impl RafsDevice {
     }
 
     /// Write a range of data to blob from the provided reader
-    pub fn write_from(&self, _r: &mut dyn ZeroCopyReader, _desc: RafsBioDesc) -> io::Result<usize> {
+    pub fn write_from(
+        &self,
+        _r: &mut dyn ZeroCopyReader<S = ()>,
+        _desc: RafsBioDesc,
+    ) -> io::Result<usize> {
         unimplemented!()
     }
 

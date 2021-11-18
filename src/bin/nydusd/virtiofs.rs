@@ -17,9 +17,15 @@ use libc::EFD_NONBLOCK;
 use fuse_backend_rs::api::{server::Server, Vfs};
 use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, Writer};
 
-use vhost_rs::vhost_user::{message::*, Listener, SlaveFsCacheReq};
-use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring};
-use vm_memory::GuestMemoryMmap;
+use vhost::vhost_user::{message::*, Listener, SlaveFsCacheReq};
+use vhost_user_backend::{
+    VhostUserBackend, VhostUserBackendMut, VhostUserDaemon, VringMutex, VringStateMutGuard, VringT,
+};
+use virtio_bindings::bindings::virtio_ring::{
+    VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
+};
+use virtio_queue::DescriptorChain;
+use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 use vmm_sys_util::eventfd::EventFd;
 
 use nydus_app::BuildTimeInfo;
@@ -39,22 +45,21 @@ const HIPRIO_QUEUE_EVENT: u16 = 0;
 // The guest queued an available buffer for the request queue.
 const REQ_QUEUE_EVENT: u16 = 1;
 // The device has been dropped.
-const KILL_EVENT: u16 = 2;
+// const KILL_EVENT: u16 = 2;
 
 type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
 
-#[allow(dead_code)]
 struct VhostUserFsBackendHandler {
     backend: Mutex<VhostUserFsBackend>,
 }
 
 struct VhostUserFsBackend {
-    mem: Option<GuestMemoryMmap>,
+    mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     kill_evt: EventFd,
+    event_idx: bool,
     server: Arc<Server<Arc<Vfs>>>,
     // handle request from slave to master
     vu_req: Option<SlaveFsCacheReq>,
-    used_descs: Vec<(u16, u32)>,
 }
 
 impl VhostUserFsBackendHandler {
@@ -62,9 +67,9 @@ impl VhostUserFsBackendHandler {
         let backend = VhostUserFsBackend {
             mem: None,
             kill_evt: EventFd::new(EFD_NONBLOCK).map_err(DaemonError::Epoll)?,
+            event_idx: false,
             server: Arc::new(Server::new(vfs)),
             vu_req: None,
-            used_descs: Vec::with_capacity(QUEUE_SIZE),
         };
         Ok(VhostUserFsBackendHandler {
             backend: Mutex::new(backend),
@@ -72,21 +77,49 @@ impl VhostUserFsBackendHandler {
     }
 }
 
+impl Clone for VhostUserFsBackend {
+    fn clone(&self) -> Self {
+        VhostUserFsBackend {
+            mem: self.mem.clone(),
+            kill_evt: self.kill_evt.try_clone().unwrap(),
+            event_idx: self.event_idx,
+            server: self.server.clone(),
+            vu_req: self.vu_req.clone(),
+        }
+    }
+}
+
 impl VhostUserFsBackend {
     // There's no way to recover if error happens during processing a virtq, let the caller
     // to handle it.
-    fn process_queue(&mut self, vring: &mut Vring) -> Result<()> {
-        let mem = self.mem.as_ref().ok_or(DaemonError::NoMemoryConfigured)?;
+    fn process_queue(
+        &mut self,
+        vring_state: &mut VringStateMutGuard<GuestMemoryAtomic<GuestMemoryMmap>>,
+    ) -> Result<bool> {
+        let mut used_any = false;
+        let mem = self
+            .mem
+            .as_ref()
+            .ok_or(DaemonError::NoMemoryConfigured)?
+            .memory();
 
-        while let Some(avail_desc) = vring.mut_queue().iter(mem).next() {
-            let head_index = avail_desc.index();
-            let reader = Reader::new(mem, avail_desc.clone())
-                .map_err(DaemonError::InvalidDescriptorChain)?;
+        let avail_chains: Vec<DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>> = vring_state
+            .get_queue_mut()
+            .iter()
+            .map_err(|_| DaemonError::IterateQueue)?
+            .collect();
+
+        for chain in avail_chains {
+            used_any = true;
+
+            let head_index = chain.head_index();
+
+            let reader =
+                Reader::new(&mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
             let writer =
-                Writer::new(mem, avail_desc).map_err(DaemonError::InvalidDescriptorChain)?;
+                Writer::new(&mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
 
-            let total = self
-                .server
+            self.server
                 .handle_message(
                     reader,
                     writer,
@@ -97,28 +130,35 @@ impl VhostUserFsBackend {
                 )
                 .map_err(DaemonError::ProcessQueue)?;
 
-            self.used_descs.push((head_index, total as u32));
-        }
+            if self.event_idx {
+                if vring_state.add_used(head_index, 0).is_err() {
+                    warn!("Couldn't return used descriptors to the ring");
+                }
 
-        if !self.used_descs.is_empty() {
-            for (desc_index, data_sz) in &self.used_descs {
-                trace!(
-                    "used desc index {} bytes {} total_used {}",
-                    desc_index,
-                    data_sz,
-                    self.used_descs.len()
-                );
-                vring.mut_queue().add_used(mem, *desc_index, *data_sz);
+                match vring_state.needs_notification() {
+                    Err(_) => {
+                        warn!("Couldn't check if queue needs to be notified");
+                        vring_state.signal_used_queue().unwrap();
+                    }
+                    Ok(needs_notification) => {
+                        if needs_notification {
+                            vring_state.signal_used_queue().unwrap();
+                        }
+                    }
+                }
+            } else {
+                if vring_state.add_used(head_index, 0).is_err() {
+                    warn!("Couldn't return used descriptors to the ring");
+                }
+                vring_state.signal_used_queue().unwrap();
             }
-            self.used_descs.clear();
-            vring.signal_used_queue().unwrap();
         }
 
-        Ok(())
+        Ok(used_any)
     }
 }
 
-impl VhostUserBackend for VhostUserFsBackendHandler {
+impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
     fn num_queues(&self) -> usize {
         NUM_QUEUES
     }
@@ -128,53 +168,81 @@ impl VhostUserBackend for VhostUserFsBackendHandler {
     }
 
     fn features(&self) -> u64 {
-        1 << VIRTIO_F_VERSION_1 | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+        1 << VIRTIO_F_VERSION_1
+            | 1 << VIRTIO_RING_F_INDIRECT_DESC
+            | 1 << VIRTIO_RING_F_EVENT_IDX
+            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
         VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::SLAVE_REQ
     }
 
-    fn set_event_idx(&mut self, _enabled: bool) {}
+    fn set_event_idx(&mut self, _enabled: bool) {
+        self.backend.lock().unwrap().event_idx = true
+    }
 
-    fn update_memory(&mut self, mem: GuestMemoryMmap) -> VhostUserBackendResult<()> {
+    fn update_memory(
+        &mut self,
+        mem: GuestMemoryAtomic<GuestMemoryMmap>,
+    ) -> VhostUserBackendResult<()> {
         self.backend.lock().unwrap().mem = Some(mem);
         Ok(())
     }
 
     fn handle_event(
-        &self,
-        index: u16,
+        &mut self,
+        device_event: u16,
         evset: epoll::Events,
-        vrings: &[Arc<RwLock<Vring>>],
+        vrings: &[VringMutex],
         _thread_id: usize,
     ) -> VhostUserBackendResult<bool> {
         if evset != epoll::Events::EPOLLIN {
             return Err(DaemonError::HandleEventNotEpollIn.into());
         }
 
-        match index {
+        let mut vring_state = match device_event {
             HIPRIO_QUEUE_EVENT => {
-                let mut vring = vrings[HIPRIO_QUEUE_EVENT as usize].write().unwrap();
-                // high priority requests are also just plain fuse requests, just in a
-                // different queue
-                self.backend.lock().unwrap().process_queue(&mut vring)?;
+                debug!("HIPRIO_QUEUE_EVENT");
+                vrings[0].get_mut()
             }
-            x if x >= REQ_QUEUE_EVENT && x < vrings.len() as u16 => {
-                let mut vring = vrings[x as usize].write().unwrap();
-                self.backend.lock().unwrap().process_queue(&mut vring)?;
+            REQ_QUEUE_EVENT => {
+                debug!("QUEUE_EVENT");
+                vrings[1].get_mut()
             }
             _ => return Err(DaemonError::HandleEventUnknownEvent.into()),
+        };
+
+        if self.backend.lock().unwrap().event_idx {
+            // vm-virtio's Queue implementation only checks avail_index
+            // once, so to properly support EVENT_IDX we need to keep
+            // calling process_queue() until it stops finding new
+            // requests on the queue.
+            loop {
+                vring_state.disable_notification().unwrap();
+                self.backend
+                    .lock()
+                    .unwrap()
+                    .process_queue(&mut vring_state)?;
+                if !vring_state.enable_notification().unwrap() {
+                    break;
+                }
+            }
+        } else {
+            // Without EVENT_IDX, a single call is enough.
+            self.backend
+                .lock()
+                .unwrap()
+                .process_queue(&mut vring_state)?;
         }
 
         Ok(false)
     }
 
-    fn exit_event(&self, _thread_index: usize) -> Option<(EventFd, Option<u16>)> {
-        Some((
-            self.backend.lock().unwrap().kill_evt.try_clone().unwrap(),
-            Some(KILL_EVENT),
-        ))
+    fn exit_event(&self, _thread_index: usize) -> Option<EventFd> {
+        // FIXME: need to patch vhost-user-backend to return KILL_EVENT
+        // so that daemon stop event gets popped up.
+        Some(self.backend.lock().unwrap().kill_evt.try_clone().unwrap())
     }
 
     fn set_slave_req_fd(&mut self, vu_req: SlaveFsCacheReq) {
@@ -182,9 +250,9 @@ impl VhostUserBackend for VhostUserFsBackendHandler {
     }
 }
 
-struct VirtiofsDaemon<S: VhostUserBackend> {
+struct VirtiofsDaemon<S: VhostUserBackend<VringMutex> + Clone> {
     vfs: Arc<Vfs>,
-    daemon: Arc<Mutex<VhostUserDaemon<S>>>,
+    daemon: Arc<Mutex<VhostUserDaemon<S, VringMutex>>>,
     sock: String,
     id: Option<String>,
     supervisor: Option<String>,
@@ -195,7 +263,7 @@ struct VirtiofsDaemon<S: VhostUserBackend> {
     bti: BuildTimeInfo,
 }
 
-impl<S: VhostUserBackend> NydusDaemon for VirtiofsDaemon<S> {
+impl<S: VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> {
     fn start(&self) -> DaemonResult<()> {
         let listener = Listener::new(&self.sock, true)
             .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
@@ -274,7 +342,7 @@ impl<S: VhostUserBackend> NydusDaemon for VirtiofsDaemon<S> {
     }
 }
 
-impl<S: VhostUserBackend> DaemonStateMachineSubscriber for VirtiofsDaemon<S> {
+impl<S: VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscriber for VirtiofsDaemon<S> {
     fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
         self.trigger
             .lock()
@@ -301,6 +369,7 @@ pub fn create_nydus_daemon(
     let vu_daemon = VhostUserDaemon::new(
         String::from("vhost-user-fs-backend"),
         Arc::new(RwLock::new(VhostUserFsBackendHandler::new(vfs.clone())?)),
+        GuestMemoryAtomic::new(GuestMemoryMmap::new()),
     )
     .map_err(|e| DaemonError::DaemonFailure(format!("{:?}", e)))?;
 

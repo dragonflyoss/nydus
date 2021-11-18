@@ -23,7 +23,7 @@ rlimit = "0.3.0"
 log = "0.4.8"
 epoll = ">=4.0.1"
 libc = "0.2"
-vmm-sys-util = "0.6.0"
+vmm-sys-util = ">=0.8.0"
 clap = "2.33"
 flexi_logger = { version = "0.17" }
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
@@ -36,17 +36,19 @@ nix = "0.17"
 anyhow = "1.0.35"
 base64 = { version = ">=0.12.0" }
 rust-fsm = "0.6.0"
-vm-memory = { version = ">=0.2.0", optional = true }
+vm-memory = { version = "0.6.0", features = ["backend-mmap"], optional = true }
 chrono = "0.4.19"
 openssl = { version = "0.10.35", features = ["vendored"] }
-
-event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "v0.2.0" }
-fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", optional = true, rev = "cfd2cca", package = "fuse-rs" }
-vhost-rs = { git = "https://github.com/cloud-hypervisor/vhost.git", branch = "dragonball", package = "vhost", optional = true }
-vhost-user-backend = { git = "https://github.com/cloud-hypervisor/vhost-user-backend.git", package = "vhost_user_backend", rev = "78757bfa", optional = true }
 hyperlocal = "0.8.0"
 tokio = { version = "1.9.0", features = ["macros"] }
 hyper = "0.14.11"
+
+event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "v0.2.1" }
+fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "afc7b69", optional = true }
+vhost = { version = "0.2.0", features = ["vhost-user-slave"], optional = true }
+vhost-user-backend = { git = "https://github.com/rust-vmm/vhost-user-backend", rev = "3242b37", optional = true }
+virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = true }
+virtio-queue = { git = "https://github.com/rust-vmm/vm-virtio", rev = "6013dd9", optional = true }
 
 nydus-api = { path = "api" }
 nydus-app = { path = "app" }
@@ -57,12 +59,12 @@ storage = { path = "storage" }
 
 [dev-dependencies]
 sendfd = "0.3.3"
-vmm-sys-util = "0.6.0"
+vmm-sys-util = ">=0.8.0"
 env_logger = "0.8.2"
 
 [features]
 fusedev = ["nydus-utils/fusedev", "fuse-backend-rs/fusedev"]
-virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory/backend-mmap", "vhost-rs/vhost-user-slave", "vhost-user-backend"]
+virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings"]
 
 [workspace]
 members = ["api", "app", "error", "rafs", "storage", "utils"]

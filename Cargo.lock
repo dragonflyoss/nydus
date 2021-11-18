@@ -52,6 +52,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b585a98a234c46fc563103e9278c9391fde1f4e6850334da895d27edb9580f62"
 
 [[package]]
+name = "arc-swap"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d78ce20460b82d3fa150275ed9d55e21064fc7951177baacf86a145c4a4b1f"
+
+[[package]]
 name = "arrayref"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -174,12 +180,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e8c087f005730276d1096a652e92a8bacee2e2472bcc9715a74d2bec38b5820"
 
 [[package]]
-name = "byteorder"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae44d1a3d5a19df61dd0c8beb138458ac2a53a7ac09eba97d55592540004306b"
-
-[[package]]
 name = "bytes"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -190,6 +190,17 @@ name = "bytes"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4872d67bab6358e59559027aa3b9157c53d9358c51423c17554809a8858e0f8"
+
+[[package]]
+name = "caps"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61bf7211aad104ce2769ec05efcdfabf85ee84ac92461d142f22cf8badd0e54c"
+dependencies = [
+ "errno",
+ "libc",
+ "thiserror",
+]
 
 [[package]]
 name = "cargo-lock"
@@ -386,12 +397,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "errno"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "winapi",
+]
+
+[[package]]
+name = "errno-dragonfly"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa68f1b12764fab894d2755d2518754e71b4fd80ecfb822714a1206c2aab39bf"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "event-manager"
-version = "0.2.0"
-source = "git+https://github.com/rust-vmm/event-manager.git?tag=v0.2.0#abac92899908e6a23a6927b5c1c9d4d53bc4f59e"
+version = "0.2.1"
+source = "git+https://github.com/rust-vmm/event-manager.git?tag=v0.2.1#3fa29497b397bfbe613cbc142b426da198a36a01"
 dependencies = [
  "libc",
- "vmm-sys-util 0.6.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -455,18 +487,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "fuse-rs"
-version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=cfd2cca#cfd2ccae69fad616b7cc863dc230076838d9a245"
+name = "fuse-backend-rs"
+version = "0.1.2"
+source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=afc7b69#afc7b69ca485fd00555687d31bb2b59d36a0155b"
 dependencies = [
- "arc-swap",
+ "arc-swap 0.4.6",
  "bitflags",
+ "caps",
  "libc",
  "log",
- "nix",
+ "nix 0.22.2",
  "vhost",
+ "virtio-queue",
  "vm-memory",
- "vm-virtio",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -937,12 +971,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3728d817d99e5ac407411fa471ff9800a778d88a24685968b36824eaf4bee400"
 
 [[package]]
+name = "memoffset"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59accc507f1338036a0477ef61afdae33cde60840f4dfe481319ce3ad116ddf9"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "micro_http"
 version = "0.2.0"
 source = "git+https://github.com/cloud-hypervisor/micro-http.git?branch=master#f4405cb5afb092e86204c26d589e8c9448721bf0"
 dependencies = [
  "libc",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1024,6 +1067,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.22.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3bb9a13fa32bc5aeb64150cd3f32d6cf4c748f8f8a417cce5d2eb976a8370ba"
+dependencies = [
+ "bitflags",
+ "cc",
+ "cfg-if 1.0.0",
+ "libc",
+ "memoffset",
+]
+
+[[package]]
 name = "no-std-compat"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1096,7 +1152,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "url",
- "vmm-sys-util 0.6.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1107,7 +1163,7 @@ dependencies = [
  "flexi_logger",
  "libc",
  "log",
- "nix",
+ "nix 0.17.0",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
@@ -1150,13 +1206,13 @@ dependencies = [
  "epoll",
  "event-manager",
  "flexi_logger",
- "fuse-rs",
+ "fuse-backend-rs",
  "hyper",
  "hyperlocal",
  "lazy_static",
  "libc",
  "log",
- "nix",
+ "nix 0.17.0",
  "nydus-api",
  "nydus-app",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1173,9 +1229,11 @@ dependencies = [
  "storage",
  "tokio",
  "vhost",
- "vhost_user_backend",
+ "vhost-user-backend",
+ "virtio-bindings",
+ "virtio-queue",
  "vm-memory",
- "vmm-sys-util 0.6.0",
+ "vmm-sys-util",
  "xattr",
 ]
 
@@ -1184,17 +1242,14 @@ name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
  "blake3 0.3.6",
- "epoll",
- "fuse-rs",
+ "fuse-backend-rs",
  "lazy_static",
  "libc",
  "log",
- "nix",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sha2",
- "vmm-sys-util 0.6.0",
 ]
 
 [[package]]
@@ -1378,20 +1433,20 @@ name = "rafs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
+ "arc-swap 0.4.6",
  "assert_matches",
  "base64",
  "bitflags",
  "blake3 1.0.0",
  "flate2",
- "fuse-rs",
+ "fuse-backend-rs",
  "futures",
  "hmac",
  "lazy_static",
  "libc",
  "log",
  "lz4-sys",
- "nix",
+ "nix 0.17.0",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "serde",
@@ -1403,7 +1458,7 @@ dependencies = [
  "storage",
  "url",
  "vm-memory",
- "vmm-sys-util 0.6.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1793,11 +1848,11 @@ name = "storage"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "arc-swap",
+ "arc-swap 0.4.6",
  "base64",
  "bitflags",
  "flate2",
- "fuse-rs",
+ "fuse-backend-rs",
  "futures",
  "governor",
  "hmac",
@@ -1805,7 +1860,7 @@ dependencies = [
  "libc",
  "log",
  "lz4-sys",
- "nix",
+ "nix 0.17.0",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "reqwest",
@@ -1818,7 +1873,7 @@ dependencies = [
  "tokio",
  "url",
  "vm-memory",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -2094,27 +2149,29 @@ checksum = "b5a972e5669d67ba988ce3dc826706fb0a8b01471c088cb0b6110b805cc36aed"
 
 [[package]]
 name = "vhost"
-version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/vhost.git?branch=dragonball#422964150a69afd4611708076c60cb34c64a9856"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d23ddeb452fb4f837526c6298cc8a2f4948e5595b0328a3d61b5eebe51874d7"
 dependencies = [
  "bitflags",
  "libc",
- "vmm-sys-util 0.9.0",
+ "vm-memory",
+ "vmm-sys-util",
 ]
 
 [[package]]
-name = "vhost_user_backend"
+name = "vhost-user-backend"
 version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/vhost-user-backend.git?rev=78757bfa#78757bfad67c84f83dd383a10b1788a137e5478f"
+source = "git+https://github.com/rust-vmm/vhost-user-backend?rev=3242b37#3242b37d3258c2072faa47d0d17097f4bc0966c7"
 dependencies = [
  "epoll",
  "libc",
  "log",
  "vhost",
  "virtio-bindings",
+ "virtio-queue",
  "vm-memory",
- "vm-virtio",
- "vmm-sys-util 0.6.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -2124,44 +2181,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ff512178285488516ed85f15b5d0113a7cdb89e9e8a760b269ae4f02b84bd6b"
 
 [[package]]
-name = "vm-memory"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45b5b0a6f371f8147143b1adb95edddafc9cb9e40adaf94edb6f93a1d04b0330"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
-name = "vm-virtio"
+name = "virtio-queue"
 version = "0.1.0"
-source = "git+https://github.com/cloud-hypervisor/vm-virtio.git?branch=dragonball#c8cdf7adaf62a368605191803787ab9c28f0f71b"
+source = "git+https://github.com/rust-vmm/vm-virtio?rev=6013dd9#6013dd91b2e6eb77ea10c6bdeda8f5eb18de6dda"
 dependencies = [
- "byteorder",
- "libc",
  "log",
  "vm-memory",
- "vmm-sys-util 0.4.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
-name = "vmm-sys-util"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "048b10a74f061d87dacca196a1964052a7135651641ab8d100aef21e58f33571"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "vmm-sys-util"
+name = "vm-memory"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c40b8c9abb58cec48e0e39dfbe83ff1cfed17d89df28f0fa74f5e88021ae56b"
+checksum = "0a8ebcb86ca457f9d6e14cf97009f679952eba42f0113de5db596e514cd0e43b"
 dependencies = [
- "bitflags",
+ "arc-swap 1.5.0",
  "libc",
+ "winapi",
 ]
 
 [[package]]
