@@ -9,7 +9,6 @@ use super::direct_v6::DirectSuperBlockV6;
 use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock};
 use super::layout::v6::{RafsV6SuperBlock, RafsV6SuperBlockExt};
 use super::*;
-use crate::fs::READ_AMPLIFY_WINDOW_SIZE;
 
 impl RafsSuperMeta {
     /// V5: get compression algorithm to handle chunk data for the filesystem.
@@ -191,6 +190,7 @@ impl RafsSuper {
     // TODO: Add a UT for me.
     pub(crate) fn amplify_io(
         &self,
+        max_size: u32,
         descs: &mut Vec<BlobIoVec>,
         inode: &Arc<dyn RafsInode>,
         window_base: u64,
@@ -218,7 +218,7 @@ impl RafsSuper {
             if let Ok(ni) = self.get_inode(next_ino, false) {
                 if ni.is_reg() {
                     let next_size = ni.size();
-                    if next_size > READ_AMPLIFY_WINDOW_SIZE {
+                    if next_size > max_size as u64 {
                         break;
                     }
 
