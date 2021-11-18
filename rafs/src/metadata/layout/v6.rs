@@ -3,19 +3,22 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
+use lazy_static::lazy_static;
+use std::convert::{TryFrom, TryInto};
+use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::io::{Read, Result};
 use std::mem::size_of;
+use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use nydus_utils::{digest, round_up};
+use nydus_utils::{digest, round_up, ByteSize};
 use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::BlobMetaHeaderOndisk;
 use storage::{compress, RAFS_MAX_CHUNK_SIZE};
 
 use crate::metadata::layout::v5::{rafsv5_align, RAFSV5_ALIGNMENT};
-use crate::metadata::{RafsStore, RafsSuperFlags};
+use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
 
 /// EROFS metadata slot size.
@@ -442,6 +445,11 @@ impl RafsV6InodeExtended {
             i_nlink: u32::to_le(0),
             i_reserved2: [0u8; 16],
         }
+    }
+
+    /// Set xattr inline count.
+    pub fn set_xattr_inline_count(&mut self, count: u16) {
+        self.i_xattr_icount = count.to_le();
     }
 
     /// Set file size for inode.
@@ -998,10 +1006,224 @@ impl RafsStore for RafsV6BlobTable {
     }
 }
 
+// RafsV6 xattr
+const EROFS_XATTR_INDEX_USER: u8 = 1;
+const EROFS_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
+const EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
+const EROFS_XATTR_INDEX_TRUSTED: u8 = 4;
+// const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
+const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
+
+const XATTR_USER_PREFIX: &str = "user.";
+const XATTR_SECURITY_PREFIX: &str = "security.";
+const XATTR_TRUSTED_PREFIX: &str = "trusted.";
+const XATTR_NAME_POSIX_ACL_ACCESS: &str = "system.posix_acl_access";
+const XATTR_NAME_POSIX_ACL_DEFAULT: &str = "system.posix_acl_default";
+
+struct RafsV6XattrPrefix {
+    index: u8,
+    prefix: &'static str,
+    prefix_len: usize,
+}
+
+impl RafsV6XattrPrefix {
+    fn new(prefix: &'static str, index: u8, prefix_len: usize) -> Self {
+        RafsV6XattrPrefix {
+            index,
+            prefix,
+            prefix_len,
+        }
+    }
+}
+
+lazy_static! {
+    static ref RAFSV6_XATTR_TYPES: Vec<RafsV6XattrPrefix> = vec![
+        RafsV6XattrPrefix::new(
+            XATTR_USER_PREFIX,
+            EROFS_XATTR_INDEX_USER,
+            XATTR_USER_PREFIX.len()
+        ),
+        RafsV6XattrPrefix::new(
+            XATTR_NAME_POSIX_ACL_ACCESS,
+            EROFS_XATTR_INDEX_POSIX_ACL_ACCESS,
+            XATTR_NAME_POSIX_ACL_ACCESS.len()
+        ),
+        RafsV6XattrPrefix::new(
+            XATTR_NAME_POSIX_ACL_DEFAULT,
+            EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT,
+            XATTR_NAME_POSIX_ACL_DEFAULT.len()
+        ),
+        RafsV6XattrPrefix::new(
+            XATTR_TRUSTED_PREFIX,
+            EROFS_XATTR_INDEX_TRUSTED,
+            XATTR_TRUSTED_PREFIX.len()
+        ),
+        RafsV6XattrPrefix::new(
+            XATTR_SECURITY_PREFIX,
+            EROFS_XATTR_INDEX_SECURITY,
+            XATTR_SECURITY_PREFIX.len()
+        ),
+    ];
+}
+
+// inline xattrs (n == i_xattr_icount):
+// erofs_xattr_ibody_header(1) + (n - 1) * 4 bytes
+//          12 bytes           /                   \
+//                            /                     \
+//                           /-----------------------\
+//                           |  erofs_xattr_entries+ |
+//                           +-----------------------+
+// inline xattrs must starts in erofs_xattr_ibody_header,
+// for read-only fs, no need to introduce h_refcount
+#[repr(C)]
+#[derive(Default)]
+pub struct RafsV6XattrIbodyHeader {
+    h_reserved: u32,
+    h_shared_count: u8,
+    h_reserved2: [u8; 7],
+    // may be followed by shared xattr id array
+}
+
+impl_bootstrap_converter!(RafsV6XattrIbodyHeader);
+
+impl RafsV6XattrIbodyHeader {
+    pub fn new() -> Self {
+        RafsV6XattrIbodyHeader::default()
+    }
+
+    /// Load a `RafsV6XattrIbodyHeader` from a reader.
+    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
+    }
+}
+
+// RafsV6 xattr entry (for both inline & shared xattrs)
+#[repr(C)]
+#[derive(Default, PartialEq)]
+struct RafsV6XattrEntry {
+    // length of name
+    e_name_len: u8,
+    // attribute name index
+    e_name_index: u8,
+    // size of attribute value
+    e_value_size: u16,
+    // followed by e_name and e_value
+}
+
+impl_bootstrap_converter!(RafsV6XattrEntry);
+
+impl RafsV6XattrEntry {
+    fn new() -> Self {
+        RafsV6XattrEntry::default()
+    }
+
+    fn name_len(&self) -> u8 {
+        self.e_name_len
+    }
+
+    fn name_index(&self) -> u8 {
+        self.e_name_index
+    }
+
+    fn value_size(&self) -> u16 {
+        u16::from_le(self.e_value_size)
+    }
+
+    fn set_name_len(&mut self, v: u8) {
+        self.e_name_len = v;
+    }
+
+    fn set_name_index(&mut self, v: u8) {
+        self.e_name_index = v;
+    }
+
+    fn set_value_size(&mut self, v: u16) {
+        self.e_value_size = v.to_le();
+    }
+}
+
+impl RafsXAttrs {
+    /// Get the number of xattr pairs.
+    pub fn count_v6(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            let size = self.aligned_size_v6();
+            (size - size_of::<RafsV6XattrIbodyHeader>()) / size_of::<RafsV6XattrEntry>() + 1
+        }
+    }
+
+    /// Get aligned size of all xattr pairs.
+    pub fn aligned_size_v6(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            let mut size: usize = size_of::<RafsV6XattrIbodyHeader>();
+            for (key, value) in self.pairs.iter() {
+                let (_, prefix_len) = Self::match_prefix(key).expect("xattr is not valid");
+
+                size += size_of::<RafsV6XattrEntry>();
+                size += key.byte_size() - prefix_len + value.len();
+                size = round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64) as usize;
+            }
+
+            size
+        }
+    }
+
+    /// Write Xattr to rafsv6 ondisk inode.
+    pub fn store_v6(&self, w: &mut RafsIoWriter) -> Result<usize> {
+        // TODO: check count of shared.
+        let header = RafsV6XattrIbodyHeader::new();
+        w.write_all(header.as_ref())?;
+
+        if !self.pairs.is_empty() {
+            for (key, value) in self.pairs.iter() {
+                // TODO: fix error handling on unknown xattr.
+                let (index, prefix_len) = Self::match_prefix(key).expect("xattr is not valid");
+
+                let mut entry = RafsV6XattrEntry::new();
+                entry.set_name_len((key.byte_size() - prefix_len) as u8);
+                entry.set_name_index(index);
+                entry.set_value_size(value.len().try_into().unwrap());
+
+                w.write_all(entry.as_ref())?;
+                w.write_all(&key.as_bytes()[prefix_len..])?;
+                w.write_all(value.as_ref())?;
+
+                let size =
+                    size_of::<RafsV6XattrEntry>() + key.byte_size() - prefix_len + value.len();
+
+                let padding =
+                    round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64) as usize - size;
+                w.write_padding(padding)?;
+            }
+        }
+
+        Ok(0)
+    }
+
+    fn match_prefix(key: &OsStr) -> Result<(u8, usize)> {
+        let pos = RAFSV6_XATTR_TYPES
+            .iter()
+            .position(|x| {
+                key.to_str()
+                    .expect("failed to convert osstr to str")
+                    .starts_with(x.prefix)
+            })
+            .ok_or_else(|| einval!(format!("xattr prefix {:?} is not valid", key)))?;
+        Ok((
+            RAFSV6_XATTR_TYPES[pos].index,
+            RAFSV6_XATTR_TYPES[pos].prefix_len,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{RafsIoRead, RafsIoWrite};
+    use std::ffi::OsString;
     use std::fs::OpenOptions;
     use vmm_sys_util::tempfile::TempFile;
 
@@ -1160,5 +1382,96 @@ mod tests {
         device2.load(&mut reader).unwrap();
         assert_eq!(device2.blocks(), 0x1234);
         assert_eq!(device.blob_id(), &id);
+    }
+
+    #[test]
+    fn test_rafs_xattr_count_v6() {
+        let mut xattrs = RafsXAttrs::new();
+        xattrs.add(OsString::from("user.a"), vec![1u8]);
+        xattrs.add(OsString::from("trusted.b"), vec![2u8]);
+
+        assert_eq!(xattrs.count_v6(), 5);
+
+        let xattrs2 = RafsXAttrs::new();
+        assert_eq!(xattrs2.count_v6(), 0);
+    }
+
+    #[test]
+    fn test_rafs_xattr_size_v6() {
+        let mut xattrs = RafsXAttrs::new();
+        xattrs.add(OsString::from("user.a"), vec![1u8]);
+        xattrs.add(OsString::from("trusted.b"), vec![2u8]);
+
+        let size = 12 + 8 + 8;
+        assert_eq!(xattrs.aligned_size_v6(), size);
+
+        let xattrs2 = RafsXAttrs::new();
+        assert_eq!(xattrs2.aligned_size_v6(), 0);
+
+        // let mut xattrs2 = RafsXAttrs::new();
+        // xattrs2.add(OsString::from("user.a"), vec![1u8]);
+        // xattrs2.add(OsString::from("unknown.b"), vec![2u8]);
+
+        // assert_eq!(xattrs2.aligned_size_v6().is_error(), true);
+    }
+
+    #[test]
+    fn test_rafs_xattr_store_v6() {
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
+
+        let mut xattrs = RafsXAttrs::new();
+        xattrs.add(OsString::from("user.nydus"), vec![1u8]);
+        xattrs.add(OsString::from("security.rafs"), vec![2u8, 3u8]);
+        xattrs.store_v6(&mut writer).unwrap();
+
+        let mut header = RafsV6XattrIbodyHeader::new();
+        header.load(&mut reader).unwrap();
+        let mut size = size_of::<RafsV6XattrIbodyHeader>();
+
+        assert_eq!(header.h_shared_count, 0u8);
+
+        let target1 = RafsV6XattrEntry {
+            e_name_len: 4u8,
+            e_name_index: 6u8,
+            e_value_size: u16::to_le(2u16),
+        };
+
+        let target2 = RafsV6XattrEntry {
+            e_name_len: 5u8,
+            e_name_index: 1u8,
+            e_value_size: u16::to_le(1u16),
+        };
+
+        let mut entry1 = RafsV6XattrEntry::new();
+        reader.read_exact(entry1.as_mut()).unwrap();
+        assert_eq!((entry1 == target1 || entry1 == target2), true);
+
+        size += size_of::<RafsV6XattrEntry>()
+            + entry1.name_len() as usize
+            + entry1.value_size() as usize;
+
+        reader
+            .seek_to_offset(round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64))
+            .unwrap();
+
+        let mut entry2 = RafsV6XattrEntry::new();
+        reader.read_exact(entry2.as_mut()).unwrap();
+        if entry1 == target1 {
+            assert_eq!(entry2 == target2, true);
+        } else {
+            assert_eq!(entry2 == target1, true);
+        }
     }
 }

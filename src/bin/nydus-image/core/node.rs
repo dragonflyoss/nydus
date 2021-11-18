@@ -467,13 +467,14 @@ impl Node {
         inode.set_nlink(self.inode.nlink());
         inode.set_mode(self.inode.mode() as u16);
         inode.set_data_layout(self.v6_datalayout);
+        inode.set_xattr_inline_count(self.xattrs.count_v6() as u16);
 
         // update all the inodes's offset according to the new 'meta_addr'.
         self.offset = self.offset - orig_meta_addr + meta_addr;
         if self.is_dir() {
             // the 1st 4k block after dir inode.
             let mut dirent_off = align_offset(
-                self.offset + self.inode.size_with_xattr() as u64,
+                self.offset + self.size_with_xattr() as u64,
                 EROFS_BLOCK_SIZE,
             );
 
@@ -483,6 +484,13 @@ impl Node {
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for dir inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
+
+            // Dump xattr
+            if !self.xattrs.is_empty() {
+                self.xattrs
+                    .store_v6(f_bootstrap)
+                    .context("failed to dump xattr to bootstrap")?;
+            }
 
             // Dump dirents
             let mut dir_data: Vec<u8> = Vec::new();
@@ -576,7 +584,7 @@ impl Node {
                 }
 
                 let tail_off = match self.v6_datalayout {
-                    EROFS_INODE_FLAT_INLINE => self.offset + self.inode.size_with_xattr() as u64,
+                    EROFS_INODE_FLAT_INLINE => self.offset + self.size_with_xattr() as u64,
                     EROFS_INODE_FLAT_PLAIN => dirent_off,
                     _ => unimplemented!(),
                 };
@@ -608,8 +616,16 @@ impl Node {
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for dir inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
+
+            // Dump xattr
+            if !self.xattrs.is_empty() {
+                self.xattrs
+                    .store_v6(f_bootstrap)
+                    .context("failed to dump xattr to bootstrap")?;
+            }
+
             let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-            let chunk_off = align_offset(self.offset + self.inode.size_with_xattr() as u64, unit);
+            let chunk_off = align_offset(self.offset + self.size_with_xattr() as u64, unit);
             f_bootstrap
                 .seek(SeekFrom::Start(chunk_off))
                 .context("failed seek for dir inode")?;
@@ -618,7 +634,7 @@ impl Node {
                 .context("failed to write chunkindexes")?;
         } else if self.is_symlink() {
             let data_off = align_offset(
-                self.offset + self.inode.size_with_xattr() as u64,
+                self.offset + self.size_with_xattr() as u64,
                 EROFS_BLOCK_SIZE,
             );
 
@@ -629,10 +645,18 @@ impl Node {
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for dir inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
+
+            // Dump xattr
+            if !self.xattrs.is_empty() {
+                self.xattrs
+                    .store_v6(f_bootstrap)
+                    .context("failed to dump xattr to bootstrap")?;
+            }
+
             // write symlink.
             if let Some(symlink) = &self.symlink {
                 let tail_off = if self.v6_datalayout == EROFS_INODE_FLAT_INLINE {
-                    self.offset + self.inode.size_with_xattr() as u64
+                    self.offset + self.size_with_xattr() as u64
                 } else {
                     assert_eq!(self.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
                     data_off
@@ -820,6 +844,16 @@ impl Node {
     pub fn target(&self) -> &PathBuf {
         &self.target
     }
+
+    // TODO: this needs to take xattr into account.
+    // change back to V6 when we have v6 inode in Node directly.
+    pub fn size_with_xattr(&self) -> usize {
+        match self.inode {
+            InodeWrapper::V5(_i) => {
+                size_of::<RafsV6InodeExtended>() + self.xattrs.aligned_size_v6()
+            }
+        }
+    }
 }
 
 // OCI and Overlayfs whiteout handling.
@@ -897,8 +931,7 @@ impl Node {
     /// Set node offset in bootstrap and return the next position.
     pub(crate) fn set_v6_offset(&mut self, bootstrap_ctx: &mut BootstrapContext) {
         if self.is_reg() {
-            // FIXME: size also includes xattr size.
-            let size = self.inode.size_with_xattr() as u64;
+            let size = self.size_with_xattr() as u64;
             let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
 
             self.offset = bootstrap_ctx.offset;
@@ -977,8 +1010,7 @@ impl Node {
         //          |         inode                   |
         //
         //
-        // TODO: add xattr_size
-        let inode_size = self.inode.size_with_xattr() as u64;
+        let inode_size = self.size_with_xattr() as u64;
 
         bootstrap_ctx.offset += inode_size;
         let avail: u64 = EROFS_BLOCK_SIZE - bootstrap_ctx.offset % EROFS_BLOCK_SIZE;
@@ -1039,14 +1071,6 @@ impl InodeWrapper {
             InodeWrapper::V5(to_rafsv5_inode(inode))
         } else {
             panic!("unknown chunk information struct");
-        }
-    }
-
-    // TODO: this needs to take xattr into account.
-    // change back to V6 when we have v6 inode in Node directly.
-    pub fn size_with_xattr(&self) -> usize {
-        match self {
-            InodeWrapper::V5(_i) => size_of::<RafsV6InodeExtended>(),
         }
     }
 
