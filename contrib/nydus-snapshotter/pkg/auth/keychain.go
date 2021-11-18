@@ -25,7 +25,7 @@ var (
 	emptyPassKeyChain = PassKeyChain{}
 )
 
-// PassKeyChain is user/pass based key chain
+// PassKeyChain is user/password based key chain
 type PassKeyChain struct {
 	Username string
 	Password string
@@ -59,12 +59,23 @@ func (kc PassKeyChain) TokenBase() bool {
 	return kc.Username == "" && kc.Password != ""
 }
 
-// FromLabels find image pull username and secret from snapshot labels
-// if username and secret is empty, we treat it as empty string
-func FromLabels(labels map[string]string) PassKeyChain {
-	return PassKeyChain{
-		Username: labels[label.ImagePullUsername],
-		Password: labels[label.ImagePullSecret],
+// FromLabels finds image pull username and secret from snapshot labels.
+// Returned `nil` means no validated username and secrect are passed, it should
+// not override input nydusd configuration.
+func FromLabels(labels map[string]string) *PassKeyChain {
+	u, found := labels[label.ImagePullUsername]
+	if !found || u == "" {
+		return nil
+	}
+
+	p, found := labels[label.ImagePullSecret]
+	if !found || p == "" {
+		return nil
+	}
+
+	return &PassKeyChain{
+		Username: u,
+		Password: p,
 	}
 }
 
@@ -81,7 +92,7 @@ func (kc PassKeyChain) toAuthConfig() authn.AuthConfig {
 		}
 	}
 	return authn.AuthConfig{
-		Username:      kc.Username,
-		Password:      kc.Password,
+		Username: kc.Username,
+		Password: kc.Password,
 	}
 }
