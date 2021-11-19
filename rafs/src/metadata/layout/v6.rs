@@ -10,13 +10,13 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use nydus_utils::{digest, round_up};
+use storage::device::{BlobFeatures, BlobInfo};
+use storage::meta::BlobMetaHeaderOndisk;
+use storage::{compress, RAFS_MAX_CHUNK_SIZE};
 
 use crate::metadata::layout::v5::{rafsv5_align, RAFSV5_ALIGNMENT};
 use crate::metadata::{RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
-use storage::compress;
-use storage::device::{BlobFeatures, BlobInfo};
-use storage::meta::BlobMetaHeaderOndisk;
 
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
@@ -56,11 +56,13 @@ const EROFS_CHUNK_FORMAT_SIZE_MASK: u16 = 0x001F;
 /// Checksum of superblock, compatible with EROFS versions prior to Linux kernel 5.5.
 #[allow(dead_code)]
 const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
+/// Rafs v6 specific metadata, compatible with EROFS versions prior to Linux kernel 5.16.
+const EROFS_FEATURE_COMPAT_RAFS_V6: u32 = 0x4000_0000;
 /// Chunked inode, incompatible with EROFS versions prior to Linux kernel 5.15.
 const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 /// Multi-devices, incompatible with EROFS versions prior to Linux kernel 5.16.
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
-
+/// Size of SHA256 digest string.
 const BLOB_SHA256_LEN: usize = 64;
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
@@ -106,7 +108,7 @@ pub struct RafsV6SuperBlock {
     s_u: u16,
     /// # of devices besides the primary device.
     s_extra_devices: u16,
-    /// Offset of the device table, `startoff = s_devt_slotoff * devt_slotsize`.
+    /// Offset of the device table, `startoff = s_devt_slotoff * 128`.
     s_devt_slotoff: u16,
     /// Padding.
     s_reserved: [u8; 38],
@@ -648,14 +650,6 @@ pub struct RafsV6Device {
     /// Mapping start address.
     mapped_blkaddr: u32,
     reserved2: [u8; 56],
-    // =======
-    // pub struct RafsV6DeviceSlot {
-    //     // blob digest (sha256)
-    //     pub digest: [u8; 64],
-    //     pub blocks: u32,
-    //     pub mapped_blkaddr: u32,
-    //     pub reserved: [u8; 56],
-    // >>>>>>> patched
 }
 
 impl Default for RafsV6Device {
@@ -664,9 +658,6 @@ impl Default for RafsV6Device {
             uuid: [0u8; 16],
             blob_id: [0u8; 32],
             reserved1: [0u8; 16],
-            // =======
-            //             digest: [0u8; 64],
-            // >>>>>>> patched
             blocks: u32::to_le(0),
             mapped_blkaddr: u32::to_le(0),
             reserved2: [0u8; 56],
@@ -700,12 +691,15 @@ impl RafsV6Device {
         self.blocks = blocks.to_le();
     }
 
+    /// Set mapped block address.
+    pub fn set_mapped_blkaddr(&mut self, addr: u32) {
+        self.mapped_blkaddr = addr.to_le();
+    }
+
     /// Load a `RafsV6Device` from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
     }
-
-    impl_pub_getter_setter!(mapped_blkaddr, set_mapped_blkaddr, mapped_blkaddr, u32);
 }
 
 impl_bootstrap_converter!(RafsV6Device);
