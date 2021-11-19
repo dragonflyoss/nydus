@@ -128,10 +128,53 @@ impl RafsV6SuperBlock {
 
         r.read_exact(&mut buf1)?;
         r.read_exact(self.as_mut())
-        // we need to leave this to 2nd sb read.
-        // let mut buf2 = [0u8; (EROFS_BLOCK_SIZE as usize
-        //     - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)];
-        // r.read_exact(&mut buf2)
+    }
+
+    /// Validate the Rafs v6 super block.
+    pub fn validate(&self, meta_size: u64) -> Result<()> {
+        if meta_size < EROFS_BLOCK_SIZE {
+            Err(einval!("invalid Rafs v6 metadata size"))
+        } else if self.s_blkszbits != EROFS_BLOCK_BITS {
+            Err(einval!("invalid block size bits in Rafsv6 superblock"))
+        } else if u64::from_le(self.s_inos) == 0 {
+            Err(einval!("invalid inode number in Rafsv6 superblock"))
+        } else if self.s_extslots != 0 {
+            Err(einval!("invalid extended slots in Rafsv6 superblock"))
+        } else if self.s_blocks == 0 {
+            Err(einval!("invalid blocks in Rafsv6 superblock"))
+        } else if u16::from_le(self.s_u) != 0 {
+            Err(einval!("invalid union field in Rafsv6 superblock"))
+        } else if u32::from_le(self.s_meta_blkaddr) == 0 {
+            Err(einval!(
+                "invalid metadata block address in Rafsv6 superblock"
+            ))
+        } else if u32::from_le(self.s_xattr_blkaddr) != 0 {
+            Err(einval!(
+                "invalid extended attribute block address in Rafsv6 superblock"
+            ))
+        } else if u64::from_le(self.s_build_time) != 0 || u32::from_le(self.s_build_time_nsec) != 0
+        {
+            Err(einval!("invalid build time in Rafsv6 superblock"))
+        } else if u32::from_le(self.s_feature_incompat)
+            != EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+        {
+            Err(einval!(
+                "invalid incompatible feature bits in Rafsv6 superblock"
+            ))
+        } else if u32::from_le(self.s_feature_compat) & EROFS_FEATURE_COMPAT_RAFS_V6
+            != EROFS_FEATURE_COMPAT_RAFS_V6
+        {
+            Err(einval!(
+                "invalid incompatible feature bits in Rafsv6 superblock"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check whether it's super block for Rafs v6.
+    pub fn is_rafs_v6(&self) -> bool {
+        self.magic() == EROFS_SUPER_MAGIC_V1
     }
 
     /// Get maximum ino.
@@ -151,6 +194,7 @@ impl RafsV6SuperBlock {
 
     /// Set EROFS meta block address.
     pub fn set_meta_addr(&mut self, meta_addr: u64) {
+        debug_assert!(((meta_addr / EROFS_BLOCK_SIZE) >> 32) == 0);
         self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE) as u32);
     }
 
@@ -159,21 +203,12 @@ impl RafsV6SuperBlock {
         self.s_extra_devices = count.to_le();
     }
 
-    /// Check whether it's super block for Rafs v6.
-    pub fn is_rafs_v6(&self) -> bool {
-        self.magic() == EROFS_SUPER_MAGIC_V1
-    }
-
-    /// Validate the Rafs v6 super block.
-    pub fn validate(&self, _meta_size: u64) -> Result<()> {
-        // TODO:
-        Ok(())
-    }
-
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);
 }
 
 impl RafsStore for RafsV6SuperBlock {
+    // This method must be called before RafsV6SuperBlockExt::store(), otherwise data written by
+    // RafsV6SuperBlockExt::store() will be overwritten.
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         debug_assert!(((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64) < EROFS_BLOCK_SIZE);
         w.write_all(&[0u8; EROFS_SUPER_OFFSET as usize])?;
@@ -189,10 +224,11 @@ impl RafsStore for RafsV6SuperBlock {
 
 impl Default for RafsV6SuperBlock {
     fn default() -> Self {
+        debug_assert!(size_of::<RafsV6Device>() == 128);
         Self {
             s_magic: u32::to_le(EROFS_SUPER_MAGIC_V1),
             s_checksum: u32::to_le(0),
-            s_feature_compat: u32::to_le(0),
+            s_feature_compat: u32::to_le(EROFS_FEATURE_COMPAT_RAFS_V6),
             s_blkszbits: EROFS_BLOCK_BITS,
             s_extslots: 0u8,
             s_root_nid: u16::to_le(0),
@@ -220,32 +256,63 @@ impl Default for RafsV6SuperBlock {
 #[derive(Clone, Copy)]
 pub struct RafsV6SuperBlockExt {
     /// superblock flags
-    pub s_flags: u64,
-    /// where on disk blob table starts
-    pub s_blob_table_offset: u64,
-    /// blob table size
-    pub s_blob_table_size: u32,
+    s_flags: u64,
+    /// offset of blob table
+    s_blob_table_offset: u64,
+    /// size of blob table
+    s_blob_table_size: u32,
     /// chunk size
-    pub s_chunk_size: u32,
+    s_chunk_size: u32,
     /// Reserved
-    pub s_reserved: [u8; 232],
+    s_reserved: [u8; 232],
 }
 
 impl_bootstrap_converter!(RafsV6SuperBlockExt);
 
 impl RafsV6SuperBlockExt {
+    /// Create a new instance `RafsV6SuperBlockExt`.
     pub fn new() -> Self {
+        debug_assert!(size_of::<Self>() == 256);
         Self::default()
     }
 
+    /// Load an `RafsV6SuperBlockExt` from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
-        r.read_exact(self.as_mut())
+        r.read_exact(self.as_mut())?;
+        r.seek_to_offset(EROFS_BLOCK_SIZE as u64)?;
+
+        Ok(())
     }
 
     /// Validate the Rafs v6 super block.
     pub fn validate(&self, _meta_size: u64) -> Result<()> {
-        // TODO:
+        let mut flags = self.flags();
+        flags &= RafsSuperFlags::COMPRESS_NONE.bits()
+            | RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits()
+            | RafsSuperFlags::COMPRESS_GZIP.bits();
+        if flags.count_ones() != 1 {
+            return Err(einval!(
+                "invalid flags related to compression algorithm in Rafs v6 extended superblock"
+            ));
+        }
+
+        let mut flags = self.flags();
+        flags &= RafsSuperFlags::DIGESTER_BLAKE3.bits() | RafsSuperFlags::DIGESTER_SHA256.bits();
+        if flags.count_ones() != 1 {
+            return Err(einval!(
+                "invalid flags related to digest algorithm in Rafs v6 extended superblock"
+            ));
+        }
+
+        let chunk_size = u32::from_le(self.s_chunk_size) as u64;
+        if !chunk_size.is_power_of_two()
+            || chunk_size < EROFS_BLOCK_SIZE
+            || chunk_size > RAFS_MAX_CHUNK_SIZE
+        {
+            return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
+        }
+
         Ok(())
     }
 
@@ -283,12 +350,9 @@ impl RafsStore for RafsV6SuperBlockExt {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         w.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         w.write_all(self.as_ref())?;
-        w.write_all(
-            &[0u8; (EROFS_BLOCK_SIZE as usize
-                - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE)
-                    as usize)],
-        )?;
-        Ok(self.as_ref().len())
+        w.seek_to_offset(EROFS_BLOCK_SIZE as u64)?;
+
+        Ok(EROFS_BLOCK_SIZE as usize - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)
     }
 }
 
@@ -546,14 +610,14 @@ impl RafsV6InodeChunkHeader {
 
     /// Convert to a u32 value.
     pub fn to_u32(&self) -> u32 {
-        (self.format as u32) | ((self.reserved as u32) << 16)
+        (u16::from_le(self.format) as u32) | ((u16::from_le(self.reserved) as u32) << 16)
     }
 
     /// Convert a u32 value to `RafsV6InodeChunkHeader`.
     pub fn from_u32(val: u32) -> Self {
         Self {
-            format: val as u16,
-            reserved: (val >> 16) as u16,
+            format: (val as u16).to_le(),
+            reserved: ((val >> 16) as u16).to_le(),
         }
     }
 }
@@ -757,6 +821,7 @@ mod tests {
         assert_eq!(sb2.s_blocks, 0x1000u32.to_le());
         assert_eq!(sb2.s_extra_devices, 5u16.to_le());
         assert_eq!(sb2.s_inos, 0x200u64.to_le());
+        assert_eq!(sb2.s_feature_compat, EROFS_FEATURE_COMPAT_RAFS_V6.to_le());
         assert_eq!(
             sb2.s_feature_incompat,
             (EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE).to_le()

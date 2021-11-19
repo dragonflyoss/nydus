@@ -53,7 +53,7 @@ impl RafsSuper {
 mod tests {
     use super::*;
     use crate::metadata::RafsStore;
-    use crate::{RafsIoWrite, RafsIoWriter};
+    use crate::RafsIoWriter;
     use std::fs::OpenOptions;
     use std::io::Write;
     use vmm_sys_util::tempfile::TempFile;
