@@ -74,6 +74,18 @@ func New(remote *remote.Remote, opt Opt) (*Cache, error) {
 	return cache, nil
 }
 
+func (cacheRecord *CacheRecord) GetReferenceBlobs() []string {
+	listStr := cacheRecord.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs]
+	if listStr == "" {
+		return []string{}
+	}
+	var blobs []string
+	if err := json.Unmarshal([]byte(listStr), &blobs); err != nil {
+		return []string{}
+	}
+	return blobs
+}
+
 func (cache *Cache) recordToLayer(record *CacheRecord) (*ocispec.Descriptor, *ocispec.Descriptor) {
 	bootstrapCacheMediaType := ocispec.MediaTypeImageLayerGzip
 	if cache.opt.DockerV2Format {
@@ -90,6 +102,9 @@ func (cache *Cache) recordToLayer(record *CacheRecord) (*ocispec.Descriptor, *oc
 			// Use the annotation to record bootstrap layer DiffID.
 			utils.LayerAnnotationUncompressed: record.NydusBootstrapDiffID.String(),
 		},
+	}
+	if refenceBlobsStr, ok := record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs]; ok {
+		bootstrapCacheDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = refenceBlobsStr
 	}
 
 	var blobCacheDesc *ocispec.Descriptor
@@ -160,6 +175,10 @@ func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *CacheRecord {
 				utils.LayerAnnotationNydusBootstrap: "true",
 				utils.LayerAnnotationUncompressed:   uncompressedDigestStr,
 			},
+		}
+		referenceBlobsStr := layer.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs]
+		if referenceBlobsStr != "" {
+			bootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = referenceBlobsStr
 		}
 		var nydusBlobDesc *ocispec.Descriptor
 		if layer.Annotations[utils.LayerAnnotationNydusBlobDigest] != "" &&

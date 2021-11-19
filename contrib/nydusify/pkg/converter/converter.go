@@ -248,6 +248,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 			backend:        cvt.storageBackend,
 			forcePush:      cvt.BackendForcePush,
 			alignedChunk:   cvt.BackendAlignedChunk,
+			referenceBlobs: blobs,
 		}
 		parentBuildLayer = buildLayer
 		buildLayers = append(buildLayers, buildLayer)
@@ -332,7 +333,6 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{
-		referenceBlobs: blobs,
 		sourceProvider: sourceProvider,
 		remote:         cvt.TargetRemote,
 		backend:        cvt.storageBackend,

@@ -27,7 +27,6 @@ import (
 // manifestManager merges OCI and Nydus manifest, pushes them to
 // remote registry
 type manifestManager struct {
-	referenceBlobs []string
 	sourceProvider provider.SourceProvider
 	backend        backend.Backend
 	remote         *remote.Remote
@@ -162,14 +161,34 @@ func (mm *manifestManager) CloneSourcePlatform(ctx context.Context, additionalOS
 	}, nil
 }
 
+func appendBlobs(oldBlobs []string, newBlobs []string) []string {
+	for _, newBlob := range newBlobs {
+		exist := false
+		for _, oldBlob := range oldBlobs {
+			if oldBlob == newBlob {
+				exist = true
+				break
+			}
+		}
+		if !exist {
+			oldBlobs = append(oldBlobs, newBlob)
+		}
+	}
+	return oldBlobs
+}
+
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
 	layers := []ocispec.Descriptor{}
 	// add reference blobs to annotation
-	blobListInAnnotation := mm.referenceBlobs
+	var (
+		blobListInAnnotation []string
+		referenceBlobs       []string
+	)
 
 	for idx, _layer := range buildLayers {
 		record := _layer.GetCacheRecord()
-
+		referenceBlobs = appendBlobs(referenceBlobs, _layer.referenceBlobs)
+		blobListInAnnotation = appendBlobs(blobListInAnnotation, _layer.referenceBlobs)
 		if record.NydusBlobDesc != nil {
 			// Write blob digest list in JSON format to layer annotation of bootstrap.
 			blobListInAnnotation = append(blobListInAnnotation, record.NydusBlobDesc.Digest.Hex())
@@ -188,6 +207,13 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 				return errors.Wrap(err, "Marshal blob list")
 			}
 			record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobIDs] = string(blobListBytes)
+			if len(referenceBlobs) > 0 {
+				blobListBytes, err = json.Marshal(referenceBlobs)
+				if err != nil {
+					return errors.Wrap(err, "Marshal blob list")
+				}
+				record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = string(blobListBytes)
+			}
 			layers = append(layers, *record.NydusBootstrapDesc)
 		}
 	}
@@ -201,9 +227,10 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 
 	// Remove useless annotations from layer
 	validAnnotationKeys := map[string]bool{
-		utils.LayerAnnotationNydusBlob:      true,
-		utils.LayerAnnotationNydusBlobIDs:   true,
-		utils.LayerAnnotationNydusBootstrap: true,
+		utils.LayerAnnotationNydusBlob:             true,
+		utils.LayerAnnotationNydusBlobIDs:          true,
+		utils.LayerAnnotationNydusReferenceBlobIDs: true,
+		utils.LayerAnnotationNydusBootstrap:        true,
 	}
 	for idx, desc := range layers {
 		layerDiffID := digest.Digest(desc.Annotations[utils.LayerAnnotationUncompressed])

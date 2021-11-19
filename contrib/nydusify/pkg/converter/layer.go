@@ -6,6 +6,7 @@ package converter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,8 @@ type buildLayer struct {
 	backend         backend.Backend
 	forcePush       bool
 	alignedChunk    bool
+
+	referenceBlobs []string
 }
 
 // parseSourceMount parses mounts object returned by the Mount method in
@@ -158,6 +161,10 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 			utils.LayerAnnotationNydusBootstrap: "true",
 		},
 	}
+	if len(layer.referenceBlobs) > 0 {
+		blobsBytes, _ := json.Marshal(&layer.referenceBlobs)
+		desc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = string(blobsBytes)
+	}
 
 	if err := utils.WithRetry(func() error {
 		compressedReader, err := utils.PackTargz(
@@ -244,6 +251,8 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	}
 	if cacheRecord != nil {
 		layer.cacheRecord = cacheRecord
+		// assign reference blobs from cache
+		layer.referenceBlobs = cacheRecord.GetReferenceBlobs()
 		return nil, nil
 	}
 

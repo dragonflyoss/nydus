@@ -78,7 +78,7 @@ func (cg *cacheGlue) Pull(
 			"ChainID": sourceLayerChainID,
 		})
 		// Pull the cached layer from cache image, then push to target namespace/repo,
-		// because the blob data is not shared between diffrent namespaces in registry,
+		// because the blob data is not shared between different namespaces in registry,
 		// this operation ensures that Nydus image owns these layers.
 		cacheRecord = _cacheRecord
 		defer bootstrapReader.Close()
