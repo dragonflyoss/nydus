@@ -25,7 +25,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use storage::compress;
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
-use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5};
+use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
@@ -293,21 +293,36 @@ impl RafsSuperMeta {
         self.version == RAFS_SUPER_VERSION_V5
     }
 
+    /// Check whether the superblock is for Rafs v6 filesystems.
+    pub fn is_v6(&self) -> bool {
+        self.version == RAFS_SUPER_VERSION_V6
+    }
+
     /// Check whether the explicit UID/GID feature has been enable or not.
     pub fn explicit_uidgid(&self) -> bool {
-        if self.is_v5() {
-            self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
-        } else {
-            false
-        }
+        self.flags.contains(RafsSuperFlags::EXPLICIT_UID_GID)
     }
 
     /// Check whether the filesystem supports extended attribute or not.
     pub fn has_xattr(&self) -> bool {
-        if self.is_v5() {
-            self.flags.contains(RafsSuperFlags::HAS_XATTR)
+        self.flags.contains(RafsSuperFlags::HAS_XATTR)
+    }
+
+    /// Get compression algorithm to handle chunk data for the filesystem.
+    pub fn get_compressor(&self) -> compress::Algorithm {
+        if self.is_v5() || self.is_v6() {
+            self.flags.into()
         } else {
-            false
+            compress::Algorithm::None
+        }
+    }
+
+    /// V5: get message digest algorithm to validate chunk data for the filesystem.
+    pub fn get_digester(&self) -> digest::Algorithm {
+        if self.is_v5() || self.is_v6() {
+            self.flags.into()
+        } else {
+            digest::Algorithm::Blake3
         }
     }
 }

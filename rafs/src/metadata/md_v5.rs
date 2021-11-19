@@ -8,26 +8,6 @@ use super::direct_v5::DirectSuperBlockV5;
 use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock};
 use super::*;
 
-impl RafsSuperMeta {
-    /// V5: get compression algorithm to handle chunk data for the filesystem.
-    pub fn get_compressor(&self) -> compress::Algorithm {
-        if self.is_v5() {
-            self.flags.into()
-        } else {
-            compress::Algorithm::None
-        }
-    }
-
-    /// V5: get message digest algorithm to validate chunk data for the filesystem.
-    pub fn get_digester(&self) -> digest::Algorithm {
-        if self.is_v5() {
-            self.flags.into()
-        } else {
-            digest::Algorithm::Blake3
-        }
-    }
-}
-
 impl RafsSuper {
     pub(crate) fn try_load_v5(&mut self, r: &mut RafsIoReader) -> Result<bool> {
         let end = r.seek_to_end(0)?;
