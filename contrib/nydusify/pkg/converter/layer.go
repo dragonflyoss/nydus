@@ -6,6 +6,7 @@ package converter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,6 +56,8 @@ type buildLayer struct {
 	backend         backend.Backend
 	forcePush       bool
 	alignedChunk    bool
+
+	referenceBlobs []ocispec.Descriptor
 }
 
 // parseSourceMount parses mounts object returned by the Mount method in
@@ -158,6 +161,10 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 			utils.LayerAnnotationNydusBootstrap: "true",
 		},
 	}
+	if len(layer.referenceBlobs) > 0 {
+		blobsBytes, _ := json.Marshal(layersHex(layer.referenceBlobs))
+		desc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = string(blobsBytes)
+	}
 
 	if err := utils.WithRetry(func() error {
 		compressedReader, err := utils.PackTargz(
@@ -244,6 +251,30 @@ func (layer *buildLayer) Mount(ctx context.Context) (func() error, error) {
 	}
 	if cacheRecord != nil {
 		layer.cacheRecord = cacheRecord
+		// assign reference blobs from cache
+		var referenceBlobs []ocispec.Descriptor
+		blobIDs := cacheRecord.GetReferenceBlobs()
+		for _, blobID := range blobIDs {
+			blobDigest := digest.NewDigestFromEncoded(digest.SHA256, blobID)
+			if layer.backend.Type() == backend.RegistryBackend {
+				// we store blob layers on build-cache
+				record := layer.cacheGlue.GetReferenceRecord(blobDigest)
+				if record == nil {
+					return nil, fmt.Errorf("can't find reference blob layer in build-cache")
+				}
+				referenceBlobs = append(referenceBlobs, *record.NydusBlobDesc)
+			} else {
+				// for oss backend, only need digest
+				referenceBlobs = append(referenceBlobs, ocispec.Descriptor{
+					MediaType: utils.MediaTypeNydusBlob,
+					Digest:    blobDigest,
+					Annotations: map[string]string{
+						utils.LayerAnnotationNydusBlob: "true",
+					},
+				})
+			}
+		}
+		layer.referenceBlobs = referenceBlobs
 		return nil, nil
 	}
 

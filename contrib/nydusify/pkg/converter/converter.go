@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/reference/docker"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
@@ -185,11 +186,11 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 		return errors.Wrap(err, "Pull cache image")
 	}
 	var (
-		blobs        []string
+		blobLayers   []ocispec.Descriptor
 		chunkDictOpt string
 	)
 	if cvt.chunkDict.Args != "" {
-		chunkDictOpt, blobs, err = cvt.prepareChunkDict()
+		chunkDictOpt, blobLayers, err = cvt.prepareChunkDict()
 		if err != nil {
 			logrus.Warnf("get chunk dict err %v", err)
 		}
@@ -248,6 +249,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 			backend:        cvt.storageBackend,
 			forcePush:      cvt.BackendForcePush,
 			alignedChunk:   cvt.BackendAlignedChunk,
+			referenceBlobs: blobLayers,
 		}
 		parentBuildLayer = buildLayer
 		buildLayers = append(buildLayers, buildLayer)
@@ -332,7 +334,6 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 
 	// Push OCI manifest, Nydus manifest and manifest index
 	mm := &manifestManager{
-		referenceBlobs: blobs,
 		sourceProvider: sourceProvider,
 		remote:         cvt.TargetRemote,
 		backend:        cvt.storageBackend,

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
@@ -92,7 +94,7 @@ func getChunkDictFromRegistry(prepareDir, imageName string, insecure bool, platf
 	return targetFile, nil
 }
 
-func (cvt *Converter) prepareBootstrap(prepareDir, from, info string) (string, []string, error) {
+func (cvt *Converter) prepareBootstrap(prepareDir, from, info string) (string, []ocispec.Descriptor, error) {
 	var (
 		target string
 		err    error
@@ -102,11 +104,11 @@ func (cvt *Converter) prepareBootstrap(prepareDir, from, info string) (string, [
 	} else {
 		_, arch, err := provider.ExtractOsArch(cvt.chunkDict.Platform)
 		if err != nil {
-			return "", []string{}, err
+			return "", []ocispec.Descriptor{}, err
 		}
 		target, err = getChunkDictFromRegistry(prepareDir, info, cvt.chunkDict.Insecure, arch)
 		if err != nil {
-			return "", []string{}, err
+			return "", []ocispec.Descriptor{}, err
 		}
 	}
 	debugOutput := filepath.Join(prepareDir, "check.output")
@@ -115,7 +117,7 @@ func (cvt *Converter) prepareBootstrap(prepareDir, from, info string) (string, [
 		BootstrapPath:   target,
 		DebugOutputPath: debugOutput,
 	}); err != nil {
-		return "", []string{}, fmt.Errorf("invalid bootstrap format %v", err)
+		return "", []ocispec.Descriptor{}, fmt.Errorf("invalid bootstrap format %v", err)
 	}
 
 	item, err := tool.NewInspector(cvt.NydusImagePath).Inspect(tool.InspectOption{
@@ -123,15 +125,23 @@ func (cvt *Converter) prepareBootstrap(prepareDir, from, info string) (string, [
 		Bootstrap: target,
 	})
 	if err != nil {
-		return "", []string{}, err
+		return "", []ocispec.Descriptor{}, err
 	}
-	blobsInfo, _ := item.([]tool.BlobInfo)
-	var blobs []string
+	blobsInfo, _ := item.(tool.BlobInfoList)
+	var blobLayers []ocispec.Descriptor
 	for _, blobInfo := range blobsInfo {
-		blobs = append(blobs, blobInfo.BlobID)
+		blobDigest := digest.NewDigestFromEncoded(digest.SHA256, blobInfo.BlobID)
+		blobLayers = append(blobLayers, ocispec.Descriptor{
+			MediaType: utils.MediaTypeNydusBlob,
+			Size:      int64(blobInfo.CompressedSize),
+			Digest:    blobDigest,
+			Annotations: map[string]string{
+				utils.LayerAnnotationNydusBlob: "true",
+			},
+		})
 	}
-	logrus.Infof("chunk dict has blobs %v", blobs)
-	return "bootstrap=" + target, blobs, nil
+	logrus.Infof("chunk dict has blobs %s", blobsInfo)
+	return "bootstrap=" + target, blobLayers, nil
 }
 
 type ChunkDictOpt struct {
@@ -146,20 +156,20 @@ type ChunkDictOpt struct {
 // return
 // type=$path, which could be used as a command-line argument of nydus-image
 // blobs we need add blobs which are belongs to chunk dict to bootstrap manifests
-func (cvt *Converter) prepareChunkDict() (string, []string, error) {
+func (cvt *Converter) prepareChunkDict() (string, []ocispec.Descriptor, error) {
 	// prepare dir
 	prepareDir := filepath.Join(cvt.WorkDir, "chunk_dict")
 	err := os.MkdirAll(prepareDir, 0755)
 	if err != nil {
-		return "", []string{}, err
+		return "", []ocispec.Descriptor{}, err
 	}
 	cType, from, info, err := parseArgs(cvt.chunkDict.Args)
 	if err != nil {
-		return "", []string{}, err
+		return "", []ocispec.Descriptor{}, err
 	}
 	switch cType {
 	case "bootstrap":
 		return cvt.prepareBootstrap(prepareDir, from, info)
 	}
-	return "", []string{}, fmt.Errorf("invalid type %s", cType)
+	return "", []ocispec.Descriptor{}, fmt.Errorf("invalid type %s", cType)
 }
