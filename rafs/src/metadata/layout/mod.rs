@@ -21,6 +21,8 @@ use crate::metadata::layout::v5::RAFSV5_ALIGNMENT;
 pub const RAFS_SUPER_VERSION_V4: u32 = 0x400;
 /// Version number for Rafs v5.
 pub const RAFS_SUPER_VERSION_V5: u32 = 0x500;
+/// Version number for Rafs v6.
+pub const RAFS_SUPER_VERSION_V6: u32 = 0x600;
 /// Minimal version of Rafs supported.
 pub const RAFS_SUPER_MIN_VERSION: u32 = RAFS_SUPER_VERSION_V4;
 /// Inode number for Rafs root inode.

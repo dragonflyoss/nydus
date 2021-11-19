@@ -1263,26 +1263,6 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeChunkOps + RafsV5I
     Ok(descs)
 }
 
-/*
-/// Allocate a `BlobIoVec` to handle blob io to range `offset..ofset + size`.
-///
-/// The range `offset..ofset + size` must be backed by a single blob.
-pub(crate) fn rafsv5_alloc_bio_vec<I: RafsInode + RafsV5InodeChunkOps + RafsV5InodeOps>(
-    inode: &I,
-    offset: u64,
-    size: usize,
-    user_io: bool,
-) -> Result<BlobIoVec> {
-    let mut vec = rafsv5_alloc_bio_vecs(inode, offset, size, user_io)?;
-
-    if vec.len() == 1 {
-        Ok(vec.remove(0))
-    } else {
-        Err(einval!("file range is backed by multiple blobs"))
-    }
-}
- */
-
 /// Add a new bio covering the IO range into the provided bio desc.
 ///
 /// Returns true if caller should continue checking more chunks.

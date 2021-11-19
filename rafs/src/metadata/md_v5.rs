@@ -5,9 +5,7 @@
 
 use super::cached_v5::CachedSuperBlockV5;
 use super::direct_v5::DirectSuperBlockV5;
-use super::direct_v6::DirectSuperBlockV6;
 use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock};
-use super::layout::v6::{RafsV6SuperBlock, RafsV6SuperBlockExt};
 use super::*;
 
 impl RafsSuperMeta {
@@ -31,43 +29,6 @@ impl RafsSuperMeta {
 }
 
 impl RafsSuper {
-    pub(crate) fn try_load_v6(&mut self, r: &mut RafsIoReader) -> Result<bool> {
-        let end = r.seek_to_end(0)?;
-        r.seek_to_offset(0)?;
-        let mut sb = RafsV6SuperBlock::new();
-        sb.load(r)?;
-        if !sb.is_rafs_v6() {
-            return Ok(false);
-        }
-        sb.validate(end)?;
-
-        self.meta.magic = sb.magic();
-
-        let mut ext_sb = RafsV6SuperBlockExt::new();
-        ext_sb.load(r)?;
-        ext_sb.validate(end)?;
-
-        // use RAFS_DEFAULT_CHUNK_SIZE for now
-        self.meta.chunk_size = ext_sb.chunk_size();
-        self.meta.flags = RafsSuperFlags::from_bits(ext_sb.flags())
-            .ok_or_else(|| einval!(format!("invalid super flags {:x}", ext_sb.flags())))?;
-        info!("rafs superblock features: {}", self.meta.flags);
-
-        self.meta.blob_table_offset = ext_sb.blob_table_offset();
-        self.meta.blob_table_size = ext_sb.blob_table_size();
-
-        match self.mode {
-            RafsMode::Direct => {
-                let mut sb_v6 = DirectSuperBlockV6::new(&self.meta, self.validate_digest);
-                sb_v6.load(r)?;
-                self.superblock = Arc::new(sb_v6);
-            }
-            RafsMode::Cached => todo!(),
-        }
-
-        Ok(true)
-    }
-
     pub(crate) fn try_load_v5(&mut self, r: &mut RafsIoReader) -> Result<bool> {
         let end = r.seek_to_end(0)?;
         r.seek_to_offset(0)?;

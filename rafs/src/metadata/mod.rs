@@ -35,6 +35,7 @@ pub mod direct_v5;
 pub mod direct_v6;
 pub mod layout;
 mod md_v5;
+mod md_v6;
 mod noop;
 
 pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
