@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use std::convert::{TryFrom, TryInto};
 use std::ffi::OsStr;
 use std::fmt::Debug;
-use std::io::{Read, Result};
+use std::io::{Read, Result, Write};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
@@ -17,9 +17,9 @@ use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::BlobMetaHeaderOndisk;
 use storage::{compress, RAFS_MAX_CHUNK_SIZE};
 
-use crate::metadata::layout::v5::{rafsv5_align, RAFSV5_ALIGNMENT};
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
+use nydus_utils::digest::RAFS_DIGEST_LENGTH;
 
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
@@ -794,6 +794,180 @@ pub fn calculate_nid(offset: u64, meta_size: u64) -> u64 {
     (offset - meta_size) >> EROFS_INODE_SLOT_BITS
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RafsV6Blob {
+    // SHA256 blob id in string form.
+    blob_id: [u8; BLOB_SHA256_LEN],
+    // Index in the blob table.
+    blob_index: u32,
+    // Chunk size of the blob.
+    chunk_size: u32,
+    // Number of chunks in the blob.
+    chunk_count: u32,
+    // Compression algorithm for chunks in the blob.
+    compression_algo: u32,
+    // Digest algorithm for chunks in the blob.
+    digest_algo: u32,
+    // Flags for the compression information array.
+    meta_features: u32,
+    // Size of the compressed blob.
+    compressed_size: u64,
+    // Size of the uncompressed blob.
+    uncompressed_size: u64,
+
+    reserved1: u32,
+    // Compression algorithm for the compression information array.
+    ci_compressor: u32,
+    // Offset into the compressed blob for the compression information array.
+    ci_offset: u64,
+    // Size of the compressed compression information array.
+    ci_compressed_size: u64,
+    // Size of the uncompressed compression information array.
+    ci_uncompressed_size: u64,
+    // SHA256 digest of the compression information array in binary form.
+    ci_digest: [u8; 32],
+
+    reserved2: [u8; 88],
+}
+
+impl Default for RafsV6Blob {
+    fn default() -> Self {
+        RafsV6Blob {
+            blob_id: [0u8; BLOB_SHA256_LEN],
+            blob_index: 0u32.to_le(),
+            chunk_size: 0u32.to_le(),
+            chunk_count: 0u32.to_le(),
+            compression_algo: (compress::Algorithm::None as u32).to_le(),
+            digest_algo: (digest::Algorithm::Blake3 as u32).to_le(),
+            meta_features: 0u32.to_le(),
+            compressed_size: 0u64.to_le(),
+            uncompressed_size: 0u64.to_le(),
+            reserved1: 0u32.to_le(),
+            ci_compressor: (compress::Algorithm::None as u32).to_le(),
+            ci_offset: 0u64.to_le(),
+            ci_compressed_size: 0u64.to_le(),
+            ci_uncompressed_size: 0u64.to_le(),
+            ci_digest: [0u8; 32],
+            reserved2: [0u8; 88],
+        }
+    }
+}
+
+impl_bootstrap_converter!(RafsV6Blob);
+
+impl RafsV6Blob {
+    fn to_blob_info(&self) -> Result<BlobInfo> {
+        // debug_assert!(RAFS_DIGEST_LENGTH == 32);
+        debug_assert!(size_of::<RafsV6Blob>() == 256);
+
+        let blob_id = String::from_utf8(self.blob_id.to_vec())
+            .map_err(|e| einval!(format!("invalid blob id, {}", e)))?;
+        let mut blob_info = BlobInfo::new(
+            u32::from_le(self.blob_index),
+            blob_id,
+            u64::from_le(self.uncompressed_size),
+            u64::from_le(self.compressed_size),
+            u32::from_le(self.chunk_size),
+            u32::from_le(self.chunk_count),
+            BlobFeatures::empty(),
+        );
+
+        let comp = compress::Algorithm::try_from(u32::from_le(self.compression_algo))
+            .map_err(|_| einval!("invalid compression algorithm in Rafs v6 blob entry"))?;
+        blob_info.set_compressor(comp);
+        let digest = digest::Algorithm::try_from(u32::from_le(self.digest_algo))
+            .map_err(|_| einval!("invalid digest algorithm in Rafs v6 blob entry"))?;
+        blob_info.set_digester(digest);
+        // blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+        blob_info.set_blob_meta_info(
+            u32::from_le(self.meta_features),
+            u64::from_le(self.ci_offset),
+            u64::from_le(self.ci_compressed_size),
+            u64::from_le(self.ci_uncompressed_size),
+            u32::from_le(self.ci_compressor),
+        );
+
+        Ok(blob_info)
+    }
+
+    fn from_blob_info(blob_info: &BlobInfo) -> Result<Self> {
+        if blob_info.blob_id().len() != BLOB_SHA256_LEN {
+            return Err(einval!(format!(
+                "invalid blob id in blob info, {}",
+                blob_info.blob_id()
+            )));
+        }
+
+        let mut blob_id = [0u8; BLOB_SHA256_LEN];
+        blob_id.copy_from_slice(blob_info.blob_id().as_bytes());
+
+        Ok(RafsV6Blob {
+            blob_id,
+            blob_index: blob_info.blob_index().to_le(),
+            chunk_size: blob_info.chunk_size().to_le(),
+            chunk_count: blob_info.chunk_count().to_le(),
+            compression_algo: (blob_info.compressor() as u32).to_le(),
+            digest_algo: (blob_info.digester() as u32).to_le(),
+            reserved1: 0u32.to_le(),
+            compressed_size: blob_info.compressed_size().to_le(),
+            uncompressed_size: blob_info.uncompressed_size().to_le(),
+            meta_features: blob_info.meta_flags(),
+            ci_compressor: (blob_info.meta_ci_compressor() as u32).to_le(),
+            ci_offset: blob_info.meta_ci_offset().to_le(),
+            ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
+            ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
+            ci_digest: [0u8; 32],
+            reserved2: [0u8; 88],
+        })
+    }
+
+    fn validate(&self, blob_index: u32, chunk_size: u32, _flags: RafsSuperFlags) -> bool {
+        /* TODO: check fields: compressed_size, meta_features, ci_offset, ci_compressed_size, ci_uncompressed_size, ci_digest */
+        match String::from_utf8(self.blob_id.to_vec()) {
+            Ok(v) => {
+                if v.len() != BLOB_SHA256_LEN {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+
+        if self.blob_index != blob_index.to_le() {
+            return false;
+        }
+
+        let c_size = u32::from_le(self.chunk_size) as u64;
+        if c_size.count_ones() != 1
+            || c_size < EROFS_BLOCK_SIZE
+            || c_size > RAFS_MAX_CHUNK_SIZE
+            || c_size != chunk_size as u64
+        {
+            return false;
+        }
+
+        if u32::from_le(self.chunk_count) >= (1u32 << 24) {
+            return false;
+        }
+
+        let uncompressed_size = u64::from_le(self.uncompressed_size);
+        if uncompressed_size & (EROFS_BLOCK_SIZE as u64 - 1) != 0
+            || uncompressed_size >= (1u64 << 44)
+        {
+            return false;
+        }
+
+        if compress::Algorithm::try_from(u32::from_le(self.compression_algo)).is_err()
+            || compress::Algorithm::try_from(u32::from_le(self.ci_compressor)).is_err()
+            || digest::Algorithm::try_from(u32::from_le(self.digest_algo)).is_err()
+        {
+            return false;
+        }
+
+        true
+    }
+}
+
 /// Rafs v6 blob description table.
 #[derive(Clone, Debug, Default)]
 pub struct RafsV6BlobTable {
@@ -809,23 +983,24 @@ impl RafsV6BlobTable {
         }
     }
 
-    fn field_size(&self) -> usize {
-        2 * size_of::<u32>() + 3 * size_of::<u64>() + size_of::<u32>() + 2 * size_of::<u64>()
+    /// Get blob table size.
+    pub fn size(&self) -> usize {
+        self.entries.len() * size_of::<RafsV6Blob>()
     }
 
-    /// Get blob table size, aligned with RAFS_ALIGNMENT bytes
-    pub fn size(&self) -> usize {
-        if self.entries.is_empty() {
-            return 0;
+    /// Get base information for a blob.
+    #[inline]
+    pub fn get(&self, blob_index: u32) -> Result<Arc<BlobInfo>> {
+        if blob_index >= self.entries.len() as u32 {
+            Err(enoent!("blob not found"))
+        } else {
+            Ok(self.entries[blob_index as usize].clone())
         }
-        // Blob entry split with '\0'
-        rafsv5_align(
-            self.entries.iter().fold(0usize, |size, entry| {
-                // meta_ci info + blob id.
-                let entry_size = self.field_size() + entry.blob_id().len();
-                size + entry_size + 1
-            }) - 1,
-        )
+    }
+
+    /// Get the base blob information array.
+    pub fn get_all(&self) -> Vec<Arc<BlobInfo>> {
+        self.entries.clone()
     }
 
     /// Add information for new blob into the blob information table.
@@ -856,9 +1031,7 @@ impl RafsV6BlobTable {
 
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
-        // TODO: readahead may not be needed anymore.
         blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
-
         blob_info.set_blob_meta_info(
             header.meta_flags(),
             header.ci_compressed_offset(),
@@ -872,15 +1045,6 @@ impl RafsV6BlobTable {
         blob_index
     }
 
-    /// Get base information for a blob.
-    #[inline]
-    pub fn get(&self, blob_index: u32) -> Result<Arc<BlobInfo>> {
-        if blob_index >= self.entries.len() as u32 {
-            return Err(enoent!("blob not found"));
-        }
-        Ok(self.entries[blob_index as usize].clone())
-    }
-
     /// Load blob information table from a reader.
     pub fn load(
         &mut self,
@@ -892,117 +1056,32 @@ impl RafsV6BlobTable {
         if blob_table_size == 0 {
             return Ok(());
         }
+        if blob_table_size as usize % size_of::<RafsV6Blob>() != 0 {
+            return Err(einval!("invalid Rafs v6 blob table size"));
+        }
 
-        debug!("blob table size {}", blob_table_size);
-        let mut data = vec![0u8; blob_table_size as usize];
-        r.read_exact(&mut data)?;
-
-        // Each entry frame looks like:
-        // u32 * 2 | u64 * 3 | u32 | u64 * 2 | string | trailing '\0' , except that the last entry has no trailing '\0'
-        let mut buf = data.as_mut_slice();
-        while buf.len() > self.field_size() {
-            let ci_compressor =
-                unsafe { std::ptr::read_unaligned::<u32>(buf[0..4].as_ptr() as *const u32) };
-            let ci_features =
-                unsafe { std::ptr::read_unaligned::<u32>(buf[4..8].as_ptr() as *const u32) };
-            let ci_offset =
-                unsafe { std::ptr::read_unaligned::<u64>(buf[8..16].as_ptr() as *const u64) };
-            let ci_compressed_size =
-                unsafe { std::ptr::read_unaligned::<u64>(buf[16..24].as_ptr() as *const u64) };
-            let ci_uncompressed_size =
-                unsafe { std::ptr::read_unaligned::<u64>(buf[24..32].as_ptr() as *const u64) };
-            let chunk_count =
-                unsafe { std::ptr::read_unaligned::<u32>(buf[32..36].as_ptr() as *const u32) };
-            let uncompressed_size =
-                unsafe { std::ptr::read_unaligned::<u64>(buf[36..44].as_ptr() as *const u64) };
-            let compressed_size =
-                unsafe { std::ptr::read_unaligned::<u64>(buf[44..52].as_ptr() as *const u64) };
-
-            let orig_pos = 52;
-            let mut pos = orig_pos;
-            while pos < buf.len() && buf[pos] != 0 {
-                pos += 1;
+        for idx in 0..(blob_table_size as usize / size_of::<RafsV6Blob>()) {
+            let mut blob = RafsV6Blob::default();
+            r.read_exact(blob.as_mut())?;
+            if !blob.validate(idx as u32, chunk_size, flags) {
+                return Err(einval!("invalid Rafs v6 blob entry"));
             }
-            let blob_id = std::str::from_utf8(&buf[orig_pos..pos])
-                .map(|v| v.to_owned())
-                .map_err(|e| einval!(e))?;
-            if pos == buf.len() {
-                buf = &mut buf[pos..];
-            } else {
-                buf = &mut buf[pos + 1..];
-            }
-            debug!("blob {:?} lies on", blob_id);
-            if blob_id.len() != BLOB_SHA256_LEN {
-                return Err(einval!(format!("invalid blob id len {}", blob_id.len())));
-            }
-
-            let index = self.entries.len();
-            let mut blob_info = BlobInfo::new(
-                index as u32,
-                blob_id,
-                uncompressed_size,
-                compressed_size,
-                chunk_size,
-                chunk_count,
-                BlobFeatures::empty(),
-            );
-
-            blob_info.set_compressor(flags.into());
-            blob_info.set_digester(flags.into());
-            // blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
-            blob_info.set_blob_meta_info(
-                ci_features as u32,
-                ci_offset as u64,
-                ci_compressed_size as u64,
-                ci_uncompressed_size as u64,
-                ci_compressor as u32,
-            );
-            trace!("load blob_info {:?}", blob_info);
-
+            let blob_info = blob.to_blob_info()?;
             self.entries.push(Arc::new(blob_info));
         }
 
         Ok(())
     }
-
-    /// Get the base blob information array.
-    pub fn get_all(&self) -> Vec<Arc<BlobInfo>> {
-        self.entries.clone()
-    }
 }
 
 impl RafsStore for RafsV6BlobTable {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
-        let mut size = 0;
-        self.entries
-            .iter()
-            .enumerate()
-            .try_for_each::<_, Result<()>>(|(idx, entry)| {
-                w.write_all(&u32::to_le_bytes(entry.meta_ci_compressor() as u32))?;
-                w.write_all(&u32::to_le_bytes(entry.meta_flags() as u32))?;
-                w.write_all(&u64::to_le_bytes(entry.meta_ci_offset() as u64))?;
-                w.write_all(&u64::to_le_bytes(entry.meta_ci_compressed_size() as u64))?;
-                w.write_all(&u64::to_le_bytes(entry.meta_ci_uncompressed_size() as u64))?;
-                w.write_all(&u32::to_le_bytes(entry.chunk_count() as u32))?;
-                w.write_all(&u64::to_le_bytes(entry.uncompressed_size() as u64))?;
-                w.write_all(&u64::to_le_bytes(entry.compressed_size() as u64))?;
-                trace!("store blob_info {:?}", entry);
-                w.write_all(entry.blob_id().as_bytes())?;
+        for blob_info in self.entries.iter() {
+            let blob: RafsV6Blob = RafsV6Blob::from_blob_info(blob_info)?;
+            w.write_all(blob.as_ref())?;
+        }
 
-                if idx != self.entries.len() - 1 {
-                    size += self.field_size() + entry.blob_id().len() + 1;
-                    w.write_all(&[b'\0'])?;
-                } else {
-                    size += self.field_size() + entry.blob_id().len();
-                }
-                Ok(())
-            })?;
-
-        let padding = rafsv5_align(size) - size;
-        w.write_padding(padding)?;
-        size += padding;
-
-        w.validate_alignment(size, RAFSV5_ALIGNMENT)
+        Ok(self.entries.len() * size_of::<RafsV6Blob>())
     }
 }
 

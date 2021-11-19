@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::convert::TryFrom;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Error, Read, Result, Write};
@@ -45,6 +46,22 @@ impl FromStr for Algorithm {
             "lz4_block" => Ok(Self::Lz4Block),
             "gzip" => Ok(Self::GZip),
             _ => Err(einval!("compression algorithm should be none or lz4_block")),
+        }
+    }
+}
+
+impl TryFrom<u32> for Algorithm {
+    type Error = ();
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        if value == Algorithm::None as u32 {
+            Ok(Algorithm::None)
+        } else if value == Algorithm::Lz4Block as u32 {
+            Ok(Algorithm::Lz4Block)
+        } else if value == Algorithm::GZip as u32 {
+            Ok(Algorithm::GZip)
+        } else {
+            Err(())
         }
     }
 }
