@@ -16,6 +16,8 @@ extern crate log;
 
 use std::any::Any;
 use std::collections::{btree_map, BTreeMap};
+#[cfg(feature = "virtiofs")]
+use std::ffi::OsString;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
