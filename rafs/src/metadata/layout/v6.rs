@@ -786,171 +786,6 @@ pub fn calculate_nid(offset: u64, meta_size: u64) -> u64 {
     (offset - meta_size) >> EROFS_INODE_SLOT_BITS
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{RafsIoRead, RafsIoWrite};
-    use std::fs::OpenOptions;
-    use vmm_sys_util::tempfile::TempFile;
-
-    #[test]
-    fn test_super_block_load_store() {
-        let mut sb = RafsV6SuperBlock::new();
-        let temp = TempFile::new().unwrap();
-        let w = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.as_path())
-            .unwrap();
-        let r = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(temp.as_path())
-            .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
-        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
-
-        sb.s_blocks = 0x1000;
-        sb.s_extra_devices = 5;
-        sb.s_inos = 0x200;
-        sb.store(&mut writer).unwrap();
-
-        let mut sb2 = RafsV6SuperBlock::new();
-        sb2.load(&mut reader).unwrap();
-        assert_eq!(sb2.s_magic, EROFS_SUPER_MAGIC_V1.to_le());
-        assert_eq!(sb2.s_blocks, 0x1000u32.to_le());
-        assert_eq!(sb2.s_extra_devices, 5u16.to_le());
-        assert_eq!(sb2.s_inos, 0x200u64.to_le());
-        assert_eq!(sb2.s_feature_compat, EROFS_FEATURE_COMPAT_RAFS_V6.to_le());
-        assert_eq!(
-            sb2.s_feature_incompat,
-            (EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE).to_le()
-        );
-    }
-
-    #[test]
-    fn test_rafs_v6_inode_extended() {
-        let temp = TempFile::new().unwrap();
-        let w = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.as_path())
-            .unwrap();
-        let r = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(temp.as_path())
-            .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
-        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
-
-        let mut inode = RafsV6InodeExtended::new();
-        assert_eq!(
-            inode.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_PLAIN << 1))
-        );
-        inode.set_data_layout(EROFS_INODE_FLAT_INLINE);
-        assert_eq!(
-            inode.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_INLINE << 1))
-        );
-        inode.set_inline_plain_layout();
-        assert_eq!(
-            inode.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_PLAIN << 1))
-        );
-        inode.set_inline_inline_layout();
-        assert_eq!(
-            inode.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_INLINE << 1))
-        );
-        inode.set_chunk_based_layout();
-        assert_eq!(
-            inode.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_CHUNK_BASED << 1))
-        );
-        inode.set_uidgid(1, 2);
-        inode.set_mtime(3, 4);
-        inode.store(&mut writer).unwrap();
-
-        let mut inode2 = RafsV6InodeExtended::new();
-        inode2.load(&mut reader).unwrap();
-        assert_eq!(inode2.i_uid, 1u32.to_le());
-        assert_eq!(inode2.i_gid, 2u32.to_le());
-        assert_eq!(inode2.i_mtime, 3u64.to_le());
-        assert_eq!(inode2.i_mtime_nsec, 4u32.to_le());
-        assert_eq!(
-            inode2.i_format,
-            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_CHUNK_BASED << 1))
-        );
-    }
-
-    #[test]
-    fn test_rafs_v6_chunk_header() {
-        let chunk_size: u32 = 1024 * 1024;
-        let header = RafsV6InodeChunkHeader::new(chunk_size);
-        let target = EROFS_CHUNK_FORMAT_INDEXES_FLAG | (20 - 12) as u16;
-        assert_eq!(u16::from_le(header.format), target);
-    }
-
-    #[test]
-    fn test_rafs_v6_chunk_addr() {
-        let temp = TempFile::new().unwrap();
-        let w = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.as_path())
-            .unwrap();
-        let r = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(temp.as_path())
-            .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
-        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
-
-        let mut chunk = RafsV6InodeChunkAddr::new();
-        chunk.set_blob_index(3);
-        chunk.set_blob_comp_index(0x123456);
-        chunk.set_block_addr(0xa5a53412);
-        chunk.store(&mut writer).unwrap();
-
-        let mut chunk2 = RafsV6InodeChunkAddr::new();
-        chunk2.load(&mut reader).unwrap();
-        assert_eq!(chunk2.blob_index(), 3);
-        assert_eq!(chunk2.blob_comp_index(), 0x123456);
-        assert_eq!(chunk2.block_addr(), 0xa5a53412);
-    }
-
-    #[test]
-    fn test_rafs_v6_device() {
-        let temp = TempFile::new().unwrap();
-        let w = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.as_path())
-            .unwrap();
-        let r = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(temp.as_path())
-            .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
-        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
-
-        let id = [0xa5u8; 32];
-        let mut device = RafsV6Device::new();
-        device.set_blocks(0x1234);
-        device.set_blob_id(&id);
-        device.store(&mut writer).unwrap();
-
-        let mut device2 = RafsV6Device::new();
-        device2.load(&mut reader).unwrap();
-        assert_eq!(device2.blocks(), 0x1234);
-        assert_eq!(device.blob_id(), &id);
-    }
-}
-
 /// Rafs v6 blob description table.
 #[derive(Clone, Debug, Default)]
 pub struct RafsV6BlobTable {
@@ -1160,5 +995,170 @@ impl RafsStore for RafsV6BlobTable {
         size += padding;
 
         w.validate_alignment(size, RAFSV5_ALIGNMENT)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RafsIoRead, RafsIoWrite};
+    use std::fs::OpenOptions;
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[test]
+    fn test_super_block_load_store() {
+        let mut sb = RafsV6SuperBlock::new();
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
+
+        sb.s_blocks = 0x1000;
+        sb.s_extra_devices = 5;
+        sb.s_inos = 0x200;
+        sb.store(&mut writer).unwrap();
+
+        let mut sb2 = RafsV6SuperBlock::new();
+        sb2.load(&mut reader).unwrap();
+        assert_eq!(sb2.s_magic, EROFS_SUPER_MAGIC_V1.to_le());
+        assert_eq!(sb2.s_blocks, 0x1000u32.to_le());
+        assert_eq!(sb2.s_extra_devices, 5u16.to_le());
+        assert_eq!(sb2.s_inos, 0x200u64.to_le());
+        assert_eq!(sb2.s_feature_compat, EROFS_FEATURE_COMPAT_RAFS_V6.to_le());
+        assert_eq!(
+            sb2.s_feature_incompat,
+            (EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE).to_le()
+        );
+    }
+
+    #[test]
+    fn test_rafs_v6_inode_extended() {
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
+
+        let mut inode = RafsV6InodeExtended::new();
+        assert_eq!(
+            inode.i_format,
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_PLAIN << 1))
+        );
+        inode.set_data_layout(EROFS_INODE_FLAT_INLINE);
+        assert_eq!(
+            inode.i_format,
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_INLINE << 1))
+        );
+        inode.set_inline_plain_layout();
+        assert_eq!(
+            inode.i_format,
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_PLAIN << 1))
+        );
+        inode.set_inline_inline_layout();
+        assert_eq!(
+            inode.i_format,
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_INLINE << 1))
+        );
+        inode.set_chunk_based_layout();
+        assert_eq!(
+            inode.i_format,
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_CHUNK_BASED << 1))
+        );
+        inode.set_uidgid(1, 2);
+        inode.set_mtime(3, 4);
+        inode.store(&mut writer).unwrap();
+
+        let mut inode2 = RafsV6InodeExtended::new();
+        inode2.load(&mut reader).unwrap();
+        assert_eq!(inode2.i_uid, 1u32.to_le());
+        assert_eq!(inode2.i_gid, 2u32.to_le());
+        assert_eq!(inode2.i_mtime, 3u64.to_le());
+        assert_eq!(inode2.i_mtime_nsec, 4u32.to_le());
+        assert_eq!(
+            inode2.i_format,
+            u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_CHUNK_BASED << 1))
+        );
+    }
+
+    #[test]
+    fn test_rafs_v6_chunk_header() {
+        let chunk_size: u32 = 1024 * 1024;
+        let header = RafsV6InodeChunkHeader::new(chunk_size);
+        let target = EROFS_CHUNK_FORMAT_INDEXES_FLAG | (20 - 12) as u16;
+        assert_eq!(u16::from_le(header.format), target);
+    }
+
+    #[test]
+    fn test_rafs_v6_chunk_addr() {
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
+
+        let mut chunk = RafsV6InodeChunkAddr::new();
+        chunk.set_blob_index(3);
+        chunk.set_blob_comp_index(0x123456);
+        chunk.set_block_addr(0xa5a53412);
+        chunk.store(&mut writer).unwrap();
+
+        let mut chunk2 = RafsV6InodeChunkAddr::new();
+        chunk2.load(&mut reader).unwrap();
+        assert_eq!(chunk2.blob_index(), 3);
+        assert_eq!(chunk2.blob_comp_index(), 0x123456);
+        assert_eq!(chunk2.block_addr(), 0xa5a53412);
+    }
+
+    #[test]
+    fn test_rafs_v6_device() {
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut reader: Box<dyn RafsIoRead> = Box::new(r);
+
+        let id = [0xa5u8; 32];
+        let mut device = RafsV6Device::new();
+        device.set_blocks(0x1234);
+        device.set_blob_id(&id);
+        device.store(&mut writer).unwrap();
+
+        let mut device2 = RafsV6Device::new();
+        device2.load(&mut reader).unwrap();
+        assert_eq!(device2.blocks(), 0x1234);
+        assert_eq!(device.blob_id(), &id);
     }
 }
