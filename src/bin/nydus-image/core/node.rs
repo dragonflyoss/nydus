@@ -671,6 +671,18 @@ impl Node {
                     .write(symlink.as_bytes())
                     .context("filed to store symlink")?;
             }
+        } else {
+            f_bootstrap
+                .seek(SeekFrom::Start(self.offset))
+                .context("failed seek for dir inode")?;
+            inode.store(f_bootstrap).context("failed to store inode")?;
+
+            // Dump xattr
+            if !self.xattrs.is_empty() {
+                self.xattrs
+                    .store_v6(f_bootstrap)
+                    .context("failed to dump xattr to bootstrap")?;
+            }
         }
 
         // FIXME: return a real size
@@ -942,7 +954,8 @@ impl Node {
         } else if self.is_symlink() {
             self.set_v6_offset_with_tail(bootstrap_ctx, self.inode.size());
         } else {
-            todo!()
+            self.offset = bootstrap_ctx.offset;
+            bootstrap_ctx.offset += self.size_with_xattr() as u64;
         }
     }
 
