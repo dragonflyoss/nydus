@@ -220,7 +220,7 @@ impl Display for Node {
 
 impl Node {
     pub fn new(
-        _version: RafsVersion,
+        version: RafsVersion,
         source: PathBuf,
         path: PathBuf,
         overlay: Overlay,
@@ -240,8 +240,7 @@ impl Node {
             path,
             target_vec,
             overlay,
-            // liubo: for now, we use rafs v5 inode to build the whole tree.
-            inode: InodeWrapper::new(RafsVersion::V5),
+            inode: InodeWrapper::new(version),
             chunks: Vec::new(),
             symlink: None,
             xattrs: RafsXAttrs::default(),
@@ -413,42 +412,44 @@ impl Node {
 
     pub fn dump_bootstrap_v5(&mut self, f_bootstrap: &mut RafsIoWriter) -> Result<usize> {
         let mut node_size = 0;
-        let InodeWrapper::V5(raw_inode) = &self.inode;
-
-        // Dump inode info
-        let name = self.name();
-        let inode = RafsV5InodeWrapper {
-            name,
-            symlink: self.symlink.as_deref(),
-            inode: raw_inode,
-        };
-        let inode_size = inode
-            .store(f_bootstrap)
-            .context("failed to dump inode to bootstrap")?;
-        node_size += inode_size;
-
-        // Dump inode xattr
-        if !self.xattrs.is_empty() {
-            let xattr_size = self
-                .xattrs
-                .store_v5(f_bootstrap)
-                .context("failed to dump xattr to bootstrap")?;
-            node_size += xattr_size;
-        }
-
-        // Dump chunk info
-        if self.is_reg() && self.inode.child_count() as usize != self.chunks.len() {
-            bail!("invalid chunks count {}: {}", self.chunks.len(), self);
-        }
-
-        for chunk in &mut self.chunks {
-            let chunk_size = chunk
+        if let InodeWrapper::V5(raw_inode) = &self.inode {
+            // Dump inode info
+            let name = self.name();
+            let inode = RafsV5InodeWrapper {
+                name,
+                symlink: self.symlink.as_deref(),
+                inode: raw_inode,
+            };
+            let inode_size = inode
                 .store(f_bootstrap)
-                .context("failed to dump chunk info to bootstrap")?;
-            node_size += chunk_size;
-        }
+                .context("failed to dump inode to bootstrap")?;
+            node_size += inode_size;
 
-        Ok(node_size)
+            // Dump inode xattr
+            if !self.xattrs.is_empty() {
+                let xattr_size = self
+                    .xattrs
+                    .store_v5(f_bootstrap)
+                    .context("failed to dump xattr to bootstrap")?;
+                node_size += xattr_size;
+            }
+
+            // Dump chunk info
+            if self.is_reg() && self.inode.child_count() as usize != self.chunks.len() {
+                bail!("invalid chunks count {}: {}", self.chunks.len(), self);
+            }
+
+            for chunk in &mut self.chunks {
+                let chunk_size = chunk
+                    .store(f_bootstrap)
+                    .context("failed to dump chunk info to bootstrap")?;
+                node_size += chunk_size;
+            }
+
+            Ok(node_size)
+        } else {
+            panic!("dump_bootstrap_v5 should not use v6 inode");
+        }
     }
 
     pub fn dump_bootstrap_v6(
@@ -857,11 +858,10 @@ impl Node {
         &self.target
     }
 
-    // TODO: this needs to take xattr into account.
-    // change back to V6 when we have v6 inode in Node directly.
     pub fn size_with_xattr(&self) -> usize {
         match self.inode {
-            InodeWrapper::V5(_i) => {
+            InodeWrapper::V5(_i) => todo!(),
+            InodeWrapper::V6(_i) => {
                 size_of::<RafsV6InodeExtended>() + self.xattrs.aligned_size_v6()
             }
         }
@@ -1067,13 +1067,16 @@ impl Node {
 #[derive(Clone, Debug)]
 pub enum InodeWrapper {
     V5(RafsV5Inode),
+    // In order to reuse v5 code, we still need to use v5 inode but
+    // with a different wrapper.
+    V6(RafsV5Inode),
 }
 
 impl InodeWrapper {
     pub fn new(version: RafsVersion) -> Self {
         match version {
             RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode::new()),
-            RafsVersion::V6 => todo!(),
+            RafsVersion::V6 => InodeWrapper::V6(RafsV5Inode::new()),
         }
     }
 
@@ -1090,60 +1093,70 @@ impl InodeWrapper {
     pub fn inode_size(&self) -> usize {
         match self {
             InodeWrapper::V5(i) => i.size(),
+            InodeWrapper::V6(i) => i.size(),
         }
     }
 
     pub fn mode(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.mode(),
+            InodeWrapper::V6(i) => i.mode(),
         }
     }
 
     pub fn is_dir(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_dir(),
+            InodeWrapper::V6(i) => i.is_dir(),
         }
     }
 
     pub fn is_reg(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_reg(),
+            InodeWrapper::V6(i) => i.is_reg(),
         }
     }
 
     pub fn is_hardlink(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_hardlink(),
+            InodeWrapper::V6(i) => i.is_hardlink(),
         }
     }
 
     pub fn is_symlink(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_symlink(),
+            InodeWrapper::V6(i) => i.is_symlink(),
         }
     }
 
     pub fn is_chrdev(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFCHR,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFCHR,
         }
     }
 
     pub fn is_blkdev(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFBLK,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFBLK,
         }
     }
 
     pub fn is_fifo(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFIFO,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFIFO,
         }
     }
 
     pub fn is_sock(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFSOCK,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFSOCK,
         }
     }
 
@@ -1154,6 +1167,7 @@ impl InodeWrapper {
     pub fn has_xattr(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.has_xattr(),
+            InodeWrapper::V6(i) => i.has_xattr(),
         }
     }
 
@@ -1166,102 +1180,125 @@ impl InodeWrapper {
                     i.i_flags &= !RafsV5InodeFlags::XATTR;
                 }
             }
+            InodeWrapper::V6(i) => {
+                if enable {
+                    i.i_flags |= RafsV5InodeFlags::XATTR;
+                } else {
+                    i.i_flags &= !RafsV5InodeFlags::XATTR;
+                }
+            }
         }
     }
 
     pub fn ino(&self) -> Inode {
         match self {
             InodeWrapper::V5(i) => i.i_ino,
+            InodeWrapper::V6(i) => i.i_ino,
         }
     }
 
     pub fn set_ino(&mut self, ino: Inode) {
         match self {
             InodeWrapper::V5(i) => i.i_ino = ino,
+            InodeWrapper::V6(i) => i.i_ino = ino,
         }
     }
 
     pub fn parent(&self) -> Inode {
         match self {
             InodeWrapper::V5(i) => i.i_parent,
+            InodeWrapper::V6(i) => i.i_parent,
         }
     }
 
     pub fn set_parent(&mut self, parent: Inode) {
         match self {
             InodeWrapper::V5(i) => i.i_parent = parent,
+            InodeWrapper::V6(i) => i.i_parent = parent,
         }
     }
 
     pub fn size(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_size,
+            InodeWrapper::V6(i) => i.i_size,
         }
     }
 
     pub fn set_size(&mut self, size: u64) {
         match self {
             InodeWrapper::V5(i) => i.i_size = size,
+            InodeWrapper::V6(i) => i.i_size = size,
         }
     }
 
     pub fn uid(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_uid,
+            InodeWrapper::V6(i) => i.i_uid,
         }
     }
 
     pub fn gid(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_gid,
+            InodeWrapper::V6(i) => i.i_gid,
         }
     }
 
     pub fn mtime(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_mtime,
+            InodeWrapper::V6(i) => i.i_mtime,
         }
     }
 
     pub fn mtime_nsec(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_mtime_nsec,
+            InodeWrapper::V6(i) => i.i_mtime_nsec,
         }
     }
 
     pub fn blocks(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_blocks,
+            InodeWrapper::V6(i) => i.i_blocks,
         }
     }
 
     pub fn nlink(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_nlink,
+            InodeWrapper::V6(i) => i.i_nlink,
         }
     }
 
     pub fn set_nlink(&mut self, nlink: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_nlink = nlink,
+            InodeWrapper::V6(i) => i.i_nlink = nlink,
         }
     }
 
     pub fn digest(&self) -> &RafsDigest {
         match self {
             InodeWrapper::V5(i) => &i.i_digest,
+            InodeWrapper::V6(i) => &i.i_digest,
         }
     }
 
     pub fn set_digest(&mut self, digest: RafsDigest) {
         match self {
             InodeWrapper::V5(i) => i.i_digest = digest,
+            InodeWrapper::V6(i) => i.i_digest = digest,
         }
     }
 
     pub fn name_size(&self) -> u16 {
         match self {
             InodeWrapper::V5(i) => i.i_name_size,
+            InodeWrapper::V6(i) => i.i_name_size,
         }
     }
 
@@ -1269,12 +1306,14 @@ impl InodeWrapper {
         debug_assert!(size < u16::MAX as usize);
         match self {
             InodeWrapper::V5(i) => i.i_name_size = size as u16,
+            InodeWrapper::V6(i) => i.i_name_size = size as u16,
         }
     }
 
     pub fn symlink_size(&self) -> u16 {
         match self {
             InodeWrapper::V5(i) => i.i_symlink_size,
+            InodeWrapper::V6(i) => i.i_symlink_size,
         }
     }
 
@@ -1285,30 +1324,38 @@ impl InodeWrapper {
                 i.i_flags |= RafsV5InodeFlags::SYMLINK;
                 i.i_symlink_size = size as u16;
             }
+            InodeWrapper::V6(i) => {
+                i.i_flags |= RafsV5InodeFlags::SYMLINK;
+                i.i_symlink_size = size as u16;
+            }
         }
     }
 
     pub fn child_index(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_child_index,
+            InodeWrapper::V6(i) => i.i_child_index,
         }
     }
 
     pub fn set_child_index(&mut self, index: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_child_index = index,
+            InodeWrapper::V6(i) => i.i_child_index = index,
         }
     }
 
     pub fn child_count(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_child_count,
+            InodeWrapper::V6(i) => i.i_child_count,
         }
     }
 
     pub fn set_child_count(&mut self, count: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_child_count = count,
+            InodeWrapper::V6(i) => i.i_child_count = count,
         }
     }
 
@@ -1340,12 +1387,34 @@ impl InodeWrapper {
                 // the unique image built.
                 i.i_blocks = div_round_up(i.i_size + xattrs.aligned_size_v5() as u64, 512);
             }
+            InodeWrapper::V6(i) => {
+                i.i_mode = meta.st_mode();
+                if explicit_uidgid {
+                    i.i_uid = meta.st_uid();
+                    i.i_gid = meta.st_gid();
+                }
+                i.i_mtime = meta.st_mtime() as u64;
+                i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
+                i.i_projid = 0;
+                i.i_size = meta.st_size();
+                i.i_rdev = meta.st_rdev() as u32;
+                // Ignore actual nlink value and calculate from rootfs directory instead
+                i.i_nlink = 1;
+
+                // Xattr paris are located into bootstrap rather than blob, however, we should
+                // also reflect the size they consume like other file system. We don't
+                // directly use local file's metadata for `i_block` since we are purchasing
+                // "reproducible build" which means nydus image can be built from anywhere with
+                // the unique image built.
+                i.i_blocks = div_round_up(i.i_size + xattrs.aligned_size_v5() as u64, 512);
+            }
         }
     }
 
     fn create_chunk(&self) -> ChunkWrapper {
         match self {
             InodeWrapper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
+            InodeWrapper::V6(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
         }
     }
 }
@@ -1353,6 +1422,8 @@ impl InodeWrapper {
 #[derive(Clone, Debug)]
 pub enum ChunkWrapper {
     V5(RafsV5ChunkInfo),
+    // see InodeWrapper V6.
+    V6(RafsV5ChunkInfo),
 }
 
 impl ChunkWrapper {
@@ -1360,7 +1431,7 @@ impl ChunkWrapper {
     pub fn new(version: RafsVersion) -> Self {
         match version {
             RafsVersion::V5 => ChunkWrapper::V5(RafsV5ChunkInfo::default()),
-            RafsVersion::V6 => todo!(),
+            RafsVersion::V6 => ChunkWrapper::V6(RafsV5ChunkInfo::default()),
         }
     }
 
@@ -1377,72 +1448,84 @@ impl ChunkWrapper {
     pub fn id(&self) -> &RafsDigest {
         match self {
             ChunkWrapper::V5(c) => &c.block_id,
+            ChunkWrapper::V6(c) => &c.block_id,
         }
     }
 
     pub fn set_id(&mut self, id: RafsDigest) {
         match self {
             ChunkWrapper::V5(c) => c.block_id = id,
+            ChunkWrapper::V6(c) => c.block_id = id,
         }
     }
 
     pub fn index(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.index,
+            ChunkWrapper::V6(c) => c.index,
         }
     }
 
     pub fn set_index(&mut self, index: u32) {
         match self {
             ChunkWrapper::V5(c) => c.index = index,
+            ChunkWrapper::V6(c) => c.index = index,
         }
     }
 
     pub fn blob_index(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.blob_index,
+            ChunkWrapper::V6(c) => c.blob_index,
         }
     }
 
     pub fn set_blob_index(&mut self, index: u32) {
         match self {
             ChunkWrapper::V5(c) => c.blob_index = index,
+            ChunkWrapper::V6(c) => c.blob_index = index,
         }
     }
 
     pub fn compressed_offset(&self) -> u64 {
         match self {
             ChunkWrapper::V5(c) => c.compress_offset,
+            ChunkWrapper::V6(c) => c.compress_offset,
         }
     }
 
     pub fn compressed_size(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.compress_size,
+            ChunkWrapper::V6(c) => c.compress_size,
         }
     }
 
     pub fn uncompressed_offset(&self) -> u64 {
         match self {
             ChunkWrapper::V5(c) => c.uncompress_offset,
+            ChunkWrapper::V6(c) => c.uncompress_offset,
         }
     }
 
     pub fn uncompressed_size(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.uncompress_size,
+            ChunkWrapper::V6(c) => c.uncompress_size,
         }
     }
 
     pub fn file_offset(&self) -> u64 {
         match self {
             ChunkWrapper::V5(c) => c.file_offset,
+            ChunkWrapper::V6(c) => c.file_offset,
         }
     }
 
     pub fn set_file_offset(&mut self, offset: u64) {
         match self {
             ChunkWrapper::V5(c) => c.file_offset = offset,
+            ChunkWrapper::V6(c) => c.file_offset = offset,
         }
     }
 
@@ -1472,6 +1555,18 @@ impl ChunkWrapper {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
             }
+            ChunkWrapper::V6(c) => {
+                c.index = chunk_index;
+                c.blob_index = blob_index;
+                c.file_offset = file_offset;
+                c.compress_size = compressed_size as u32;
+                c.compress_offset = compressed_offset;
+                c.uncompress_size = chunk_size;
+                c.uncompress_offset = uncompressed_offset;
+                if is_compressed {
+                    c.flags |= BlobChunkFlags::COMPRESSED;
+                }
+            }
         }
 
         Ok(())
@@ -1482,12 +1577,18 @@ impl ChunkWrapper {
             (ChunkWrapper::V5(s), ChunkWrapper::V5(o)) => {
                 s.clone_from(o);
             }
+            (ChunkWrapper::V6(s), ChunkWrapper::V6(o)) => {
+                s.clone_from(o);
+            }
+            (ChunkWrapper::V5(_s), ChunkWrapper::V6(_o)) => todo!(),
+            (ChunkWrapper::V6(_s), ChunkWrapper::V5(_o)) => todo!(),
         }
     }
 
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         match self {
             ChunkWrapper::V5(c) => c.store(w).context("failed to store rafs v5 chunk"),
+            ChunkWrapper::V6(c) => c.store(w).context("failed to store rafs v5 chunk"),
         }
     }
 }
