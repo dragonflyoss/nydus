@@ -568,7 +568,7 @@ impl Bootstrap {
         let mut sb = RafsV6SuperBlock::new();
         sb.set_inos(bootstrap_ctx.nodes.len() as u64);
         // FIXME
-        sb.set_blocks(0);
+        sb.set_blocks(EROFS_BLOCK_SIZE as u32);
         sb.set_root_nid(root_nid as u16);
         sb.set_meta_addr(meta_addr);
 
