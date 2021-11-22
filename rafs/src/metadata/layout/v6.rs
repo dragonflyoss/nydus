@@ -927,13 +927,19 @@ impl RafsV6Blob {
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
+                    error!("v.len {} is invalid", v.len());
                     return false;
                 }
             }
-            Err(_) => return false,
+
+            Err(_) => {
+                error!("blob_id from_utf8 is invalid");
+                return false;
+            }
         }
 
         if self.blob_index != blob_index.to_le() {
+            error!("blob_index mismatch {} {}", self.blob_index, blob_index);
             return false;
         }
 
@@ -943,10 +949,16 @@ impl RafsV6Blob {
             || c_size > RAFS_MAX_CHUNK_SIZE
             || c_size != chunk_size as u64
         {
+            error!(
+                "invalid c_size {}, count_ones() {}",
+                c_size,
+                c_size.count_ones()
+            );
             return false;
         }
 
         if u32::from_le(self.chunk_count) >= (1u32 << 24) {
+            error!("chunk_count {}", u32::from_le(self.chunk_count));
             return false;
         }
 
@@ -954,6 +966,7 @@ impl RafsV6Blob {
         if uncompressed_size & (EROFS_BLOCK_SIZE as u64 - 1) != 0
             || uncompressed_size >= (1u64 << 44)
         {
+            error!("uncompressd_size {}", uncompressed_size);
             return false;
         }
 
@@ -961,6 +974,10 @@ impl RafsV6Blob {
             || compress::Algorithm::try_from(u32::from_le(self.ci_compressor)).is_err()
             || digest::Algorithm::try_from(u32::from_le(self.digest_algo)).is_err()
         {
+            error!(
+                "invalid compression_algo {} ci_compressor {} digest_algo {}",
+                self.compression_algo, self.ci_compressor, self.digest_algo
+            );
             return false;
         }
 
@@ -1057,7 +1074,10 @@ impl RafsV6BlobTable {
             return Ok(());
         }
         if blob_table_size as usize % size_of::<RafsV6Blob>() != 0 {
-            return Err(einval!("invalid Rafs v6 blob table size"));
+            return Err(einval!(format!(
+                "invalid Rafs v6 blob table size {}",
+                blob_table_size
+            )));
         }
 
         for idx in 0..(blob_table_size as usize / size_of::<RafsV6Blob>()) {
@@ -1078,6 +1098,12 @@ impl RafsStore for RafsV6BlobTable {
     fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
         for blob_info in self.entries.iter() {
             let blob: RafsV6Blob = RafsV6Blob::from_blob_info(blob_info)?;
+            trace!(
+                "blob_info index {}, chunk_count {} blob_id {:?}",
+                blob_info.blob_index(),
+                blob_info.chunk_count(),
+                blob_info.blob_id(),
+            );
             w.write_all(blob.as_ref())?;
         }
 

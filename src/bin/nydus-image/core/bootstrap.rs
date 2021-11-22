@@ -545,9 +545,10 @@ impl Bootstrap {
             EROFS_BLOCK_SIZE as u64,
         );
         trace!(
-            "devtable len {} blob table offset {}",
+            "devtable len {} blob table offset {} blob table size {}",
             devtable_len,
-            blob_table_offset
+            blob_table_offset,
+            blob_table_size
         );
 
         let blob_table_entries = blob_table.entries.len();
