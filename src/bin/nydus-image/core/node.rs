@@ -367,7 +367,8 @@ impl Node {
             let pre_compress_offset = blob_ctx.compress_offset;
 
             blob_ctx.compress_offset += compressed_size as u64;
-            blob_ctx.decompressed_blob_size = blob_ctx.decompress_offset + chunk_size as u64;
+            blob_ctx.decompressed_blob_size =
+                blob_ctx.decompress_offset + aligned_chunk_size as u64;
             blob_ctx.compressed_blob_size += compressed_size as u64;
             blob_ctx.decompress_offset += aligned_chunk_size as u64;
             blob_ctx.blob_hash.update(&compressed);
