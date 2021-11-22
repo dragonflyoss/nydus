@@ -357,6 +357,7 @@ impl RafsInode for CachedInodeV5 {
             attr: self.get_attr().into(),
             inode: self.i_ino,
             generation: 0,
+            attr_flags: 0,
             attr_timeout: self.i_meta.attr_timeout,
             entry_timeout: self.i_meta.entry_timeout,
         }

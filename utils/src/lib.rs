@@ -14,15 +14,11 @@ extern crate lazy_static;
 use std::convert::{Into, TryFrom, TryInto};
 
 pub use self::exec::*;
-#[cfg(feature = "fusedev")]
-pub use self::fuse::{FuseChannel, FuseSession};
 pub use self::inode_bitmap::InodeBitmap;
 pub use self::types::*;
 
 pub mod digest;
 pub mod exec;
-#[cfg(feature = "fusedev")]
-pub mod fuse;
 pub mod inode_bitmap;
 pub mod metrics;
 pub mod types;
