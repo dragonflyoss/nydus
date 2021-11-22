@@ -43,7 +43,7 @@ hyperlocal = "0.8.0"
 tokio = { version = "1.9.0", features = ["macros"] }
 hyper = "0.14.11"
 
-event-manager = { git = "https://github.com/rust-vmm/event-manager.git", tag = "v0.2.1" }
+event-manager = "0.2.1"
 fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "afc7b69", optional = true }
 vhost = { version = "0.2.0", features = ["vhost-user-slave"], optional = true }
 vhost-user-backend = { git = "https://github.com/rust-vmm/vhost-user-backend", rev = "3242b37", optional = true }
