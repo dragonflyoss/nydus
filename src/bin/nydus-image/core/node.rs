@@ -1141,8 +1141,14 @@ impl InodeWrapper {
         }
     }
 
+    pub fn is_sock(&self) -> bool {
+        match self {
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFSOCK,
+        }
+    }
+
     pub fn is_special(&self) -> bool {
-        self.is_chrdev() || self.is_blkdev() || self.is_fifo()
+        self.is_chrdev() || self.is_blkdev() || self.is_fifo() || self.is_sock()
     }
 
     pub fn has_xattr(&self) -> bool {
