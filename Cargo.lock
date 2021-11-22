@@ -420,7 +420,8 @@ dependencies = [
 [[package]]
 name = "event-manager"
 version = "0.2.1"
-source = "git+https://github.com/rust-vmm/event-manager.git?tag=v0.2.1#3fa29497b397bfbe613cbc142b426da198a36a01"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "377fa591135fbe23396a18e2655a6d5481bf7c5823cdfa3cc81b01a229cbe640"
 dependencies = [
  "libc",
  "vmm-sys-util",
