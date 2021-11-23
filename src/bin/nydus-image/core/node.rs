@@ -1671,7 +1671,7 @@ mod tests {
         let pa = TempDir::new().unwrap();
         let pa_aa = TempFile::new_in(pa.as_path()).unwrap();
         let mut node = Node::new(
-            RafsVersion::V5,
+            RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa_aa.as_path().to_path_buf(),
             Overlay::UpperAddition,
@@ -1706,7 +1706,7 @@ mod tests {
         fs::symlink(pa_aa.as_path(), &pa_sym).unwrap();
 
         let mut sym_node = Node::new(
-            RafsVersion::V5,
+            RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa_sym.as_path().to_path_buf(),
             Overlay::UpperAddition,
@@ -1731,7 +1731,7 @@ mod tests {
         );
 
         let mut dir_node = Node::new(
-            RafsVersion::V5,
+            RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa.as_path().to_path_buf(),
             Overlay::UpperAddition,
