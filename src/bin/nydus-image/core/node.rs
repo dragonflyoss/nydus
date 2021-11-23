@@ -449,7 +449,7 @@ impl Node {
 
             Ok(node_size)
         } else {
-            panic!("dump_bootstrap_v5 should not use v6 inode");
+            bail!("dump_bootstrap_v5 should not use v6 inode");
         }
     }
 
