@@ -26,7 +26,7 @@ VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 #	$(2): How to build the golang project
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
-	if [ $(DOCKER) =  "true" ]; then
+	if [ $(DOCKER) = "true" ]; then
 		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.15 $(2)
 	else
 		$(2) -C $(1)
@@ -58,7 +58,7 @@ endef
 # Targets that are exposed to developers and users.
 build: .format fusedev virtiofs
 release: .format .release_version fusedev virtiofs
-static-release: .musl_target .format .release_version fusedev
+static-release: .musl_target .format .release_version fusedev virtiofs
 fusedev-release: .format .release_version fusedev
 virtiofs-release: .format .release_version virtiofs
 
@@ -159,9 +159,19 @@ nydus-overlayfs:
 nydus-overlayfs-static:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make static-release)
 
+DOCKER-GRAPHDRIVER_PATH = contrib/docker-nydus-graphdriver
+docker-nydus-graphdriver:
+	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make)
+
+docker-nydus-graphdriver-static:
+	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make static-release)
+
 # Run integration smoke test in docker-in-docker container. It requires some special settings,
 # refer to `misc/example/README.md` for details.
-all-static-release: docker-static nydusify-static nydus-snapshotter-static ctr-remote-static nydus-overlayfs-static
+all-static-release: docker-static all-contrib-static-release
+
+all-contrib-static-release: nydusify-static nydus-snapshotter-static ctr-remote-static \
+			    nydus-overlayfs-static docker-nydus-graphdriver-static
 
 # https://www.gnu.org/software/make/manual/html_node/One-Shell.html
 .ONESHELL:
