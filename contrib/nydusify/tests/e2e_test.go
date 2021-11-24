@@ -60,7 +60,7 @@ func testConvertWithChunkDict(t *testing.T) {
 	nydusify2.Check(t)
 	// build with build-cache
 	registry.Build(t, "image-from-1")
-	nydusify3 := NewNydusify(registry, "image-from-1", "nydus:image-from-1", "cache:v1", chunkDictOpt)
+	nydusify3 := NewNydusify(registry, "image-from-1", "nydus:image-from-1", "nydus:cache_v1", chunkDictOpt)
 	nydusify3.Convert(t)
 	nydusify3.Check(t)
 	// change chunk dict
@@ -70,7 +70,7 @@ func testConvertWithChunkDict(t *testing.T) {
 	nydusify4.Check(t)
 	chunkDictOpt = fmt.Sprintf("bootstrap:registry:%s/%s", registry.Host(), "nydus:chunk-dict-2")
 	registry.Build(t, "image-from-2")
-	nydusify5 := NewNydusify(registry, "image-from-2", "nydus:image-from-2", "cache:v1", chunkDictOpt)
+	nydusify5 := NewNydusify(registry, "image-from-2", "nydus:image-from-2", "nydus:cache_v1", chunkDictOpt)
 	nydusify5.Convert(t)
 	nydusify5.Check(t)
 }

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -20,11 +22,23 @@ type InspectOption struct {
 }
 
 type BlobInfo struct {
-	BlobID          string `json:"blob_id"`
-	CompressSize    uint64 `json:"compress_size"`
-	DecompressSize  uint64 `json:"decompress_size"`
-	ReadaheadOffset uint32 `json:"readahead_offset"`
-	ReadaheadSize   uint32 `json:"readahead_size"`
+	BlobID           string `json:"blob_id"`
+	CompressedSize   uint64 `json:"compressed_size"`
+	DecompressedSize uint64 `json:"decompressed_size"`
+	ReadaheadOffset  uint32 `json:"readahead_offset"`
+	ReadaheadSize    uint32 `json:"readahead_size"`
+}
+
+func (info *BlobInfo) String() string {
+	jsonBytes, _ := json.Marshal(info)
+	return string(jsonBytes)
+}
+
+type BlobInfoList []BlobInfo
+
+func (infos BlobInfoList) String() string {
+	jsonBytes, _ := json.Marshal(&infos)
+	return string(jsonBytes)
 }
 
 type Inspector struct {
@@ -51,9 +65,9 @@ func (p *Inspector) Inspect(option InspectOption) (interface{}, error) {
 		cmd := exec.Command(p.binaryPath, args...)
 		msg, err := cmd.CombinedOutput()
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, string(msg))
 		}
-		var blobs []BlobInfo
+		var blobs BlobInfoList
 		if err = json.Unmarshal(msg, &blobs); err != nil {
 			return nil, err
 		}

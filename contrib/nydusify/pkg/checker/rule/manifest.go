@@ -69,7 +69,6 @@ func (rule *ManifestRule) Validate() error {
 	var (
 		blobListInAnnotation []string
 		blobListInLayer      []string
-		hasReference         bool
 	)
 	for i, layer := range layers {
 		if i == len(layers)-1 {
@@ -84,7 +83,6 @@ func (rule *ManifestRule) Validate() error {
 			if err := json.Unmarshal([]byte(blobListStr), &blobListInAnnotation); err != nil {
 				return errors.Wrap(err, "failed to unmarshal blob list in annotation of nydus image manifest")
 			}
-			_, hasReference = layer.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs]
 		} else {
 			if layer.MediaType != utils.MediaTypeNydusBlob ||
 				layer.Annotations[utils.LayerAnnotationNydusBlob] != "true" {
@@ -96,7 +94,7 @@ func (rule *ManifestRule) Validate() error {
 
 	// Compare the blob list differences between bootstrap layer annotation
 	// and manifest layers.
-	if !hasReference && rule.BackendType == "registry" && !reflect.DeepEqual(blobListInAnnotation, blobListInLayer) {
+	if rule.BackendType == "registry" && !reflect.DeepEqual(blobListInAnnotation, blobListInLayer) {
 		return fmt.Errorf(
 			"unmatched blob list between in annotation and layers: %v != %v",
 			blobListInAnnotation, blobListInLayer,

@@ -161,6 +161,23 @@ func (mm *manifestManager) CloneSourcePlatform(ctx context.Context, additionalOS
 	}, nil
 }
 
+func layersHex(layers []ocispec.Descriptor) []string {
+	var digests []string
+	for _, layer := range layers {
+		digests = append(digests, layer.Digest.Hex())
+	}
+	return digests
+}
+
+func containsLayer(layers []ocispec.Descriptor, d digest.Digest) bool {
+	for _, layer := range layers {
+		if layer.Digest == d {
+			return true
+		}
+	}
+	return false
+}
+
 func appendBlobs(oldBlobs []string, newBlobs []string) []string {
 	for _, newBlob := range newBlobs {
 		exist := false
@@ -178,25 +195,30 @@ func appendBlobs(oldBlobs []string, newBlobs []string) []string {
 }
 
 func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
-	layers := []ocispec.Descriptor{}
-	// add reference blobs to annotation
 	var (
 		blobListInAnnotation []string
 		referenceBlobs       []string
+		layers               []ocispec.Descriptor
 	)
-
 	for idx, _layer := range buildLayers {
 		record := _layer.GetCacheRecord()
-		referenceBlobs = appendBlobs(referenceBlobs, _layer.referenceBlobs)
-		blobListInAnnotation = appendBlobs(blobListInAnnotation, _layer.referenceBlobs)
+		referenceBlobs = appendBlobs(referenceBlobs, layersHex(_layer.referenceBlobs))
+		blobListInAnnotation = appendBlobs(blobListInAnnotation, layersHex(_layer.referenceBlobs))
 		if record.NydusBlobDesc != nil {
 			// Write blob digest list in JSON format to layer annotation of bootstrap.
 			blobListInAnnotation = append(blobListInAnnotation, record.NydusBlobDesc.Digest.Hex())
 			// For registry backend, we need to write the blob layer to
 			// manifest to prevent them from being deleted by registry GC.
-			// todo: add reference blobs layer to manifest
 			if mm.backend.Type() == backend.RegistryBackend {
 				layers = append(layers, *record.NydusBlobDesc)
+			}
+		}
+		// try add reference blob layers to manifest
+		if mm.backend.Type() == backend.RegistryBackend {
+			for _, blobDesc := range _layer.referenceBlobs {
+				if !containsLayer(layers, blobDesc.Digest) {
+					layers = append(layers, blobDesc)
+				}
 			}
 		}
 
