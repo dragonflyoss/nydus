@@ -861,7 +861,8 @@ impl Node {
 
     pub fn size_with_xattr(&self) -> usize {
         match self.inode {
-            InodeWrapper::V5(_i) => todo!(),
+            // this is not used by v5, put a dummy one.
+            InodeWrapper::V5(_i) => 0,
             InodeWrapper::V6(_i) => {
                 size_of::<RafsV6InodeExtended>() + self.xattrs.aligned_size_v6()
             }
