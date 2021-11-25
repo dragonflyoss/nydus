@@ -256,7 +256,7 @@ impl BlobCache for FileCacheEntry {
     fn stop_prefetch(&self) -> StorageResult<()> {
         self.prefetch_state
             .store(AsyncRequestState::Cancelled as u32, Ordering::Release);
-
+        self.workers.stop();
         Ok(())
     }
 

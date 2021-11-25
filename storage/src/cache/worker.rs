@@ -180,8 +180,7 @@ impl AsyncWorkerMgr {
 
     /// Stop all working threads.
     pub fn stop(&self) {
-        self.exiting.store(true, Ordering::Release);
-
+        //self.exiting.store(true, Ordering::Release);
         while self.send(AsyncRequestMessage::Exit).is_ok()
             && self.workers.load(Ordering::Relaxed) > 0
         {

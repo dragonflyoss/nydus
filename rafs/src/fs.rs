@@ -548,6 +548,8 @@ impl Rafs {
                 info!("No file to be prefetched {:?}", e);
             });
         }
+
+        device.stop_prefetch();
     }
 
     fn convert_file_list(files: &[PathBuf], sb: &Arc<RafsSuper>) -> Vec<Inode> {
