@@ -167,7 +167,7 @@ fn main() -> Result<()> {
             Arg::with_name("log-file")
                 .long("log-file")
                 .short("L")
-                .help("Log messages to the file. If file extension is not specified, the default extenstion \".log\" will be appended.")
+                .help("Log messages to the file. If file extension is not specified, the default extension \".log\" will be appended.")
                 .takes_value(true)
                 .required(false)
                 .global(true),
@@ -235,8 +235,19 @@ fn main() -> Result<()> {
                 .short("B")
                 .help("Rafs filesystem bootstrap/metadata file")
                 .takes_value(true)
-                .min_values(1),
+                .conflicts_with("shared-dir")
         )
+        .arg(
+            Arg::with_name("shared-dir")
+                .long("shared-dir")
+                .short("s")
+                .help("Directory to pass through to the guest VM")
+                .takes_value(true)
+                .conflicts_with("bootstrap"),
+        );
+
+    #[cfg(feature = "fusedev")]
+    let cmd_arguments = cmd_arguments
         .arg(
             Arg::with_name("mountpoint")
                 .long("mountpoint")
@@ -275,32 +286,13 @@ fn main() -> Result<()> {
         );
 
     #[cfg(feature = "virtiofs")]
-    let cmd_arguments = cmd_arguments
-        .arg(
-            Arg::with_name("sock")
-                .long("sock")
-                .help("Vhost-user API socket")
-                .takes_value(true)
-                .required(true),
-        )
-        .arg(
-            Arg::with_name("bootstrap")
-                .long("bootstrap")
-                .short("B")
-                .help("Rafs filesystem bootstrap/metadata file")
-                .takes_value(true)
-                .min_values(1)
-                .conflicts_with("shared-dir"),
-        )
-        .arg(
-            Arg::with_name("shared-dir")
-                .long("shared-dir")
-                .short("s")
-                .help("Directory to pass through to the guest VM")
-                .takes_value(true)
-                .min_values(1)
-                .conflicts_with("bootstrap"),
-        );
+    let cmd_arguments = cmd_arguments.arg(
+        Arg::with_name("sock")
+            .long("sock")
+            .help("Vhost-user API socket")
+            .takes_value(true)
+            .required(true),
+    );
 
     let cmd_arguments_parsed = cmd_arguments.get_matches();
 
