@@ -25,7 +25,7 @@ func New(publicKey []byte) (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Signer {
+	return &Signer{
 		publicKey: key,
 	}, nil
 }

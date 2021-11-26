@@ -7,13 +7,12 @@
 package stargz
 
 import (
-	"errors"
-	"fmt"
 	"os"
 
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
+	"github.com/pkg/errors"
 )
 
 func WithMeta(root string) NewFSOpt {
@@ -83,7 +82,7 @@ func WithLogLevel(logLevel string) NewFSOpt {
 func WithLogDir(dir string) NewFSOpt {
 	return func(d *filesystem) error {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return errors.New(fmt.Sprintf("failed to create logDir %s: %v", dir, err))
+			return errors.Errorf("failed to create logDir %s: %v", dir, err)
 		}
 		d.logDir = dir
 		return nil

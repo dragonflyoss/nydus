@@ -7,8 +7,6 @@
 package nydus
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"strings"
 
@@ -18,6 +16,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/filesystem/meta"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/process"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/signature"
+	"github.com/pkg/errors"
 )
 
 type NewFSOpt func(d *filesystem) error
@@ -123,7 +122,7 @@ func WithLogLevel(logLevel string) NewFSOpt {
 func WithLogDir(dir string) NewFSOpt {
 	return func(d *filesystem) error {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return errors.New(fmt.Sprintf("failed to create logDir %s: %v", dir, err))
+			return errors.Errorf("failed to create logDir %s: %v", dir, err)
 		}
 		d.logDir = dir
 		return nil

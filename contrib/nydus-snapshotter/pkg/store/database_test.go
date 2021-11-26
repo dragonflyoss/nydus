@@ -42,7 +42,7 @@ func Test_daemon(t *testing.T) {
 
 	// Check records
 	ids := make(map[string]string)
-	err = db.WalkDaemons(ctx, func(info *daemon.Daemon) error {
+	_ = db.WalkDaemons(ctx, func(info *daemon.Daemon) error {
 		ids[info.ID] = ""
 		return nil
 	})

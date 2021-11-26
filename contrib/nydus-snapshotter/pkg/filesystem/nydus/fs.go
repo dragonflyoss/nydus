@@ -39,7 +39,7 @@ type filesystem struct {
 	daemonCfg        config.DaemonConfig
 	vpcRegistry      bool
 	nydusdBinaryPath string
-	mode             fspkg.FSMode
+	mode             fspkg.Mode
 	logLevel         string
 	logDir           string
 	logToStdout      bool
@@ -211,15 +211,15 @@ func (fs *filesystem) MountPoint(snapshotID string) (string, error) {
 		// For NoneDaemon mode, just return error to use snapshotter
 		// default mount point path
 		return "", fmt.Errorf("don't need nydus daemon of snapshot %s", snapshotID)
-	} else {
-		if d, err := fs.manager.GetBySnapshotID(snapshotID); err == nil {
-			if fs.mode == fspkg.SharedInstance {
-				return d.SharedMountPoint(), nil
-			}
-			return d.MountPoint(), nil
-		}
-		return "", fmt.Errorf("failed to find nydus mountpoint of snapshot %s", snapshotID)
 	}
+
+	if d, err := fs.manager.GetBySnapshotID(snapshotID); err == nil {
+		if fs.mode == fspkg.SharedInstance {
+			return d.SharedMountPoint(), nil
+		}
+		return d.MountPoint(), nil
+	}
+	return "", fmt.Errorf("failed to find nydus mountpoint of snapshot %s", snapshotID)
 }
 
 func (fs *filesystem) BootstrapFile(id string) (string, error) {

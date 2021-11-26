@@ -1,5 +1,3 @@
-// +build linux
-
 package mount
 
 import (
@@ -10,7 +8,6 @@ import (
 )
 
 type Mounter struct {
-
 }
 
 func (m *Mounter) Umount(target string) error {
@@ -36,6 +33,3 @@ func (m *Mounter) IsLikelyNotMountPoint(file string) (bool, error) {
 
 	return true, nil
 }
-
-
-
