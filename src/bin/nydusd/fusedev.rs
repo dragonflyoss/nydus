@@ -29,6 +29,7 @@ use fuse_backend_rs::api::{
 };
 
 use fuse_backend_rs::abi::linux_abi::{InHeader, OutHeader};
+use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
@@ -38,7 +39,6 @@ use daemon::{
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
 use nydus_app::BuildTimeInfo;
-use nydus_utils::{FuseChannel, FuseSession};
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -71,8 +71,6 @@ impl Default for FuseOp {
 pub(crate) struct FuseServer {
     server: Arc<Server<Arc<Vfs>>>,
     ch: FuseChannel,
-    // read buffer for fuse requests
-    buf: Vec<u8>,
 }
 
 impl FuseServer {
@@ -80,21 +78,18 @@ impl FuseServer {
         Ok(FuseServer {
             server,
             ch: se.new_channel(evtfd)?,
-            buf: Vec::with_capacity(se.bufsize()),
         })
     }
 
     fn svc_loop(&mut self, metrics_hook: &dyn MetricsHook) -> Result<()> {
-        // Safe because we have already reserved the capacity
-        unsafe {
-            self.buf.set_len(self.buf.capacity());
-        }
-
         // Given error EBADF, it means kernel has shut down this session.
         let _ebadf = std::io::Error::from_raw_os_error(libc::EBADF);
         loop {
-            if let Some(reader) = self.ch.get_reader(&mut self.buf)? {
-                let writer = self.ch.get_writer()?;
+            if let Some((reader, writer)) = self
+                .ch
+                .get_request()
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?
+            {
                 if let Err(e) = self
                     .server
                     .handle_message(reader, writer, None, Some(metrics_hook))

@@ -442,6 +442,7 @@ impl Rafs {
             .into(),
             inode: 0,
             generation: 0,
+            attr_flags: 0,
             attr_timeout: self.sb.meta.attr_timeout,
             entry_timeout: self.sb.meta.entry_timeout,
         }
@@ -532,7 +533,7 @@ impl FileSystem for Rafs {
 
     fn destroy(&self) {}
 
-    fn lookup(&self, _ctx: Context, ino: u64, name: &CStr) -> Result<Entry> {
+    fn lookup(&self, _ctx: &Context, ino: u64, name: &CStr) -> Result<Entry> {
         let mut rec = FopRecorder::settle(Lookup, ino, &self.ios);
         let target = OsStr::from_bytes(name.to_bytes());
         let parent = self.sb.get_inode(ino, self.digest_validate)?;
@@ -563,9 +564,9 @@ impl FileSystem for Rafs {
         }
     }
 
-    fn forget(&self, _ctx: Context, _inode: u64, _count: u64) {}
+    fn forget(&self, _ctx: &Context, _inode: u64, _count: u64) {}
 
-    fn batch_forget(&self, ctx: Context, requests: Vec<(u64, u64)>) {
+    fn batch_forget(&self, ctx: &Context, requests: Vec<(u64, u64)>) {
         for (inode, count) in requests {
             self.forget(ctx, inode, count)
         }
@@ -573,7 +574,7 @@ impl FileSystem for Rafs {
 
     fn getattr(
         &self,
-        _ctx: Context,
+        _ctx: &Context,
         ino: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
@@ -593,7 +594,7 @@ impl FileSystem for Rafs {
         Ok((attr.into(), self.sb.meta.attr_timeout))
     }
 
-    fn readlink(&self, _ctx: Context, ino: u64) -> Result<Vec<u8>> {
+    fn readlink(&self, _ctx: &Context, ino: u64) -> Result<Vec<u8>> {
         let mut rec = FopRecorder::settle(Readlink, ino, &self.ios);
         let inode = self.sb.get_inode(ino, self.digest_validate)?;
         Ok(inode
@@ -609,10 +610,10 @@ impl FileSystem for Rafs {
     #[allow(clippy::too_many_arguments)]
     fn read(
         &self,
-        _ctx: Context,
+        _ctx: &Context,
         ino: u64,
         _handle: u64,
-        w: &mut dyn ZeroCopyWriter,
+        w: &mut dyn ZeroCopyWriter<S = ()>,
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
@@ -664,7 +665,7 @@ impl FileSystem for Rafs {
 
     fn release(
         &self,
-        _ctx: Context,
+        _ctx: &Context,
         _inode: u64,
         _flags: u32,
         _handle: u64,
@@ -675,7 +676,7 @@ impl FileSystem for Rafs {
         Ok(())
     }
 
-    fn statfs(&self, _ctx: Context, _inode: u64) -> Result<libc::statvfs64> {
+    fn statfs(&self, _ctx: &Context, _inode: u64) -> Result<libc::statvfs64> {
         // Safe because we are zero-initializing a struct with only POD fields.
         let mut st: libc::statvfs64 = unsafe { std::mem::zeroed() };
 
@@ -689,7 +690,13 @@ impl FileSystem for Rafs {
         Ok(st)
     }
 
-    fn getxattr(&self, _ctx: Context, inode: u64, name: &CStr, size: u32) -> Result<GetxattrReply> {
+    fn getxattr(
+        &self,
+        _ctx: &Context,
+        inode: u64,
+        name: &CStr,
+        size: u32,
+    ) -> Result<GetxattrReply> {
         let mut recorder = FopRecorder::settle(Getxattr, inode, &self.ios);
 
         if !self.xattr_supported() {
@@ -721,7 +728,7 @@ impl FileSystem for Rafs {
         })
     }
 
-    fn listxattr(&self, _ctx: Context, inode: u64, size: u32) -> Result<ListxattrReply> {
+    fn listxattr(&self, _ctx: &Context, inode: u64, size: u32) -> Result<ListxattrReply> {
         let mut rec = FopRecorder::settle(Listxattr, inode, &self.ios);
         if !self.xattr_supported() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
@@ -751,7 +758,7 @@ impl FileSystem for Rafs {
 
     fn readdir(
         &self,
-        _ctx: Context,
+        _ctx: &Context,
         inode: u64,
         _handle: u64,
         size: u32,
@@ -767,7 +774,7 @@ impl FileSystem for Rafs {
 
     fn readdirplus(
         &self,
-        _ctx: Context,
+        _ctx: &Context,
         ino: u64,
         _handle: u64,
         size: u32,
@@ -785,11 +792,11 @@ impl FileSystem for Rafs {
         })
     }
 
-    fn releasedir(&self, _ctx: Context, _inode: u64, _flags: u32, _handle: u64) -> Result<()> {
+    fn releasedir(&self, _ctx: &Context, _inode: u64, _flags: u32, _handle: u64) -> Result<()> {
         Ok(())
     }
 
-    fn access(&self, ctx: Context, ino: u64, mask: u32) -> Result<()> {
+    fn access(&self, ctx: &Context, ino: u64, mask: u32) -> Result<()> {
         let mut rec = FopRecorder::settle(Access, ino, &self.ios);
         let st = self.get_inode_attr(ino)?;
         let mode = mask as i32 & (libc::R_OK | libc::W_OK | libc::X_OK);
@@ -888,7 +895,7 @@ mod tests {
     #[test]
     fn it_should_access() {
         let rafs = new_rafs_backend();
-        let ctx = Context {
+        let ctx = &Context {
             gid: 0,
             pid: 1,
             uid: 0,
@@ -901,7 +908,7 @@ mod tests {
     #[test]
     fn it_should_listxattr() {
         let rafs = new_rafs_backend();
-        let ctx = Context {
+        let ctx = &Context {
             gid: 0,
             pid: 1,
             uid: 0,
@@ -918,7 +925,7 @@ mod tests {
     #[test]
     fn it_should_get_statfs() {
         let rafs = new_rafs_backend();
-        let ctx = Context {
+        let ctx = &Context {
             gid: 0,
             pid: 1,
             uid: 0,
@@ -944,7 +951,7 @@ mod tests {
     #[test]
     fn it_should_lookup_entry() {
         let rafs = new_rafs_backend();
-        let ctx = Context {
+        let ctx = &Context {
             gid: 0,
             pid: 1,
             uid: 0,

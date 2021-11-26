@@ -3,7 +3,7 @@ module github.com/dragonflyoss/image-service/contrib/nydus-snapshotter
 go 1.14
 
 require (
-	github.com/containerd/containerd v1.4.11
+	github.com/containerd/containerd v1.4.12
 	github.com/containerd/continuity v0.0.0-20200928162600-f2cc35102c2a
 	github.com/dragonflyoss/image-service/contrib/nydusify v0.0.0-20210518022841-c17fb49cce7c
 	github.com/gogo/protobuf v1.3.2 // indirect

@@ -27,17 +27,23 @@ jobs:
     - name: Build nydus-rs
       run: |
         make docker-static
-        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusd .
+        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusd nydusd-fusedev
         sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydus-image .
+        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusctl .
+        sudo mv target-virtiofs/x86_64-unknown-linux-musl/release/nydusd nydusd-virtiofs
+        sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) .
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
         name: nydus-artifacts
         path: |
-          nydusd
+          nydusd-fusedev
+          nydusd-virtiofs
           nydus-image
-  build-nydusify-nydus-snapshotter:
+          nydusctl
+          configs
+  build-contrib:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
@@ -45,27 +51,30 @@ jobs:
       uses: actions/cache@v2
       with:
         path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum') }}
+        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go
-    - name: build nydusify
+    - name: build contrib go components
       run: |
-        make nydusify-static
-    - name: build nydus-snapshotter
-      run: |
-        make nydus-snapshotter-static
+        make all-contrib-static-release
+        sudo mv contrib/ctr-remote/bin/ctr-remote .
+        sudo mv contrib/docker-nydus-graphdriver/bin/nydus_graphdriver .
         sudo mv contrib/nydusify/cmd/nydusify .
+        sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
         sudo mv contrib/nydus-snapshotter/bin/containerd-nydus-grpc .
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
         name: nydus-artifacts
         path: |
+          ctr-remote
+          nydus_graphdriver
           nydusify
+          nydus-overlayfs
           containerd-nydus-grpc
   upload-artifacts:
     runs-on: ubuntu-latest
-    needs: [build-nydus-rs, build-nydusify-nydus-snapshotter]
+    needs: [build-nydus-rs, build-contrib]
     steps:
     - uses: actions/checkout@v2
     - name: install hub
