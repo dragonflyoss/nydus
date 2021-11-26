@@ -10,7 +10,7 @@ PROXY := GOPROXY="${GOPROXY}"
 endif
 
 .PHONY: build
-build:
+build: check
 	GOOS=linux ${PROXY} go build -ldflags="-s -w -X 'main.Version=${VERSION}'" -v -o bin/containerd-nydus-grpc ./cmd/containerd-nydus-grpc
 
 static-release:
