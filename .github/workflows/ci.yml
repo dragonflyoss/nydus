@@ -4,7 +4,7 @@ on:
   push:
     branches: ["*"]
   pull_request:
-    branches: [master]
+    branches: [master, stable-1.x]
 
 env:
   CARGO_TERM_COLOR: always
