@@ -425,6 +425,7 @@ impl Default for Config {
     }
 }
 
+#[allow(dead_code)]
 struct BootstrapArgs {
     rafs: Rafs,
     // bootstrap: String,
@@ -473,6 +474,7 @@ pub struct BlobFs {
 
     cfg: Config,
 
+    #[allow(dead_code)]
     bootstrap_args: BootstrapArgs,
 }
 

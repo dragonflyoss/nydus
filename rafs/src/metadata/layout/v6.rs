@@ -19,7 +19,6 @@ use storage::{compress, RAFS_MAX_CHUNK_SIZE};
 
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
-use nydus_utils::digest::RAFS_DIGEST_LENGTH;
 
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
@@ -1222,14 +1221,17 @@ impl RafsV6XattrEntry {
         RafsV6XattrEntry::default()
     }
 
+    #[allow(dead_code)]
     fn name_len(&self) -> u8 {
         self.e_name_len
     }
 
+    #[allow(dead_code)]
     fn name_index(&self) -> u8 {
         self.e_name_index
     }
 
+    #[allow(dead_code)]
     fn value_size(&self) -> u16 {
         u16::from_le(self.e_value_size)
     }
