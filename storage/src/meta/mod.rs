@@ -522,10 +522,6 @@ impl BlobMetaInfo {
         reader: &Arc<dyn BlobReader>,
         buffer: &mut [u8],
     ) -> Result<()> {
-        let compressed_size = blob_info.meta_ci_compressed_size();
-        let mut buf = Vec::with_capacity(compressed_size as usize);
-        unsafe { buf.set_len(compressed_size as usize) };
-
         trace!(
             "blob_info compressor {} ci_compressor {} ci_compressed_size {} ci_uncompressed_size {}",
             blob_info.compressor(),
@@ -533,17 +529,40 @@ impl BlobMetaInfo {
             blob_info.meta_ci_compressed_size(),
             blob_info.meta_ci_uncompressed_size(),
         );
-        let size = reader
-            .read(&mut buf, blob_info.meta_ci_offset())
-            .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
-        if size as u64 != compressed_size {
-            return Err(eio!("failed to read blob metadata from backend"));
-        }
 
-        compress::decompress(&buf, None, buffer, blob_info.meta_ci_compressor()).map_err(|e| {
-            error!("failed to decompress metadata: {}", e);
-            e
-        })?;
+        if blob_info.meta_ci_compressor() == compress::Algorithm::None {
+            let size = reader
+                .read(buffer, blob_info.meta_ci_offset())
+                .map_err(|e| {
+                    eio!(format!(
+                        "failed to read metadata from backend(compressor is none), {:?}",
+                        e
+                    ))
+                })?;
+            if size as u64 != blob_info.meta_ci_uncompressed_size() {
+                return Err(eio!(
+                    "failed to read blob metadata from backend(compressor is None)"
+                ));
+            }
+        } else {
+            let compressed_size = blob_info.meta_ci_compressed_size();
+            let mut buf = Vec::with_capacity(compressed_size as usize);
+            unsafe { buf.set_len(compressed_size as usize) };
+
+            let size = reader
+                .read(&mut buf, blob_info.meta_ci_offset())
+                .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
+            if size as u64 != compressed_size {
+                return Err(eio!("failed to read blob metadata from backend"));
+            }
+
+            compress::decompress(&buf, None, buffer, blob_info.meta_ci_compressor()).map_err(
+                |e| {
+                    error!("failed to decompress metadata: {}", e);
+                    e
+                },
+            )?;
+        }
 
         // TODO: validate metadata
 
