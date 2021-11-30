@@ -299,7 +299,7 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
         }
         let backend = fs_backend_factory(&cmd)?;
         let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
-        info!("rafs mounted at {}", &cmd.mountpoint);
+        info!("{} mounted at {}", &cmd.fs_type, &cmd.mountpoint);
         self.backend_collection().add(&cmd.mountpoint, &cmd)?;
 
         // Add mounts opaque to UpgradeManager
