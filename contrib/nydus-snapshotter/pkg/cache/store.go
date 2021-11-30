@@ -11,19 +11,15 @@ const (
 	chunkMapFileSuffix = ".chunk_map"
 )
 
-type Store interface {
-	DelBlob(blob string) error
-}
-
-type CacheStore struct {
+type Store struct {
 	cacheDir string
 }
 
-func NewStore(cacheDir string) *CacheStore {
-	return &CacheStore{cacheDir: cacheDir}
+func NewStore(cacheDir string) *Store {
+	return &Store{cacheDir: cacheDir}
 }
 
-func (cs *CacheStore) DelBlob(blob string) error {
+func (cs *Store) DelBlob(blob string) error {
 	blobPath := cs.blobPath(blob)
 
 	// Remove the blob chunkmap file named $blob_id.chunk_map first.
@@ -44,6 +40,6 @@ func (cs *CacheStore) DelBlob(blob string) error {
 	return nil
 }
 
-func (cs *CacheStore) blobPath(blob string) string {
+func (cs *Store) blobPath(blob string) string {
 	return filepath.Join(cs.cacheDir, blob)
 }

@@ -29,7 +29,7 @@ const (
 	mountEndpoint  = "/api/v1/mount"
 	metricEndpoint = "/api/v1/metrics"
 
-	defaultHttpClientTimeout = 30 * time.Second
+	defaultHTTPClientTimeout = 30 * time.Second
 	contentType              = "application/json"
 )
 
@@ -51,7 +51,7 @@ func NewNydusClient(sock string) (Interface, error) {
 	}
 	return &NydusClient{
 		httpClient: &http.Client{
-			Timeout:   defaultHttpClientTimeout,
+			Timeout:   defaultHTTPClientTimeout,
 			Transport: transport,
 		},
 	}, nil

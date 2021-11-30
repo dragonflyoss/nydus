@@ -8,14 +8,15 @@ package fs
 
 import (
 	"context"
+
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/config"
 )
 
-type FSMode int
+type Mode int
 
 const (
-	SharedInstance FSMode = iota
+	SharedInstance Mode = iota
 	MultiInstance
 	NoneInstance
 	PrefetchInstance

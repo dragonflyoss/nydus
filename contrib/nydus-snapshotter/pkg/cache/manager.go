@@ -10,7 +10,7 @@ import (
 
 type Manager struct {
 	db       DB
-	store    Store
+	store    *Store
 	cacheDir string
 	period   time.Duration
 	eventCh  chan struct{}

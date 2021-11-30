@@ -24,9 +24,8 @@ func IsAlreadyExists(err error) bool {
 // IsConnectionClosed returns true if error is due to connection closed
 // this is used when snapshotter closed by sig term
 func IsConnectionClosed(err error) bool {
-	switch err.(type) {
+	switch err := err.(type) {
 	case *net.OpError:
-		err := err.(*net.OpError)
 		return err.Err.Error() == "use of closed network connection"
 	default:
 		return false

@@ -36,7 +36,7 @@ type Daemon struct {
 	Pid              int
 	ImageID          string
 	DaemonMode       string
-	ApiSock          *string
+	apiSock          *string
 	RootMountPoint   *string
 	CustomMountPoint *string
 }
@@ -68,8 +68,8 @@ func (d *Daemon) ConfigFile() string {
 }
 
 func (d *Daemon) APISock() string {
-	if d.ApiSock != nil {
-		return *d.ApiSock
+	if d.apiSock != nil {
+		return *d.apiSock
 	}
 	return filepath.Join(d.SocketDir, APISocketFileName)
 }

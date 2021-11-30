@@ -25,8 +25,6 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/utils/mount"
 )
 
-type configGenerator = func(*daemon.Daemon) error
-
 type Manager struct {
 	store            Store
 	nydusdBinaryPath string
@@ -240,7 +238,7 @@ func (m *Manager) IsPrefetchDaemon() bool {
 func (m *Manager) Reconnect(ctx context.Context) error {
 	var (
 		daemons      []*daemon.Daemon
-		sharedDaemon *daemon.Daemon = nil
+		sharedDaemon *daemon.Daemon
 	)
 
 	if m.isNoneDaemon() {

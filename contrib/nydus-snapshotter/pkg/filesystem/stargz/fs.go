@@ -185,11 +185,11 @@ func (f *filesystem) Mount(ctx context.Context, snapshotID string, labels map[st
 	return nil
 }
 
-func (fs *filesystem) BootstrapFile(id string) (string, error) {
+func (f *filesystem) BootstrapFile(id string) (string, error) {
 	panic("stargz has no bootstrap file")
 }
 
-func (fs *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonConfig, error) {
+func (f *filesystem) NewDaemonConfig(labels map[string]string) (config.DaemonConfig, error) {
 	panic("implement me")
 }
 

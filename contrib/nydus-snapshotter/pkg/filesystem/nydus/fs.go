@@ -39,7 +39,7 @@ type filesystem struct {
 	daemonCfg        config.DaemonConfig
 	vpcRegistry      bool
 	nydusdBinaryPath string
-	mode             fspkg.FSMode
+	mode             fspkg.Mode
 	logLevel         string
 	logDir           string
 	logToStdout      bool
@@ -211,15 +211,15 @@ func (fs *filesystem) MountPoint(snapshotID string) (string, error) {
 		// For NoneDaemon mode, just return error to use snapshotter
 		// default mount point path
 		return "", fmt.Errorf("don't need nydus daemon of snapshot %s", snapshotID)
-	} else {
-		if d, err := fs.manager.GetBySnapshotID(snapshotID); err == nil {
-			if fs.mode == fspkg.SharedInstance {
-				return d.SharedMountPoint(), nil
-			}
-			return d.MountPoint(), nil
-		}
-		return "", fmt.Errorf("failed to find nydus mountpoint of snapshot %s", snapshotID)
 	}
+
+	if d, err := fs.manager.GetBySnapshotID(snapshotID); err == nil {
+		if fs.mode == fspkg.SharedInstance {
+			return d.SharedMountPoint(), nil
+		}
+		return d.MountPoint(), nil
+	}
+	return "", fmt.Errorf("failed to find nydus mountpoint of snapshot %s", snapshotID)
 }
 
 func (fs *filesystem) BootstrapFile(id string) (string, error) {
@@ -306,7 +306,7 @@ func (fs *filesystem) newDaemon(ctx context.Context, snapshotID string, imageID 
 				log.G(ctx).Infof("daemon(ID=%s) is already running and reconnected", daemon.SharedNydusDaemonID)
 			}
 		} else {
-			d, err = fs.initSharedDaemon(ctx)
+			_, err = fs.initSharedDaemon(ctx)
 			if err != nil {
 				// AlreadyExists means someone else has initialized shared daemon.
 				if !errdefs.IsAlreadyExists(err) {
@@ -332,10 +332,10 @@ func (fs *filesystem) newDaemon(ctx context.Context, snapshotID string, imageID 
 func (fs *filesystem) getSharedDaemon() (*daemon.Daemon, error) {
 	if fs.sharedDaemon != nil {
 		return fs.sharedDaemon, nil
-	} else {
-		d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
-		return d, err
 	}
+
+	d, err := fs.manager.GetByID(daemon.SharedNydusDaemonID)
+	return d, err
 }
 
 // createNewDaemon create new nydus daemon by snapshotID and imageID

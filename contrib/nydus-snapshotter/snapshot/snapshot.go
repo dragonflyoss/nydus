@@ -128,7 +128,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.Config) (snapshots.Snapshot
 		return nil, errors.Wrap(err, "failed to initialize nydus filesystem")
 	}
 
-	var stargzFs fspkg.FileSystem = nil
+	var stargzFs fspkg.FileSystem
 	if cfg.EnableStargz {
 		if hasDaemon {
 			stargzFs, err = stargz.NewFileSystem(
@@ -282,7 +282,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		}
 	}
 
-	logCtx.Infof("prepare key %s parent %s labels", key, parent)
+	logCtx.Infof("Preparing. Key=%s, Parent=%s, Labels %v", key, parent, base.Labels)
 	if target, ok := base.Labels[label.TargetSnapshotLabel]; ok {
 		// check if image layer is nydus layer
 		if o.fs.Support(ctx, base.Labels) {
@@ -296,7 +296,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		// then skip layer download
 		if o.stargzFs != nil && o.stargzFs.Support(ctx, base.Labels) {
 			// Mark this snapshot as remote
-			base.Labels[label.RemoteLabel] = fmt.Sprintf("remote snapshot")
+			base.Labels[label.RemoteLabel] = "remote snapshot"
 			err := o.stargzFs.PrepareLayer(ctx, s, base.Labels)
 			if err != nil {
 				logCtx.Errorf("failed to prepare stargz layer of snapshot ID %s, err: %v", s.ID, err)
@@ -800,16 +800,4 @@ func (o *snapshotter) snapshotRoot() string {
 
 func (o *snapshotter) snapshotDir(id string) string {
 	return filepath.Join(o.snapshotRoot(), id)
-}
-
-func (o *snapshotter) socketRoot() string {
-	return filepath.Join(o.root, "socket")
-}
-
-func (o *snapshotter) configRoot() string {
-	return filepath.Join(o.root, "config")
-}
-
-func (o *snapshotter) logRoot() string {
-	return filepath.Join(o.root, "logs")
 }

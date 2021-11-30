@@ -62,9 +62,10 @@ func FindSnapshot(ctx context.Context, ms *storage.MetaStore, key string, fn Wal
 		}
 		if fn(info) {
 			return id, info, nil
-		} else {
-			log.G(ctx).Infof("id %s is data layer, continue to check parent layer", id)
 		}
+
+		log.G(ctx).Infof("id %s is data layer, continue to check parent layer", id)
+
 		cKey = info.Parent
 	}
 	return "", snapshots.Info{}, fmt.Errorf("failed to find meta layer of key %s", key)
