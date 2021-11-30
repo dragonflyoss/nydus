@@ -156,7 +156,7 @@ $ sudo ls  ./mnt/
 bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
 
-## Build Nydus Image From Directory Source
+## Build Nydus Image from Directory Source
 
 Nydus also offers a `nydus-image` tool to convert an unpacked container image into a Nydus format image. For multiple layers of an image, you need to manually and recursively convert them from the lowest layer, one layer at a time.
 The layers of an image could be rendered by the following command.
@@ -276,7 +276,7 @@ $ tree -L 2 ./nydus-image
 
 ```
 
-Finaly, we use `nydusd` to mount the converted nydus image with last converted bootstrap (`./nydus-image/layer4/bootstrap`).
+Finally, we use `nydusd` to mount the converted nydus image with last converted bootstrap (`./nydus-image/layer4/bootstrap`).
 
 ```bash
 $ sudo nydusd \
@@ -305,7 +305,7 @@ $ cat localfs.json
 
 As in the previous section, we could verify the setup by accessing a file in the mounted directory.
 
-## Run Containers With Nydus
+## Run Containers with Nydus
 
 ### Simple Example
 
