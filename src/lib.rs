@@ -53,13 +53,6 @@ impl Display for FsBackendType {
     }
 }
 
-impl Display for NydusError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-/// Nydus filesystem backend configuration.
 #[serde_as]
 #[derive(Serialize, Clone, Deserialize)]
 pub struct FsBackendDesc {
