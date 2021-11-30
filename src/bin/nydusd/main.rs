@@ -384,7 +384,7 @@ fn main() -> Result<()> {
     let exit_evtfd = daemon_subscriber.get_event_fd()?;
     event_manager.add_subscriber(daemon_subscriber);
 
-    let vfs = Arc::new(Vfs::new(VfsOptions::default()));
+    let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = cmd_arguments_parsed.value_of("id").map(|id| id.to_string());
     let supervisor = cmd_arguments_parsed
