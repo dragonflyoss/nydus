@@ -301,7 +301,7 @@ fn main() -> Result<()> {
         .map(|n| n.parse().unwrap_or(rlimit_nofile_default))
         .unwrap_or(rlimit_nofile_default);
 
-    let vfs = Vfs::new(VfsOptions::default());
+    let mut opts = VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
         info!(
             "set rlimit {}, default {}",
@@ -319,6 +319,10 @@ fn main() -> Result<()> {
             mountpoint: virtual_mnt.to_string(),
             prefetch_files: None,
         };
+
+        // passthroughfs requires !no_open
+        opts.no_open = false;
+        opts.killpriv_v2 = true;
 
         Some(cmd)
     } else if let Some(b) = bootstrap {
@@ -338,10 +342,15 @@ fn main() -> Result<()> {
             prefetch_files,
         };
 
+        // rafs can be readonly and skip open
+        opts.no_open = true;
+
         Some(cmd)
     } else {
         None
     };
+
+    let vfs = Vfs::new(opts);
 
     let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
 
