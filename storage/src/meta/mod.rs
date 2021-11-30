@@ -301,7 +301,12 @@ impl BlobMetaInfo {
         }
 
         let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
-        trace!("meta_path {:?}", meta_path);
+        trace!(
+            "meta_path {:?} info_size {} chunk_count {}",
+            meta_path,
+            blob_info.meta_ci_uncompressed_size(),
+            chunk_count
+        );
         let enable_write = reader.is_some();
         let file = OpenOptions::new()
             .read(true)
@@ -415,6 +420,11 @@ impl BlobMetaInfo {
         self.validate_chunk(entry)?;
         debug_assert!(entry.uncompressed_offset() <= start);
         debug_assert!(entry.uncompressed_end() > start);
+        trace!(
+            "get_chunks_uncompressed: entry {} {}",
+            entry.uncompressed_offset(),
+            entry.uncompressed_end()
+        );
 
         let mut vec = Vec::with_capacity(512);
         vec.push(BlobMetaChunk::new(index, &self.state));
@@ -428,7 +438,12 @@ impl BlobMetaInfo {
                 let entry = &infos[index];
                 self.validate_chunk(entry)?;
                 if entry.uncompressed_offset() != last_end {
-                    return Err(einval!());
+                    return Err(einval!(format!(
+                        "mismatch uncompressed {} size {} last_end {}",
+                        entry.uncompressed_offset(),
+                        entry.uncompressed_size(),
+                        last_end
+                    )));
                 }
 
                 vec.push(BlobMetaChunk::new(index, &self.state));
@@ -438,7 +453,11 @@ impl BlobMetaInfo {
                 }
             }
 
-            Err(einval!())
+            Err(einval!(format!(
+                "entry not found index {} infos.len {}",
+                index,
+                infos.len()
+            )))
         }
     }
 
@@ -508,9 +527,11 @@ impl BlobMetaInfo {
         unsafe { buf.set_len(compressed_size as usize) };
 
         trace!(
-            "blob_info compressor {} ci_compressor {}",
+            "blob_info compressor {} ci_compressor {} ci_compressed_size {} ci_uncompressed_size {}",
             blob_info.compressor(),
-            blob_info.meta_ci_compressor()
+            blob_info.meta_ci_compressor(),
+            blob_info.meta_ci_compressed_size(),
+            blob_info.meta_ci_uncompressed_size(),
         );
         let size = reader
             .read(&mut buf, blob_info.meta_ci_offset())

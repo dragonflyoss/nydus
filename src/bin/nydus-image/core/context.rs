@@ -281,6 +281,11 @@ impl BlobContext {
             meta.set_compressed_size(chunk.compressed_size());
             meta.set_uncompressed_offset(chunk.uncompressed_offset(), self.blob_meta_info_enabled);
             meta.set_uncompressed_size(chunk.uncompressed_size());
+            trace!(
+                "chunk uncompressed {} size {}",
+                meta.uncompressed_offset(),
+                meta.uncompressed_size()
+            );
             self.blob_meta_info.push(meta);
         }
 
