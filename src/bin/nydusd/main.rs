@@ -244,6 +244,13 @@ fn main() -> Result<()> {
                 .help("Directory to pass through to the guest VM")
                 .takes_value(true)
                 .conflicts_with("bootstrap"),
+        )
+        .arg(
+            Arg::with_name("hybrid-mode").long("hybrid-mode")
+            .help("run nydusd in rafs and passthroughfs hybrid mode")
+            .required(false)
+            .takes_value(false)
+            .global(true)
         );
 
     #[cfg(feature = "fusedev")]
