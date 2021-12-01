@@ -231,6 +231,13 @@ fn main() -> Result<()> {
                 .default_value("/")
                 .required(false)
                 .global(true),
+        )
+        .arg(
+            Arg::with_name("hybrid-mode").long("hybrid-mode")
+            .help("run nydusd in rafs and passthroughfs hybrid mode")
+            .required(false)
+            .takes_value(false)
+            .global(true)
         );
 
     #[cfg(feature = "fusedev")]
@@ -349,6 +356,12 @@ fn main() -> Result<()> {
     } else {
         None
     };
+
+    // Enable all options required by passthroughfs
+    if cmd_arguments_parsed.is_present("hybrid-mode") {
+        opts.no_open = false;
+        opts.killpriv_v2 = true;
+    }
 
     let vfs = Vfs::new(opts);
 
