@@ -664,6 +664,17 @@ impl FileSystem for Rafs {
         r
     }
 
+    fn open(
+        &self,
+        _ctx: &Context,
+        _inode: Self::Inode,
+        _flags: u32,
+        _fuse_flags: u32,
+    ) -> Result<(Option<Self::Handle>, OpenOptions)> {
+        // Keep cache since we are readonly
+        Ok((None, OpenOptions::KEEP_CACHE))
+    }
+
     fn release(
         &self,
         _ctx: &Context,
@@ -791,6 +802,16 @@ impl FileSystem for Rafs {
             rec.mark_success(0);
             r
         })
+    }
+
+    fn opendir(
+        &self,
+        _ctx: &Context,
+        _inode: Self::Inode,
+        _flags: u32,
+    ) -> Result<(Option<Self::Handle>, OpenOptions)> {
+        // Cache dir since we are readonly
+        Ok((None, OpenOptions::CACHE_DIR))
     }
 
     fn releasedir(&self, _ctx: &Context, _inode: u64, _flags: u32, _handle: u64) -> Result<()> {
