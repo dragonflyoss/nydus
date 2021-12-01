@@ -627,13 +627,13 @@ impl Builder for StargzBuilder {
         let mut bootstrap = Bootstrap::new()?;
         if bootstrap_ctx.f_parent_bootstrap.is_some() {
             // Merge with lower layer if there's one.
-            bootstrap.build(ctx, bootstrap_ctx, &mut tree);
+            bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
             tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
         }
         timing_tracer!(
             { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
             "build_bootstrap"
-        );
+        )?;
 
         // generate node chunks and digest
         self.generate_nodes(ctx, bootstrap_ctx, blob_mgr)?;

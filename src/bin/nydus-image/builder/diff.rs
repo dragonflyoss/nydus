@@ -438,7 +438,7 @@ impl DiffBuilder {
 
         // Build bootstrap from tree
         let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(ctx, bootstrap_ctx, &mut tree);
+        bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
 
         // Dump bootstrap file
         match ctx.fs_version {

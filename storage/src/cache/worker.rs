@@ -53,6 +53,7 @@ pub(crate) enum AsyncRequestState {
     /// after executing the request.
     Pending,
     /// The asynchronous service request has been cancelled.
+    #[allow(dead_code)]
     Cancelled,
     /*
     /// The caller is waiting for the worker to execute the request and set state to `Finished`.

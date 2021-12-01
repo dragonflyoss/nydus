@@ -115,14 +115,14 @@ impl Builder for DirectoryBuilder {
         if bootstrap_ctx.f_parent_bootstrap.is_some() {
             // Merge with lower layer if there's one, do not prepare `prefetch` list during merging.
             ctx.prefetch.disable();
-            bootstrap.build(ctx, bootstrap_ctx, &mut tree);
+            bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
             tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
         }
         // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
         timing_tracer!(
             { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
             "build_bootstrap"
-        );
+        )?;
 
         // Dump blob file
         let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone())?;

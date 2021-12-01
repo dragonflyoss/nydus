@@ -58,7 +58,7 @@ impl Bootstrap {
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
         tree: &mut Tree,
-    ) {
+    ) -> Result<()> {
         tree.node.index = RAFS_ROOT_INODE;
         tree.node.inode.set_ino(RAFS_ROOT_INODE);
         // Filesystem walking skips root inode within subsequent while loop, however, we allow
@@ -79,10 +79,12 @@ impl Bootstrap {
         let root_offset = bootstrap_ctx.offset;
         let mut nodes = Vec::with_capacity(0x10000);
         nodes.push(tree.node.clone());
-        self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes);
+        self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes)?;
 
         self.update_dirents(&mut nodes, tree, root_offset);
         bootstrap_ctx.nodes = nodes;
+
+        Ok(())
     }
 
     /// Apply diff operations to the base tree (lower layer) and return the merged `Tree` object.
@@ -129,19 +131,22 @@ impl Bootstrap {
         bootstrap_ctx: &mut BootstrapContext,
         tree: &mut Tree,
         nodes: &mut Vec<Node>,
-    ) {
+    ) -> Result<()> {
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
-
-        parent.inode.set_child_index(index);
-        parent.inode.set_child_count(tree.children.len() as u32);
 
         // Sort children list by name, so that we can improve performance in fs read_dir using
         // binary search.
         tree.children
             .sort_by_key(|child| child.node.name().to_os_string());
 
-        parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree));
+        // Maybe the parent is not a directory in multi-layers build scenario, so we check here.
+        if parent.is_dir() {
+            parent.inode.set_child_index(index);
+            parent.inode.set_child_count(tree.children.len() as u32);
+            parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree)?)?;
+        }
+
         tree.node.offset = parent.offset;
         // alignment for inode, which is 32 bytes;
         bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
@@ -239,8 +244,10 @@ impl Bootstrap {
         parent_dir.inode.set_nlink((2 + dirs.len()) as u32);
 
         for dir in dirs {
-            self.build_rafs(ctx, bootstrap_ctx, dir, nodes);
+            self.build_rafs(ctx, bootstrap_ctx, dir, nodes)?;
         }
+
+        Ok(())
     }
 
     /// Rafsv6 update offset

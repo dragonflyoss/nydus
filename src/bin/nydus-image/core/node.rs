@@ -298,8 +298,11 @@ impl Node {
             let chunk_size = blob_ctx.chunk_size;
             let file_offset = i as u64 * chunk_size as u64;
             let chunk_size = if i == self.inode.child_count() - 1 {
-                // Safe because size of last chunk is less than or equal to `chunk_size`.
-                (self.inode.size() - (chunk_size as u64 * i as u64)) as u32
+                (self.inode.size() as u64)
+                    .checked_sub((chunk_size * i) as u64)
+                    .ok_or_else(|| {
+                        anyhow!("the rest chunk size of inode is bigger than chunk_size")
+                    })? as u32
             } else {
                 chunk_size
             };
@@ -961,7 +964,9 @@ impl Node {
         }
     }
 
-    pub(crate) fn get_dir_d_size(&self, tree: &Tree) -> u64 {
+    pub(crate) fn get_dir_d_size(&self, tree: &Tree) -> Result<u64> {
+        ensure!(self.is_dir(), "{} is not a directory", self);
+
         let mut d_size: u64 =
             (1 + size_of::<RafsV6Dirent>() + 2 + size_of::<RafsV6Dirent>()) as u64;
 
@@ -974,13 +979,21 @@ impl Node {
             }
             d_size += len as u64;
         }
-        d_size
+        Ok(d_size)
     }
 
-    pub fn dir_set_v6_offset(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
+    pub fn dir_set_v6_offset(
+        &mut self,
+        bootstrap_ctx: &mut BootstrapContext,
+        d_size: u64,
+    ) -> Result<()> {
+        ensure!(self.is_dir(), "{} is not a directory", self);
+
         // Dir isize is the total bytes of 'dirents + names'.
         self.inode.set_size(d_size);
         self.set_v6_offset_with_tail(bootstrap_ctx, d_size);
+
+        Ok(())
     }
 
     // For DIR inode, size is the total bytes of 'dirents + names'.
@@ -1745,78 +1758,92 @@ mod tests {
 
         // tail = 64, avail = 0
         bootstrap_ctx.offset = 4096 - 64;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64);
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64).unwrap();
         assert_eq!(bootstrap_ctx.offset, 8192);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
         // tail = 64, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64);
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64).unwrap();
         assert_eq!(bootstrap_ctx.offset, 4096);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
 
         // tail = 63, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63);
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63).unwrap();
         assert_eq!(bootstrap_ctx.offset, 4095);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
 
         // tail = 0, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 4096);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 8192);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
         // tail = 64, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 65);
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 65).unwrap();
         assert_eq!(bootstrap_ctx.offset, 8192);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
         // tail = 63, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63 + 4096);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 63 + 4096)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 8192);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
 
         // tail = 0, avail = 64
         bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 8192);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 8192)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 12288);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
         // tail = 64, avail = 4095
         bootstrap_ctx.offset = 4096 - 63;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64);
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64).unwrap();
         assert_eq!(bootstrap_ctx.offset, 4096 + 65);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
 
         // tail = 63, avail = 4095
         bootstrap_ctx.offset = 4096 - 63;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63);
+        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63).unwrap();
         assert_eq!(bootstrap_ctx.offset, 4096 + 64);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
 
         // tail = 0, avail = 4095
         bootstrap_ctx.offset = 4096 - 63;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 4096);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 12288);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
         // tail = 4095, avail = 4095
         bootstrap_ctx.offset = 4096 - 63;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 4095);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4095)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 8192);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
 
         // tail = 4095, avail = 4094
         bootstrap_ctx.offset = 4096 - 62;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 4095);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4095)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 12288);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
         bootstrap_ctx.offset = 8105024;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 5012);
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 5012)
+            .unwrap();
         assert_eq!(bootstrap_ctx.offset, 8114176);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
