@@ -19,7 +19,7 @@ pub enum NydusError {
 
 pub type Result<T> = std::result::Result<T, NydusError>;
 
-#[derive(Clone, Serialize, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Serialize, PartialEq, Deserialize)]
 pub enum FsBackendType {
     Rafs,
     PassthroughFs,
@@ -36,6 +36,12 @@ impl FromStr for FsBackendType {
                 o
             ))),
         }
+    }
+}
+
+impl Display for FsBackendType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
