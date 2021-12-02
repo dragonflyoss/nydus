@@ -391,10 +391,11 @@ impl BlobMetaInfo {
 
         let state = Arc::new(BlobMetaState {
             blob_index: blob_info.blob_index(),
-            ci_compressed_size: blob_info.compressed_size(),
-            ci_uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
+            ci_compressed_size: blob_info.meta_ci_compressed_size(),
+            ci_uncompressed_size: round_up_4k(blob_info.meta_ci_uncompressed_size()),
             chunk_count,
             chunks: chunk_infos,
+            base: base as *const u8,
         });
 
         Ok(BlobMetaInfo { state })
@@ -576,6 +577,22 @@ struct BlobMetaState {
     ci_uncompressed_size: u64,
     chunk_count: u32,
     chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
+    base: *const u8,
+}
+
+// // Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for BlobMetaState {}
+unsafe impl Sync for BlobMetaState {}
+
+impl Drop for BlobMetaState {
+    fn drop(&mut self) {
+        if !self.base.is_null() {
+            // ci_uncompressed_size has been round_up to 4k.
+            let size = BLOB_METADTAT_HEADER_SIZE as usize + self.ci_uncompressed_size as usize;
+            unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, size) };
+            self.base = std::ptr::null();
+        }
+    }
 }
 
 impl BlobMetaState {
@@ -704,6 +721,7 @@ mod tests {
                     comp_info: 0x00ff_f000_0010_0000,
                 },
             ]),
+            base: std::ptr::null(),
         };
 
         assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
@@ -773,6 +791,7 @@ mod tests {
                     comp_info: 0x00ff_f000_0000_5000,
                 },
             ]),
+            base: std::ptr::null(),
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),
