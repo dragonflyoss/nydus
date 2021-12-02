@@ -678,6 +678,14 @@ fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{BackendResult, BlobReader};
+    use crate::device::BlobFeatures;
+    use crate::RAFS_MAX_CHUNK_SIZE;
+    use nix::sys::uio;
+    use nydus_utils::metrics::BackendMetrics;
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_get_chunk_index_with_hole() {
@@ -820,5 +828,168 @@ mod tests {
         assert_eq!(round_up_4k(0x1000), 0x1000u32);
         assert_eq!(round_up_4k(0x1001), 0x2000u32);
         assert_eq!(round_up_4k(0x1fff), 0x2000u64);
+    }
+
+    struct DummyBlobReader {
+        pub metrics: Arc<BackendMetrics>,
+        file: File,
+    }
+
+    impl BlobReader for DummyBlobReader {
+        fn blob_size(&self) -> BackendResult<u64> {
+            Ok(0)
+        }
+
+        fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+            let ret = uio::pread(self.file.as_raw_fd(), buf, offset as i64).unwrap();
+            Ok(ret)
+        }
+
+        fn prefetch_blob_data_range(
+            &self,
+            _blob_readahead_offset: u32,
+            _blob_readahead_size: u32,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn stop_data_prefetch(&self) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> &BackendMetrics {
+            &self.metrics
+        }
+    }
+
+    #[test]
+    fn test_read_metadata_compressor_none() {
+        let temp = TempFile::new().unwrap();
+        let mut w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+
+        let chunks = vec![
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0000_0000,
+                comp_info: 0x00ff_f000_0000_0000,
+            },
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0010_0000,
+                comp_info: 0x00ff_f000_0010_0000,
+            },
+        ];
+
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                chunks.as_ptr() as *const u8,
+                chunks.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+            )
+        };
+
+        let pos = 0;
+        w.write_all(&data).unwrap();
+
+        let mut blob_info = BlobInfo::new(
+            0,
+            "dummy".to_string(),
+            0,
+            0,
+            RAFS_MAX_CHUNK_SIZE as u32,
+            0,
+            BlobFeatures::default(),
+        );
+        blob_info.set_blob_meta_info(
+            0,
+            pos,
+            data.len() as u64,
+            data.len() as u64,
+            compress::Algorithm::None as u32,
+        );
+
+        let mut buffer = Vec::with_capacity(data.len());
+        unsafe { buffer.set_len(data.len()) };
+        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
+            metrics: BackendMetrics::new("dummy", "localfs"),
+            file: r,
+        });
+        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+
+        assert_eq!(buffer, data);
+    }
+
+    #[test]
+    fn test_read_metadata_compressor_lz4() {
+        let temp = TempFile::new().unwrap();
+        let mut w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+
+        let chunks = vec![
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0000_0000,
+                comp_info: 0x00ff_f000_0000_0000,
+            },
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0010_0000,
+                comp_info: 0x00ff_f000_0010_0000,
+            },
+        ];
+
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                chunks.as_ptr() as *const u8,
+                chunks.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+            )
+        };
+
+        let (buf, compressed) = compress::compress(data, compress::Algorithm::Lz4Block).unwrap();
+        assert_eq!(compressed, true);
+
+        let pos = 0;
+        w.write_all(&buf).unwrap();
+
+        let compressed_size = buf.len();
+        let uncompressed_size = data.len();
+        let mut blob_info = BlobInfo::new(
+            0,
+            "dummy".to_string(),
+            0,
+            0,
+            RAFS_MAX_CHUNK_SIZE as u32,
+            0,
+            BlobFeatures::default(),
+        );
+        blob_info.set_blob_meta_info(
+            0,
+            pos,
+            compressed_size as u64,
+            uncompressed_size as u64,
+            compress::Algorithm::Lz4Block as u32,
+        );
+
+        let mut buffer = Vec::with_capacity(uncompressed_size);
+        unsafe { buffer.set_len(uncompressed_size) };
+        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
+            metrics: BackendMetrics::new("dummy", "localfs"),
+            file: r,
+        });
+        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+
+        assert_eq!(buffer, data);
     }
 }
