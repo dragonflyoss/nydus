@@ -158,6 +158,7 @@ impl RafsInspector {
     }
 
     /// Index is u32, by which the inode can be found.
+    /// NOTE: `index` is inode index within inodes table, which equals to inode number plus ONE
     fn load_inode_by_index(&self, index: usize) -> Result<(InodeWrapper, OsString)> {
         match self.rafs_meta.version {
             RafsVersion::V5 => self.load_ondisk_inode_v5(index),
@@ -314,7 +315,7 @@ Blocks:             {blocks}"#,
         let mut entries = Vec::<PathBuf>::new();
 
         loop {
-            let (inode, file_name) = self.load_inode_by_index(ino as usize)?;
+            let (inode, file_name) = self.load_inode_by_index((ino - 1) as usize)?;
             entries.push(file_name.into());
             if inode.parent() == 0 {
                 break;

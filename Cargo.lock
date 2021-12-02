@@ -1196,7 +1196,7 @@ dependencies = [
  "flexi_logger",
  "libc",
  "log",
- "nix",
+ "nix 0.17.0",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
