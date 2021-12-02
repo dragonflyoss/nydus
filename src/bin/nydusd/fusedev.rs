@@ -400,12 +400,13 @@ pub fn create_nydus_daemon(
     threads_cnt: u32,
     api_sock: Option<impl AsRef<Path>>,
     upgrade: bool,
+    readonly: bool,
     fp: FailoverPolicy,
     mount_cmd: Option<FsBackendMountCmd>,
     bti: BuildTimeInfo,
 ) -> Result<Arc<dyn NydusDaemon + Send>> {
     let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
-    let session = FuseSession::new(Path::new(mountpoint), "rafs", "")?;
+    let session = FuseSession::new(Path::new(mountpoint), "rafs", "", readonly)?;
 
     // Create upgrade manager
     let upgrade_mgr = supervisor
