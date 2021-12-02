@@ -5,6 +5,7 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
+use std::io::Write;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
@@ -16,12 +17,15 @@ use rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
+use rafs::RafsIoWrite;
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperFlags};
 use storage::device::BlobFeatures;
 
-use super::context::{BlobManager, BootstrapContext, BuildContext, RafsVersion, SourceType};
+use super::context::{
+    BlobManager, BootstrapContext, BootstrapManager, BuildContext, RafsVersion, SourceType,
+};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::prefetch::PrefetchPolicy;
 use super::tree::Tree;
@@ -94,12 +98,13 @@ impl Bootstrap {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
         tree: Option<Tree>,
     ) -> Result<Tree> {
         let mut tree = match tree {
             Some(v) => v,
-            None => self.load_parent_bootstrap(ctx, bootstrap_ctx, blob_mgr)?,
+            None => self.load_parent_bootstrap(ctx, bootstrap_mgr, blob_mgr)?,
         };
 
         // Apply new node (upper layer) to node tree (lower layer)
@@ -198,10 +203,10 @@ impl Bootstrap {
             // Put the whiteout file of upper layer in the front of node list for layered build,
             // so that it can be applied to the node tree of lower layer first than other files of upper layer.
             match (
-                &bootstrap_ctx.f_parent_bootstrap,
+                bootstrap_ctx.layered,
                 child.node.whiteout_type(ctx.whiteout_spec),
             ) {
-                (Some(_), Some(whiteout_type)) => {
+                (true, Some(whiteout_type)) => {
                     // Insert removal operations at the head, so they will be handled first when
                     // applying to lower layer.
                     nodes.insert(0, child.node.clone());
@@ -214,7 +219,7 @@ impl Bootstrap {
                         nodes.push(child.node.clone());
                     }
                 }
-                (None, Some(whiteout_type)) => {
+                (false, Some(whiteout_type)) => {
                     // Remove overlayfs opaque xattr for single layer build
                     if whiteout_type == WhiteoutType::OverlayFsOpaque {
                         child
@@ -291,10 +296,10 @@ impl Bootstrap {
     fn load_parent_bootstrap(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<Tree> {
-        let rs = if let Some(r) = bootstrap_ctx.f_parent_bootstrap.as_mut() {
+        let rs = if let Some(r) = bootstrap_mgr.f_parent_bootstrap.as_mut() {
             let mut rs = RafsSuper {
                 mode: RafsMode::Direct,
                 validate_digest: true,
@@ -453,46 +458,48 @@ impl Bootstrap {
             super_block.set_has_xattr();
         }
 
+        let mut bootstrap_writer = bootstrap_ctx.create_writer()?;
+
         // Dump super block
         super_block
-            .store(&mut bootstrap_ctx.f_bootstrap)
+            .store(&mut bootstrap_writer)
             .context("failed to store superblock")?;
 
         // Dump inode table
         inode_table
-            .store(&mut bootstrap_ctx.f_bootstrap)
+            .store(&mut bootstrap_writer)
             .context("failed to store inode table")?;
 
         // Dump prefetch table
         if let Some(mut prefetch_table) = ctx.prefetch.get_rafsv5_prefetch_table() {
             prefetch_table
-                .store(&mut bootstrap_ctx.f_bootstrap)
+                .store(&mut bootstrap_writer)
                 .context("failed to store prefetch table")?;
         }
 
         // Dump blob table
         blob_table
-            .store(&mut bootstrap_ctx.f_bootstrap)
+            .store(&mut bootstrap_writer)
             .context("failed to store blob table")?;
 
         // Dump extended blob table
         blob_table
-            .store_extended(&mut bootstrap_ctx.f_bootstrap)
+            .store_extended(&mut bootstrap_writer)
             .context("failed to store extended blob table")?;
 
         // Dump inodes and chunks
         timing_tracer!(
             {
-                for node in &mut bootstrap_ctx.nodes {
+                for node in &bootstrap_ctx.nodes {
                     if ctx.source_type == SourceType::StargzIndex {
                         debug!("[{}]\t{}", node.overlay, node);
                         if log::max_level() >= log::LevelFilter::Debug {
-                            for chunk in node.chunks.iter_mut() {
+                            for chunk in node.chunks.iter() {
                                 trace!("\t\tbuilding chunk: {}", chunk);
                             }
                         }
                     }
-                    node.dump_bootstrap_v5(&mut bootstrap_ctx.f_bootstrap)
+                    node.dump_bootstrap_v5(&mut bootstrap_writer)
                         .context("failed to dump bootstrap")?;
                 }
 
@@ -503,7 +510,7 @@ impl Bootstrap {
         )?;
 
         // Flush remaining data in BufWriter to file
-        bootstrap_ctx.f_bootstrap.flush()?;
+        bootstrap_writer.flush()?;
 
         let blob_ids: Vec<String> = blob_table
             .entries
@@ -534,6 +541,7 @@ impl Bootstrap {
 
         let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
         let blob_table_size = blob_table.size() as u64;
+        let bootstrap_writer = &mut bootstrap_ctx.create_writer()? as &mut dyn RafsIoWrite;
 
         // get devt_slotoff
         let mut devtable: Vec<RafsV6Device> = Vec::new();
@@ -583,8 +591,7 @@ impl Bootstrap {
 
         sb.set_extra_devices(blob_table_entries as u16);
 
-        sb.store(&mut bootstrap_ctx.f_bootstrap)
-            .context("failed to store SB")?;
+        sb.store(bootstrap_writer).context("failed to store SB")?;
 
         // Dump extended superblock
         let mut ext_sb = RafsV6SuperBlockExt::new();
@@ -595,39 +602,32 @@ impl Bootstrap {
         ext_sb.set_blob_table_size(blob_table_size as u32);
 
         ext_sb
-            .store(&mut bootstrap_ctx.f_bootstrap)
+            .store(bootstrap_writer)
             .context("failed to store extended SB")?;
 
         // dump devtslot
-        bootstrap_ctx
-            .f_bootstrap
+        bootstrap_writer
             .seek_to_offset(EROFS_DEVTABLE_OFFSET as u64)
             .context("failed to seek to devtslot")?;
         for slot in devtable.iter() {
-            slot.store(&mut bootstrap_ctx.f_bootstrap)
+            slot.store(bootstrap_writer)
                 .context("failed to store device slot")?;
         }
 
         // Dump blob table
-        bootstrap_ctx
-            .f_bootstrap
+        bootstrap_writer
             .seek_to_offset(blob_table_offset as u64)
             .context("failed seek for extended blob table offset")?;
         blob_table
-            .store(&mut bootstrap_ctx.f_bootstrap)
+            .store(bootstrap_writer)
             .context("failed to store extended blob table")?;
 
         // Dump bootstrap
         timing_tracer!(
             {
                 for node in &mut bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v6(
-                        &mut bootstrap_ctx.f_bootstrap,
-                        orig_meta_addr,
-                        meta_addr,
-                        ctx,
-                    )
-                    .context("failed to dump bootstrap")?;
+                    node.dump_bootstrap_v6(bootstrap_writer, orig_meta_addr, meta_addr, ctx)
+                        .context("failed to dump bootstrap")?;
                 }
 
                 Ok(())
@@ -637,12 +637,10 @@ impl Bootstrap {
         )?;
 
         // Flush remaining data in BufWriter to file
-        bootstrap_ctx
-            .f_bootstrap
+        bootstrap_writer
             .flush()
             .context("failed to flush bootstrap")?;
-        let pos = bootstrap_ctx
-            .f_bootstrap
+        let pos = bootstrap_writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end")?;
         debug!(
@@ -650,8 +648,7 @@ impl Bootstrap {
             align_offset(pos, EROFS_BLOCK_SIZE as u64)
         );
         let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
-        bootstrap_ctx
-            .f_bootstrap
+        bootstrap_writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
 

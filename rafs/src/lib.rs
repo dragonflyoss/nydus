@@ -79,7 +79,7 @@ impl RafsIoRead for File {}
 pub type RafsIoWriter = Box<dyn RafsIoWrite>;
 
 /// A helper trait for RafsIoWriter.
-pub trait RafsIoWrite: Write + Seek {
+pub trait RafsIoWrite: Write + Seek + 'static {
     fn as_any(&self) -> &dyn Any;
 
     fn validate_alignment(&mut self, size: usize, alignment: usize) -> Result<usize> {

@@ -51,7 +51,7 @@ use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER
 use crate::metadata::{
     Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
-use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
+use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
 
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
 // compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures
@@ -354,7 +354,7 @@ impl RafsV5SuperBlock {
 }
 
 impl RafsStore for RafsV5SuperBlock {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
         w.validate_alignment(self.as_ref().len(), RAFSV5_ALIGNMENT)
     }
@@ -464,7 +464,7 @@ impl RafsV5InodeTable {
 }
 
 impl RafsStore for RafsV5InodeTable {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let (_, data, _) = unsafe { self.data.align_to::<u8>() };
 
         w.write_all(data)?;
@@ -516,7 +516,7 @@ impl RafsV5PrefetchTable {
     }
 
     /// Store the inode prefetch table to a writer.
-    pub fn store(&mut self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub fn store(&mut self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         // Sort prefetch table by inode index, hopefully, it can save time when mounting rafs
         // Because file data is dumped in the order of inode index.
         self.inodes.sort_unstable();
@@ -710,13 +710,13 @@ impl RafsV5BlobTable {
     }
 
     /// Store the extended blob information array.
-    pub fn store_extended(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub fn store_extended(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         self.extended.store(w)
     }
 }
 
 impl RafsStore for RafsV5BlobTable {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut size = 0;
         self.entries
             .iter()
@@ -858,7 +858,7 @@ impl RafsV5ExtBlobTable {
 }
 
 impl RafsStore for RafsV5ExtBlobTable {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut size = 0;
 
         // Store the list of entries
@@ -1043,7 +1043,7 @@ pub struct RafsV5InodeWrapper<'a> {
 }
 
 impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut size: usize = 0;
 
         let inode_data = self.inode.as_ref();
@@ -1109,7 +1109,7 @@ impl RafsV5ChunkInfo {
 }
 
 impl RafsStore for RafsV5ChunkInfo {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
         w.validate_alignment(self.as_ref().len(), RAFSV5_ALIGNMENT)
     }
@@ -1175,7 +1175,7 @@ impl RafsXAttrs {
         rafsv5_align(self.size())
     }
 
-    pub fn store_v5(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub fn store_v5(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut size = 0;
 
         if !self.pairs.is_empty() {
@@ -1417,7 +1417,7 @@ pub mod tests {
 
     use super::*;
     use crate::metadata::RafsStore;
-    use crate::{RafsIoRead, RafsIoReader, RafsIoWrite};
+    use crate::{RafsIoRead, RafsIoReader};
     use std::any::Any;
     use std::str::FromStr;
 
@@ -1535,7 +1535,7 @@ pub mod tests {
             .write(true)
             .open(tmp_file.as_path())
             .unwrap();
-        let mut writer = Box::new(BufWriter::new(file)) as Box<dyn RafsIoWrite>;
+        let mut writer = BufWriter::new(file);
         table.store(&mut writer).unwrap();
 
         // Load extended blob table
@@ -1817,7 +1817,7 @@ pub mod tests {
             .write(true)
             .open(tmp_file.as_path())
             .unwrap();
-        let mut writer = Box::new(BufWriter::new(file)) as Box<dyn RafsIoWrite>;
+        let mut writer = BufWriter::new(file);
         writer.write_all(&[0u8; 8]).unwrap();
         assert_eq!(table.store(&mut writer).unwrap(), 8);
         writer.flush().unwrap();
@@ -1880,7 +1880,7 @@ pub mod tests {
             .write(true)
             .open(tmp_file.as_path())
             .unwrap();
-        let mut writer = Box::new(BufWriter::new(file)) as Box<dyn RafsIoWrite>;
+        let mut writer = BufWriter::new(file);
         assert_eq!(inode_wrapper.store(&mut writer).unwrap(), 144);
         writer.flush().unwrap();
 

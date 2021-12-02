@@ -16,7 +16,6 @@ extern crate serde_json;
 extern crate lazy_static;
 
 use std::fs::{self, metadata, DirEntry, OpenOptions};
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -32,8 +31,7 @@ use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::chunk_dict::import_chunk_dict;
 use crate::core::context::{
-    BlobManager, BlobStorage, BootstrapContext, BuildContext, RafsVersion, SourceType,
-    BUF_WRITER_CAPACITY,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, RafsVersion, SourceType,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
@@ -450,17 +448,6 @@ impl Command {
             .parse()?;
         let prefetch = Prefetch::new(prefetch_policy)?;
 
-        let bootstrap = Box::new(BufWriter::with_capacity(
-            BUF_WRITER_CAPACITY,
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(bootstrap_path)
-                .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
-        ));
-        let mut bootstrap_ctx = BootstrapContext::new(bootstrap, parent_bootstrap);
-
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -477,13 +464,26 @@ impl Command {
         build_ctx.set_chunk_size(chunk_size);
 
         let mut blob_mgr = BlobManager::new();
-
         if let Some(chunk_dict_arg) = matches.value_of("chunk-dict") {
             blob_mgr.set_chunk_dict(timing_tracer!(
                 { import_chunk_dict(chunk_dict_arg) },
                 "import_chunk_dict"
             )?);
         }
+
+        let mut bootstrap_mgr = if source_type == SourceType::Diff {
+            // TODO: with diff build scenario, use ArtifactStorage::FileDir
+            // to dump bootstrap for every layer into a directory.
+            BootstrapManager::new(
+                ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path)),
+                None,
+            )
+        } else {
+            BootstrapManager::new(
+                ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path)),
+                parent_bootstrap,
+            )
+        };
 
         let diff_overlay_hint = matches.is_present("diff-overlay-hint");
         let mut builder: Box<dyn Builder> = match source_type {
@@ -494,7 +494,7 @@ impl Command {
         let (blob_ids, blob_size) = timing_tracer!(
             {
                 builder
-                    .build(&mut build_ctx, &mut bootstrap_ctx, &mut blob_mgr)
+                    .build(&mut build_ctx, &mut bootstrap_mgr, &mut blob_mgr)
                     .context("build failed")
             },
             "total_build"
@@ -610,21 +610,21 @@ impl Command {
     fn get_blob_storage(
         matches: &clap::ArgMatches,
         source_type: SourceType,
-    ) -> Result<Option<BlobStorage>> {
+    ) -> Result<Option<ArtifactStorage>> {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
         let blob_stor = if source_type == SourceType::Directory || source_type == SourceType::Diff {
             if let Some(p) = matches
                 .value_of("blob")
-                .map(|b| BlobStorage::SingleFile(b.into()))
+                .map(|b| ArtifactStorage::SingleFile(b.into()))
             {
                 Some(p)
             } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
                 if !d.exists() {
                     bail!("Directory holding blobs does not exist")
                 }
-                Some(BlobStorage::BlobsDir(d))
+                Some(ArtifactStorage::FileDir(d))
             } else {
                 // Safe because `backend-type` must be specified if `blob` is not with `Directory` source
                 // and `backend-config` must be provided as per clap restriction.
@@ -637,7 +637,7 @@ impl Command {
                 if let Some(bf) = config.get("blob_file") {
                     // Even unwrap, it is caused by invalid json. Image creation just can't start.
                     let b: PathBuf = bf.as_str().unwrap().to_string().into();
-                    Some(BlobStorage::SingleFile(b))
+                    Some(ArtifactStorage::SingleFile(b))
                 } else {
                     error!("Wrong backend config input!");
                     return Err(anyhow!("invalid backend config"));

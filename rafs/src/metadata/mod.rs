@@ -28,7 +28,7 @@ use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
-use crate::{RafsError, RafsIoReader, RafsIoWriter, RafsResult};
+use crate::{RafsError, RafsIoReader, RafsIoWrite, RafsResult};
 
 pub mod cached_v5;
 pub mod direct_v5;
@@ -203,7 +203,7 @@ pub trait RafsInode: Any {
 /// Trait to store Rafs meta block and validate alignment.
 pub trait RafsStore {
     /// Write the Rafs filesystem metadata to a writer.
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize>;
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize>;
 }
 
 bitflags! {
@@ -470,7 +470,7 @@ impl RafsSuper {
     }
 
     /// Store RAFS metadata to backend storage.
-    pub fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         if self.meta.is_v5() {
             return self.store_v5(w);
         }

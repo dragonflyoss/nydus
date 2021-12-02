@@ -26,7 +26,9 @@ use storage::device::BlobChunkFlags;
 
 use crate::builder::Builder;
 use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext, RafsVersion};
+use crate::core::context::{
+    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, RafsVersion,
+};
 use crate::core::node::{ChunkWrapper, InodeWrapper, Node, Overlay};
 use crate::core::tree::Tree;
 
@@ -621,28 +623,29 @@ impl Builder for StargzBuilder {
     fn build(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         // Build tree from source
         let mut tree = self.build_tree_from_index(ctx)?;
         let mut bootstrap = Bootstrap::new()?;
-        if bootstrap_ctx.f_parent_bootstrap.is_some() {
+        if bootstrap_mgr.f_parent_bootstrap.is_some() {
             // Merge with lower layer if there's one.
-            bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
-            tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
+            bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
+            tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         }
         timing_tracer!(
-            { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+            { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },
             "build_bootstrap"
         )?;
 
         // generate node chunks and digest
-        self.generate_nodes(ctx, bootstrap_ctx, blob_mgr)?;
+        self.generate_nodes(ctx, &mut bootstrap_ctx, blob_mgr)?;
 
         // Dump bootstrap file
         match ctx.fs_version {
-            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr),
+            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, blob_mgr),
             RafsVersion::V6 => todo!(),
         }
     }

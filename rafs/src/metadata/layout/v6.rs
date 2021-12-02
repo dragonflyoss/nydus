@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use std::convert::{TryFrom, TryInto};
 use std::ffi::OsStr;
 use std::fmt::Debug;
-use std::io::{Read, Result, Write};
+use std::io::{Read, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use storage::meta::BlobMetaHeaderOndisk;
 use storage::{compress, RAFS_MAX_CHUNK_SIZE};
 
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
-use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWriter};
+use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
 
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
@@ -203,7 +203,7 @@ impl RafsV6SuperBlock {
 impl RafsStore for RafsV6SuperBlock {
     // This method must be called before RafsV6SuperBlockExt::store(), otherwise data written by
     // RafsV6SuperBlockExt::store() will be overwritten.
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         debug_assert!(((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64) < EROFS_BLOCK_SIZE);
         w.write_all(&[0u8; EROFS_SUPER_OFFSET as usize])?;
         w.write_all(self.as_ref())?;
@@ -341,7 +341,7 @@ impl RafsV6SuperBlockExt {
 }
 
 impl RafsStore for RafsV6SuperBlockExt {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         w.write_all(self.as_ref())?;
         w.seek_to_offset(EROFS_BLOCK_SIZE as u64)?;
@@ -510,7 +510,7 @@ impl RafsV6OndiskInodeTrait for RafsV6InodeCompact {
 impl_bootstrap_converter!(RafsV6InodeCompact);
 
 impl RafsStore for RafsV6InodeCompact {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         // TODO: need to write xattr as well.
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
@@ -627,7 +627,7 @@ impl RafsV6OndiskInodeTrait for RafsV6InodeExtended {
 impl_bootstrap_converter!(RafsV6InodeExtended);
 
 impl RafsStore for RafsV6InodeExtended {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         // TODO: need to write xattr as well.
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
@@ -690,7 +690,7 @@ impl RafsV6Dirent {
 }
 
 impl RafsStore for RafsV6Dirent {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
 
         Ok(self.as_ref().len())
@@ -807,7 +807,7 @@ impl RafsV6InodeChunkAddr {
 impl_bootstrap_converter!(RafsV6InodeChunkAddr);
 
 impl RafsStore for RafsV6InodeChunkAddr {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
 
         Ok(self.as_ref().len())
@@ -878,7 +878,7 @@ impl RafsV6Device {
 impl_bootstrap_converter!(RafsV6Device);
 
 impl RafsStore for RafsV6Device {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
 
         Ok(self.as_ref().len())
@@ -1196,7 +1196,7 @@ impl RafsV6BlobTable {
 }
 
 impl RafsStore for RafsV6BlobTable {
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         for blob_info in self.entries.iter() {
             let blob: RafsV6Blob = RafsV6Blob::from_blob_info(blob_info)?;
             trace!(
@@ -1381,7 +1381,7 @@ impl RafsXAttrs {
     }
 
     /// Write Xattr to rafsv6 ondisk inode.
-    pub fn store_v6(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub fn store_v6(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         // TODO: check count of shared.
         let header = RafsV6XattrIbodyHeader::new();
         w.write_all(header.as_ref())?;
@@ -1431,7 +1431,7 @@ impl RafsXAttrs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RafsIoRead, RafsIoWrite};
+    use crate::{BufWriter, RafsIoRead};
     use std::ffi::OsString;
     use std::fs::OpenOptions;
     use vmm_sys_util::tempfile::TempFile;
@@ -1450,7 +1450,7 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut writer = BufWriter::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         sb.s_blocks = 0x1000;
@@ -1484,7 +1484,7 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut writer = BufWriter::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut inode = RafsV6InodeExtended::new();
@@ -1549,7 +1549,7 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut writer = BufWriter::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut chunk = RafsV6InodeChunkAddr::new();
@@ -1578,7 +1578,7 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut writer = BufWriter::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let id = [0xa5u8; 64];
@@ -1637,7 +1637,7 @@ mod tests {
             .write(false)
             .open(temp.as_path())
             .unwrap();
-        let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
+        let mut writer = BufWriter::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut xattrs = RafsXAttrs::new();

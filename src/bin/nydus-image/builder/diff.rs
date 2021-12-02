@@ -56,7 +56,8 @@ use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
 use crate::core::context::{
-    BlobContext, BlobManager, BlobStorage, BootstrapContext, BuildContext, RafsVersion,
+    ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
+    RafsVersion,
 };
 use crate::core::node::{ChunkWrapper, Node, Overlay};
 use crate::core::tree::Tree;
@@ -223,7 +224,7 @@ fn dump_blob(
     ctx: Arc<BuildContext>,
     snapshot_idx: u32,
     blob_id: String,
-    blob_storage: Option<BlobStorage>,
+    blob_storage: Option<ArtifactStorage>,
     upper_nodes: UpperNodes,
     nodes: &mut Vec<Node>,
     chunk_dict: Arc<dyn ChunkDict>,
@@ -450,9 +451,11 @@ impl DiffBuilder {
     fn build_with_hint(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+
         let mut paths = vec![ctx.source_path.clone()];
         paths.append(&mut self.extra_paths);
 
@@ -501,7 +504,7 @@ impl DiffBuilder {
 
         self.build_bootstrap(
             ctx,
-            bootstrap_ctx,
+            &mut bootstrap_ctx,
             blob_mgr,
             workers,
             paths[base - 1].clone(),
@@ -511,9 +514,10 @@ impl DiffBuilder {
     fn build_with_diff(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut paths = vec![None, Some(ctx.source_path.clone())];
         let mut extra_paths: Vec<_> = self.extra_paths.iter().map(|p| Some(p.clone())).collect();
         paths.append(&mut extra_paths);
@@ -555,7 +559,7 @@ impl DiffBuilder {
         // Safe to unwrap because last snapshot path must be exists.
         self.build_bootstrap(
             ctx,
-            bootstrap_ctx,
+            &mut bootstrap_ctx,
             blob_mgr,
             workers,
             paths[base].clone().unwrap(),
@@ -567,13 +571,13 @@ impl Builder for DiffBuilder {
     fn build(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)> {
         if self.diff_hint {
-            self.build_with_hint(ctx, bootstrap_ctx, blob_mgr)
+            self.build_with_hint(ctx, bootstrap_mgr, blob_mgr)
         } else {
-            self.build_with_diff(ctx, bootstrap_ctx, blob_mgr)
+            self.build_with_diff(ctx, bootstrap_mgr, blob_mgr)
         }
     }
 }

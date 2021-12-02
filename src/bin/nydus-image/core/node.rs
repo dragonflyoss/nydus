@@ -8,7 +8,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
-use std::io::prelude::*;
 use std::io::Read;
 use std::io::SeekFrom;
 use std::mem::size_of;
@@ -38,7 +37,7 @@ use rafs::metadata::layout::v6::{
 };
 use rafs::metadata::layout::RafsXAttrs;
 use rafs::metadata::{Inode, RafsInode, RafsStore};
-use rafs::RafsIoWriter;
+use rafs::RafsIoWrite;
 use storage::compress;
 use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkFlags, BlobChunkInfo};
@@ -420,7 +419,7 @@ impl Node {
         Ok(blob_size)
     }
 
-    pub fn dump_bootstrap_v5(&mut self, f_bootstrap: &mut RafsIoWriter) -> Result<usize> {
+    pub fn dump_bootstrap_v5(&self, f_bootstrap: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut node_size = 0;
         if let InodeWrapper::V5(raw_inode) = &self.inode {
             // Dump inode info
@@ -449,7 +448,7 @@ impl Node {
                 bail!("invalid chunks count {}: {}", self.chunks.len(), self);
             }
 
-            for chunk in &mut self.chunks {
+            for chunk in &self.chunks {
                 let chunk_size = chunk
                     .store(f_bootstrap)
                     .context("failed to dump chunk info to bootstrap")?;
@@ -481,7 +480,7 @@ impl Node {
 
     pub fn dump_bootstrap_v6(
         &mut self,
-        f_bootstrap: &mut RafsIoWriter,
+        f_bootstrap: &mut dyn RafsIoWrite,
         orig_meta_addr: u64,
         meta_addr: u64,
         ctx: &BuildContext,
@@ -1628,7 +1627,7 @@ impl ChunkWrapper {
         }
     }
 
-    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         match self {
             ChunkWrapper::V5(c) => c.store(w).context("failed to store rafs v5 chunk"),
             ChunkWrapper::V6(c) => c.store(w).context("failed to store rafs v5 chunk"),
@@ -1699,11 +1698,9 @@ fn to_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{BootstrapContext, BUF_WRITER_CAPACITY};
+    use crate::core::context::{ArtifactStorage, BootstrapContext};
     use rafs::metadata::layout::v6::EROFS_INODE_CHUNK_BASED;
     use rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
-    use std::fs::OpenOptions;
-    use std::io::BufWriter;
     use std::os::unix::fs;
     use std::path::Path;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
@@ -1723,16 +1720,8 @@ mod tests {
         .unwrap();
 
         let bootstrap_path = TempFile::new().unwrap();
-        let f_bootstrap = Box::new(BufWriter::with_capacity(
-            BUF_WRITER_CAPACITY,
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(bootstrap_path.as_path())
-                .unwrap(),
-        ));
-        let mut bootstrap_ctx = BootstrapContext::new(f_bootstrap, None);
+        let storage = ArtifactStorage::SingleFile(bootstrap_path.as_path().to_path_buf());
+        let mut bootstrap_ctx = BootstrapContext::new(storage, false).unwrap();
         bootstrap_ctx.offset = 1;
 
         // reg file.

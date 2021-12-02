@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 
-use crate::core::context::{BlobManager, BootstrapContext, BuildContext};
+use crate::core::context::{BlobManager, BootstrapManager, BuildContext};
 
 pub(crate) use diff::DiffBuilder;
 pub(crate) use directory::DirectoryBuilder;
@@ -18,7 +18,7 @@ pub(crate) trait Builder {
     fn build(
         &mut self,
         build_ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<(Vec<String>, u64)>;
 }

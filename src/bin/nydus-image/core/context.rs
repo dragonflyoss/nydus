@@ -4,6 +4,7 @@
 
 //! Struct to maintain context information for the image builder.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
@@ -18,7 +19,7 @@ use nydus_utils::digest;
 use nydus_utils::div_round_up;
 use rafs::metadata::layout::v6::EROFS_BLOCK_SIZE;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
-use rafs::{RafsIoReader, RafsIoWriter};
+use rafs::{RafsIoReader, RafsIoWrite};
 use sha2::{Digest, Sha256};
 use storage::compress;
 use storage::device::BlobInfo;
@@ -72,31 +73,55 @@ impl FromStr for SourceType {
 }
 
 #[derive(Debug, Clone)]
-pub enum BlobStorage {
+pub enum ArtifactStorage {
     // Won't rename user's specification
     SingleFile(PathBuf),
     // Will rename it from tmp file as user didn't specify a name.
-    BlobsDir(PathBuf),
+    FileDir(PathBuf),
 }
 
-impl Default for BlobStorage {
+impl Default for ArtifactStorage {
     fn default() -> Self {
         Self::SingleFile(PathBuf::new())
     }
 }
 
-pub struct BlobBufferWriter {
+/// ArtifactBufferWriter provides a writer to allow writing bootstrap
+/// or blob data to a single file or in a directory.
+pub struct ArtifactBufferWriter {
     file: BufWriter<File>,
-    blob_stor: BlobStorage,
+    storage: ArtifactStorage,
     // Keep this because tmp file will be removed automatically when it is dropped.
     // But we will rename/link the tmp file before it is removed.
     tmp_file: Option<TempFile>,
 }
 
-impl BlobBufferWriter {
-    pub fn new(blob_stor: BlobStorage) -> Result<Self> {
-        match blob_stor {
-            BlobStorage::SingleFile(ref p) => {
+impl RafsIoWrite for ArtifactBufferWriter {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl std::io::Write for ArtifactBufferWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for ArtifactBufferWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl ArtifactBufferWriter {
+    pub fn new(storage: ArtifactStorage) -> Result<Self> {
+        match storage {
+            ArtifactStorage::SingleFile(ref p) => {
                 let b = BufWriter::with_capacity(
                     BUF_WRITER_CAPACITY,
                     OpenOptions::new()
@@ -104,23 +129,23 @@ impl BlobBufferWriter {
                         .create(true)
                         .truncate(true)
                         .open(p)
-                        .with_context(|| format!("failed to open blob {:?}", p))?,
+                        .with_context(|| format!("failed to open file {:?}", p))?,
                 );
                 Ok(Self {
                     file: b,
-                    blob_stor,
+                    storage,
                     tmp_file: None,
                 })
             }
-            BlobStorage::BlobsDir(ref p) => {
+            ArtifactStorage::FileDir(ref p) => {
                 // Better we can use open(2) O_TMPFILE, but for compatibility sake, we delay this job.
                 // TODO: Blob dir existence?
                 let tmp = TempFile::new_in(&p)
-                    .with_context(|| format!("failed to create temp blob file in {:?}", p))?;
+                    .with_context(|| format!("failed to create temp file in {:?}", p))?;
                 let tmp2 = tmp.as_file().try_clone()?;
                 Ok(Self {
                     file: BufWriter::with_capacity(BUF_WRITER_CAPACITY, tmp2),
-                    blob_stor,
+                    storage,
                     tmp_file: Some(tmp),
                 })
             }
@@ -142,7 +167,7 @@ impl BlobBufferWriter {
         f.flush()?;
 
         if let Some(n) = name {
-            if let BlobStorage::BlobsDir(s) = &self.blob_stor {
+            if let ArtifactStorage::FileDir(s) = &self.storage {
                 // NOTE: File with same name will be deleted ahead of time.
                 // So each newly generated blob can be stored.
                 let might_exist_path = Path::new(s).join(n);
@@ -151,7 +176,7 @@ impl BlobBufferWriter {
                         .with_context(|| format!("failed to remove blob {:?}", might_exist_path))?;
                 }
 
-                // Safe to unwrap as `BlobsDir` must have `tmp_file` created.
+                // Safe to unwrap as `FileDir` must have `tmp_file` created.
                 let tmp_file = self.tmp_file.unwrap();
                 rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
                     format!(
@@ -161,7 +186,7 @@ impl BlobBufferWriter {
                     )
                 })?;
             }
-        } else if let BlobStorage::SingleFile(s) = &self.blob_stor {
+        } else if let ArtifactStorage::SingleFile(s) = &self.storage {
             // `new_name` is None means no blob is really built, perhaps due to dedup.
             // We don't want to puzzle user, so delete it from here.
             // In the future, FIFO could be leveraged, don't remove it then.
@@ -169,16 +194,6 @@ impl BlobBufferWriter {
         }
 
         Ok(())
-    }
-}
-
-impl Write for BlobBufferWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
     }
 }
 
@@ -216,13 +231,13 @@ pub struct BlobContext {
     pub chunk_dict: Arc<dyn ChunkDict>,
 
     // Blob writer for writing to disk file.
-    pub writer: Option<BlobBufferWriter>,
+    pub writer: Option<ArtifactBufferWriter>,
 }
 
 impl BlobContext {
-    pub fn new(blob_id: String, blob_stor: Option<BlobStorage>) -> Result<Self> {
+    pub fn new(blob_id: String, blob_stor: Option<ArtifactStorage>) -> Result<Self> {
         let writer = if let Some(blob_stor) = blob_stor {
-            Some(BlobBufferWriter::new(blob_stor)?)
+            Some(ArtifactBufferWriter::new(blob_stor)?)
         } else {
             None
         };
@@ -230,7 +245,7 @@ impl BlobContext {
         Ok(Self::new_with_writer(blob_id, writer))
     }
 
-    pub fn new_with_writer(blob_id: String, writer: Option<BlobBufferWriter>) -> Self {
+    pub fn new_with_writer(blob_id: String, writer: Option<ArtifactBufferWriter>) -> Self {
         let size = if writer.is_some() {
             RAFS_MAX_CHUNK_SIZE as usize
         } else {
@@ -410,10 +425,7 @@ impl BlobManager {
 
 /// BootstrapContext is used to hold inmemory data of bootstrap during build.
 pub struct BootstrapContext {
-    /// Bootstrap file writer.
-    pub f_bootstrap: RafsIoWriter,
-    /// Parent bootstrap file reader.
-    pub f_parent_bootstrap: Option<RafsIoReader>,
+    pub layered: bool,
     /// Cache node index for hardlinks, HashMap<(real_inode, dev), Vec<index>>.
     pub lower_inode_map: HashMap<(Inode, u64), Vec<u64>>,
     pub upper_inode_map: HashMap<(Inode, u64), Vec<u64>>,
@@ -421,24 +433,57 @@ pub struct BootstrapContext {
     pub nodes: Vec<Node>,
     /// current position to write in f_bootstrap
     pub offset: u64,
+    /// Bootstrap file writer.
+    storage: ArtifactStorage,
 }
 
 impl BootstrapContext {
-    pub fn new(f_bootstrap: RafsIoWriter, f_parent_bootstrap: Option<RafsIoReader>) -> Self {
-        Self {
-            f_bootstrap,
-            f_parent_bootstrap,
+    pub fn new(storage: ArtifactStorage, layered: bool) -> Result<Self> {
+        Ok(Self {
+            layered,
             lower_inode_map: HashMap::new(),
             upper_inode_map: HashMap::new(),
             nodes: Vec::new(),
             offset: EROFS_BLOCK_SIZE,
-        }
+            storage,
+        })
     }
 
     pub fn align_offset(&mut self, align_size: u64) {
         if self.offset % align_size > 0 {
             self.offset = div_round_up(self.offset, align_size) * align_size;
         }
+    }
+
+    pub fn create_writer(&self) -> Result<ArtifactBufferWriter> {
+        ArtifactBufferWriter::new(self.storage.clone())
+    }
+}
+
+/// BootstrapManager is used to hold the parent bootstrap reader and create
+/// new bootstrap context.
+pub struct BootstrapManager {
+    /// Parent bootstrap file reader.
+    pub f_parent_bootstrap: Option<RafsIoReader>,
+    bootstrap_storage: ArtifactStorage,
+}
+
+impl BootstrapManager {
+    pub fn new(
+        bootstrap_storage: ArtifactStorage,
+        f_parent_bootstrap: Option<RafsIoReader>,
+    ) -> Self {
+        Self {
+            f_parent_bootstrap,
+            bootstrap_storage,
+        }
+    }
+
+    pub fn create_ctx(&self) -> Result<BootstrapContext> {
+        BootstrapContext::new(
+            self.bootstrap_storage.clone(),
+            self.f_parent_bootstrap.is_some(),
+        )
     }
 }
 
@@ -476,7 +521,7 @@ pub struct BuildContext {
     pub prefetch: Prefetch,
 
     /// Storage writing blob to single file or a directory.
-    pub blob_storage: Option<BlobStorage>,
+    pub blob_storage: Option<ArtifactStorage>,
 }
 
 impl BuildContext {
@@ -491,7 +536,7 @@ impl BuildContext {
         source_type: SourceType,
         source_path: PathBuf,
         prefetch: Prefetch,
-        blob_storage: Option<BlobStorage>,
+        blob_storage: Option<ArtifactStorage>,
     ) -> Self {
         BuildContext {
             blob_id,

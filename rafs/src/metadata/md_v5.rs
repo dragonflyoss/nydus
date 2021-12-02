@@ -53,7 +53,7 @@ impl RafsSuper {
         Ok(true)
     }
 
-    pub(crate) fn store_v5(&self, w: &mut RafsIoWriter) -> Result<usize> {
+    pub(crate) fn store_v5(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut sb = RafsV5SuperBlock::new();
 
         sb.set_magic(self.meta.magic);
