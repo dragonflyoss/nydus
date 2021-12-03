@@ -864,7 +864,11 @@ impl BlobDevice {
     }
 
     /// Read a range of data from blob into the provided writer
-    pub fn read_to(&self, w: &mut dyn ZeroCopyWriter<S = ()>, desc: &mut BlobIoVec) -> io::Result<usize> {
+    pub fn read_to(
+        &self,
+        w: &mut dyn ZeroCopyWriter<S = ()>,
+        desc: &mut BlobIoVec,
+    ) -> io::Result<usize> {
         // Validate that:
         // - bi_vec[0] is valid
         // - bi_vec[0].blob.blob_index() is valid

@@ -21,20 +21,20 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuse_backend_rs::abi::linux_abi::{InHeader, OutHeader};
-use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
+use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
 use nix::sys::stat::{major, minor};
 use nydus_app::BuildTimeInfo;
 use serde::Serialize;
 use vmm_sys_util::eventfd::EventFd;
 
-use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
 use crate::exit_event_manager;
+use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -398,7 +398,6 @@ pub fn create_nydus_daemon(
     mount_cmd: Option<FsBackendMountCmd>,
     bti: BuildTimeInfo,
 ) -> Result<Arc<dyn NydusDaemon + Send + Sync>> {
-    let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
     let session = FuseSession::new(Path::new(mountpoint), "rafs", "", readonly)?;
 
     // Create upgrade manager
