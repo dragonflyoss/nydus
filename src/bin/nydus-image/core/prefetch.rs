@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
-
 use rafs::metadata::layout::v5::RafsV5PrefetchTable;
 
-use crate::node::*;
+use crate::node::Node;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
@@ -88,6 +87,8 @@ fn gather_readahead_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
 pub struct Prefetch {
     pub policy: PrefetchPolicy,
 
+    pub disabled: bool,
+
     /// Specify patterns for prefetch.
     /// Their inode numbers will be persist to prefetch table. They could be directory's or regular
     /// file's inode number, by which its inode index of inode table can be calculated.
@@ -109,6 +110,7 @@ impl Prefetch {
 
         Ok(Self {
             policy,
+            disabled: false,
             readahead_patterns,
             readahead_files: BTreeMap::new(),
         })
@@ -116,11 +118,11 @@ impl Prefetch {
 
     pub fn insert_if_need(&mut self, node: &Node) {
         let path = node.target();
-        let inode = node.inode.i_ino;
+        let inode = node.inode.ino();
         let index = node.index;
         let mut remove_node = false;
 
-        if self.policy == PrefetchPolicy::None || node.inode.i_size == 0 {
+        if self.policy == PrefetchPolicy::None || self.disabled || node.inode.size() == 0 {
             return;
         }
 
@@ -169,7 +171,12 @@ impl Prefetch {
         }
     }
 
+    pub fn disable(&mut self) {
+        self.disabled = true;
+    }
+
     pub fn clear(&mut self) {
+        self.disabled = false;
         self.readahead_files.clear();
     }
 }

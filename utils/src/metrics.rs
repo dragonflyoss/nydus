@@ -596,7 +596,7 @@ pub struct BackendMetrics {
     read_cumulative_latency_millis_dist: [BasicMetric; BLOCK_READ_SIZES_MAX],
     read_count_block_size_dist: [BasicMetric; BLOCK_READ_SIZES_MAX],
     // Categorize metrics as per their latency and request size
-    read_latency_hits_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_SIZES_MAX],
+    read_latency_sizes_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_SIZES_MAX],
 }
 
 impl Metric for BasicMetric {
@@ -680,7 +680,7 @@ impl BackendMetrics {
             let size_idx = request_size_index(size);
             self.read_cumulative_latency_millis_dist[size_idx].add(elapsed);
             self.read_count_block_size_dist[size_idx].inc();
-            self.read_latency_hits_dist[size_idx][lat_idx].inc();
+            self.read_latency_sizes_dist[size_idx][lat_idx].inc();
         }
     }
 

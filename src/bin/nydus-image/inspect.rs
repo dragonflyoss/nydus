@@ -10,9 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
-
 use anyhow::Result;
+use serde_json::Value;
 
 use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobTable, RafsV5Inode, RafsV5InodeTable,
@@ -20,29 +19,33 @@ use rafs::metadata::layout::v5::{
 };
 use rafs::metadata::RafsSuperFlags;
 use rafs::{RafsIoRead, RafsIoReader};
+use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
-pub(crate) struct RafsInspector {
-    request_mode: bool,
-    bootstrap: Arc<Mutex<RafsIoReader>>,
-    layout_profile: RafsLayoutV5,
-    rafs_meta: RafsMeta,
-    cur_dir_index: u32,
-    parent_indexes: Vec<u32>,
-    inodes_table: RafsV5InodeTable,
-    blobs_table: RafsV5BlobTable,
-    extended_blobs_table: Option<RafsV5ExtBlobTable>,
-}
+use crate::core::context::RafsVersion;
+use crate::core::node::InodeWrapper;
 
 /// | Superblock | inode table | prefetch table |inode + name + symlink pointer + xattr size + xattr pairs + chunk info
 #[allow(dead_code)]
-pub(crate) struct RafsLayoutV5 {
+struct RafsLayout {
     super_block_offset: u32,
     super_block_size: u32,
     inode_size: u32,
     chunk_info_size: u32,
 }
 
-pub(crate) struct RafsMeta {
+impl RafsLayout {
+    fn rafsv5_layout() -> Self {
+        RafsLayout {
+            super_block_offset: 0,
+            super_block_size: 8192,
+            inode_size: 128,
+            chunk_info_size: 80,
+        }
+    }
+}
+
+struct RafsMeta {
+    inodes_count: u64,
     inode_table_offset: u64,
     inode_table_entries: u32,
     prefetch_table_offset: u64,
@@ -51,11 +54,16 @@ pub(crate) struct RafsMeta {
     blob_table_size: u32,
     extended_blob_table_offset: u64,
     extended_blob_table_entries: u32,
+    fs_version: u32,
+    chunk_size: u32,
+    flags: RafsSuperFlags,
+    version: RafsVersion,
 }
 
 impl From<&RafsV5SuperBlock> for RafsMeta {
     fn from(sb: &RafsV5SuperBlock) -> Self {
         Self {
+            inodes_count: sb.inodes_count(),
             inode_table_offset: sb.inode_table_offset(),
             inode_table_entries: sb.inode_table_entries(),
             prefetch_table_offset: sb.prefetch_table_offset(),
@@ -64,17 +72,10 @@ impl From<&RafsV5SuperBlock> for RafsMeta {
             prefetch_table_entries: sb.prefetch_table_entries(),
             extended_blob_table_offset: sb.extended_blob_table_offset(),
             extended_blob_table_entries: sb.extended_blob_table_entries(),
-        }
-    }
-}
-
-impl RafsLayoutV5 {
-    pub fn new() -> Self {
-        RafsLayoutV5 {
-            super_block_offset: 0,
-            super_block_size: 8192,
-            inode_size: 128,
-            chunk_info_size: 80,
+            chunk_size: sb.block_size(),
+            flags: RafsSuperFlags::from_bits_truncate(sb.flags()),
+            fs_version: sb.version(),
+            version: RafsVersion::V5,
         }
     }
 }
@@ -84,31 +85,46 @@ pub enum Action {
     Continue,
 }
 
+struct RafsV5State {
+    inodes_table: RafsV5InodeTable,
+    blobs_table: RafsV5BlobTable,
+    extended_blobs_table: Option<RafsV5ExtBlobTable>,
+}
+
+enum RafsState {
+    V5(RafsV5State),
+}
+
+impl RafsState {
+    fn get_blob_id(&self, blob_index: u32) -> Result<String> {
+        match self {
+            RafsState::V5(b) => {
+                let blob = b.blobs_table.get(blob_index)?;
+                Ok(blob.blob_id().to_owned())
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct RafsInspector {
+    request_mode: bool,
+    bootstrap: Arc<Mutex<RafsIoReader>>,
+    layout_profile: RafsLayout,
+    rafs_meta: RafsMeta,
+    cur_dir_index: u32,
+    parent_indexes: Vec<u32>,
+    state: RafsState,
+}
+
 impl RafsInspector {
     pub fn new(b: &Path, request_mode: bool) -> Result<Self> {
-        let layout_profile = RafsLayoutV5::new();
         let mut f = <dyn RafsIoRead>::from_file(b)
             .map_err(|e| anyhow!("Can't find bootstrap, path={:?}, {:?}", b, e))?;
-        let sb = Self::super_block(&mut f, &layout_profile)?;
-        let rafs_meta: RafsMeta = (&sb).into();
-
-        let mut inodes_table = RafsV5InodeTable::new(rafs_meta.inode_table_entries as usize);
-        f.seek_to_offset(rafs_meta.inode_table_offset)?;
-        inodes_table.load(&mut f)?;
-
-        f.seek_to_offset(rafs_meta.blob_table_offset)?;
-        let mut blobs_table = RafsV5BlobTable::new();
-        blobs_table.load(&mut f, rafs_meta.blob_table_size)?;
-
-        // Load extended blob table if the bootstrap including
-        // extended blob table.
-        let extended_blobs_table = if rafs_meta.extended_blob_table_offset > 0 {
-            f.seek_to_offset(rafs_meta.extended_blob_table_offset)?;
-            let mut et = RafsV5ExtBlobTable::new();
-            et.load(&mut f, rafs_meta.extended_blob_table_entries as usize)?;
-            Some(et)
-        } else {
-            None
+        let (rafs_meta, layout_profile) = Self::load_meta(&mut f)?;
+        let state = match rafs_meta.version {
+            RafsVersion::V5 => Self::load_state_v5(&mut f, &rafs_meta)?,
+            RafsVersion::V6 => todo!(),
         };
 
         Ok(RafsInspector {
@@ -119,50 +135,40 @@ impl RafsInspector {
             // Root inode has index of 0
             cur_dir_index: 0,
             parent_indexes: Vec::new(),
-            inodes_table,
-            blobs_table,
-            extended_blobs_table,
+            state,
         })
     }
 
-    fn super_block(
-        b: &mut RafsIoReader,
-        layout_profile: &RafsLayoutV5,
-    ) -> Result<RafsV5SuperBlock> {
-        let mut sb = RafsV5SuperBlock::new();
+    fn load_meta(f: &mut RafsIoReader) -> Result<(RafsMeta, RafsLayout)> {
+        let layout_profile = RafsLayout::rafsv5_layout();
+        match Self::super_block_v5(f, &layout_profile) {
+            Ok(sb) => {
+                let rafs_meta: RafsMeta = (&sb).into();
+                Ok((rafs_meta, layout_profile))
+            }
+            Err(e) => Err(e),
+        }
 
-        b.seek_to_offset(layout_profile.super_block_offset as u64)?;
-        sb.load(b)
-            .map_err(|e| anyhow!("Failed in loading super block, {:?}", e))?;
-
-        Ok(sb)
-    }
-
-    fn load_ondisk_inode(&self, offset: u32) -> Result<(RafsV5Inode, OsString)> {
-        let mut ondisk_inode = RafsV5Inode::new();
-        let mut guard = self.bootstrap.lock().unwrap();
-        let bootstrap = guard.deref_mut();
-        bootstrap.seek_to_offset(offset as u64)?;
-        ondisk_inode
-            .load(bootstrap)
-            .map_err(|e| anyhow!("failed to jump to inode offset={}, {:?}", offset, e))?;
-
-        // No need to move offset forward
-        let file_name = ondisk_inode.file_name(bootstrap)?;
-
-        Ok((ondisk_inode, file_name))
+        /*
+        match Self::super_block_v6(f, &layout_profile) {
+            Ok(sb) => {}
+            Err(e) => Err(e),
+        }
+         */
     }
 
     /// Index is u32, by which the inode can be found.
-    fn load_inode_by_index(&self, index: usize) -> Result<(RafsV5Inode, OsString)> {
-        // Safe to truncate `inode_table_offset` now.
-        let inode_offset = self.inodes_table.data[index] << 3;
-        self.load_ondisk_inode(inode_offset)
+    /// NOTE: `index` is inode index within inodes table, which equals to inode number plus ONE
+    fn load_inode_by_index(&self, index: usize) -> Result<(InodeWrapper, OsString)> {
+        match self.rafs_meta.version {
+            RafsVersion::V5 => self.load_ondisk_inode_v5(index),
+            RafsVersion::V6 => todo!(),
+        }
     }
 
     fn list_chunks(
         r: &mut RafsIoReader,
-        inode: &RafsV5Inode,
+        inode: &InodeWrapper,
         inode_offset: u32,
     ) -> Result<Option<Vec<RafsV5ChunkInfo>>> {
         if !inode.is_reg() {
@@ -185,9 +191,9 @@ impl RafsInspector {
 
         r.seek_to_offset(chunks_offset as u64)?;
 
-        if inode.i_child_count > 0 {
+        if inode.child_count() > 0 {
             chunks = Some(Vec::<RafsV5ChunkInfo>::new());
-            for _ in 0..inode.i_child_count {
+            for _ in 0..inode.child_count() {
                 let mut chunk = RafsV5ChunkInfo::new();
                 chunk.load(r)?;
                 chunks.as_mut().unwrap().push(chunk);
@@ -197,7 +203,7 @@ impl RafsInspector {
         Ok(chunks)
     }
 
-    fn stat_single_file(inode: &RafsV5Inode, name: &str, index: usize) {
+    fn stat_single_file(inode: &InodeWrapper, name: &str, index: usize) {
         println!(
             r#"
 Inode Number:       {inode_number}
@@ -213,43 +219,46 @@ GID:                {gid}
 Mtime:              {mtime}
 MtimeNsec:          {mtime_nsec}
 Blocks:             {blocks}"#,
-            inode_number = inode.i_ino,
+            inode_number = inode.ino(),
             name = name,
             index = index,
-            size = inode.i_size,
-            parent = inode.i_parent,
-            mode = inode.i_mode,
-            permissions = Permissions::from_mode(inode.i_mode).mode(),
-            nlink = inode.i_nlink,
-            uid = inode.i_uid,
-            gid = inode.i_gid,
-            mtime = inode.i_mtime,
-            mtime_nsec = inode.i_mtime_nsec,
-            blocks = inode.i_blocks,
+            size = inode.size(),
+            parent = inode.parent(),
+            mode = inode.mode(),
+            permissions = Permissions::from_mode(inode.mode()).mode(),
+            nlink = inode.nlink(),
+            uid = inode.uid(),
+            gid = inode.gid(),
+            mtime = inode.mtime(),
+            mtime_nsec = inode.mtime_nsec(),
+            blocks = inode.blocks(),
         );
     }
 
     pub fn iter_dir(
         &self,
-        mut op: impl FnMut(&OsStr, &RafsV5Inode, u32, u32) -> Action,
+        mut op: impl FnMut(&OsStr, &InodeWrapper, u32, u32) -> Action,
     ) -> Result<()> {
         let (dir_inode, _) = self.load_inode_by_index(self.cur_dir_index as usize)?;
-        let parent_ino = dir_inode.i_ino;
+        let parent_ino = dir_inode.ino();
 
-        let children_count = dir_inode.i_child_count;
+        let children_count = dir_inode.child_count();
         // Somehow, the it has subtract 1 to identify the first child file's index in inode table.
-        let first_index = dir_inode.i_child_index - 1;
+        let first_index = dir_inode.child_index() - 1;
         let last_index = first_index + children_count - 1;
 
         for idx in first_index..=last_index {
             let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
 
-            if child_inode.i_parent != parent_ino {
+            if child_inode.parent() != parent_ino {
                 bail!("File {:?} is not a child of CWD", name);
             }
 
             trace!("inode: {:?}; name: {:?}", child_inode, name);
-            let inode_offset = self.inodes_table.data[idx as usize] << 3;
+            let inode_offset = match &self.state {
+                RafsState::V5(s) => s.inodes_table.data[idx as usize] << 3,
+            };
+
             match op(name.as_os_str(), &child_inode, idx, inode_offset) {
                 Action::Break => break,
                 Action::Continue => continue,
@@ -262,21 +271,21 @@ Blocks:             {blocks}"#,
     fn walk_fs(
         &self,
         top_index: u32,
-        op: &mut dyn FnMut(&OsStr, &RafsV5Inode, u32, u32) -> Action,
+        op: &mut dyn FnMut(&OsStr, &InodeWrapper, u32, u32) -> Action,
     ) -> Result<()> {
         let (top, _) = self.load_inode_by_index(top_index as usize)?;
-        let parent_ino = top.i_ino;
+        let parent_ino = top.ino();
         let mut dir_indexes = vec![];
 
-        let children_count = top.i_child_count;
+        let children_count = top.child_count();
         // Somehow, the it has subtract 1 to identify the first child file's index in inode table.
-        let first_index = top.i_child_index - 1;
+        let first_index = top.child_index() - 1;
         let last_index = first_index + children_count - 1;
 
         for idx in first_index..=last_index {
             let (child_inode, name) = self.load_inode_by_index(idx as usize)?;
 
-            if child_inode.i_parent != parent_ino {
+            if child_inode.parent() != parent_ino {
                 bail!("File {:?} is not a child of CWD", name);
             }
 
@@ -285,7 +294,9 @@ Blocks:             {blocks}"#,
             }
 
             trace!("inode: {:?}; name: {:?}", child_inode, name);
-            let inode_offset = self.inodes_table.data[idx as usize] << 3;
+            let inode_offset = match &self.state {
+                RafsState::V5(s) => s.inodes_table.data[idx as usize] << 3,
+            };
             match op(name.as_os_str(), &child_inode, idx, inode_offset) {
                 Action::Break => break,
                 Action::Continue => continue,
@@ -304,13 +315,12 @@ Blocks:             {blocks}"#,
         let mut entries = Vec::<PathBuf>::new();
 
         loop {
-            let offset = self.inodes_table.get(ino)?;
-            let (inode, file_name) = self.load_ondisk_inode(offset)?;
+            let (inode, file_name) = self.load_inode_by_index((ino - 1) as usize)?;
             entries.push(file_name.into());
-            if inode.i_parent == 0 {
+            if inode.parent() == 0 {
                 break;
             }
-            ino = inode.i_parent;
+            ino = inode.parent();
         }
         entries.reverse();
         for e in entries {
@@ -336,7 +346,7 @@ Blocks:             {blocks}"#,
                 drop(guard);
                 for c in chunks {
                     if c.compress_offset == offset_in_blob {
-                        let path = self.path_from_ino(inode.i_parent).unwrap();
+                        let path = self.path_from_ino(inode.parent()).unwrap();
                         println!(
                             r#"
     {:width$} Parent Path {:width$}
@@ -345,8 +355,8 @@ Blocks:             {blocks}"#,
                             name.to_string_lossy(),
                             path.to_string_lossy(),
                             c.block_id,
-                            if let Ok(ref blob) = self.blobs_table.get(c.blob_index) {
-                                &blob.blob_id
+                            if let Ok(blob_id) = self.state.get_blob_id(c.blob_index) {
+                                blob_id
                             } else {
                                 error!("Can't find blob by its index, index={:?}", c.blob_index);
                                 return Action::Break;
@@ -367,10 +377,10 @@ Blocks:             {blocks}"#,
     fn cmd_check_inode(&self, ino: u64) -> Result<Option<Value>> {
         self.walk_fs(0, &mut |name, inode, index, _offset| {
             // Not expect poisoned lock
-            if inode.i_ino == ino {
+            if inode.ino() == ino {
                 println!(
                     r#"{}"#,
-                    self.path_from_ino(inode.i_ino).unwrap().to_string_lossy(),
+                    self.path_from_ino(inode.ino()).unwrap().to_string_lossy(),
                 );
                 Self::stat_single_file(inode, &name.to_string_lossy(), index as usize);
             }
@@ -405,7 +415,7 @@ Blocks:             {blocks}"#,
                 r#"{}    {inode_number:<8} {name:?}"#,
                 sign,
                 name = f,
-                inode_number = inode.i_ino,
+                inode_number = inode.ino(),
             );
 
             Action::Continue
@@ -476,8 +486,8 @@ Blocks:             {blocks}"#,
                 if let Ok(Some(cks)) = chunks {
                     println!("    Chunks list:");
                     for (i, c) in cks.iter().enumerate() {
-                        let blob_id = if let Ok(entry) = self.blobs_table.get(c.blob_index) {
-                            entry.blob_id.clone()
+                        let blob_id = if let Ok(id) = self.state.get_blob_id(c.blob_index) {
+                            id.to_owned()
                         } else {
                             error!(
                                 "Blob index is {} . But no blob entry associate with it",
@@ -497,8 +507,8 @@ Blocks:             {blocks}"#,
                             chunk_index = c.index,
                             file_offset = c.file_offset,
                             compressed_size = c.compress_size,
-                            decompressed_size = c.decompress_size,
-                            decompressed_offset = c.decompress_offset,
+                            decompressed_size = c.uncompress_size,
+                            decompressed_offset = c.uncompress_offset,
                             compressed_offset = c.compress_offset,
                             blob_id = blob_id,
                             chunk_id = c.block_id
@@ -514,7 +524,7 @@ Blocks:             {blocks}"#,
         Ok(None)
     }
 
-    pub fn cmd_change_dir(&mut self, name: &str) -> Result<Option<Value>> {
+    fn cmd_change_dir(&mut self, name: &str) -> Result<Option<Value>> {
         if name == "." {
             return Ok(None);
         }
@@ -558,19 +568,21 @@ Blocks:             {blocks}"#,
     pub fn cmd_stats(&mut self) -> Result<Option<Value>> {
         let mut guard = self.bootstrap.lock().unwrap();
         let bootstrap = guard.deref_mut();
-        let sb = Self::super_block(bootstrap, &self.layout_profile)?;
+        let (meta, _) = Self::load_meta(bootstrap)?;
 
         let o = if self.request_mode {
-            Some(json!({"inodes_count": sb.inodes_count()}))
+            Some(json!({"inodes_count": meta.inodes_count}))
         } else {
             println!(
                 r#"
     Version:            {version}
     Inodes Count:       {inodes_count}
+    Chunk Size:         {chunk_size}
     Flags:              {flags}"#,
-                version = sb.version(),
-                inodes_count = sb.inodes_count(),
-                flags = RafsSuperFlags::from_bits(sb.flags()).unwrap()
+                version = meta.fs_version,
+                inodes_count = meta.inodes_count,
+                chunk_size = meta.chunk_size,
+                flags = meta.flags,
             );
 
             None
@@ -584,58 +596,126 @@ Blocks:             {blocks}"#,
         let bootstrap = guard.deref_mut();
         bootstrap.seek_to_offset(self.rafs_meta.blob_table_offset)?;
 
-        let blobs = &mut self.blobs_table;
-        let extended = &mut self.extended_blobs_table;
+        match &self.state {
+            RafsState::V5(s) => {
+                let blobs = &s.blobs_table;
+                let extended = &s.extended_blobs_table;
 
-        let o = if self.request_mode {
-            let mut value = json!([]);
+                let o = if self.request_mode {
+                    let mut value = json!([]);
 
-            for (i, b) in blobs.entries.iter().enumerate() {
-                let (decompressed_size, compressed_size) = if let Some(et) = extended {
-                    (
-                        Some(et.entries[i].blob_cache_size),
-                        Some(et.entries[i].compressed_blob_size),
-                    )
+                    for (i, b) in blobs.entries.iter().enumerate() {
+                        let (decompressed_size, compressed_size) = if let Some(et) = extended {
+                            (
+                                Some(et.entries[i].uncompressed_size),
+                                Some(et.entries[i].compressed_size),
+                            )
+                        } else {
+                            (None, None)
+                        };
+
+                        let v = json!({"blob_id": b.blob_id(), "readahead_offset": b.readahead_offset(),
+                "readahead_size":b.readahead_size(), "decompressed_size": decompressed_size, "compressed_size": compressed_size});
+                        value.as_array_mut().unwrap().push(v);
+                    }
+                    Some(value)
                 } else {
-                    (None, None)
-                };
-
-                let v = json!({"blob_id": b.blob_id, "readahead_offset": b.readahead_offset,
-                "readahead_size":b.readahead_size, "decompressed_size": decompressed_size, "compressed_size": compressed_size});
-                value.as_array_mut().unwrap().push(v);
-            }
-            Some(value)
-        } else {
-            for (i, b) in blobs.entries.iter().enumerate() {
-                print!(
-                    r#"
+                    for (i, b) in blobs.entries.iter().enumerate() {
+                        print!(
+                            r#"
     Blob ID:            {blob_id}
     Readahead Offset:   {readahead_offset}
     Readahead Size:     {readahead_size}
     "#,
-                    blob_id = b.blob_id,
-                    readahead_offset = b.readahead_offset,
-                    readahead_size = b.readahead_size,
-                );
+                            blob_id = b.blob_id(),
+                            readahead_offset = b.readahead_offset(),
+                            readahead_size = b.readahead_size(),
+                        );
 
-                if let Some(et) = extended {
-                    print!(
-                        r#"Cache Size:         {cache_size}
+                        if let Some(et) = extended {
+                            print!(
+                                r#"Cache Size:         {cache_size}
     Compressed Size:    {compressed_size}
     "#,
-                        cache_size = et.entries[i].blob_cache_size,
-                        compressed_size = et.entries[i].compressed_blob_size
-                    )
-                }
-            }
-            None
-        };
+                                cache_size = et.entries[i].uncompressed_size,
+                                compressed_size = et.entries[i].compressed_size
+                            )
+                        }
+                    }
+                    None
+                };
 
-        Ok(o)
+                Ok(o)
+            }
+        }
     }
 }
 
-pub(crate) struct Prompt {}
+impl RafsInspector {
+    fn load_state_v5(f: &mut RafsIoReader, meta: &RafsMeta) -> Result<RafsState> {
+        let mut inodes_table = RafsV5InodeTable::new(meta.inode_table_entries as usize);
+        f.seek_to_offset(meta.inode_table_offset)?;
+        inodes_table.load(f)?;
+
+        f.seek_to_offset(meta.blob_table_offset)?;
+        let mut blobs_table = RafsV5BlobTable::new();
+        blobs_table.load(
+            f,
+            meta.blob_table_size,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            meta.flags,
+        )?;
+
+        // Load extended blob table if the bootstrap including
+        // extended blob table.
+        let extended_blobs_table = if meta.extended_blob_table_offset > 0 {
+            f.seek_to_offset(meta.extended_blob_table_offset)?;
+            let mut et = RafsV5ExtBlobTable::new();
+            et.load(f, meta.extended_blob_table_entries as usize)?;
+            Some(et)
+        } else {
+            None
+        };
+
+        Ok(RafsState::V5(RafsV5State {
+            inodes_table,
+            blobs_table,
+            extended_blobs_table,
+        }))
+    }
+
+    fn super_block_v5(
+        b: &mut RafsIoReader,
+        layout_profile: &RafsLayout,
+    ) -> Result<RafsV5SuperBlock> {
+        let mut sb = RafsV5SuperBlock::new();
+
+        b.seek_to_offset(layout_profile.super_block_offset as u64)?;
+        sb.load(b)
+            .map_err(|e| anyhow!("Failed in loading super block, {:?}", e))?;
+
+        Ok(sb)
+    }
+
+    fn load_ondisk_inode_v5(&self, index: usize) -> Result<(InodeWrapper, OsString)> {
+        let offset = match &self.state {
+            RafsState::V5(s) => s.inodes_table.data[index] << 3,
+        };
+
+        let mut ondisk_inode = RafsV5Inode::new();
+        let mut guard = self.bootstrap.lock().unwrap();
+        let bootstrap = guard.deref_mut();
+        bootstrap.seek_to_offset(offset as u64)?;
+        ondisk_inode
+            .load(bootstrap)
+            .map_err(|e| anyhow!("failed to jump to inode offset={}, {:?}", offset, e))?;
+
+        // No need to move offset forward
+        let filename = ondisk_inode.load_file_name(bootstrap)?;
+
+        Ok((InodeWrapper::V5(ondisk_inode), filename))
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum ExecuteError {
@@ -718,6 +798,8 @@ impl Executor {
         );
     }
 }
+
+pub(crate) struct Prompt {}
 
 impl Prompt {
     pub(crate) fn run(mut inspector: RafsInspector) {

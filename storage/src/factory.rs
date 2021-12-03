@@ -2,50 +2,62 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Factory to create blob cache objects for blobs.
+//!
+//! The factory module provides methods to create
+//! [blob cache objects](../cache/trait.BlobCache.html) for blobs. Internally it caches a group
+//! of [BlobCacheMgr](../cache/trait.BlobCacheMgr.html) objects according to their
+//! [FactoryConfig](struct.FactoryConfig.html). Those cached blob managers may be garbage-collected
+//! by [BlobFactory::gc()](struct.BlobFactory.html#method.gc).
+//! if not used anymore.
+use std::collections::HashMap;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::Result as IOResult;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::value::Value;
 
-use crate::backend::*;
-use crate::cache::*;
-use crate::compress;
+#[cfg(feature = "backend-oss")]
+use crate::backend::oss;
+#[cfg(feature = "backend-registry")]
+use crate::backend::registry;
+use crate::backend::{localfs, BlobBackend};
+use crate::cache::{BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr};
+use crate::device::BlobInfo;
 
-use nydus_utils::digest;
-
-// storage backend config
-#[derive(Default, Clone, Deserialize)]
-pub struct Config {
-    pub backend: BackendConfig,
-    #[serde(default)]
-    pub cache: CacheConfig,
-}
-
-#[derive(Default, Clone, Deserialize)]
+/// Configuration information for storage backend.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendConfig {
+    /// Type of storage backend.
     #[serde(rename = "type")]
     pub backend_type: String,
+    /// Configuration for storage backend.
     #[serde(rename = "config")]
     pub backend_config: Value,
 }
 
 impl BackendConfig {
+    /// Create a new instance of `BackendConfig`.
     pub fn from_str(backend_type: &str, json_str: &str) -> Result<BackendConfig> {
         let backend_config = serde_json::from_str(json_str)
             .context("failed to parse backend config in JSON string")?;
+
         Ok(Self {
             backend_type: backend_type.to_string(),
             backend_config,
         })
     }
+
+    /// Load storage backend configuration from a configuration file.
     pub fn from_file(backend_type: &str, file_path: &str) -> Result<BackendConfig> {
         let file = File::open(file_path)
             .with_context(|| format!("failed to open backend config file {}", file_path))?;
         let backend_config = serde_json::from_reader(file)
             .with_context(|| format!("failed to parse backend config file {}", file_path))?;
+
         Ok(Self {
             backend_type: backend_type.to_string(),
             backend_config,
@@ -53,60 +65,158 @@ impl BackendConfig {
     }
 }
 
-#[derive(Default, Clone, Deserialize)]
+/// Configuration information for blob cache manager.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CacheConfig {
-    #[serde(default, rename = "compressed")]
-    pub cache_compressed: bool,
+    /// Type of blob cache.
     #[serde(default, rename = "type")]
     pub cache_type: String,
+    /// Whether the data from the cache is compressed, not used anymore.
+    #[serde(default, rename = "compressed")]
+    pub cache_compressed: bool,
+    /// Blob cache manager specific configuration.
     #[serde(default, rename = "config")]
     pub cache_config: Value,
-    // Whether to validate cache is up to upper layer - Rafs. So don't try to
-    // get it from a user configuration file.
+    /// Whether to validate data read from the cache.
     #[serde(skip_serializing, skip_deserializing)]
     pub cache_validate: bool,
+    /// Configuration for blob data prefetching.
     #[serde(skip_serializing, skip_deserializing)]
-    pub prefetch_worker: PrefetchWorker,
+    pub prefetch_config: BlobPrefetchConfig,
 }
 
-pub fn new_backend(
-    config: BackendConfig,
-    id: &str,
-) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
-    match config.backend_type.as_str() {
-        #[cfg(feature = "backend-oss")]
-        "oss" => Ok(Arc::new(oss::new(config.backend_config, Some(id))?)),
-        #[cfg(feature = "backend-registry")]
-        "registry" => Ok(Arc::new(registry::new(config.backend_config, Some(id))?)),
-        #[cfg(feature = "backend-localfs")]
-        "localfs" => Ok(Arc::new(localfs::new(config.backend_config, Some(id))?)),
-        _ => Err(einval!(format!(
-            "unsupported backend type '{}'",
-            config.backend_type
-        ))),
+/// Configuration information to create blob cache manager.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FactoryConfig {
+    /// Id of the factory.
+    #[serde(default)]
+    pub id: String,
+    /// Configuration for storage backend.
+    pub backend: BackendConfig,
+    /// Configuration for blob cache manager.
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+#[derive(Eq, PartialEq)]
+struct BlobCacheMgrKey {
+    config: Arc<FactoryConfig>,
+}
+
+#[allow(clippy::derive_hash_xor_eq)]
+impl Hash for BlobCacheMgrKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.config.backend.backend_type.hash(state);
+        self.config.cache.cache_type.hash(state);
+        self.config.cache.prefetch_config.hash(state);
     }
 }
 
-pub fn new_rw_layer(
-    config: Config,
-    compressor: compress::Algorithm,
-    digester: digest::Algorithm,
-    id: &str,
-) -> IOResult<Arc<dyn RafsCache + Send + Sync>> {
-    let backend = new_backend(config.backend, id)?;
-    match config.cache.cache_type.as_str() {
-        "blobcache" => Ok(blobcache::new(
-            config.cache,
-            backend,
-            compressor,
-            digester,
-            id,
-        )?),
-        _ => Ok(Arc::new(dummycache::new(
-            config.cache,
-            backend,
-            compressor,
-            digester,
-        )?)),
+lazy_static::lazy_static! {
+    /// Default blob factory.
+    pub static ref BLOB_FACTORY: BlobFactory = BlobFactory::new();
+}
+
+/// Factory to create blob cache for blob objects.
+pub struct BlobFactory {
+    mgrs: Mutex<HashMap<BlobCacheMgrKey, Arc<dyn BlobCacheMgr>>>,
+}
+
+impl BlobFactory {
+    /// Create a new instance of blob factory object.
+    pub fn new() -> Self {
+        BlobFactory {
+            mgrs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a blob cache object for a blob with specified configuration.
+    pub fn new_blob_cache(
+        &self,
+        config: &Arc<FactoryConfig>,
+        blob_info: &Arc<BlobInfo>,
+    ) -> IOResult<Arc<dyn BlobCache>> {
+        let key = BlobCacheMgrKey {
+            config: config.clone(),
+        };
+        // Use the existing blob cache manager if there's one with the same configuration.
+        if let Some(mgr) = self.mgrs.lock().unwrap().get(&key) {
+            return mgr.get_blob_cache(blob_info);
+        }
+
+        let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
+        let mgr = match key.config.cache.cache_type.as_str() {
+            "blobcache" => {
+                let mgr = FileCacheMgr::new(config.cache.clone(), backend, &config.id)?;
+                mgr.init()?;
+                Arc::new(mgr) as Arc<dyn BlobCacheMgr>
+            }
+            _ => {
+                let mgr = DummyCacheMgr::new(config.cache.clone(), backend, false, false)?;
+                mgr.init()?;
+                Arc::new(mgr) as Arc<dyn BlobCacheMgr>
+            }
+        };
+
+        let mut guard = self.mgrs.lock().unwrap();
+        let mgr = guard.entry(key).or_insert_with(|| mgr);
+
+        mgr.get_blob_cache(blob_info)
+    }
+
+    /// Garbage-collect unused blob cache managers and blob caches.
+    pub fn gc(&self) {
+        unimplemented!("TODO")
+    }
+
+    /// Create a storage backend for the blob with id `blob_id`.
+    fn new_backend(
+        config: BackendConfig,
+        blob_id: &str,
+    ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
+        match config.backend_type.as_str() {
+            #[cfg(feature = "backend-oss")]
+            "oss" => Ok(Arc::new(oss::Oss::new(
+                config.backend_config,
+                Some(blob_id),
+            )?)),
+            #[cfg(feature = "backend-registry")]
+            "registry" => Ok(Arc::new(registry::Registry::new(
+                config.backend_config,
+                Some(blob_id),
+            )?)),
+            #[cfg(feature = "backend-localfs")]
+            "localfs" => Ok(Arc::new(localfs::LocalFs::new(
+                config.backend_config,
+                Some(blob_id),
+            )?)),
+            _ => Err(einval!(format!(
+                "unsupported backend type '{}'",
+                config.backend_type
+            ))),
+        }
+    }
+}
+
+impl Default for BlobFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_config() {
+        let config = BackendConfig {
+            backend_type: "localfs".to_string(),
+            backend_config: Default::default(),
+        };
+        let str_val = serde_json::to_string(&config).unwrap();
+        let config2 = serde_json::from_str(&str_val).unwrap();
+
+        assert_eq!(config, config2);
     }
 }

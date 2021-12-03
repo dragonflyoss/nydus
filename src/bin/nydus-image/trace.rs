@@ -258,13 +258,11 @@ macro_rules! event_tracer {
 
 #[cfg(test)]
 pub mod tests {
-
     use super::{EventTracerClass, TraceClass};
     use std::thread;
 
     #[test]
     fn test_event_trace() {
-        //register_tracer!(TraceClass::Timing, TimingTracerClass);
         register_tracer!(TraceClass::Event, EventTracerClass);
 
         let t1 = thread::Builder::new()

@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+extern crate serde_json;
+
 use std::fmt::{self, Display};
 use std::str::FromStr;
 
@@ -9,16 +11,22 @@ use chrono::{self, DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
-extern crate serde_json;
-
-#[allow(dead_code)]
+/// Error code related to Nydus library.
 #[derive(Debug)]
 pub enum NydusError {
     InvalidArguments(String),
 }
 
+impl Display for NydusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// Specialized `Result` for Nydus library.
 pub type Result<T> = std::result::Result<T, NydusError>;
 
+/// Supported filesystem types.
 #[derive(Clone, Debug, Serialize, PartialEq, Deserialize)]
 pub enum FsBackendType {
     Rafs,
@@ -40,12 +48,6 @@ impl FromStr for FsBackendType {
 }
 
 impl Display for FsBackendType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Display for NydusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
     }

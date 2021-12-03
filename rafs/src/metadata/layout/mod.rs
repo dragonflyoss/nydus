@@ -3,24 +3,40 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Rafs filesystem metadata layout and data structures.
+
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 
 use fuse_backend_rs::abi::linux_abi::ROOT_ID;
+use nydus_utils::ByteSize;
 
+use crate::metadata::layout::v5::RAFSV5_ALIGNMENT;
+
+/// Version number for Rafs v4.
 pub const RAFS_SUPER_VERSION_V4: u32 = 0x400;
+/// Version number for Rafs v5.
 pub const RAFS_SUPER_VERSION_V5: u32 = 0x500;
+/// Version number for Rafs v6.
+pub const RAFS_SUPER_VERSION_V6: u32 = 0x600;
+/// Minimal version of Rafs supported.
 pub const RAFS_SUPER_MIN_VERSION: u32 = RAFS_SUPER_VERSION_V4;
+/// Inode number for Rafs root inode.
 pub const RAFS_ROOT_INODE: u64 = ROOT_ID;
 
+/// Type for filesystem xattr attribute key.
 pub type XattrName = Vec<u8>;
+/// Type for filesystem xattr attribute value.
 pub type XattrValue = Vec<u8>;
 
 pub mod v5;
+pub mod v6;
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! impl_bootstrap_converter {
     ($T: ty) => {
@@ -72,6 +88,7 @@ macro_rules! impl_bootstrap_converter {
     };
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! impl_pub_getter_setter {
     ($G: ident, $S: ident, $F: ident, $U: ty) => {
@@ -186,6 +203,99 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
     Ok(value)
 }
 
+/// Rafs inode extended attributes.
+///
+/// An extended attribute is a (String, String) pair associated with a inode.
+#[derive(Clone, Default)]
+pub struct RafsXAttrs {
+    pairs: HashMap<OsString, XattrValue>,
+}
+
+impl RafsXAttrs {
+    /// Create a new instance of `RafsV5Xattrs`.
+    pub fn new() -> Self {
+        Self {
+            pairs: HashMap::new(),
+        }
+    }
+
+    /// Get size needed to store the extended attributes.
+    pub fn size(&self) -> usize {
+        let mut size: usize = 0;
+
+        for (key, value) in self.pairs.iter() {
+            size += size_of::<u32>();
+            size += key.byte_size() + 1 + value.len();
+        }
+
+        size
+    }
+
+    /// Get extended attribute with  key `name`.
+    pub fn get(&self, name: &OsStr) -> Option<&XattrValue> {
+        self.pairs.get(name)
+    }
+
+    /// Add or update an extended attribute.
+    pub fn add(&mut self, name: OsString, value: XattrValue) {
+        self.pairs.insert(name, value);
+    }
+
+    /// Remove an extended attribute
+    pub fn remove(&mut self, name: &OsStr) {
+        self.pairs.remove(name);
+    }
+
+    /// Check whether there's any extended attribute.
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+}
+
+pub(crate) struct MetaRange {
+    start: u64,
+    size: u64,
+}
+
+impl MetaRange {
+    pub fn new(start: u64, size: u64, aligned_size: bool) -> std::io::Result<Self> {
+        let mask = RAFSV5_ALIGNMENT as u64 - 1;
+        if start & mask == 0
+            && (!aligned_size || size & mask == 0)
+            && start.checked_add(size).is_some()
+        {
+            Ok(MetaRange { start, size })
+        } else {
+            Err(einval!(format!(
+                "invalid metadata range {}:{}",
+                start, size
+            )))
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    #[allow(dead_code)]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn end(&self) -> u64 {
+        self.start + self.size
+    }
+
+    pub fn is_subrange_of(&self, other: &MetaRange) -> bool {
+        self.start >= other.start && self.end() <= other.end()
+    }
+
+    pub fn intersect_with(&self, other: &MetaRange) -> bool {
+        self.start < other.end() && self.end() > other.start
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +363,42 @@ mod tests {
 
         let value = parse_xattr_value(&buf, 7, &OsString::from("a")).unwrap();
         assert_eq!(value, Some(vec![b'b']));
+    }
+
+    #[test]
+    fn test_meta_range() {
+        assert!(MetaRange::new(u64::MAX, 1, true).is_err());
+        assert!(MetaRange::new(u64::MAX, 1, true).is_err());
+        assert!(MetaRange::new(1, 1, true).is_err());
+        assert!(MetaRange::new(8, 0, true).is_ok());
+        assert!(MetaRange::new(8, 1, true).is_err());
+        assert_eq!(MetaRange::new(8, 8, true).unwrap().start(), 8);
+        assert_eq!(MetaRange::new(8, 8, true).unwrap().size(), 8);
+        assert_eq!(MetaRange::new(8, 8, true).unwrap().end(), 16);
+
+        let range = MetaRange::new(16, 16, true).unwrap();
+
+        assert!(!MetaRange::new(0, 8, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(0, 16, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(8, 8, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(8, 16, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(8, 24, true).unwrap().is_subrange_of(&range));
+        assert!(MetaRange::new(16, 8, true).unwrap().is_subrange_of(&range));
+        assert!(MetaRange::new(16, 16, true).unwrap().is_subrange_of(&range));
+        assert!(MetaRange::new(24, 8, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(24, 16, true).unwrap().is_subrange_of(&range));
+        assert!(!MetaRange::new(32, 8, true).unwrap().is_subrange_of(&range));
+
+        assert!(!MetaRange::new(0, 8, true).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(0, 16, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(0, 24, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(8, 16, true).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(8, 8, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(16, 8, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(16, 16, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(16, 24, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(24, 8, true).unwrap().intersect_with(&range));
+        assert!(MetaRange::new(24, 16, true).unwrap().intersect_with(&range));
+        assert!(!MetaRange::new(32, 8, true).unwrap().intersect_with(&range));
     }
 }

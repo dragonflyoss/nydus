@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 #![deny(warnings)]
-#[macro_use(crate_authors, crate_version)]
+#[macro_use(crate_version)]
 extern crate clap;
 #[macro_use]
 extern crate log;
@@ -12,7 +12,6 @@ extern crate log;
 extern crate lazy_static;
 extern crate rafs;
 extern crate serde_json;
-
 #[macro_use]
 extern crate nydus_error;
 
@@ -29,34 +28,32 @@ use std::sync::{
 use std::thread;
 use std::{io, process};
 
+use clap::{App, Arg};
+use event_manager::{EventManager, EventSubscriber, SubscriberOps};
+use fuse_backend_rs::api::{Vfs, VfsOptions};
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
-
-use clap::{App, Arg};
-use fuse_backend_rs::api::{Vfs, VfsOptions};
-
-use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use vmm_sys_util::eventfd::EventFd;
 
+use nydus::FsBackendType;
 use nydus_api::http::start_http_thread;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
-mod daemon;
-use daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
-use nydus::FsBackendType;
+use self::api_server_glue::{ApiServer, ApiSeverSubscriber};
+use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
 #[cfg(feature = "virtiofs")]
-use virtiofs::create_nydus_daemon;
+use self::virtiofs::create_nydus_daemon;
 #[cfg(feature = "fusedev")]
 mod fusedev;
 #[cfg(feature = "fusedev")]
-use fusedev::create_nydus_daemon;
+use self::fusedev::create_nydus_daemon;
 
 mod api_server_glue;
+mod daemon;
 mod upgrade;
-use api_server_glue::{ApiServer, ApiSeverSubscriber};
 
 lazy_static! {
     static ref EVENT_MANAGER_RUN: AtomicBool = AtomicBool::new(true);
@@ -119,62 +116,58 @@ fn main() -> Result<()> {
 
     let cmd_arguments = App::new("")
         .version(bti_string.as_str())
-        .author(crate_authors!())
-        .about("Nydus image service")
+        .about("Nydus Image Service")
         .arg(
-            Arg::with_name("bootstrap")
-                .long("bootstrap")
-                .help("rafs bootstrap file")
+            Arg::with_name("apisock")
+                .long("apisock")
+                .short("A")
+                .help("Administration API socket")
                 .takes_value(true)
-                .min_values(1)
-                .conflicts_with("shared-dir"),
+                .required(false),
         )
         .arg(
             Arg::with_name("config")
                 .long("config")
-                .help("config file")
+                .short("C")
+                .help("Configuration file")
                 .takes_value(true)
                 .required(false)
-                .min_values(1),
         )
         .arg(
-            Arg::with_name("apisock")
-                .long("apisock")
-                .help("admin api socket path")
+            Arg::with_name("failover-policy")
+                .long("failover-policy")
+                .default_value("resend")
+                .help("Nydus image service failover policy")
+                .possible_values(&["resend", "flush"])
                 .takes_value(true)
-                .min_values(1),
+                .required(false)
+                .global(true),
         )
         .arg(
-            Arg::with_name("shared-dir")
-                .long("shared-dir")
-                .help("Shared directory path")
+            Arg::with_name("id")
+                .long("id")
+                .help("Nydus image service identifier")
                 .takes_value(true)
-                .min_values(1)
-                .conflicts_with("bootstrap"),
+                .required(false)
+                .requires("supervisor")
+                .global(true),
         )
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
+                .short("l")
+                .help("Log level:")
                 .default_value("info")
-                .help("Specify log level: trace, debug, info, warn, error")
-                .takes_value(true)
                 .possible_values(&["trace", "debug", "info", "warn", "error"])
+                .takes_value(true)
                 .required(false)
                 .global(true),
         )
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
-                .help("Specify the path to log file. If log filename has not extension, the default \".log\" will be added.")
-                .takes_value(true)
-                .required(false)
-                .global(true),
-        )
-        .arg(
-            Arg::with_name("rlimit-nofile")
-                .long("rlimit-nofile")
-                .default_value("1,000,000")
-                .help("set maximum number of file descriptors (0 leaves rlimit unchanged)")
+                .short("L")
+                .help("Log messages to the file. If file extension is not specified, the default extension \".log\" will be appended.")
                 .takes_value(true)
                 .required(false)
                 .global(true),
@@ -182,51 +175,45 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("prefetch-files")
                 .long("prefetch-files")
-                .help("Specify a files list hinting which files should be prefetched.")
+                .help("List of file/directory to prefetch")
                 .takes_value(true)
                 .required(false)
                 .multiple(true)
                 .global(true),
         )
         .arg(
+            Arg::with_name("rlimit-nofile")
+                .long("rlimit-nofile")
+                .default_value("1,000,000")
+                .help("Tune the maximum number of file descriptors (0 leaves rlimit unchanged)")
+                .takes_value(true)
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::with_name("supervisor")
                 .long("supervisor")
-                .help("A socket by which communicate to external supervisor")
+                .short("S")
+                .help("Supervisor API socket")
                 .takes_value(true)
                 .required(false)
                 .requires("id")
                 .global(true),
         )
         .arg(
-            Arg::with_name("id")
-                .long("id")
-                .help("Assigned ID to identify a daemon")
-                .takes_value(true)
-                .required(false)
-                .requires("supervisor")
-                .global(true),
-        )
-        .arg(
             Arg::with_name("upgrade")
                 .long("upgrade")
-                .help("Start nydusd in Upgrade mode")
+                .short("U")
+                .help("Start in upgrade mode")
                 .takes_value(false)
-                .required(false)
-                .global(true),
-        )
-        .arg(
-            Arg::with_name("failover-policy")
-                .long("failover-policy")
-                .default_value("resend")
-                .help("`flush` or `resend`")
-                .takes_value(true)
                 .required(false)
                 .global(true),
         )
         .arg(
             Arg::with_name("virtual-mountpoint")
                 .long("virtual-mountpoint")
-                .help("Mount bootstrap or shared-dir (if provided) to specificed virtual mountpoint")
+                .short("V")
+                .help("Virtual mountpoint for the filesystem")
                 .takes_value(true)
                 .default_value("/")
                 .required(false)
@@ -243,26 +230,56 @@ fn main() -> Result<()> {
     #[cfg(feature = "fusedev")]
     let cmd_arguments = cmd_arguments
         .arg(
+            Arg::with_name("bootstrap")
+                .long("bootstrap")
+                .short("B")
+                .help("Rafs filesystem bootstrap/metadata file")
+                .takes_value(true)
+                .conflicts_with("shared-dir"),
+        )
+        .arg(
+            Arg::with_name("shared-dir")
+                .long("shared-dir")
+                .short("s")
+                .help("Directory to pass through to the guest VM")
+                .takes_value(true)
+                .conflicts_with("bootstrap"),
+        )
+        .arg(
+            Arg::with_name("hybrid-mode")
+                .long("hybrid-mode")
+                .help("run nydusd in rafs and passthroughfs hybrid mode")
+                .required(false)
+                .takes_value(false)
+                .global(true),
+        );
+
+    #[cfg(feature = "fusedev")]
+    let cmd_arguments = cmd_arguments
+        .arg(
             Arg::with_name("mountpoint")
                 .long("mountpoint")
-                .help("fuse mount point")
+                .short("M")
+                .help("Fuse mount point")
                 .takes_value(true)
-                .min_values(1),
+                .required(true),
         )
         .arg(
             Arg::with_name("threads")
                 .long("thread-num")
+                .short("T")
                 .default_value("1")
-                .help("Specify the number of fuse service threads")
+                .help("Number of working threads to serve IO requests")
                 .takes_value(true)
                 .required(false)
                 .global(true)
                 .validator(|v| {
                     if let Ok(t) = v.parse::<i32>() {
-                        if t > 0 {
+                        if t > 0 || t > 1024 {
                             Ok(())
                         } else {
-                            Err("Zero thread count is not allowed".to_string())
+                            Err("Invalid working thread number {}, valid values: [1-1024]"
+                                .to_string())
                         }
                     } else {
                         Err("Input thread number is not legal".to_string())
@@ -280,9 +297,9 @@ fn main() -> Result<()> {
     let cmd_arguments = cmd_arguments.arg(
         Arg::with_name("sock")
             .long("sock")
-            .help("vhost-user socket path")
+            .help("Vhost-user API socket")
             .takes_value(true)
-            .min_values(1),
+            .required(true),
     );
 
     let cmd_arguments_parsed = cmd_arguments.get_matches();
@@ -294,7 +311,6 @@ fn main() -> Result<()> {
         .unwrap()
         .parse()
         .unwrap();
-
     setup_logging(logging_file, level)?;
 
     dump_program_info(crate_version!());
@@ -316,12 +332,11 @@ fn main() -> Result<()> {
 
     let mut opts = VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
-        info!(
-            "set rlimit {}, default {}",
-            rlimit_nofile, rlimit_nofile_default
-        );
-
         if rlimit_nofile != 0 {
+            info!(
+                "set rlimit {}, default {}",
+                rlimit_nofile, rlimit_nofile_default
+            );
             Resource::NOFILE.set(rlimit_nofile, rlimit_nofile)?;
         }
 
@@ -372,13 +387,12 @@ fn main() -> Result<()> {
     let vfs = Vfs::new(opts);
 
     let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
-
-    let vfs = Arc::new(vfs);
     let daemon_subscriber = Arc::new(NydusDaemonSubscriber::new()?);
     // Send an event to exit from Event Manager so as to exit from nydusd
     let exit_evtfd = daemon_subscriber.get_event_fd()?;
     event_manager.add_subscriber(daemon_subscriber);
 
+    let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = cmd_arguments_parsed.value_of("id").map(|id| id.to_string());
     let supervisor = cmd_arguments_parsed
@@ -478,5 +492,6 @@ fn main() -> Result<()> {
     daemon.stop().unwrap_or_else(|e| error!("{}", e));
     daemon.wait().unwrap_or_else(|e| error!("{}", e));
     info!("nydusd quits");
+
     Ok(())
 }

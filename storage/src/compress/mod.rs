@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::convert::TryFrom;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Error, Read, Result, Write};
@@ -17,7 +18,7 @@ use self::lz4_standard::*;
 
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Algorithm {
     None,
     Lz4Block,
@@ -45,6 +46,22 @@ impl FromStr for Algorithm {
             "lz4_block" => Ok(Self::Lz4Block),
             "gzip" => Ok(Self::GZip),
             _ => Err(einval!("compression algorithm should be none or lz4_block")),
+        }
+    }
+}
+
+impl TryFrom<u32> for Algorithm {
+    type Error = ();
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        if value == Algorithm::None as u32 {
+            Ok(Algorithm::None)
+        } else if value == Algorithm::Lz4Block as u32 {
+            Ok(Algorithm::Lz4Block)
+        } else if value == Algorithm::GZip as u32 {
+            Ok(Algorithm::GZip)
+        } else {
+            Err(())
         }
     }
 }
@@ -83,9 +100,10 @@ pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
     if (COMPRESSION_MINIMUM_RATIO == 100 && compressed.len() >= src_size)
         || ((100 * compressed.len() / src_size) >= COMPRESSION_MINIMUM_RATIO)
     {
-        return Ok((Cow::Borrowed(src), false));
+        Ok((Cow::Borrowed(src), false))
+    } else {
+        Ok((Cow::Owned(compressed), true))
     }
-    Ok((Cow::Owned(compressed), true))
 }
 
 /// Decompress a source slice or file stream into destination slice, with provided compression algorithm.
@@ -268,4 +286,53 @@ mod tests {
         assert_eq!(sz, 4097);
         assert_eq!(buf, decompressed);
     }
+}
+
+/// Estimate the maximum compressed data size from uncompressed data size.
+///
+/// Gzip is special that it doesn't carry compress_size. We need to read the maximum possible size
+/// of compressed data for `chunk_decompress_size`, and try to decompress `chunk_decompress_size`
+/// bytes of data out of it.
+//
+// Per man(1) gzip
+// The worst case expansion is a few bytes for the gzip file header, plus 5 bytes every 32K block,
+// or an expansion ratio of 0.015% for large files.
+//
+// Per http://www.zlib.org/rfc-gzip.html#header-trailer, each member has the following structure:
+// +---+---+---+---+---+---+---+---+---+---+
+// |ID1|ID2|CM |FLG|     MTIME     |XFL|OS | (more-->)
+// +---+---+---+---+---+---+---+---+---+---+
+// (if FLG.FEXTRA set)
+// +---+---+=================================+
+// | XLEN  |...XLEN bytes of "extra field"...| (more-->)
+// +---+---+=================================+
+// (if FLG.FNAME set)
+// +=========================================+
+// |...original file name, zero-terminated...| (more-->)
+// +=========================================+
+// (if FLG.FCOMMENT set)
+// +===================================+
+// |...file comment, zero-terminated...| (more-->)
+// +===================================+
+// (if FLG.FHCRC set)
+// +---+---+
+// | CRC16 |
+// +---+---+
+// +=======================+
+// |...compressed blocks...| (more-->)
+// +=======================+
+//   0   1   2   3   4   5   6   7
+// +---+---+---+---+---+---+---+---+
+// |     CRC32     |     ISIZE     |
+// +---+---+---+---+---+---+---+---+
+// gzip head+footer is at least 10+8 bytes, stargz header doesn't include any flags
+// so it's 18 bytes. Let's read at least 128 bytes more, to allow the decompressor to
+// find out end of the gzip stream.
+//
+// Ideally we should introduce a streaming cache for stargz that maintains internal
+// chunks and expose stream APIs.
+pub fn compute_compressed_gzip_size(size: usize, max_size: usize) -> usize {
+    let size = size + 10 + 8 + 5 + (size / (16 << 10)) * 5 + 128;
+
+    std::cmp::min(size, max_size)
 }

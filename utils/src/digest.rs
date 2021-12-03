@@ -5,6 +5,7 @@
 
 //! Fast message digest algorithms for Rafs and Nydus, including Blake3 and SHA256.
 
+use std::convert::TryFrom;
 use std::fmt;
 use std::io::Error;
 use std::str::FromStr;
@@ -12,7 +13,9 @@ use std::str::FromStr;
 use sha2::digest::Digest;
 use sha2::Sha256;
 
+/// Size in bytes of chunk digest value.
 pub const RAFS_DIGEST_LENGTH: usize = 32;
+
 type DigestData = [u8; RAFS_DIGEST_LENGTH];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,6 +44,20 @@ impl FromStr for Algorithm {
             "blake3" => Ok(Self::Blake3),
             "sha256" => Ok(Self::Sha256),
             _ => Err(einval!("digest algorithm should be blake3 or sha256")),
+        }
+    }
+}
+
+impl TryFrom<u32> for Algorithm {
+    type Error = ();
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        if value == Algorithm::Sha256 as u32 {
+            Ok(Algorithm::Sha256)
+        } else if value == Algorithm::Blake3 as u32 {
+            Ok(Algorithm::Blake3)
+        } else {
+            Err(())
         }
     }
 }
