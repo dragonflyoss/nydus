@@ -58,7 +58,7 @@ const EROFS_CHUNK_FORMAT_SIZE_MASK: u16 = 0x001F;
 /// Checksum of superblock, compatible with EROFS versions prior to Linux kernel 5.5.
 #[allow(dead_code)]
 const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
-/// Rafs v6 specific metadata, compatible with EROFS versions prior to Linux kernel 5.16.
+/// Rafs v6 specific metadata, compatible with EROFS versions since Linux kernel 5.16.
 const EROFS_FEATURE_COMPAT_RAFS_V6: u32 = 0x4000_0000;
 /// Chunked inode, incompatible with EROFS versions prior to Linux kernel 5.15.
 const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
@@ -146,14 +146,6 @@ impl RafsV6SuperBlock {
             Err(einval!("invalid blocks in Rafsv6 superblock"))
         } else if u16::from_le(self.s_u) != 0 {
             Err(einval!("invalid union field in Rafsv6 superblock"))
-        } else if u32::from_le(self.s_meta_blkaddr) == 0 {
-            Err(einval!(
-                "invalid metadata block address in Rafsv6 superblock"
-            ))
-        } else if u32::from_le(self.s_xattr_blkaddr) != 0 {
-            Err(einval!(
-                "invalid extended attribute block address in Rafsv6 superblock"
-            ))
         } else if u64::from_le(self.s_build_time) != 0 || u32::from_le(self.s_build_time_nsec) != 0
         {
             Err(einval!("invalid build time in Rafsv6 superblock"))
@@ -167,7 +159,7 @@ impl RafsV6SuperBlock {
             != EROFS_FEATURE_COMPAT_RAFS_V6
         {
             Err(einval!(
-                "invalid incompatible feature bits in Rafsv6 superblock"
+                "invalid compatible feature bits in Rafsv6 superblock"
             ))
         } else {
             Ok(())
