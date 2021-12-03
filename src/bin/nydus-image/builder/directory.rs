@@ -11,7 +11,8 @@ use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
-    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, RafsVersion,
+    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    RafsVersion,
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
@@ -109,7 +110,7 @@ impl Builder for DirectoryBuilder {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
-    ) -> Result<(Vec<String>, u64)> {
+    ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         // Scan source directory to build upper layer tree.
         let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx)?;
@@ -135,7 +136,7 @@ impl Builder for DirectoryBuilder {
 
         let blob_index = blob_mgr.alloc_index()?;
         let mut blob = Blob::new();
-        timing_tracer!(
+        let blob_exists = timing_tracer!(
             {
                 blob.dump(
                     ctx,
@@ -147,17 +148,23 @@ impl Builder for DirectoryBuilder {
             },
             "dump_blob"
         )?;
-        blob.flush(&mut blob_ctx)?;
 
         // Add new blob to blob table
-        if blob_ctx.compressed_blob_size > 0 {
-            blob_mgr.add(blob_ctx);
-        }
+        blob_mgr.add(if blob_exists { Some(blob_ctx) } else { None });
 
         // Dump bootstrap file
         match ctx.fs_version {
-            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, blob_mgr),
-            RafsVersion::V6 => bootstrap.dump_rafsv6(ctx, &mut bootstrap_ctx, blob_mgr),
+            RafsVersion::V5 => {
+                let blob_table = blob_mgr.to_blob_table_v5(ctx, None)?;
+                bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &blob_table)?
+            }
+            RafsVersion::V6 => {
+                let blob_table = blob_mgr.to_blob_table_v6(ctx, None)?;
+                bootstrap.dump_rafsv6(ctx, &mut bootstrap_ctx, &blob_table)?
+            }
         }
+
+        bootstrap_mgr.add(bootstrap_ctx);
+        BuildOutput::new(&blob_mgr, &bootstrap_mgr, 0)
     }
 }

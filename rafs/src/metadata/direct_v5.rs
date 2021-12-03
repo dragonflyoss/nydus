@@ -530,7 +530,10 @@ impl RafsInode for OndiskInodeWrapper {
         if inode.is_reg() {
             let chunks = (inode.i_size + chunk_size - 1) / chunk_size;
             if !inode.has_hole() && chunks != inode.i_child_count as u64 {
-                return Err(einval!("invalid chunk count"));
+                return Err(einval!(format!(
+                    "invalid chunk count, ino {}, expected {}, actual {}",
+                    inode.i_ino, chunks, inode.i_child_count,
+                )));
             }
             let size = inode.size()
                 + xattr_size

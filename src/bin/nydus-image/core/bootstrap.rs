@@ -5,7 +5,6 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
-use std::io::Write;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
@@ -20,14 +19,10 @@ use rafs::metadata::layout::v6::{
 use rafs::RafsIoWrite;
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
-use rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperFlags};
-use storage::device::BlobFeatures;
+use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
-use super::context::{
-    BlobManager, BootstrapContext, BootstrapManager, BuildContext, RafsVersion, SourceType,
-};
+use super::context::{BlobManager, BootstrapContext, BootstrapManager, BuildContext, SourceType};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
-use super::prefetch::PrefetchPolicy;
 use super::tree::Tree;
 
 pub(crate) const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
@@ -363,22 +358,8 @@ impl Bootstrap {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
-        blob_mgr: &mut BlobManager,
-    ) -> Result<(Vec<String>, u64)> {
-        let blob_ctx = blob_mgr.current();
-
-        let blob_size = if let Some(blob_ctx) = blob_ctx {
-            if (blob_ctx.compressed_blob_size > 0
-                || (ctx.source_type == SourceType::StargzIndex && !blob_ctx.blob_id.is_empty()))
-                && ctx.prefetch.policy != PrefetchPolicy::Blob
-            {
-                blob_ctx.blob_readahead_size = 0;
-            }
-            blob_ctx.compressed_blob_size
-        } else {
-            0
-        };
-
+        blob_table: &RafsV5BlobTable,
+    ) -> Result<()> {
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
         for idx in (0..bootstrap_ctx.nodes.len()).rev() {
             self.digest_node(ctx, bootstrap_ctx, idx);
@@ -399,7 +380,6 @@ impl Bootstrap {
             };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
-        let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
         let prefetch_table_offset = super_block_size + inode_table_size;
         let blob_table_offset = prefetch_table_offset + prefetch_table_size;
         let blob_table_size = blob_table.size();
@@ -509,16 +489,9 @@ impl Bootstrap {
             Result<()>
         )?;
 
-        // Flush remaining data in BufWriter to file
-        bootstrap_writer.flush()?;
+        bootstrap_writer.release(Some(bootstrap_ctx.name.as_str()))?;
 
-        let blob_ids: Vec<String> = blob_table
-            .entries
-            .iter()
-            .map(|entry| entry.blob_id().to_owned())
-            .collect();
-
-        Ok((blob_ids, blob_size))
+        Ok(())
     }
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
@@ -526,8 +499,8 @@ impl Bootstrap {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
-        blob_mgr: &mut BlobManager,
-    ) -> Result<(Vec<String>, u64)> {
+        blob_table: &RafsV6BlobTable,
+    ) -> Result<()> {
         // Rafs v6 disk layout
         //
         //  EROFS_SUPER_OFFSET
@@ -539,7 +512,6 @@ impl Bootstrap {
         // |   |         |devslot     |             |                                                                   |
         // +---+---------+------------+-------------+-------------------------------------------------------------------+
 
-        let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
         let blob_table_size = blob_table.size() as u64;
         let bootstrap_writer = &mut bootstrap_ctx.create_writer()? as &mut dyn RafsIoWrite;
 
@@ -652,90 +624,6 @@ impl Bootstrap {
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
 
-        let mut blob_size = 0;
-        let mut blob_ids = Vec::new();
-        for blob in &blob_mgr.blobs {
-            blob_ids.push(blob.blob_id.clone());
-        }
-        if let Some(blob) = blob_mgr.current() {
-            blob_size = blob.compressed_blob_size;
-        }
-
-        Ok((blob_ids, blob_size))
-    }
-}
-
-impl BlobManager {
-    pub fn to_blob_table_v5(&self, build_ctx: &BuildContext) -> Result<RafsV5BlobTable> {
-        let mut blob_table = RafsV5BlobTable::new();
-
-        for ctx in &self.blobs {
-            let blob_id = ctx.blob_id.clone();
-            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
-            let chunk_count = ctx.chunk_count;
-            let decompressed_blob_size = ctx.decompressed_blob_size;
-            let compressed_blob_size = ctx.compressed_blob_size;
-            let blob_features = BlobFeatures::empty();
-
-            let mut flags = RafsSuperFlags::empty();
-            match build_ctx.fs_version {
-                RafsVersion::V5 => {
-                    flags |= RafsSuperFlags::from(build_ctx.compressor);
-                    flags |= RafsSuperFlags::from(build_ctx.digester);
-                }
-                RafsVersion::V6 => todo!(),
-            }
-
-            blob_table.add(
-                blob_id,
-                0,
-                blob_readahead_size,
-                ctx.chunk_size,
-                chunk_count,
-                decompressed_blob_size,
-                compressed_blob_size,
-                blob_features,
-                flags,
-            );
-        }
-
-        Ok(blob_table)
-    }
-
-    pub fn to_blob_table_v6(&self, build_ctx: &BuildContext) -> Result<RafsV6BlobTable> {
-        let mut blob_table = RafsV6BlobTable::new();
-
-        for ctx in &self.blobs {
-            let blob_id = ctx.blob_id.clone();
-            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
-            let chunk_count = ctx.chunk_count;
-            let decompressed_blob_size = ctx.decompressed_blob_size;
-            let compressed_blob_size = ctx.compressed_blob_size;
-            let blob_features = BlobFeatures::empty();
-
-            let mut flags = RafsSuperFlags::empty();
-            match build_ctx.fs_version {
-                RafsVersion::V5 => todo!(),
-                RafsVersion::V6 => {
-                    flags |= RafsSuperFlags::from(build_ctx.compressor);
-                    flags |= RafsSuperFlags::from(build_ctx.digester);
-                }
-            }
-
-            blob_table.add(
-                blob_id,
-                0,
-                blob_readahead_size,
-                ctx.chunk_size,
-                chunk_count,
-                decompressed_blob_size,
-                compressed_blob_size,
-                blob_features,
-                flags,
-                ctx.blob_meta_header,
-            );
-        }
-
-        Ok(blob_table)
+        Ok(())
     }
 }
