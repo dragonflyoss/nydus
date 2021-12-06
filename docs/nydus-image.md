@@ -24,7 +24,7 @@ Nydus-image tool writes data portion into a file which is generally called `blob
 
 - With `--blob <BLOB_FILE>` option, nydus-image tool will write blob contents into the custom file path `BLOB_FILE`
 
-- With `--blob-dir BLOB_DIR` provided to command, nydus-image tool creates the blob file named as its sha-256 digest. This is useful when you don't want to set a custom name or you are building a layered nydus image. Please create the `BLOB_DIR` before perform the command.
+- With `--blob-dir BLOB_DIR` provided to command, nydus-image tool creates the blob file named as its sha-256 digest. This is useful when you don't want to set a custom name or you are building a layered nydus image. Please create the `BLOB_DIR` before performing the command.
 
 Generally, this is regular file which blob content will be dumped into. It can also be a fifo(named pipe) from which nydusify or other tool can receive blob content.
 
@@ -77,4 +77,4 @@ nydus-image create \
   /path/to/stargz.index.upper.json
 ```
 
-Note: the argument value of image layer id specified in nydus-image CLI should omit `sha256:` prefix.
+**Note**: the argument value of image layer id specified in nydus-image CLI should omit `sha256:` prefix.
