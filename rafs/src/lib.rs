@@ -64,7 +64,7 @@ pub enum RafsError {
     Configure(String),
 }
 
-/// Speicialized version of std::result::Result<> for Rafs.
+/// Specialized version of std::result::Result<> for Rafs.
 pub type RafsResult<T> = std::result::Result<T, RafsError>;
 
 /// Handler to read file system bootstrap.

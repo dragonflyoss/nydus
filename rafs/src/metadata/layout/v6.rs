@@ -1143,10 +1143,11 @@ impl RafsV6Blob {
         }
 
         let uncompressed_size = u64::from_le(self.uncompressed_size);
-        if uncompressed_size & (EROFS_BLOCK_SIZE as u64 - 1) != 0
-            || uncompressed_size >= (1u64 << 44)
-        {
-            error!("RafsV6Blob: invalid uncompressd_size {}", uncompressed_size);
+        if uncompressed_size >= (1u64 << 44) {
+            error!(
+                "RafsV6Blob: invalid uncompressed_size {}",
+                uncompressed_size
+            );
             return false;
         }
 
