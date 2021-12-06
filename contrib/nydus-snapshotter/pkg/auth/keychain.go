@@ -79,6 +79,17 @@ func FromLabels(labels map[string]string) *PassKeyChain {
 	}
 }
 
+// GetRegistryKeyChain get image pull kaychain from (ordered):
+// 1. username and secrets labels
+// 2. docker config
+func GetRegistryKeyChain(host string, labels map[string]string) *PassKeyChain {
+	kc := FromLabels(labels)
+	if kc != nil {
+		return kc
+	}
+	return FromDockerConfig(host)
+}
+
 func (kc PassKeyChain) Resolve(target authn.Resource) (authn.Authenticator, error) {
 	return authn.FromConfig(kc.toAuthConfig()), nil
 }
