@@ -18,7 +18,7 @@ With option `prefetch-policy`, `nydus-image` tries to read stdin to gather a lis
 
 Note that, `fs_prefetch` has to be enabled in rafs configuration file if prefetch is required.
 
-### 1 File System Level
+### 1. File System Level
 
 Nydus issues prefetch requests to backend and pulls needed chunks to local storage. So read IO can hit the blobcache which was previously filled by prefetch. Speaking of file system level prefetch, the prefetch request is issued from Rafs layer. So it is easier to better understand about files layout on disk, the relationship between files and directories. Prefetch works on top of file system is born of agility and very nimble.
 
@@ -37,7 +37,7 @@ Prefetch is configurable by Rafs configuration file.
   In unit of bytes.
   In order to mitigate possible backend bandwidth contention, we can give a bandwidth ratelimit to prefetch. Note that the `bandwidth_rate` sets the limit to the aggregated backend bandwidth consumed by all the threads configured by `threads_count`. So with a lower `bandwidth_rate` limit, more prefetch threads might be meaningless.
 
-A rafs configuration file (only $.fs_prefetch shows, other properties are omitted) follows:
+A rafs configuration file (only `$.fs_prefetch` shows, other properties are omitted) follows:
 
 ```json
 {
@@ -67,7 +67,7 @@ Nydus can now only prefetch data from backend by an explicit hint either from pr
 - User IO triggered, block-level readahead.
 - Prefetch the parent directory if one of its child is read.
 
-### 2 Blob Level
+### 2. Blob Level
 
 Not like file system level prefetch, blob level prefetch directly pre-fetches a contiguous region from blob when nydusd started. This prefetch procedure is not aware of files, directories and chunks structures. When creating nydus image, a range descriptor composed of `readahead_offset` and `readahead_length` is written bootstrap. But blob level prefetch **won't** cache any data into blobcache or any other kind of cache. It works at `StorageBackend` level which is lower than `RafsCache`. For now, blob level prefetch only benefits `LocalFs` specific backend. In particular, `LocalFs` backend can perform Linux system call `readahead(2)` to load data from `readahead_offset` up to `readahead_length` bytes.
 

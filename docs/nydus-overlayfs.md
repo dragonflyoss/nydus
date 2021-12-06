@@ -2,8 +2,9 @@
 
 `nydus-overlayfs` is a FUSE(Filesystem in UserSpacE) mount helper command for containerd to use with Nydus. The document explains in a nutshell on how it works.
 
-When the `--enable-nydus-overlayfs` option is specified, `nydus-snapshotter` `Mount()` method returns a mount slice like
-```shell
+When the `--enable-nydus-overlayfs` option is specified, `nydus-snapshotter`'s `Mount()` method returns a mount slice like
+
+```json
 [
     {
         Type: "fuse.nydus-overlayfs",
@@ -35,6 +36,6 @@ And `nydus-overlayfs` parses the mount options, filters out `extraoption`, and c
 mount -t overlay overlay ./foo/merged -o lowerdir=./foo/lower2:./foo/lower1,upperdir=./foo/upper,workdir=./foo/work,dev,suid
 ```
 
-Meanwhile, when ncontainerd passes the `nydus-snapshotter` mount slice to `containerd-shim-kata-v2`, it can parse the mount slice and pass the `extraoption` to `nydusd`, to support nydus image format natively.
+Meanwhile, when containerd passes the `nydus-snapshotter` mount slice to `containerd-shim-kata-v2`, it can parse the mount slice and pass the `extraoption` to `nydusd`, to support nydus image format natively.
 
 So in summary, `containerd` and `containerd-shim-runc-v2` rely on the `nydus-overlay` mount helper to handle the mount slice returned by `nydus-snapshotter`, while `containerd-shim-kata-v2` can parse and handle it on its own.
