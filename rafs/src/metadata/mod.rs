@@ -285,6 +285,7 @@ pub struct RafsSuperMeta {
     pub attr_timeout: Duration,
     /// Default inode timeout value.
     pub entry_timeout: Duration,
+    pub meta_blkaddr: u64,
 }
 
 impl RafsSuperMeta {
@@ -349,6 +350,7 @@ impl Default for RafsSuperMeta {
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
             entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
+            meta_blkaddr: 0,
         }
     }
 }

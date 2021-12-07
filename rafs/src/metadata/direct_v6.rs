@@ -1,7 +1,6 @@
 // Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
-
 /// A bootstrap driver to directly use on disk bootstrap as runtime in-memory bootstrap.
 ///
 /// To reduce memory footprint and speed up filesystem initialization, the V5 on disk bootstrap
@@ -17,6 +16,9 @@
 /// The bootstrap file may be provided by untrusted parties, so we must ensure strong validations
 /// before making use of any bootstrap, especially we are using them in memory-mapped mode. The
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
+use std::any::Any;
+use std::ffi::{OsStr, OsString};
+
 use std::fs::File;
 use std::io::{Result, SeekFrom};
 // use std::mem::size_of;
@@ -25,15 +27,26 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE};
+use crate::metadata::layout::v6::EROFS_BLOCK_SIZE;
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
-    Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
+    layout::{
+        v6::{RafsV6BlobTable, RafsV6InodeExtended, EROFS_INODE_SLOT_SIZE},
+        XattrName, XattrValue,
+    },
+    {
+        Attr, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes,
+        RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
+    },
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
-use nydus_utils::digest::Algorithm;
-use storage::device::BlobInfo;
+use nydus_utils::digest::{Algorithm, RafsDigest};
+use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 use storage::utils::readahead;
+
+// Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for DirectSuperBlockV6 {}
+unsafe impl Sync for DirectSuperBlockV6 {}
 
 /// The underlying struct to maintain memory mapped bootstrap for a file system.
 ///
@@ -95,15 +108,8 @@ impl DirectMappingState {
     //     Ok(())
     // }
 }
-
 impl Drop for DirectMappingState {
     fn drop(&mut self) {
-        // Drop the inode_table if it's not a memory-mapped one.
-        // if !self.mmapped_inode_table {
-        //     unsafe {
-        //         ManuallyDrop::drop(&mut self.inode_table);
-        //     }
-        // }
         if !self.base.is_null() {
             unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, self.size) };
             self.base = std::ptr::null();
@@ -123,10 +129,6 @@ pub struct DirectSuperBlockV6 {
     state: ArcSwap<DirectMappingState>,
 }
 
-// Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for DirectSuperBlockV6 {}
-unsafe impl Sync for DirectSuperBlockV6 {}
-
 impl DirectSuperBlockV6 {
     /// Create a new instance of `DirectSuperBlockV6`.
     pub fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
@@ -135,6 +137,19 @@ impl DirectSuperBlockV6 {
         Self {
             state: ArcSwap::new(Arc::new(state)),
         }
+    }
+
+    pub fn get_inode_wrapper(&self, nid: u64) -> Result<OndiskInodeWrapper> {
+        Ok(OndiskInodeWrapper {
+            mapping: self.clone(),
+            // TODO(chge): ensure safety
+            offset: self.calculate_inode_offset(nid) as usize,
+        })
+    }
+
+    fn calculate_inode_offset(&self, nid: u64) -> u64 {
+        let meta_offset = self.state.load().meta.meta_blkaddr;
+        meta_offset + nid * EROFS_INODE_SLOT_SIZE as u64
     }
 
     #[allow(clippy::cast_ptr_alignment)]
@@ -206,8 +221,8 @@ impl DirectSuperBlockV6 {
             validate_digest,
         };
 
-        // Swap new and old DirectMappingState object, the old object will be destroyed when the
-        // reference count reaches zero.
+        // Swap new and old DirectMappingState object,
+        // the old object will be destroyed when the reference count reaches zero.
         self.state.store(Arc::new(state));
 
         Ok(())
@@ -220,8 +235,9 @@ impl RafsSuperInodes for DirectSuperBlockV6 {
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
-    fn get_inode(&self, _ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
-        todo!()
+    fn get_inode(&self, ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
+        let wrapper = self.get_inode_wrapper(ino)?;
+        Ok(Arc::new(wrapper) as Arc<dyn RafsInode>)
     }
 
     fn validate_digest(
@@ -257,5 +273,204 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
 
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         self.state.load().blob_table.entries.clone()
+    }
+}
+
+pub struct OndiskInodeWrapper {
+    pub mapping: DirectSuperBlockV6,
+    pub offset: usize,
+}
+
+impl OndiskInodeWrapper {
+    fn disk_inode(&self) -> &RafsV6InodeExtended {
+        let m = self.mapping.state.load();
+        unsafe { &*(m.base.add(self.offset) as *const RafsV6InodeExtended) }
+    }
+}
+
+// TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
+#[allow(unused_variables)]
+impl RafsInode for OndiskInodeWrapper {
+    #[allow(clippy::collapsible_if)]
+    fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
+        todo!()
+    }
+
+    fn get_entry(&self) -> Entry {
+        let state = self.mapping.state.load();
+        let inode = self.disk_inode();
+
+        Entry {
+            attr: self.get_attr().into(),
+            inode: inode.i_ino as u64,
+            generation: 0,
+            attr_timeout: state.meta.attr_timeout,
+            entry_timeout: state.meta.entry_timeout,
+            ..Default::default()
+        }
+    }
+
+    fn get_attr(&self) -> Attr {
+        let inode = self.disk_inode();
+
+        // TODO(chge): Calculate blocks count from isize later.
+        // TODO(chge): Include `rdev` into ondisk v6 extended inode.
+        Attr {
+            ino: inode.i_ino as u64,
+            size: inode.i_size,
+            mode: inode.i_mode as u32,
+            nlink: inode.i_nlink,
+            uid: inode.i_uid,
+            gid: inode.i_gid,
+            mtime: inode.i_mtime,
+            mtimensec: inode.i_mtime_nsec,
+            blksize: RAFS_INODE_BLOCKSIZE,
+            ..Default::default()
+        }
+    }
+
+    /// Check whether the inode has extended attributes.
+    fn has_xattr(&self) -> bool {
+        todo!()
+    }
+
+    /// Get symlink target of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn get_symlink(&self) -> Result<OsString> {
+        todo!()
+    }
+
+    /// Get the child with the specified name.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+        todo!()
+    }
+
+    /// Get the child with the specified index.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    /// `idx` is the number of child files in line. So we can keep the term `idx`
+    /// in super crate and keep it consistent with layout v5.
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>> {
+        todo!()
+    }
+
+    #[inline]
+    fn get_child_count(&self) -> u32 {
+        todo!()
+    }
+
+    fn get_child_index(&self) -> Result<u32> {
+        todo!()
+    }
+
+    #[inline]
+    fn get_chunk_count(&self) -> u32 {
+        self.get_child_count()
+    }
+
+    /// Get chunk information with index `idx`
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    #[allow(clippy::cast_ptr_alignment)]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
+        todo!()
+    }
+
+    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
+        todo!()
+    }
+
+    fn get_xattrs(&self) -> Result<Vec<XattrName>> {
+        todo!()
+    }
+
+    fn ino(&self) -> u64 {
+        todo!()
+    }
+
+    /// Get name of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn name(&self) -> OsString {
+        todo!()
+    }
+
+    fn flags(&self) -> u64 {
+        todo!()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        todo!()
+    }
+
+    fn is_dir(&self) -> bool {
+        todo!()
+    }
+
+    /// Check whether the inode is a symlink.
+    fn is_symlink(&self) -> bool {
+        todo!()
+    }
+
+    /// Check whether the inode is a regular file.
+    fn is_reg(&self) -> bool {
+        todo!()
+    }
+
+    /// Check whether the inode is a hardlink.
+    fn is_hardlink(&self) -> bool {
+        todo!()
+    }
+
+    /// Get inode number of the parent directory.
+    fn parent(&self) -> u64 {
+        todo!()
+    }
+
+    /// Get real device number of the inode.
+    fn rdev(&self) -> u32 {
+        todo!()
+    }
+
+    /// Get project id associated with the inode.
+    fn projid(&self) -> u32 {
+        todo!()
+    }
+
+    /// Get data size of the inode.
+    fn size(&self) -> u64 {
+        todo!()
+    }
+
+    /// Get file name size of the inode.
+    fn get_name_size(&self) -> u16 {
+        todo!()
+    }
+
+    fn get_symlink_size(&self) -> u16 {
+        todo!()
+    }
+
+    fn collect_descendants_inodes(
+        &self,
+        descendants: &mut Vec<Arc<dyn RafsInode>>,
+    ) -> Result<usize> {
+        todo!()
+    }
+
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+        todo!()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
