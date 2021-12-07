@@ -18,20 +18,23 @@
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
 use std::any::Any;
 use std::ffi::{OsStr, OsString};
-
 use std::fs::File;
 use std::io::{Result, SeekFrom};
+use std::mem::size_of;
 // use std::mem::size_of;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::metadata::layout::v6::EROFS_BLOCK_SIZE;
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
     layout::{
-        v6::{RafsV6BlobTable, RafsV6InodeExtended, EROFS_INODE_SLOT_SIZE},
+        bytes_to_os_str,
+        v6::{
+            RafsV6BlobTable, RafsV6Dirent, RafsV6InodeExtended, EROFS_BLOCK_SIZE,
+            EROFS_INODE_SLOT_SIZE,
+        },
         XattrName, XattrValue,
     },
     {
@@ -40,7 +43,10 @@ use crate::metadata::{
     },
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
-use nydus_utils::digest::{Algorithm, RafsDigest};
+use nydus_utils::{
+    digest::{Algorithm, RafsDigest},
+    div_round_up,
+};
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 use storage::utils::readahead;
 
@@ -286,6 +292,68 @@ impl OndiskInodeWrapper {
         let m = self.mapping.state.load();
         unsafe { &*(m.base.add(self.offset) as *const RafsV6InodeExtended) }
     }
+    // COPIED from kernel code:
+    // >
+    // erofs inode data layout (i_format in on-disk inode):
+    // 0 - inode plain without inline data A:
+    // inode, [xattrs], ... | ... | no-holed data
+    // 1 - inode VLE compression B (legacy):
+    // inode, [xattrs], extents ... | ...
+    // 2 - inode plain with inline data C:
+    // inode, [xattrs], last_inline_data, ... | ... | no-holed data
+    // 3 - inode compression D:
+    // inode, [xattrs], map_header, extents ... | ...
+    // 4 - inode chunk-based E:
+    // inode, [xattrs], chunk indexes ... | ...
+    // 5~7 - reserved
+
+    fn data_block_mapping(&self, index: usize) -> *const u8 {
+        let inode = self.disk_inode();
+        assert!(inode.i_format == 0 || inode.i_format == 2 || inode.i_format == 4);
+        // With legal format set, we can reliably refer `i_u` as raw blocks pointer.
+        let m = self.mapping.state.load();
+        unsafe {
+            m.base.add(
+                // `i_u` points to the Nth block
+                self.offset
+                    + (inode.i_u as u64 * EROFS_BLOCK_SIZE) as usize
+                    + index * EROFS_BLOCK_SIZE as usize,
+            )
+        }
+    }
+
+    fn get_entry(&self, block_index: usize, index: usize) -> &RafsV6Dirent {
+        // TODO: We indeed need safety check here.
+        let block_mapping = self.data_block_mapping(block_index);
+        unsafe { &*(block_mapping.add(size_of::<RafsV6Dirent>() * index) as *const RafsV6Dirent) }
+    }
+
+    // `max_entries` indicates the quantity of entries residing in a single block.
+    // Both `block_index` and `index` start from 0.
+    fn entry_name(&self, block_index: usize, index: usize, max_entries: usize) -> &OsStr {
+        let block_mapping = self.data_block_mapping(block_index);
+        // TODO: Handle the case with inlined tail packing data.
+        let de = self.get_entry(block_index, index);
+        if index < max_entries - 1 {
+            let next_de = self.get_entry(block_index, index + 1);
+            let len = next_de.e_nameoff - de.e_nameoff;
+            unsafe {
+                bytes_to_os_str(std::slice::from_raw_parts(
+                    block_mapping.add(de.e_nameoff as usize),
+                    len as usize,
+                ))
+            }
+        } else {
+            // We can safely do this as name does not span two blocks, and encountered zero
+            // will stop UTF-8 decoding
+            unsafe {
+                bytes_to_os_str(std::slice::from_raw_parts(
+                    block_mapping.add(de.e_nameoff as usize),
+                    (EROFS_BLOCK_SIZE - de.e_nameoff as u64) as usize,
+                ))
+            }
+        }
+    }
 }
 
 // TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
@@ -347,7 +415,45 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
-        todo!()
+        let inode = self.disk_inode();
+
+        if inode.i_size == 0 {
+            return Err(enoent!());
+        }
+
+        let blocks_count = div_round_up(inode.i_size, EROFS_BLOCK_SIZE);
+        let mut target: Option<u64> = None;
+
+        let nid = 'outer: for i in 0..blocks_count {
+            let head_entry = self.get_entry(i as usize, 0);
+            // `e_nameoff` is offset from each single block?
+            let name_offset = head_entry.e_nameoff;
+            let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
+
+            let d_name = self.entry_name(i as usize, 0, entries_count as usize);
+
+            if d_name == name {
+                target = Some(head_entry.e_nid);
+                break 'outer;
+            }
+
+            // TODO: Let binary search optimize this in the future.
+            for j in 1..entries_count {
+                let de = self.get_entry(i as usize, j as usize);
+                let d_name = self.entry_name(i as usize, j as usize, entries_count as usize);
+
+                if d_name == name {
+                    target = Some(head_entry.e_nid);
+                    break 'outer;
+                }
+            }
+        };
+
+        if let Some(nid) = target {
+            Ok(Arc::new(self.mapping.get_inode_wrapper(nid)?) as Arc<dyn RafsInode>)
+        } else {
+            Err(enoent!())
+        }
     }
 
     /// Get the child with the specified index.
