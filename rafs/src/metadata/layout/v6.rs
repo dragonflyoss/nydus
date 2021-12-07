@@ -568,28 +568,29 @@ impl RafsStore for RafsV6InodeCompact {
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RafsV6InodeExtended {
     /// Layout format for of the inode.
-    i_format: u16,
+    pub i_format: u16,
     /// TODO: doc
-    i_xattr_icount: u16,
+    pub i_xattr_icount: u16,
     /// Protection mode.
-    i_mode: u16,
+    pub i_mode: u16,
     i_reserved: u16,
     /// Size of the file content.
-    i_size: u64,
-    /// A `u32` union: raw_blkaddr or rdev or rafs_v6_inode_chunk_info
-    i_u: u32,
+    pub i_size: u64,
+    /// A `u32` union: raw_blkaddr or `rdev` or `rafs_v6_inode_chunk_info`
+    /// TODO: Use this field like C union style.
+    pub i_u: u32,
     /// Inode number.
-    i_ino: u32,
+    pub i_ino: u32,
     /// User ID of owner.
-    i_uid: u32,
+    pub i_uid: u32,
     /// Group ID of owner
-    i_gid: u32,
-    /// Time of last modification.
-    i_mtime: u64,
-    /// Time of last modification.
-    i_mtime_nsec: u32,
-    /// Number of hard links.
-    i_nlink: u32,
+    pub i_gid: u32,
+    /// Time of last modification - second part.
+    pub i_mtime: u64,
+    /// Time of last modification - nanoseconds part.
+    pub i_mtime_nsec: u32,
+    /// Number of links.
+    pub i_nlink: u32,
     i_reserved2: [u8; 16],
 }
 
