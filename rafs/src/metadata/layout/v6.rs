@@ -684,11 +684,11 @@ impl RafsStore for RafsV6InodeExtended {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct RafsV6Dirent {
     /// Node number, inode offset = s_meta_blkaddr * 4096 + nid * 32
-    e_nid: u64,
+    pub e_nid: u64,
     /// start offset of file name in the block
-    e_nameoff: u16,
+    pub e_nameoff: u16,
     /// file type
-    e_file_type: u8,
+    pub e_file_type: u8,
     /// reserved
     e_reserved: u8,
 }
@@ -737,7 +737,6 @@ impl RafsV6Dirent {
 impl RafsStore for RafsV6Dirent {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
-
         Ok(self.as_ref().len())
     }
 }
