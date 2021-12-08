@@ -237,7 +237,9 @@ impl DirectSuperBlockV6 {
 
 impl RafsSuperInodes for DirectSuperBlockV6 {
     fn get_max_ino(&self) -> Inode {
-        todo!()
+        // Library fuse-rs has limit of underlying file system's maximum inode number.
+        // TODO: So we rafs v6 should record it when building
+        0xff_ffff_ffff_ffff - 1
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
