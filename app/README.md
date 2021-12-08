@@ -1,4 +1,4 @@
-# nydus-error
+# nydus-app
 
 The `nydus-app` crate is a collection of utilities to help creating applications for [`Nydus Image Service`](https://github.com/dragonflyoss/image-service) project, which provides:
 - `struct BuildTimeInfo`: application build and version information.
@@ -23,7 +23,7 @@ Add `nydus-app` as a dependency in `Cargo.toml`
 nydus-app = "*"
 ```
 
-Then add `extern crate nydus-error;` to your crate root if needed.
+Then add `extern crate nydus-app;` to your crate root if needed.
 
 ## Examples
 
