@@ -339,11 +339,17 @@ Blocks:             {blocks}"#,
                         let path = self.path_from_ino(inode.i_parent).unwrap();
                         println!(
                             r#"
-    {:width$} Parent Path {:width$}
+    File: {:width$} Parent Path: {:width$}
+    Compressed Offset: {}, Compressed Size: {}
+    Decompressed Offset: {}, Decompressed Size: {}
     Chunk ID: {:50}, Blob ID: {}
 "#,
                             name.to_string_lossy(),
                             path.to_string_lossy(),
+                            c.compress_offset,
+                            c.compress_size,
+                            c.decompress_offset,
+                            c.decompress_size,
                             c.block_id,
                             if let Ok(ref blob) = self.blobs_table.get(c.blob_index) {
                                 &blob.blob_id
