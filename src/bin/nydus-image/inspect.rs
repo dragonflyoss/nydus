@@ -349,11 +349,17 @@ Blocks:             {blocks}"#,
                         let path = self.path_from_ino(inode.parent()).unwrap();
                         println!(
                             r#"
-    {:width$} Parent Path {:width$}
+    File: {:width$} Parent Path: {:width$}
+    Compressed Offset: {}, Compressed Size: {}
+    Decompressed Offset: {}, Decompressed Size: {}
     Chunk ID: {:50}, Blob ID: {}
 "#,
                             name.to_string_lossy(),
                             path.to_string_lossy(),
+                            c.compress_offset,
+                            c.compress_size,
+                            c.decompress_offset,
+                            c.decompress_size,
                             c.block_id,
                             if let Ok(blob_id) = self.state.get_blob_id(c.blob_index) {
                                 blob_id
