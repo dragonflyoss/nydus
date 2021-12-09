@@ -727,9 +727,8 @@ impl BlobCache {
                     if i != 0 && self.compressor() != compress::Algorithm::GZip {
                         let prior_cki = &req.chunks[i - 1];
                         assert!(
-                            chunk.decompress_offset()
-                                == prior_cki.decompress_offset()
-                                    + prior_cki.decompress_size() as u64
+                            chunk.compress_offset()
+                                == prior_cki.compress_offset() + prior_cki.compress_size() as u64
                         )
                     }
 
