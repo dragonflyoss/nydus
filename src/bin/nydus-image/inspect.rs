@@ -659,9 +659,12 @@ impl Executor {
         inspector: &mut RafsInspector,
         input: String,
     ) -> std::result::Result<Option<Value>, ExecuteError> {
-        let mut raw = input.strip_suffix("\n").unwrap_or(&input).split(' ');
+        let mut raw = input
+            .strip_suffix("\n")
+            .unwrap_or(&input)
+            .split_ascii_whitespace();
         let cmd = raw.next().unwrap();
-        let args = raw.next();
+        let args = raw.next().map(|a| a.trim());
 
         debug!("execute {:?} {:?}", cmd, args);
 
