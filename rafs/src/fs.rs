@@ -649,17 +649,9 @@ impl FileSystem for Rafs {
     fn getattr(
         &self,
         _ctx: &Context,
-        i: u64,
+        ino: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
-        // Because kernel fuse always assumes that user-space filesystem has root
-        // inode with inode number equaling to 1.
-        let ino = if i == RAFS_ROOT_INODE {
-            self.root_ino()
-        } else {
-            i
-        };
-
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
 
         let attr = self.get_inode_attr(ino).map(|r| {
