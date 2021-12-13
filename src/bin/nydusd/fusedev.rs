@@ -376,7 +376,10 @@ fn is_crashed(path: impl AsRef<Path>, sock: &impl AsRef<Path>) -> Result<bool> {
 }
 
 fn calc_fuse_conn(mp: impl AsRef<Path>) -> Result<u64> {
-    let st = metadata(mp)?;
+    let st = metadata(mp.as_ref()).map_err(|e| {
+        error!("Stat mountpoint {:?}, {}", mp.as_ref(), &e);
+        e
+    })?;
     let dev = st.st_dev();
     let (major, minor) = (major(dev), minor(dev));
 

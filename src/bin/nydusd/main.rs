@@ -433,6 +433,10 @@ fn main() -> Result<()> {
         .map(|d| {
             info!("Fuse daemon started!");
             d
+        })
+        .map_err(|e| {
+            error!("Failed in starting daemon, {}", e);
+            e
         })?
     };
 
