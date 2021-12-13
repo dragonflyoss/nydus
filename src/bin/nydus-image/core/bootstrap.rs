@@ -539,8 +539,9 @@ impl Bootstrap {
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         for entry in blob_table.entries.iter() {
             let mut devslot = RafsV6Device::new();
-            debug_assert!(entry.blob_id().len() == 32);
-            devslot.set_blob_id(entry.blob_id().as_bytes()[0..32].try_into().unwrap());
+            // blob id is String, which is processed by sha256.finalize().
+            debug_assert!(entry.blob_id().len() == 64);
+            devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
             devslot.set_blocks(entry.uncompressed_size() as u32);
             devslot.set_mapped_blkaddr(0);
             devtable.push(devslot);

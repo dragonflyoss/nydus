@@ -819,8 +819,7 @@ impl RafsStore for RafsV6InodeChunkAddr {
 #[derive(Clone, Copy, Debug)]
 pub struct RafsV6Device {
     /// Blob id of sha256.
-    blob_id: [u8; 32],
-    reserved1: [u8; 32],
+    blob_id: [u8; 64],
     /// Number of blocks on the device.
     blocks: u32,
     /// Mapping start address.
@@ -831,8 +830,7 @@ pub struct RafsV6Device {
 impl Default for RafsV6Device {
     fn default() -> Self {
         Self {
-            blob_id: [0u8; 32],
-            reserved1: [0u8; 32],
+            blob_id: [0u8; 64],
             blocks: u32::to_le(0),
             mapped_blkaddr: u32::to_le(0),
             reserved2: [0u8; 56],
@@ -852,7 +850,7 @@ impl RafsV6Device {
     }
 
     /// Set blob id.
-    pub fn set_blob_id(&mut self, id: &[u8; 32]) {
+    pub fn set_blob_id(&mut self, id: &[u8; 64]) {
         self.blob_id.copy_from_slice(id);
     }
 
@@ -1583,7 +1581,7 @@ mod tests {
         let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
-        let id = [0xa5u8; 32];
+        let id = [0xa5u8; 64];
         let mut device = RafsV6Device::new();
         device.set_blocks(0x1234);
         device.set_blob_id(&id);
