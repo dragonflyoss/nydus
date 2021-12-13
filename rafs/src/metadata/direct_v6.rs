@@ -154,7 +154,7 @@ impl DirectSuperBlockV6 {
     }
 
     fn calculate_inode_offset(&self, nid: u64) -> u64 {
-        let meta_offset = self.state.load().meta.meta_blkaddr;
+        let meta_offset = self.state.load().meta.meta_blkaddr as u64 * EROFS_BLOCK_SIZE;
         meta_offset + nid * EROFS_INODE_SLOT_SIZE as u64
     }
 
@@ -238,7 +238,7 @@ impl DirectSuperBlockV6 {
 impl RafsSuperInodes for DirectSuperBlockV6 {
     fn get_max_ino(&self) -> Inode {
         // Library fuse-rs has limit of underlying file system's maximum inode number.
-        // TODO: So we rafs v6 should record it when building
+        // FIXME: So we rafs v6 should record it when building.
         0xff_ffff_ffff_ffff - 1
     }
 
@@ -282,6 +282,10 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         self.state.load().blob_table.entries.clone()
     }
+
+    fn root_ino(&self) -> u64 {
+        self.state.load().meta.root_nid as u64
+    }
 }
 
 pub struct OndiskInodeWrapper {
@@ -292,8 +296,11 @@ pub struct OndiskInodeWrapper {
 impl OndiskInodeWrapper {
     fn disk_inode(&self) -> &RafsV6InodeExtended {
         let m = self.mapping.state.load();
-        unsafe { &*(m.base.add(self.offset) as *const RafsV6InodeExtended) }
+        let i = unsafe { &*(m.base.add(self.offset) as *const RafsV6InodeExtended) };
+        trace!("erofs disk inode loaded {:?}", i);
+        &i
     }
+
     // COPIED from kernel code:
     // >
     // erofs inode data layout (i_format in on-disk inode):
@@ -308,7 +315,6 @@ impl OndiskInodeWrapper {
     // 4 - inode chunk-based E:
     // inode, [xattrs], chunk indexes ... | ...
     // 5~7 - reserved
-
     fn data_block_mapping(&self, index: usize) -> *const u8 {
         let inode = self.disk_inode();
         assert!(inode.i_format == 0 || inode.i_format == 2 || inode.i_format == 4);
@@ -372,7 +378,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         Entry {
             attr: self.get_attr().into(),
-            inode: inode.i_ino as u64,
+            inode: self.ino(),
             generation: 0,
             attr_timeout: state.meta.attr_timeout,
             entry_timeout: state.meta.entry_timeout,
@@ -500,7 +506,8 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn ino(&self) -> u64 {
-        todo!()
+        let meta_blkaddr = self.mapping.state.load().meta.meta_blkaddr as u64;
+        (self.offset as u64 - meta_blkaddr * EROFS_BLOCK_SIZE) / EROFS_INODE_SLOT_SIZE as u64
     }
 
     /// Get name of the inode.

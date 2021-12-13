@@ -92,6 +92,8 @@ pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes + Send + Sync {
 
     /// Get all blob information objects used by the filesystem.
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
+
+    fn root_ino(&self) -> u64;
 }
 
 /// Trait to access metadata and data for an inode.
@@ -285,7 +287,8 @@ pub struct RafsSuperMeta {
     pub attr_timeout: Duration,
     /// Default inode timeout value.
     pub entry_timeout: Duration,
-    pub meta_blkaddr: u64,
+    pub meta_blkaddr: u32,
+    pub root_nid: u16,
 }
 
 impl RafsSuperMeta {
@@ -351,6 +354,7 @@ impl Default for RafsSuperMeta {
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
             entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
             meta_blkaddr: 0,
+            root_nid: 0,
         }
     }
 }

@@ -214,6 +214,10 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         self.s_blob.entries.clone()
     }
+
+    fn root_ino(&self) -> u64 {
+        RAFS_ROOT_INODE
+    }
 }
 
 /// Cached Rafs v5 inode metadata.

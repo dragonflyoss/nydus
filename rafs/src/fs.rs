@@ -504,6 +504,10 @@ impl Rafs {
         self.device.fetch_range_synchronous(prefetches)
     }
 
+    fn root_ino(&self) -> u64 {
+        self.sb.superblock.root_ino()
+    }
+
     fn do_prefetch_v5(
         mut reader: RafsIoReader,
         prefetch_files: Option<Vec<PathBuf>>,
@@ -567,11 +571,11 @@ impl Rafs {
 
 impl BackendFileSystem for Rafs {
     fn mount(&self) -> Result<(Entry, u64)> {
-        let root_inode = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
+        let root_inode = self.sb.get_inode(self.root_ino(), self.digest_validate)?;
         self.ios
             .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
-
-        Ok((self.get_inode_entry(root_inode), self.sb.get_max_ino()))
+        let e = self.get_inode_entry(root_inode);
+        Ok((e, self.sb.get_max_ino()))
     }
 
     fn as_any(&self) -> &dyn Any {

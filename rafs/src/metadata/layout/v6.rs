@@ -87,7 +87,7 @@ pub struct RafsV6SuperBlock {
     s_extslots: u8,
     /// Nid of the root directory.
     /// `root inode offset = s_meta_blkaddr * 4096 + s_root_nid * 32`.
-    s_root_nid: u16,
+    pub s_root_nid: u16,
     /// Total valid ino #
     s_inos: u64,
     /// Timestamp of filesystem creation.
@@ -97,7 +97,7 @@ pub struct RafsV6SuperBlock {
     /// Total size of file system in blocks, used for statfs
     s_blocks: u32,
     /// Start block address of the metadata area.
-    s_meta_blkaddr: u32,
+    pub s_meta_blkaddr: u32,
     /// Start block address of the shared xattr area.
     s_xattr_blkaddr: u32,
     /// 128-bit uuid for volume

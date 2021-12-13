@@ -71,4 +71,8 @@ impl RafsSuperBlock for MockSuperBlock {
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         unimplemented!()
     }
+
+    fn root_ino(&self) -> u64 {
+        unimplemented!()
+    }
 }

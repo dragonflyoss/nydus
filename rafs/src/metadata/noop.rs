@@ -66,4 +66,8 @@ impl RafsSuperBlock for NoopSuperBlock {
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         Vec::new()
     }
+
+    fn root_ino(&self) -> u64 {
+        unimplemented!()
+    }
 }
