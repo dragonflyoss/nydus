@@ -389,7 +389,6 @@ struct Command {}
 
 impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
-        let aligned_chunk = matches.is_present("aligned-chunk");
         let blob_id = Self::get_blob_id(&matches)?;
         let bootstrap_path = Self::get_bootstrap(&matches)?;
         let chunk_size = Self::get_chunk_size(&matches)?;
@@ -403,6 +402,13 @@ impl Command {
         let blob_stor = Self::get_blob_storage(&matches, source_type)?;
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(&matches)?;
+        let aligned_chunk = if version == RafsVersion::V6 {
+            info!("v6 enforces to use \"aligned-chunk\".");
+            true
+        } else {
+            // get_fs_version makes sure it's either v6 or v5.
+            matches.is_present("aligned-chunk")
+        };
         let whiteout_spec: WhiteoutSpec = matches
             .value_of("whiteout-spec")
             .unwrap_or_default()
