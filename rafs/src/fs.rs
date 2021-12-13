@@ -451,8 +451,9 @@ impl Rafs {
         // since nydusify gives root directory permission of 0o750 and fuse mount
         // options `rootmode=` does not affect root directory's permission bits, ending
         // up with preventing other users from accessing the container rootfs.
-        if attr.ino == ROOT_ID {
+        if attr.ino == self.root_ino() {
             attr.mode = attr.mode & !0o777 | 0o755;
+            attr.ino = RAFS_ROOT_INODE;
         }
 
         Ok(attr)
@@ -648,10 +649,19 @@ impl FileSystem for Rafs {
     fn getattr(
         &self,
         _ctx: &Context,
-        ino: u64,
+        i: u64,
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
+        // Because kernel fuse always assumes that user-space filesystem has root
+        // inode with inode number equaling to 1.
+        let ino = if i == RAFS_ROOT_INODE {
+            self.root_ino()
+        } else {
+            i
+        };
+
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
+
         let attr = self.get_inode_attr(ino).map(|r| {
             recorder.mark_success(0);
             r
