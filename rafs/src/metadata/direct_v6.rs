@@ -362,6 +362,11 @@ impl OndiskInodeWrapper {
             }
         }
     }
+
+    fn mode_format_bits(&self) -> u32 {
+        let i = self.disk_inode();
+        i.i_mode as u32 & libc::S_IFMT
+    }
 }
 
 // TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
@@ -527,17 +532,17 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn is_dir(&self) -> bool {
-        todo!()
+        self.mode_format_bits() == libc::S_IFDIR
     }
 
     /// Check whether the inode is a symlink.
     fn is_symlink(&self) -> bool {
-        todo!()
+        self.mode_format_bits() == libc::S_IFLNK
     }
 
     /// Check whether the inode is a regular file.
     fn is_reg(&self) -> bool {
-        todo!()
+        self.mode_format_bits() == libc::S_IFREG
     }
 
     /// Check whether the inode is a hardlink.
