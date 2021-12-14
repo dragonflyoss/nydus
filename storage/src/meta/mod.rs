@@ -391,11 +391,12 @@ impl BlobMetaInfo {
 
         let state = Arc::new(BlobMetaState {
             blob_index: blob_info.blob_index(),
-            ci_compressed_size: blob_info.meta_ci_compressed_size(),
-            ci_uncompressed_size: round_up_4k(blob_info.meta_ci_uncompressed_size()),
+            compressed_size: blob_info.compressed_size(),
+            uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_count,
             chunks: chunk_infos,
             base: base as *const u8,
+            unmap_len: expected_size,
         });
 
         Ok(BlobMetaInfo { state })
@@ -410,8 +411,11 @@ impl BlobMetaInfo {
     /// - the blob metadata is invalid.
     pub fn get_chunks_uncompressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
-        if end > self.state.ci_uncompressed_size {
-            return Err(einval!());
+        if end > self.state.uncompressed_size {
+            return Err(einval!(format!(
+                "get_chunks_uncompressed: end {} uncompressed_size {}",
+                end, self.state.uncompressed_size
+            )));
         }
 
         let infos = &*self.state.chunks;
@@ -471,8 +475,11 @@ impl BlobMetaInfo {
     /// - the blob metadata is invalid.
     pub fn get_chunks_compressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
-        if end > self.state.ci_compressed_size {
-            return Err(einval!());
+        if end > self.state.compressed_size {
+            return Err(einval!(format!(
+                "get_chunks_compressed: end {} compressed_size {}",
+                end, self.state.compressed_size
+            )));
         }
 
         let infos = &*self.state.chunks;
@@ -509,8 +516,8 @@ impl BlobMetaInfo {
 
     #[inline]
     fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
-        if entry.compressed_end() > self.state.ci_compressed_size
-            || entry.uncompressed_end() > self.state.ci_uncompressed_size
+        if entry.compressed_end() > self.state.compressed_size
+            || entry.uncompressed_end() > self.state.uncompressed_size
         {
             Err(einval!())
         } else {
@@ -573,11 +580,15 @@ impl BlobMetaInfo {
 
 struct BlobMetaState {
     blob_index: u32,
-    ci_compressed_size: u64,
-    ci_uncompressed_size: u64,
+    // The file size of blob file when it contains compressed chunks.
+    compressed_size: u64,
+    // The file size of blob file when it contains raw(uncompressed)
+    // chunks, it usually refers to a blob file in cache(e.g. filecache).
+    uncompressed_size: u64,
     chunk_count: u32,
     chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
     base: *const u8,
+    unmap_len: usize,
 }
 
 // // Safe to Send/Sync because the underlying data structures are readonly
@@ -587,8 +598,7 @@ unsafe impl Sync for BlobMetaState {}
 impl Drop for BlobMetaState {
     fn drop(&mut self) {
         if !self.base.is_null() {
-            // ci_uncompressed_size has been round_up to 4k.
-            let size = BLOB_METADTAT_HEADER_SIZE as usize + self.ci_uncompressed_size as usize;
+            let size = self.unmap_len;
             unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, size) };
             self.base = std::ptr::null();
         }
@@ -708,8 +718,8 @@ mod tests {
     fn test_get_chunk_index_with_hole() {
         let state = BlobMetaState {
             blob_index: 0,
-            ci_compressed_size: 0,
-            ci_uncompressed_size: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
             chunk_count: 2,
             chunks: ManuallyDrop::new(vec![
                 BlobChunkInfoOndisk {
@@ -722,6 +732,7 @@ mod tests {
                 },
             ]),
             base: std::ptr::null(),
+            unmap_len: 0,
         };
 
         assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
@@ -766,8 +777,8 @@ mod tests {
     fn test_get_chunks() {
         let state = BlobMetaState {
             blob_index: 1,
-            ci_compressed_size: 0x6001,
-            ci_uncompressed_size: 0x102001,
+            compressed_size: 0x6001,
+            uncompressed_size: 0x102001,
             chunk_count: 5,
             chunks: ManuallyDrop::new(vec![
                 BlobChunkInfoOndisk {
@@ -792,6 +803,7 @@ mod tests {
                 },
             ]),
             base: std::ptr::null(),
+            unmap_len: 0,
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),
