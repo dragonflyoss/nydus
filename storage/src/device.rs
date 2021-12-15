@@ -983,7 +983,7 @@ impl BlobDevice {
                                 e
                             );
                             e
-                        });
+                        })?;
                 } else {
                     error!("No support for fetching uncompressed blob data");
                     return Err(einval!("No support for fetching uncompressed blob data"));

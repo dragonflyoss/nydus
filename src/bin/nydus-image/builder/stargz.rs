@@ -546,6 +546,8 @@ impl StargzIndexTreeBuilder {
             offset: 0,
             dirents: Vec::<(u64, OsString, u32)>::new(),
             v6_datalayout: 0,
+            v6_compact_inode: false,
+            v6_force_extended_inode: false,
         })
     }
 }

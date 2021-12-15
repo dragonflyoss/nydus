@@ -391,10 +391,12 @@ impl BlobMetaInfo {
 
         let state = Arc::new(BlobMetaState {
             blob_index: blob_info.blob_index(),
-            ci_compressed_size: blob_info.compressed_size(),
-            ci_uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
+            compressed_size: blob_info.compressed_size(),
+            uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_count,
             chunks: chunk_infos,
+            base: base as *const u8,
+            unmap_len: expected_size,
         });
 
         Ok(BlobMetaInfo { state })
@@ -409,8 +411,11 @@ impl BlobMetaInfo {
     /// - the blob metadata is invalid.
     pub fn get_chunks_uncompressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
-        if end > self.state.ci_uncompressed_size {
-            return Err(einval!());
+        if end > self.state.uncompressed_size {
+            return Err(einval!(format!(
+                "get_chunks_uncompressed: end {} uncompressed_size {}",
+                end, self.state.uncompressed_size
+            )));
         }
 
         let infos = &*self.state.chunks;
@@ -470,8 +475,11 @@ impl BlobMetaInfo {
     /// - the blob metadata is invalid.
     pub fn get_chunks_compressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
-        if end > self.state.ci_compressed_size {
-            return Err(einval!());
+        if end > self.state.compressed_size {
+            return Err(einval!(format!(
+                "get_chunks_compressed: end {} compressed_size {}",
+                end, self.state.compressed_size
+            )));
         }
 
         let infos = &*self.state.chunks;
@@ -508,8 +516,8 @@ impl BlobMetaInfo {
 
     #[inline]
     fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
-        if entry.compressed_end() > self.state.ci_compressed_size
-            || entry.uncompressed_end() > self.state.ci_uncompressed_size
+        if entry.compressed_end() > self.state.compressed_size
+            || entry.uncompressed_end() > self.state.uncompressed_size
         {
             Err(einval!())
         } else {
@@ -572,10 +580,29 @@ impl BlobMetaInfo {
 
 struct BlobMetaState {
     blob_index: u32,
-    ci_compressed_size: u64,
-    ci_uncompressed_size: u64,
+    // The file size of blob file when it contains compressed chunks.
+    compressed_size: u64,
+    // The file size of blob file when it contains raw(uncompressed)
+    // chunks, it usually refers to a blob file in cache(e.g. filecache).
+    uncompressed_size: u64,
     chunk_count: u32,
     chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
+    base: *const u8,
+    unmap_len: usize,
+}
+
+// // Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for BlobMetaState {}
+unsafe impl Sync for BlobMetaState {}
+
+impl Drop for BlobMetaState {
+    fn drop(&mut self) {
+        if !self.base.is_null() {
+            let size = self.unmap_len;
+            unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, size) };
+            self.base = std::ptr::null();
+        }
+    }
 }
 
 impl BlobMetaState {
@@ -678,13 +705,21 @@ fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{BackendResult, BlobReader};
+    use crate::device::BlobFeatures;
+    use crate::RAFS_MAX_CHUNK_SIZE;
+    use nix::sys::uio;
+    use nydus_utils::metrics::BackendMetrics;
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_get_chunk_index_with_hole() {
         let state = BlobMetaState {
             blob_index: 0,
-            ci_compressed_size: 0,
-            ci_uncompressed_size: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
             chunk_count: 2,
             chunks: ManuallyDrop::new(vec![
                 BlobChunkInfoOndisk {
@@ -696,6 +731,8 @@ mod tests {
                     comp_info: 0x00ff_f000_0010_0000,
                 },
             ]),
+            base: std::ptr::null(),
+            unmap_len: 0,
         };
 
         assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
@@ -740,8 +777,8 @@ mod tests {
     fn test_get_chunks() {
         let state = BlobMetaState {
             blob_index: 1,
-            ci_compressed_size: 0x6001,
-            ci_uncompressed_size: 0x102001,
+            compressed_size: 0x6001,
+            uncompressed_size: 0x102001,
             chunk_count: 5,
             chunks: ManuallyDrop::new(vec![
                 BlobChunkInfoOndisk {
@@ -765,6 +802,8 @@ mod tests {
                     comp_info: 0x00ff_f000_0000_5000,
                 },
             ]),
+            base: std::ptr::null(),
+            unmap_len: 0,
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),
@@ -820,5 +859,168 @@ mod tests {
         assert_eq!(round_up_4k(0x1000), 0x1000u32);
         assert_eq!(round_up_4k(0x1001), 0x2000u32);
         assert_eq!(round_up_4k(0x1fff), 0x2000u64);
+    }
+
+    struct DummyBlobReader {
+        pub metrics: Arc<BackendMetrics>,
+        file: File,
+    }
+
+    impl BlobReader for DummyBlobReader {
+        fn blob_size(&self) -> BackendResult<u64> {
+            Ok(0)
+        }
+
+        fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+            let ret = uio::pread(self.file.as_raw_fd(), buf, offset as i64).unwrap();
+            Ok(ret)
+        }
+
+        fn prefetch_blob_data_range(
+            &self,
+            _blob_readahead_offset: u32,
+            _blob_readahead_size: u32,
+        ) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn stop_data_prefetch(&self) -> BackendResult<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> &BackendMetrics {
+            &self.metrics
+        }
+    }
+
+    #[test]
+    fn test_read_metadata_compressor_none() {
+        let temp = TempFile::new().unwrap();
+        let mut w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+
+        let chunks = vec![
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0000_0000,
+                comp_info: 0x00ff_f000_0000_0000,
+            },
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0010_0000,
+                comp_info: 0x00ff_f000_0010_0000,
+            },
+        ];
+
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                chunks.as_ptr() as *const u8,
+                chunks.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+            )
+        };
+
+        let pos = 0;
+        w.write_all(&data).unwrap();
+
+        let mut blob_info = BlobInfo::new(
+            0,
+            "dummy".to_string(),
+            0,
+            0,
+            RAFS_MAX_CHUNK_SIZE as u32,
+            0,
+            BlobFeatures::default(),
+        );
+        blob_info.set_blob_meta_info(
+            0,
+            pos,
+            data.len() as u64,
+            data.len() as u64,
+            compress::Algorithm::None as u32,
+        );
+
+        let mut buffer = Vec::with_capacity(data.len());
+        unsafe { buffer.set_len(data.len()) };
+        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
+            metrics: BackendMetrics::new("dummy", "localfs"),
+            file: r,
+        });
+        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+
+        assert_eq!(buffer, data);
+    }
+
+    #[test]
+    fn test_read_metadata_compressor_lz4() {
+        let temp = TempFile::new().unwrap();
+        let mut w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+
+        let chunks = vec![
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0000_0000,
+                comp_info: 0x00ff_f000_0000_0000,
+            },
+            BlobChunkInfoOndisk {
+                uncomp_info: 0x01ff_f000_0010_0000,
+                comp_info: 0x00ff_f000_0010_0000,
+            },
+        ];
+
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                chunks.as_ptr() as *const u8,
+                chunks.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+            )
+        };
+
+        let (buf, compressed) = compress::compress(data, compress::Algorithm::Lz4Block).unwrap();
+        assert_eq!(compressed, true);
+
+        let pos = 0;
+        w.write_all(&buf).unwrap();
+
+        let compressed_size = buf.len();
+        let uncompressed_size = data.len();
+        let mut blob_info = BlobInfo::new(
+            0,
+            "dummy".to_string(),
+            0,
+            0,
+            RAFS_MAX_CHUNK_SIZE as u32,
+            0,
+            BlobFeatures::default(),
+        );
+        blob_info.set_blob_meta_info(
+            0,
+            pos,
+            compressed_size as u64,
+            uncompressed_size as u64,
+            compress::Algorithm::Lz4Block as u32,
+        );
+
+        let mut buffer = Vec::with_capacity(uncompressed_size);
+        unsafe { buffer.set_len(uncompressed_size) };
+        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
+            metrics: BackendMetrics::new("dummy", "localfs"),
+            file: r,
+        });
+        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+
+        assert_eq!(buffer, data);
     }
 }

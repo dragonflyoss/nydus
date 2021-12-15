@@ -153,9 +153,10 @@ impl BlobFs {
         self.bootstrap_args
             .rafs
             .fetch_range_synchronous(&[req])
-            .unwrap_or_else(|e| warn!("load chunks: error, {:?}", e));
-
-        Ok(())
+            .map_err(|e| {
+                warn!("load chunks: error, {:?}", e);
+                e
+            })
     }
 
     // #[cfg(feature = "virtiofs")]

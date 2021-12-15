@@ -58,7 +58,7 @@ const EROFS_CHUNK_FORMAT_SIZE_MASK: u16 = 0x001F;
 /// Checksum of superblock, compatible with EROFS versions prior to Linux kernel 5.5.
 #[allow(dead_code)]
 const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
-/// Rafs v6 specific metadata, compatible with EROFS versions prior to Linux kernel 5.16.
+/// Rafs v6 specific metadata, compatible with EROFS versions since Linux kernel 5.16.
 const EROFS_FEATURE_COMPAT_RAFS_V6: u32 = 0x4000_0000;
 /// Chunked inode, incompatible with EROFS versions prior to Linux kernel 5.15.
 const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
@@ -146,14 +146,6 @@ impl RafsV6SuperBlock {
             Err(einval!("invalid blocks in Rafsv6 superblock"))
         } else if u16::from_le(self.s_u) != 0 {
             Err(einval!("invalid union field in Rafsv6 superblock"))
-        } else if u32::from_le(self.s_meta_blkaddr) == 0 {
-            Err(einval!(
-                "invalid metadata block address in Rafsv6 superblock"
-            ))
-        } else if u32::from_le(self.s_xattr_blkaddr) != 0 {
-            Err(einval!(
-                "invalid extended attribute block address in Rafsv6 superblock"
-            ))
         } else if u64::from_le(self.s_build_time) != 0 || u32::from_le(self.s_build_time_nsec) != 0
         {
             Err(einval!("invalid build time in Rafsv6 superblock"))
@@ -167,7 +159,7 @@ impl RafsV6SuperBlock {
             != EROFS_FEATURE_COMPAT_RAFS_V6
         {
             Err(einval!(
-                "invalid incompatible feature bits in Rafsv6 superblock"
+                "invalid compatible feature bits in Rafsv6 superblock"
             ))
         } else {
             Ok(())
@@ -394,6 +386,137 @@ enum EROFS_FILE_TYPE {
     EROFS_FT_MAX,
 }
 
+pub trait RafsV6OndiskInodeTrait: RafsStore {
+    fn set_xattr_inline_count(&mut self, count: u16);
+    fn set_size(&mut self, size: u64);
+    fn set_ino(&mut self, ino: u32);
+    fn set_nlink(&mut self, nlinks: u32);
+    fn set_mode(&mut self, mode: u16);
+    fn set_u(&mut self, u: u32);
+    fn set_uidgid(&mut self, uid: u32, gid: u32);
+    fn set_mtime(&mut self, _sec: u64, _nsec: u32);
+    fn set_data_layout(&mut self, data_layout: u16);
+    /// Set inode data layout format to be PLAIN.
+    #[inline]
+    fn set_inline_plain_layout(&mut self) {
+        self.set_data_layout(EROFS_INODE_FLAT_PLAIN);
+    }
+
+    /// Set inode data layout format to be INLINE.
+    #[inline]
+    fn set_inline_inline_layout(&mut self) {
+        self.set_data_layout(EROFS_INODE_FLAT_INLINE);
+    }
+
+    /// Set inode data layout format to be CHUNKED.
+    #[inline]
+    fn set_chunk_based_layout(&mut self) {
+        self.set_data_layout(EROFS_INODE_CHUNK_BASED);
+    }
+
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
+}
+
+/// RAFS v6 inode on-disk format, 32 bytes.
+///
+/// This structure is designed to be compatible with EROFS compact inode format.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct RafsV6InodeCompact {
+    /// inode format hints
+    pub i_format: u16,
+    pub i_xattr_icount: u16,
+    pub i_mode: u16,
+    pub i_nlink: u16,
+    pub i_size: u32,
+    pub i_reserved: u32,
+    /// raw_blkaddr or rdev or rafs_v6_inode_chunk_info
+    pub i_u: u32,
+    pub i_ino: u32,
+    pub i_uid: u16,
+    pub i_gid: u16,
+    pub i_reserved2: [u8; 4],
+}
+
+impl RafsV6InodeCompact {
+    pub fn new() -> Self {
+        Self {
+            i_format: u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (EROFS_INODE_FLAT_PLAIN << 1)),
+            i_xattr_icount: u16::to_le(0),
+            i_mode: u16::to_le(0),
+            i_nlink: u16::to_le(0),
+            i_size: u32::to_le(0),
+            i_reserved: u32::to_le(0),
+            i_u: u32::to_le(0),
+            i_ino: u32::to_le(0),
+            i_uid: u16::to_le(0),
+            i_gid: u16::to_le(0),
+            i_reserved2: [0u8; 4],
+        }
+    }
+}
+
+impl RafsV6OndiskInodeTrait for RafsV6InodeCompact {
+    /// Set xattr inline count.
+    fn set_xattr_inline_count(&mut self, count: u16) {
+        self.i_xattr_icount = count.to_le();
+    }
+
+    /// Set file size for inode.
+    fn set_size(&mut self, size: u64) {
+        self.i_size = u32::to_le(size as u32);
+    }
+
+    /// Set ino for inode.
+    fn set_ino(&mut self, ino: u32) {
+        self.i_ino = ino.to_le();
+    }
+
+    /// Set number of hardlink.
+    fn set_nlink(&mut self, nlinks: u32) {
+        self.i_nlink = u16::to_le(nlinks as u16);
+    }
+
+    /// Set file protection mode.
+    fn set_mode(&mut self, mode: u16) {
+        self.i_mode = mode.to_le();
+    }
+
+    /// Set the union field.
+    fn set_u(&mut self, u: u32) {
+        self.i_u = u.to_le();
+    }
+
+    /// Set uid and gid for the inode.
+    fn set_uidgid(&mut self, uid: u32, gid: u32) {
+        self.i_uid = u16::to_le(uid as u16);
+        self.i_gid = u16::to_le(gid as u16);
+    }
+
+    /// Set last modification time for the inode.
+    fn set_mtime(&mut self, _sec: u64, _nsec: u32) {}
+
+    /// Set inode data layout format.
+    fn set_data_layout(&mut self, data_layout: u16) {
+        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (data_layout << 1));
+    }
+
+    /// Load a `RafsV6InodeCompact` from a reader.
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
+    }
+}
+
+impl_bootstrap_converter!(RafsV6InodeCompact);
+
+impl RafsStore for RafsV6InodeCompact {
+    fn store(&self, w: &mut RafsIoWriter) -> Result<usize> {
+        // TODO: need to write xattr as well.
+        w.write_all(self.as_ref())?;
+        Ok(self.as_ref().len())
+    }
+}
+
 /// RAFS v6 inode on-disk format, 64 bytes.
 ///
 /// This structure is designed to be compatible with EROFS extended inode format.
@@ -445,74 +568,58 @@ impl RafsV6InodeExtended {
             i_reserved2: [0u8; 16],
         }
     }
+}
 
+impl RafsV6OndiskInodeTrait for RafsV6InodeExtended {
     /// Set xattr inline count.
-    pub fn set_xattr_inline_count(&mut self, count: u16) {
+    fn set_xattr_inline_count(&mut self, count: u16) {
         self.i_xattr_icount = count.to_le();
     }
 
     /// Set file size for inode.
-    pub fn set_size(&mut self, size: u64) {
+    fn set_size(&mut self, size: u64) {
         self.i_size = size.to_le();
     }
 
     /// Set ino for inode.
-    pub fn set_ino(&mut self, ino: u32) {
+    fn set_ino(&mut self, ino: u32) {
         self.i_ino = ino.to_le();
     }
 
     /// Set number of hardlink.
-    pub fn set_nlink(&mut self, nlinks: u32) {
+    fn set_nlink(&mut self, nlinks: u32) {
         self.i_nlink = nlinks.to_le();
     }
 
     /// Set file protection mode.
-    pub fn set_mode(&mut self, mode: u16) {
+    fn set_mode(&mut self, mode: u16) {
         self.i_mode = mode.to_le();
     }
 
     /// Set the union field.
-    pub fn set_u(&mut self, u: u32) {
+    fn set_u(&mut self, u: u32) {
         self.i_u = u.to_le();
     }
 
     /// Set uid and gid for the inode.
-    pub fn set_uidgid(&mut self, uid: u32, gid: u32) {
+    fn set_uidgid(&mut self, uid: u32, gid: u32) {
         self.i_uid = u32::to_le(uid);
         self.i_gid = u32::to_le(gid);
     }
 
     /// Set last modification time for the inode.
-    pub fn set_mtime(&mut self, sec: u64, nsec: u32) {
+    fn set_mtime(&mut self, sec: u64, nsec: u32) {
         self.i_mtime = u64::to_le(sec);
         self.i_mtime_nsec = u32::to_le(nsec);
     }
 
     /// Set inode data layout format.
-    pub fn set_data_layout(&mut self, data_layout: u16) {
+    fn set_data_layout(&mut self, data_layout: u16) {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (data_layout << 1));
     }
 
-    /// Set inode data layout format to be PLAIN.
-    #[inline]
-    pub fn set_inline_plain_layout(&mut self) {
-        self.set_data_layout(EROFS_INODE_FLAT_PLAIN);
-    }
-
-    /// Set inode data layout format to be INLINE.
-    #[inline]
-    pub fn set_inline_inline_layout(&mut self) {
-        self.set_data_layout(EROFS_INODE_FLAT_INLINE);
-    }
-
-    /// Set inode data layout format to be CHUNKED.
-    #[inline]
-    pub fn set_chunk_based_layout(&mut self) {
-        self.set_data_layout(EROFS_INODE_CHUNK_BASED);
-    }
-
     /// Load a `RafsV6InodeExtended` from a reader.
-    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
     }
 }
@@ -711,11 +818,8 @@ impl RafsStore for RafsV6InodeChunkAddr {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct RafsV6Device {
-    /// UUID for blob device.
-    uuid: [u8; 16],
     /// Blob id of sha256.
-    blob_id: [u8; 32],
-    reserved1: [u8; 16],
+    blob_id: [u8; 64],
     /// Number of blocks on the device.
     blocks: u32,
     /// Mapping start address.
@@ -726,9 +830,7 @@ pub struct RafsV6Device {
 impl Default for RafsV6Device {
     fn default() -> Self {
         Self {
-            uuid: [0u8; 16],
-            blob_id: [0u8; 32],
-            reserved1: [0u8; 16],
+            blob_id: [0u8; 64],
             blocks: u32::to_le(0),
             mapped_blkaddr: u32::to_le(0),
             reserved2: [0u8; 56],
@@ -748,7 +850,7 @@ impl RafsV6Device {
     }
 
     /// Set blob id.
-    pub fn set_blob_id(&mut self, id: &[u8; 32]) {
+    pub fn set_blob_id(&mut self, id: &[u8; 64]) {
         self.blob_id.copy_from_slice(id);
     }
 
@@ -1479,7 +1581,7 @@ mod tests {
         let mut writer: Box<dyn RafsIoWrite> = Box::new(w);
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
-        let id = [0xa5u8; 32];
+        let id = [0xa5u8; 64];
         let mut device = RafsV6Device::new();
         device.set_blocks(0x1234);
         device.set_blob_id(&id);
