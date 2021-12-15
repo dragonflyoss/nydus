@@ -24,7 +24,7 @@ Nydus' key features include:
 - Access trace based prefetch table
 - User IO amplification to reduce the amount of small requests to storage backend.
 
-Currently the repository includes following tools:
+Currently Nydus includes following tools:
 
 | Tool                     | Description                                                                                                                                         |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -33,8 +33,9 @@ Currently the repository includes following tools:
 | nydusify                 | It pulls OCI image down and unpack it, invokes `nydus-image` to convert image and then pushes the converted image back to registry and data storage |
 | containerd-nydus-grpc    | Works as a `containerd` remote snapshotter to help setup container rootfs with nydus images                                                         |
 | nydusctl                 | Nydusd CLI client, query daemon's working status/metrics and configure it                                                                           |
-| ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                       |
+| ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                        |
 | nydus-docker-graphdriver | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                 |
+| [acceleration-service](https://github.com/goharbor/acceleration-service) | Provides a general service for Harbor to support image acceleration based on kinds of accelerator like Nydus and eStargz etc. |
 
 To try nydus image service:
 
@@ -80,7 +81,6 @@ Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
 Docker graph driver is also accompanied, it helps to start container from nydus image. For more particular instructions, please refer to
 
 - [Nydus Graph Driver](./contrib/docker-nydus-graphdriver/README.md)
-- [使用 docker 启动容器](./docs/chinese_docker_graph_driver_guide.md)
 
 ## Learn Concepts and Commands
 

@@ -2,6 +2,8 @@
 
 Docker supports remote graph driver as a plugin. With the nydus graph driver, you can start a container from previously converted nydus image. The initial intent to build the graph driver is to provide a way to help users quickly experience the speed starting a container from nydus image. So it is **not ready for productive usage**. If you think docker is important in your use case, a PR is welcomed to listen to your story. We might enhance this in the future.
 
+Chinese: [使用 Docker 启动容器](../../docs/chinese_docker_graph_driver_guide.md)
+
 ## Architecture
 
 ---
