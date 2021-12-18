@@ -29,7 +29,7 @@ impl RafsSuper {
 
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.load(r)?;
-        ext_sb.validate(end)?;
+        ext_sb.validate()?;
         self.meta.chunk_size = ext_sb.chunk_size();
         self.meta.blob_table_offset = ext_sb.blob_table_offset();
         self.meta.blob_table_size = ext_sb.blob_table_size();

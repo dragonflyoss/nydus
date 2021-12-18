@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use nydus_utils::{digest, round_up, ByteSize};
 use storage::device::{BlobFeatures, BlobInfo};
-use storage::meta::BlobMetaHeaderOndisk;
+use storage::meta::{BlobMetaHeaderOndisk, BLOB_FEATURE_4K_ALIGNED};
 use storage::{compress, RAFS_MAX_CHUNK_SIZE};
 
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
@@ -135,35 +135,71 @@ impl RafsV6SuperBlock {
     /// Validate the Rafs v6 super block.
     pub fn validate(&self, meta_size: u64) -> Result<()> {
         if meta_size < EROFS_BLOCK_SIZE {
-            Err(einval!("invalid Rafs v6 metadata size"))
-        } else if self.s_blkszbits != EROFS_BLOCK_BITS {
-            Err(einval!("invalid block size bits in Rafsv6 superblock"))
-        } else if u64::from_le(self.s_inos) == 0 {
-            Err(einval!("invalid inode number in Rafsv6 superblock"))
-        } else if self.s_extslots != 0 {
-            Err(einval!("invalid extended slots in Rafsv6 superblock"))
-        } else if self.s_blocks == 0 {
-            Err(einval!("invalid blocks in Rafsv6 superblock"))
-        } else if u16::from_le(self.s_u) != 0 {
-            Err(einval!("invalid union field in Rafsv6 superblock"))
-        } else if u64::from_le(self.s_build_time) != 0 || u32::from_le(self.s_build_time_nsec) != 0
-        {
-            Err(einval!("invalid build time in Rafsv6 superblock"))
-        } else if u32::from_le(self.s_feature_incompat)
+            return Err(einval!(format!(
+                "invalid Rafs v6 metadata size: {}",
+                meta_size
+            )));
+        }
+
+        if meta_size & (EROFS_BLOCK_SIZE - 1) != 0 {
+            return Err(einval!(format!(
+                "invalid Rafs v6 metadata size: bootstrap size {} is not aligned",
+                meta_size
+            )));
+        }
+
+        if u32::from_le(self.s_checksum) != 0 {
+            return Err(einval!(format!(
+                "invalid checksum {} in Rafsv6 superblock",
+                u32::from_le(self.s_checksum)
+            )));
+        }
+
+        if self.s_blkszbits != EROFS_BLOCK_BITS {
+            return Err(einval!(format!(
+                "invalid block size bits {} in Rafsv6 superblock",
+                self.s_blkszbits
+            )));
+        }
+
+        if u64::from_le(self.s_inos) == 0 {
+            return Err(einval!("invalid inode number in Rafsv6 superblock"));
+        }
+
+        if self.s_extslots != 0 {
+            return Err(einval!("invalid extended slots in Rafsv6 superblock"));
+        }
+
+        if self.s_blocks == 0 {
+            return Err(einval!("invalid blocks in Rafsv6 superblock"));
+        }
+
+        if u16::from_le(self.s_u) != 0 {
+            return Err(einval!("invalid union field in Rafsv6 superblock"));
+        }
+
+        // s_build_time may be used as compact_inode's timestamp in the future.
+        // if u64::from_le(self.s_build_time) != 0 || u32::from_le(self.s_build_time_nsec) != 0 {
+        //     return Err(einval!("invalid build time in Rafsv6 superblock"));
+        // }
+
+        if u32::from_le(self.s_feature_incompat)
             != EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
         {
-            Err(einval!(
+            return Err(einval!(
                 "invalid incompatible feature bits in Rafsv6 superblock"
-            ))
-        } else if u32::from_le(self.s_feature_compat) & EROFS_FEATURE_COMPAT_RAFS_V6
+            ));
+        }
+
+        if u32::from_le(self.s_feature_compat) & EROFS_FEATURE_COMPAT_RAFS_V6
             != EROFS_FEATURE_COMPAT_RAFS_V6
         {
-            Err(einval!(
+            return Err(einval!(
                 "invalid compatible feature bits in Rafsv6 superblock"
-            ))
-        } else {
-            Ok(())
+            ));
         }
+
+        Ok(())
     }
 
     /// Check whether it's super block for Rafs v6.
@@ -280,23 +316,25 @@ impl RafsV6SuperBlockExt {
     }
 
     /// Validate the Rafs v6 super block.
-    pub fn validate(&self, _meta_size: u64) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let mut flags = self.flags();
         flags &= RafsSuperFlags::COMPRESS_NONE.bits()
             | RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits()
             | RafsSuperFlags::COMPRESS_GZIP.bits();
         if flags.count_ones() != 1 {
-            return Err(einval!(
-                "invalid flags related to compression algorithm in Rafs v6 extended superblock"
-            ));
+            return Err(einval!(format!(
+                "invalid flags {:#x} related to compression algorithm in Rafs v6 extended superblock",
+                flags
+            )));
         }
 
         let mut flags = self.flags();
         flags &= RafsSuperFlags::DIGESTER_BLAKE3.bits() | RafsSuperFlags::DIGESTER_SHA256.bits();
         if flags.count_ones() != 1 {
-            return Err(einval!(
-                "invalid flags related to digest algorithm in Rafs v6 extended superblock"
-            ));
+            return Err(einval!(format!(
+                "invalid flags {:#x} related to digest algorithm in Rafs v6 extended superblock",
+                flags
+            )));
         }
 
         let chunk_size = u32::from_le(self.s_chunk_size) as u64;
@@ -307,6 +345,12 @@ impl RafsV6SuperBlockExt {
             return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
         }
 
+        if self.blob_table_offset() & (EROFS_BLOCK_SIZE - 1) != 0 {
+            return Err(einval!(format!(
+                "invalid blob table offset {} in Rafs v6 extended superblock",
+                self.blob_table_offset()
+            )));
+        }
         Ok(())
     }
 
@@ -819,7 +863,7 @@ impl RafsStore for RafsV6InodeChunkAddr {
 #[derive(Clone, Copy, Debug)]
 pub struct RafsV6Device {
     /// Blob id of sha256.
-    blob_id: [u8; 64],
+    blob_id: [u8; BLOB_SHA256_LEN],
     /// Number of blocks on the device.
     blocks: u32,
     /// Mapping start address.
@@ -872,6 +916,34 @@ impl RafsV6Device {
     /// Load a `RafsV6Device` from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
+    }
+
+    /// Validate the Rafs v6 Device slot.
+    pub fn validate(&self) -> Result<()> {
+        match String::from_utf8(self.blob_id.to_vec()) {
+            Ok(v) => {
+                if v.len() != BLOB_SHA256_LEN {
+                    return Err(einval!(format!("v.len {} is invalid", v.len())));
+                }
+            }
+
+            Err(_) => {
+                return Err(einval!("blob_id from_utf8 is invalid"));
+            }
+        }
+
+        if self.blocks() == 0 {
+            return Err(einval!(format!(
+                "invalid blocks {} in Rafs v6 Device",
+                self.blocks()
+            )));
+        }
+
+        if u32::from_le(self.mapped_blkaddr) != 0 {
+            return Err(einval!("invalid mapped_addr in Rafs v6 Device"));
+        }
+
+        Ok(())
     }
 }
 
@@ -1024,23 +1096,26 @@ impl RafsV6Blob {
     }
 
     fn validate(&self, blob_index: u32, chunk_size: u32, _flags: RafsSuperFlags) -> bool {
-        /* TODO: check fields: compressed_size, meta_features, ci_offset, ci_compressed_size, ci_uncompressed_size, ci_digest */
+        /* TODO: check fields: compressed_size, meta_features, ci_offset, ci_compressed_size, ci_uncompressed_size */
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
-                    error!("v.len {} is invalid", v.len());
+                    error!("RafsV6Blob: v.len {} is invalid", v.len());
                     return false;
                 }
             }
 
             Err(_) => {
-                error!("blob_id from_utf8 is invalid");
+                error!("RafsV6Blob: blob_id from_utf8 is invalid");
                 return false;
             }
         }
 
         if self.blob_index != blob_index.to_le() {
-            error!("blob_index mismatch {} {}", self.blob_index, blob_index);
+            error!(
+                "RafsV6Blob: blob_index mismatch {} {}",
+                self.blob_index, blob_index
+            );
             return false;
         }
 
@@ -1051,7 +1126,7 @@ impl RafsV6Blob {
             || c_size != chunk_size as u64
         {
             error!(
-                "invalid c_size {}, count_ones() {}",
+                "RafsV6Blob: invalid c_size {}, count_ones() {}",
                 c_size,
                 c_size.count_ones()
             );
@@ -1059,7 +1134,10 @@ impl RafsV6Blob {
         }
 
         if u32::from_le(self.chunk_count) >= (1u32 << 24) {
-            error!("chunk_count {}", u32::from_le(self.chunk_count));
+            error!(
+                "RafsV6Blob: invalid chunk_count {}",
+                u32::from_le(self.chunk_count)
+            );
             return false;
         }
 
@@ -1067,7 +1145,7 @@ impl RafsV6Blob {
         if uncompressed_size & (EROFS_BLOCK_SIZE as u64 - 1) != 0
             || uncompressed_size >= (1u64 << 44)
         {
-            error!("uncompressd_size {}", uncompressed_size);
+            error!("RafsV6Blob: invalid uncompressd_size {}", uncompressed_size);
             return false;
         }
 
@@ -1076,9 +1154,27 @@ impl RafsV6Blob {
             || digest::Algorithm::try_from(u32::from_le(self.digest_algo)).is_err()
         {
             error!(
-                "invalid compression_algo {} ci_compressor {} digest_algo {}",
+                "RafsV6Blob: invalid compression_algo {} ci_compressor {} digest_algo {}",
                 self.compression_algo, self.ci_compressor, self.digest_algo
             );
+            return false;
+        }
+
+        if self.ci_digest != [0u8; 32] {
+            error!("RafsV6Blob: invalid ci_digest",);
+            return false;
+        }
+
+        // for now the uncompressed data chunk of v6 image is 4k aligned.
+        if u32::from_le(self.meta_features) & BLOB_FEATURE_4K_ALIGNED == 0 {
+            error!("RafsV6Blob: invalid meta_features",);
+            return false;
+        }
+
+        let ci_compr_size = u64::from_le(self.ci_compressed_size);
+        let ci_uncompr_size = u64::from_le(self.ci_uncompressed_size);
+        if ci_compr_size > ci_uncompr_size {
+            error!("RafsV6Blob: invalid fields, ci_compressed_size {} is greater than ci_uncompressed_size {}", ci_compr_size, ci_uncompr_size);
             return false;
         }
 
