@@ -521,7 +521,7 @@ impl Bootstrap {
             // blob id is String, which is processed by sha256.finalize().
             debug_assert!(entry.blob_id().len() == 64);
             devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
-            devslot.set_blocks(entry.uncompressed_size() as u32);
+            devslot.set_blocks(entry.uncompressed_size());
             devslot.set_mapped_blkaddr(0);
             devtable.push(devslot);
         }
