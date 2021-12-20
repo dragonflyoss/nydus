@@ -739,7 +739,7 @@ impl RafsInode for OndiskInodeWrapper {
             assert!(idx <= u32::MAX as u64);
             let child = self.get_child_by_index(idx as u32)?;
             cur_offset += 1;
-            match handler(None, child.name(), self.ino(), cur_offset) {
+            match handler(None, child.name(), child.ino(), cur_offset) {
                 Ok(PostWalkAction::Continue) => idx += 1,
                 Ok(PostWalkAction::Break) => break,
                 Err(e) => return Err(e),
