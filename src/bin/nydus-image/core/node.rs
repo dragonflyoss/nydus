@@ -259,6 +259,7 @@ impl Node {
         node.build_inode(chunk_size)
             .context("failed to build inode")?;
 
+        node.set_v6_inode_compact();
         Ok(node)
     }
 
@@ -463,20 +464,24 @@ impl Node {
         }
     }
 
-    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInodeTrait> {
+    fn set_v6_inode_compact(&mut self) {
         if self.v6_force_extended_inode
             || self.inode.uid() > std::u16::MAX as u32
             || self.inode.gid() > std::u16::MAX as u32
             || self.inode.nlink() > std::u16::MAX as u32
             || self.inode.size() > std::u32::MAX as u64
             || self.path.extension() == Some(OsStr::new("pyc"))
-        // TODO: add a filter
         {
             self.v6_compact_inode = false;
-            Box::new(RafsV6InodeExtended::new())
         } else {
             self.v6_compact_inode = true;
-            Box::new(RafsV6InodeCompact::new())
+        }
+    }
+
+    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInodeTrait> {
+        match self.v6_compact_inode {
+            true => Box::new(RafsV6InodeCompact::new()),
+            false => Box::new(RafsV6InodeExtended::new()),
         }
     }
 
