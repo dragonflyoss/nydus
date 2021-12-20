@@ -1708,8 +1708,6 @@ mod tests {
     use rafs::metadata::layout::v6::EROFS_INODE_CHUNK_BASED;
     use rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     use std::fs::File;
-    use std::os::unix::fs;
-    use std::path::Path;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 
     #[test]
@@ -1737,37 +1735,10 @@ mod tests {
         node.set_v6_offset(&mut bootstrap_ctx);
         assert_eq!(node.offset, 1);
         assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
-        assert_eq!(bootstrap_ctx.offset, 72);
+        assert_eq!(node.v6_compact_inode, true);
+        assert_eq!(bootstrap_ctx.offset, 40);
 
-        // symlink
-        let pa_sym = Path::new(pa.as_path()).join("symlink");
-        fs::symlink(pa_aa.as_path(), &pa_sym).unwrap();
-
-        let mut sym_node = Node::new(
-            RafsVersion::V6,
-            pa.as_path().to_path_buf(),
-            pa_sym.as_path().to_path_buf(),
-            Overlay::UpperAddition,
-            RAFS_DEFAULT_CHUNK_SIZE as u32,
-            false,
-        )
-        .unwrap();
-
-        bootstrap_ctx.offset = 4096 - 64 - 1;
-        sym_node.set_v6_offset(&mut bootstrap_ctx);
-        assert_eq!(sym_node.offset, 4096 - 64 - 1);
-        assert_eq!(sym_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
-        assert_eq!(bootstrap_ctx.offset, 8192);
-
-        bootstrap_ctx.offset = 4096 - 129;
-        sym_node.set_v6_offset(&mut bootstrap_ctx);
-        assert_eq!(sym_node.offset, 4096 - 129);
-        assert_eq!(sym_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-        assert_eq!(
-            bootstrap_ctx.offset,
-            4096 - 129 + 64 + sym_node.inode.size() as u64
-        );
-
+        // symlink and dir are handled in the same way.
         let mut dir_node = Node::new(
             RafsVersion::V6,
             pa.as_path().to_path_buf(),
@@ -1778,101 +1749,93 @@ mod tests {
         )
         .unwrap();
 
-        // inode+tail <= avail, inline if tail > 0, otherwise plain
-
-        // tail = 64, avail = 0
-        bootstrap_ctx.offset = 4096 - 64;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64).unwrap();
-        assert_eq!(bootstrap_ctx.offset, 8192);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
-
-        // tail = 64, avail = 64
-        bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64).unwrap();
-        assert_eq!(bootstrap_ctx.offset, 4096);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-
-        // tail = 63, avail = 64
-        bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63).unwrap();
-        assert_eq!(bootstrap_ctx.offset, 4095);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-
-        // tail = 0, avail = 64
-        bootstrap_ctx.offset = 4096 - 128;
+        // 1. tail = 0
+        bootstrap_ctx.offset = 4096 - 32 - 32;
         dir_node
             .dir_set_v6_offset(&mut bootstrap_ctx, 4096)
             .unwrap();
-        assert_eq!(bootstrap_ctx.offset, 8192);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
-
-        // tail = 64, avail = 64
-        bootstrap_ctx.offset = 4096 - 128;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 65).unwrap();
         assert_eq!(bootstrap_ctx.offset, 8192);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
 
-        // tail = 63, avail = 64
-        bootstrap_ctx.offset = 4096 - 128;
-        dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 63 + 4096)
-            .unwrap();
-        assert_eq!(bootstrap_ctx.offset, 8192);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-
-        // tail = 0, avail = 64
-        bootstrap_ctx.offset = 4096 - 128;
-        dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 8192)
-            .unwrap();
-        assert_eq!(bootstrap_ctx.offset, 12288);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
-
-        // tail = 64, avail = 4095
-        bootstrap_ctx.offset = 4096 - 63;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 64).unwrap();
-        assert_eq!(bootstrap_ctx.offset, 4096 + 65);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-
-        // tail = 63, avail = 4095
-        bootstrap_ctx.offset = 4096 - 63;
-        dir_node.dir_set_v6_offset(&mut bootstrap_ctx, 63).unwrap();
-        assert_eq!(bootstrap_ctx.offset, 4096 + 64);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-
-        // tail = 0, avail = 4095
-        bootstrap_ctx.offset = 4096 - 63;
+        bootstrap_ctx.offset = 4096 - 32 + 32;
         dir_node
             .dir_set_v6_offset(&mut bootstrap_ctx, 4096)
             .unwrap();
-        assert_eq!(bootstrap_ctx.offset, 12288);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
 
-        // tail = 4095, avail = 4095
-        bootstrap_ctx.offset = 4096 - 63;
+        bootstrap_ctx.offset = 4096 - 32;
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 4095)
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096)
             .unwrap();
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
         assert_eq!(bootstrap_ctx.offset, 8192);
+
+        // 2. tail = 32
+        // avail = 32
+        bootstrap_ctx.offset = 4096 - 32 - 32;
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 32)
+            .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
+        assert_eq!(bootstrap_ctx.offset, 8192);
 
-        // tail = 4095, avail = 4094
-        bootstrap_ctx.offset = 4096 - 62;
+        // avail = 33
+        bootstrap_ctx.offset = 4096 - 32 - 33;
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 4095)
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 32)
             .unwrap();
-        assert_eq!(bootstrap_ctx.offset, 12288);
-        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
+        assert_eq!(bootstrap_ctx.offset, 8192);
 
-        bootstrap_ctx.offset = 8105024;
+        // avail = 31
+        bootstrap_ctx.offset = 4096 - 32 - 31;
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 5012)
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 32)
             .unwrap();
-        assert_eq!(bootstrap_ctx.offset, 8114176);
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
 
-        // inode > avail
-        std::fs::remove_file(&pa_sym).unwrap();
+        // avail = 4096
+        bootstrap_ctx.offset = 4096 - 32;
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 32)
+            .unwrap();
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
+
+        // 3. tail = 4095
+        // avail = 32
+        bootstrap_ctx.offset = 4096 - 32 - 32;
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 4095)
+            .unwrap();
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
+
+        // avail = 33
+        bootstrap_ctx.offset = 4096 - 32 - 33;
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 4095)
+            .unwrap();
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
+
+        // avail = 31
+        bootstrap_ctx.offset = 4096 - 32 - 31;
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 4095)
+            .unwrap();
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
+
+        // avail = 4096
+        bootstrap_ctx.offset = 4096 - 32;
+        dir_node
+            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 4095)
+            .unwrap();
+        assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
+        assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
     }
 
     #[test]
