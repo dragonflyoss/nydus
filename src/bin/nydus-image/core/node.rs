@@ -1707,6 +1707,7 @@ mod tests {
     use crate::core::context::{ArtifactStorage, BootstrapContext};
     use rafs::metadata::layout::v6::EROFS_INODE_CHUNK_BASED;
     use rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
+    use std::fs::File;
     use std::os::unix::fs;
     use std::path::Path;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
@@ -1872,5 +1873,39 @@ mod tests {
 
         // inode > avail
         std::fs::remove_file(&pa_sym).unwrap();
+    }
+
+    #[test]
+    fn test_set_v6_inode_compact() {
+        let pa = TempDir::new().unwrap();
+        let pa_reg = TempFile::new_in(pa.as_path()).unwrap();
+        let pa_pyc = pa.as_path().join("foo.pyc");
+        let _ = File::create(&pa_pyc).unwrap();
+
+        let reg_node = Node::new(
+            RafsVersion::V6,
+            pa.as_path().to_path_buf(),
+            pa_reg.as_path().to_path_buf(),
+            Overlay::UpperAddition,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(reg_node.v6_compact_inode, true);
+
+        let pyc_node = Node::new(
+            RafsVersion::V6,
+            pa.as_path().to_path_buf(),
+            pa_pyc.as_path().to_path_buf(),
+            Overlay::UpperAddition,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(pyc_node.v6_compact_inode, false);
+
+        std::fs::remove_file(&pa_pyc).unwrap();
     }
 }
