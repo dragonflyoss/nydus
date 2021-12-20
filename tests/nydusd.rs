@@ -57,7 +57,7 @@ pub fn new(
             }},
             "mode": "{}",
             "digest_validate": {},
-            "iostats_files": true
+            "iostats_files": false
         }}
         "###,
         work_dir.join("blobs"),
