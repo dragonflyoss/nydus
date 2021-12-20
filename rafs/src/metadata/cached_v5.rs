@@ -30,8 +30,9 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    BlobIoVec, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
-    RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE, RAFS_MAX_NAME,
+    BlobIoVec, ChildInodeHandler, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs,
+    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
+    RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
 
@@ -448,6 +449,10 @@ impl RafsInode for CachedInodeV5 {
         } else {
             Err(einval!("invalid child index"))
         }
+    }
+
+    fn walk_children_inodes(&self, _entry_offset: u64, _handler: ChildInodeHandler) -> Result<()> {
+        todo!()
     }
 
     #[inline]

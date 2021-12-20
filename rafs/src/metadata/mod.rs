@@ -96,6 +96,14 @@ pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes + Send + Sync {
     fn root_ino(&self) -> u64;
 }
 
+pub enum PostWalkAction {
+    Continue,
+    Break,
+}
+
+pub type ChildInodeHandler<'a> =
+    &'a mut dyn FnMut(Option<Arc<dyn RafsInode>>, OsString, u64, u64) -> Result<PostWalkAction>;
+
 /// Trait to access metadata and data for an inode.
 ///
 /// The RAFS filesystem is a readonly filesystem, so does its inodes. The `RafsInode` trait acts
@@ -124,6 +132,8 @@ pub trait RafsInode: Any {
 
     /// Get child inode of a directory by name.
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()>;
 
     /// Get child inode of a directory by child index, child index starting at 0.
     fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>>;

@@ -17,7 +17,7 @@
 use std::any::Any;
 use std::cmp;
 use std::convert::TryFrom;
-use std::ffi::{CStr, OsStr};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::Result;
@@ -39,7 +39,9 @@ use storage::device::{BlobDevice, BlobPrefetchRequest};
 use storage::factory::FactoryConfig;
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
-use crate::metadata::{Inode, RafsInode, RafsSuper, RafsSuperMeta, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::metadata::{
+    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, RAFS_DEFAULT_CHUNK_SIZE,
+};
 use crate::{RafsError, RafsIoReader, RafsResult};
 
 /// Type of RAFS fuse handle.
@@ -346,10 +348,13 @@ impl Rafs {
         self.xattr_enabled || self.sb.meta.has_xattr()
     }
 
-    fn do_readdir<F>(&self, ino: Inode, size: u32, offset: u64, mut add_entry: F) -> Result<()>
-    where
-        F: FnMut(DirEntry) -> Result<usize>,
-    {
+    fn do_readdir(
+        &self,
+        ino: Inode,
+        size: u32,
+        offset: u64,
+        add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
+    ) -> Result<()> {
         if size == 0 {
             return Ok(());
         }
@@ -359,58 +364,21 @@ impl Rafs {
             return Err(enotdir!());
         }
 
-        let mut cur_offset = offset;
-
-        // offset 0 and 1 is for "." and ".." respectively.
-        if cur_offset == 0 {
-            cur_offset += 1;
-            add_entry(DirEntry {
-                ino,
-                offset: cur_offset,
-                type_: 0,
-                name: DOT.as_bytes(),
-            })?;
-        }
-        if cur_offset == 1 {
-            let parent = if ino == ROOT_ID {
-                ROOT_ID
-            } else {
-                parent.parent()
-            };
-            cur_offset += 1;
-            add_entry(DirEntry {
-                ino: parent,
-                offset: cur_offset,
-                type_: 0,
-                name: DOTDOT.as_bytes(),
-            })?;
-        }
-
-        let mut idx = cur_offset - 2;
-        while idx < parent.get_child_count() as u64 {
-            debug_assert!(idx <= u32::MAX as u64);
-            let child = parent.get_child_by_index(idx as u32)?;
-
-            cur_offset += 1;
+        let mut handler = |_inode, name: OsString, ino, offset| {
+            // FIXME: Bring per-file metrics counter back
             match add_entry(DirEntry {
-                ino: child.ino(),
-                offset: cur_offset,
+                ino,
+                offset,
                 type_: 0,
-                name: child.name().as_bytes(),
+                name: name.as_os_str().as_bytes(),
             }) {
-                Ok(0) => {
-                    self.ios
-                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap());
-                    break;
-                }
-                Ok(_) => {
-                    idx += 1;
-                    self.ios
-                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap())
-                } // TODO: should we check `size` here?
-                Err(r) => return Err(r),
+                Ok(0) => Ok(PostWalkAction::Break),
+                Ok(_) => Ok(PostWalkAction::Continue), // TODO: should we check `size` here?
+                Err(e) => Err(e),
             }
-        }
+        };
+
+        parent.walk_children_inodes(offset, &mut handler)?;
 
         Ok(())
     }
@@ -875,7 +843,7 @@ impl FileSystem for Rafs {
     ) -> Result<()> {
         let mut rec = FopRecorder::settle(Readdirplus, ino, &self.ios);
 
-        self.do_readdir(ino, size, offset, |dir_entry| {
+        self.do_readdir(ino, size, offset, &mut |dir_entry| {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
         })

@@ -26,6 +26,7 @@ use std::mem::{size_of, ManuallyDrop};
 use std::ops::Deref;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::slice;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
@@ -44,10 +45,14 @@ use crate::metadata::layout::{
     RAFS_ROOT_INODE,
 };
 use crate::metadata::{
-    Attr, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
-    RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
+    Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
+    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE,
+    RAFS_MAX_NAME,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
+
+const DOT: &str = ".";
+const DOTDOT: &str = "..";
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {
@@ -692,6 +697,56 @@ impl RafsInode for OndiskInodeWrapper {
         let inode = self.inode(state.deref());
 
         Ok(inode.i_child_index)
+    }
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
+        let mut cur_offset = entry_offset;
+        // offset 0 and 1 is for "." and ".." respectively.
+
+        if cur_offset == 0 {
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOT).unwrap(),
+                self.ino(),
+                cur_offset,
+            ) {
+                Ok(PostWalkAction::Continue) => {}
+                Ok(PostWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+
+        if cur_offset == 1 {
+            let parent = if self.ino() == 1 { 1 } else { self.parent() };
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOTDOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOTDOT).unwrap(),
+                parent,
+                cur_offset,
+            ) {
+                Ok(PostWalkAction::Continue) => {}
+                Ok(PostWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+        }
+
+        let mut idx = cur_offset - 2;
+        while idx < self.get_child_count() as u64 {
+            assert!(idx <= u32::MAX as u64);
+            let child = self.get_child_by_index(idx as u32)?;
+            cur_offset += 1;
+            match handler(None, child.name(), self.ino(), cur_offset) {
+                Ok(PostWalkAction::Continue) => idx += 1,
+                Ok(PostWalkAction::Break) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
     }
 
     #[inline]
