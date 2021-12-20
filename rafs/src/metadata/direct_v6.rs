@@ -701,7 +701,8 @@ impl RafsInode for OndiskInodeWrapper {
 
     /// Get data size of the inode.
     fn size(&self) -> u64 {
-        todo!()
+        let i = self.disk_inode();
+        i.i_size
     }
 
     /// Get file name size of the inode.

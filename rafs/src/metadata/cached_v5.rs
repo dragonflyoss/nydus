@@ -15,6 +15,7 @@ use std::io::SeekFrom;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use fuse_backend_rs::abi::linux_abi;
@@ -30,11 +31,14 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    BlobIoVec, ChildInodeHandler, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs,
-    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE,
-    RAFS_MAX_NAME,
+    BlobIoVec, ChildInodeHandler, Inode, PostWalkAction, RafsError, RafsInode, RafsResult,
+    RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue,
+    RAFS_INODE_BLOCKSIZE, RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
+
+const DOT: &str = ".";
+const DOTDOT: &str = "..";
 
 /// Cached Rafs v5 super block.
 pub struct CachedSuperBlockV5 {
@@ -451,8 +455,54 @@ impl RafsInode for CachedInodeV5 {
         }
     }
 
-    fn walk_children_inodes(&self, _entry_offset: u64, _handler: ChildInodeHandler) -> Result<()> {
-        todo!()
+    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
+        let mut cur_offset = entry_offset;
+        // offset 0 and 1 is for "." and ".." respectively.
+
+        if cur_offset == 0 {
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOT).unwrap(),
+                self.ino(),
+                cur_offset,
+            ) {
+                Ok(PostWalkAction::Continue) => {}
+                Ok(PostWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+
+        if cur_offset == 1 {
+            let parent = if self.ino() == 1 { 1 } else { self.parent() };
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOTDOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOTDOT).unwrap(),
+                parent,
+                cur_offset,
+            ) {
+                Ok(PostWalkAction::Continue) => {}
+                Ok(PostWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+        }
+
+        let mut idx = cur_offset - 2;
+        while idx < self.get_child_count() as u64 {
+            assert!(idx <= u32::MAX as u64);
+            let child = self.get_child_by_index(idx as u32)?;
+            cur_offset += 1;
+            match handler(None, child.name(), child.ino(), cur_offset) {
+                Ok(PostWalkAction::Continue) => idx += 1,
+                Ok(PostWalkAction::Break) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
     }
 
     #[inline]
