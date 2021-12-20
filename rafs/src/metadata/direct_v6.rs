@@ -498,7 +498,15 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn get_symlink(&self) -> Result<OsString> {
-        todo!()
+        // FIXME: assume that symlink can't be that long
+        let inode = self.disk_inode();
+        let data = self.data_block_mapping(0);
+        unsafe {
+            Ok(
+                bytes_to_os_str(std::slice::from_raw_parts(data, inode.i_size as usize))
+                    .to_os_string(),
+            )
+        }
     }
 
     /// Get the child with the specified name.
@@ -702,7 +710,8 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn get_symlink_size(&self) -> u16 {
-        todo!()
+        let inode = self.disk_inode();
+        inode.i_size as u16
     }
 
     fn collect_descendants_inodes(
