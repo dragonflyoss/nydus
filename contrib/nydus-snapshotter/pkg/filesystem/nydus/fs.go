@@ -344,6 +344,10 @@ func (fs *filesystem) createNewDaemon(snapshotID string, imageID string) (*daemo
 		d   *daemon.Daemon
 		err error
 	)
+	d, _ = fs.manager.GetBySnapshotID(snapshotID)
+	if d != nil {
+		return nil, errdefs.ErrAlreadyExists
+	}
 	customMountPoint := filepath.Join(fs.SnapshotRoot(), snapshotID, "mnt")
 	if d, err = daemon.NewDaemon(
 		daemon.WithSnapshotID(snapshotID),
@@ -373,7 +377,10 @@ func (fs *filesystem) createSharedDaemon(snapshotID string, imageID string) (*da
 		d            *daemon.Daemon
 		err          error
 	)
-
+	d, _ = fs.manager.GetBySnapshotID(snapshotID)
+	if d != nil {
+		return nil, errdefs.ErrAlreadyExists
+	}
 	sharedDaemon, err = fs.getSharedDaemon()
 	if err != nil {
 		return nil, err
