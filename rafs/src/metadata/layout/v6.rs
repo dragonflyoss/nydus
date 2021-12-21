@@ -34,6 +34,9 @@ pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
 pub const EROFS_DEVTABLE_OFFSET: u16 =
     EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE;
 
+pub const EROFS_I_VERSION_BITS: u16 = 1;
+pub const EROFS_I_DATALAYOUT_BITS: u16 = 3;
+
 // Offset of EROFS super block.
 const EROFS_SUPER_OFFSET: u16 = 1024;
 // Size of EROFS super block.

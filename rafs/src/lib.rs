@@ -62,6 +62,7 @@ pub enum RafsError {
     CreateDevice(Error),
     Prefetch(String),
     Configure(String),
+    Incompatible(u16),
 }
 
 /// Specialized version of std::result::Result<> for Rafs.

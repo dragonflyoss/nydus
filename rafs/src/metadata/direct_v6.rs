@@ -34,7 +34,7 @@ use crate::metadata::{
         v6::{
             RafsV6BlobTable, RafsV6Dirent, RafsV6InodeExtended, EROFS_BLOCK_SIZE,
             EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
-            EROFS_INODE_SLOT_SIZE,
+            EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BITS,
         },
         XattrName, XattrValue,
     },
@@ -331,14 +331,21 @@ impl OndiskInodeWrapper {
     // 4 - inode chunk-based E:
     // inode, [xattrs], chunk indexes ... | ...
     // 5~7 - reserved
-    fn data_block_mapping(&self, index: usize) -> *const u8 {
+    fn data_block_mapping(&self, index: usize) -> RafsResult<*const u8> {
         let inode = self.disk_inode();
-        let layout = inode.i_format >> 1;
+
+        if (inode.i_format & (!(((1 << EROFS_I_DATALAYOUT_BITS) - 1) << 1 | EROFS_I_VERSION_BITS)))
+            != 0
+        {
+            return Err(RafsError::Incompatible(inode.i_format));
+        }
+
+        let layout = inode.i_format >> EROFS_I_VERSION_BITS;
         assert!(layout == 0 || layout == 2 || layout == 4);
         // With legal format set, we can reliably refer `i_u` as raw blocks pointer.
         let m = self.mapping.state.load();
 
-        match layout {
+        let r = match layout {
             EROFS_INODE_FLAT_PLAIN => {
                 unsafe {
                     m.base.add(
@@ -360,39 +367,33 @@ impl OndiskInodeWrapper {
                         )
                     }
                 } else {
-                    unsafe {
-                        m.base.add(
-                            // `i_u` points to the Nth block
-                            self.offset as usize + 64 + xattr_size,
-                        )
-                    }
+                    unsafe { m.base.add(self.offset as usize + 64 + xattr_size) }
                 }
             }
             EROFS_INODE_CHUNK_BASED => {
-                unsafe {
-                    m.base.add(
-                        // `i_u` points to the Nth block
-                        (inode.i_u as u64 * EROFS_BLOCK_SIZE) as usize
-                            + index * EROFS_BLOCK_SIZE as usize,
-                    )
-                }
+                let xattr_size = 0;
+                unsafe { m.base.add(self.offset as usize + 64 + xattr_size) }
             }
             _ => {
                 panic!("layout is {}", layout)
             }
-        }
+        };
+
+        Ok(r)
     }
 
     fn get_entry(&self, block_index: usize, index: usize) -> &RafsV6Dirent {
         // TODO: We indeed need safety check here.
-        let block_mapping = self.data_block_mapping(block_index);
+        // FIXME: unwrap
+        let block_mapping = self.data_block_mapping(block_index).unwrap();
         unsafe { &*(block_mapping.add(size_of::<RafsV6Dirent>() * index) as *const RafsV6Dirent) }
     }
 
     // `max_entries` indicates the quantity of entries residing in a single block.
     // Both `block_index` and `index` start from 0.
     fn entry_name(&self, block_index: usize, index: usize, max_entries: usize) -> &OsStr {
-        let block_mapping = self.data_block_mapping(block_index);
+        // FIXME: unwrap
+        let block_mapping = self.data_block_mapping(block_index).unwrap();
         // TODO: Handle the case with inlined tail packing data.
         let de = self.get_entry(block_index, index);
         debug!("entry index {} block index {}", index, block_index);
@@ -500,7 +501,8 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_symlink(&self) -> Result<OsString> {
         // FIXME: assume that symlink can't be that long
         let inode = self.disk_inode();
-        let data = self.data_block_mapping(0);
+        // FIXME: Unwrap
+        let data = self.data_block_mapping(0).unwrap();
         unsafe {
             Ok(
                 bytes_to_os_str(std::slice::from_raw_parts(data, inode.i_size as usize))
