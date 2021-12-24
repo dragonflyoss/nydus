@@ -321,20 +321,22 @@ impl BlobContext {
     }
 
     pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper) -> Result<()> {
-        if self.blob_meta_info_enabled {
-            debug_assert!(chunk.index() as usize == self.blob_meta_info.len());
-            let mut meta = BlobChunkInfoOndisk::default();
-            meta.set_compressed_offset(chunk.compressed_offset());
-            meta.set_compressed_size(chunk.compressed_size());
-            meta.set_uncompressed_offset(chunk.uncompressed_offset(), self.blob_meta_info_enabled);
-            meta.set_uncompressed_size(chunk.uncompressed_size());
-            trace!(
-                "chunk uncompressed {} size {}",
-                meta.uncompressed_offset(),
-                meta.uncompressed_size()
-            );
-            self.blob_meta_info.push(meta);
+        if !self.blob_meta_info_enabled {
+            return Ok(());
         }
+
+        debug_assert!(chunk.index() as usize == self.blob_meta_info.len());
+        let mut meta = BlobChunkInfoOndisk::default();
+        meta.set_compressed_offset(chunk.compressed_offset());
+        meta.set_compressed_size(chunk.compressed_size());
+        meta.set_uncompressed_offset(chunk.uncompressed_offset());
+        meta.set_uncompressed_size(chunk.uncompressed_size());
+        trace!(
+            "chunk uncompressed {} size {}",
+            meta.uncompressed_offset(),
+            meta.uncompressed_size()
+        );
+        self.blob_meta_info.push(meta);
 
         Ok(())
     }

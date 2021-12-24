@@ -302,7 +302,7 @@ fn dump_blob(
     let mut blob_ctx = BlobContext::new(blob_id, blob_storage)?;
     blob_ctx.set_chunk_dict(chunk_dict);
     blob_ctx.set_chunk_size(ctx.chunk_size);
-    blob_ctx.set_meta_info_enabled(true);
+    blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
 
     // Since all layers are built concurrently, it is not possible to deduplicate
     // chunk between layers while ensuring reproducible build, so we only do
