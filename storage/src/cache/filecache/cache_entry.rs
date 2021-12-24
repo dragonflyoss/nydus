@@ -678,7 +678,7 @@ impl FileCacheEntry {
         let metrics = self.metrics.clone();
 
         metrics.buffered_backend_size.add(buffer.size() as u64);
-        self.runtime.spawn(async move {
+        self.runtime.spawn_blocking(move || {
             metrics.buffered_backend_size.sub(buffer.size() as u64);
             match Self::persist_chunk(&file, offset, buffer.slice()) {
                 Ok(_) => delayed_chunk_map

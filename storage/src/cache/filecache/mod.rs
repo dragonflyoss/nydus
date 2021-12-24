@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Result;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use tokio::runtime::{Builder, Runtime};
 
 use nydus_utils::metrics::BlobcacheMetrics;
-use tokio::runtime::Runtime;
 
 use self::cache_entry::FileCacheEntry;
 use crate::backend::BlobBackend;
@@ -84,7 +86,15 @@ impl FileCacheMgr {
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
         let work_dir = blob_config.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
-        let runtime = Arc::new(Runtime::new().map_err(|e| eother!(e))?);
+        let runtime = Arc::new(
+            Builder::new_multi_thread()
+                .worker_threads(1) // Limit the number of worker thread to 1 since this runtime is generally used to do blocking IO.
+                .thread_keep_alive(Duration::from_secs(10))
+                .max_blocking_threads(8)
+                .thread_name("cache-flusher")
+                .build()
+                .map_err(|e| eother!(e))?,
+        );
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
