@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use nix::sys::uio;
+use nix::unistd::dup;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
@@ -14,11 +16,9 @@ use std::sync::{
     Arc, Mutex, RwLock,
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use nix::sys::uio;
-use nix::unistd::dup;
-
-use tokio::{self, runtime::Runtime};
+use tokio::runtime::{Builder, Runtime};
 
 use futures::executor::block_on;
 use governor::{
@@ -340,7 +340,7 @@ impl BlobCache {
         let compressed = self.is_compressed;
         self.metrics.buffered_backend_size.add(buffer.size() as u64);
         let metrics = self.metrics.clone();
-        self.runtime.spawn(async move {
+        self.runtime.spawn_blocking(move || {
             metrics.buffered_backend_size.sub(buffer.size() as u64);
             match Self::persist_chunk(compressed, fd, delayed_chunk.as_ref(), buffer.slice()) {
                 Err(e) => {
@@ -1384,7 +1384,15 @@ pub fn new(
         mr_sender: Arc::new(Mutex::new(tx)),
         mr_receiver: rx,
         metrics,
-        runtime: Arc::new(Runtime::new().unwrap()),
+        runtime: Arc::new(
+            Builder::new_multi_thread()
+                .worker_threads(1) // Limit the number of worker thread to 1 since this runtime is generally used to do blocking IO.
+                .thread_keep_alive(Duration::from_secs(10))
+                .max_blocking_threads(8)
+                .thread_name("cache-flusher")
+                .build()
+                .map_err(|e| eother!(e))?,
+        ),
     });
 
     if enabled {
