@@ -109,7 +109,7 @@ impl BlobCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, iovec: &BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
+    fn read(&self, iovec: &mut BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
         let bios = &iovec.bi_vec;
 
         if iovec.bi_size == 0 || bios.is_empty() {

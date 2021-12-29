@@ -794,6 +794,7 @@ pub struct RafsV6InodeChunkAddr {
     /// Higher part of encoded blob address.
     c_blob_addr_hi: u16,
     /// start block address of this inode chunk
+    /// decompressed offset must be aligned, in unit of block
     c_blk_addr: u32,
 }
 
@@ -821,6 +822,7 @@ impl RafsV6InodeChunkAddr {
     }
 
     /// Get the index into the blob compression information array.
+    /// Within blob, chunk's index 24bits
     pub fn blob_comp_index(&self) -> u32 {
         let val = (u16::from_le(self.c_blob_addr_hi) as u32) >> 8;
         (val << 16) | (u16::from_le(self.c_blob_addr_lo) as u32)

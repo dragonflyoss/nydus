@@ -176,7 +176,7 @@ pub trait BlobCache: Send + Sync {
     }
 
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
-    fn read(&self, iovec: &BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize>;
+    fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize>;
 
     /// Read multiple chunks from the blob cache in batch mode.
     ///
