@@ -32,9 +32,10 @@ use crate::metadata::{
     layout::{
         bytes_to_os_str,
         v6::{
-            RafsV6BlobTable, RafsV6Dirent, RafsV6InodeExtended, EROFS_BLOCK_SIZE,
-            EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
-            EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BITS,
+            RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeExtended,
+            EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+            EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS,
+            EROFS_I_VERSION_BITS,
         },
         XattrName, XattrValue,
     },
@@ -48,7 +49,7 @@ use nydus_utils::{
     digest::{Algorithm, RafsDigest},
     div_round_up,
 };
-use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
+use storage::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec};
 use storage::utils::readahead;
 
 // Safe to Send/Sync because the underlying data structures are readonly
@@ -725,7 +726,78 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
-        todo!()
+        let blk_size = self.mapping.state.load().meta.chunk_size as u32;
+        let chunks_per_blk = EROFS_BLOCK_SIZE / size_of::<RafsV6InodeChunkAddr>() as u64;
+
+        let mut left = std::cmp::min(self.size(), size as u64) as u32;
+        let head_chunk_index = offset / blk_size as u64;
+
+        // TODO: Validate chunk format by checking its `i_u`
+
+        let mut vec: Vec<BlobIoVec> = Vec::new();
+        // FIXME: unwrap
+        let block_mapping = self.data_block_mapping(0).unwrap();
+        let chunks: &[RafsV6InodeChunkAddr] = unsafe {
+            std::slice::from_raw_parts(
+                block_mapping.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
+                    as *const RafsV6InodeChunkAddr,
+                (div_round_up(self.size(), blk_size as u64) - head_chunk_index) as usize,
+            )
+        };
+
+        let mut descs = BlobIoVec::new();
+        let content_offset = (offset % blk_size as u64) as u32;
+        let mut content_len = std::cmp::min(blk_size - content_offset, left);
+
+        let blob_table = &self.mapping.state.load().blob_table.entries;
+
+        // FIXME: unwrap
+        let first_chunk = chunks.first().unwrap();
+        let blob_index = first_chunk.blob_index() - 1;
+        let chunk_index = first_chunk.blob_comp_index();
+        let blob = blob_table[blob_index as usize].clone();
+        let cki = BlobIoChunk::Address(blob_index as u32, chunk_index);
+
+        let desc = BlobIoDesc::new(blob, cki, content_offset, content_len as usize, user_io);
+
+        descs.bi_vec.push(desc);
+        descs.bi_size += content_len as usize;
+        left -= content_len;
+
+        if left != 0 {
+            // Handle the rest of chunks since they shares the same content length = 0.
+            for c in chunks.iter().skip(1) {
+                let blob_index = c.blob_index() - 1;
+                let chunk_index = c.blob_comp_index();
+                let cki = BlobIoChunk::Address(blob_index as u32, chunk_index);
+                let blob = blob_table[blob_index as usize].clone();
+
+                content_len = std::cmp::min(blk_size, left);
+                let desc = BlobIoDesc::new(blob, cki, 0, content_len as usize, user_io);
+
+                if blob_index as u32 != descs.bi_vec[0].blob.blob_index() {
+                    vec.push(descs);
+                    descs = BlobIoVec::new();
+                }
+
+                descs.bi_vec.push(desc);
+                // TODO: change type of bi_size to u32
+                descs.bi_size += content_len as usize;
+                left -= content_len;
+
+                if left == 0 {
+                    break;
+                }
+            }
+        }
+
+        if !descs.bi_vec.is_empty() {
+            vec.push(descs)
+        }
+
+        assert_eq!(left, 0);
+
+        Ok(vec)
     }
 
     fn as_any(&self) -> &dyn Any {
