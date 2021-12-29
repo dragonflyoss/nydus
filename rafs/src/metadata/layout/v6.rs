@@ -806,7 +806,7 @@ impl RafsV6InodeChunkAddr {
 
     /// Get the blob index of the chunk.
     pub fn blob_index(&self) -> u8 {
-        (u16::from_le(self.c_blob_addr_hi)) as u8
+        (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u8
     }
 
     /// Set the blob index of the chunk.
@@ -820,7 +820,6 @@ impl RafsV6InodeChunkAddr {
     /// Get the index into the blob compression information array.
     pub fn blob_comp_index(&self) -> u32 {
         let val = (u16::from_le(self.c_blob_addr_hi) as u32) >> 8;
-
         (val << 16) | (u16::from_le(self.c_blob_addr_lo) as u32)
     }
 
