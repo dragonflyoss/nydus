@@ -641,6 +641,7 @@ impl Node {
                 let mut v6_chunk = RafsV6InodeChunkAddr::new();
                 // for erofs, bump id by 1 since device id 0 is bootstrap.
                 v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
+                v6_chunk.set_blob_comp_index(chunk.index());
                 v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
                 trace!("name {:?} chunk {}", self.name(), chunk);
 
