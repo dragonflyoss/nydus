@@ -218,24 +218,13 @@ fn main() -> Result<()> {
                 .default_value("/")
                 .required(false)
                 .global(true),
-        )
-        .arg(
-            Arg::with_name("hybrid-mode").long("hybrid-mode")
-            .help("run nydusd in rafs and passthroughfs hybrid mode")
-            .required(false)
-            .takes_value(false)
-            .global(true)
-        );
-
-    #[cfg(feature = "fusedev")]
-    let cmd_arguments = cmd_arguments
-        .arg(
+        ).arg(
             Arg::with_name("bootstrap")
                 .long("bootstrap")
                 .short("B")
                 .help("Rafs filesystem bootstrap/metadata file")
                 .takes_value(true)
-                .conflicts_with("shared-dir"),
+                .conflicts_with("shared-dir")
         )
         .arg(
             Arg::with_name("shared-dir")
@@ -246,12 +235,11 @@ fn main() -> Result<()> {
                 .conflicts_with("bootstrap"),
         )
         .arg(
-            Arg::with_name("hybrid-mode")
-                .long("hybrid-mode")
-                .help("run nydusd in rafs and passthroughfs hybrid mode")
-                .required(false)
-                .takes_value(false)
-                .global(true),
+            Arg::with_name("hybrid-mode").long("hybrid-mode")
+            .help("run nydusd in rafs and passthroughfs hybrid mode")
+            .required(false)
+            .takes_value(false)
+            .global(true)
         );
 
     #[cfg(feature = "fusedev")]

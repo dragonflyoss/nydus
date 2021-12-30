@@ -157,7 +157,7 @@ dependencies = [
 name = "blobfs"
 version = "0.1.0"
 dependencies = [
- "fuse-backend-rs",
+ "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=afc7b69)",
  "libc",
  "log",
  "nydus-app",
@@ -519,6 +519,22 @@ dependencies = [
  "virtio-queue",
  "vm-memory",
  "vmm-sys-util 0.9.0",
+]
+
+[[package]]
+name = "fuse-backend-rs"
+version = "0.1.2"
+source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=afc7b69#afc7b69ca485fd00555687d31bb2b59d36a0155b"
+dependencies = [
+ "arc-swap 0.4.6",
+ "bitflags",
+ "caps",
+ "libc",
+ "log",
+ "nix 0.22.2",
+ "virtio-queue",
+ "vm-memory",
+ "vmm-sys-util 0.8.0",
 ]
 
 [[package]]
@@ -1187,21 +1203,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nydus-app"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91166e11340319bb872baba7546649218eb2454db54cb9c1b9f9ec922c66e390"
-dependencies = [
- "built",
- "flexi_logger",
- "libc",
- "log",
- "nix 0.17.0",
- "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
-]
-
-[[package]]
 name = "nydus-error"
 version = "0.1.0"
 dependencies = [
@@ -1240,7 +1241,7 @@ dependencies = [
  "epoll",
  "event-manager",
  "flexi_logger",
- "fuse-backend-rs",
+ "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
  "hyper",
  "hyperlocal",
  "lazy_static",
@@ -1248,7 +1249,7 @@ dependencies = [
  "log",
  "nix 0.17.0",
  "nydus-api",
- "nydus-app 0.1.0",
+ "nydus-app",
  "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nydus-utils",
  "openssl",
@@ -1276,7 +1277,7 @@ name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
  "blake3 0.3.6",
- "fuse-backend-rs",
+ "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
  "lazy_static",
  "libc",
  "log",
@@ -1473,7 +1474,7 @@ dependencies = [
  "bitflags",
  "blake3 1.0.0",
  "flate2",
- "fuse-backend-rs",
+ "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
  "futures",
  "hmac",
  "lazy_static",
@@ -1886,7 +1887,7 @@ dependencies = [
  "base64",
  "bitflags",
  "flate2",
- "fuse-backend-rs",
+ "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
  "futures",
  "governor",
  "hmac",
