@@ -475,6 +475,20 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn nlink(&self) -> u32;
 }
 
+impl Debug for &dyn RafsV6OndiskInode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Ondisk Inode")
+            .field("format", &self.format())
+            .field("ino", &self.ino())
+            .field("mode", &self.mode())
+            .field("size", &self.size())
+            .field("union", &self.union())
+            .field("nlink", &self.nlink())
+            .field("xattr count", &self.xattr_count())
+            .finish()
+    }
+}
+
 /// RAFS v6 inode on-disk format, 32 bytes.
 ///
 /// This structure is designed to be compatible with EROFS compact inode format.
