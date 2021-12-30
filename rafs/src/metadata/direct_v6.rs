@@ -21,7 +21,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Result, SeekFrom};
 use std::mem::size_of;
-// use std::mem::size_of;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::sync::Arc;
 
@@ -302,7 +302,6 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
 pub struct OndiskInodeWrapper {
     pub mapping: DirectSuperBlockV6,
     pub offset: usize,
-    // Rafs does not have the help of linux kernel to manage dcache.
     pub blocks_count: u64,
 }
 
@@ -392,16 +391,22 @@ impl OndiskInodeWrapper {
 
     // `max_entries` indicates the quantity of entries residing in a single block.
     // Both `block_index` and `index` start from 0.
-    fn entry_name(&self, block_index: usize, index: usize, max_entries: usize) -> &OsStr {
+    fn entry_name(
+        &self,
+        block_index: usize,
+        index: usize,
+        entries_per_block: usize,
+        pos: u32,
+    ) -> &OsStr {
         // FIXME: unwrap
         let block_mapping = self.data_block_mapping(block_index).unwrap();
         // TODO: Handle the case with inlined tail packing data.
         let de = self.get_entry(block_index, index);
         debug!("entry index {} block index {}", index, block_index);
         // `index` starts from zero
-        if index < max_entries - 1 {
+        if index < entries_per_block - 1 {
             let next_de = self.get_entry(block_index, index + 1);
-            // FIXME: fix unwrap
+            // FIXME: unwrap
             let len = next_de
                 .e_nameoff
                 .checked_sub(de.e_nameoff)
@@ -413,6 +418,7 @@ impl OndiskInodeWrapper {
                     );
                 })
                 .unwrap();
+
             unsafe {
                 bytes_to_os_str(std::slice::from_raw_parts(
                     block_mapping.add(de.e_nameoff as usize),
@@ -420,8 +426,6 @@ impl OndiskInodeWrapper {
                 ))
             }
         } else {
-            // We can safely do this as name does not span two blocks, and encountered zero
-            // will stop UTF-8 decoding
             unsafe {
                 let e = std::slice::from_raw_parts(
                     block_mapping.add(de.e_nameoff as usize),
@@ -433,11 +437,14 @@ impl OndiskInodeWrapper {
                 for i in e {
                     if *i != 0 {
                         l += 1;
+                        let v = pos as u64 + l as u64 + size_of::<RafsV6Dirent>() as u64;
+                        if v == self.size() || v % EROFS_BLOCK_SIZE == 0 {
+                            break;
+                        }
                     } else {
                         break;
                     }
                 }
-
                 bytes_to_os_str(&e[0..l])
             }
         }
@@ -477,10 +484,11 @@ impl RafsInode for OndiskInodeWrapper {
         // TODO(chge): Calculate blocks count from isize later.
         // TODO(chge): Include `rdev` into ondisk v6 extended inode.
         Attr {
-            ino: inode.i_ino as u64,
+            ino: self.ino(),
             size: inode.i_size,
             mode: inode.i_mode as u32,
             nlink: inode.i_nlink,
+            blocks: div_round_up(inode.i_size, 512),
             uid: inode.i_uid,
             gid: inode.i_gid,
             mtime: inode.i_mtime,
@@ -526,13 +534,16 @@ impl RafsInode for OndiskInodeWrapper {
         let blocks_count = div_round_up(inode.i_size, EROFS_BLOCK_SIZE);
         let mut target: Option<u64> = None;
 
+        let mut pos: usize = 0;
+
         let nid = 'outer: for i in 0..blocks_count {
             let head_entry = self.get_entry(i as usize, 0);
             // `e_nameoff` is offset from each single block?
             let head_name_offset = head_entry.e_nameoff;
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
 
-            let d_name = self.entry_name(i as usize, 0, entries_count as usize);
+            let d_name = self.entry_name(i as usize, 0, entries_count as usize, pos as u32);
+            pos += d_name.as_bytes().len();
 
             if d_name == name {
                 target = Some(head_entry.e_nid);
@@ -542,7 +553,9 @@ impl RafsInode for OndiskInodeWrapper {
             // TODO: Let binary search optimize this in the future.
             for j in 1..entries_count {
                 let de = self.get_entry(i as usize, j as usize);
-                let d_name = self.entry_name(i as usize, j as usize, entries_count as usize);
+                let d_name =
+                    self.entry_name(i as usize, j as usize, entries_count as usize, pos as u32);
+                pos += d_name.as_bytes().len() + size_of::<RafsV6Dirent>();
 
                 if d_name == name {
                     target = Some(head_entry.e_nid);
@@ -598,26 +611,27 @@ impl RafsInode for OndiskInodeWrapper {
             inode
         );
 
+        let mut pos: usize = 0;
         for i in 0..blocks_count {
-            // Skip specified offset
-            if skipped != 0 {
-                skipped -= 1;
-                continue;
-            }
-
-            cur_offset += 1;
-
             let head_entry = self.get_entry(i as usize, 0);
             let name_offset = head_entry.e_nameoff;
             let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
 
             for j in 0..entries_count {
+                // Skip specified offset
+                if skipped != 0 {
+                    skipped -= 1;
+                    continue;
+                }
                 let de = self.get_entry(i as usize, j as usize);
-                let name = self.entry_name(i as usize, j as usize, entries_count as usize);
+                let name =
+                    self.entry_name(i as usize, j as usize, entries_count as usize, pos as u32);
+                pos += name.as_bytes().len() + size_of::<RafsV6Dirent>();
 
                 let nid = de.e_nid;
                 let inode = self.mapping.inode_wrapper(nid)? as Arc<dyn RafsInode>;
-                debug!("find a inode ino={} name={:?}", nid, name);
+                trace!("found file {:?}, nid {}", name, nid);
+                cur_offset += 1;
                 handler(Some(inode), name.to_os_string(), nid, cur_offset).unwrap();
             }
         }
