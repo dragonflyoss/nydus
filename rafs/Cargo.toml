@@ -25,16 +25,16 @@ sha2 = { version = "0.9.1" }
 sha-1 = { version = "0.9.1", optional = true }
 spmc = "0.3.0"
 url = { version = "2.1.1", optional = true }
-vm-memory = "0.6"
+vm-memory = "0.7.0"
 
-fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "5a4b2ac" }
+fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "1367097" }
 
 nydus-utils = { path = "../utils" }
 nydus-error = "0.1"
 storage = { path = "../storage", features = ["backend-localfs"] }
 
 [dev-dependencies]
-vmm-sys-util = ">=0.8.0"
+vmm-sys-util = ">=0.9.0"
 assert_matches = "1.5.0"
 
 [features]
