@@ -15,8 +15,8 @@
 
 use std::sync::Arc;
 
+use fuse_backend_rs::transport::FileVolatileSlice;
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
-use vm_memory::VolatileSlice;
 
 use crate::utils::copyv;
 use crate::StorageError;
@@ -152,7 +152,12 @@ pub trait BlobReader: Send + Sync {
     ///
     /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
     /// read data.
-    fn readv(&self, bufs: &[VolatileSlice], offset: u64, max_size: usize) -> BackendResult<usize> {
+    fn readv(
+        &self,
+        bufs: &[FileVolatileSlice],
+        offset: u64,
+        max_size: usize,
+    ) -> BackendResult<usize> {
         if bufs.len() == 1 && max_size >= bufs[0].len() {
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), bufs[0].len()) };
             self.read(buf, offset)

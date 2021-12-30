@@ -22,7 +22,7 @@ use std::io::Result;
 use std::slice;
 use std::sync::Arc;
 
-use vm_memory::VolatileSlice;
+use fuse_backend_rs::transport::FileVolatileSlice;
 
 pub use dummycache::DummyCacheMgr;
 pub use filecache::FileCacheMgr;
@@ -176,7 +176,7 @@ pub trait BlobCache: Send + Sync {
     }
 
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
-    fn read(&self, iovec: &BlobIoVec, buffers: &[VolatileSlice]) -> Result<usize>;
+    fn read(&self, iovec: &BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize>;
 
     /// Read multiple chunks from the blob cache in batch mode.
     ///

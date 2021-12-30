@@ -28,9 +28,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
-use fuse_backend_rs::transport::FileReadWriteVolatile;
+use fuse_backend_rs::transport::{FileReadWriteVolatile, FileVolatileSlice};
 use nydus_utils::digest::{self, RafsDigest};
-use vm_memory::{Bytes, VolatileSlice};
+use vm_memory::Bytes;
 
 use crate::cache::BlobCache;
 use crate::compress;
@@ -864,11 +864,7 @@ impl BlobDevice {
     }
 
     /// Read a range of data from blob into the provided writer
-    pub fn read_to(
-        &self,
-        w: &mut dyn ZeroCopyWriter<S = ()>,
-        desc: &mut BlobIoVec,
-    ) -> io::Result<usize> {
+    pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: &mut BlobIoVec) -> io::Result<usize> {
         // Validate that:
         // - bi_vec[0] is valid
         // - bi_vec[0].blob.blob_index() is valid
@@ -1009,7 +1005,7 @@ impl<'a> BlobDeviceIoVec<'a> {
 
 #[allow(dead_code)]
 impl BlobDeviceIoVec<'_> {
-    fn fill_hole(&self, bufs: &[VolatileSlice], size: usize) -> Result<usize, Error> {
+    fn fill_hole(&self, bufs: &[FileVolatileSlice], size: usize) -> Result<usize, Error> {
         let mut count: usize = 0;
         let mut remain = size;
 
@@ -1032,24 +1028,28 @@ impl BlobDeviceIoVec<'_> {
 }
 
 impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
-    fn read_volatile(&mut self, _slice: VolatileSlice) -> Result<usize, Error> {
+    fn read_volatile(&mut self, _slice: FileVolatileSlice) -> Result<usize, Error> {
         // Skip because we don't really use it
         unimplemented!();
     }
 
-    fn write_volatile(&mut self, _slice: VolatileSlice) -> Result<usize, Error> {
+    fn write_volatile(&mut self, _slice: FileVolatileSlice) -> Result<usize, Error> {
         // Skip because we don't really use it
         unimplemented!();
     }
 
-    fn read_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
+    fn read_at_volatile(
+        &mut self,
+        _slice: FileVolatileSlice,
+        _offset: u64,
+    ) -> Result<usize, Error> {
         unimplemented!();
     }
 
     // The default read_vectored_at_volatile only read to the first slice, so we have to overload it.
     fn read_vectored_at_volatile(
         &mut self,
-        buffers: &[VolatileSlice],
+        buffers: &[FileVolatileSlice],
         _offset: u64,
     ) -> Result<usize, Error> {
         // BlobDevice::read_to() has validated that:
@@ -1066,7 +1066,11 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         Err(einval!("can not get blob index"))
     }
 
-    fn write_at_volatile(&mut self, _slice: VolatileSlice, _offset: u64) -> Result<usize, Error> {
+    fn write_at_volatile(
+        &mut self,
+        _slice: FileVolatileSlice,
+        _offset: u64,
+    ) -> Result<usize, Error> {
         unimplemented!()
     }
 }

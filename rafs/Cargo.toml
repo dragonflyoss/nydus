@@ -26,8 +26,7 @@ sha-1 = { version = "0.9.1", optional = true }
 spmc = "0.3.0"
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.7.0"
-
-fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "1367097" }
+fuse-backend-rs = { version = "0.2.0" }
 
 nydus-utils = { path = "../utils" }
 nydus-error = "0.1"

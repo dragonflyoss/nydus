@@ -676,7 +676,7 @@ impl FileSystem for Rafs {
         _ctx: &Context,
         ino: u64,
         _handle: u64,
-        w: &mut dyn ZeroCopyWriter<S = ()>,
+        w: &mut dyn ZeroCopyWriter,
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,

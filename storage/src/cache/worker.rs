@@ -19,7 +19,7 @@ use spmc::{channel, Receiver, Sender};
 
 use crate::cache::{BlobCache, BlobIoRange, BlobPrefetchConfig};
 use crate::RAFS_MAX_CHUNK_SIZE;
-use vm_memory::VolatileSlice;
+use fuse_backend_rs::transport::FileVolatileSlice;
 
 /// Configuration information for asynchronous workers.
 pub(crate) struct AsyncPrefetchConfig {
@@ -237,7 +237,7 @@ impl AsyncWorkerMgr {
     }
 
     /// Consume network bandwidth budget for prefetching.
-    pub fn consume_prefetch_budget(&self, buffers: &[VolatileSlice]) {
+    pub fn consume_prefetch_budget(&self, buffers: &[FileVolatileSlice]) {
         if self.busy_workers.load(Ordering::Relaxed) > 0 {
             let size = buffers.iter().fold(0, |v, i| v + i.len());
             if let Some(v) = NonZeroU32::new(std::cmp::min(size, u32::MAX as usize) as u32) {

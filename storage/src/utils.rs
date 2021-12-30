@@ -8,13 +8,14 @@ use std::io::{ErrorKind, Result};
 use std::os::unix::io::RawFd;
 use std::slice::from_raw_parts_mut;
 
+use fuse_backend_rs::transport::FileVolatileSlice;
 use libc::off64_t;
 use nix::sys::uio::{preadv, IoVec};
 use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
-use vm_memory::{Bytes, VolatileSlice};
+use vm_memory::Bytes;
 
 use crate::{StorageError, StorageResult};
 
@@ -38,7 +39,7 @@ pub fn readv(fd: RawFd, iovec: &[IoVec<&mut [u8]>], offset: u64) -> Result<usize
 /// Return (Total copied bytes, (Final written destination index, Final written destination offset))
 pub fn copyv<S: AsRef<[u8]>>(
     src: &[S],
-    dst: &[VolatileSlice],
+    dst: &[FileVolatileSlice],
     offset: usize,
     length: usize,
     mut dst_index: usize,
@@ -93,16 +94,16 @@ pub fn copyv<S: AsRef<[u8]>>(
     Ok((copied, (dst_index, dst_offset)))
 }
 
-/// An memory cursor to access an `VolatileSlice` array.
+/// An memory cursor to access an `FileVolatileSlice` array.
 pub struct MemSliceCursor<'a> {
-    pub mem_slice: &'a [VolatileSlice<'a>],
+    pub mem_slice: &'a [FileVolatileSlice<'a>],
     pub index: usize,
     pub offset: usize,
 }
 
 impl<'a> MemSliceCursor<'a> {
     /// Create a new `MemSliceCursor` object.
-    pub fn new<'b: 'a>(slice: &'b [VolatileSlice]) -> Self {
+    pub fn new<'b: 'a>(slice: &'b [FileVolatileSlice]) -> Self {
         Self {
             mem_slice: slice,
             index: 0,
@@ -176,8 +177,8 @@ impl<'a> MemSliceCursor<'a> {
         vectors
     }
 
-    /// Get the inner `VolatileSlice` array.
-    pub fn inner_slice(&self) -> &[VolatileSlice] {
+    /// Get the inner `FileVolatileSlice` array.
+    pub fn inner_slice(&self) -> &[FileVolatileSlice] {
         self.mem_slice
     }
 }
@@ -211,14 +212,16 @@ pub fn digest_check(data: &[u8], digest: &RafsDigest, digester: digest::Algorith
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vm_memory::VolatileSlice;
+    use fuse_backend_rs::transport::FileVolatileSlice;
 
     #[test]
     fn test_copyv() {
         let mut dst_buf1 = vec![0x0u8; 4];
         let mut dst_buf2 = vec![0x0u8; 4];
-        let volatile_slice_1 = unsafe { VolatileSlice::new(dst_buf1.as_mut_ptr(), dst_buf1.len()) };
-        let volatile_slice_2 = unsafe { VolatileSlice::new(dst_buf2.as_mut_ptr(), dst_buf2.len()) };
+        let volatile_slice_1 =
+            unsafe { FileVolatileSlice::new(dst_buf1.as_mut_ptr(), dst_buf1.len()) };
+        let volatile_slice_2 =
+            unsafe { FileVolatileSlice::new(dst_buf2.as_mut_ptr(), dst_buf2.len()) };
         let dst_bufs = [volatile_slice_1, volatile_slice_2];
 
         let src_buf_1 = vec![1u8, 2u8, 3u8];
@@ -277,9 +280,9 @@ mod tests {
     #[test]
     fn test_mem_slice_cursor_move() {
         let mut buf1 = vec![0x0u8; 2];
-        let vs1 = unsafe { VolatileSlice::new(buf1.as_mut_ptr(), buf1.len()) };
+        let vs1 = unsafe { FileVolatileSlice::new(buf1.as_mut_ptr(), buf1.len()) };
         let mut buf2 = vec![0x0u8; 2];
-        let vs2 = unsafe { VolatileSlice::new(buf2.as_mut_ptr(), buf2.len()) };
+        let vs2 = unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), buf2.len()) };
         let vs = [vs1, vs2];
 
         let mut cursor = MemSliceCursor::new(&vs);
@@ -314,9 +317,9 @@ mod tests {
     #[test]
     fn test_mem_slice_cursor_consume() {
         let mut buf1 = vec![0x0u8; 2];
-        let vs1 = unsafe { VolatileSlice::new(buf1.as_mut_ptr(), buf1.len()) };
+        let vs1 = unsafe { FileVolatileSlice::new(buf1.as_mut_ptr(), buf1.len()) };
         let mut buf2 = vec![0x0u8; 2];
-        let vs2 = unsafe { VolatileSlice::new(buf2.as_mut_ptr(), buf2.len()) };
+        let vs2 = unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), buf2.len()) };
         let vs = [vs1, vs2];
 
         let mut cursor = MemSliceCursor::new(&vs);

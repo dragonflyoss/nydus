@@ -506,10 +506,11 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.1.2"
-source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=1367097#136709796d7b4d53d145f71a1b3aeafa22819aca"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29edd681312df94a2c7a44e4f2de824d1a037728e87a7f7896d1d08cc0f012a"
 dependencies = [
- "arc-swap 0.4.8",
+ "arc-swap 1.5.0",
  "bitflags",
  "caps",
  "libc",
