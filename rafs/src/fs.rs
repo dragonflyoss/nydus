@@ -421,7 +421,6 @@ impl Rafs {
         // up with preventing other users from accessing the container rootfs.
         if attr.ino == self.root_ino() {
             attr.mode = attr.mode & !0o777 | 0o755;
-            attr.ino = RAFS_ROOT_INODE;
         }
 
         Ok(attr)
