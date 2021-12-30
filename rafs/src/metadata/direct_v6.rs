@@ -32,10 +32,10 @@ use crate::metadata::{
     layout::{
         bytes_to_os_str,
         v6::{
-            RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeExtended,
-            EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-            EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS,
-            EROFS_I_VERSION_BITS,
+            RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeCompact,
+            RafsV6InodeExtended, RafsV6OndiskInode, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED,
+            EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
+            EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
         },
         XattrName, XattrValue,
     },
@@ -147,16 +147,22 @@ impl DirectSuperBlockV6 {
         }
     }
 
-    fn disk_inode(&self, offset: usize) -> &RafsV6InodeExtended {
+    fn disk_inode(&self, offset: usize) -> &dyn RafsV6OndiskInode {
         let m = self.state.load();
-        unsafe { &*(m.base.add(offset) as *const RafsV6InodeExtended) }
+        let i = unsafe { &*(m.base.add(offset) as *const RafsV6InodeExtended) };
+
+        if i.format() & EROFS_I_VERSION_BITS != 0 {
+            i
+        } else {
+            unsafe { &*(m.base.add(offset) as *const RafsV6InodeCompact) }
+        }
     }
 
     pub fn inode_wrapper(&self, nid: u64) -> Result<Arc<OndiskInodeWrapper>> {
         // TODO(chge): ensure safety
         let offset = self.calculate_inode_offset(nid) as usize;
         let inode = self.disk_inode(offset);
-        let blocks_count = div_round_up(inode.i_size, EROFS_BLOCK_SIZE);
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         Ok(Arc::new(OndiskInodeWrapper {
             mapping: self.clone(),
             offset,
@@ -306,11 +312,10 @@ pub struct OndiskInodeWrapper {
 }
 
 impl OndiskInodeWrapper {
-    fn disk_inode(&self) -> &RafsV6InodeExtended {
+    fn disk_inode(&self) -> &dyn RafsV6OndiskInode {
         let i = self.mapping.disk_inode(self.offset);
-        // let i = unsafe { &*(m.base.add(self.offset) as *const RafsV6InodeExtended) };
-        trace!("erofs disk inode loaded {:?}", i);
-        &i
+        trace!("erofs disk inode loaded nid={} {:?}", i.ino(), i);
+        i
     }
 
     fn blocks_count(&self) -> u64 {
@@ -334,13 +339,19 @@ impl OndiskInodeWrapper {
     fn data_block_mapping(&self, index: usize) -> RafsResult<*const u8> {
         let inode = self.disk_inode();
 
-        if (inode.i_format & (!(((1 << EROFS_I_DATALAYOUT_BITS) - 1) << 1 | EROFS_I_VERSION_BITS)))
+        if (inode.format() & (!(((1 << EROFS_I_DATALAYOUT_BITS) - 1) << 1 | EROFS_I_VERSION_BITS)))
             != 0
         {
-            return Err(RafsError::Incompatible(inode.i_format));
+            return Err(RafsError::Incompatible(inode.format()));
         }
 
-        let layout = inode.i_format >> EROFS_I_VERSION_BITS;
+        let s = if (inode.format() & 1 << EROFS_I_VERSION_BIT) != 0 {
+            64
+        } else {
+            32
+        };
+
+        let layout = inode.format() >> EROFS_I_VERSION_BITS;
         assert!(layout == 0 || layout == 2 || layout == 4);
         // With legal format set, we can reliably refer `i_u` as raw blocks pointer.
         let m = self.mapping.state.load();
@@ -350,29 +361,30 @@ impl OndiskInodeWrapper {
                 unsafe {
                     m.base.add(
                         // `i_u` points to the Nth block
-                        (inode.i_u as u64 * EROFS_BLOCK_SIZE) as usize
+                        (inode.union() as u64 * EROFS_BLOCK_SIZE) as usize
                             + index * EROFS_BLOCK_SIZE as usize,
                     )
                 }
             }
             EROFS_INODE_FLAT_INLINE => {
-                // FIXME: load xattr size.
+                // FIXME: load xattr size
+                // FIXME: Ensure the correctness of locate inline data (tail packing)
                 let xattr_size = 0;
                 if index as u64 != self.blocks_count() - 1 {
                     unsafe {
                         m.base.add(
                             // `i_u` points to the Nth block
-                            (inode.i_u as u64 * EROFS_BLOCK_SIZE) as usize
+                            (inode.union() as u64 * EROFS_BLOCK_SIZE) as usize
                                 + index * EROFS_BLOCK_SIZE as usize,
                         )
                     }
                 } else {
-                    unsafe { m.base.add(self.offset as usize + 64 + xattr_size) }
+                    unsafe { m.base.add(self.offset as usize + s + xattr_size) }
                 }
             }
             EROFS_INODE_CHUNK_BASED => {
                 let xattr_size = 0;
-                unsafe { m.base.add(self.offset as usize + 64 + xattr_size) }
+                unsafe { m.base.add(self.offset as usize + s + xattr_size) }
             }
             _ => {
                 panic!("layout is {}", layout)
@@ -389,7 +401,7 @@ impl OndiskInodeWrapper {
         unsafe { &*(block_mapping.add(size_of::<RafsV6Dirent>() * index) as *const RafsV6Dirent) }
     }
 
-    // `max_entries` indicates the quantity of entries residing in a single block.
+    // `entries_per_block` indicates the quantity of entries residing in a single block.
     // Both `block_index` and `index` start from 0.
     fn entry_name(
         &self,
@@ -400,7 +412,6 @@ impl OndiskInodeWrapper {
     ) -> &OsStr {
         // FIXME: unwrap
         let block_mapping = self.data_block_mapping(block_index).unwrap();
-        // TODO: Handle the case with inlined tail packing data.
         let de = self.get_entry(block_index, index);
         debug!("entry index {} block index {}", index, block_index);
         // `index` starts from zero
@@ -411,10 +422,9 @@ impl OndiskInodeWrapper {
                 .e_nameoff
                 .checked_sub(de.e_nameoff)
                 .ok_or_else(|| {
-                    let inode = self.disk_inode();
                     error!(
-                        "nid {} inode {:?} entry index {} block index {} next dir entry {:?} current dir entry {:?}",
-                        self.ino(), inode, index, block_index, next_de, de
+                        "nid {} entry index {} block index {} next dir entry {:?} current dir entry {:?}",
+                        self.ino(), index, block_index, next_de, de
                     );
                 })
                 .unwrap();
@@ -433,6 +443,7 @@ impl OndiskInodeWrapper {
                 );
 
                 // Use this trick to temporarily decide entry name's length. Improve this?
+                // TODO: Replace this use `libc::strncpy`
                 let mut l: usize = 0;
                 for i in e {
                     if *i != 0 {
@@ -452,7 +463,7 @@ impl OndiskInodeWrapper {
 
     fn mode_format_bits(&self) -> u32 {
         let i = self.disk_inode();
-        i.i_mode as u32 & libc::S_IFMT
+        i.mode() as u32 & libc::S_IFMT
     }
 }
 
@@ -485,14 +496,14 @@ impl RafsInode for OndiskInodeWrapper {
         // TODO(chge): Include `rdev` into ondisk v6 extended inode.
         Attr {
             ino: self.ino(),
-            size: inode.i_size,
-            mode: inode.i_mode as u32,
-            nlink: inode.i_nlink,
-            blocks: div_round_up(inode.i_size, 512),
-            uid: inode.i_uid,
-            gid: inode.i_gid,
-            mtime: inode.i_mtime,
-            mtimensec: inode.i_mtime_nsec,
+            size: inode.size(),
+            mode: inode.mode() as u32,
+            nlink: inode.nlink(),
+            blocks: div_round_up(inode.size(), 512),
+            uid: inode.ugid().0,
+            gid: inode.ugid().1,
+            mtime: inode.mtime_s_ns().0,
+            mtimensec: inode.mtime_s_ns().1,
             blksize: RAFS_INODE_BLOCKSIZE,
             ..Default::default()
         }
@@ -508,16 +519,14 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn get_symlink(&self) -> Result<OsString> {
-        // FIXME: assume that symlink can't be that long
+        // FIXME: assume that symlink can't be that long, tail packing is ignored
         let inode = self.disk_inode();
         // FIXME: Unwrap
         let data = self.data_block_mapping(0).unwrap();
-        unsafe {
-            Ok(
-                bytes_to_os_str(std::slice::from_raw_parts(data, inode.i_size as usize))
-                    .to_os_string(),
-            )
-        }
+        let s = unsafe {
+            bytes_to_os_str(std::slice::from_raw_parts(data, inode.size() as usize)).to_os_string()
+        };
+        Ok(s)
     }
 
     /// Get the child with the specified name.
@@ -527,11 +536,11 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
         let inode = self.disk_inode();
 
-        if inode.i_size == 0 {
+        if inode.size() == 0 {
             return Err(enoent!());
         }
 
-        let blocks_count = div_round_up(inode.i_size, EROFS_BLOCK_SIZE);
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         let mut target: Option<u64> = None;
 
         let mut pos: usize = 0;
@@ -543,7 +552,7 @@ impl RafsInode for OndiskInodeWrapper {
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
 
             let d_name = self.entry_name(i as usize, 0, entries_count as usize, pos as u32);
-            pos += d_name.as_bytes().len();
+            pos += d_name.as_bytes().len() + size_of::<RafsV6Dirent>();
 
             if d_name == name {
                 target = Some(head_entry.e_nid);
@@ -558,7 +567,7 @@ impl RafsInode for OndiskInodeWrapper {
                 pos += d_name.as_bytes().len() + size_of::<RafsV6Dirent>();
 
                 if d_name == name {
-                    target = Some(head_entry.e_nid);
+                    target = Some(de.e_nid);
                     break 'outer;
                 }
             }
@@ -593,22 +602,22 @@ impl RafsInode for OndiskInodeWrapper {
     fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
         let inode = self.disk_inode();
 
-        if inode.i_size == 0 {
+        if inode.size() == 0 {
             return Err(enoent!());
         }
 
-        let blocks_count = div_round_up(inode.i_size, EROFS_BLOCK_SIZE);
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
 
         let mut cur_offset = entry_offset;
         let mut skipped = entry_offset;
 
-        debug!(
-            "Total blocks count {} skipped {} current offset {} nid {} inode overview {:?}",
+        trace!(
+            "Total blocks count {} skipped {} current offset {} nid {} inode {:?}",
             blocks_count,
             skipped,
             cur_offset,
             self.ino(),
-            inode
+            inode,
         );
 
         let mut pos: usize = 0;
@@ -719,7 +728,7 @@ impl RafsInode for OndiskInodeWrapper {
     /// Get data size of the inode.
     fn size(&self) -> u64 {
         let i = self.disk_inode();
-        i.i_size
+        i.size()
     }
 
     /// Get file name size of the inode.
@@ -729,7 +738,7 @@ impl RafsInode for OndiskInodeWrapper {
 
     fn get_symlink_size(&self) -> u16 {
         let inode = self.disk_inode();
-        inode.i_size as u16
+        inode.size() as u16
     }
 
     fn collect_descendants_inodes(

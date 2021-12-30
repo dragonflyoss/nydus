@@ -34,6 +34,7 @@ pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
 pub const EROFS_DEVTABLE_OFFSET: u16 =
     EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE;
 
+pub const EROFS_I_VERSION_BIT: u16 = 0;
 pub const EROFS_I_VERSION_BITS: u16 = 1;
 pub const EROFS_I_DATALAYOUT_BITS: u16 = 3;
 
@@ -462,6 +463,16 @@ pub trait RafsV6OndiskInode: RafsStore {
     }
 
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
+
+    fn format(&self) -> u16;
+    fn xattr_count(&self) -> u16;
+    fn mode(&self) -> u16;
+    fn size(&self) -> u64;
+    fn union(&self) -> u32;
+    fn ino(&self) -> u32;
+    fn ugid(&self) -> (u32, u32);
+    fn mtime_s_ns(&self) -> (u64, u32);
+    fn nlink(&self) -> u32;
 }
 
 /// RAFS v6 inode on-disk format, 32 bytes.
@@ -551,6 +562,42 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     /// Load a `RafsV6InodeCompact` from a reader.
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
+    }
+
+    fn format(&self) -> u16 {
+        self.i_format
+    }
+
+    fn xattr_count(&self) -> u16 {
+        self.i_xattr_icount
+    }
+
+    fn mode(&self) -> u16 {
+        self.i_mode
+    }
+
+    fn size(&self) -> u64 {
+        self.i_size as u64
+    }
+
+    fn union(&self) -> u32 {
+        self.i_u
+    }
+
+    fn ino(&self) -> u32 {
+        self.i_ino
+    }
+
+    fn ugid(&self) -> (u32, u32) {
+        (self.i_uid as u32, self.i_gid as u32)
+    }
+
+    fn mtime_s_ns(&self) -> (u64, u32) {
+        (0, 0)
+    }
+
+    fn nlink(&self) -> u32 {
+        self.i_nlink as u32
     }
 }
 
@@ -669,6 +716,42 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
     /// Load a `RafsV6InodeExtended` from a reader.
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
+    }
+
+    fn format(&self) -> u16 {
+        self.i_format
+    }
+
+    fn xattr_count(&self) -> u16 {
+        self.i_xattr_icount
+    }
+
+    fn mode(&self) -> u16 {
+        self.i_mode
+    }
+
+    fn size(&self) -> u64 {
+        self.i_size
+    }
+
+    fn union(&self) -> u32 {
+        self.i_u
+    }
+
+    fn ino(&self) -> u32 {
+        self.i_ino
+    }
+
+    fn ugid(&self) -> (u32, u32) {
+        (self.i_uid, self.i_gid)
+    }
+
+    fn mtime_s_ns(&self) -> (u64, u32) {
+        (self.i_mtime, self.i_mtime_nsec)
+    }
+
+    fn nlink(&self) -> u32 {
+        self.i_nlink
     }
 }
 
