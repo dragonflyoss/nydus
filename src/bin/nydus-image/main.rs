@@ -31,8 +31,8 @@ use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::chunk_dict::import_chunk_dict;
 use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, RafsVersion,
-    SourceType,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputBlob,
+    RafsVersion, SourceType,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
@@ -52,9 +52,19 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 
 #[derive(Serialize, Default)]
 pub struct OutputSerializer {
+    /// The binary version of builder (nydus-image).
     version: String,
+    /// Represents all blob in blob table ordered by blob index, this field
+    /// only include the layer that does have a blob, and should be deprecated
+    /// in future, use `ordered_blobs` field to replace.
     blobs: Vec<String>,
+    /// Represents all blob in blob table ordered by layer, this field
+    /// include the layer that does not have a blob.
+    ordered_blobs: Vec<Option<BuildOutputBlob>>,
+    /// Represents all bootstrap names for every snapshot in diff build,
+    /// ordered by snapshot index, not include the skipped (cached) snapshots.
     bootstraps: Vec<String>,
+    /// Performance trace info for current build.
     trace: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -80,7 +90,8 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
-                blobs: build_output.blobs.clone(),
+                blobs: build_output.get_exists_blobs(),
+                ordered_blobs: build_output.blobs.clone(),
                 bootstraps: build_output.bootstraps.clone(),
                 trace,
             };
@@ -113,6 +124,7 @@ impl OutputSerializer {
             let output = Self {
                 version,
                 blobs: blob_ids,
+                ordered_blobs: Vec::new(),
                 bootstraps: Vec::new(),
                 trace,
             };
@@ -448,7 +460,7 @@ impl Command {
         let blob_stor = Self::get_blob_storage(&matches, source_type)?;
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(&matches)?;
-        let aligned_chunk = if version == RafsVersion::V6 {
+        let aligned_chunk = if version.is_v6() {
             info!("v6 enforces to use \"aligned-chunk\".");
             true
         } else {

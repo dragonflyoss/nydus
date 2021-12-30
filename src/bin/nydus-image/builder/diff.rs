@@ -427,18 +427,24 @@ impl DiffBuilder {
     fn cache_chunks(&mut self, inode: &dyn RafsInode, path: &Path) -> Result<()> {
         let chunk_count = inode.get_chunk_count();
         let mut chunks = Vec::with_capacity(chunk_count as usize);
-        let mut cached_nodes = self.cached_nodes.write().unwrap();
+        let mut blob_index = 0;
         for i in 0..chunk_count {
             let cki = inode.get_chunk_info(i)?;
             chunks.push(ChunkWrapper::from_chunk_info(&cki));
+            blob_index = cki.blob_index();
         }
-        cached_nodes.insert(
-            path.to_path_buf(),
-            vec![Some(CachedNode {
-                chunks,
-                digest: inode.get_digest(),
-            })],
-        );
+
+        // This logic uses CachedNodes to make the final bootstrap of image refer
+        // to the modified files in upper snapshot, not the files in lower snapshot,
+        // so here we should fill None for the lower snapshot that does not contain
+        // the file.
+        let mut cached = vec![None::<CachedNode>; blob_index as usize];
+        cached.push(Some(CachedNode {
+            chunks,
+            digest: inode.get_digest(),
+        }));
+        let mut cached_nodes = self.cached_nodes.write().unwrap();
+        cached_nodes.insert(path.to_path_buf(), cached);
 
         Ok(())
     }
@@ -556,8 +562,8 @@ impl DiffBuilder {
                         child_node.inode.set_child_count(cached.chunks.len() as u32);
                         child_node.chunks = cached.chunks.clone();
                         child_node.inode.set_digest(cached.digest);
-                        let target_snapshot_idx = caches.len() - 1;
-                        for chunk in &mut child_node.chunks {
+                        if !child_node.chunks.is_empty() {
+                            let target_snapshot_idx = caches.len() - 1;
                             let blob_index = blob_mgr
                                 .get_blob_idx_by_layer_idx(target_snapshot_idx as u32)
                                 .ok_or_else(|| {
@@ -567,7 +573,9 @@ impl DiffBuilder {
                                         target_snapshot_idx
                                     )
                                 })?;
-                            chunk.set_blob_index(blob_index);
+                            for chunk in &mut child_node.chunks {
+                                chunk.set_blob_index(blob_index);
+                            }
                         }
                     }
                 }
@@ -700,7 +708,7 @@ impl DiffBuilder {
             bootstrap_mgr.add(bootstrap_ctx);
         }
 
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr, skip)
+        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 
     fn build_with_diff(
@@ -761,7 +769,7 @@ impl DiffBuilder {
             )?;
         }
 
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr, 0)
+        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 }
 

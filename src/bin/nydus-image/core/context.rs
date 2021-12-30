@@ -15,6 +15,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use vmm_sys_util::tempfile::TempFile;
+
 use nydus_utils::digest;
 use nydus_utils::div_round_up;
 use rafs::metadata::layout::v5::RafsV5BlobTable;
@@ -23,12 +27,10 @@ use rafs::metadata::layout::v6::EROFS_BLOCK_SIZE;
 use rafs::metadata::RafsSuperFlags;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWrite};
-use sha2::{Digest, Sha256};
 use storage::compress;
 use storage::device::BlobFeatures;
 use storage::device::BlobInfo;
 use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
-use vmm_sys_util::tempfile::TempFile;
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::layout::BlobLayout;
@@ -48,6 +50,17 @@ pub enum RafsVersion {
 impl Default for RafsVersion {
     fn default() -> Self {
         RafsVersion::V5
+    }
+}
+
+impl RafsVersion {
+    #[allow(dead_code)]
+    pub fn is_v5(&self) -> bool {
+        self == &Self::V5
+    }
+
+    pub fn is_v6(&self) -> bool {
+        self == &Self::V6
     }
 }
 
@@ -424,13 +437,9 @@ impl BlobManager {
         self.blobs.len()
     }
 
-    /// Only get valid (non-empty) blobs.
-    pub fn get_blobs(&self) -> Vec<&BlobContext> {
-        self.blobs.iter().flatten().collect()
-    }
-
-    pub fn get_blobs_from(&self, skip: usize) -> Vec<&BlobContext> {
-        self.blobs.iter().skip(skip).flatten().collect()
+    /// Get all blob contexts (include the blob context that does not have a blob).
+    pub fn get_blobs(&self) -> Vec<&Option<BlobContext>> {
+        self.blobs.iter().collect()
     }
 
     pub fn get_last_blob(&self) -> Option<&BlobContext> {
@@ -445,7 +454,7 @@ impl BlobManager {
     }
 
     pub fn get_blob_idx_by_id(&self, id: &str) -> Option<u32> {
-        for (idx, blob) in self.get_blobs().iter().enumerate() {
+        for (idx, blob) in self.blobs.iter().flatten().enumerate() {
             if blob.blob_id.eq(id) {
                 return Some(idx as u32);
             }
@@ -745,11 +754,17 @@ impl BuildContext {
     }
 }
 
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct BuildOutputBlob {
+    blob_id: String,
+    blob_size: u64,
+}
+
 /// BuildOutput represents the output in this build.
 #[derive(Default, Debug, Clone)]
 pub struct BuildOutput {
-    /// Blob ids for all layer, index equals blob index.
-    pub blobs: Vec<String>,
+    /// Blob infos for all layer, some layers may not have a blob.
+    pub blobs: Vec<Option<BuildOutputBlob>>,
     /// Bootstrap names for all layer in this build, index equals layer index.
     pub bootstraps: Vec<String>,
     /// The size of output blob in this build.
@@ -760,15 +775,16 @@ pub struct BuildOutput {
 }
 
 impl BuildOutput {
-    pub fn new(
-        blob_mgr: &BlobManager,
-        bootstrap_mgr: &BootstrapManager,
-        skip: usize,
-    ) -> Result<BuildOutput> {
+    pub fn new(blob_mgr: &BlobManager, bootstrap_mgr: &BootstrapManager) -> Result<BuildOutput> {
         let blobs = blob_mgr
-            .get_blobs_from(skip)
+            .get_blobs()
             .iter()
-            .map(|b| b.blob_id.to_owned())
+            .map(|blob| {
+                blob.as_ref().map(|b| BuildOutputBlob {
+                    blob_id: b.blob_id.to_owned(),
+                    blob_size: b.compressed_blob_size,
+                })
+            })
             .collect();
         let bootstraps = bootstrap_mgr.get_bootstraps();
         let blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
@@ -781,5 +797,13 @@ impl BuildOutput {
             blob_size,
             bootstrap_name,
         })
+    }
+
+    pub fn get_exists_blobs(&self) -> Vec<String> {
+        self.blobs
+            .iter()
+            .flatten()
+            .map(|b| b.blob_id.to_owned())
+            .collect()
     }
 }

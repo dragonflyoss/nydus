@@ -41,10 +41,7 @@ impl Blob {
                         .dump_blob(ctx, blob_ctx, blob_index, chunk_dict)
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
-                        debug!("[{}]\treadahead {}", node.overlay, node);
                         blob_ctx.blob_readahead_size += size;
-                    } else {
-                        debug!("[{}]\t{}", node.overlay, node);
                     }
                 }
                 self.dump_meta_data(blob_ctx)?;

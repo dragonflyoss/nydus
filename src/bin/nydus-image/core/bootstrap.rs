@@ -80,7 +80,9 @@ impl Bootstrap {
         nodes.push(tree.node.clone());
         self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes)?;
 
-        self.update_dirents(&mut nodes, tree, root_offset);
+        if ctx.fs_version.is_v6() {
+            self.update_dirents(&mut nodes, tree, root_offset);
+        }
         bootstrap_ctx.nodes = nodes;
 
         Ok(())
@@ -144,7 +146,9 @@ impl Bootstrap {
         if parent.is_dir() {
             parent.inode.set_child_index(index);
             parent.inode.set_child_count(tree.children.len() as u32);
-            parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree)?)?;
+            if ctx.fs_version.is_v6() {
+                parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree)?)?;
+            }
         }
 
         tree.node.offset = parent.offset;
@@ -190,7 +194,9 @@ impl Bootstrap {
 
             // update bootstrap_ctx.offset for rafs v6.
             if !child.node.is_dir() {
-                child.node.set_v6_offset(bootstrap_ctx);
+                if ctx.fs_version.is_v6() {
+                    child.node.set_v6_offset(bootstrap_ctx);
+                }
                 bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
             }
 
@@ -471,15 +477,7 @@ impl Bootstrap {
         timing_tracer!(
             {
                 for node in &bootstrap_ctx.nodes {
-                    if ctx.source_type == SourceType::StargzIndex {
-                        debug!("[{}]\t{}", node.overlay, node);
-                        if log::max_level() >= log::LevelFilter::Debug {
-                            for chunk in node.chunks.iter() {
-                                trace!("\t\tbuilding chunk: {}", chunk);
-                            }
-                        }
-                    }
-                    node.dump_bootstrap_v5(&mut bootstrap_writer)
+                    node.dump_bootstrap_v5(&ctx, &mut bootstrap_writer)
                         .context("failed to dump bootstrap")?;
                 }
 

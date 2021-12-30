@@ -656,6 +656,6 @@ impl Builder for StargzBuilder {
         }
 
         bootstrap_mgr.add(bootstrap_ctx);
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr, 0)
+        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 }

@@ -401,11 +401,6 @@ impl Node {
                 chunk_size,
                 is_compressed,
             )?;
-            trace!(
-                "\t\tbuilding chunk: {} compressor {}",
-                chunk,
-                ctx.compressor,
-            );
 
             blob_ctx.add_chunk_meta_info(&chunk)?;
             chunk_dict.add_chunk(chunk.clone());
@@ -419,7 +414,13 @@ impl Node {
         Ok(blob_size)
     }
 
-    pub fn dump_bootstrap_v5(&self, f_bootstrap: &mut dyn RafsIoWrite) -> Result<usize> {
+    pub fn dump_bootstrap_v5(
+        &self,
+        ctx: &BuildContext,
+        f_bootstrap: &mut dyn RafsIoWrite,
+    ) -> Result<usize> {
+        debug!("[{}]\t{}", self.overlay, self);
+
         let mut node_size = 0;
         if let InodeWrapper::V5(raw_inode) = &self.inode {
             // Dump inode info
@@ -453,6 +454,7 @@ impl Node {
                     .store(f_bootstrap)
                     .context("failed to dump chunk info to bootstrap")?;
                 node_size += chunk_size;
+                trace!("\t\tchunk: {} compressor {}", chunk, ctx.compressor,);
             }
 
             Ok(node_size)
@@ -1102,7 +1104,6 @@ impl Node {
             d_size,
             self.v6_datalayout
         );
-        // assert_ne!(self.offset, 8105024);
     }
 }
 
