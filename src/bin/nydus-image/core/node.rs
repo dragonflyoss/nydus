@@ -32,7 +32,7 @@ use rafs::metadata::layout::v5::{
 };
 use rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInodeTrait, EROFS_BLOCK_SIZE,
+    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, EROFS_BLOCK_SIZE,
     EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
 };
 use rafs::metadata::layout::RafsXAttrs;
@@ -478,7 +478,7 @@ impl Node {
         }
     }
 
-    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInodeTrait> {
+    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInode> {
         match self.v6_compact_inode {
             true => Box::new(RafsV6InodeCompact::new()),
             false => Box::new(RafsV6InodeExtended::new()),

@@ -433,7 +433,7 @@ enum EROFS_FILE_TYPE {
     EROFS_FT_MAX,
 }
 
-pub trait RafsV6OndiskInodeTrait: RafsStore {
+pub trait RafsV6OndiskInode: RafsStore {
     fn set_xattr_inline_count(&mut self, count: u16);
     fn set_size(&mut self, size: u64);
     fn set_ino(&mut self, ino: u32);
@@ -503,7 +503,7 @@ impl RafsV6InodeCompact {
     }
 }
 
-impl RafsV6OndiskInodeTrait for RafsV6InodeCompact {
+impl RafsV6OndiskInode for RafsV6InodeCompact {
     /// Set xattr inline count.
     fn set_xattr_inline_count(&mut self, count: u16) {
         self.i_xattr_icount = count.to_le();
@@ -618,7 +618,7 @@ impl RafsV6InodeExtended {
     }
 }
 
-impl RafsV6OndiskInodeTrait for RafsV6InodeExtended {
+impl RafsV6OndiskInode for RafsV6InodeExtended {
     /// Set xattr inline count.
     fn set_xattr_inline_count(&mut self, count: u16) {
         self.i_xattr_icount = count.to_le();
