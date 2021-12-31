@@ -21,7 +21,6 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Result, SeekFrom};
 use std::mem::size_of;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::sync::Arc;
 
@@ -47,7 +46,7 @@ use crate::metadata::{
 use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
 use nydus_utils::{
     digest::{Algorithm, RafsDigest},
-    div_round_up, try_round_up_4k,
+    div_round_up,
 };
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec};
 use storage::utils::readahead;
@@ -350,9 +349,9 @@ impl OndiskInodeWrapper {
         }
 
         let s = if (inode.format() & 1 << EROFS_I_VERSION_BIT) != 0 {
-            64
+            size_of::<RafsV6InodeExtended>()
         } else {
-            32
+            size_of::<RafsV6InodeCompact>()
         };
 
         let layout = inode.format() >> EROFS_I_VERSION_BITS;
@@ -406,18 +405,17 @@ impl OndiskInodeWrapper {
         })
     }
 
-    // `entries_per_block` indicates the quantity of entries residing in a single block.
+    // `max_entries` indicates the quantity of entries residing in a single block including tail packing.
     // Both `block_index` and `index` start from 0.
     fn entry_name(
         &self,
         block_index: usize,
         index: usize,
-        entries_per_block: usize,
-        pos: u32,
+        max_entries: usize,
     ) -> RafsResult<&OsStr> {
         let block_mapping = self.data_block_mapping(block_index)?;
         let de = self.get_entry(block_index, index)?;
-        if index < entries_per_block - 1 {
+        if index < max_entries - 1 {
             let next_de = self.get_entry(block_index, index + 1)?;
             let (next_de_name_off, de_name_off) = (next_de.e_nameoff, de.e_nameoff);
             let len = next_de.e_nameoff.checked_sub(de.e_nameoff).ok_or_else(|| {
@@ -448,11 +446,13 @@ impl OndiskInodeWrapper {
 
                 // Use this trick to temporarily decide entry name's length. Improve this?
                 let mut l: usize = 0;
+                let head_de = self.get_entry(block_index, 0)?;
+                let s = (de.e_nameoff - head_de.e_nameoff) as u64
+                    + (size_of::<RafsV6Dirent>() * max_entries) as u64;
                 for i in e {
                     if *i != 0 {
                         l += 1;
-                        let v = pos as u64 + l as u64 + size_of::<RafsV6Dirent>() as u64;
-                        if v == self.size() || v % EROFS_BLOCK_SIZE == 0 {
+                        if self.size() % EROFS_BLOCK_SIZE - s == l as u64 {
                             break;
                         }
                     } else {
@@ -513,14 +513,6 @@ impl OndiskInodeWrapper {
 
         Ok(chunks)
     }
-}
-
-fn next_ent_pos(cur: usize, cur_name_len: usize, if_last: bool) -> usize {
-    let mut pos = cur + cur_name_len + size_of::<RafsV6Dirent>();
-    if if_last {
-        pos = try_round_up_4k(pos as u64).unwrap();
-    }
-    pos
 }
 
 // TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
@@ -598,8 +590,6 @@ impl RafsInode for OndiskInodeWrapper {
         let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         let mut target: Option<u64> = None;
 
-        let mut pos: usize = 0;
-
         let nid = 'outer: for i in 0..blocks_count {
             let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
             // `e_nameoff` is offset from each single block?
@@ -607,9 +597,8 @@ impl RafsInode for OndiskInodeWrapper {
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
 
             let d_name = self
-                .entry_name(i as usize, 0, entries_count as usize, pos as u32)
+                .entry_name(i as usize, 0, entries_count as usize)
                 .map_err(err_invalidate_data)?;
-            pos = next_ent_pos(pos, d_name.len(), entries_count == 1);
 
             if d_name == name {
                 target = Some(head_entry.e_nid);
@@ -623,9 +612,8 @@ impl RafsInode for OndiskInodeWrapper {
                     .get_entry(i as usize, j as usize)
                     .map_err(err_invalidate_data)?;
                 let d_name = self
-                    .entry_name(i as usize, j as usize, entries_count as usize, pos as u32)
+                    .entry_name(i as usize, j as usize, entries_count as usize)
                     .map_err(err_invalidate_data)?;
-                pos = next_ent_pos(pos, d_name.len(), j == entries_count - 1);
 
                 if d_name == name {
                     target = Some(de.e_nid);
@@ -681,7 +669,6 @@ impl RafsInode for OndiskInodeWrapper {
             inode,
         );
 
-        let mut pos: usize = 0;
         for i in 0..blocks_count {
             let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
             let name_offset = head_entry.e_nameoff;
@@ -692,10 +679,8 @@ impl RafsInode for OndiskInodeWrapper {
                     .get_entry(i as usize, j as usize)
                     .map_err(err_invalidate_data)?;
                 let name = self
-                    .entry_name(i as usize, j as usize, entries_count as usize, pos as u32)
+                    .entry_name(i as usize, j as usize, entries_count as usize)
                     .map_err(err_invalidate_data)?;
-
-                pos = next_ent_pos(pos, name.as_bytes().len(), j == entries_count - 1);
 
                 // Skip specified offset
                 if skipped != 0 {
