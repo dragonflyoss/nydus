@@ -38,6 +38,7 @@ extern crate nydus_error;
 extern crate storage;
 
 use std::any::Any;
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::File;
 use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
@@ -63,6 +64,27 @@ pub enum RafsError {
     Prefetch(String),
     Configure(String),
     Incompatible(u16),
+    IllegalMetaStruct(MetaType, String),
+}
+
+impl std::error::Error for RafsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
+
+impl Display for RafsError {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        write!(f, "{}", format!("{:?}", self))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum MetaType {
+    Regular,
+    Dir,
+    Symlink,
 }
 
 /// Specialized version of std::result::Result<> for Rafs.

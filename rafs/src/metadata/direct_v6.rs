@@ -44,7 +44,7 @@ use crate::metadata::{
         RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
     },
 };
-use crate::{RafsError, RafsIoReader, RafsResult};
+use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
 use nydus_utils::{
     digest::{Algorithm, RafsDigest},
     div_round_up, try_round_up_4k,
@@ -55,6 +55,10 @@ use storage::utils::readahead;
 // Safe to Send/Sync because the underlying data structures are readonly
 unsafe impl Send for DirectSuperBlockV6 {}
 unsafe impl Sync for DirectSuperBlockV6 {}
+
+fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, rafs_err)
+}
 
 /// The underlying struct to maintain memory mapped bootstrap for a file system.
 ///
@@ -394,11 +398,12 @@ impl OndiskInodeWrapper {
         Ok(r)
     }
 
-    fn get_entry(&self, block_index: usize, index: usize) -> &RafsV6Dirent {
+    fn get_entry(&self, block_index: usize, index: usize) -> RafsResult<&RafsV6Dirent> {
         // TODO: We indeed need safety check here.
-        // FIXME: unwrap
-        let block_mapping = self.data_block_mapping(block_index).unwrap();
-        unsafe { &*(block_mapping.add(size_of::<RafsV6Dirent>() * index) as *const RafsV6Dirent) }
+        let block_mapping = self.data_block_mapping(block_index)?;
+        Ok(unsafe {
+            &*(block_mapping.add(size_of::<RafsV6Dirent>() * index) as *const RafsV6Dirent)
+        })
     }
 
     // `entries_per_block` indicates the quantity of entries residing in a single block.
@@ -409,32 +414,31 @@ impl OndiskInodeWrapper {
         index: usize,
         entries_per_block: usize,
         pos: u32,
-    ) -> &OsStr {
-        // FIXME: unwrap
-        let block_mapping = self.data_block_mapping(block_index).unwrap();
-        let de = self.get_entry(block_index, index);
-        debug!("entry index {} block index {}", index, block_index);
-        // `index` starts from zero
+    ) -> RafsResult<&OsStr> {
+        let block_mapping = self.data_block_mapping(block_index)?;
+        let de = self.get_entry(block_index, index)?;
         if index < entries_per_block - 1 {
-            let next_de = self.get_entry(block_index, index + 1);
-            // FIXME: unwrap
-            let len = next_de
-                .e_nameoff
-                .checked_sub(de.e_nameoff)
-                .ok_or_else(|| {
-                    error!(
-                        "nid {} entry index {} block index {} next dir entry {:?} current dir entry {:?}",
-                        self.ino(), index, block_index, next_de, de
-                    );
-                })
-                .unwrap();
+            let next_de = self.get_entry(block_index, index + 1)?;
+            let (next_de_name_off, de_name_off) = (next_de.e_nameoff, de.e_nameoff);
+            let len = next_de.e_nameoff.checked_sub(de.e_nameoff).ok_or_else(|| {
+                error!(
+                    "nid {} entry index {} block index {} next dir entry {:?} current dir entry {:?}",
+                    self.ino(), index, block_index, next_de, de
+                );
+                RafsError::IllegalMetaStruct(
+                    MetaType::Dir,
+                    format!("cur {} next {}", next_de_name_off, de_name_off),
+                )
+            })?;
 
-            unsafe {
+            let n = unsafe {
                 bytes_to_os_str(std::slice::from_raw_parts(
                     block_mapping.add(de.e_nameoff as usize),
                     len as usize,
                 ))
-            }
+            };
+
+            Ok(n)
         } else {
             unsafe {
                 let e = std::slice::from_raw_parts(
@@ -455,7 +459,8 @@ impl OndiskInodeWrapper {
                         break;
                     }
                 }
-                bytes_to_os_str(&e[0..l])
+                let n = bytes_to_os_str(&e[0..l]);
+                Ok(n)
             }
         }
     }
@@ -528,8 +533,7 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_symlink(&self) -> Result<OsString> {
         // FIXME: assume that symlink can't be that long, tail packing is ignored
         let inode = self.disk_inode();
-        // FIXME: Unwrap
-        let data = self.data_block_mapping(0).unwrap();
+        let data = self.data_block_mapping(0).map_err(err_invalidate_data)?;
         let s = unsafe {
             bytes_to_os_str(std::slice::from_raw_parts(data, inode.size() as usize)).to_os_string()
         };
@@ -553,12 +557,14 @@ impl RafsInode for OndiskInodeWrapper {
         let mut pos: usize = 0;
 
         let nid = 'outer: for i in 0..blocks_count {
-            let head_entry = self.get_entry(i as usize, 0);
+            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
             // `e_nameoff` is offset from each single block?
             let head_name_offset = head_entry.e_nameoff;
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
 
-            let d_name = self.entry_name(i as usize, 0, entries_count as usize, pos as u32);
+            let d_name = self
+                .entry_name(i as usize, 0, entries_count as usize, pos as u32)
+                .map_err(err_invalidate_data)?;
             pos = next_ent_pos(pos, d_name.len(), entries_count == 1);
 
             if d_name == name {
@@ -566,11 +572,15 @@ impl RafsInode for OndiskInodeWrapper {
                 break 'outer;
             }
 
-            // TODO: Let binary search optimize this in the future. So this logic might look similar to `walk_children_inodes`
+            // TODO: Let binary search optimize this in the future.
+            // So this logic might look similar to `walk_children_inodes`
             for j in 1..entries_count {
-                let de = self.get_entry(i as usize, j as usize);
-                let d_name =
-                    self.entry_name(i as usize, j as usize, entries_count as usize, pos as u32);
+                let de = self
+                    .get_entry(i as usize, j as usize)
+                    .map_err(err_invalidate_data)?;
+                let d_name = self
+                    .entry_name(i as usize, j as usize, entries_count as usize, pos as u32)
+                    .map_err(err_invalidate_data)?;
                 pos = next_ent_pos(pos, d_name.len(), j == entries_count - 1);
 
                 if d_name == name {
@@ -629,7 +639,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         let mut pos: usize = 0;
         for i in 0..blocks_count {
-            let head_entry = self.get_entry(i as usize, 0);
+            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
             let name_offset = head_entry.e_nameoff;
             let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
 
@@ -639,9 +649,12 @@ impl RafsInode for OndiskInodeWrapper {
                     skipped -= 1;
                     continue;
                 }
-                let de = self.get_entry(i as usize, j as usize);
-                let name =
-                    self.entry_name(i as usize, j as usize, entries_count as usize, pos as u32);
+                let de = self
+                    .get_entry(i as usize, j as usize)
+                    .map_err(err_invalidate_data)?;
+                let name = self
+                    .entry_name(i as usize, j as usize, entries_count as usize, pos as u32)
+                    .map_err(err_invalidate_data)?;
 
                 pos = next_ent_pos(pos, name.as_bytes().len(), j == entries_count - 1);
 
@@ -649,6 +662,7 @@ impl RafsInode for OndiskInodeWrapper {
                 let inode = self.mapping.inode_wrapper(nid)? as Arc<dyn RafsInode>;
                 trace!("found file {:?}, nid {}", name, nid);
                 cur_offset += 1;
+                // FIXME: handle action output
                 handler(Some(inode), name.to_os_string(), nid, cur_offset).unwrap();
             }
         }
@@ -759,20 +773,19 @@ impl RafsInode for OndiskInodeWrapper {
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         let blk_size = self.mapping.state.load().meta.chunk_size as u32;
         let chunks_per_blk = EROFS_BLOCK_SIZE / size_of::<RafsV6InodeChunkAddr>() as u64;
+        let total_chunks = div_round_up(self.size(), blk_size as u64);
 
         let mut left = std::cmp::min(self.size(), size as u64) as u32;
         let head_chunk_index = offset / blk_size as u64;
 
         // TODO: Validate chunk format by checking its `i_u`
-
         let mut vec: Vec<BlobIoVec> = Vec::new();
-        // FIXME: unwrap
-        let block_mapping = self.data_block_mapping(0).unwrap();
+        let block_mapping = self.data_block_mapping(0).map_err(err_invalidate_data)?;
         let chunks: &[RafsV6InodeChunkAddr] = unsafe {
             std::slice::from_raw_parts(
                 block_mapping.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
                     as *const RafsV6InodeChunkAddr,
-                (div_round_up(self.size(), blk_size as u64) - head_chunk_index) as usize,
+                (total_chunks - head_chunk_index) as usize,
             )
         };
 
@@ -782,7 +795,11 @@ impl RafsInode for OndiskInodeWrapper {
 
         let blob_table = &self.mapping.state.load().blob_table.entries;
 
-        // FIXME: unwrap
+        if chunks.is_empty() {
+            return Ok(vec);
+        }
+
+        // Safe to unwrap because chunks is not empty to reach here.
         let first_chunk = chunks.first().unwrap();
         let blob_index = first_chunk.blob_index() - 1;
         let chunk_index = first_chunk.blob_comp_index();
