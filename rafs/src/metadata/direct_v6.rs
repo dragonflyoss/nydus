@@ -40,8 +40,8 @@ use crate::metadata::{
         XattrName, XattrValue,
     },
     {
-        Attr, ChildInodeHandler, Entry, Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock,
-        RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
+        Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
+        RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
     },
 };
 use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
@@ -469,6 +469,50 @@ impl OndiskInodeWrapper {
         let i = self.disk_inode();
         i.mode() as u32 & libc::S_IFMT
     }
+
+    fn create_backend_io_chunk(
+        &self,
+        chunk_addr: &RafsV6InodeChunkAddr,
+        content_offset: u32,
+        content_len: u32,
+        user_io: bool,
+    ) -> BlobIoDesc {
+        let state = self.mapping.state.load();
+        let blob_table = &state.blob_table.entries;
+
+        let blob_index = chunk_addr.blob_index() - 1;
+        let chunk_index = chunk_addr.blob_comp_index();
+        let io_chunk = BlobIoChunk::Address(blob_index as u32, chunk_index);
+
+        let blob = blob_table[blob_index as usize].clone();
+
+        BlobIoDesc::new(
+            blob,
+            io_chunk,
+            content_offset,
+            content_len as usize,
+            user_io,
+        )
+    }
+
+    fn chunk_size(&self) -> u32 {
+        self.mapping.state.load().meta.chunk_size
+    }
+
+    fn chunk_addresses(&self, head_chunk_index: u32) -> RafsResult<&[RafsV6InodeChunkAddr]> {
+        let total_chunk_addresses = div_round_up(self.size(), self.chunk_size() as u64) as u32;
+
+        let block_mapping = self.data_block_mapping(0)?;
+        let chunks: &[RafsV6InodeChunkAddr] = unsafe {
+            std::slice::from_raw_parts(
+                block_mapping.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
+                    as *const RafsV6InodeChunkAddr,
+                (total_chunk_addresses - head_chunk_index) as usize,
+            )
+        };
+
+        Ok(chunks)
+    }
 }
 
 fn next_ent_pos(cur: usize, cur_name_len: usize, if_last: bool) -> usize {
@@ -644,11 +688,6 @@ impl RafsInode for OndiskInodeWrapper {
             let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
 
             for j in 0..entries_count {
-                // Skip specified offset
-                if skipped != 0 {
-                    skipped -= 1;
-                    continue;
-                }
                 let de = self
                     .get_entry(i as usize, j as usize)
                     .map_err(err_invalidate_data)?;
@@ -658,12 +697,21 @@ impl RafsInode for OndiskInodeWrapper {
 
                 pos = next_ent_pos(pos, name.as_bytes().len(), j == entries_count - 1);
 
+                // Skip specified offset
+                if skipped != 0 {
+                    skipped -= 1;
+                    continue;
+                }
+
                 let nid = de.e_nid;
                 let inode = self.mapping.inode_wrapper(nid)? as Arc<dyn RafsInode>;
                 trace!("found file {:?}, nid {}", name, nid);
                 cur_offset += 1;
-                // FIXME: handle action output
-                handler(Some(inode), name.to_os_string(), nid, cur_offset).unwrap();
+                match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
+                    Ok(PostWalkAction::Break) => break,
+                    Ok(PostWalkAction::Continue) => continue,
+                    Err(_) => break,
+                };
             }
         }
 
@@ -771,43 +819,29 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
-        let blk_size = self.mapping.state.load().meta.chunk_size as u32;
-        let chunks_per_blk = EROFS_BLOCK_SIZE / size_of::<RafsV6InodeChunkAddr>() as u64;
-        let total_chunks = div_round_up(self.size(), blk_size as u64);
-
-        let mut left = std::cmp::min(self.size(), size as u64) as u32;
-        let head_chunk_index = offset / blk_size as u64;
+        let chunk_size = self.chunk_size();
+        let head_chunk_index = offset / chunk_size as u64;
 
         // TODO: Validate chunk format by checking its `i_u`
         let mut vec: Vec<BlobIoVec> = Vec::new();
-        let block_mapping = self.data_block_mapping(0).map_err(err_invalidate_data)?;
-        let chunks: &[RafsV6InodeChunkAddr] = unsafe {
-            std::slice::from_raw_parts(
-                block_mapping.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
-                    as *const RafsV6InodeChunkAddr,
-                (total_chunks - head_chunk_index) as usize,
-            )
-        };
-
-        let mut descs = BlobIoVec::new();
-        let content_offset = (offset % blk_size as u64) as u32;
-        let mut content_len = std::cmp::min(blk_size - content_offset, left);
-
-        let blob_table = &self.mapping.state.load().blob_table.entries;
+        let chunks = self
+            .chunk_addresses(head_chunk_index as u32)
+            .map_err(err_invalidate_data)?;
 
         if chunks.is_empty() {
             return Ok(vec);
         }
 
+        let content_offset = (offset % chunk_size as u64) as u32;
+        let mut left = std::cmp::min(self.size(), size as u64) as u32;
+        let mut content_len = std::cmp::min(chunk_size - content_offset, left);
+
         // Safe to unwrap because chunks is not empty to reach here.
-        let first_chunk = chunks.first().unwrap();
-        let blob_index = first_chunk.blob_index() - 1;
-        let chunk_index = first_chunk.blob_comp_index();
-        let blob = blob_table[blob_index as usize].clone();
-        let cki = BlobIoChunk::Address(blob_index as u32, chunk_index);
+        let first_chunk_addr = chunks.first().unwrap();
+        let desc =
+            self.create_backend_io_chunk(first_chunk_addr, content_offset, content_len, user_io);
 
-        let desc = BlobIoDesc::new(blob, cki, content_offset, content_len as usize, user_io);
-
+        let mut descs = BlobIoVec::new();
         descs.bi_vec.push(desc);
         descs.bi_size += content_len as usize;
         left -= content_len;
@@ -815,21 +849,16 @@ impl RafsInode for OndiskInodeWrapper {
         if left != 0 {
             // Handle the rest of chunks since they shares the same content length = 0.
             for c in chunks.iter().skip(1) {
-                let blob_index = c.blob_index() - 1;
-                let chunk_index = c.blob_comp_index();
-                let cki = BlobIoChunk::Address(blob_index as u32, chunk_index);
-                let blob = blob_table[blob_index as usize].clone();
+                content_len = std::cmp::min(chunk_size, left);
+                let desc = self.create_backend_io_chunk(c, 0, content_len, user_io);
 
-                content_len = std::cmp::min(blk_size, left);
-                let desc = BlobIoDesc::new(blob, cki, 0, content_len as usize, user_io);
-
-                if blob_index as u32 != descs.bi_vec[0].blob.blob_index() {
+                if c.blob_index() as u32 != descs.bi_vec[0].blob.blob_index() {
                     vec.push(descs);
                     descs = BlobIoVec::new();
                 }
 
-                descs.bi_vec.push(desc);
                 // TODO: change type of bi_size to u32
+                descs.bi_vec.push(desc);
                 descs.bi_size += content_len as usize;
                 left -= content_len;
 
