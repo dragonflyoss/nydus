@@ -15,9 +15,9 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
+use fuse_backend_rs::transport::FileVolatileSlice;
 use nix::sys::uio;
 use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
-use vm_memory::VolatileSlice;
 
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 use crate::utils::{readahead, readv, MemSliceCursor};
@@ -104,7 +104,12 @@ impl BlobReader for LocalFsEntry {
             .map_err(|e| LocalFsError::ReadBlob(e).into())
     }
 
-    fn readv(&self, bufs: &[VolatileSlice], offset: u64, max_size: usize) -> BackendResult<usize> {
+    fn readv(
+        &self,
+        bufs: &[FileVolatileSlice],
+        offset: u64,
+        max_size: usize,
+    ) -> BackendResult<usize> {
         let mut c = MemSliceCursor::new(bufs);
         let iovec = c.consume(max_size);
 
@@ -576,8 +581,8 @@ mod tests {
         let mut buf2 = [0x0u8];
         let mut buf3 = [0x0u8];
         let bufs = [
-            unsafe { VolatileSlice::new(buf2.as_mut_ptr(), 1) },
-            unsafe { VolatileSlice::new(buf3.as_mut_ptr(), 1) },
+            unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), 1) },
+            unsafe { FileVolatileSlice::new(buf3.as_mut_ptr(), 1) },
         ];
 
         assert_eq!(blob2.readv(&bufs, 0x1, 2).unwrap(), 2);
@@ -631,8 +636,8 @@ mod tests {
         let mut buf2 = [0x0u8];
         let mut buf3 = [0x0u8];
         let bufs = [
-            unsafe { VolatileSlice::new(buf2.as_mut_ptr(), 1) },
-            unsafe { VolatileSlice::new(buf3.as_mut_ptr(), 1) },
+            unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), 1) },
+            unsafe { FileVolatileSlice::new(buf3.as_mut_ptr(), 1) },
         ];
         assert_eq!(blob2.readv(&bufs, 0x1001, 3).unwrap(), 2);
         assert_eq!(buf2[0], 0x2);

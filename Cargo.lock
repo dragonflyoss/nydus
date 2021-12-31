@@ -47,9 +47,9 @@ checksum = "afddf7f520a80dbf76e6f50a35bca42a2331ef227a28b3b6dc5c2e2338d114b1"
 
 [[package]]
 name = "arc-swap"
-version = "0.4.6"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b585a98a234c46fc563103e9278c9391fde1f4e6850334da895d27edb9580f62"
+checksum = "dabe5a181f83789739c194cbe5a897dde195078fac08568d09221fd6137a7ba8"
 
 [[package]]
 name = "arc-swap"
@@ -157,7 +157,7 @@ dependencies = [
 name = "blobfs"
 version = "0.1.0"
 dependencies = [
- "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=afc7b69)",
+ "fuse-backend-rs",
  "libc",
  "log",
  "nydus-app",
@@ -441,7 +441,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "377fa591135fbe23396a18e2655a6d5481bf7c5823cdfa3cc81b01a229cbe640"
 dependencies = [
  "libc",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -506,8 +506,9 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.1.2"
-source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac#5a4b2ac1971cb0ec7a1e06459bd9d520f4fc15ee"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29edd681312df94a2c7a44e4f2de824d1a037728e87a7f7896d1d08cc0f012a"
 dependencies = [
  "arc-swap 1.5.0",
  "bitflags",
@@ -518,23 +519,7 @@ dependencies = [
  "vhost",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util 0.9.0",
-]
-
-[[package]]
-name = "fuse-backend-rs"
-version = "0.1.2"
-source = "git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=afc7b69#afc7b69ca485fd00555687d31bb2b59d36a0155b"
-dependencies = [
- "arc-swap 0.4.6",
- "bitflags",
- "caps",
- "libc",
- "log",
- "nix 0.22.2",
- "virtio-queue",
- "vm-memory",
- "vmm-sys-util 0.8.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1019,7 +1004,7 @@ version = "0.2.0"
 source = "git+https://github.com/cloud-hypervisor/micro-http.git?branch=master#f4405cb5afb092e86204c26d589e8c9448721bf0"
 dependencies = [
  "libc",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1186,7 +1171,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "url",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1241,7 +1226,7 @@ dependencies = [
  "epoll",
  "event-manager",
  "flexi_logger",
- "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
+ "fuse-backend-rs",
  "hyper",
  "hyperlocal",
  "lazy_static",
@@ -1268,7 +1253,7 @@ dependencies = [
  "virtio-bindings",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
  "xattr",
 ]
 
@@ -1277,7 +1262,7 @@ name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
  "blake3 0.3.6",
- "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
+ "fuse-backend-rs",
  "lazy_static",
  "libc",
  "log",
@@ -1468,13 +1453,13 @@ name = "rafs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap 0.4.6",
+ "arc-swap 0.4.8",
  "assert_matches",
  "base64",
  "bitflags",
  "blake3 1.0.0",
  "flate2",
- "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
+ "fuse-backend-rs",
  "futures",
  "hmac",
  "lazy_static",
@@ -1493,7 +1478,7 @@ dependencies = [
  "storage",
  "url",
  "vm-memory",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1883,11 +1868,11 @@ name = "storage"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "arc-swap 0.4.6",
+ "arc-swap 0.4.8",
  "base64",
  "bitflags",
  "flate2",
- "fuse-backend-rs 0.1.2 (git+https://github.com/cloud-hypervisor/fuse-backend-rs.git?rev=5a4b2ac)",
+ "fuse-backend-rs",
  "futures",
  "governor",
  "hmac",
@@ -1909,7 +1894,7 @@ dependencies = [
  "tokio",
  "url",
  "vm-memory",
- "vmm-sys-util 0.8.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -2185,29 +2170,29 @@ checksum = "b5a972e5669d67ba988ce3dc826706fb0a8b01471c088cb0b6110b805cc36aed"
 
 [[package]]
 name = "vhost"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d23ddeb452fb4f837526c6298cc8a2f4948e5595b0328a3d61b5eebe51874d7"
+checksum = "3b56bf8f178fc500fe14505fca8b00dec76fc38f2304f461c8d9d7547982311d"
 dependencies = [
  "bitflags",
  "libc",
  "vm-memory",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
 name = "vhost-user-backend"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vhost-user-backend?rev=3242b37#3242b37d3258c2072faa47d0d17097f4bc0966c7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8db00e93514caa8987bb8b536fe962c9b66b4068583abc4c531eb97988477cd"
 dependencies = [
- "epoll",
  "libc",
  "log",
  "vhost",
  "virtio-bindings",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -2219,32 +2204,23 @@ checksum = "3ff512178285488516ed85f15b5d0113a7cdb89e9e8a760b269ae4f02b84bd6b"
 [[package]]
 name = "virtio-queue"
 version = "0.1.0"
-source = "git+https://github.com/rust-vmm/vm-virtio?rev=6013dd9#6013dd91b2e6eb77ea10c6bdeda8f5eb18de6dda"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f90da9e627f6aaf667cc7b6548a28be332d3e1f058f4ceeb46ab6bcee5c4b74d"
 dependencies = [
  "log",
  "vm-memory",
- "vmm-sys-util 0.9.0",
+ "vmm-sys-util",
 ]
 
 [[package]]
 name = "vm-memory"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a8ebcb86ca457f9d6e14cf97009f679952eba42f0113de5db596e514cd0e43b"
+checksum = "339d4349c126fdcd87e034631d7274370cf19eb0e87b33166bcd956589fc72c5"
 dependencies = [
  "arc-swap 1.5.0",
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "vmm-sys-util"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01cf11afbc4ebc0d5c7a7748a77d19e2042677fc15faa2f4ccccb27c18a60605"
-dependencies = [
- "bitflags",
- "libc",
 ]
 
 [[package]]

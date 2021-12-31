@@ -451,7 +451,7 @@ impl Endpoint {
             iov_len: len,
         }];
         // Safe because we own rbuf and it's safe to fill a byte array with arbitrary data.
-        let (bytes, _) = self.sock.recv_with_fds(&mut iovs, &mut [])?;
+        let (bytes, _) = unsafe { self.sock.recv_with_fds(&mut iovs, &mut [])? };
         Ok((bytes, rbuf))
     }
 

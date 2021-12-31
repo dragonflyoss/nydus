@@ -12,13 +12,12 @@ serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"
 serde_with = { version = "1.6.0", features = ["macros"] }
 libc = "0.2"
-vm-memory = { version = ">=0.2.0" }
+vm-memory = { version = "0.7.0" }
+fuse-backend-rs = { version = "0.2.0" }
 
 rafs = { path = "../rafs" }
 nydus-error = { path = "../error" }
 storage = { path = "../storage", features = ["backend-localfs", "backend-oss", "backend-registry"] }
-
-fuse-backend-rs = { git = "https://github.com/cloud-hypervisor/fuse-backend-rs.git", rev = "afc7b69" }
 
 [features]
 virtiofs = [ "fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]

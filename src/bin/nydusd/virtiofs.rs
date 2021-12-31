@@ -19,13 +19,14 @@ use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, Writer};
 
 use vhost::vhost_user::{message::*, Listener, SlaveFsCacheReq};
 use vhost_user_backend::{
-    VhostUserBackend, VhostUserBackendMut, VhostUserDaemon, VringMutex, VringStateMutGuard, VringT,
+    VhostUserBackend, VhostUserBackendMut, VhostUserDaemon, VringMutex, VringState, VringT,
 };
 use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use virtio_queue::DescriptorChain;
-use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
+use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
 use nydus_app::BuildTimeInfo;
@@ -92,10 +93,7 @@ impl Clone for VhostUserFsBackend {
 impl VhostUserFsBackend {
     // There's no way to recover if error happens during processing a virtq, let the caller
     // to handle it.
-    fn process_queue(
-        &mut self,
-        vring_state: &mut VringStateMutGuard<GuestMemoryAtomic<GuestMemoryMmap>>,
-    ) -> Result<bool> {
+    fn process_queue(&mut self, vring_state: &mut MutexGuard<VringState>) -> Result<bool> {
         let mut used_any = false;
         let mem = self
             .mem
@@ -103,7 +101,7 @@ impl VhostUserFsBackend {
             .ok_or(DaemonError::NoMemoryConfigured)?
             .memory();
 
-        let avail_chains: Vec<DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>> = vring_state
+        let avail_chains: Vec<DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>> = vring_state
             .get_queue_mut()
             .iter()
             .map_err(|_| DaemonError::IterateQueue)?
@@ -193,11 +191,11 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
     fn handle_event(
         &mut self,
         device_event: u16,
-        evset: epoll::Events,
+        evset: EventSet,
         vrings: &[VringMutex],
         _thread_id: usize,
     ) -> VhostUserBackendResult<bool> {
-        if evset != epoll::Events::EPOLLIN {
+        if evset != EventSet::IN {
             return Err(DaemonError::HandleEventNotEpollIn.into());
         }
 
@@ -250,7 +248,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
     }
 }
 
-struct VirtiofsDaemon<S: VhostUserBackend<VringMutex> + Clone> {
+struct VirtiofsDaemon<S: 'static + VhostUserBackend<VringMutex> + Clone> {
     vfs: Arc<Vfs>,
     daemon: Arc<Mutex<VhostUserDaemon<S, VringMutex>>>,
     sock: String,
@@ -263,7 +261,7 @@ struct VirtiofsDaemon<S: VhostUserBackend<VringMutex> + Clone> {
     bti: BuildTimeInfo,
 }
 
-impl<S: VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> {
+impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> {
     fn start(&self) -> DaemonResult<()> {
         let listener = Listener::new(&self.sock, true)
             .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
@@ -342,7 +340,9 @@ impl<S: VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> 
     }
 }
 
-impl<S: VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscriber for VirtiofsDaemon<S> {
+impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscriber
+    for VirtiofsDaemon<S>
+{
     fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
         self.trigger
             .lock()

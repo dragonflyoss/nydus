@@ -11,12 +11,12 @@ use std::slice;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use fuse_backend_rs::transport::FileVolatileSlice;
 use nix::sys::uio;
 use nix::unistd::dup;
 use nydus_utils::digest;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
-use vm_memory::VolatileSlice;
 
 use crate::backend::BlobReader;
 use crate::cache::filecache::FileCacheMgr;
@@ -345,7 +345,7 @@ impl BlobCache for FileCacheEntry {
         Ok(total_size)
     }
 
-    fn read(&self, iovec: &BlobIoVec, buffers: &[VolatileSlice]) -> Result<usize> {
+    fn read(&self, iovec: &BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
         debug_assert!(iovec.validate());
         self.metrics.total.inc();
         self.workers.consume_prefetch_budget(buffers);
@@ -499,7 +499,7 @@ impl FileCacheEntry {
     //   request.
     // - Optionally there may be some prefetch/read amplify requests following the user io request.
     // - The optional prefetch/read amplify requests may be silently dropped.
-    fn read_iter(&self, bios: &[BlobIoDesc], buffers: &[VolatileSlice]) -> Result<usize> {
+    fn read_iter(&self, bios: &[BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
         debug!("bios {:?}", bios);
         // Merge requests with continuous blob addresses.
         let requests = self

@@ -21,8 +21,8 @@
 use std::io::Result;
 use std::sync::Arc;
 
+use fuse_backend_rs::transport::FileVolatileSlice;
 use nydus_utils::digest;
-use vm_memory::VolatileSlice;
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
@@ -109,7 +109,7 @@ impl BlobCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, iovec: &BlobIoVec, bufs: &[VolatileSlice]) -> Result<usize> {
+    fn read(&self, iovec: &BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
         let bios = &iovec.bi_vec;
 
         if iovec.bi_size == 0 || bios.is_empty() {
