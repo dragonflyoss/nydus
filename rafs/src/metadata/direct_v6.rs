@@ -47,7 +47,7 @@ use crate::metadata::{
 use crate::{RafsError, RafsIoReader, RafsResult};
 use nydus_utils::{
     digest::{Algorithm, RafsDigest},
-    div_round_up,
+    div_round_up, try_round_up_4k,
 };
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec};
 use storage::utils::readahead;
@@ -443,7 +443,6 @@ impl OndiskInodeWrapper {
                 );
 
                 // Use this trick to temporarily decide entry name's length. Improve this?
-                // TODO: Replace this use `libc::strncpy`
                 let mut l: usize = 0;
                 for i in e {
                     if *i != 0 {
@@ -465,6 +464,14 @@ impl OndiskInodeWrapper {
         let i = self.disk_inode();
         i.mode() as u32 & libc::S_IFMT
     }
+}
+
+fn next_ent_pos(cur: usize, cur_name_len: usize, if_last: bool) -> usize {
+    let mut pos = cur + cur_name_len + size_of::<RafsV6Dirent>();
+    if if_last {
+        pos = try_round_up_4k(pos as u64).unwrap();
+    }
+    pos
 }
 
 // TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
@@ -552,19 +559,19 @@ impl RafsInode for OndiskInodeWrapper {
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
 
             let d_name = self.entry_name(i as usize, 0, entries_count as usize, pos as u32);
-            pos += d_name.as_bytes().len() + size_of::<RafsV6Dirent>();
+            pos = next_ent_pos(pos, d_name.len(), entries_count == 1);
 
             if d_name == name {
                 target = Some(head_entry.e_nid);
                 break 'outer;
             }
 
-            // TODO: Let binary search optimize this in the future.
+            // TODO: Let binary search optimize this in the future. So this logic might look similar to `walk_children_inodes`
             for j in 1..entries_count {
                 let de = self.get_entry(i as usize, j as usize);
                 let d_name =
                     self.entry_name(i as usize, j as usize, entries_count as usize, pos as u32);
-                pos += d_name.as_bytes().len() + size_of::<RafsV6Dirent>();
+                pos = next_ent_pos(pos, d_name.len(), j == entries_count - 1);
 
                 if d_name == name {
                     target = Some(de.e_nid);
@@ -635,7 +642,8 @@ impl RafsInode for OndiskInodeWrapper {
                 let de = self.get_entry(i as usize, j as usize);
                 let name =
                     self.entry_name(i as usize, j as usize, entries_count as usize, pos as u32);
-                pos += name.as_bytes().len() + size_of::<RafsV6Dirent>();
+
+                pos = next_ent_pos(pos, name.as_bytes().len(), j == entries_count - 1);
 
                 let nid = de.e_nid;
                 let inode = self.mapping.inode_wrapper(nid)? as Arc<dyn RafsInode>;
