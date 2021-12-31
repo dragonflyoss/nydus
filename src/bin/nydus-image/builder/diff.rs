@@ -563,7 +563,20 @@ impl DiffBuilder {
                         child_node.chunks = cached.chunks.clone();
                         child_node.inode.set_digest(cached.digest);
                         if !child_node.chunks.is_empty() {
-                            let target_snapshot_idx = caches.len() - 1;
+                            // The bootstrap of current snapshot should only reference the file in
+                            // current snapshot or lower snapshot.
+                            // FIXME: the current CachedNodes implementation may have performance
+                            // issue and need be optimized using a better data structure.
+                            let mut target_snapshot_idx = 0;
+                            for (idx, cache) in caches.iter().enumerate() {
+                                if idx > snapshot_idx as usize {
+                                    break;
+                                }
+                                if cache.is_some() {
+                                    target_snapshot_idx = idx;
+                                }
+                            }
+                            // Get the blob index of chunk via current snapshot index.
                             let blob_index = blob_mgr
                                 .get_blob_idx_by_layer_idx(target_snapshot_idx as u32)
                                 .ok_or_else(|| {
