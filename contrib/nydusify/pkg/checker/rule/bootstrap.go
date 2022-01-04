@@ -15,7 +15,6 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 // BootstrapRule validates bootstrap in Nydus image
@@ -24,6 +23,7 @@ type BootstrapRule struct {
 	BootstrapPath   string
 	NydusImagePath  string
 	DebugOutputPath string
+	BackendType     string
 }
 
 type bootstrapDebug struct {
@@ -47,6 +47,13 @@ func (rule *BootstrapRule) Validate() error {
 		return errors.Wrap(err, "invalid nydus bootstrap format")
 	}
 
+	// For registry garbage collection, nydus puts the blobs to
+	// the layers in manifest, so here only need to check blob
+	// list consistency for registry backend.
+	if rule.BackendType != "registry" {
+		return nil
+	}
+
 	var bootstrap bootstrapDebug
 	bootstrapBytes, err := ioutil.ReadFile(rule.DebugOutputPath)
 	if err != nil {
@@ -56,26 +63,24 @@ func (rule *BootstrapRule) Validate() error {
 		return errors.Wrap(err, "unmarshal bootstrap output JSON")
 	}
 
-	var blobListInAnnotation []string
+	// Parse blob list from blob layers in Nydus manifest
+	var blobListInLayer []string
 	layers := rule.Parsed.NydusImage.Manifest.Layers
-
-	// Parse blob list from bootstrap layer annotation in Nydus manifest
-	blobListStr := rule.Parsed.NydusImage.Manifest.Layers[len(layers)-1].Annotations[utils.LayerAnnotationNydusBlobIDs]
-	if blobListStr != "" {
-		if err := json.Unmarshal([]byte(blobListStr), &blobListInAnnotation); err != nil {
-			return errors.Wrap(err, "unmarshal blob list from layer annotation")
+	for i, layer := range layers {
+		if i != len(layers)-1 {
+			blobListInLayer = append(blobListInLayer, layer.Digest.Hex())
 		}
 	}
 
 	// Blob list recorded in manifest annotation should be equal with
 	// the blob list recorded in blob table of bootstrap
-	if !reflect.DeepEqual(bootstrap.Blobs, blobListInAnnotation) {
+	if !reflect.DeepEqual(bootstrap.Blobs, blobListInLayer) {
 		return fmt.Errorf(
 			"nydus blob list in bootstrap(%d) does not match with manifest(%d)'s, %v != %v",
 			len(bootstrap.Blobs),
-			len(blobListInAnnotation),
+			len(blobListInLayer),
 			bootstrap.Blobs,
-			blobListInAnnotation,
+			blobListInLayer,
 		)
 	}
 

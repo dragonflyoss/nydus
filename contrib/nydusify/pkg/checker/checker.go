@@ -116,6 +116,7 @@ func (checker *Checker) Check(ctx context.Context) error {
 		&rule.BootstrapRule{
 			Parsed:          targetParsed,
 			NydusImagePath:  checker.NydusImagePath,
+			BackendType:     checker.BackendType,
 			BootstrapPath:   filepath.Join(checker.WorkDir, "nydus_bootstrap"),
 			DebugOutputPath: filepath.Join(checker.WorkDir, "nydus_bootstrap_debug.json"),
 		},
