@@ -16,7 +16,6 @@ extern crate serde_json;
 extern crate lazy_static;
 
 use std::fs::{self, metadata, DirEntry, OpenOptions};
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -32,8 +31,8 @@ use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::chunk_dict::import_chunk_dict;
 use crate::core::context::{
-    BlobManager, BlobStorage, BootstrapContext, BuildContext, RafsVersion, SourceType,
-    BUF_WRITER_CAPACITY,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputBlob,
+    RafsVersion, SourceType,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
@@ -52,14 +51,58 @@ mod validator;
 const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 
 #[derive(Serialize, Default)]
-pub struct ResultOutput {
+pub struct OutputSerializer {
+    /// The binary version of builder (nydus-image).
     version: String,
+    /// Represents all blob in blob table ordered by blob index, this field
+    /// only include the layer that does have a blob, and should be deprecated
+    /// in future, use `ordered_blobs` field to replace.
     blobs: Vec<String>,
+    /// Represents all blob in blob table ordered by layer, this field
+    /// include the layer that does not have a blob.
+    ordered_blobs: Vec<Option<BuildOutputBlob>>,
+    /// Represents all bootstrap names for every snapshot in diff build,
+    /// ordered by snapshot index, not include the skipped (cached) snapshots.
+    bootstraps: Vec<String>,
+    /// Performance trace info for current build.
     trace: serde_json::Map<String, serde_json::Value>,
 }
 
-impl ResultOutput {
+impl OutputSerializer {
     fn dump(
+        matches: &clap::ArgMatches,
+        build_output: &BuildOutput,
+        build_info: &BuildTimeInfo,
+    ) -> Result<()> {
+        let output_json: Option<PathBuf> = matches
+            .value_of("output-json")
+            .map(|o| o.to_string().into());
+
+        if let Some(ref f) = output_json {
+            let w = OpenOptions::new()
+                .truncate(true)
+                .create(true)
+                .write(true)
+                .open(f)
+                .with_context(|| format!("Output file {:?} can't be opened", f))?;
+
+            let trace = root_tracer!().dump_summary_map().unwrap_or_default();
+            let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
+            let output = Self {
+                version,
+                blobs: build_output.get_exists_blobs(),
+                ordered_blobs: build_output.blobs.clone(),
+                bootstraps: build_output.bootstraps.clone(),
+                trace,
+            };
+
+            serde_json::to_writer(w, &output).context("Write output file failed")?;
+        }
+
+        Ok(())
+    }
+
+    fn dump_with_check(
         matches: &clap::ArgMatches,
         build_info: &BuildTimeInfo,
         blob_ids: Vec<String>,
@@ -80,8 +123,10 @@ impl ResultOutput {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
-                trace,
                 blobs: blob_ids,
+                ordered_blobs: Vec::new(),
+                bootstraps: Vec::new(),
+                trace,
             };
 
             serde_json::to_writer(w, &output).context("Write output file failed")?;
@@ -124,11 +169,25 @@ fn main() -> Result<()> {
                         .takes_value(false)
                 )
                 .arg(
+                    Arg::with_name("diff-bootstrap-dir")
+                        .long("diff-bootstrap-dir")
+                        .help("specify a directory to store bootstrap for each layer on diff build")
+                        .conflicts_with("bootstrap")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("diff-skip-layer")
+                        .long("diff-skip-layer")
+                        .help("specify the index of layer to skip and start building from there for speeding up diff build")
+                        .takes_value(true)
+                )
+                .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .short("B")
                         .help("path to store the nydus image's metadata blob")
-                        .required(true)
+                        .required_unless("diff-bootstrap-dir")
+                        .conflicts_with("diff-bootstrap-dir")
                         .takes_value(true),
                 ).arg(
                     Arg::with_name("blob")
@@ -390,7 +449,6 @@ struct Command {}
 impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(&matches)?;
-        let bootstrap_path = Self::get_bootstrap(&matches)?;
         let chunk_size = Self::get_chunk_size(&matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(&matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
@@ -402,7 +460,7 @@ impl Command {
         let blob_stor = Self::get_blob_storage(&matches, source_type)?;
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(&matches)?;
-        let aligned_chunk = if version == RafsVersion::V6 {
+        let aligned_chunk = if version.is_v6() {
             info!("v6 enforces to use \"aligned-chunk\".");
             true
         } else {
@@ -418,18 +476,10 @@ impl Command {
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
         match source_type {
             SourceType::Directory | SourceType::Diff => {
-                let source_file = metadata(&source_path)
-                    .context(format!("failed to get source path {:?}", source_path))?;
-                if !source_file.is_dir() {
-                    bail!("source {:?} must be a directory", source_path);
-                }
+                Self::ensure_directory(&source_path)?;
             }
             SourceType::StargzIndex => {
-                let source_file = metadata(&source_path)
-                    .context(format!("failed to get source path {:?}", source_path))?;
-                if !source_file.is_file() {
-                    bail!("source {:?} must be a JSON file", source_path);
-                }
+                Self::ensure_file(&source_path)?;
                 if blob_id.trim() == "" {
                     bail!("blob-id can't be empty");
                 }
@@ -450,17 +500,6 @@ impl Command {
             .parse()?;
         let prefetch = Prefetch::new(prefetch_policy)?;
 
-        let bootstrap = Box::new(BufWriter::with_capacity(
-            BUF_WRITER_CAPACITY,
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(bootstrap_path)
-                .with_context(|| format!("failed to create bootstrap file {:?}", bootstrap_path))?,
-        ));
-        let mut bootstrap_ctx = BootstrapContext::new(bootstrap, parent_bootstrap);
-
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -477,7 +516,6 @@ impl Command {
         build_ctx.set_chunk_size(chunk_size);
 
         let mut blob_mgr = BlobManager::new();
-
         if let Some(chunk_dict_arg) = matches.value_of("chunk-dict") {
             blob_mgr.set_chunk_dict(timing_tracer!(
                 { import_chunk_dict(chunk_dict_arg) },
@@ -485,16 +523,38 @@ impl Command {
             )?);
         }
 
+        let mut bootstrap_mgr = if source_type == SourceType::Diff {
+            let bootstrap_dir = matches.value_of("diff-bootstrap-dir");
+            let storage = if let Some(bootstrap_dir) = bootstrap_dir {
+                Self::ensure_directory(&bootstrap_dir)?;
+                ArtifactStorage::FileDir(PathBuf::from(bootstrap_dir))
+            } else {
+                let bootstrap_path = Self::get_bootstrap(&matches)?;
+                ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path))
+            };
+            BootstrapManager::new(storage, parent_bootstrap)
+        } else {
+            let bootstrap_path = Self::get_bootstrap(&matches)?;
+            BootstrapManager::new(
+                ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path)),
+                parent_bootstrap,
+            )
+        };
+
         let diff_overlay_hint = matches.is_present("diff-overlay-hint");
         let mut builder: Box<dyn Builder> = match source_type {
             SourceType::Directory => Box::new(DirectoryBuilder::new()),
             SourceType::StargzIndex => Box::new(StargzBuilder::new()),
-            SourceType::Diff => Box::new(DiffBuilder::new(extra_paths, diff_overlay_hint)),
+            SourceType::Diff => Box::new(DiffBuilder::new(
+                extra_paths,
+                diff_overlay_hint,
+                matches.value_of("diff-skip-layer"),
+            )?),
         };
-        let (blob_ids, blob_size) = timing_tracer!(
+        let build_output = timing_tracer!(
             {
                 builder
-                    .build(&mut build_ctx, &mut bootstrap_ctx, &mut blob_mgr)
+                    .build(&mut build_ctx, &mut bootstrap_mgr, &mut blob_mgr)
                     .context("build failed")
             },
             "total_build"
@@ -506,12 +566,10 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
+        let bootstrap_path = bootstrap_mgr.get_bootstrap_path(&build_output.bootstrap_name);
         Self::validate_image(&matches, &bootstrap_path)?;
-        ResultOutput::dump(matches, &build_info, blob_ids.clone())?;
-        info!(
-            "Image build(size={}Bytes) successfully. Blobs table: {:?}",
-            blob_size, blob_ids
-        );
+        OutputSerializer::dump(matches, &build_output, &build_info)?;
+        info!("build successfully: {:?}", build_output,);
 
         Ok(())
     }
@@ -525,7 +583,7 @@ impl Command {
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
         info!("bootstrap is valid, blobs: {:?}", blob_ids);
-        ResultOutput::dump(matches, &build_info, blob_ids)?;
+        OutputSerializer::dump_with_check(matches, &build_info, blob_ids)?;
 
         Ok(())
     }
@@ -610,21 +668,21 @@ impl Command {
     fn get_blob_storage(
         matches: &clap::ArgMatches,
         source_type: SourceType,
-    ) -> Result<Option<BlobStorage>> {
+    ) -> Result<Option<ArtifactStorage>> {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
         let blob_stor = if source_type == SourceType::Directory || source_type == SourceType::Diff {
             if let Some(p) = matches
                 .value_of("blob")
-                .map(|b| BlobStorage::SingleFile(b.into()))
+                .map(|b| ArtifactStorage::SingleFile(b.into()))
             {
                 Some(p)
             } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
                 if !d.exists() {
                     bail!("Directory holding blobs does not exist")
                 }
-                Some(BlobStorage::BlobsDir(d))
+                Some(ArtifactStorage::FileDir(d))
             } else {
                 // Safe because `backend-type` must be specified if `blob` is not with `Directory` source
                 // and `backend-config` must be provided as per clap restriction.
@@ -637,7 +695,7 @@ impl Command {
                 if let Some(bf) = config.get("blob_file") {
                     // Even unwrap, it is caused by invalid json. Image creation just can't start.
                     let b: PathBuf = bf.as_str().unwrap().to_string().into();
-                    Some(BlobStorage::SingleFile(b))
+                    Some(ArtifactStorage::SingleFile(b))
                 } else {
                     error!("Wrong backend config input!");
                     return Err(anyhow!("invalid backend config"));
@@ -687,6 +745,7 @@ impl Command {
         Ok(blob_id)
     }
 
+    #[allow(dead_code)]
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(&bootstrap_path)?;
@@ -735,5 +794,27 @@ impl Command {
                 }
             }
         }
+    }
+
+    fn ensure_file<P: AsRef<Path>>(path: P) -> Result<()> {
+        let file =
+            metadata(path.as_ref()).context(format!("failed to get path {:?}", path.as_ref()))?;
+        ensure!(
+            file.is_file(),
+            "specified path must be a regular file: {:?}",
+            path.as_ref()
+        );
+        Ok(())
+    }
+
+    fn ensure_directory<P: AsRef<Path>>(path: P) -> Result<()> {
+        let dir =
+            metadata(path.as_ref()).context(format!("failed to get path {:?}", path.as_ref()))?;
+        ensure!(
+            dir.is_dir(),
+            "specified path must be a directory: {:?}",
+            path.as_ref()
+        );
+        Ok(())
     }
 }

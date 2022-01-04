@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext, RafsVersion};
+use crate::core::context::{
+    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    RafsVersion,
+};
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
 
@@ -33,7 +36,6 @@ impl FilesystemTreeBuilder {
             return Ok(result);
         }
 
-        let layered = bootstrap_ctx.f_parent_bootstrap.is_some();
         let children = fs::read_dir(parent.path())
             .with_context(|| format!("failed to read dir {:?}", parent.path()))?;
         let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
@@ -53,7 +55,7 @@ impl FilesystemTreeBuilder {
 
             // as per OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
-            if !layered
+            if !bootstrap_ctx.layered
                 && child.whiteout_type(ctx.whiteout_spec).is_some()
                 && !child.is_overlayfs_opaque(ctx.whiteout_spec)
             {
@@ -106,21 +108,22 @@ impl Builder for DirectoryBuilder {
     fn build(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
-    ) -> Result<(Vec<String>, u64)> {
+    ) -> Result<BuildOutput> {
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         // Scan source directory to build upper layer tree.
-        let mut tree = self.build_tree_from_fs(ctx, bootstrap_ctx)?;
+        let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx)?;
         let mut bootstrap = Bootstrap::new()?;
-        if bootstrap_ctx.f_parent_bootstrap.is_some() {
+        if bootstrap_ctx.layered {
             // Merge with lower layer if there's one, do not prepare `prefetch` list during merging.
             ctx.prefetch.disable();
-            bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
-            tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
+            bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
+            tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         }
         // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
         timing_tracer!(
-            { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+            { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },
             "build_bootstrap"
         )?;
 
@@ -133,7 +136,7 @@ impl Builder for DirectoryBuilder {
 
         let blob_index = blob_mgr.alloc_index()?;
         let mut blob = Blob::new();
-        timing_tracer!(
+        let blob_exists = timing_tracer!(
             {
                 blob.dump(
                     ctx,
@@ -145,17 +148,23 @@ impl Builder for DirectoryBuilder {
             },
             "dump_blob"
         )?;
-        blob.flush(&mut blob_ctx)?;
 
         // Add new blob to blob table
-        if blob_ctx.compressed_blob_size > 0 {
-            blob_mgr.add(blob_ctx);
-        }
+        blob_mgr.add(if blob_exists { Some(blob_ctx) } else { None });
 
         // Dump bootstrap file
         match ctx.fs_version {
-            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr),
-            RafsVersion::V6 => bootstrap.dump_rafsv6(ctx, bootstrap_ctx, blob_mgr),
+            RafsVersion::V5 => {
+                let blob_table = blob_mgr.to_blob_table_v5(ctx, None)?;
+                bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &blob_table)?
+            }
+            RafsVersion::V6 => {
+                let blob_table = blob_mgr.to_blob_table_v6(ctx, None)?;
+                bootstrap.dump_rafsv6(ctx, &mut bootstrap_ctx, &blob_table)?
+            }
         }
+
+        bootstrap_mgr.add(bootstrap_ctx);
+        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 }

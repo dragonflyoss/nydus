@@ -26,7 +26,10 @@ use storage::device::BlobChunkFlags;
 
 use crate::builder::Builder;
 use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext, RafsVersion};
+use crate::core::context::{
+    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    RafsVersion,
+};
 use crate::core::node::{ChunkWrapper, InodeWrapper, Node, Overlay};
 use crate::core::tree::Tree;
 
@@ -602,9 +605,11 @@ impl StargzBuilder {
 
         blob_ctx.decompressed_blob_size = decompressed_blob_size;
         blob_ctx.compressed_blob_size = compressed_blob_size;
-        if blob_ctx.decompressed_blob_size > 0 {
-            blob_mgr.add(blob_ctx);
-        }
+        blob_mgr.add(if blob_ctx.decompressed_blob_size > 0 {
+            Some(blob_ctx)
+        } else {
+            None
+        });
 
         Ok(())
     }
@@ -621,29 +626,36 @@ impl Builder for StargzBuilder {
     fn build(
         &mut self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
+        bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
-    ) -> Result<(Vec<String>, u64)> {
+    ) -> Result<BuildOutput> {
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         // Build tree from source
         let mut tree = self.build_tree_from_index(ctx)?;
         let mut bootstrap = Bootstrap::new()?;
-        if bootstrap_ctx.f_parent_bootstrap.is_some() {
+        if bootstrap_mgr.f_parent_bootstrap.is_some() {
             // Merge with lower layer if there's one.
-            bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
-            tree = bootstrap.apply(ctx, bootstrap_ctx, blob_mgr, None)?;
+            bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
+            tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         }
         timing_tracer!(
-            { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+            { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },
             "build_bootstrap"
         )?;
 
-        // generate node chunks and digest
-        self.generate_nodes(ctx, bootstrap_ctx, blob_mgr)?;
+        // Generate node chunks and digest
+        self.generate_nodes(ctx, &mut bootstrap_ctx, blob_mgr)?;
 
         // Dump bootstrap file
         match ctx.fs_version {
-            RafsVersion::V5 => bootstrap.dump_rafsv5(ctx, bootstrap_ctx, blob_mgr),
+            RafsVersion::V5 => {
+                let blob_table = blob_mgr.to_blob_table_v5(ctx, None)?;
+                bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &blob_table)?
+            }
             RafsVersion::V6 => todo!(),
         }
+
+        bootstrap_mgr.add(bootstrap_ctx);
+        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 }

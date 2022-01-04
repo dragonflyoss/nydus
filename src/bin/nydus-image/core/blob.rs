@@ -22,14 +22,14 @@ impl Blob {
     }
 
     /// Dump blob file and generate chunks
-    pub fn dump<T: ChunkDict>(
+    pub fn dump<'a, T: ChunkDict>(
         &mut self,
         ctx: &BuildContext,
-        blob_ctx: &mut BlobContext,
+        blob_ctx: &'a mut BlobContext,
         blob_index: u32,
         nodes: &mut Vec<Node>,
         chunk_dict: &mut T,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match ctx.source_type {
             SourceType::Directory | SourceType::Diff => {
                 let (inodes, prefetch_entries) = blob_ctx
@@ -41,10 +41,7 @@ impl Blob {
                         .dump_blob(ctx, blob_ctx, blob_index, chunk_dict)
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
-                        debug!("[{}]\treadahead {}", node.overlay, node);
                         blob_ctx.blob_readahead_size += size;
-                    } else {
-                        debug!("[{}]\t{}", node.overlay, node);
                     }
                 }
                 self.dump_meta_data(blob_ctx)?;
@@ -76,20 +73,12 @@ impl Blob {
             blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
         }
 
-        Ok(())
-    }
+        blob_ctx.set_blob_readahead_size(ctx);
+        blob_ctx.flush()?;
 
-    pub fn flush(self, blob_ctx: &mut BlobContext) -> Result<()> {
-        let blob_id = if blob_ctx.compressed_blob_size > 0 {
-            Some(blob_ctx.blob_id.as_str())
-        } else {
-            None
-        };
-        if let Some(writer) = blob_ctx.writer.take() {
-            writer.release(blob_id)?;
-        }
+        let blob_exists = blob_ctx.compressed_blob_size > 0;
 
-        Ok(())
+        Ok(blob_exists)
     }
 
     fn dump_meta_data(&mut self, blob_ctx: &mut BlobContext) -> Result<()> {

@@ -733,7 +733,7 @@ mod cached_tests {
     };
     use crate::metadata::layout::{RafsXAttrs, RAFS_ROOT_INODE};
     use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
-    use crate::{RafsIoReader, RafsIoWriter};
+    use crate::{BufWriter, RafsIoReader};
 
     #[test]
     fn test_load_inode() {
@@ -744,7 +744,7 @@ mod cached_tests {
             .read(true)
             .open("/tmp/buf_1")
             .unwrap();
-        let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
+        let mut writer = BufWriter::new(f.try_clone().unwrap());
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
 
         let mut ondisk_inode = RafsV5Inode::new();
@@ -815,7 +815,7 @@ mod cached_tests {
             .read(true)
             .open("/tmp/buf_2")
             .unwrap();
-        let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
+        let mut writer = BufWriter::new(f.try_clone().unwrap());
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
         let file_name = OsString::from("c_inode_2");
         let symlink_name = OsString::from("c_inode_1");
@@ -856,7 +856,7 @@ mod cached_tests {
             .read(true)
             .open("/tmp/buf_3")
             .unwrap();
-        let mut writer = Box::new(f.try_clone().unwrap()) as RafsIoWriter;
+        let mut writer = BufWriter::new(f.try_clone().unwrap());
         let mut reader = Box::new(f.try_clone().unwrap()) as RafsIoReader;
         let file_name = OsString::from("c_inode_3");
         let mut ondisk_inode = RafsV5Inode::new();

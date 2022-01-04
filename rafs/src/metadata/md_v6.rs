@@ -53,7 +53,7 @@ impl RafsSuper {
 mod tests {
     use super::*;
     use crate::metadata::RafsStore;
-    use crate::RafsIoWriter;
+    use crate::BufWriter;
     use std::fs::OpenOptions;
     use std::io::Write;
     use vmm_sys_util::tempfile::TempFile;
@@ -107,7 +107,7 @@ mod tests {
             .open(t_file.as_path())
             .unwrap();
         let sb = RafsV6SuperBlock::new();
-        let mut writer = Box::new(file) as RafsIoWriter;
+        let mut writer = BufWriter::new(file);
         sb.store(&mut writer).unwrap();
 
         let file = OpenOptions::new()
