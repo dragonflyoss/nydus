@@ -194,12 +194,9 @@ impl ArtifactBufferWriter {
 
         if let Some(n) = name {
             if let ArtifactStorage::FileDir(s) = &self.storage {
-                // NOTE: File with same name will be deleted ahead of time.
-                // So each newly generated blob can be stored.
                 let might_exist_path = Path::new(s).join(n);
                 if might_exist_path.exists() {
-                    remove_file(&might_exist_path)
-                        .with_context(|| format!("failed to remove blob {:?}", might_exist_path))?;
+                    return Ok(());
                 }
 
                 // Safe to unwrap as `FileDir` must have `tmp_file` created.
