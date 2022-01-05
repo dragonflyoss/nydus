@@ -1,3 +1,5 @@
+PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
+
 all:clear build
 
 .PHONY: build
@@ -11,3 +13,8 @@ clear:
 .PHONY: static-release
 static-release:
 	GOOS=linux go build -ldflags '-s -w -extldflags "-static"' -v -o bin/nydus_graphdriver .
+
+.PHONY: test
+test: build
+	go vet $(PACKAGES)
+	go test -v -cover ${PACKAGES}

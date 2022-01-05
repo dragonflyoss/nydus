@@ -2,6 +2,7 @@ all:clear build
 
 GIT_COMMIT := $(shell git rev-parse --verify HEAD --short=7)
 BUILD_TIME := $(shell date -u +%Y%m%d.%H%M)
+PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 
 .PHONY: build
 build:
@@ -14,3 +15,8 @@ clear:
 .PHONY: static-release
 static-release:
 	GOOS=linux go build -ldflags '-s -w -extldflags "-static"' -v -o bin/nydus-overlayfs ./cmd/main.go
+
+.PHONY: test
+test: build
+	go vet $(PACKAGES)
+	go test -v -cover ${PACKAGES}
