@@ -10,7 +10,7 @@ PROXY := GOPROXY="${GOPROXY}"
 endif
 
 .PHONY: build
-build: check
+build:
 	GOOS=linux ${PROXY} go build -ldflags="-s -w -X 'main.Version=${VERSION}'" -v -o bin/containerd-nydus-grpc ./cmd/containerd-nydus-grpc
 
 static-release:
@@ -21,19 +21,14 @@ clear:
 	rm -f bin/*
 	rm -rf _out
 
-.PHONY: vet
-vet:
-	go vet $(PACKAGES)
-
-check: vet
-	golangci-lint run
-
 .PHONY: test
-test: vet
-	go test -v -mod=mod -cover ${PACKAGES}
+test: build
+	go vet $(PACKAGES)
+	golangci-lint run
+	go test -v -cover ${PACKAGES}
 
 .PHONY: cover
-cover: vet
+cover:
 	@go test -coverprofile=_out/cover.out ${PACKAGES}
 	@go tool cover -func=_out/cover.out
 	@rm -f cover.out

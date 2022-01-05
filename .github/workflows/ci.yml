@@ -10,8 +10,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  contrib-ut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: cache go mod
+        uses: actions/cache@v2
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go
+      - name: test contrib UT
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.43.0
+          make all-contrib-test
   smoke:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - name: Cache Nydus

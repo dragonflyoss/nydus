@@ -133,14 +133,20 @@ docker-nydusify-image-test: docker-static
 docker-smoke: docker-nydus-smoke docker-nydusify-smoke nydus-snapshotter
 
 nydusify:
-	$(call build_golang,${NYDUSIFY_PATH},make build-smoke)
+	$(call build_golang,${NYDUSIFY_PATH},make)
+
+nydusify-test:
+	$(call build_golang,${NYDUSIFY_PATH},make test)
 
 nydusify-static:
 	$(call build_golang,${NYDUSIFY_PATH},make static-release)
 
 SNAPSHOTTER_PATH = contrib/nydus-snapshotter
 nydus-snapshotter:
-	$(call build_golang,${SNAPSHOTTER_PATH},make static-release build test)
+	$(call build_golang,${SNAPSHOTTER_PATH},make)
+
+nydus-snapshotter-test:
+	$(call build_golang,${SNAPSHOTTER_PATH},make test)
 
 nydus-snapshotter-static:
 	$(call build_golang,${SNAPSHOTTER_PATH},make static-release)
@@ -149,6 +155,9 @@ CTR-REMOTE_PATH = contrib/ctr-remote
 ctr-remote:
 	$(call build_golang,${CTR-REMOTE_PATH},make)
 
+ctr-remote-test:
+	$(call build_golang,${CTR-REMOTE_PATH},make test)
+
 ctr-remote-static:
 	$(call build_golang,${CTR-REMOTE_PATH},make static-release)
 
@@ -156,12 +165,18 @@ NYDUS-OVERLAYFS_PATH = contrib/nydus-overlayfs
 nydus-overlayfs:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make)
 
+nydus-overlayfs-test:
+	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make test)
+
 nydus-overlayfs-static:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make static-release)
 
 DOCKER-GRAPHDRIVER_PATH = contrib/docker-nydus-graphdriver
 docker-nydus-graphdriver:
 	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make)
+
+docker-nydus-graphdriver-test:
+	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make test)
 
 docker-nydus-graphdriver-static:
 	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make static-release)
@@ -172,6 +187,9 @@ all-static-release: docker-static all-contrib-static-release
 
 all-contrib-static-release: nydusify-static nydus-snapshotter-static ctr-remote-static \
 			    nydus-overlayfs-static docker-nydus-graphdriver-static
+
+all-contrib-test: nydusify-test nydus-snapshotter-test ctr-remote-test \
+		  nydus-overlayfs-test docker-nydus-graphdriver-test
 
 # https://www.gnu.org/software/make/manual/html_node/One-Shell.html
 .ONESHELL:
