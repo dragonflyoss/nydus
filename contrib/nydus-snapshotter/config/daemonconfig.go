@@ -117,7 +117,7 @@ func NewDaemonConfig(cfg DaemonConfig, imageID string, vpcRegistry bool, labels 
 		if vpcRegistry {
 			registryHost = registry.ConvertToVPCHost(registryHost)
 		}
-		keyChain := auth.FromLabels(labels)
+		keyChain := auth.GetRegistryKeyChain(registryHost, labels)
 		// If no auth is provided, don't touch auth from provided nydusd configuration file.
 		// We don't validate the original nydusd auth from configuration file since it can be empty
 		// when repository is public.

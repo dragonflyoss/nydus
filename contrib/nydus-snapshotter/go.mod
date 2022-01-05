@@ -5,6 +5,7 @@ go 1.14
 require (
 	github.com/containerd/containerd v1.4.12
 	github.com/containerd/continuity v0.0.0-20200928162600-f2cc35102c2a
+	github.com/docker/cli v20.10.0-beta1.0.20201029214301-1d20b15adc38+incompatible
 	github.com/dragonflyoss/image-service/contrib/nydusify v0.0.0-20210518022841-c17fb49cce7c
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e
