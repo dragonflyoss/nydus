@@ -1,0 +1,41 @@
+name: Convert Top Docker Hub Images
+
+on:
+  schedule:
+    # Do conversion every day at 00:00 clock UTC
+    - cron: "* 0 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  ORGANIZATION: ${{ github.repository }}
+  IMAGE_LIST_PATH: misc/top_images/image_list.txt
+
+jobs:
+  convert-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Install Nydus binaries
+        run: |
+          NYDUS_VERSION=$(curl --silent "https://api.github.com/repos/dragonflyoss/image-service/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
+          wget https://github.com/dragonflyoss/image-service/releases/download/$NYDUS_VERSION/nydus-static-$NYDUS_VERSION-x86_64.tgz
+          tar xzf nydus-static-$NYDUS_VERSION-x86_64.tgz
+          sudo cp nydus-static/nydusify nydus-static/nydus-image /usr/local/bin/
+      - name: Log in to the container registry
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Convert images
+        run: |
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            echo "converting $I:latest"
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --source $I:latest \
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-latest \
+                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I
+            sudo rm -rf ./tmp
+          done
