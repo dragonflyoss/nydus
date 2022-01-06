@@ -35,7 +35,7 @@ Currently Nydus includes following tools:
 | nydusctl                 | Nydusd CLI client, query daemon's working status/metrics and configure it                                                                           |
 | ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                        |
 | nydus-docker-graphdriver | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                 |
-| [acceleration-service](https://github.com/goharbor/acceleration-service) | Provides a general service for Harbor to support image acceleration based on kinds of accelerator like Nydus and eStargz etc. |
+| nydus-overlayfs          | `Containerd` mount helper to invoke overlayfs mount with tweaking mount options a bit. So nydus prerequisites can be passed to vm-based runtime     |
 
 To try nydus image service:
 
@@ -75,6 +75,10 @@ To build and setup nydus-snapshotter for containerd, please refer to [Nydus Snap
 Normally, users do not need to start `nydusd` by hand. It is started by `nydus-snapshotter` or `nydus-docker-graphdriver` when a container rootfs is prepared.
 
 Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
+
+## Build Images via Harbor
+
+Nydus cooperates with Harbor community to develop [acceleration-service](https://github.com/goharbor/acceleration-service) which provides a general service for Harbor to support image acceleration based on kinds of accelerators like Nydus, eStargz, etc.
 
 ## Docker graph driver support
 
