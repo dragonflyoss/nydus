@@ -1,0 +1,23 @@
+# https://golangci-lint.run/usage/configuration#config-file
+
+linters:
+  enable:
+    - structcheck
+    - varcheck
+    - staticcheck
+    - unconvert
+    - gofmt
+    - goimports
+    - revive
+    - ineffassign
+    - vet
+    - unused
+    - misspell
+  disable:
+    - errcheck
+
+run:
+  deadline: 4m
+  skip-dirs:
+    - misc
+
