@@ -56,9 +56,9 @@ type Cache struct {
 	// Remote is responsible for pulling & pushing cache image
 	remote *remote.Remote
 	// Store the pulled records from registry
-	pulledRecords map[digest.Digest]*CacheRecord
+	pulledRecords map[digest.Digest]*Record
 	// Store the records prepared to push to registry
-	pushedRecords []*CacheRecord
+	pushedRecords []*Record
 }
 
 // New creates Nydus cache instance,
@@ -67,14 +67,14 @@ func New(remote *remote.Remote, opt Opt) (*Cache, error) {
 		opt:    opt,
 		remote: remote,
 		// source_layer_chain_id -> cache_record
-		pulledRecords: make(map[digest.Digest]*CacheRecord),
-		pushedRecords: []*CacheRecord{},
+		pulledRecords: make(map[digest.Digest]*Record),
+		pushedRecords: []*Record{},
 	}
 
 	return cache, nil
 }
 
-func (cache *Cache) recordToLayer(record *CacheRecord) (*ocispec.Descriptor, *ocispec.Descriptor) {
+func (cache *Cache) recordToLayer(record *Record) (*ocispec.Descriptor, *ocispec.Descriptor) {
 	bootstrapCacheMediaType := ocispec.MediaTypeImageLayerGzip
 	if cache.opt.DockerV2Format {
 		bootstrapCacheMediaType = images.MediaTypeDockerSchema2LayerGzip
@@ -129,7 +129,7 @@ func (cache *Cache) exportRecordsToLayers() []ocispec.Descriptor {
 	return layers
 }
 
-func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *CacheRecord {
+func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *Record {
 	sourceChainIDStr, ok := layer.Annotations[utils.LayerAnnotationNydusSourceChainID]
 	if !ok {
 		return nil
@@ -181,7 +181,7 @@ func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *CacheRecord {
 				},
 			}
 		}
-		return &CacheRecord{
+		return &Record{
 			SourceChainID:        sourceChainID,
 			NydusBootstrapDesc:   &bootstrapDesc,
 			NydusBlobDesc:        nydusBlobDesc,
@@ -199,7 +199,7 @@ func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *CacheRecord {
 				utils.LayerAnnotationNydusBlob: "true",
 			},
 		}
-		return &CacheRecord{
+		return &Record{
 			SourceChainID: sourceChainID,
 			NydusBlobDesc: nydusBlobDesc,
 		}
@@ -208,9 +208,9 @@ func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *CacheRecord {
 	return nil
 }
 
-func mergeRecord(old, new *CacheRecord) *CacheRecord {
+func mergeRecord(old, new *Record) *Record {
 	if old == nil {
-		old = &CacheRecord{
+		old = &Record{
 			SourceChainID: new.SourceChainID,
 		}
 	}
@@ -228,8 +228,8 @@ func mergeRecord(old, new *CacheRecord) *CacheRecord {
 }
 
 func (cache *Cache) importRecordsFromLayers(layers []ocispec.Descriptor) {
-	pulledRecords := make(map[digest.Digest]*CacheRecord)
-	pushedRecords := []*CacheRecord{}
+	pulledRecords := make(map[digest.Digest]*Record)
+	pushedRecords := []*Record{}
 
 	for _, layer := range layers {
 		record := cache.layerToRecord(&layer)
@@ -308,7 +308,7 @@ func (cache *Cache) Export(ctx context.Context) error {
 		mediaType = images.MediaTypeDockerSchema2Manifest
 	}
 
-	manifest := CacheManifest{
+	manifest := Manifest{
 		MediaType: mediaType,
 		Manifest: ocispec.Manifest{
 			Versioned: specs.Versioned{
@@ -355,7 +355,7 @@ func (cache *Cache) Import(ctx context.Context) error {
 		return errors.Wrap(err, "Read cache manifest")
 	}
 
-	var manifest CacheManifest
+	var manifest Manifest
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return errors.Wrap(err, "Unmarshal cache manifest")
 	}
@@ -374,7 +374,7 @@ func (cache *Cache) Import(ctx context.Context) error {
 }
 
 // Check checks bootstrap & blob layer exists in registry or storage backend
-func (cache *Cache) Check(ctx context.Context, layerChainID digest.Digest) (*CacheRecord, io.ReadCloser, io.ReadCloser, error) {
+func (cache *Cache) Check(ctx context.Context, layerChainID digest.Digest) (*Record, io.ReadCloser, io.ReadCloser, error) {
 	record, ok := cache.pulledRecords[layerChainID]
 	if !ok {
 		return nil, nil, nil, nil
@@ -409,7 +409,7 @@ func (cache *Cache) Check(ctx context.Context, layerChainID digest.Digest) (*Cac
 }
 
 // Record puts new bootstrap & blob layer to cache record, it's a limited queue.
-func (cache *Cache) Record(records []*CacheRecord) {
+func (cache *Cache) Record(records []*Record) {
 	moveFront := map[digest.Digest]bool{}
 	for _, record := range records {
 		moveFront[record.SourceChainID] = true

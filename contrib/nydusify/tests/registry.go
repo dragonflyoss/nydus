@@ -48,7 +48,7 @@ func NewRegistry(t *testing.T) *Registry {
 	}
 }
 
-func (registry *Registry) Destory(t *testing.T) {
+func (registry *Registry) Destroy(t *testing.T) {
 	run(t, fmt.Sprintf("docker rm -f %s", registry.id), true)
 }
 

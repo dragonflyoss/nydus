@@ -157,8 +157,7 @@ func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 func (nydusd *Nydusd) Mount() error {
 	nydusd.Umount()
 
-	var args []string
-	args = []string{
+	args := []string{
 		"--config",
 		nydusd.ConfigPath,
 		"--mountpoint",

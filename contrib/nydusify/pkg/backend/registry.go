@@ -40,7 +40,7 @@ func (r *Registry) Check(blobID string) (bool, error) {
 	return true, nil
 }
 
-func (r *Registry) Type() BackendType {
+func (r *Registry) Type() Type {
 	return RegistryBackend
 }
 

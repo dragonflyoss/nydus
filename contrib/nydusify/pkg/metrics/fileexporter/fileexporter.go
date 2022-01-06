@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package file_exporter
+package fileexporter
 
 import (
 	"github.com/prometheus/client_golang/prometheus"

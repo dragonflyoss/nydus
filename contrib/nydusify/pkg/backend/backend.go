@@ -23,20 +23,20 @@ type Backend interface {
 	// file handle and file path.
 	Upload(ctx context.Context, blobID, blobPath string, blobSize int64, forcePush bool) (*ocispec.Descriptor, error)
 	Check(blobID string) (bool, error)
-	Type() BackendType
+	Type() Type
 }
 
 // TODO: Directly forward blob data to storage backend
 
-type BackendType = int
+type Type = int
 
 const (
-	OssBackend BackendType = iota
+	OssBackend Type = iota
 	RegistryBackend
 )
 
-func blobDesc(size int64, blobId string) ocispec.Descriptor {
-	blobDigest := digest.NewDigestFromEncoded(digest.SHA256, blobId)
+func blobDesc(size int64, blobID string) ocispec.Descriptor {
+	blobDigest := digest.NewDigestFromEncoded(digest.SHA256, blobID)
 	desc := ocispec.Descriptor{
 		Digest:    blobDigest,
 		Size:      size,

@@ -10,7 +10,7 @@ import (
 
 func testBasicConvert(t *testing.T) {
 	registry := NewRegistry(t)
-	defer registry.Destory(t)
+	defer registry.Destroy(t)
 
 	registry.Build(t, "image-basic")
 	nydusify := NewNydusify(registry, "image-basic", "image-basic-nydus", "")
@@ -20,7 +20,7 @@ func testBasicConvert(t *testing.T) {
 
 func testConvertWithCache(t *testing.T) {
 	registry := NewRegistry(t)
-	defer registry.Destory(t)
+	defer registry.Destroy(t)
 
 	registry.Build(t, "image-basic")
 	nydusify1 := NewNydusify(registry, "image-basic", "image-basic-nydus-1", "cache:v1")
