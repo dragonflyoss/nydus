@@ -92,10 +92,11 @@ Browse the documentation to learn more. Here are some topics you may be interest
 
 ## Community
 
-Welcome to share your use cases and contribute to Nydus project.
-You can reach the community via Dingtalk and Slack
+Nydus aims to form a **vendor-neutral opensource** image distribution solution to all communities.
+Questions, bug reports, technical discussion, feature requests and contribution are always welcomed!
 
-Any bug report, feature requirement, and technique discussion and cooperation are welcomed and expected!
+We're very pleased to hear your use cases any time.
+Feel free to reach/join us via Slack and Dingtalk
 
 - Slack
 
@@ -103,7 +104,7 @@ Any bug report, feature requirement, and technique discussion and cooperation ar
 
 - Dingtalk
 
-  Join nydus-devel group by clicking [URL](https://qr.dingtalk.com/action/joingroup?code=v1,k1,YfGzhaTOnpm10Bf+/ohz4WcuDEIe9nTIjo+MPuIgRGQ=&_dt_no_comment=1&origin=11) from your phone.
+  Join nydus-devel group by clicking [URL](https://qr.dingtalk.com/action/joingroup?code=v1,k1,YfGzhaTOnpm10Bf+/ohz4WcuDEIe9nTIjo+MPuIgRGQ=&_dt_no_comment=1&origin=11) on your phone.
 
   You can also search our talking group by number _34971767_ and QR code
 
