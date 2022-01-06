@@ -293,9 +293,6 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
     // NOTE: This method is not thread-safe, however, it is acceptable as
     // mount/umount/remount/restore_mount is invoked from single thread in FSM
     fn mount(&self, cmd: FsBackendMountCmd) -> DaemonResult<()> {
-        if self.backend_from_mountpoint(&cmd.mountpoint)?.is_some() {
-            return Err(DaemonError::AlreadyExists);
-        }
         let backend = fs_backend_factory(&cmd)?;
         let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
         info!("{} mounted at {}", &cmd.fs_type, &cmd.mountpoint);
