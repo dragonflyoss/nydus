@@ -59,29 +59,31 @@ func getDaemonStatus(socket string) error {
 
 	client := http.Client{Transport: &transport, Timeout: 30 * time.Second}
 
-	if resp, err := client.Get("http://unix/api/v1/daemon"); err != nil {
+	resp, err := client.Get("http://unix/api/v1/daemon")
+	if err != nil {
 		return err
-	} else {
-		defer resp.Body.Close()
-		if b, err := ioutil.ReadAll(resp.Body); err != nil {
-			return err
-		} else {
+	}
 
-			if resp.StatusCode >= 400 {
-				var message errorMessage
-				json.Unmarshal(b, &message)
-				return errors.Errorf("request error, status = %d, message %s", resp.StatusCode, message)
-			}
+	defer resp.Body.Close()
 
-			var info DaemonInfo
-			if err = json.Unmarshal(b, &info); err != nil {
-				return err
-			} else {
-				if info.State != "RUNNING" {
-					return errors.Errorf("nydus is not ready. current stat %s", info.State)
-				}
-			}
-		}
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode >= 400 {
+		var message errorMessage
+		json.Unmarshal(b, &message)
+		return errors.Errorf("request error, status = %d, message %s", resp.StatusCode, message)
+	}
+
+	var info DaemonInfo
+	if err = json.Unmarshal(b, &info); err != nil {
+		return err
+	}
+
+	if info.State != "RUNNING" {
+		return errors.Errorf("nydus is not ready. current stat %s", info.State)
 	}
 
 	return nil
@@ -110,7 +112,7 @@ func (nydus *Nydus) Mount(bootstrap, mountpoint string) error {
 	ready := false
 
 	// return error if nydusd does not reach normal state after elapse.
-	for i := 0; i < 30; i += 1 {
+	for i := 0; i < 30; i++ {
 		err := getDaemonStatus(NydusdSocket)
 		if err == nil {
 			ready = true
