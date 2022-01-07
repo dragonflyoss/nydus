@@ -22,7 +22,6 @@ debian
 sonarqube
 wordpress
 influxdb
-elasticsearch
 tomcat
 amazonlinux
 maven
@@ -42,9 +41,6 @@ adminer
 ghost
 java
 kong
-kibana
 solr
 sentry
-logstash
 zookeeper
-jenkins
