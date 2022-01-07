@@ -437,12 +437,7 @@ func (d *Driver) isParent(id, parent string) bool {
 	}
 
 	if parent == "" {
-		if len(lowers) == 0 {
-			return true
-		} else {
-			return false
-		}
-
+		return len(lowers) == 0
 	}
 
 	return parent == lowers[len(lowers)-1]
