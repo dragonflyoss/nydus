@@ -120,14 +120,14 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	}
 	blobSize := stat.Size()
 
-	var needMultiparts bool = false
+	var needMultiparts = false
 	// Blob size bigger than 100MB, apply multiparts upload.
 	if blobSize >= multipartsUploadThreshold {
 		needMultiparts = true
 	}
 
 	start := time.Now()
-	var crc64 uint64 = 0
+	var crc64 uint64
 	crc64ErrChan := make(chan error, 1)
 	go func() {
 		var e error
@@ -237,6 +237,6 @@ func (b *OSSBackend) Check(blobID string) (bool, error) {
 	return b.bucket.IsObjectExist(blobID)
 }
 
-func (r *OSSBackend) Type() BackendType {
+func (b *OSSBackend) Type() Type {
 	return OssBackend
 }

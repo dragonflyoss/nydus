@@ -63,12 +63,12 @@ func newCacheGlue(
 
 func (cg *cacheGlue) Pull(
 	ctx context.Context, sourceLayerChainID digest.Digest,
-) (*cache.CacheRecord, error) {
+) (*cache.Record, error) {
 	if cg.cache == nil {
 		return nil, nil
 	}
 
-	var cacheRecord *cache.CacheRecord
+	var cacheRecord *cache.Record
 
 	// Using ChainID to ensure we can find corresponding overlayed
 	// Nydus blob/bootstrap layer in cache records.
@@ -78,7 +78,7 @@ func (cg *cacheGlue) Pull(
 			"ChainID": sourceLayerChainID,
 		})
 		// Pull the cached layer from cache image, then push to target namespace/repo,
-		// because the blob data is not shared between diffrent namespaces in registry,
+		// because the blob data is not shared between different namespaces in registry,
 		// this operation ensures that Nydus image owns these layers.
 		cacheRecord = _cacheRecord
 		defer bootstrapReader.Close()
@@ -176,7 +176,7 @@ func (cg *cacheGlue) Export(
 	// conversion progress as much as possible
 	cg.cache.Import(ctx)
 
-	cacheRecords := []*cache.CacheRecord{}
+	cacheRecords := []*cache.Record{}
 	for _, layer := range buildLayers {
 		record := layer.GetCacheRecord()
 		cacheRecords = append(cacheRecords, &record)

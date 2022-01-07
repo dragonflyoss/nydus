@@ -25,7 +25,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics/file_exporter"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics/fileexporter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
@@ -273,7 +273,7 @@ func main() {
 					return err
 				}
 
-				metrics.Register(file_exporter.New(filepath.Join(opt.WorkDir, "conversion_metrics.prom")))
+				metrics.Register(fileexporter.New(filepath.Join(opt.WorkDir, "conversion_metrics.prom")))
 				defer metrics.Export()
 
 				return cvt.Convert(context.Background())
@@ -312,6 +312,9 @@ func main() {
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
+				if err != nil {
+					return err
+				}
 
 				checker, err := checker.New(checker.Opt{
 					WorkDir:        c.String("work-dir"),

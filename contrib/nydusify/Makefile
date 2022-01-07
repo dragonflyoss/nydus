@@ -19,6 +19,7 @@ static-release:
 .PHONY: test
 test: build build-smoke
 	@go vet $(PACKAGES)
+	golangci-lint run
 	@go test -count=1 -v -timeout 20m -race ./pkg/...
 
 build-smoke:

@@ -32,8 +32,7 @@ func NewBuilder(binaryPath string) *Builder {
 // Check calls `nydus-image check` to parse Nydus bootstrap
 // and output debug information to specified JSON file.
 func (builder *Builder) Check(option BuilderOption) error {
-	var args []string
-	args = []string{
+	args := []string{
 		"check",
 		"--bootstrap",
 		option.BootstrapPath,

@@ -17,7 +17,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
-func makeRecord(id int64, hashBlob bool) *CacheRecord {
+func makeRecord(id int64, hashBlob bool) *Record {
 	var blobDesc *ocispec.Descriptor
 	idStr := strconv.FormatInt(id, 10)
 	if hashBlob {
@@ -27,7 +27,7 @@ func makeRecord(id int64, hashBlob bool) *CacheRecord {
 			Size:      id,
 		}
 	}
-	return &CacheRecord{
+	return &Record{
 		SourceChainID: digest.FromString("chain-" + idStr),
 		NydusBootstrapDesc: &ocispec.Descriptor{
 			MediaType: ocispec.MediaTypeImageLayerGzip,
@@ -79,7 +79,7 @@ func testWithBackend(t *testing.T, _backend backend.Backend) {
 	})
 	assert.Nil(t, err)
 
-	exported := []*CacheRecord{
+	exported := []*Record{
 		makeRecord(1, true),
 		makeRecord(2, true),
 		makeRecord(3, false),
@@ -105,7 +105,7 @@ func testWithBackend(t *testing.T, _backend backend.Backend) {
 	}
 
 	cache.importRecordsFromLayers(layers)
-	cache.Record([]*CacheRecord{
+	cache.Record([]*Record{
 		makeRecord(4, true),
 		makeRecord(5, true),
 	})

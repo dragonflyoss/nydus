@@ -164,8 +164,8 @@ func (parser *Parser) PullNydusBootstrap(ctx context.Context, image *Image) (io.
 	return reader, nil
 }
 
-func (p *Parser) matchImagePlatform(desc *ocispec.Descriptor) bool {
-	if p.interestedArch == desc.Platform.Architecture && desc.Platform.OS == "linux" {
+func (parser *Parser) matchImagePlatform(desc *ocispec.Descriptor) bool {
+	if parser.interestedArch == desc.Platform.Architecture && desc.Platform.OS == "linux" {
 		return true
 	}
 	return false

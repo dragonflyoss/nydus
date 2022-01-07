@@ -9,12 +9,12 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-type CacheManifest struct {
+type Manifest struct {
 	MediaType string `json:"mediaType,omitempty"`
 	ocispec.Manifest
 }
 
-type CacheRecord struct {
+type Record struct {
 	SourceChainID        digest.Digest
 	NydusBlobDesc        *ocispec.Descriptor
 	NydusBootstrapDesc   *ocispec.Descriptor

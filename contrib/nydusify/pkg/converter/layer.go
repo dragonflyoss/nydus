@@ -44,7 +44,7 @@ type buildLayer struct {
 	bootstrapsDir  string
 	dockerV2Format bool
 
-	cacheRecord     *cache.CacheRecord
+	cacheRecord     *cache.Record
 	blobDesc        *ocispec.Descriptor
 	bootstrapDesc   *ocispec.Descriptor
 	bootstrapDiffID *digest.Digest
@@ -304,11 +304,11 @@ func (layer *buildLayer) Build(ctx context.Context) error {
 	return buildDone(nil)
 }
 
-func (layer *buildLayer) GetCacheRecord() cache.CacheRecord {
+func (layer *buildLayer) GetCacheRecord() cache.Record {
 	if layer.cacheRecord != nil {
 		return *layer.cacheRecord
 	}
-	return cache.CacheRecord{
+	return cache.Record{
 		SourceChainID:        layer.source.ChainID(),
 		NydusBlobDesc:        layer.blobDesc,
 		NydusBootstrapDesc:   layer.bootstrapDesc,
