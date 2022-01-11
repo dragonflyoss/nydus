@@ -130,7 +130,7 @@ docker-nydusify-image-test: docker-static
 		-e BACKEND_CONFIG=$(BACKEND_CONFIG) \
 		-v $(current_dir):/nydus-rs $(dind_cache_mount) nydusify-smoke TestDockerHubImage
 
-docker-smoke: docker-nydus-smoke docker-nydusify-smoke nydus-snapshotter
+docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 
 nydusify:
 	$(call build_golang,${NYDUSIFY_PATH},make)
@@ -140,16 +140,6 @@ nydusify-test:
 
 nydusify-static:
 	$(call build_golang,${NYDUSIFY_PATH},make static-release)
-
-SNAPSHOTTER_PATH = contrib/nydus-snapshotter
-nydus-snapshotter:
-	$(call build_golang,${SNAPSHOTTER_PATH},make)
-
-nydus-snapshotter-test:
-	$(call build_golang,${SNAPSHOTTER_PATH},make test)
-
-nydus-snapshotter-static:
-	$(call build_golang,${SNAPSHOTTER_PATH},make static-release)
 
 CTR-REMOTE_PATH = contrib/ctr-remote
 ctr-remote:
@@ -185,11 +175,11 @@ docker-nydus-graphdriver-static:
 # refer to `misc/example/README.md` for details.
 all-static-release: docker-static all-contrib-static-release
 
-all-contrib-static-release: nydusify-static nydus-snapshotter-static ctr-remote-static \
+all-contrib-static-release: nydusify-static ctr-remote-static \
 			    nydus-overlayfs-static docker-nydus-graphdriver-static
 
-all-contrib-test: nydusify-test nydus-snapshotter-test ctr-remote-test \
-		  nydus-overlayfs-test docker-nydus-graphdriver-test
+all-contrib-test: nydusify-test ctr-remote-test \
+				nydus-overlayfs-test docker-nydus-graphdriver-test
 
 # https://www.gnu.org/software/make/manual/html_node/One-Shell.html
 .ONESHELL:
@@ -197,7 +187,6 @@ docker-example: all-static-release
 	cp ${current_dir}/target-fusedev/${ARCH}-unknown-linux-musl/release/nydusd misc/example
 	cp ${current_dir}/target-fusedev/${ARCH}-unknown-linux-musl/release/nydus-image misc/example
 	cp contrib/nydusify/cmd/nydusify misc/example
-	cp contrib/nydus-snapshotter/bin/containerd-nydus-grpc misc/example
 	docker build -t nydus-rs-example misc/example
 	@cid=$(shell docker run --rm -t -d --privileged $(dind_cache_mount) nydus-rs-example)
 	@docker exec $$cid /run.sh
