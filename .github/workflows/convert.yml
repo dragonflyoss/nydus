@@ -2,8 +2,8 @@ name: Convert Top Docker Hub Images
 
 on:
   schedule:
-    # Do conversion every day at 00:00 clock UTC
-    - cron: "* 0 * * *"
+    # Do conversion every day at 00:03 clock UTC
+    - cron: "3 0 * * *"
 
 env:
   CARGO_TERM_COLOR: always
