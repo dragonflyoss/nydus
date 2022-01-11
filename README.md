@@ -31,7 +31,6 @@ Currently Nydus includes following tools:
 | nydusd                   | Linux FUSE user-space daemon, it processes all fuse messages from host/guest kernel and parses nydus container image to fullfil those requests      |
 | nydus-image              | Convert a single layer of OCI format container image into a nydus format container image generating meta part file and data part file respectively  |
 | nydusify                 | It pulls OCI image down and unpack it, invokes `nydus-image` to convert image and then pushes the converted image back to registry and data storage |
-| containerd-nydus-grpc    | Works as a `containerd` remote snapshotter to help setup container rootfs with nydus images                                                         |
 | nydusctl                 | Nydusd CLI client, query daemon's working status/metrics and configure it                                                                           |
 | ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                        |
 | nydus-docker-graphdriver | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                 |
@@ -66,9 +65,10 @@ Convert OCI image to Nydus image: [Nydusify](./docs/nydusify.md).
 
 ## Nydus Snapshotter
 
-Nydus supports `containerd`. To run containers with nydus images and `containerd`, please build and install the nydus snapshotter. It is a `containerd` remote snapshotter and handles nydus image format when necessary. When running without nydus images, it is identical to the containerd's builtin overlayfs snapshotter.
+Nydus-snapshotter is a non-core sub-project of containerd.
 
-To build and setup nydus-snapshotter for containerd, please refer to [Nydus Snapshotter](./contrib/nydus-snapshotter/README.md)
+Check out its code and tutorial from [Nydus-snapshotter repository](https://github.com/containerd/nydus-snapshotter).
+It works as a `containerd` remote snapshotter to help setup container rootfs with nydus images, which handles nydus image format when necessary. When running without nydus images, it is identical to the containerd's builtin overlayfs snapshotter.
 
 ## Run Nydusd Daemon
 
