@@ -339,6 +339,9 @@ impl OndiskInodeWrapper {
     // 4 - inode chunk-based E:
     // inode, [xattrs], chunk indexes ... | ...
     // 5~7 - reserved
+
+    // Mapping file data blocks to in-memory address.
+    // Not only for data blocks so chunks' addresses are not covered.
     fn data_block_mapping(&self, index: usize) -> RafsResult<*const u8> {
         let inode = self.disk_inode();
 
@@ -348,15 +351,9 @@ impl OndiskInodeWrapper {
             return Err(RafsError::Incompatible(inode.format()));
         }
 
-        let s = if (inode.format() & 1 << EROFS_I_VERSION_BIT) != 0 {
-            size_of::<RafsV6InodeExtended>()
-        } else {
-            size_of::<RafsV6InodeCompact>()
-        };
+        let s = self.this_inode_size();
 
         let layout = inode.format() >> EROFS_I_VERSION_BITS;
-        assert!(layout == 0 || layout == 2 || layout == 4);
-        // With legal format set, we can reliably refer `i_u` as raw blocks pointer.
         let m = self.mapping.state.load();
 
         let r = match layout {
@@ -384,10 +381,6 @@ impl OndiskInodeWrapper {
                 } else {
                     unsafe { m.base.add(self.offset as usize + s + xattr_size) }
                 }
-            }
-            EROFS_INODE_CHUNK_BASED => {
-                let xattr_size = 0;
-                unsafe { m.base.add(self.offset as usize + s + xattr_size) }
             }
             _ => {
                 panic!("layout is {}", layout)
@@ -499,13 +492,35 @@ impl OndiskInodeWrapper {
         self.mapping.state.load().meta.chunk_size
     }
 
+    fn this_inode_size(&self) -> usize {
+        let inode = self.disk_inode();
+
+        if (inode.format() & 1 << EROFS_I_VERSION_BIT) != 0 {
+            size_of::<RafsV6InodeExtended>()
+        } else {
+            size_of::<RafsV6InodeCompact>()
+        }
+    }
+
     fn chunk_addresses(&self, head_chunk_index: u32) -> RafsResult<&[RafsV6InodeChunkAddr]> {
         let total_chunk_addresses = div_round_up(self.size(), self.chunk_size() as u64) as u32;
 
-        let block_mapping = self.data_block_mapping(0)?;
+        assert_eq!(
+            self.disk_inode().format() >> EROFS_I_VERSION_BITS,
+            EROFS_INODE_CHUNK_BASED
+        );
+
+        // FIXME: xattr_size
+        let xattr_size = 0;
+        let m = self.mapping.state.load();
+        let indices = unsafe {
+            m.base
+                .add(self.offset as usize + self.this_inode_size() + xattr_size)
+        };
+
         let chunks: &[RafsV6InodeChunkAddr] = unsafe {
             std::slice::from_raw_parts(
-                block_mapping.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
+                indices.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
                     as *const RafsV6InodeChunkAddr,
                 (total_chunk_addresses - head_chunk_index) as usize,
             )
