@@ -40,7 +40,8 @@ use storage::factory::FactoryConfig;
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
 use crate::metadata::{
-    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, RAFS_DEFAULT_CHUNK_SIZE,
+    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
+    RAFS_DEFAULT_CHUNK_SIZE,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -51,9 +52,6 @@ pub type Handle = u64;
 pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
-
-const DOT: &str = ".";
-const DOTDOT: &str = "..";
 
 fn default_threads_count() -> usize {
     8

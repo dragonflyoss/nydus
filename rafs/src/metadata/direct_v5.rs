@@ -46,13 +46,10 @@ use crate::metadata::layout::{
 };
 use crate::metadata::{
     Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
-    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE, RAFS_MAX_METADATA_SIZE,
-    RAFS_MAX_NAME,
+    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, DOT, DOTDOT, RAFS_INODE_BLOCKSIZE,
+    RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
-
-const DOT: &str = ".";
-const DOTDOT: &str = "..";
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {

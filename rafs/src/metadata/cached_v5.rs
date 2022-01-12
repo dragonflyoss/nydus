@@ -32,13 +32,10 @@ use crate::metadata::layout::v5::{
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
     BlobIoVec, ChildInodeHandler, Inode, PostWalkAction, RafsError, RafsInode, RafsResult,
-    RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue,
-    RAFS_INODE_BLOCKSIZE, RAFS_MAX_NAME,
+    RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT,
+    DOTDOT, RAFS_INODE_BLOCKSIZE, RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
-
-const DOT: &str = ".";
-const DOTDOT: &str = "..";
 
 /// Cached Rafs v5 super block.
 pub struct CachedSuperBlockV5 {
