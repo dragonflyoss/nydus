@@ -33,7 +33,7 @@ use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
     BlobIoVec, ChildInodeHandler, Inode, PostWalkAction, RafsError, RafsInode, RafsResult,
     RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT,
-    DOTDOT, RAFS_INODE_BLOCKSIZE, RAFS_MAX_NAME,
+    DOTDOT, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
 
@@ -406,7 +406,7 @@ impl RafsInode for CachedInodeV5 {
             blocks: self.i_blocks,
             mode: self.i_mode,
             nlink: self.i_nlink as u32,
-            blksize: RAFS_INODE_BLOCKSIZE,
+            blksize: RAFS_ATTR_BLOCK_SIZE,
             rdev: self.i_rdev,
             ..Default::default()
         }

@@ -40,7 +40,7 @@ use crate::metadata::{
     },
     {
         Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
-        RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_INODE_BLOCKSIZE,
+        RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
     },
 };
 use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
@@ -567,7 +567,7 @@ impl RafsInode for OndiskInodeWrapper {
             gid: inode.ugid().1,
             mtime: inode.mtime_s_ns().0,
             mtimensec: inode.mtime_s_ns().1,
-            blksize: RAFS_INODE_BLOCKSIZE,
+            blksize: RAFS_ATTR_BLOCK_SIZE,
             ..Default::default()
         }
     }

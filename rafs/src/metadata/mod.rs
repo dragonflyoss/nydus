@@ -42,8 +42,8 @@ pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 
 /// Maximum size of blob id string.
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 64;
-/// Block size reported to fuse by get_attr()
-pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
+/// Block size reported to fuse by get_attr().
+pub const RAFS_ATTR_BLOCK_SIZE: u32 = 4096;
 /// Maximum size of file name supported by rafs.
 pub const RAFS_MAX_NAME: usize = 255;
 /// Maximum size of the rafs metadata blob.
