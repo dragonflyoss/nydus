@@ -363,15 +363,20 @@ impl Rafs {
         }
 
         let mut handler = |_inode, name: OsString, ino, offset| {
-            // FIXME: Bring per-file metrics counter back
             match add_entry(DirEntry {
                 ino,
                 offset,
                 type_: 0,
                 name: name.as_os_str().as_bytes(),
             }) {
-                Ok(0) => Ok(PostWalkAction::Break),
-                Ok(_) => Ok(PostWalkAction::Continue), // TODO: should we check `size` here?
+                Ok(0) => {
+                    self.ios.new_file_counter(ino);
+                    Ok(PostWalkAction::Break)
+                }
+                Ok(_) => {
+                    self.ios.new_file_counter(ino);
+                    Ok(PostWalkAction::Continue)
+                } // TODO: should we check `size` here?
                 Err(e) => Err(e),
             }
         };
@@ -538,8 +543,7 @@ impl Rafs {
 impl BackendFileSystem for Rafs {
     fn mount(&self) -> Result<(Entry, u64)> {
         let root_inode = self.sb.get_inode(self.root_ino(), self.digest_validate)?;
-        self.ios
-            .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
+        self.ios.new_file_counter(root_inode.ino());
         let e = self.get_inode_entry(root_inode);
         Ok((e, self.sb.get_max_ino()))
     }
@@ -595,8 +599,7 @@ impl FileSystem for Rafs {
             Ok(parent
                 .get_child_by_name(target)
                 .map(|i| {
-                    self.ios
-                        .new_file_counter(i.ino(), |i| self.sb.path_from_ino(i).unwrap());
+                    self.ios.new_file_counter(i.ino());
                     self.get_inode_entry(i)
                 })
                 .unwrap_or_else(|_| self.negative_entry()))

@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Drop};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -174,7 +173,7 @@ pub struct InodeIoStats {
 ///
 #[derive(Default, Debug, Serialize)]
 pub struct AccessPattern {
-    file_path: PathBuf,
+    ino: u64,
     nr_read: BasicMetric,
     /// In unit of seconds.
     first_access_time_secs: AtomicU64,
@@ -266,10 +265,7 @@ impl GlobalIoStats {
 
     /// For now, each inode has its iostats counter regardless whether it is
     /// enabled per rafs.
-    pub fn new_file_counter<F>(&self, ino: Inode, path_getter: F)
-    where
-        F: Fn(u64) -> PathBuf,
-    {
+    pub fn new_file_counter(&self, ino: Inode) {
         if self.files_enabled() {
             let mut counters = self.file_counters.write().unwrap();
             if counters.get(&ino).is_none() {
@@ -283,7 +279,7 @@ impl GlobalIoStats {
                 records.insert(
                     ino,
                     Arc::new(AccessPattern {
-                        file_path: path_getter(ino),
+                        ino,
                         ..Default::default()
                     }),
                 );

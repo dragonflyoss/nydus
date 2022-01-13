@@ -70,6 +70,7 @@ const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 /// Size of SHA256 digest string.
 const BLOB_SHA256_LEN: usize = 64;
+const BLOB_MAX_SIZE: u64 = 1u64 << 44;
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
@@ -1244,11 +1245,13 @@ impl RafsV6Blob {
             return false;
         }
 
-        let uncompressed_size = u64::from_le(self.uncompressed_size);
-        if uncompressed_size >= (1u64 << 44) {
+        let uncompressed_blob_size = u64::from_le(self.uncompressed_size);
+        // TODO: Make blobs of 4k size aligned.
+
+        if uncompressed_blob_size > BLOB_MAX_SIZE {
             error!(
                 "RafsV6Blob: invalid uncompressed_size {}",
-                uncompressed_size
+                uncompressed_blob_size
             );
             return false;
         }
