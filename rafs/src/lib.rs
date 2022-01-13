@@ -93,6 +93,30 @@ pub trait RafsIoWrite: Write + Seek + 'static {
 
         Ok(size)
     }
+
+    /// write padding to align to RAFS_ALIGNMENT.
+    fn write_padding(&mut self, size: usize) -> Result<()> {
+        if size > WRITE_PADDING_DATA.len() {
+            return Err(einval!("invalid padding size"));
+        }
+        self.write_all(&WRITE_PADDING_DATA[0..size])
+    }
+
+    /// Seek the writer to the end.
+    fn seek_to_end(&mut self) -> Result<u64> {
+        self.seek(SeekFrom::End(0)).map_err(|e| {
+            error!("Seeking to end fails, {}", e);
+            e
+        })
+    }
+
+    /// Seek the writer to the `offset`.
+    fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
+        self.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!("Seeking to offset {} from start fails, {}", offset, e);
+            e
+        })
+    }
 }
 
 impl RafsIoWrite for File {
@@ -111,32 +135,6 @@ impl RafsIoWrite for BufWriter<File> {
 }
 
 const WRITE_PADDING_DATA: [u8; 64] = [0u8; 64];
-
-impl dyn RafsIoWrite {
-    /// write padding to align to RAFS_ALIGNMENT.
-    pub fn write_padding(&mut self, size: usize) -> Result<()> {
-        if size > WRITE_PADDING_DATA.len() {
-            return Err(einval!("invalid padding size"));
-        }
-        self.write_all(&WRITE_PADDING_DATA[0..size])
-    }
-
-    /// Seek the writer to the end.
-    pub fn seek_to_end(&mut self) -> Result<u64> {
-        self.seek(SeekFrom::End(0)).map_err(|e| {
-            error!("Seeking to end fails, {}", e);
-            e
-        })
-    }
-
-    /// Seek the writer to the `offset`.
-    pub fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
-        self.seek(SeekFrom::Start(offset)).map_err(|e| {
-            error!("Seeking to offset {} from start fails, {}", offset, e);
-            e
-        })
-    }
-}
 
 impl dyn RafsIoRead {
     /// Seek the reader to next aligned position.

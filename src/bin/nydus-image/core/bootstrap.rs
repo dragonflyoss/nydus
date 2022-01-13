@@ -5,6 +5,7 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
+use std::io::Write;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
@@ -511,7 +512,7 @@ impl Bootstrap {
         // +---+---------+------------+-------------+-------------------------------------------------------------------+
 
         let blob_table_size = blob_table.size() as u64;
-        let bootstrap_writer = &mut bootstrap_ctx.create_writer()? as &mut dyn RafsIoWrite;
+        let mut bootstrap_writer = bootstrap_ctx.create_writer()?;
 
         // get devt_slotoff
         let mut devtable: Vec<RafsV6Device> = Vec::new();
@@ -561,7 +562,8 @@ impl Bootstrap {
 
         sb.set_extra_devices(blob_table_entries as u16);
 
-        sb.store(bootstrap_writer).context("failed to store SB")?;
+        sb.store(&mut bootstrap_writer)
+            .context("failed to store SB")?;
 
         // Dump extended superblock
         let mut ext_sb = RafsV6SuperBlockExt::new();
@@ -572,7 +574,7 @@ impl Bootstrap {
         ext_sb.set_blob_table_size(blob_table_size as u32);
 
         ext_sb
-            .store(bootstrap_writer)
+            .store(&mut bootstrap_writer)
             .context("failed to store extended SB")?;
 
         // dump devtslot
@@ -580,7 +582,7 @@ impl Bootstrap {
             .seek_to_offset(EROFS_DEVTABLE_OFFSET as u64)
             .context("failed to seek to devtslot")?;
         for slot in devtable.iter() {
-            slot.store(bootstrap_writer)
+            slot.store(&mut bootstrap_writer)
                 .context("failed to store device slot")?;
         }
 
@@ -589,14 +591,14 @@ impl Bootstrap {
             .seek_to_offset(blob_table_offset as u64)
             .context("failed seek for extended blob table offset")?;
         blob_table
-            .store(bootstrap_writer)
+            .store(&mut bootstrap_writer)
             .context("failed to store extended blob table")?;
 
         // Dump bootstrap
         timing_tracer!(
             {
                 for node in &mut bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v6(bootstrap_writer, orig_meta_addr, meta_addr, ctx)
+                    node.dump_bootstrap_v6(&mut bootstrap_writer, orig_meta_addr, meta_addr, ctx)
                         .context("failed to dump bootstrap")?;
                 }
 
@@ -621,6 +623,8 @@ impl Bootstrap {
         bootstrap_writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
+
+        bootstrap_writer.release(Some(bootstrap_ctx.name.as_str()))?;
 
         Ok(())
     }
