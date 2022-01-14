@@ -481,7 +481,7 @@ pub struct BlobIoDesc {
     /// Whether it's a user initiated IO, otherwise is a storage system internal IO.
     ///
     /// It might be initiated by user io amplification. With this flag, lower device
-    /// layer may choose how to priority the IO operation.
+    /// layer may choose how to prioritize the IO operation.
     pub user_io: bool,
 }
 

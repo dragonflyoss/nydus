@@ -474,6 +474,7 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn ugid(&self) -> (u32, u32);
     fn mtime_s_ns(&self) -> (u64, u32);
     fn nlink(&self) -> u32;
+    fn xattr_inline_count(&self) -> u16;
 }
 
 impl Debug for &dyn RafsV6OndiskInode {
@@ -614,6 +615,10 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     fn nlink(&self) -> u32 {
         self.i_nlink as u32
     }
+
+    fn xattr_inline_count(&self) -> u16 {
+        self.i_xattr_icount
+    }
 }
 
 impl_bootstrap_converter!(RafsV6InodeCompact);
@@ -635,6 +640,7 @@ pub struct RafsV6InodeExtended {
     /// Layout format for of the inode.
     pub i_format: u16,
     /// TODO: doc
+    /// In unit of 4k
     pub i_xattr_icount: u16,
     /// Protection mode.
     pub i_mode: u16,
@@ -767,6 +773,10 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
 
     fn nlink(&self) -> u32 {
         self.i_nlink
+    }
+
+    fn xattr_inline_count(&self) -> u16 {
+        self.i_xattr_icount
     }
 }
 
@@ -1509,7 +1519,7 @@ impl RafsV6XattrIbodyHeader {
 // RafsV6 xattr entry (for both inline & shared xattrs)
 #[repr(C)]
 #[derive(Default, PartialEq)]
-struct RafsV6XattrEntry {
+pub struct RafsV6XattrEntry {
     // length of name
     e_name_len: u8,
     // attribute name index
@@ -1526,19 +1536,16 @@ impl RafsV6XattrEntry {
         RafsV6XattrEntry::default()
     }
 
-    #[allow(dead_code)]
-    fn name_len(&self) -> u8 {
-        self.e_name_len
+    pub fn name_len(&self) -> u32 {
+        self.e_name_len as u32
     }
 
-    #[allow(dead_code)]
-    fn name_index(&self) -> u8 {
+    pub fn name_index(&self) -> u8 {
         self.e_name_index
     }
 
-    #[allow(dead_code)]
-    fn value_size(&self) -> u16 {
-        u16::from_le(self.e_value_size)
+    pub fn value_size(&self) -> u32 {
+        u32::from_le(self.e_value_size as u32)
     }
 
     fn set_name_len(&mut self, v: u8) {

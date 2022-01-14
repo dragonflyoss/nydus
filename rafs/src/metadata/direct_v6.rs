@@ -22,6 +22,7 @@ use std::fs::File;
 use std::io::{Result, SeekFrom};
 use std::mem::size_of;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
+use std::slice;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -32,9 +33,10 @@ use crate::metadata::{
         bytes_to_os_str,
         v6::{
             RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeCompact,
-            RafsV6InodeExtended, RafsV6OndiskInode, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED,
-            EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
-            EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
+            RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry, RafsV6XattrIbodyHeader,
+            EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+            EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS,
+            EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
         },
         XattrName, XattrValue,
     },
@@ -46,7 +48,7 @@ use crate::metadata::{
 use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
 use nydus_utils::{
     digest::{Algorithm, RafsDigest},
-    div_round_up,
+    div_round_up, round_up,
 };
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec};
 use storage::utils::readahead;
@@ -367,9 +369,7 @@ impl OndiskInodeWrapper {
                 }
             }
             EROFS_INODE_FLAT_INLINE => {
-                // FIXME: load xattr size
                 // FIXME: Ensure the correctness of locate inline data (tail packing)
-                let xattr_size = 0;
                 if index as u64 != self.blocks_count() - 1 {
                     unsafe {
                         m.base.add(
@@ -379,7 +379,10 @@ impl OndiskInodeWrapper {
                         )
                     }
                 } else {
-                    unsafe { m.base.add(self.offset as usize + s + xattr_size) }
+                    unsafe {
+                        m.base
+                            .add(self.offset as usize + s + self.xattr_size() as usize)
+                    }
                 }
             }
             _ => {
@@ -432,16 +435,16 @@ impl OndiskInodeWrapper {
             Ok(n)
         } else {
             unsafe {
-                let e = std::slice::from_raw_parts(
-                    block_mapping.add(de.e_nameoff as usize),
-                    (EROFS_BLOCK_SIZE - de.e_nameoff as u64) as usize,
-                );
-
-                // Use this trick to temporarily decide entry name's length. Improve this?
-                let mut l: usize = 0;
                 let head_de = self.get_entry(block_index, 0)?;
                 let s = (de.e_nameoff - head_de.e_nameoff) as u64
                     + (size_of::<RafsV6Dirent>() * max_entries) as u64;
+
+                let e = slice::from_raw_parts(
+                    block_mapping.add(de.e_nameoff as usize),
+                    (self.size() % EROFS_BLOCK_SIZE - s) as usize,
+                );
+                // Use this trick to temporarily decide entry name's length. Improve this?
+                let mut l: usize = 0;
                 for i in e {
                     if *i != 0 {
                         l += 1;
@@ -452,6 +455,7 @@ impl OndiskInodeWrapper {
                         break;
                     }
                 }
+
                 let n = bytes_to_os_str(&e[0..l]);
                 Ok(n)
             }
@@ -502,6 +506,17 @@ impl OndiskInodeWrapper {
         }
     }
 
+    fn xattr_size(&self) -> u32 {
+        let inode = self.disk_inode();
+        // Rafs v6 only supports EROFS inline xattr.
+        if inode.xattr_inline_count() > 0 {
+            (inode.xattr_inline_count() as u32 - 1) * size_of::<RafsV6XattrEntry>() as u32
+                + size_of::<RafsV6XattrIbodyHeader>() as u32
+        } else {
+            0
+        }
+    }
+
     fn chunk_addresses(&self, head_chunk_index: u32) -> RafsResult<&[RafsV6InodeChunkAddr]> {
         let total_chunk_addresses = div_round_up(self.size(), self.chunk_size() as u64) as u32;
 
@@ -510,12 +525,15 @@ impl OndiskInodeWrapper {
             EROFS_INODE_CHUNK_BASED
         );
 
-        // FIXME: xattr_size
-        let xattr_size = 0;
         let m = self.mapping.state.load();
         let indices = unsafe {
-            m.base
-                .add(self.offset as usize + self.this_inode_size() + xattr_size)
+            m.base.add(
+                self.offset as usize
+                    + round_up(
+                        self.this_inode_size() as u64 + self.xattr_size() as u64,
+                        size_of::<RafsV6InodeChunkAddr>() as u64,
+                    ) as usize,
+            )
         };
 
         let chunks: &[RafsV6InodeChunkAddr] = unsafe {
@@ -735,7 +753,6 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
         todo!()
     }
-
     fn get_xattrs(&self) -> Result<Vec<XattrName>> {
         todo!()
     }
