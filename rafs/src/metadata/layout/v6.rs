@@ -1615,11 +1615,7 @@ impl RafsXAttrs {
     fn match_prefix(key: &OsStr) -> Result<(u8, usize)> {
         let pos = RAFSV6_XATTR_TYPES
             .iter()
-            .position(|x| {
-                key.to_str()
-                    .expect("failed to convert osstr to str")
-                    .starts_with(x.prefix)
-            })
+            .position(|x| key.to_string_lossy().starts_with(x.prefix))
             .ok_or_else(|| einval!(format!("xattr prefix {:?} is not valid", key)))?;
         Ok((
             RAFSV6_XATTR_TYPES[pos].index,
