@@ -3,14 +3,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use lazy_static::lazy_static;
 use std::convert::{TryFrom, TryInto};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Debug;
 use std::io::{Read, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
+use std::str::FromStr;
 use std::sync::Arc;
+
+use lazy_static::lazy_static;
 
 use nydus_utils::{digest, round_up, ByteSize};
 use storage::device::{BlobFeatures, BlobInfo};
@@ -470,7 +472,6 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 
     fn format(&self) -> u16;
-    fn xattr_count(&self) -> u16;
     fn mode(&self) -> u16;
     fn size(&self) -> u64;
     fn union(&self) -> u32;
@@ -490,7 +491,7 @@ impl Debug for &dyn RafsV6OndiskInode {
             .field("size", &self.size())
             .field("union", &self.union())
             .field("nlink", &self.nlink())
-            .field("xattr count", &self.xattr_count())
+            .field("xattr count", &self.xattr_inline_count())
             .finish()
     }
 }
@@ -588,10 +589,6 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
         self.i_format
     }
 
-    fn xattr_count(&self) -> u16 {
-        self.i_xattr_icount
-    }
-
     fn mode(&self) -> u16 {
         self.i_mode
     }
@@ -644,7 +641,7 @@ pub struct RafsV6InodeExtended {
     /// Layout format for of the inode.
     pub i_format: u16,
     /// TODO: doc
-    /// In unit of 4k
+    /// In unit of 4Byte
     pub i_xattr_icount: u16,
     /// Protection mode.
     pub i_mode: u16,
@@ -745,10 +742,6 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
 
     fn format(&self) -> u16 {
         self.i_format
-    }
-
-    fn xattr_count(&self) -> u16 {
-        self.i_xattr_icount
     }
 
     fn mode(&self) -> u16 {
@@ -1563,6 +1556,15 @@ impl RafsV6XattrEntry {
     fn set_value_size(&mut self, v: u16) {
         self.e_value_size = v.to_le();
     }
+}
+
+pub fn recover_namespace(index: u8) -> Result<OsString> {
+    let pos = RAFSV6_XATTR_TYPES
+        .iter()
+        .position(|x| x.index == index)
+        .ok_or_else(|| einval!(format!("invalid xattr name index {}", index)))?;
+    // Safe to unwrap since it is encoded in Nydus
+    Ok(OsString::from_str(RAFSV6_XATTR_TYPES[pos].prefix).unwrap())
 }
 
 impl RafsXAttrs {

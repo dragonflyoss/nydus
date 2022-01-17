@@ -21,7 +21,10 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Result, SeekFrom};
 use std::mem::size_of;
-use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::{
+    ffi::{OsStrExt, OsStringExt},
+    io::{FromRawFd, IntoRawFd, RawFd},
+};
 use std::slice;
 use std::sync::Arc;
 
@@ -32,11 +35,11 @@ use crate::metadata::{
     layout::{
         bytes_to_os_str,
         v6::{
-            RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeCompact,
-            RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry, RafsV6XattrIbodyHeader,
-            EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-            EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS,
-            EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
+            recover_namespace, RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr,
+            RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry,
+            RafsV6XattrIbodyHeader, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED,
+            EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
+            EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
         },
         XattrName, XattrValue,
     },
@@ -467,7 +470,7 @@ impl OndiskInodeWrapper {
         i.mode() as u32 & libc::S_IFMT
     }
 
-    fn create_backend_io_chunk(
+    fn make_chunk_io(
         &self,
         chunk_addr: &RafsV6InodeChunkAddr,
         content_offset: u32,
@@ -751,10 +754,91 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
-        todo!()
+        let inode = self.disk_inode();
+        let total = inode.xattr_inline_count();
+        if total == 0 {
+            return Ok(None);
+        }
+        let m = self.mapping.state.load();
+        let mut cur = unsafe {
+            m.base
+                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
+        };
+
+        let mut size = size_of::<RafsV6XattrIbodyHeader>() as u32;
+
+        while size as usize
+            <= total as usize * size_of::<RafsV6XattrEntry>() - size_of::<RafsV6XattrIbodyHeader>()
+        {
+            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
+
+            let mut xa_name = recover_namespace(e.name_index())?;
+
+            let suffix = OsStr::from_bytes(unsafe {
+                slice::from_raw_parts(
+                    cur.add(size_of::<RafsV6XattrEntry>()),
+                    e.name_len() as usize,
+                )
+            });
+
+            xa_name.push(suffix);
+
+            if xa_name == name {
+                let value = unsafe {
+                    slice::from_raw_parts(
+                        cur.add(size_of::<RafsV6XattrEntry>() + e.name_len() as usize),
+                        e.value_size() as usize,
+                    )
+                }
+                .to_vec();
+                return Ok(Some(value));
+            }
+
+            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
+            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
+            size += s;
+            cur = unsafe { cur.add(s as usize) };
+        }
+
+        Ok(None)
     }
+
     fn get_xattrs(&self) -> Result<Vec<XattrName>> {
-        todo!()
+        let inode = self.disk_inode();
+        let mut xattrs = Vec::new();
+        let total = inode.xattr_inline_count();
+        if total == 0 {
+            return Ok(xattrs);
+        }
+        let m = self.mapping.state.load();
+        let mut cur = unsafe {
+            m.base
+                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
+        };
+
+        let mut size = size_of::<RafsV6XattrIbodyHeader>() as u32;
+
+        while size as usize
+            <= total as usize * size_of::<RafsV6XattrEntry>() - size_of::<RafsV6XattrIbodyHeader>()
+        {
+            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
+
+            let ns = recover_namespace(e.name_index())?;
+            let mut xa = ns.into_vec();
+            xa.extend_from_slice(unsafe {
+                slice::from_raw_parts(
+                    cur.add(size_of::<RafsV6XattrEntry>()),
+                    e.name_len() as usize,
+                )
+            });
+            xattrs.push(xa);
+            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
+            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
+            size += s;
+            cur = unsafe { cur.add(s as usize) };
+        }
+
+        Ok(xattrs)
     }
 
     fn ino(&self) -> u64 {
@@ -855,8 +939,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         // Safe to unwrap because chunks is not empty to reach here.
         let first_chunk_addr = chunks.first().unwrap();
-        let desc =
-            self.create_backend_io_chunk(first_chunk_addr, content_offset, content_len, user_io);
+        let desc = self.make_chunk_io(first_chunk_addr, content_offset, content_len, user_io);
 
         let mut descs = BlobIoVec::new();
         descs.bi_vec.push(desc);
@@ -867,7 +950,7 @@ impl RafsInode for OndiskInodeWrapper {
             // Handle the rest of chunks since they shares the same content length = 0.
             for c in chunks.iter().skip(1) {
                 content_len = std::cmp::min(chunk_size, left);
-                let desc = self.create_backend_io_chunk(c, 0, content_len, user_io);
+                let desc = self.make_chunk_io(c, 0, content_len, user_io);
 
                 if c.blob_index() as u32 != descs.bi_vec[0].blob.blob_index() {
                     vec.push(descs);
