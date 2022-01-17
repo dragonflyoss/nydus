@@ -369,6 +369,10 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= c.bits();
     }
 
+    pub fn set_has_xattr(&mut self) {
+        self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
+    }
+
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();

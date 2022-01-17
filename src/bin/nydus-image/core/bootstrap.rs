@@ -5,7 +5,7 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
@@ -565,6 +565,8 @@ impl Bootstrap {
         sb.store(&mut bootstrap_writer)
             .context("failed to store SB")?;
 
+        let ext_sb_offset = bootstrap_writer.file.stream_position()?;
+
         // Dump extended superblock
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.set_compressor(ctx.compressor);
@@ -607,6 +609,16 @@ impl Bootstrap {
             "dump_bootstrap",
             Result<()>
         )?;
+
+        // Erofs does not have inode table, so we lose the chance to decide if this
+        // image has xattr. So we have to rewrite extended super block.
+        if ctx.has_xattr {
+            ext_sb.set_has_xattr();
+            bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
+            ext_sb
+                .store(&mut bootstrap_writer)
+                .context("failed to revise extended SB")?;
+        }
 
         // Flush remaining data in BufWriter to file
         bootstrap_writer

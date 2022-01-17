@@ -490,7 +490,7 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         orig_meta_addr: u64,
         meta_addr: u64,
-        ctx: &BuildContext,
+        ctx: &mut BuildContext,
     ) -> Result<usize> {
         let mut inode = self.new_rafsv6_inode();
 
@@ -525,6 +525,7 @@ impl Node {
                 self.xattrs
                     .store_v6(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
+                ctx.has_xattr = true;
             }
 
             // Dump dirents
