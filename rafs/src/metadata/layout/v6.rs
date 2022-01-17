@@ -1460,27 +1460,27 @@ lazy_static! {
         RafsV6XattrPrefix::new(
             XATTR_USER_PREFIX,
             EROFS_XATTR_INDEX_USER,
-            XATTR_USER_PREFIX.len()
+            XATTR_USER_PREFIX.as_bytes().len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_NAME_POSIX_ACL_ACCESS,
             EROFS_XATTR_INDEX_POSIX_ACL_ACCESS,
-            XATTR_NAME_POSIX_ACL_ACCESS.len()
+            XATTR_NAME_POSIX_ACL_ACCESS.as_bytes().len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_NAME_POSIX_ACL_DEFAULT,
             EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT,
-            XATTR_NAME_POSIX_ACL_DEFAULT.len()
+            XATTR_NAME_POSIX_ACL_DEFAULT.as_bytes().len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_TRUSTED_PREFIX,
             EROFS_XATTR_INDEX_TRUSTED,
-            XATTR_TRUSTED_PREFIX.len()
+            XATTR_TRUSTED_PREFIX.as_bytes().len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_SECURITY_PREFIX,
             EROFS_XATTR_INDEX_SECURITY,
-            XATTR_SECURITY_PREFIX.len()
+            XATTR_SECURITY_PREFIX.as_bytes().len()
         ),
     ];
 }
