@@ -66,8 +66,10 @@ func (rule *ManifestRule) Validate() error {
 	}
 
 	layers := rule.TargetParsed.NydusImage.Manifest.Layers
-	blobListInAnnotation := []string{}
-	blobListInLayer := []string{}
+	var (
+		blobListInAnnotation []string
+		blobListInLayer      []string
+	)
 	for i, layer := range layers {
 		if i == len(layers)-1 {
 			if layer.Annotations[utils.LayerAnnotationNydusBootstrap] != "true" {

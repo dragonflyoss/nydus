@@ -61,6 +61,10 @@ func newCacheGlue(
 	}, nil
 }
 
+func (cg *cacheGlue) GetReferenceRecord(d digest.Digest) *cache.CacheRecord {
+	return cg.cache.GetReference(d)
+}
+
 func (cg *cacheGlue) Pull(
 	ctx context.Context, sourceLayerChainID digest.Digest,
 ) (*cache.CacheRecord, error) {
@@ -78,7 +82,7 @@ func (cg *cacheGlue) Pull(
 			"ChainID": sourceLayerChainID,
 		})
 		// Pull the cached layer from cache image, then push to target namespace/repo,
-		// because the blob data is not shared between diffrent namespaces in registry,
+		// because the blob data is not shared between different namespaces in registry,
 		// this operation ensures that Nydus image owns these layers.
 		cacheRecord = _cacheRecord
 		defer bootstrapReader.Close()
@@ -180,6 +184,11 @@ func (cg *cacheGlue) Export(
 	for _, layer := range buildLayers {
 		record := layer.GetCacheRecord()
 		cacheRecords = append(cacheRecords, &record)
+		if layer.backend.Type() == backend.RegistryBackend {
+			for idx := range layer.referenceBlobs {
+				cg.cache.SetReference(&layer.referenceBlobs[idx])
+			}
+		}
 	}
 	cg.cache.Record(cacheRecords)
 

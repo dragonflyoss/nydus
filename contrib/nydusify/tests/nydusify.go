@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,20 +41,22 @@ type Nydusify struct {
 	Cache         string
 	backendType   string
 	backendConfig string
+	chunkDictArgs string
 }
 
-func NewNydusify(registry *Registry, source, target, cache string) *Nydusify {
+func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string) *Nydusify {
 	host := registry.Host()
 
 	backendType := "registry"
 	if os.Getenv("BACKEND_TYPE") != "" {
 		backendType = os.Getenv("BACKEND_TYPE")
 	}
+	repoTag := strings.Split(target, ":")
 	backendConfig := fmt.Sprintf(`{
 		"host": "%s",
 		"repo": "%s",
 		"scheme": "http"
-	}`, host, target)
+	}`, host, repoTag[0])
 	if os.Getenv("BACKEND_CONFIG") != "" {
 		backendConfig = os.Getenv("BACKEND_CONFIG")
 	}
@@ -65,6 +68,7 @@ func NewNydusify(registry *Registry, source, target, cache string) *Nydusify {
 		Cache:         cache,
 		backendType:   backendType,
 		backendConfig: backendConfig,
+		chunkDictArgs: chunkDictArgs,
 	}
 }
 
@@ -118,6 +122,12 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 
 		BackendType:   nydusify.backendType,
 		BackendConfig: nydusify.backendConfig,
+
+		ChunkDict: converter.ChunkDictOpt{
+			Args:     nydusify.chunkDictArgs,
+			Insecure: false,
+			Platform: "linux/amd64",
+		},
 	}
 
 	cvt, err := converter.New(opt)
