@@ -66,6 +66,8 @@ struct LocalFsConfig {
     blob_file: String,
     #[serde(default)]
     dir: String,
+    #[serde(default)]
+    alt_dirs: Vec<String>,
 }
 
 struct LocalFsEntry {
@@ -210,6 +212,8 @@ pub struct LocalFs {
     // Directory to store blob files. If `blob_file` is not specified, `dir`/`blob_id` will be used
     // as the blob file name.
     dir: String,
+    // Alternative directories to store blob files
+    alt_dirs: Vec<String>,
     // Whether to prefetch data from the blob file
     readahead: bool,
     // Number of seconds to collect blob access logs
@@ -232,6 +236,7 @@ impl LocalFs {
         Ok(LocalFs {
             blob_file: config.blob_file,
             dir: config.dir,
+            alt_dirs: config.alt_dirs,
             readahead: config.readahead,
             readahead_sec: config.readahead_sec,
             metrics: BackendMetrics::new(id, "localfs"),
@@ -245,7 +250,29 @@ impl LocalFs {
         let path = if !self.blob_file.is_empty() {
             Path::new(&self.blob_file).to_path_buf()
         } else {
-            Path::new(&self.dir).join(blob_id)
+            // Search blob file in dir and additionally in alt_dirs
+            let is_valid = |dir: &PathBuf| -> bool {
+                let blob = Path::new(&dir).join(blob_id);
+                if let Ok(meta) = std::fs::metadata(&blob) {
+                    meta.len() != 0
+                } else {
+                    false
+                }
+            };
+
+            let blob = Path::new(&self.dir).join(blob_id);
+            if is_valid(&blob) || self.alt_dirs.is_empty() {
+                blob
+            } else {
+                let mut file = PathBuf::new();
+                for dir in &self.alt_dirs {
+                    file = Path::new(dir).join(blob_id);
+                    if is_valid(&file) {
+                        break;
+                    }
+                }
+                file
+            }
         };
 
         path.canonicalize().map_err(LocalFsError::BlobFile)
@@ -480,6 +507,7 @@ mod tests {
             readahead_sec: 20,
             blob_file: "".to_string(),
             dir: "".to_string(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         assert!(LocalFs::new(json, Some("test")).is_err());
@@ -489,6 +517,7 @@ mod tests {
             readahead_sec: 20,
             blob_file: "/a/b/c".to_string(),
             dir: "/a/b".to_string(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         assert!(LocalFs::new(json, None).is_err());
@@ -501,6 +530,7 @@ mod tests {
             readahead_sec: 20,
             blob_file: "/a/b/cxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
             dir: "/a/b".to_string(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some("test")).unwrap();
@@ -515,6 +545,7 @@ mod tests {
             readahead_sec: 20,
             blob_file: path.to_str().unwrap().to_owned(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some("test")).unwrap();
@@ -525,6 +556,21 @@ mod tests {
             readahead_sec: 20,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+            alt_dirs: Vec::new(),
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        assert_eq!(fs.get_blob_path(filename).unwrap().to_str(), path.to_str());
+
+        let config = LocalFsConfig {
+            readahead: true,
+            readahead_sec: 20,
+            blob_file: "".to_string(),
+            dir: "/a/b".to_string(),
+            alt_dirs: vec![
+                "/test".to_string(),
+                path.parent().unwrap().to_str().unwrap().to_owned(),
+            ],
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some(filename)).unwrap();
@@ -541,6 +587,7 @@ mod tests {
             readahead_sec: 20,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some(filename)).unwrap();
@@ -567,6 +614,7 @@ mod tests {
             readahead_sec: 20,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some(filename)).unwrap();
@@ -616,6 +664,7 @@ mod tests {
             readahead_sec: 10,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+            alt_dirs: Vec::new(),
         };
         let json = serde_json::to_value(&config).unwrap();
         let fs = LocalFs::new(json, Some(filename)).unwrap();
