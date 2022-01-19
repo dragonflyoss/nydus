@@ -71,10 +71,7 @@ After pulling an image, it should be ready to use the same reference in a run co
 		}
 		config.FetchConfig = fc
 
-		if err := pull(ctx, client, ref, config); err != nil {
-			return err
-		}
-		return nil
+		return pull(ctx, client, ref, config)
 	},
 }
 
