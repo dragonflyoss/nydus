@@ -56,7 +56,7 @@ jobs:
     - name: cache go mod
       uses: actions/cache@v2
       with:
-        path: ~/go/pkg/mod
+        path: /go/pkg/mod
         key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go
