@@ -111,7 +111,6 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 		WhiteoutSpec:   "overlayfs",
 		OutputJSONPath: p.outputJsonPath(),
 		BlobPath:       p.blobFilePath(blobFileName(req.Meta)),
-		AlignedChunk:   true,
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to Pack targetDir %s", req.TargetDir)
 	}
