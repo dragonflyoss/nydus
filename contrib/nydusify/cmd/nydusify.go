@@ -375,10 +375,11 @@ func main() {
 					EnvVars:     []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
-					Name:     "meta",
+					Name:     "bootstrap",
+					Aliases:  []string{"meta"}, // for compatibility
 					Required: true,
 					Usage:    "Specify Nydus meta file name",
-					EnvVars:  []string{"META"},
+					EnvVars:  []string{"BOOTSTRAP"},
 				},
 				&cli.StringFlag{
 					Name:      "backend-config-file",
@@ -423,7 +424,7 @@ func main() {
 					}
 					cfg, err := packer.ParseBackendConfig(backendConfigFile)
 					if err != nil {
-						return errors.Errorf("failed to parse backend-config-file %s", backendConfigFile)
+						return errors.Errorf("failed to parse backend-config-file %s, err = %v", backendConfigFile, err)
 					}
 					backendConfig = &cfg
 				}
@@ -439,7 +440,7 @@ func main() {
 
 				if res, err = p.Pack(context.Background(), packer.PackRequest{
 					TargetDir: c.String("target-dir"),
-					Meta:      c.String("meta"),
+					Meta:      c.String("bootstrap"),
 					PushBlob:  c.Bool("backend-push"),
 				}); err != nil {
 					return err
