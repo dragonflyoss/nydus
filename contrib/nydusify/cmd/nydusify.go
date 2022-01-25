@@ -339,7 +339,7 @@ func main() {
 		},
 		{
 			Name:  "pack",
-			Usage: "Pack a directory to rafs meta and blob",
+			Usage: "Pack a directory to nydus bootstrap and blob",
 			Flags: []cli.Flag{
 				&cli.StringFlag{
 					Name:    "log-level",
@@ -349,10 +349,11 @@ func main() {
 					EnvVars: []string{"LOG_LEVEL"},
 				},
 				&cli.StringFlag{
-					Name:     "target-dir",
+					Name:     "source-dir",
+					Aliases:  []string{"target-dir"}, // for compatibility
 					Required: true,
-					Usage:    "The directory of build target",
-					EnvVars:  []string{"TARGET_DIR"},
+					Usage:    "The source directory of build target",
+					EnvVars:  []string{"SOURCE_DIR"},
 				},
 				&cli.StringFlag{
 					Name:     "output-dir",
@@ -380,6 +381,11 @@ func main() {
 					Required: true,
 					Usage:    "Specify Nydus meta file name",
 					EnvVars:  []string{"BOOTSTRAP"},
+				},
+				&cli.StringFlag{
+					Name:    "parent-bootstrap",
+					Usage:   "Specify parent bootstrap to pack dictionary",
+					EnvVars: []string{"PARENT_BOOTSTRAP"},
 				},
 				&cli.StringFlag{
 					Name:      "backend-config-file",
@@ -439,6 +445,7 @@ func main() {
 				}
 
 				if res, err = p.Pack(context.Background(), packer.PackRequest{
+					Parent:    c.String("parent-bootstrap"),
 					TargetDir: c.String("target-dir"),
 					Meta:      c.String("bootstrap"),
 					PushBlob:  c.Bool("backend-push"),

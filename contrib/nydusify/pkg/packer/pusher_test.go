@@ -44,19 +44,6 @@ func Test_parseBackendConfig(t *testing.T) {
 	}, cfg)
 }
 
-func TestPusher_getBlobHash(t *testing.T) {
-	artifact, err := NewArtifact("testdata")
-	assert.Nil(t, err)
-	pusher := Pusher{
-		Artifact: artifact,
-		cfg:      BackendConfig{},
-		logger:   logrus.New(),
-	}
-	hash, err := pusher.getBlobHash()
-	assert.Nil(t, err)
-	assert.Equal(t, "3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090", hash)
-}
-
 func TestPusher_Push(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()
@@ -81,13 +68,13 @@ func TestPusher_Push(t *testing.T) {
 		blobBackend: mp,
 	}
 
-	hash, err := pusher.getBlobHash()
+	hash := "3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090"
 	assert.Nil(t, err)
 	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
 	mp.On("Upload", mock.Anything, hash, mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
 	res, err := pusher.Push(PushRequest{
 		Meta: "mock.meta",
-		Blob: "mock.blob",
+		Blob: hash,
 	})
 	assert.Nil(t, err)
 	assert.Equal(

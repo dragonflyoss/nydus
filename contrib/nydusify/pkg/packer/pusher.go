@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -70,46 +69,23 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 // and blob file name is the hash of the blobfile that is extracted from output.json
 func (p *Pusher) Push(req PushRequest) (PushResult, error) {
 	p.logger.Info("start to push meta and blob to remote backend")
-	blobHash, err := p.getBlobHash()
-	if err != nil {
-		return PushResult{}, errors.Wrapf(err, "failed to get blob hash from output json")
-	}
-	p.logger.Infof("get blob hash %s", blobHash)
-	var (
-		metaKey = fmt.Sprintf("%s/%s", p.cfg.MetaPrefix, req.Meta)
-		blobKey = fmt.Sprintf("%s/%s", p.cfg.BlobPrefix, blobHash)
-		ctx     = context.Background()
-	)
+	p.logger.Infof("push blob %s", req.Blob)
+	// todo: add a suitable timeout
+	ctx := context.Background()
 	// todo: use blob desc to build manifest
-	if _, err = p.metaBackend.Upload(ctx, req.Meta, p.bootstrapPath(req.Meta), 0, true); err != nil {
-		return PushResult{}, errors.Wrapf(err, "failed to put metafile to remote")
+	if req.Blob != "" {
+		if _, err := p.blobBackend.Upload(ctx, req.Blob, p.blobFilePath(req.Blob), 0, false); err != nil {
+			return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")
+		}
 	}
-	if _, err = p.blobBackend.Upload(ctx, blobHash, p.blobFilePath(req.Blob), 0, true); err != nil {
-		return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")
+	if _, err := p.metaBackend.Upload(ctx, req.Meta, p.bootstrapPath(req.Meta), 0, true); err != nil {
+		return PushResult{}, errors.Wrapf(err, "failed to put metafile to remote")
 	}
 
 	return PushResult{
-		RemoteMeta: fmt.Sprintf("oss://%s/%s", p.cfg.BucketName, metaKey),
-		RemoteBlob: fmt.Sprintf("oss://%s/%s", p.cfg.BucketName, blobKey),
+		RemoteMeta: fmt.Sprintf("oss://%s/%s/%s", p.cfg.BucketName, p.cfg.MetaPrefix, req.Meta),
+		RemoteBlob: fmt.Sprintf("oss://%s/%s/%s", p.cfg.BucketName, p.cfg.BlobPrefix, req.Blob),
 	}, nil
-}
-
-// getBlobHash will get blobs hash from output.json, the hash will be
-// used oss key as blob
-func (p *Pusher) getBlobHash() (string, error) {
-	content, err := ioutil.ReadFile(p.outputJsonPath())
-	if err != nil {
-		return "", err
-	}
-	var manifest BlobManifest
-	if err = json.Unmarshal(content, &manifest); err != nil {
-		return "", err
-	}
-	if len(manifest.Blobs) == 0 {
-		return "", ErrInvalidBlobManifest
-	}
-	// return the first blob hash
-	return manifest.Blobs[0], nil
 }
 
 func ParseBackendConfig(backendConfigFile string) (BackendConfig, error) {

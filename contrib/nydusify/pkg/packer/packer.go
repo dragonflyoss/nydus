@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -24,7 +25,6 @@ const (
 
 var (
 	ErrNydusImageBinaryNotFound = errors.New("failed to find nydus-image binary")
-	ErrInvalidBlobManifest      = errors.New("invalid blob manifest")
 )
 
 type Opt struct {
@@ -87,6 +87,7 @@ func (cfg *BackendConfig) rawBlobBackendCfg() []byte {
 type PackRequest struct {
 	TargetDir string
 	Meta      string
+	Parent    string
 	// PushBlob whether to push blob and meta to remote backend
 	PushBlob bool
 }
@@ -128,31 +129,102 @@ func New(opt Opt) (*Packer, error) {
 	return p, nil
 }
 
+// get blobs from parent bootstrap
+func (p *Packer) loadParentBlobs(parent string) ([]string, error) {
+	var parentBlobs []string
+	if parent == "" {
+		return []string{}, nil
+	}
+	inspector := tool.NewInspector(p.nydusImagePath)
+	item, err := inspector.Inspect(tool.InspectOption{
+		Operation: tool.GetBlobs,
+		Bootstrap: parent,
+	})
+	if err != nil {
+		return []string{}, err
+	}
+	blobsInfo, _ := item.(tool.BlobInfoList)
+	p.logger.Infof("get parent blobs %v", blobsInfo)
+	for _, blobInfo := range blobsInfo {
+		parentBlobs = append(parentBlobs, blobInfo.BlobID)
+	}
+
+	return parentBlobs, nil
+}
+
+// getBlobHash will get blobs hash from output.json, the hash will be
+// used oss key as blob
+// ignore blobs already exist
+func (p *Packer) getNewBlobsHash(exists []string) (string, error) {
+	// build tmp lookup map
+	m := make(map[string]bool)
+	for _, blob := range exists {
+		m[blob] = true
+	}
+	content, err := ioutil.ReadFile(p.outputJsonPath())
+	if err != nil {
+		return "", err
+	}
+	var manifest BlobManifest
+	if err = json.Unmarshal(content, &manifest); err != nil {
+		return "", err
+	}
+	for _, blob := range manifest.Blobs {
+		if _, ok := m[blob]; !ok {
+			return blob, nil
+		}
+	}
+	// return the latest blob hash
+	return "", nil
+}
+
 func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	p.logger.Infof("start to pack source directory %q", req.TargetDir)
-	if err := p.builder.Run(build.BuilderOption{
-		BootstrapPath:  p.bootstrapPath(req.Meta),
-		RootfsPath:     req.TargetDir,
-		WhiteoutSpec:   "overlayfs",
-		OutputJSONPath: p.outputJsonPath(),
-		BlobPath:       p.blobFilePath(blobFileName(req.Meta)),
+	blobPath := p.blobFilePath(blobFileName(req.Meta))
+	parentBlobs, err := p.loadParentBlobs(req.Parent)
+	if err != nil {
+		return PackResult{}, err
+	}
+	if err = p.builder.Run(build.BuilderOption{
+		ParentBootstrapPath: req.Parent,
+		BootstrapPath:       p.bootstrapPath(req.Meta),
+		RootfsPath:          req.TargetDir,
+		WhiteoutSpec:        "oci",
+		OutputJSONPath:      p.outputJsonPath(),
+		BlobPath:            blobPath,
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to Pack targetDir %s", req.TargetDir)
 	}
-	// if we don't need to push meta and blob to remote, just return the local build artifact
+	newBlobHash, err := p.getNewBlobsHash(parentBlobs)
+	if err != nil {
+		return PackResult{}, errors.Wrap(err, "failed to get blobs hash")
+	}
+	if req.Parent != "" {
+		p.logger.Infof("should make sure parent blobs already exists on oss or local")
+		if newBlobHash != "" {
+			if err = os.Rename(blobPath, p.blobFilePath(newBlobHash)); err != nil {
+				return PackResult{}, errors.Wrap(err, "failed to rename blob file")
+			}
+			blobPath = p.blobFilePath(newBlobHash)
+		} else {
+			blobPath = ""
+		}
+	}
 	if !req.PushBlob {
+		// if we don't need to push meta and blob to remote, just return the local build artifact
 		return PackResult{
 			Meta: p.bootstrapPath(req.Meta),
-			Blob: p.blobFilePath(blobFileName(req.Meta)),
+			Blob: blobPath,
 		}, nil
 	}
+
 	// if pusher is empty, that means backend config is not provided
 	if p.pusher == nil {
 		return PackResult{}, errors.New("failed to push blob to remote as missing BackendConfig")
 	}
 	pushResult, err := p.pusher.Push(PushRequest{
 		Meta: req.Meta,
-		Blob: blobFileName(req.Meta),
+		Blob: newBlobHash,
 	})
 	if err != nil {
 		return PackResult{}, errors.Wrap(err, "failed to push pack result to remote")
