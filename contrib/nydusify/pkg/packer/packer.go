@@ -2,6 +2,7 @@ package packer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -57,6 +58,30 @@ type BackendConfig struct {
 	BucketName      string `json:"bucket_name"`
 	MetaPrefix      string `json:"meta_prefix"`
 	BlobPrefix      string `json:"blob_prefix"`
+}
+
+func (cfg *BackendConfig) rawMetaBackendCfg() []byte {
+	configMap := map[string]string{
+		"endpoint":          cfg.Endpoint,
+		"access_key_id":     cfg.AccessKeyId,
+		"access_key_secret": cfg.AccessKeySecret,
+		"bucket_name":       cfg.BucketName,
+		"object_prefix":     cfg.MetaPrefix + "/",
+	}
+	b, _ := json.Marshal(configMap)
+	return b
+}
+
+func (cfg *BackendConfig) rawBlobBackendCfg() []byte {
+	configMap := map[string]string{
+		"endpoint":          cfg.Endpoint,
+		"access_key_id":     cfg.AccessKeyId,
+		"access_key_secret": cfg.AccessKeySecret,
+		"bucket_name":       cfg.BucketName,
+		"object_prefix":     cfg.BlobPrefix + "/",
+	}
+	b, _ := json.Marshal(configMap)
+	return b
 }
 
 type PackRequest struct {

@@ -1,26 +1,34 @@
 package packer
 
 import (
-	"fmt"
-	"io"
+	"context"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
-type mockPusher struct {
+type mockBackend struct {
 	mock.Mock
 }
 
-func (m *mockPusher) PutObject(s string, reader io.Reader, option ...oss.Option) error {
-	args := m.Called(s, reader, option)
-	return args.Error(0)
+func (m *mockBackend) Upload(ctx context.Context, blobID, blobPath string, blobSize int64, forcePush bool) (*ocispec.Descriptor, error) {
+	args := m.Called(ctx, blobID, blobPath, blobSize, forcePush)
+	return nil, args.Error(0)
+}
+
+func (m *mockBackend) Check(_ string) (bool, error) {
+	return false, nil
+}
+
+func (m *mockBackend) Type() backend.BackendType {
+	return backend.OssBackend
 }
 
 func Test_parseBackendConfig(t *testing.T) {
@@ -60,7 +68,7 @@ func TestPusher_Push(t *testing.T) {
 
 	artifact, err := NewArtifact(tmpDir)
 	assert.Nil(t, err)
-	mp := &mockPusher{}
+	mp := &mockBackend{}
 	pusher := Pusher{
 		Artifact: artifact,
 		cfg: BackendConfig{
@@ -68,14 +76,15 @@ func TestPusher_Push(t *testing.T) {
 			BlobPrefix: "testblobprefix",
 			MetaPrefix: "testmetaprefix",
 		},
-		logger: logrus.New(),
-		bucket: mp,
+		logger:      logrus.New(),
+		metaBackend: mp,
+		blobBackend: mp,
 	}
 
 	hash, err := pusher.getBlobHash()
 	assert.Nil(t, err)
-	mp.On("PutObject", "testmetaprefix/mock.meta", mock.Anything, mock.Anything).Return(nil)
-	mp.On("PutObject", fmt.Sprintf("testblobprefix/%s", hash), mock.Anything, mock.Anything).Return(nil)
+	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
+	mp.On("Upload", mock.Anything, hash, mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
 	res, err := pusher.Push(PushRequest{
 		Meta: "mock.meta",
 		Blob: "mock.blob",

@@ -1,28 +1,26 @@
 package packer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"strings"
 
-	"github.com/aliyun/aliyun-oss-go-sdk/oss"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 type Pusher struct {
 	Artifact
-	cfg    BackendConfig
-	bucket OSSPusher
-	logger *logrus.Logger
-}
-
-type OSSPusher interface {
-	PutObject(string, io.Reader, ...oss.Option) error
+	cfg         BackendConfig
+	blobBackend backend.Backend
+	metaBackend backend.Backend
+	logger      *logrus.Logger
 }
 
 type PushRequest struct {
@@ -49,19 +47,21 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 		return nil, errors.Errorf("outputDir %q does not exists", opt.OutputDir)
 	}
 
-	ossClient, err := oss.New(opt.BackendConfig.Endpoint, opt.BackendConfig.AccessKeyId, opt.BackendConfig.AccessKeySecret)
+	metaBackend, err := backend.NewBackend("oss", opt.BackendConfig.rawMetaBackendCfg(), nil)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to init oss client")
+		return nil, errors.Wrapf(err, "failed to init meta backend")
 	}
-	bucket, err := ossClient.Bucket(opt.BackendConfig.BucketName)
+	blobBackend, err := backend.NewBackend("oss", opt.BackendConfig.rawBlobBackendCfg(), nil)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get bucket %s", opt.BackendConfig.BucketName)
+		return nil, errors.Wrapf(err, "failed to init blob backend")
 	}
+
 	return &Pusher{
-		Artifact: opt.Artifact,
-		logger:   opt.Logger,
-		bucket:   bucket,
-		cfg:      opt.BackendConfig,
+		Artifact:    opt.Artifact,
+		logger:      opt.Logger,
+		metaBackend: metaBackend,
+		blobBackend: blobBackend,
+		cfg:         opt.BackendConfig,
 	}, nil
 }
 
@@ -78,11 +78,13 @@ func (p *Pusher) Push(req PushRequest) (PushResult, error) {
 	var (
 		metaKey = fmt.Sprintf("%s/%s", p.cfg.MetaPrefix, req.Meta)
 		blobKey = fmt.Sprintf("%s/%s", p.cfg.BlobPrefix, blobHash)
+		ctx     = context.Background()
 	)
-	if err = p.putObject(metaKey, p.bootstrapPath(req.Meta)); err != nil {
-		return PushResult{}, errors.Wrap(err, "failed to put metafile to remote")
+	// todo: use blob desc to build manifest
+	if _, err = p.metaBackend.Upload(ctx, req.Meta, p.bootstrapPath(req.Meta), 0, true); err != nil {
+		return PushResult{}, errors.Wrapf(err, "failed to put metafile to remote")
 	}
-	if err = p.putObject(blobKey, p.blobFilePath(req.Blob)); err != nil {
+	if _, err = p.blobBackend.Upload(ctx, blobHash, p.blobFilePath(req.Blob), 0, true); err != nil {
 		return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")
 	}
 
@@ -90,15 +92,6 @@ func (p *Pusher) Push(req PushRequest) (PushResult, error) {
 		RemoteMeta: fmt.Sprintf("oss://%s/%s", p.cfg.BucketName, metaKey),
 		RemoteBlob: fmt.Sprintf("oss://%s/%s", p.cfg.BucketName, blobKey),
 	}, nil
-}
-
-func (p *Pusher) putObject(key, path string) error {
-	metaFile, err := os.Open(path)
-	if err != nil {
-		return errors.Wrapf(err, "failed to open file from %s", path)
-	}
-	defer metaFile.Close()
-	return p.bucket.PutObject(key, metaFile)
 }
 
 // getBlobHash will get blobs hash from output.json, the hash will be

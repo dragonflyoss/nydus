@@ -29,8 +29,9 @@ func TestNew(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()
 	_, err := New(Opt{
-		LogLevel:  "info",
-		OutputDir: tmpDir,
+		LogLevel:       "info",
+		OutputDir:      tmpDir,
+		NydusImagePath: filepath.Join(tmpDir, "nydus-image"),
 	})
 	assert.Nil(t, err)
 }
@@ -39,8 +40,9 @@ func TestPacker_Pack(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()
 	p, err := New(Opt{
-		LogLevel:  "info",
-		OutputDir: tmpDir,
+		LogLevel:       "info",
+		OutputDir:      tmpDir,
+		NydusImagePath: filepath.Join(tmpDir, "nydus-image"),
 	})
 	assert.Nil(t, err)
 	builder := &mockBuilder{}
@@ -62,6 +64,9 @@ func TestPacker_Pack(t *testing.T) {
 func setUpTmpDir(t *testing.T) (string, func()) {
 	tmpDir := filepath.Join("testdata", t.Name())
 	os.MkdirAll(tmpDir, 0755)
+	file, _ := os.Create(filepath.Join(tmpDir, "nydus-image"))
+	file.Write([]byte("for test"))
+	file.Close()
 	return tmpDir, func() {
 		os.RemoveAll(tmpDir)
 	}
