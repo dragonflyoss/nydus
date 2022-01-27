@@ -263,7 +263,7 @@ fn main() -> Result<()> {
                 .global(true)
                 .validator(|v| {
                     if let Ok(t) = v.parse::<i32>() {
-                        if t > 0 || t > 1024 {
+                        if t > 0 && t <= 1024 {
                             Ok(())
                         } else {
                             Err("Invalid working thread number {}, valid values: [1-1024]"
