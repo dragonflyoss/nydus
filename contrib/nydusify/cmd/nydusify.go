@@ -388,6 +388,12 @@ func main() {
 					EnvVars: []string{"PARENT_BOOTSTRAP"},
 				},
 				&cli.StringFlag{
+					Name: "chunk-dict",
+					Usage: "Specify a chunk dict expression for chunk deduplication, " +
+						"for example: bootstrap=/path/to/dict.boot",
+					EnvVars: []string{"CHUNK_DICT"},
+				},
+				&cli.StringFlag{
 					Name:      "backend-config-file",
 					TakesFile: true,
 					Usage:     "Specify Nydus blob storage backend config from path",
@@ -446,6 +452,7 @@ func main() {
 
 				if res, err = p.Pack(context.Background(), packer.PackRequest{
 					Parent:    c.String("parent-bootstrap"),
+					ChunkDict: c.String("chunk-dict"),
 					TargetDir: c.String("target-dir"),
 					Meta:      c.String("bootstrap"),
 					PushBlob:  c.Bool("backend-push"),

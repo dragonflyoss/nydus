@@ -25,6 +25,8 @@ const (
 
 var (
 	ErrNydusImageBinaryNotFound = errors.New("failed to find nydus-image binary")
+	ErrInvalidChunkDictArgs     = errors.New("invalid chunk-dict args")
+	ErrNoSupport                = errors.New("no support")
 )
 
 type Opt struct {
@@ -88,6 +90,7 @@ type PackRequest struct {
 	TargetDir string
 	Meta      string
 	Parent    string
+	ChunkDict string
 	// PushBlob whether to push blob and meta to remote backend
 	PushBlob bool
 }
@@ -129,27 +132,44 @@ func New(opt Opt) (*Packer, error) {
 	return p, nil
 }
 
-// get blobs from parent bootstrap
-func (p *Packer) loadParentBlobs(parent string) ([]string, error) {
-	var parentBlobs []string
-	if parent == "" {
+// get blobs from bootstrap
+func (p *Packer) getBlobsFromBootstrap(bootstrap string) ([]string, error) {
+	var blobs []string
+	if bootstrap == "" {
 		return []string{}, nil
 	}
 	inspector := tool.NewInspector(p.nydusImagePath)
 	item, err := inspector.Inspect(tool.InspectOption{
 		Operation: tool.GetBlobs,
-		Bootstrap: parent,
+		Bootstrap: bootstrap,
 	})
 	if err != nil {
 		return []string{}, err
 	}
 	blobsInfo, _ := item.(tool.BlobInfoList)
-	p.logger.Infof("get parent blobs %v", blobsInfo)
+	p.logger.Infof("get blobs %v", blobsInfo)
 	for _, blobInfo := range blobsInfo {
-		parentBlobs = append(parentBlobs, blobInfo.BlobID)
+		blobs = append(blobs, blobInfo.BlobID)
 	}
 
-	return parentBlobs, nil
+	return blobs, nil
+}
+
+func (p *Packer) getChunkDictBlobs(chunkDict string) ([]string, error) {
+	if chunkDict == "" {
+		return []string{}, nil
+	}
+	// get chunk-dict file
+	info := strings.Split(chunkDict, "=")
+	if len(info) != 2 {
+		return []string{}, ErrInvalidChunkDictArgs
+	}
+	switch info[0] {
+	case "bootstrap":
+		return p.getBlobsFromBootstrap(info[1])
+	default:
+		return []string{}, ErrNoSupport
+	}
 }
 
 // getBlobHash will get blobs hash from output.json, the hash will be
@@ -181,12 +201,17 @@ func (p *Packer) getNewBlobsHash(exists []string) (string, error) {
 func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	p.logger.Infof("start to pack source directory %q", req.TargetDir)
 	blobPath := p.blobFilePath(blobFileName(req.Meta))
-	parentBlobs, err := p.loadParentBlobs(req.Parent)
+	parentBlobs, err := p.getBlobsFromBootstrap(req.Parent)
+	if err != nil {
+		return PackResult{}, err
+	}
+	chunkDictBlobs, err := p.getChunkDictBlobs(req.ChunkDict)
 	if err != nil {
 		return PackResult{}, err
 	}
 	if err = p.builder.Run(build.BuilderOption{
 		ParentBootstrapPath: req.Parent,
+		ChunkDict:           req.ChunkDict,
 		BootstrapPath:       p.bootstrapPath(req.Meta),
 		RootfsPath:          req.TargetDir,
 		WhiteoutSpec:        "oci",
@@ -195,9 +220,12 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to Pack targetDir %s", req.TargetDir)
 	}
-	newBlobHash, err := p.getNewBlobsHash(parentBlobs)
+	newBlobHash, err := p.getNewBlobsHash(append(parentBlobs, chunkDictBlobs...))
 	if err != nil {
 		return PackResult{}, errors.Wrap(err, "failed to get blobs hash")
+	}
+	if newBlobHash == "" {
+		blobPath = ""
 	}
 	if req.Parent != "" {
 		p.logger.Infof("should make sure parent blobs already exists on oss or local")
@@ -206,8 +234,6 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 				return PackResult{}, errors.Wrap(err, "failed to rename blob file")
 			}
 			blobPath = p.blobFilePath(newBlobHash)
-		} else {
-			blobPath = ""
 		}
 	}
 	if !req.PushBlob {
