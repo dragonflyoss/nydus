@@ -38,7 +38,7 @@ const BLOB_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
 const BLOB_CHUNK_SIZE_MASK: u64 = 0xf_ffff;
 const BLOB_CHUNK_SIZE_SHIFT: u64 = 44;
 const FILE_SUFFIX: &str = "blob.meta";
-const BLOB_FEATURE_4K_ALIGNED: u32 = 0x1;
+pub const BLOB_FEATURE_4K_ALIGNED: u32 = 0x1;
 
 /// Blob metadata on disk format.
 #[repr(C)]

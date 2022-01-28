@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::metadata::layout::v6::RafsV6BlobTable;
-// use crate::metadata::layout::MetaRange;
+use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE};
+use crate::metadata::layout::MetaRange;
 use crate::metadata::{
     Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
 };
@@ -150,28 +150,18 @@ impl DirectSuperBlockV6 {
         let md = file.metadata()?;
         let len = md.len();
         let size = len as usize;
-        // if len < RAFSV5_SUPERBLOCK_SIZE as u64
-        //     || len > RAFS_MAX_METADATA_SIZE as u64
-        //     || len & (RAFSV5_ALIGNMENT as u64 - 1) != 0
-        // {
-        //     return Err(ebadf!("invalid bootstrap file"));
-        // }
-        // let md_range = MetaRange::new(
-        //     RAFSV5_SUPERBLOCK_SIZE as u64,
-        //     len - RAFSV5_SUPERBLOCK_SIZE as u64,
-        //     true,
-        // )?;
 
-        // Validate blob table layout
-        // let blob_table_size = old_state.meta.blob_table_size as u64;
+        let md_range =
+            MetaRange::new(EROFS_BLOCK_SIZE as u64, len - EROFS_BLOCK_SIZE as u64, true)?;
 
-        // let blob_table_start = old_state.meta.blob_table_offset;
-        // let blob_table_range = MetaRange::new(blob_table_start, blob_table_size, false)?;
-        // if !blob_table_range.is_subrange_of(&md_range)
-        //     || blob_table_range.intersect_with(&inode_table_range)
-        // {
-        //     return Err(ebadf!("invalid blob table"));
-        // }
+        // Validate blob table layout as blob_table_start and
+        // blob_table_offset is read from bootstrap.
+        let blob_table_size = old_state.meta.blob_table_size as u64;
+        let blob_table_start = old_state.meta.blob_table_offset;
+        let blob_table_range = MetaRange::new(blob_table_start, blob_table_size, false)?;
+        if !blob_table_range.is_subrange_of(&md_range) {
+            return Err(ebadf!("invalid blob table"));
+        }
 
         // Prefetch the bootstrap file
         readahead(fd, 0, len);
