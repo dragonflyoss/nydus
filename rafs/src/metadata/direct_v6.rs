@@ -1,7 +1,6 @@
 // Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
-
 /// A bootstrap driver to directly use on disk bootstrap as runtime in-memory bootstrap.
 ///
 /// To reduce memory footprint and speed up filesystem initialization, the V5 on disk bootstrap
@@ -17,23 +16,53 @@
 /// The bootstrap file may be provided by untrusted parties, so we must ensure strong validations
 /// before making use of any bootstrap, especially we are using them in memory-mapped mode. The
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
+use std::any::Any;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Result, SeekFrom};
-// use std::mem::size_of;
-use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
+use std::mem::size_of;
+use std::os::unix::{
+    ffi::{OsStrExt, OsStringExt},
+    io::{FromRawFd, IntoRawFd, RawFd},
+};
+use std::slice;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE};
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
-    Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
+    layout::{
+        bytes_to_os_str,
+        v6::{
+            recover_namespace, RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr,
+            RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry,
+            RafsV6XattrIbodyHeader, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED,
+            EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
+            EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
+        },
+        XattrName, XattrValue,
+    },
+    {
+        Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
+        RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
+    },
 };
-use crate::{RafsError, RafsIoReader, RafsResult};
-use nydus_utils::digest::Algorithm;
-use storage::device::BlobInfo;
+use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
+use nydus_utils::{
+    digest::{Algorithm, RafsDigest},
+    div_round_up, round_up,
+};
+use storage::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec};
 use storage::utils::readahead;
+
+// Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for DirectSuperBlockV6 {}
+unsafe impl Sync for DirectSuperBlockV6 {}
+
+fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, rafs_err)
+}
 
 /// The underlying struct to maintain memory mapped bootstrap for a file system.
 ///
@@ -95,15 +124,8 @@ impl DirectMappingState {
     //     Ok(())
     // }
 }
-
 impl Drop for DirectMappingState {
     fn drop(&mut self) {
-        // Drop the inode_table if it's not a memory-mapped one.
-        // if !self.mmapped_inode_table {
-        //     unsafe {
-        //         ManuallyDrop::drop(&mut self.inode_table);
-        //     }
-        // }
         if !self.base.is_null() {
             unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, self.size) };
             self.base = std::ptr::null();
@@ -123,10 +145,6 @@ pub struct DirectSuperBlockV6 {
     state: ArcSwap<DirectMappingState>,
 }
 
-// Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for DirectSuperBlockV6 {}
-unsafe impl Sync for DirectSuperBlockV6 {}
-
 impl DirectSuperBlockV6 {
     /// Create a new instance of `DirectSuperBlockV6`.
     pub fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
@@ -135,6 +153,34 @@ impl DirectSuperBlockV6 {
         Self {
             state: ArcSwap::new(Arc::new(state)),
         }
+    }
+
+    fn disk_inode(&self, offset: usize) -> &dyn RafsV6OndiskInode {
+        let m = self.state.load();
+        let i = unsafe { &*(m.base.add(offset) as *const RafsV6InodeExtended) };
+
+        if i.format() & EROFS_I_VERSION_BITS != 0 {
+            i
+        } else {
+            unsafe { &*(m.base.add(offset) as *const RafsV6InodeCompact) }
+        }
+    }
+
+    pub fn inode_wrapper(&self, nid: u64) -> Result<Arc<OndiskInodeWrapper>> {
+        // TODO(chge): ensure safety
+        let offset = self.calculate_inode_offset(nid) as usize;
+        let inode = self.disk_inode(offset);
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+        Ok(Arc::new(OndiskInodeWrapper {
+            mapping: self.clone(),
+            offset,
+            blocks_count,
+        }))
+    }
+
+    fn calculate_inode_offset(&self, nid: u64) -> u64 {
+        let meta_offset = self.state.load().meta.meta_blkaddr as u64 * EROFS_BLOCK_SIZE;
+        meta_offset + nid * EROFS_INODE_SLOT_SIZE as u64
     }
 
     #[allow(clippy::cast_ptr_alignment)]
@@ -206,8 +252,8 @@ impl DirectSuperBlockV6 {
             validate_digest,
         };
 
-        // Swap new and old DirectMappingState object, the old object will be destroyed when the
-        // reference count reaches zero.
+        // Swap new and old DirectMappingState object,
+        // the old object will be destroyed when the reference count reaches zero.
         self.state.store(Arc::new(state));
 
         Ok(())
@@ -216,12 +262,15 @@ impl DirectSuperBlockV6 {
 
 impl RafsSuperInodes for DirectSuperBlockV6 {
     fn get_max_ino(&self) -> Inode {
-        todo!()
+        // Library fuse-rs has limit of underlying file system's maximum inode number.
+        // FIXME: So we rafs v6 should record it when building.
+        0xff_ffff_ffff_ffff - 1
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
-    fn get_inode(&self, _ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
-        todo!()
+    fn get_inode(&self, ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
+        let wrapper = self.inode_wrapper(ino)?;
+        Ok(wrapper as Arc<dyn RafsInode>)
     }
 
     fn validate_digest(
@@ -257,5 +306,678 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
 
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         self.state.load().blob_table.entries.clone()
+    }
+
+    fn root_ino(&self) -> u64 {
+        self.state.load().meta.root_nid as u64
+    }
+}
+
+pub struct OndiskInodeWrapper {
+    pub mapping: DirectSuperBlockV6,
+    pub offset: usize,
+    pub blocks_count: u64,
+}
+
+impl OndiskInodeWrapper {
+    fn disk_inode(&self) -> &dyn RafsV6OndiskInode {
+        let i = self.mapping.disk_inode(self.offset);
+        trace!("erofs disk inode loaded nid={} {:?}", i.ino(), i);
+        i
+    }
+
+    fn blocks_count(&self) -> u64 {
+        self.blocks_count
+    }
+
+    // COPIED from kernel code:
+    // >
+    // erofs inode data layout (i_format in on-disk inode):
+    // 0 - inode plain without inline data A:
+    // inode, [xattrs], ... | ... | no-holed data
+    // 1 - inode VLE compression B (legacy):
+    // inode, [xattrs], extents ... | ...
+    // 2 - inode plain with inline data C:
+    // inode, [xattrs], last_inline_data, ... | ... | no-holed data
+    // 3 - inode compression D:
+    // inode, [xattrs], map_header, extents ... | ...
+    // 4 - inode chunk-based E:
+    // inode, [xattrs], chunk indexes ... | ...
+    // 5~7 - reserved
+
+    // Mapping file data blocks to in-memory address.
+    // Not only for data blocks so chunks' addresses are not covered.
+    fn data_block_mapping(&self, index: usize) -> RafsResult<*const u8> {
+        let inode = self.disk_inode();
+
+        if (inode.format() & (!(((1 << EROFS_I_DATALAYOUT_BITS) - 1) << 1 | EROFS_I_VERSION_BITS)))
+            != 0
+        {
+            return Err(RafsError::Incompatible(inode.format()));
+        }
+
+        let s = self.this_inode_size();
+
+        let layout = inode.format() >> EROFS_I_VERSION_BITS;
+        let m = self.mapping.state.load();
+
+        let r = match layout {
+            EROFS_INODE_FLAT_PLAIN => {
+                unsafe {
+                    m.base.add(
+                        // `i_u` points to the Nth block
+                        (inode.union() as u64 * EROFS_BLOCK_SIZE) as usize
+                            + index * EROFS_BLOCK_SIZE as usize,
+                    )
+                }
+            }
+            EROFS_INODE_FLAT_INLINE => {
+                // FIXME: Ensure the correctness of locate inline data (tail packing)
+                if index as u64 != self.blocks_count() - 1 {
+                    unsafe {
+                        m.base.add(
+                            // `i_u` points to the Nth block
+                            (inode.union() as u64 * EROFS_BLOCK_SIZE) as usize
+                                + index * EROFS_BLOCK_SIZE as usize,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        m.base
+                            .add(self.offset as usize + s + self.xattr_size() as usize)
+                    }
+                }
+            }
+            _ => {
+                panic!("layout is {}", layout)
+            }
+        };
+
+        Ok(r)
+    }
+
+    fn get_entry(&self, block_index: usize, index: usize) -> RafsResult<&RafsV6Dirent> {
+        // TODO: We indeed need safety check here.
+        let block_mapping = self.data_block_mapping(block_index)?;
+        Ok(unsafe {
+            &*(block_mapping.add(size_of::<RafsV6Dirent>() * index) as *const RafsV6Dirent)
+        })
+    }
+
+    // `max_entries` indicates the quantity of entries residing in a single block including tail packing.
+    // Both `block_index` and `index` start from 0.
+    fn entry_name(
+        &self,
+        block_index: usize,
+        index: usize,
+        max_entries: usize,
+    ) -> RafsResult<&OsStr> {
+        let block_mapping = self.data_block_mapping(block_index)?;
+        let de = self.get_entry(block_index, index)?;
+        if index < max_entries - 1 {
+            let next_de = self.get_entry(block_index, index + 1)?;
+            let (next_de_name_off, de_name_off) = (next_de.e_nameoff, de.e_nameoff);
+            let len = next_de.e_nameoff.checked_sub(de.e_nameoff).ok_or_else(|| {
+                error!(
+                    "nid {} entry index {} block index {} next dir entry {:?} current dir entry {:?}",
+                    self.ino(), index, block_index, next_de, de
+                );
+                RafsError::IllegalMetaStruct(
+                    MetaType::Dir,
+                    format!("cur {} next {}", next_de_name_off, de_name_off),
+                )
+            })?;
+
+            let n = unsafe {
+                bytes_to_os_str(std::slice::from_raw_parts(
+                    block_mapping.add(de.e_nameoff as usize),
+                    len as usize,
+                ))
+            };
+
+            Ok(n)
+        } else {
+            unsafe {
+                let head_de = self.get_entry(block_index, 0)?;
+                let s = (de.e_nameoff - head_de.e_nameoff) as u64
+                    + (size_of::<RafsV6Dirent>() * max_entries) as u64;
+
+                let e = slice::from_raw_parts(
+                    block_mapping.add(de.e_nameoff as usize),
+                    (self.size() % EROFS_BLOCK_SIZE - s) as usize,
+                );
+                // Use this trick to temporarily decide entry name's length. Improve this?
+                let mut l: usize = 0;
+                for i in e {
+                    if *i != 0 {
+                        l += 1;
+                        if self.size() % EROFS_BLOCK_SIZE - s == l as u64 {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                let n = bytes_to_os_str(&e[0..l]);
+                Ok(n)
+            }
+        }
+    }
+
+    fn mode_format_bits(&self) -> u32 {
+        let i = self.disk_inode();
+        i.mode() as u32 & libc::S_IFMT
+    }
+
+    fn make_chunk_io(
+        &self,
+        chunk_addr: &RafsV6InodeChunkAddr,
+        content_offset: u32,
+        content_len: u32,
+        user_io: bool,
+    ) -> BlobIoDesc {
+        let state = self.mapping.state.load();
+        let blob_table = &state.blob_table.entries;
+
+        let blob_index = chunk_addr.blob_index() - 1;
+        let chunk_index = chunk_addr.blob_comp_index();
+        let io_chunk = BlobIoChunk::Address(blob_index as u32, chunk_index);
+
+        let blob = blob_table[blob_index as usize].clone();
+
+        BlobIoDesc::new(
+            blob,
+            io_chunk,
+            content_offset,
+            content_len as usize,
+            user_io,
+        )
+    }
+
+    fn chunk_size(&self) -> u32 {
+        self.mapping.state.load().meta.chunk_size
+    }
+
+    fn this_inode_size(&self) -> usize {
+        let inode = self.disk_inode();
+
+        if (inode.format() & 1 << EROFS_I_VERSION_BIT) != 0 {
+            size_of::<RafsV6InodeExtended>()
+        } else {
+            size_of::<RafsV6InodeCompact>()
+        }
+    }
+
+    fn xattr_size(&self) -> u32 {
+        let inode = self.disk_inode();
+        // Rafs v6 only supports EROFS inline xattr.
+        if inode.xattr_inline_count() > 0 {
+            (inode.xattr_inline_count() as u32 - 1) * size_of::<RafsV6XattrEntry>() as u32
+                + size_of::<RafsV6XattrIbodyHeader>() as u32
+        } else {
+            0
+        }
+    }
+
+    fn chunk_addresses(&self, head_chunk_index: u32) -> RafsResult<&[RafsV6InodeChunkAddr]> {
+        let total_chunk_addresses = div_round_up(self.size(), self.chunk_size() as u64) as u32;
+
+        assert_eq!(
+            self.disk_inode().format() >> EROFS_I_VERSION_BITS,
+            EROFS_INODE_CHUNK_BASED
+        );
+
+        let m = self.mapping.state.load();
+        let indices = unsafe {
+            m.base.add(
+                self.offset as usize
+                    + round_up(
+                        self.this_inode_size() as u64 + self.xattr_size() as u64,
+                        size_of::<RafsV6InodeChunkAddr>() as u64,
+                    ) as usize,
+            )
+        };
+
+        let chunks: &[RafsV6InodeChunkAddr] = unsafe {
+            std::slice::from_raw_parts(
+                indices.add(head_chunk_index as usize * size_of::<RafsV6InodeChunkAddr>())
+                    as *const RafsV6InodeChunkAddr,
+                (total_chunk_addresses - head_chunk_index) as usize,
+            )
+        };
+
+        Ok(chunks)
+    }
+}
+
+// TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
+#[allow(unused_variables)]
+impl RafsInode for OndiskInodeWrapper {
+    #[allow(clippy::collapsible_if)]
+    fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
+        todo!()
+    }
+
+    fn get_entry(&self) -> Entry {
+        let state = self.mapping.state.load();
+        let inode = self.disk_inode();
+
+        Entry {
+            attr: self.get_attr().into(),
+            inode: self.ino(),
+            generation: 0,
+            attr_timeout: state.meta.attr_timeout,
+            entry_timeout: state.meta.entry_timeout,
+            ..Default::default()
+        }
+    }
+
+    fn get_attr(&self) -> Attr {
+        let inode = self.disk_inode();
+
+        // TODO(chge): Calculate blocks count from isize later.
+        // TODO(chge): Include `rdev` into ondisk v6 extended inode.
+        Attr {
+            ino: self.ino(),
+            size: inode.size(),
+            mode: inode.mode() as u32,
+            nlink: inode.nlink(),
+            blocks: div_round_up(inode.size(), 512),
+            uid: inode.ugid().0,
+            gid: inode.ugid().1,
+            mtime: inode.mtime_s_ns().0,
+            mtimensec: inode.mtime_s_ns().1,
+            blksize: RAFS_ATTR_BLOCK_SIZE,
+            ..Default::default()
+        }
+    }
+
+    /// Check whether the inode has extended attributes.
+    fn has_xattr(&self) -> bool {
+        todo!()
+    }
+
+    /// Get symlink target of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn get_symlink(&self) -> Result<OsString> {
+        // FIXME: assume that symlink can't be that long, tail packing is ignored
+        let inode = self.disk_inode();
+        let data = self.data_block_mapping(0).map_err(err_invalidate_data)?;
+        let s = unsafe {
+            bytes_to_os_str(std::slice::from_raw_parts(data, inode.size() as usize)).to_os_string()
+        };
+        Ok(s)
+    }
+
+    /// Get the child with the specified name.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+        let inode = self.disk_inode();
+
+        if inode.size() == 0 {
+            return Err(enoent!());
+        }
+
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+        let mut target: Option<u64> = None;
+
+        let nid = 'outer: for i in 0..blocks_count {
+            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
+            // `e_nameoff` is offset from each single block?
+            let head_name_offset = head_entry.e_nameoff;
+            let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
+
+            let d_name = self
+                .entry_name(i as usize, 0, entries_count as usize)
+                .map_err(err_invalidate_data)?;
+
+            if d_name == name {
+                target = Some(head_entry.e_nid);
+                break 'outer;
+            }
+
+            // TODO: Let binary search optimize this in the future.
+            // So this logic might look similar to `walk_children_inodes`
+            for j in 1..entries_count {
+                let de = self
+                    .get_entry(i as usize, j as usize)
+                    .map_err(err_invalidate_data)?;
+                let d_name = self
+                    .entry_name(i as usize, j as usize, entries_count as usize)
+                    .map_err(err_invalidate_data)?;
+
+                if d_name == name {
+                    target = Some(de.e_nid);
+                    break 'outer;
+                }
+            }
+        };
+
+        if let Some(nid) = target {
+            Ok(self.mapping.inode_wrapper(nid)? as Arc<dyn RafsInode>)
+        } else {
+            Err(enoent!())
+        }
+    }
+
+    /// Get the child with the specified index.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    /// `idx` is the number of child files in line. So we can keep the term `idx`
+    /// in super crate and keep it consistent with layout v5.
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>> {
+        todo!()
+    }
+
+    #[inline]
+    fn get_child_count(&self) -> u32 {
+        todo!()
+    }
+
+    fn get_child_index(&self) -> Result<u32> {
+        todo!()
+    }
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
+        let inode = self.disk_inode();
+
+        if inode.size() == 0 {
+            return Err(enoent!());
+        }
+
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+
+        let mut cur_offset = entry_offset;
+        let mut skipped = entry_offset;
+
+        trace!(
+            "Total blocks count {} skipped {} current offset {} nid {} inode {:?}",
+            blocks_count,
+            skipped,
+            cur_offset,
+            self.ino(),
+            inode,
+        );
+
+        for i in 0..blocks_count {
+            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
+            let name_offset = head_entry.e_nameoff;
+            let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
+
+            for j in 0..entries_count {
+                let de = self
+                    .get_entry(i as usize, j as usize)
+                    .map_err(err_invalidate_data)?;
+                let name = self
+                    .entry_name(i as usize, j as usize, entries_count as usize)
+                    .map_err(err_invalidate_data)?;
+
+                // Skip specified offset
+                if skipped != 0 {
+                    skipped -= 1;
+                    continue;
+                }
+
+                let nid = de.e_nid;
+                let inode = self.mapping.inode_wrapper(nid)? as Arc<dyn RafsInode>;
+                trace!("found file {:?}, nid {}", name, nid);
+                cur_offset += 1;
+                match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
+                    Ok(PostWalkAction::Break) => break,
+                    Ok(PostWalkAction::Continue) => continue,
+                    Err(_) => break,
+                };
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn get_chunk_count(&self) -> u32 {
+        self.get_child_count()
+    }
+
+    /// Get chunk information with index `idx`
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    #[allow(clippy::cast_ptr_alignment)]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
+        todo!()
+    }
+
+    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
+        let inode = self.disk_inode();
+        let total = inode.xattr_inline_count();
+        if total == 0 {
+            return Ok(None);
+        }
+        let m = self.mapping.state.load();
+        let mut cur = unsafe {
+            m.base
+                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
+        };
+
+        let mut size = size_of::<RafsV6XattrIbodyHeader>() as u32;
+
+        while size as usize
+            <= total as usize * size_of::<RafsV6XattrEntry>() - size_of::<RafsV6XattrIbodyHeader>()
+        {
+            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
+
+            let mut xa_name = recover_namespace(e.name_index())?;
+
+            let suffix = OsStr::from_bytes(unsafe {
+                slice::from_raw_parts(
+                    cur.add(size_of::<RafsV6XattrEntry>()),
+                    e.name_len() as usize,
+                )
+            });
+
+            xa_name.push(suffix);
+
+            if xa_name == name {
+                let value = unsafe {
+                    slice::from_raw_parts(
+                        cur.add(size_of::<RafsV6XattrEntry>() + e.name_len() as usize),
+                        e.value_size() as usize,
+                    )
+                }
+                .to_vec();
+                return Ok(Some(value));
+            }
+
+            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
+            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
+            size += s;
+            cur = unsafe { cur.add(s as usize) };
+        }
+
+        Ok(None)
+    }
+
+    fn get_xattrs(&self) -> Result<Vec<XattrName>> {
+        let inode = self.disk_inode();
+        let mut xattrs = Vec::new();
+        let total = inode.xattr_inline_count();
+        if total == 0 {
+            return Ok(xattrs);
+        }
+        let m = self.mapping.state.load();
+        let mut cur = unsafe {
+            m.base
+                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
+        };
+
+        let mut size = size_of::<RafsV6XattrIbodyHeader>() as u32;
+
+        while size as usize
+            <= total as usize * size_of::<RafsV6XattrEntry>() - size_of::<RafsV6XattrIbodyHeader>()
+        {
+            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
+
+            let ns = recover_namespace(e.name_index())?;
+            let mut xa = ns.into_vec();
+            xa.extend_from_slice(unsafe {
+                slice::from_raw_parts(
+                    cur.add(size_of::<RafsV6XattrEntry>()),
+                    e.name_len() as usize,
+                )
+            });
+            xattrs.push(xa);
+            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
+            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
+            size += s;
+            cur = unsafe { cur.add(s as usize) };
+        }
+
+        Ok(xattrs)
+    }
+
+    fn ino(&self) -> u64 {
+        let meta_blkaddr = self.mapping.state.load().meta.meta_blkaddr as u64;
+        (self.offset as u64 - meta_blkaddr * EROFS_BLOCK_SIZE) / EROFS_INODE_SLOT_SIZE as u64
+    }
+
+    /// Get name of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn name(&self) -> OsString {
+        todo!()
+    }
+
+    fn flags(&self) -> u64 {
+        todo!()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        todo!()
+    }
+
+    fn is_dir(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFDIR
+    }
+
+    /// Check whether the inode is a symlink.
+    fn is_symlink(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFLNK
+    }
+
+    /// Check whether the inode is a regular file.
+    fn is_reg(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFREG
+    }
+
+    /// Check whether the inode is a hardlink.
+    fn is_hardlink(&self) -> bool {
+        todo!()
+    }
+
+    /// Get inode number of the parent directory.
+    fn parent(&self) -> u64 {
+        todo!()
+    }
+
+    /// Get real device number of the inode.
+    fn rdev(&self) -> u32 {
+        todo!()
+    }
+
+    /// Get project id associated with the inode.
+    fn projid(&self) -> u32 {
+        todo!()
+    }
+
+    /// Get data size of the inode.
+    fn size(&self) -> u64 {
+        let i = self.disk_inode();
+        i.size()
+    }
+
+    /// Get file name size of the inode.
+    fn get_name_size(&self) -> u16 {
+        todo!()
+    }
+
+    fn get_symlink_size(&self) -> u16 {
+        let inode = self.disk_inode();
+        inode.size() as u16
+    }
+
+    fn collect_descendants_inodes(
+        &self,
+        descendants: &mut Vec<Arc<dyn RafsInode>>,
+    ) -> Result<usize> {
+        todo!()
+    }
+
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+        let chunk_size = self.chunk_size();
+        let head_chunk_index = offset / chunk_size as u64;
+
+        // TODO: Validate chunk format by checking its `i_u`
+        let mut vec: Vec<BlobIoVec> = Vec::new();
+        let chunks = self
+            .chunk_addresses(head_chunk_index as u32)
+            .map_err(err_invalidate_data)?;
+
+        if chunks.is_empty() {
+            return Ok(vec);
+        }
+
+        let content_offset = (offset % chunk_size as u64) as u32;
+        let mut left = std::cmp::min(self.size(), size as u64) as u32;
+        let mut content_len = std::cmp::min(chunk_size - content_offset, left);
+
+        // Safe to unwrap because chunks is not empty to reach here.
+        let first_chunk_addr = chunks.first().unwrap();
+        let desc = self.make_chunk_io(first_chunk_addr, content_offset, content_len, user_io);
+
+        let mut descs = BlobIoVec::new();
+        descs.bi_vec.push(desc);
+        descs.bi_size += content_len as usize;
+        left -= content_len;
+
+        if left != 0 {
+            // Handle the rest of chunks since they shares the same content length = 0.
+            for c in chunks.iter().skip(1) {
+                content_len = std::cmp::min(chunk_size, left);
+                let desc = self.make_chunk_io(c, 0, content_len, user_io);
+
+                if c.blob_index() as u32 != descs.bi_vec[0].blob.blob_index() {
+                    vec.push(descs);
+                    descs = BlobIoVec::new();
+                }
+
+                // TODO: change type of bi_size to u32
+                descs.bi_vec.push(desc);
+                descs.bi_size += content_len as usize;
+                left -= content_len;
+
+                if left == 0 {
+                    break;
+                }
+            }
+        }
+
+        if !descs.bi_vec.is_empty() {
+            vec.push(descs)
+        }
+
+        assert_eq!(left, 0);
+
+        Ok(vec)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

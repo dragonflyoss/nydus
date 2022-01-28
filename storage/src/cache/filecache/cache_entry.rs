@@ -29,7 +29,7 @@ use crate::device::{
     BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment,
     BlobIoTag, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
-use crate::meta::BlobMetaInfo;
+use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
 
@@ -345,10 +345,20 @@ impl BlobCache for FileCacheEntry {
         Ok(total_size)
     }
 
-    fn read(&self, iovec: &BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
+    fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
         debug_assert!(iovec.validate());
         self.metrics.total.inc();
         self.workers.consume_prefetch_budget(buffers);
+
+        if let Some(ref chunks_meta) = self.meta {
+            // TODO: the first blob backend io triggers chunks array download.
+            for b in iovec.bi_vec.iter_mut() {
+                if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
+                    let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
+                    b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+                }
+            }
+        }
 
         if iovec.bi_vec.is_empty() {
             Ok(0)
@@ -359,7 +369,7 @@ impl BlobCache for FileCacheEntry {
 
             self.dispatch_one_range(&req, &mut cursor, &mut state)
         } else {
-            self.read_iter(&iovec.bi_vec, buffers)
+            self.read_iter(&mut iovec.bi_vec, buffers)
         }
     }
 }
@@ -499,7 +509,7 @@ impl FileCacheEntry {
     //   request.
     // - Optionally there may be some prefetch/read amplify requests following the user io request.
     // - The optional prefetch/read amplify requests may be silently dropped.
-    fn read_iter(&self, bios: &[BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
+    fn read_iter(&self, bios: &mut [BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
         debug!("bios {:?}", bios);
         // Merge requests with continuous blob addresses.
         let requests = self
@@ -525,7 +535,7 @@ impl FileCacheEntry {
     ) -> Result<usize> {
         let mut total_read: usize = 0;
 
-        debug!("dispatch a blob io range {:?}", req);
+        trace!("dispatch single io range {:?}", req);
         for (i, chunk) in req.chunks.iter().enumerate() {
             let is_ready = self
                 .chunk_map

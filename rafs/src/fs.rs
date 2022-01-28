@@ -17,7 +17,7 @@
 use std::any::Any;
 use std::cmp;
 use std::convert::TryFrom;
-use std::ffi::{CStr, OsStr};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::Result;
@@ -39,7 +39,10 @@ use storage::device::{BlobDevice, BlobPrefetchRequest};
 use storage::factory::FactoryConfig;
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
-use crate::metadata::{Inode, RafsInode, RafsSuper, RafsSuperMeta, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::metadata::{
+    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
+    RAFS_DEFAULT_CHUNK_SIZE,
+};
 use crate::{RafsError, RafsIoReader, RafsResult};
 
 /// Type of RAFS fuse handle.
@@ -49,9 +52,6 @@ pub type Handle = u64;
 pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
-
-const DOT: &str = ".";
-const DOTDOT: &str = "..";
 
 fn default_threads_count() -> usize {
     8
@@ -346,10 +346,13 @@ impl Rafs {
         self.xattr_enabled || self.sb.meta.has_xattr()
     }
 
-    fn do_readdir<F>(&self, ino: Inode, size: u32, offset: u64, mut add_entry: F) -> Result<()>
-    where
-        F: FnMut(DirEntry) -> Result<usize>,
-    {
+    fn do_readdir(
+        &self,
+        ino: Inode,
+        size: u32,
+        offset: u64,
+        add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
+    ) -> Result<()> {
         if size == 0 {
             return Ok(());
         }
@@ -359,58 +362,26 @@ impl Rafs {
             return Err(enotdir!());
         }
 
-        let mut cur_offset = offset;
-
-        // offset 0 and 1 is for "." and ".." respectively.
-        if cur_offset == 0 {
-            cur_offset += 1;
-            add_entry(DirEntry {
-                ino,
-                offset: cur_offset,
-                type_: 0,
-                name: DOT.as_bytes(),
-            })?;
-        }
-        if cur_offset == 1 {
-            let parent = if ino == ROOT_ID {
-                ROOT_ID
-            } else {
-                parent.parent()
-            };
-            cur_offset += 1;
-            add_entry(DirEntry {
-                ino: parent,
-                offset: cur_offset,
-                type_: 0,
-                name: DOTDOT.as_bytes(),
-            })?;
-        }
-
-        let mut idx = cur_offset - 2;
-        while idx < parent.get_child_count() as u64 {
-            debug_assert!(idx <= u32::MAX as u64);
-            let child = parent.get_child_by_index(idx as u32)?;
-
-            cur_offset += 1;
+        let mut handler = |_inode, name: OsString, ino, offset| {
             match add_entry(DirEntry {
-                ino: child.ino(),
-                offset: cur_offset,
+                ino,
+                offset,
                 type_: 0,
-                name: child.name().as_bytes(),
+                name: name.as_os_str().as_bytes(),
             }) {
                 Ok(0) => {
-                    self.ios
-                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap());
-                    break;
+                    self.ios.new_file_counter(ino);
+                    Ok(PostWalkAction::Break)
                 }
                 Ok(_) => {
-                    idx += 1;
-                    self.ios
-                        .new_file_counter(child.ino(), |i| self.sb.path_from_ino(i).unwrap())
+                    self.ios.new_file_counter(ino);
+                    Ok(PostWalkAction::Continue)
                 } // TODO: should we check `size` here?
-                Err(r) => return Err(r),
+                Err(e) => Err(e),
             }
-        }
+        };
+
+        parent.walk_children_inodes(offset, &mut handler)?;
 
         Ok(())
     }
@@ -451,7 +422,7 @@ impl Rafs {
         // since nydusify gives root directory permission of 0o750 and fuse mount
         // options `rootmode=` does not affect root directory's permission bits, ending
         // up with preventing other users from accessing the container rootfs.
-        if attr.ino == ROOT_ID {
+        if attr.ino == self.root_ino() {
             attr.mode = attr.mode & !0o777 | 0o755;
         }
 
@@ -502,6 +473,10 @@ impl Rafs {
     /// for blobfs
     pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> Result<()> {
         self.device.fetch_range_synchronous(prefetches)
+    }
+
+    fn root_ino(&self) -> u64 {
+        self.sb.superblock.root_ino()
     }
 
     fn do_prefetch_v5(
@@ -567,11 +542,10 @@ impl Rafs {
 
 impl BackendFileSystem for Rafs {
     fn mount(&self) -> Result<(Entry, u64)> {
-        let root_inode = self.sb.get_inode(ROOT_ID, self.digest_validate)?;
-        self.ios
-            .new_file_counter(root_inode.ino(), |i| self.sb.path_from_ino(i).unwrap());
-
-        Ok((self.get_inode_entry(root_inode), self.sb.get_max_ino()))
+        let root_inode = self.sb.get_inode(self.root_ino(), self.digest_validate)?;
+        self.ios.new_file_counter(root_inode.ino());
+        let e = self.get_inode_entry(root_inode);
+        Ok((e, self.sb.get_max_ino()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -625,8 +599,7 @@ impl FileSystem for Rafs {
             Ok(parent
                 .get_child_by_name(target)
                 .map(|i| {
-                    self.ios
-                        .new_file_counter(i.ino(), |i| self.sb.path_from_ino(i).unwrap());
+                    self.ios.new_file_counter(i.ino());
                     self.get_inode_entry(i)
                 })
                 .unwrap_or_else(|_| self.negative_entry()))
@@ -648,6 +621,7 @@ impl FileSystem for Rafs {
         _handle: Option<u64>,
     ) -> Result<(libc::stat64, Duration)> {
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
+
         let attr = self.get_inode_attr(ino).map(|r| {
             recorder.mark_success(0);
             r
@@ -869,7 +843,7 @@ impl FileSystem for Rafs {
     ) -> Result<()> {
         let mut rec = FopRecorder::settle(Readdirplus, ino, &self.ios);
 
-        self.do_readdir(ino, size, offset, |dir_entry| {
+        self.do_readdir(ino, size, offset, &mut |dir_entry| {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
         })

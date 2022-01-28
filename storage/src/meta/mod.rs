@@ -273,7 +273,7 @@ impl BlobChunkInfoOndisk {
 /// a specific uncompressed data range by
 /// [BlobMetaInfo::get_chunks()](struct.BlobMetaInfo.html#method.get_chunks).
 pub struct BlobMetaInfo {
-    state: Arc<BlobMetaState>,
+    pub state: Arc<BlobMetaState>,
 }
 
 impl BlobMetaInfo {
@@ -578,7 +578,7 @@ impl BlobMetaInfo {
     }
 }
 
-struct BlobMetaState {
+pub struct BlobMetaState {
     blob_index: u32,
     // The file size of blob file when it contains compressed chunks.
     compressed_size: u64,
@@ -640,14 +640,14 @@ impl BlobMetaState {
 }
 
 /// A fake `BlobChunkInfo` object created from blob metadata.
-struct BlobMetaChunk {
+pub struct BlobMetaChunk {
     chunk_index: usize,
     meta: Arc<BlobMetaState>,
 }
 
 impl BlobMetaChunk {
     #[allow(clippy::new_ret_no_self)]
-    fn new(chunk_index: usize, meta: &Arc<BlobMetaState>) -> BlobIoChunk {
+    pub(crate) fn new(chunk_index: usize, meta: &Arc<BlobMetaState>) -> BlobIoChunk {
         debug_assert!(chunk_index <= u32::MAX as usize);
         BlobIoChunk::Base(Arc::new(BlobMetaChunk {
             chunk_index,

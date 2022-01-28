@@ -115,7 +115,7 @@ impl ArtifactStorage {
 /// ArtifactBufferWriter provides a writer to allow writing bootstrap
 /// or blob data to a single file or in a directory.
 pub struct ArtifactBufferWriter {
-    file: BufWriter<File>,
+    pub file: BufWriter<File>,
     storage: ArtifactStorage,
     // Keep this because tmp file will be removed automatically when it is dropped.
     // But we will rename/link the tmp file before it is removed.
@@ -707,6 +707,7 @@ pub struct BuildContext {
 
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
+    pub has_xattr: bool,
 }
 
 impl BuildContext {
@@ -739,6 +740,7 @@ impl BuildContext {
 
             prefetch,
             blob_storage,
+            has_xattr: false,
         }
     }
 

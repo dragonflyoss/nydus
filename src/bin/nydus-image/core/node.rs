@@ -32,7 +32,7 @@ use rafs::metadata::layout::v5::{
 };
 use rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInodeTrait, EROFS_BLOCK_SIZE,
+    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, EROFS_BLOCK_SIZE,
     EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
 };
 use rafs::metadata::layout::RafsXAttrs;
@@ -478,7 +478,7 @@ impl Node {
         }
     }
 
-    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInodeTrait> {
+    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInode> {
         match self.v6_compact_inode {
             true => Box::new(RafsV6InodeCompact::new()),
             false => Box::new(RafsV6InodeExtended::new()),
@@ -490,7 +490,7 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         orig_meta_addr: u64,
         meta_addr: u64,
-        ctx: &BuildContext,
+        ctx: &mut BuildContext,
     ) -> Result<usize> {
         let mut inode = self.new_rafsv6_inode();
 
@@ -525,6 +525,7 @@ impl Node {
                 self.xattrs
                     .store_v6(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
+                ctx.has_xattr = true;
             }
 
             // Dump dirents
@@ -641,6 +642,7 @@ impl Node {
                 let mut v6_chunk = RafsV6InodeChunkAddr::new();
                 // for erofs, bump id by 1 since device id 0 is bootstrap.
                 v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
+                v6_chunk.set_blob_comp_index(chunk.index());
                 v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
                 trace!("name {:?} chunk {}", self.name(), chunk);
 

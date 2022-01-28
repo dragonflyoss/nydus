@@ -36,6 +36,8 @@ impl RafsSuper {
         self.meta.flags = RafsSuperFlags::from_bits(ext_sb.flags())
             .ok_or_else(|| einval!(format!("invalid super flags {:x}", ext_sb.flags())))?;
         info!("rafs superblock features: {}", self.meta.flags);
+        self.meta.meta_blkaddr = sb.s_meta_blkaddr;
+        self.meta.root_nid = sb.s_root_nid;
 
         match self.mode {
             RafsMode::Direct => {

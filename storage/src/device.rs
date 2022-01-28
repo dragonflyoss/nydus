@@ -387,6 +387,7 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 /// An enumeration to encapsulate different [BlobChunkInfo] implementations for [BlobIoDesc].
 #[derive(Clone)]
 pub enum BlobIoChunk {
+    Address(u32, u32),
     Base(Arc<dyn BlobChunkInfo>),
     V5(Arc<dyn self::v5::BlobV5ChunkInfo>),
 }
@@ -397,6 +398,7 @@ impl BlobIoChunk {
         match self {
             BlobIoChunk::Base(v) => &**v,
             BlobIoChunk::V5(v) => v.as_base(),
+            _ => panic!(),
         }
     }
 
@@ -479,7 +481,7 @@ pub struct BlobIoDesc {
     /// Whether it's a user initiated IO, otherwise is a storage system internal IO.
     ///
     /// It might be initiated by user io amplification. With this flag, lower device
-    /// layer may choose how to priority the IO operation.
+    /// layer may choose how to prioritize the IO operation.
     pub user_io: bool,
 }
 
@@ -880,10 +882,11 @@ impl BlobDevice {
         } else if desc.bi_vec[0].blob.blob_index() as usize >= self.blob_count {
             Err(einval!("BlobIoVec has out of range blob_index."))
         } else {
+            let size = desc.bi_size;
             let mut f = BlobDeviceIoVec::new(self, desc);
             // The `off` parameter to w.write_from() is actually ignored by
             // BlobV5IoVec::read_vectored_at_volatile()
-            w.write_from(&mut f, desc.bi_size, 0)
+            w.write_from(&mut f, size, 0)
         }
     }
 
@@ -994,11 +997,11 @@ impl BlobDevice {
 /// Struct to execute Io requests with a single blob.
 struct BlobDeviceIoVec<'a> {
     dev: &'a BlobDevice,
-    iovec: &'a BlobIoVec,
+    iovec: &'a mut BlobIoVec,
 }
 
 impl<'a> BlobDeviceIoVec<'a> {
-    fn new(dev: &'a BlobDevice, iovec: &'a BlobIoVec) -> Self {
+    fn new(dev: &'a BlobDevice, iovec: &'a mut BlobIoVec) -> Self {
         BlobDeviceIoVec { dev, iovec }
     }
 }
@@ -1059,7 +1062,7 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         if let Some(index) = self.iovec.get_target_blob_index() {
             let blobs = &self.dev.blobs.load();
             if (index as usize) < blobs.len() {
-                return blobs[index as usize].read(&self.iovec, buffers);
+                return blobs[index as usize].read(&mut self.iovec, buffers);
             }
         }
 

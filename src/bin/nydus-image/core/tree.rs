@@ -269,7 +269,8 @@ impl<'a> MetadataTreeBuilder<'a> {
         let child_count = inode.get_child_count();
         let mut children = Vec::with_capacity(child_count as usize);
         event_tracer!("load_from_parent_bootstrap", +child_count);
-
+        // TODO(chge): Implement `Iterator` for both V5 and V6 Inodes. Then we don't need
+        // `get_child_count` and `get_child_by_index` thus to get rid of concept `index`.
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();

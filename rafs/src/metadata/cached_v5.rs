@@ -15,6 +15,7 @@ use std::io::SeekFrom;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use fuse_backend_rs::abi::linux_abi;
@@ -30,8 +31,9 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    BlobIoVec, Inode, RafsError, RafsInode, RafsResult, RafsSuperBlobs, RafsSuperBlock,
-    RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, RAFS_INODE_BLOCKSIZE, RAFS_MAX_NAME,
+    BlobIoVec, ChildInodeHandler, Inode, PostWalkAction, RafsError, RafsInode, RafsResult,
+    RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT,
+    DOTDOT, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
 
@@ -213,6 +215,10 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
 
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         self.s_blob.entries.clone()
+    }
+
+    fn root_ino(&self) -> u64 {
+        RAFS_ROOT_INODE
     }
 }
 
@@ -400,7 +406,7 @@ impl RafsInode for CachedInodeV5 {
             blocks: self.i_blocks,
             mode: self.i_mode,
             nlink: self.i_nlink as u32,
-            blksize: RAFS_INODE_BLOCKSIZE,
+            blksize: RAFS_ATTR_BLOCK_SIZE,
             rdev: self.i_rdev,
             ..Default::default()
         }
@@ -444,6 +450,56 @@ impl RafsInode for CachedInodeV5 {
         } else {
             Err(einval!("invalid child index"))
         }
+    }
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
+        let mut cur_offset = entry_offset;
+        // offset 0 and 1 is for "." and ".." respectively.
+
+        if cur_offset == 0 {
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOT).unwrap(),
+                self.ino(),
+                cur_offset,
+            ) {
+                Ok(PostWalkAction::Continue) => {}
+                Ok(PostWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+
+        if cur_offset == 1 {
+            let parent = if self.ino() == 1 { 1 } else { self.parent() };
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOTDOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOTDOT).unwrap(),
+                parent,
+                cur_offset,
+            ) {
+                Ok(PostWalkAction::Continue) => {}
+                Ok(PostWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+        }
+
+        let mut idx = cur_offset - 2;
+        while idx < self.get_child_count() as u64 {
+            assert!(idx <= u32::MAX as u64);
+            let child = self.get_child_by_index(idx as u32)?;
+            cur_offset += 1;
+            match handler(None, child.name(), child.ino(), cur_offset) {
+                Ok(PostWalkAction::Continue) => idx += 1,
+                Ok(PostWalkAction::Break) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
     }
 
     #[inline]

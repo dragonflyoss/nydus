@@ -42,8 +42,8 @@ pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 
 /// Maximum size of blob id string.
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 64;
-/// Block size reported to fuse by get_attr()
-pub const RAFS_INODE_BLOCKSIZE: u32 = 4096;
+/// Block size reported to fuse by get_attr().
+pub const RAFS_ATTR_BLOCK_SIZE: u32 = 4096;
 /// Maximum size of file name supported by rafs.
 pub const RAFS_MAX_NAME: usize = 255;
 /// Maximum size of the rafs metadata blob.
@@ -92,7 +92,17 @@ pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes + Send + Sync {
 
     /// Get all blob information objects used by the filesystem.
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
+
+    fn root_ino(&self) -> u64;
 }
+
+pub enum PostWalkAction {
+    Continue,
+    Break,
+}
+
+pub type ChildInodeHandler<'a> =
+    &'a mut dyn FnMut(Option<Arc<dyn RafsInode>>, OsString, u64, u64) -> Result<PostWalkAction>;
 
 /// Trait to access metadata and data for an inode.
 ///
@@ -122,6 +132,8 @@ pub trait RafsInode: Any {
 
     /// Get child inode of a directory by name.
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()>;
 
     /// Get child inode of a directory by child index, child index starting at 0.
     fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>>;
@@ -285,6 +297,8 @@ pub struct RafsSuperMeta {
     pub attr_timeout: Duration,
     /// Default inode timeout value.
     pub entry_timeout: Duration,
+    pub meta_blkaddr: u32,
+    pub root_nid: u16,
 }
 
 impl RafsSuperMeta {
@@ -349,6 +363,8 @@ impl Default for RafsSuperMeta {
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
             entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
+            meta_blkaddr: 0,
+            root_nid: 0,
         }
     }
 }
