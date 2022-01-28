@@ -860,7 +860,9 @@ impl RafsV6Device {
     }
 
     /// Set number of blocks.
-    pub fn set_blocks(&mut self, blocks: u32) {
+    pub fn set_blocks(&mut self, size: u64) {
+        debug_assert!(size % EROFS_BLOCK_SIZE == 0);
+        let blocks: u32 = (size >> EROFS_BLOCK_BITS) as u32;
         self.blocks = blocks.to_le();
     }
 
