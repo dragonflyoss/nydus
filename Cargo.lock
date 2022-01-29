@@ -387,16 +387,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "epoll"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "990bcfe26bea89669ede68c3f970f61d02568dbc8660317c98d805ea4e710685"
-dependencies = [
- "bitflags",
- "libc",
-]
-
-[[package]]
 name = "errno"
 version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,7 +1128,6 @@ checksum = "b8f8bdf33df195859076e54ab11ee78a1b208382d3a26ec40d142ffc1ecc49ef"
 name = "nydus-api"
 version = "0.1.0"
 dependencies = [
- "epoll",
  "http",
  "lazy_static",
  "log",
@@ -1200,7 +1189,6 @@ dependencies = [
  "chrono",
  "clap",
  "env_logger",
- "epoll",
  "event-manager",
  "flexi_logger",
  "fuse-backend-rs",

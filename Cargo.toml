@@ -22,7 +22,6 @@ path = "src/lib.rs"
 [dependencies]
 rlimit = "0.3.0"
 log = "0.4.8"
-epoll = ">=4.0.1"
 libc = "0.2"
 vmm-sys-util = ">=0.9.0"
 clap = "2.33"
