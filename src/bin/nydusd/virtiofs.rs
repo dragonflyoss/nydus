@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::io::Result;
 use std::sync::{
+    atomic::{AtomicI32, Ordering},
     mpsc::{channel, Receiver},
     Arc, Mutex, MutexGuard, RwLock,
 };
@@ -259,6 +260,7 @@ struct VirtiofsDaemon<S: 'static + VhostUserBackend<VringMutex> + Clone> {
     result_receiver: Mutex<Receiver<DaemonResult<()>>>,
     backend_collection: Mutex<FsBackendCollection>,
     bti: BuildTimeInfo,
+    state: AtomicI32,
 }
 
 impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> {
@@ -306,10 +308,12 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
     }
 
     fn get_state(&self) -> DaemonState {
-        unimplemented!();
+        self.state.load(Ordering::Relaxed).into()
     }
 
-    fn set_state(&self, _state: DaemonState) {}
+    fn set_state(&self, state: DaemonState) {
+        self.state.store(state as i32, Ordering::Relaxed);
+    }
 
     fn save(&self) -> DaemonResult<()> {
         unimplemented!();
@@ -387,6 +391,7 @@ pub fn create_nydus_daemon(
         result_receiver: Mutex::new(result_receiver),
         bti,
         backend_collection: Default::default(),
+        state: AtomicI32::new(DaemonState::INIT as i32),
     });
 
     let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
