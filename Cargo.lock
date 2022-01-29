@@ -65,12 +65,6 @@ checksum = "a4c527152e37cf757a3f78aae5a06fbeefdb07ccc535c980a3208ee3060dd544"
 
 [[package]]
 name = "arrayvec"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cff77d8686867eceff3105329d4698d96c2391c176d5d03adc90c7389162b5b8"
-
-[[package]]
-name = "arrayvec"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be4dc07131ffa69b8072d35f5007352af944213cde02545e2103680baed38fcd"
@@ -126,27 +120,12 @@ checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
 
 [[package]]
 name = "blake3"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce4f9586c9a3151c4b49b19e82ba163dd073614dd057e53c969e1a4db5b52720"
-dependencies = [
- "arrayref",
- "arrayvec 0.5.1",
- "cc",
- "cfg-if 0.1.10",
- "constant_time_eq",
- "crypto-mac",
- "digest",
-]
-
-[[package]]
-name = "blake3"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcd555c66291d5f836dbb6883b48660ece810fe25a31f3bdfb911945dff2691f"
 dependencies = [
  "arrayref",
- "arrayvec 0.7.1",
+ "arrayvec",
  "cc",
  "cfg-if 1.0.0",
  "constant_time_eq",
@@ -1235,7 +1214,7 @@ dependencies = [
  "nix 0.17.0",
  "nydus-api",
  "nydus-app",
- "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nydus-error 0.1.0",
  "nydus-utils",
  "openssl",
  "rafs",
@@ -1261,7 +1240,7 @@ dependencies = [
 name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
- "blake3 0.3.6",
+ "blake3",
  "fuse-backend-rs",
  "lazy_static",
  "libc",
@@ -1457,7 +1436,7 @@ dependencies = [
  "assert_matches",
  "base64",
  "bitflags",
- "blake3 1.0.0",
+ "blake3",
  "flate2",
  "fuse-backend-rs",
  "futures",
@@ -1467,7 +1446,7 @@ dependencies = [
  "log",
  "lz4-sys",
  "nix 0.17.0",
- "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nydus-error 0.1.0",
  "nydus-utils",
  "serde",
  "serde_json",
@@ -1882,7 +1861,7 @@ dependencies = [
  "log",
  "lz4-sys",
  "nix 0.17.0",
- "nydus-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nydus-error 0.1.0",
  "nydus-utils",
  "reqwest",
  "serde",
