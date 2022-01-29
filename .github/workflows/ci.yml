@@ -33,6 +33,7 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.43.0
           make all-contrib-test
+
   smoke:
     runs-on: ubuntu-latest
     steps:
@@ -52,3 +53,12 @@ jobs:
           echo Cargo Home: $CARGO_HOME
           echo Running User: $(whoami)
           make docker-smoke
+
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v2
+      - uses: EmbarkStudios/cargo-deny-action@v1
