@@ -32,16 +32,20 @@ serde_with = { version = "1.6.0", features = ["macros"] }
 sha2 = "0.9.1"
 lazy_static = "1.4.0"
 xattr = "0.2.2"
-nix = "0.17"
+nix = ">=0.23.0"
 anyhow = "1.0.35"
 base64 = { version = ">=0.12.0" }
 rust-fsm = "0.6.0"
 vm-memory = { version = "0.7.0", features = ["backend-mmap"], optional = true }
 chrono = "0.4.19"
-openssl = { version = "0.10.35", features = ["vendored"] }
+openssl = { version = "0.10.38", features = ["vendored"] }
 hyperlocal = "0.8.0"
-tokio = { version = "1.9.0", features = ["macros"] }
+tokio = { version = ">=1.13.1", features = ["macros"] }
 hyper = "0.14.11"
+# pin openssl-src to bring in fix for RUSTSEC-2021-0098
+openssl-src = ">=111.16.0"
+# pin rand_core to bring in fix for RUSTSEC-2021-0023
+rand_core = ">=0.6.2"
 
 event-manager = "0.2.1"
 fuse-backend-rs = { version = "0.2.0", optional = true }
