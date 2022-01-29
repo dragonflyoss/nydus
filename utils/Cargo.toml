@@ -5,6 +5,7 @@ description = "Utilities for Nydus and Rafs"
 authors = ["The Nydus Developers"]
 repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
+license = "Apache-2.0 OR BSD-3-Clause"
 
 [dependencies]
 log = "0.4.8"
