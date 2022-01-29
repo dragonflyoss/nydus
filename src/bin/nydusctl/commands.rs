@@ -333,7 +333,8 @@ impl CommandDaemon {
                     r#"
 Version:                {version}
 Status:                 {state}
-Profile:                {profile}"#,
+Profile:                {profile}
+"#,
                     version = version_info["package_ver"],
                     state = i["state"],
                     profile = version_info["profile"],
