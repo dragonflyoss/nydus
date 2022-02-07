@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::client::NydusdClient;
 use anyhow::Result;
 
-use nydus::FsBackendDesc;
+use nydus::{FsBackendDesc, FsBackendType};
 use rafs::fs::RafsConfig;
 
 type CommandParams = HashMap<String, String>;
@@ -333,25 +333,40 @@ impl CommandDaemon {
                     r#"
 Version:                {version}
 Status:                 {state}
-Profile:                {profile}"#,
+Profile:                {profile}
+"#,
                     version = version_info["package_ver"],
                     state = i["state"],
                     profile = version_info["profile"],
                 );
 
-                for f in backend_list.values() {
-                    let backend: FsBackendDesc = serde_json::from_value(f.clone()).unwrap();
-                    let fs: RafsConfig = serde_json::from_value(backend.config.clone()).unwrap();
-                    print!(
-                        r#"
-Mode:                   {meta_mode}
-Prefetch:               {enabled}
-Prefetch Merging Size:  {merging_size}
+                if !backend_list.is_empty() {
+                    println!("Backend list:")
+                }
+
+                for (mount_point, backend_obj) in backend_list {
+                    let backend: FsBackendDesc =
+                        serde_json::from_value(backend_obj.clone()).unwrap();
+                    println!("  {}", mount_point);
+                    println!("    type:                   {}", backend.backend_type);
+                    println!("    mountpoint:             {}", backend.mountpoint);
+                    println!("    mounted_time:           {}", backend.mounted_time);
+                    match backend.backend_type {
+                        FsBackendType::PassthroughFs => {}
+                        FsBackendType::Rafs => {
+                            let fs: RafsConfig =
+                                serde_json::from_value(backend.config.unwrap().clone()).unwrap();
+                            print!(
+                                r#"    Mode:                   {meta_mode}
+    Prefetch:               {enabled}
+    Prefetch Merging Size:  {merging_size}
 "#,
-                        meta_mode = fs.mode,
-                        enabled = fs.fs_prefetch.enable,
-                        merging_size = fs.fs_prefetch.merging_size,
-                    );
+                                meta_mode = fs.mode,
+                                enabled = fs.fs_prefetch.enable,
+                                merging_size = fs.fs_prefetch.merging_size,
+                            );
+                        }
+                    }
                 }
             }
         }

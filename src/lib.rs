@@ -60,5 +60,5 @@ pub struct FsBackendDesc {
     pub mountpoint: String,
     #[serde_as(as = "DisplayFromStr")]
     pub mounted_time: DateTime<Local>,
-    pub config: serde_json::Value,
+    pub config: Option<serde_json::Value>,
 }

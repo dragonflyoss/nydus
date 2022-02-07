@@ -205,11 +205,11 @@ impl FsBackendCollection {
                     "auth",
                     "token"
                 );
-                config
+                Some(config)
             }
             FsBackendType::PassthroughFs => {
                 // Passthrough Fs has no config ever input.
-                serde_json::Value::Null
+                None
             }
         };
 
