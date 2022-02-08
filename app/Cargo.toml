@@ -5,7 +5,7 @@ authors = ["The Nydus Developers"]
 description = "Application framework and utilities for Nydus"
 readme = "README.md"
 repository = "https://github.com/dragonflyoss/image-service"
-license = "Apache-2.0"
+license = "Apache-2.0 OR BSD-3-Clause"
 edition = "2018"
 build = "build.rs"
 
@@ -16,7 +16,7 @@ built = { version = "=0.4.3", features = ["chrono", "git2"] }
 flexi_logger = { version = "0.17" }
 libc = "0.2"
 log = "0.4.8"
-nix = "0.17"
+nix = ">=0.23.0"
 serde = { version = ">=1.0.27", features = ["serde_derive"] }
 
 nydus-error = "0.1"

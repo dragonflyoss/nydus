@@ -5,15 +5,15 @@
 
 use std::collections::HashMap;
 use std::io::Result;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::SystemTime;
 
-use std::os::unix::io::AsRawFd;
-
 use http::uri::Uri;
 use url::Url;
+use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 
 use micro_http::{HttpServer, MediaType, Request, Response, StatusCode};
 use vmm_sys_util::eventfd::EventFd;
@@ -195,37 +195,35 @@ pub fn start_http_thread(
     let thread = thread::Builder::new()
         .name("http-server".to_string())
         .spawn(move || {
-            let epoll_fd = epoll::create(true).unwrap();
+            let epoll_fd = Epoll::new().unwrap();
 
             let mut server = HttpServer::new(socket_path).unwrap();
             // Must start the server successfully or just die by panic
             server.start_server().unwrap();
-            epoll::ctl(
-                epoll_fd,
-                epoll::ControlOptions::EPOLL_CTL_ADD,
+            epoll_fd.ctl(
+                ControlOperation::Add,
                 server.epoll().as_raw_fd(),
-                epoll::Event::new(epoll::Events::EPOLLIN, EVENT_UNIX_SOCKET),
+                EpollEvent::new(EventSet::IN, EVENT_UNIX_SOCKET),
             )?;
 
-            epoll::ctl(
-                epoll_fd,
-                epoll::ControlOptions::EPOLL_CTL_ADD,
+            epoll_fd.ctl(
+                ControlOperation::Add,
                 exit_evtfd.as_raw_fd(),
-                epoll::Event::new(epoll::Events::EPOLLIN, EVENT_HTTP_DIE),
+                EpollEvent::new(EventSet::IN, EVENT_HTTP_DIE),
             )?;
 
-            let mut events = vec![epoll::Event::new(epoll::Events::empty(), 0); 100];
+            let mut events = vec![EpollEvent::new(EventSet::empty(), 0); 100];
 
             info!("http server started");
 
             'wait: loop {
-                let num = epoll::wait(epoll_fd, -1, events.as_mut_slice()).map_err(|e| {
+                let num = epoll_fd.wait(-1, events.as_mut_slice()).map_err(|e| {
                     error!("Wait event error. {:?}", e);
                     e
                 })?;
 
                 for event in &events[..num] {
-                    match event.data {
+                    match event.data() {
                         EVENT_UNIX_SOCKET => match server.requests() {
                             Ok(request_vec) => {
                                 for server_request in request_vec {
