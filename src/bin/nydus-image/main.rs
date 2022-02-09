@@ -15,7 +15,7 @@ extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
 
-use std::fs::{self, metadata, DirEntry, OpenOptions};
+use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -29,6 +29,7 @@ use rafs::RafsIoReader;
 use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
+use crate::core::blob_compact::BlobCompactor;
 use crate::core::chunk_dict::import_chunk_dict;
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputBlob,
@@ -39,6 +40,7 @@ use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::validator::Validator;
+use storage::factory::{BackendConfig, BlobFactory};
 
 #[macro_use]
 mod trace;
@@ -198,8 +200,7 @@ fn main() -> Result<()> {
                         .required_unless("source-type")
                         .required_unless("blob-dir")
                         .takes_value(true)
-                )
-                .arg(
+                ).arg(
                     Arg::with_name("blob-id")
                         .long("blob-id")
                         .help("blob id (as object id in backend/oss)")
@@ -410,6 +411,60 @@ fn main() -> Result<()> {
                         .takes_value(true)
                 )
         )
+        .subcommand(
+            SubCommand::with_name("compact")
+                .about("(experimental)Compact specific nydus image, remove unused chunks in blobs, merge small blobs")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .short("B")
+                        .help("bootstrap to compact")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("config")
+                        .long("config")
+                        .short("C")
+                        .help("config to compactor")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("backend-type")
+                        .long("backend-type")
+                        .help("type of backend")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("backend-config-file")
+                        .long("backend-config-file")
+                        .help("config file of backend")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("chunk-dict")
+                        .long("chunk-dict")
+                        .short("M")
+                        .help("Specify a chunk dictionary for chunk deduplication")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("output-bootstrap")
+                        .long("output-bootstrap")
+                        .short("O")
+                        .help("bootstrap to output, default is source bootstrap add suffix .compact")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("output-json")
+                        .long("output-json")
+                        .short("J")
+                        .help("path to JSON output file")
+                        .takes_value(true))
+        )
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
@@ -438,6 +493,8 @@ fn main() -> Result<()> {
         Command::inspect(matches)
     } else if let Some(matches) = cmd.subcommand_matches("stat") {
         Command::stat(matches)
+    } else if let Some(matches) = cmd.subcommand_matches("compact") {
+        Command::compact(matches, &build_info)
     } else {
         println!("{}", cmd.usage());
         Ok(())
@@ -571,6 +628,37 @@ impl Command {
         OutputSerializer::dump(matches, &build_output, &build_info)?;
         info!("build successfully: {:?}", build_output,);
 
+        Ok(())
+    }
+
+    fn compact(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+        let bootstrap_path = PathBuf::from(Self::get_bootstrap(matches)?);
+        let dst_bootstrap = match matches.value_of("output-bootstrap") {
+            None => bootstrap_path.with_extension("bootstrap.compact"),
+            Some(s) => PathBuf::from(s),
+        };
+
+        let chunk_dict = match matches.value_of("chunk-dict") {
+            None => None,
+            Some(args) => Some(import_chunk_dict(args)?),
+        };
+
+        let backend_type = matches.value_of("backend-type").unwrap();
+        let backend_file = matches.value_of("backend-config-file").unwrap();
+        let backend_config = BackendConfig::from_file(backend_type, backend_file)?;
+        let backend = BlobFactory::new_backend(backend_config, "compactor")?;
+
+        let config_file_path = matches.value_of("config").unwrap();
+        let file = File::open(config_file_path)
+            .with_context(|| format!("failed to open config file {}", config_file_path))?;
+        let config = serde_json::from_reader(file)
+            .with_context(|| format!("invalid config file {}", config_file_path))?;
+
+        if let Some(build_output) =
+            BlobCompactor::do_compact(bootstrap_path, dst_bootstrap, chunk_dict, backend, &config)?
+        {
+            OutputSerializer::dump(matches, &build_output, &build_info)?;
+        }
         Ok(())
     }
 

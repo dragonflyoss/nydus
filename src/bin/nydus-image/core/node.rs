@@ -1544,6 +1544,13 @@ impl ChunkWrapper {
         }
     }
 
+    pub fn set_compressed_offset(&mut self, offset: u64) {
+        match self {
+            ChunkWrapper::V5(c) => c.compress_offset = offset,
+            ChunkWrapper::V6(c) => c.compress_offset = offset,
+        }
+    }
+
     pub fn compressed_size(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.compress_size,
@@ -1555,6 +1562,13 @@ impl ChunkWrapper {
         match self {
             ChunkWrapper::V5(c) => c.uncompress_offset,
             ChunkWrapper::V6(c) => c.uncompress_offset,
+        }
+    }
+
+    pub fn set_uncompressed_offset(&mut self, offset: u64) {
+        match self {
+            ChunkWrapper::V5(c) => c.uncompress_offset = offset,
+            ChunkWrapper::V6(c) => c.uncompress_offset = offset,
         }
     }
 

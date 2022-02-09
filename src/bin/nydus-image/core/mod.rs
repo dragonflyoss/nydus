@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub(crate) mod blob;
+pub(crate) mod blob_compact;
 pub(crate) mod bootstrap;
 pub(crate) mod chunk_dict;
 pub(crate) mod context;

@@ -439,6 +439,14 @@ impl BlobManager {
         self.blobs.iter().collect()
     }
 
+    pub fn get_blob(&self, idx: usize) -> Option<&BlobContext> {
+        self.blobs.get(idx).unwrap_or(&None).as_ref()
+    }
+
+    pub fn take_blob(&mut self, idx: usize) -> Option<BlobContext> {
+        self.blobs[idx].take()
+    }
+
     pub fn get_last_blob(&self) -> Option<&BlobContext> {
         self.blobs.last().unwrap_or(&None).as_ref()
     }

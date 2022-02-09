@@ -196,7 +196,6 @@ impl BlobReader for OssReader {
             .connection
             .call::<&[u8]>(Method::GET, url.as_str(), None, None, headers, true)
             .map_err(OssError::Request)?;
-
         Ok(resp
             .copy_to(&mut buf)
             .map_err(OssError::Transport)

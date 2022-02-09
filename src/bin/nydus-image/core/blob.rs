@@ -81,7 +81,7 @@ impl Blob {
         Ok(blob_exists)
     }
 
-    fn dump_meta_data(&mut self, blob_ctx: &mut BlobContext) -> Result<()> {
+    pub(crate) fn dump_meta_data(&mut self, blob_ctx: &mut BlobContext) -> Result<()> {
         if !blob_ctx.blob_meta_info_enabled {
             return Ok(());
         }
