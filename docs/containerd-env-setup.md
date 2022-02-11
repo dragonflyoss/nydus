@@ -79,17 +79,32 @@ Nydus uses two features of containerd:
 - remote snapshotter
 - snapshotter annotations
 
-To set them up, add something like the following to your `containerd` configuration (default to `/etc/containerd/config.toml`):
+To set them up, first add something like the following to your `containerd` configuration (default to `/etc/containerd/config.toml`):
 
 ```toml
 [proxy_plugins]
   [proxy_plugins.nydus]
     type = "snapshot"
     address = "/run/containerd/containerd-nydus-grpc.sock"
+```
+
+Next you should change default snapshotter to `nydus` and enable snapshot annotations like below:
+
+For version 1 containerd config format:
+
+```toml
 [plugins.cri]
   [plugins.cri.containerd]
     snapshotter = "nydus"
     disable_snapshot_annotations = false
+```
+
+For version 2 containerd config format:
+
+```toml
+[plugins."io.containerd.grpc.v1.cri".containerd]
+   snapshotter = "nydus"
+   disable_snapshot_annotations = false
 ```
 
 Then restart containerd, e.g.:
