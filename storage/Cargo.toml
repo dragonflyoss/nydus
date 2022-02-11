@@ -32,7 +32,7 @@ tokio = { version = ">=1.13.1", features = ["rt-multi-thread"] }
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.7.0"
 vmm-sys-util = ">=0.9.0"
-fuse-backend-rs = { version = "0.2.0" }
+fuse-backend-rs = { version = "0.3.0" }
 
 nydus-utils = { path = "../utils" }
 nydus-error = { path = "../error" }
