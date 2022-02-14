@@ -1,6 +1,8 @@
 # Nydusify
 
-The Nydusify CLI tool converts an OCI container image from source registry into a Nydus image using `nydus-image` CLI layer by layer, then pushes Nydus image to target registry.
+The Nydusify CLI tool supports:
+1. Convert an OCI container image from source registry into a Nydus image using `nydus-image` CLI layer by layer, then pushes Nydus image to target registry.
+2. Convert local file system dictionary into Nydus image using `nydus-image`, then push Nydus-image to target remote storage(e.g. oss) optionally.
 
 ### Get binaries from release page
 
@@ -8,10 +10,18 @@ Get `nydus-image`, `nydusd` and `nydusify` binaries from [release](https://githu
 
 ## Basic Usage
 
+Convert oci image:
 ```
 nydusify convert \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
+```
+Pack local file system dictionary:
+```
+nydusify pack \
+  --bootstrap target.bootstrap \
+  --target-dir /path/to/target \
+  --output-dir /path/to/output
 ```
 
 ## Upload blob to storage backend
@@ -36,6 +46,29 @@ nydusify convert \
   --target myregistry/repo:tag-nydus \
   --backend-type oss \
   --backend-config-file /path/to/backend-config.json
+```
+
+## Push Nydus Image to OSS with subcommand pack
+``` shell
+# meta_prefix:
+#  push bootstrap into oss://$bucket_name/$meta_prefix/$bootstrap_name
+# blob_prefix:
+#  push blobs into oss://$bucket_name/$blob_prefix/$blob_id
+cat /path/to/backend-config.json
+{
+  "bucket_name": "",
+  "endpoint": "region.aliyuncs.com",
+  "access_key_id": "",
+  "access_key_secret": "",
+  "meta_prefix": "meta",
+  "blob_prefix": "blob"
+}
+
+nydusify pack --bootstrap target.bootstrap \
+  --backend-push \
+  --backend-config-file /path/to/backend-config.json \
+  --target-dir /path/to/target \
+  --output-dir /path/to/output
 ```
 
 ## Check Nydus image
