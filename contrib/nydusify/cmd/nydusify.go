@@ -405,6 +405,18 @@ func main() {
 					Usage:   "The nydus-image binary path, if unset, search in PATH environment",
 					EnvVars: []string{"NYDUS_IMAGE"},
 				},
+				&cli.BoolFlag{
+					Name:    "compact",
+					Usage:   "Compact parent bootstrap if necessary before do pack",
+					EnvVars: []string{"COMPACT"},
+				},
+				&cli.StringFlag{
+					Name: "compact-config-file",
+					Usage: "Compact config file, default config is " +
+						"{\"min_used_ratio\": 5, \"compact_blob_size\": 10485760, \"max_compact_size\": 104857600, " +
+						"\"layers_to_compact\": 32}",
+					EnvVars: []string{"COMPACT_CONFIG_FILE"},
+				},
 			},
 			Before: func(ctx *cli.Context) error {
 				targetPath := ctx.String("target-dir")
@@ -456,6 +468,9 @@ func main() {
 					TargetDir: c.String("target-dir"),
 					Meta:      c.String("bootstrap"),
 					PushBlob:  c.Bool("backend-push"),
+
+					TryCompact:        c.Bool("compact"),
+					CompactConfigPath: c.String("compact-config-file"),
 				}); err != nil {
 					return err
 				}

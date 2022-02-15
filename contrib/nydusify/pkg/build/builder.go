@@ -28,6 +28,16 @@ type BuilderOption struct {
 	AlignedChunk bool
 }
 
+type CompactOption struct {
+	ChunkDict           string
+	BootstrapPath       string
+	OutputBootstrapPath string
+	BackendType         string
+	BackendConfigPath   string
+	OutputJSONPath      string
+	CompactConfigPath   string
+}
+
 type Builder struct {
 	binaryPath string
 	stdout     io.Writer
@@ -40,6 +50,50 @@ func NewBuilder(binaryPath string) *Builder {
 		stdout:     os.Stdout,
 		stderr:     os.Stderr,
 	}
+}
+
+func (builder *Builder) run(args []string, stdinInfo ...string) error {
+	logrus.Debugf("\tCommand: %s %s", builder.binaryPath, strings.Join(args[:], " "))
+
+	cmd := exec.Command(builder.binaryPath, args...)
+	cmd.Stdout = builder.stdout
+	cmd.Stderr = builder.stderr
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	for _, s := range stdinInfo {
+		io.WriteString(stdin, s)
+	}
+	stdin.Close()
+
+	if err := cmd.Run(); err != nil {
+		logrus.WithError(err).Errorf("fail to run %v %+v", builder.binaryPath, args)
+		return err
+	}
+
+	return nil
+}
+
+func (builder *Builder) Compact(option CompactOption) error {
+	args := []string{
+		"compact",
+		"--bootstrap", option.BootstrapPath,
+		"--config", option.CompactConfigPath,
+		"--backend-type", option.BackendType,
+		"--backend-config-file", option.BackendConfigPath,
+		"--log-level", "info",
+		"--output-json", option.OutputJSONPath,
+	}
+	if option.OutputBootstrapPath != "" {
+		args = append(args, "--output-bootstrap", option.OutputBootstrapPath)
+	}
+	if option.ChunkDict != "" {
+		args = append(args, "--chunk-dict", option.ChunkDict)
+	}
+	return builder.run(args)
 }
 
 // Run exec nydus-image CLI to build layer
@@ -82,24 +136,5 @@ func (builder *Builder) Run(option BuilderOption) error {
 		args = append(args, "--prefetch-policy", "fs")
 	}
 
-	logrus.Debugf("\tCommand: %s %s", builder.binaryPath, strings.Join(args[:], " "))
-
-	cmd := exec.Command(builder.binaryPath, args...)
-	cmd.Stdout = builder.stdout
-	cmd.Stderr = builder.stderr
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	io.WriteString(stdin, option.PrefetchDir)
-	stdin.Close()
-
-	if err := cmd.Run(); err != nil {
-		logrus.WithError(err).Errorf("fail to run %v %+v", builder.binaryPath, args)
-		return err
-	}
-
-	return nil
+	return builder.run(args, option.PrefetchDir)
 }
