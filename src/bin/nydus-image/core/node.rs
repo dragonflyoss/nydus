@@ -1645,8 +1645,12 @@ impl ChunkWrapper {
             (ChunkWrapper::V6(s), ChunkWrapper::V6(o)) => {
                 s.clone_from(o);
             }
-            (ChunkWrapper::V5(_s), ChunkWrapper::V6(_o)) => todo!(),
-            (ChunkWrapper::V6(_s), ChunkWrapper::V5(_o)) => todo!(),
+            (ChunkWrapper::V5(s), ChunkWrapper::V6(o)) => {
+                s.clone_from(o);
+            }
+            (ChunkWrapper::V6(s), ChunkWrapper::V5(o)) => {
+                s.clone_from(o);
+            }
         }
     }
 
