@@ -18,6 +18,7 @@ pub trait ChunkDict: Sync + Send + 'static {
     fn add_chunk(&mut self, chunk: ChunkWrapper);
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&ChunkWrapper>;
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
+    fn get_blobs_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo>;
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
     fn get_real_blob_idx(&self, inner_idx: u32) -> u32;
 }
@@ -31,6 +32,10 @@ impl ChunkDict for () {
 
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         Vec::new()
+    }
+
+    fn get_blobs_by_inner_idx(&self, _idx: u32) -> Option<&BlobInfo> {
+        None
     }
 
     fn set_real_blob_idx(&self, _inner_idx: u32, _out_idx: u32) {
@@ -65,6 +70,10 @@ impl ChunkDict for HashChunkDict {
 
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         self.blobs.clone()
+    }
+
+    fn get_blobs_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo> {
+        self.blobs.get(idx as usize).map(|b| b.as_ref())
     }
 
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32) {

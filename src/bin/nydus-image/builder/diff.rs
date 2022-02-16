@@ -128,7 +128,7 @@ use crate::core::node::{ChunkWrapper, Node, Overlay};
 use crate::core::tree::Tree;
 use nydus_utils::digest::RafsDigest;
 use rafs::metadata::layout::RAFS_ROOT_INODE;
-use rafs::metadata::{Inode, RafsInode, RafsMode, RafsSuper};
+use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
 
 #[derive(Clone)]
 struct CachedNode {
@@ -452,33 +452,6 @@ impl DiffBuilder {
         Ok(())
     }
 
-    fn load_chunks(&mut self, rs: &RafsSuper, ino: Inode, parent: Option<&PathBuf>) -> Result<()> {
-        let inode = rs.get_inode(ino, false)?;
-        if !inode.is_dir() {
-            return Ok(());
-        }
-
-        let parent_path = if let Some(parent) = parent {
-            parent.join(inode.name())
-        } else {
-            PathBuf::from("/")
-        };
-
-        let child_count = inode.get_child_count();
-        for idx in 0..child_count {
-            let child = inode.get_child_by_index(idx)?;
-            let child_ino = child.ino();
-            if child.is_dir() {
-                self.load_chunks(&rs, child_ino, Some(&parent_path))?;
-            } else {
-                let child_path = parent_path.join(child.name());
-                self.cache_chunks(child.as_ref(), &child_path)?;
-            }
-        }
-
-        Ok(())
-    }
-
     fn load_parent_chunks(
         &mut self,
         bootstrap_mgr: &mut BootstrapManager,
@@ -494,7 +467,11 @@ impl DiffBuilder {
                 .context("failed to load superblock from bootstrap")?;
             // Load blobs from the blob table of parent bootstrap.
             blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
-            self.load_chunks(&rs, RAFS_ROOT_INODE, None)?;
+            rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
+                                                        path: &Path|
+             -> Result<()> {
+                self.cache_chunks(inode, path)
+            })?;
         };
 
         Ok(())
@@ -503,7 +480,7 @@ impl DiffBuilder {
     fn build_tree(
         &mut self,
         ctx: &mut BuildContext,
-        blob_mgr: &BlobManager,
+        blob_mgr: &mut BlobManager,
         snapshot_idx: u32,
         snapshot_path: PathBuf,
     ) -> Result<Tree> {
@@ -530,7 +507,7 @@ impl DiffBuilder {
     fn build_tree_from_children(
         &mut self,
         ctx: &mut BuildContext,
-        blob_mgr: &BlobManager,
+        blob_mgr: &mut BlobManager,
         snapshot_idx: u32,
         snapshot_root: PathBuf,
         snapshot_path: PathBuf,
@@ -544,6 +521,7 @@ impl DiffBuilder {
         children.sort();
 
         let mut trees = Vec::new();
+        let chunk_dict = blob_mgr.get_chunk_dict();
 
         for child_path in children {
             let mut child_node = Node::new(
@@ -581,17 +559,31 @@ impl DiffBuilder {
                                     target_snapshot_idx = idx;
                                 }
                             }
-                            // Get the blob index of chunk via current snapshot index.
-                            let blob_index = blob_mgr
-                                .get_blob_idx_by_layer_idx(target_snapshot_idx as u32)
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "failed to get blob index for file {:?}, snapshot index {}",
-                                        child_path,
-                                        target_snapshot_idx
-                                    )
-                                })?;
                             for chunk in &mut child_node.chunks {
+                                // FIXME: this implementation may have performance issue and need be optimized.
+                                let layer_index =
+                                    if let Some(_chunk) = chunk_dict.get_chunk(chunk.id()) {
+                                        // Modify blob index for the chunk in chunk dict.
+                                        let blob = chunk_dict
+                                            .get_blobs_by_inner_idx(_chunk.blob_index())
+                                            .unwrap();
+                                        let layer_index =
+                                            blob_mgr.add_if_not_exsits(BlobContext::from(blob));
+                                        chunk.set_index(_chunk.index());
+                                        layer_index
+                                    } else {
+                                        target_snapshot_idx as u32
+                                    };
+                                // Get the blob index of chunk via current layer index.
+                                let blob_index = blob_mgr
+                                    .get_blob_idx_by_layer_idx(layer_index)
+                                    .ok_or_else(|| {
+                                        anyhow!(
+                                    "failed to get blob index for file {:?}, layer index {}",
+                                    child_path,
+                                    layer_index
+                                )
+                                    })?;
                                 chunk.set_blob_index(blob_index);
                             }
                         }

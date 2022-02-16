@@ -428,8 +428,21 @@ impl BlobManager {
     /// Add a blob context to manager
     ///
     /// This should be paired with Self::alloc_index() and keep in consistence.
-    pub fn add(&mut self, blob_ctx: Option<BlobContext>) {
+    pub fn add(&mut self, blob_ctx: Option<BlobContext>) -> u32 {
+        let layer_idx = self.blobs.len();
         self.blobs.push(blob_ctx);
+        layer_idx as u32
+    }
+
+    pub fn add_if_not_exsits(&mut self, blob_ctx: BlobContext) -> u32 {
+        for (layer_idx, blob) in self.blobs.iter().enumerate() {
+            if let Some(blob) = blob {
+                if blob_ctx.blob_id == blob.blob_id {
+                    return layer_idx as u32;
+                }
+            }
+        }
+        self.add(Some(blob_ctx))
     }
 
     pub fn len(&self) -> usize {

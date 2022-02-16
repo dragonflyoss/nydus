@@ -210,6 +210,17 @@ pub trait RafsInode: Any {
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
 
     fn as_any(&self) -> &dyn Any;
+
+    fn walk_chunks(
+        &self,
+        cb: &mut dyn FnMut(&dyn BlobChunkInfo) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let chunk_count = self.get_chunk_count();
+        for i in 0..chunk_count {
+            cb(self.get_chunk_info(i)?.as_ref())?;
+        }
+        Ok(())
+    }
 }
 
 /// Trait to store Rafs meta block and validate alignment.
@@ -723,6 +734,35 @@ impl RafsSuper {
             Self::prefetch_inode(&inode, head_desc, hardlinks, try_prefetch)?;
         }
 
+        Ok(())
+    }
+
+    pub fn walk_inodes(
+        &self,
+        ino: Inode,
+        parent: Option<&PathBuf>,
+        cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let inode = self.get_inode(ino, false)?;
+        if !inode.is_dir() {
+            return Ok(());
+        }
+        let parent_path = if let Some(parent) = parent {
+            parent.join(inode.name())
+        } else {
+            PathBuf::from("/")
+        };
+        let child_count = inode.get_child_count();
+        for idx in 0..child_count {
+            let child = inode.get_child_by_index(idx)?;
+            let child_ino = child.ino();
+            if child.is_dir() {
+                self.walk_inodes(child_ino, Some(&parent_path), cb)?;
+            } else {
+                let child_path = parent_path.join(child.name());
+                cb(child.as_ref(), &child_path)?;
+            }
+        }
         Ok(())
     }
 }
