@@ -27,6 +27,7 @@ use nydus_utils::{
 };
 use rafs::metadata::cached_v5::{CachedChunkInfoV5, CachedInodeV5};
 use rafs::metadata::direct_v5::{DirectChunkInfoV5, OndiskInodeWrapper};
+use rafs::metadata::direct_v6::DirectChunkInfoV6;
 use rafs::metadata::layout::v5::{
     RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
 };
@@ -492,6 +493,7 @@ impl Node {
         orig_meta_addr: u64,
         meta_addr: u64,
         ctx: &mut BuildContext,
+        chunk_cache: &mut dyn ChunkDict,
     ) -> Result<usize> {
         let mut inode = self.new_rafsv6_inode();
 
@@ -648,6 +650,8 @@ impl Node {
                 trace!("name {:?} chunk {}", self.name(), chunk);
 
                 chunks.extend(v6_chunk.as_ref());
+
+                chunk_cache.add_chunk(chunk.clone());
             }
 
             f_bootstrap
@@ -1491,6 +1495,8 @@ impl ChunkWrapper {
             ChunkWrapper::V5(to_rafsv5_chunk_info(cki_v5))
         } else if let Some(cki_v5) = cki.as_any().downcast_ref::<DirectChunkInfoV5>() {
             ChunkWrapper::V5(to_rafsv5_chunk_info(cki_v5))
+        } else if let Some(cki_v6) = cki.as_any().downcast_ref::<DirectChunkInfoV6>() {
+            ChunkWrapper::V6(to_rafsv5_chunk_info(cki_v6))
         } else {
             panic!("unknown chunk information struct");
         }
@@ -1654,7 +1660,7 @@ impl ChunkWrapper {
         }
     }
 
-    fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
+    pub(crate) fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         match self {
             ChunkWrapper::V5(c) => c.store(w).context("failed to store rafs v5 chunk"),
             ChunkWrapper::V6(c) => c.store(w).context("failed to store rafs v5 chunk"),

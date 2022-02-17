@@ -38,6 +38,9 @@ impl RafsSuper {
         self.meta.chunk_size = ext_sb.chunk_size();
         self.meta.blob_table_offset = ext_sb.blob_table_offset();
         self.meta.blob_table_size = ext_sb.blob_table_size();
+        self.meta.chunk_table_offset = ext_sb.chunk_table_offset();
+        self.meta.chunk_table_size = ext_sb.chunk_table_size();
+
         self.meta.flags = RafsSuperFlags::from_bits(ext_sb.flags())
             .ok_or_else(|| einval!(format!("invalid super flags {:x}", ext_sb.flags())))?;
         info!("rafs superblock features: {}", self.meta.flags);

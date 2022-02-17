@@ -94,6 +94,11 @@ pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes + Send + Sync {
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
 
     fn root_ino(&self) -> u64;
+
+    /// Get a chunk info.
+    fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
+        unimplemented!()
+    }
 }
 
 pub enum PostWalkAction {
@@ -311,6 +316,10 @@ pub struct RafsSuperMeta {
     pub meta_blkaddr: u32,
     pub root_nid: u16,
     pub is_chunk_dict: bool,
+    /// Offset of the chunk table
+    pub chunk_table_offset: u64,
+    /// Size  of the chunk table
+    pub chunk_table_size: u64,
 }
 
 impl RafsSuperMeta {
@@ -382,6 +391,8 @@ impl Default for RafsSuperMeta {
             meta_blkaddr: 0,
             root_nid: 0,
             is_chunk_dict: false,
+            chunk_table_offset: 0,
+            chunk_table_size: 0,
         }
     }
 }

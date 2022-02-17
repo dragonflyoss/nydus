@@ -322,8 +322,6 @@ fn integration_test_diff_build_with_chunk_dict() {
     })
     .unwrap();
 
-    println!("{:?}", expected_final_bootstrap);
-
     // Verify final bootstrap
     assert_eq!(actual, expected_final_bootstrap);
 
@@ -331,5 +329,5 @@ fn integration_test_diff_build_with_chunk_dict() {
     let mut file = File::open(&work_dir_2.join("output.json")).unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
-    println!("DIFF_BUILD_OUTPUT {}", contents);
+    println!("DIFF_BUILD_WITH_CHUNK_DICT_OUTPUT {}", contents);
 }

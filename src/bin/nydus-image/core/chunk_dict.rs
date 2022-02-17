@@ -3,11 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashMap};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use nydus_utils::digest::RafsDigest;
+use rafs::metadata::layout::v5::RafsV5ChunkInfo;
 use rafs::metadata::RafsSuper;
 use storage::device::BlobInfo;
 
@@ -100,9 +102,39 @@ impl HashChunkDict {
             blob_idx_m: Mutex::new(BTreeMap::new()),
         };
 
-        Tree::from_bootstrap(&rs, &mut d).context("failed to build tree from bootstrap")?;
+        if rs.meta.is_v5() {
+            Tree::from_bootstrap(&rs, &mut d).context("failed to build tree from bootstrap")?;
+        } else if rs.meta.is_v6() {
+            Self::load_chunk_table(&rs, &mut d).context("failed to load chunk table")?;
+        } else {
+            unimplemented!()
+        }
 
         Ok(d)
+    }
+
+    fn load_chunk_table(rs: &RafsSuper, chunk_dict: &mut dyn ChunkDict) -> Result<()> {
+        let size = rs.meta.chunk_table_size as usize;
+        if size == 0 {
+            return Ok(());
+        }
+
+        let unit_size = size_of::<RafsV5ChunkInfo>();
+        if size % unit_size != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL)).with_context(|| {
+                format!(
+                    "load_chunk_table: invalid rafs v6 chunk table size {}",
+                    size
+                )
+            });
+        }
+
+        for idx in 0..(size / unit_size) {
+            let chunk = rs.superblock.get_chunk_info(idx)?;
+            chunk_dict.add_chunk(ChunkWrapper::from_chunk_info(&chunk));
+        }
+
+        Ok(())
     }
 }
 
