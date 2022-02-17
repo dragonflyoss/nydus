@@ -656,9 +656,17 @@ impl Bootstrap {
         }
 
         // append chunk info table.
-        let chunk_table_offset = bootstrap_writer
+        // align chunk table to EROFS_BLOCK_SIZE firstly.
+        let pos = bootstrap_writer
             .seek_to_end()
-            .context("failed to get chunk table offset")?;
+            .context("failed to seek to bootstrap's end for chunk table")?;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        bootstrap_writer
+            .write_all(&WRITE_PADDING_DATA[0..padding as usize])
+            .context("failed to write 0 to padding of bootstrap's end for chunk table")?;
+
+        let chunk_table_offset = pos + padding;
+
         let mut chunk_table_size: u64 = 0;
         for (_, chunk) in chunk_cache.m.iter() {
             let chunk = &chunk.0;
