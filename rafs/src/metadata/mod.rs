@@ -299,6 +299,7 @@ pub struct RafsSuperMeta {
     pub entry_timeout: Duration,
     pub meta_blkaddr: u32,
     pub root_nid: u16,
+    pub is_chunk_dict: bool,
 }
 
 impl RafsSuperMeta {
@@ -310,6 +311,10 @@ impl RafsSuperMeta {
     /// Check whether the superblock is for Rafs v6 filesystems.
     pub fn is_v6(&self) -> bool {
         self.version == RAFS_SUPER_VERSION_V6
+    }
+
+    pub fn is_chunk_dict(&self) -> bool {
+        self.is_chunk_dict
     }
 
     /// Check whether the explicit UID/GID feature has been enable or not.
@@ -365,6 +370,7 @@ impl Default for RafsSuperMeta {
             entry_timeout: Duration::from_secs(RAFS_DEFAULT_ENTRY_TIMEOUT),
             meta_blkaddr: 0,
             root_nid: 0,
+            is_chunk_dict: false,
         }
     }
 }
@@ -456,6 +462,22 @@ impl RafsSuper {
         };
         let mut reader = Box::new(file) as RafsIoReader;
 
+        rs.load(&mut reader)?;
+
+        Ok(rs)
+    }
+
+    pub fn load_chunk_dict_from_metadata(path: &str) -> Result<Self> {
+        // open bootstrap file
+        let file = OpenOptions::new().read(true).write(false).open(path)?;
+        let mut rs = RafsSuper {
+            mode: RafsMode::Direct,
+            validate_digest: true,
+            ..Default::default()
+        };
+        let mut reader = Box::new(file) as RafsIoReader;
+
+        rs.meta.is_chunk_dict = true;
         rs.load(&mut reader)?;
 
         Ok(rs)

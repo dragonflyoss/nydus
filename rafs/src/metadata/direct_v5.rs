@@ -182,6 +182,7 @@ pub struct DirectSuperBlockV5 {
 
 // Safe to Send/Sync because the underlying data structures are readonly
 unsafe impl Send for DirectSuperBlockV5 {}
+
 unsafe impl Sync for DirectSuperBlockV5 {}
 
 impl DirectSuperBlockV5 {
@@ -208,7 +209,12 @@ impl DirectSuperBlockV5 {
         };
 
         // TODO: use bitmap to record validation result.
-        wrapper.validate(state.meta.inodes_count, state.meta.chunk_size as u64)?;
+        if let Err(e) = wrapper.validate(state.meta.inodes_count, state.meta.chunk_size as u64) {
+            if e.raw_os_error().unwrap_or(0) != libc::EOPNOTSUPP {
+                return Err(e);
+            }
+            // ignore unsupported err
+        }
 
         Ok(wrapper)
     }
@@ -535,6 +541,10 @@ impl RafsInode for OndiskInodeWrapper {
         };
 
         if inode.is_reg() {
+            if self.state().meta.is_chunk_dict() {
+                // chunk-dict doesn't support chunk_count check
+                return Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
             let chunks = (inode.i_size + chunk_size - 1) / chunk_size;
             if !inode.has_hole() && chunks != inode.i_child_count as u64 {
                 return Err(einval!(format!(
@@ -878,6 +888,7 @@ pub struct DirectChunkInfoV5 {
 }
 
 unsafe impl Send for DirectChunkInfoV5 {}
+
 unsafe impl Sync for DirectChunkInfoV5 {}
 
 // This is *direct* metadata mode in-memory chunk info object.

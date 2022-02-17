@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::{RafsMode, RafsSuper};
+use rafs::metadata::RafsSuper;
 use storage::device::BlobInfo;
 
 use crate::core::node::ChunkWrapper;
@@ -83,7 +83,7 @@ impl ChunkDict for HashChunkDict {
 
 impl HashChunkDict {
     fn from_bootstrap_file(path: &str) -> Result<Self> {
-        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, true)
+        let rs = RafsSuper::load_chunk_dict_from_metadata(path)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
             m: HashMap::new(),
