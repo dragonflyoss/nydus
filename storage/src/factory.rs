@@ -170,7 +170,7 @@ impl BlobFactory {
     }
 
     /// Create a storage backend for the blob with id `blob_id`.
-    fn new_backend(
+    pub fn new_backend(
         config: BackendConfig,
         blob_id: &str,
     ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
