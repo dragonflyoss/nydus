@@ -18,5 +18,7 @@ const (
 	LayerAnnotationNydusBootstrap     = "containerd.io/snapshot/nydus-bootstrap"
 	LayerAnnotationNydusSourceChainID = "containerd.io/snapshot/nydus-source-chainid"
 
+	LayerAnnotationNydusReferenceBlobIDs = "containerd.io/snapshot/nydus-reference-blob-ids"
+
 	LayerAnnotationUncompressed = "containerd.io/uncompressed"
 )

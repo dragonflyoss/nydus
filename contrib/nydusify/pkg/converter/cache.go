@@ -61,6 +61,10 @@ func newCacheGlue(
 	}, nil
 }
 
+func (cg *cacheGlue) GetReferenceRecord(d digest.Digest) *cache.Record {
+	return cg.cache.GetReference(d)
+}
+
 func (cg *cacheGlue) Pull(
 	ctx context.Context, sourceLayerChainID digest.Digest,
 ) (*cache.Record, error) {
@@ -180,6 +184,11 @@ func (cg *cacheGlue) Export(
 	for _, layer := range buildLayers {
 		record := layer.GetCacheRecord()
 		cacheRecords = append(cacheRecords, &record)
+		if layer.backend.Type() == backend.RegistryBackend {
+			for idx := range layer.referenceBlobs {
+				cg.cache.SetReference(&layer.referenceBlobs[idx])
+			}
+		}
 	}
 	cg.cache.Record(cacheRecords)
 
