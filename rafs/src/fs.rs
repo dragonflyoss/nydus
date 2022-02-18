@@ -676,7 +676,7 @@ impl FileSystem for Rafs {
 
         // Try to amplify user io for Rafs v5, to improve performance.
         if self.sb.meta.is_v5() && size < self.amplify_io {
-            let all_chunks_ready = self.device.is_all_chunk_ready(&descs);
+            let all_chunks_ready = self.device.all_chunks_ready(&descs);
             if !all_chunks_ready {
                 let chunk_size = self.metadata().chunk_size as u64;
                 let next_chunk_base = (offset + (size as u64) + chunk_size) & !chunk_size;
