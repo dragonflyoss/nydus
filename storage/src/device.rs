@@ -920,7 +920,7 @@ impl BlobDevice {
     }
 
     /// Check all chunks related to the blob io vector are ready.
-    pub fn is_all_chunk_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
+    pub fn all_chunks_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
         for io_vec in io_vecs.iter() {
             if let Some(blob) = self.get_blob_by_iovec(io_vec) {
                 let chunk_map = blob.get_chunk_map();
