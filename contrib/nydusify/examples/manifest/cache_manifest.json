@@ -8,13 +8,22 @@
   },
   "layers": [
     {
+      "mediaType": "application/vnd.oci.image.layer.nydus.blob.v1",
+      "digest": "sha256:09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059",
+      "size": 83528010,
+      "annotations": {
+        "containerd.io/snapshot/nydus-blob": "true"
+      }
+    },
+    {
       "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
       "digest": "sha256:fdfe86772cfb157dd364a7caf7a64fdc6f10abd047701c0a3fcd629b8ebc8766",
       "size": 272154,
       "annotations": {
         "containerd.io/snapshot/nydus-bootstrap": "true",
         "containerd.io/snapshot/nydus-source-chainid": "sha256:bacd3af13903e13a43fe87b6944acd1ff21024132aad6e74b4452d984fb1a99a",
-        "containerd.io/uncompressed": "sha256:032ef23acc516fb5ffda4900db1616f85b39cffb626bc0def51915e14a6a7d8d"
+        "containerd.io/uncompressed": "sha256:032ef23acc516fb5ffda4900db1616f85b39cffb626bc0def51915e14a6a7d8d",
+        "containerd.io/snapshot/nydus-reference-blob-ids": "[\"09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059\"]"
       }
     },
     {
@@ -33,7 +42,8 @@
       "annotations": {
         "containerd.io/snapshot/nydus-bootstrap": "true",
         "containerd.io/snapshot/nydus-source-chainid": "sha256:3779241fda7b1caf03964626c3503e930f2f19a5ffaba6f4b4ad21fd38df3b6b",
-        "containerd.io/uncompressed": "sha256:06014764637029de0a5d37c5a2e52249d46f45a5edecca0ad81d98347f076d7a"
+        "containerd.io/uncompressed": "sha256:06014764637029de0a5d37c5a2e52249d46f45a5edecca0ad81d98347f076d7a",
+        "containerd.io/snapshot/nydus-reference-blob-ids": "[\"09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059\"]"
       }
     },
     {
@@ -52,7 +62,8 @@
       "annotations": {
         "containerd.io/snapshot/nydus-bootstrap": "true",
         "containerd.io/snapshot/nydus-source-chainid": "sha256:9386795d450ce06c6819c8bc5eff8daa71d47ccb9f9fb8d49fe1ccfb5fb3edbe",
-        "containerd.io/uncompressed": "sha256:e3a229c2fa7d489240052abe2f9ad235e26f1aa10d70060fc8e78d478b624503"
+        "containerd.io/uncompressed": "sha256:e3a229c2fa7d489240052abe2f9ad235e26f1aa10d70060fc8e78d478b624503",
+        "containerd.io/snapshot/nydus-reference-blob-ids": "[\"09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059\"]"
       }
     },
     {
