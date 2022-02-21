@@ -41,11 +41,11 @@ type Builder interface {
 }
 
 type Packer struct {
-	logger               *logrus.Logger
-	nydusImagePath       string
-	BackendConfig        *BackendConfig
-	pusher               *Pusher
-	builder              Builder
+	logger         *logrus.Logger
+	nydusImagePath string
+	BackendConfig  *BackendConfig
+	pusher         *Pusher
+	builder        Builder
 	Artifact
 }
 
@@ -55,7 +55,7 @@ type BlobManifest struct {
 
 type BackendConfig struct {
 	Endpoint        string `json:"endpoint"`
-	AccessKeyId     string `json:"access_key_id"`
+	AccessKeyID     string `json:"access_key_id"`
 	AccessKeySecret string `json:"access_key_secret"`
 	BucketName      string `json:"bucket_name"`
 	MetaPrefix      string `json:"meta_prefix"`
@@ -65,7 +65,7 @@ type BackendConfig struct {
 func (cfg *BackendConfig) rawMetaBackendCfg() []byte {
 	configMap := map[string]string{
 		"endpoint":          cfg.Endpoint,
-		"access_key_id":     cfg.AccessKeyId,
+		"access_key_id":     cfg.AccessKeyID,
 		"access_key_secret": cfg.AccessKeySecret,
 		"bucket_name":       cfg.BucketName,
 		"object_prefix":     cfg.MetaPrefix + "/",
@@ -77,7 +77,7 @@ func (cfg *BackendConfig) rawMetaBackendCfg() []byte {
 func (cfg *BackendConfig) rawBlobBackendCfg() []byte {
 	configMap := map[string]string{
 		"endpoint":          cfg.Endpoint,
-		"access_key_id":     cfg.AccessKeyId,
+		"access_key_id":     cfg.AccessKeyID,
 		"access_key_secret": cfg.AccessKeySecret,
 		"bucket_name":       cfg.BucketName,
 		"object_prefix":     cfg.BlobPrefix + "/",
@@ -181,7 +181,7 @@ func (p *Packer) getNewBlobsHash(exists []string) (string, error) {
 	for _, blob := range exists {
 		m[blob] = true
 	}
-	content, err := ioutil.ReadFile(p.outputJsonPath())
+	content, err := ioutil.ReadFile(p.outputJSONPath())
 	if err != nil {
 		return "", err
 	}
@@ -215,7 +215,7 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 		BootstrapPath:       p.bootstrapPath(req.Meta),
 		RootfsPath:          req.TargetDir,
 		WhiteoutSpec:        "oci",
-		OutputJSONPath:      p.outputJsonPath(),
+		OutputJSONPath:      p.outputJSONPath(),
 		BlobPath:            blobPath,
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to Pack targetDir %s", req.TargetDir)

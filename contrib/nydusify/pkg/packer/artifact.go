@@ -23,7 +23,7 @@ func (a Artifact) bootstrapPath(metaFileName string) string {
 	return filepath.Join(a.OutputDir, metaFileName)
 }
 
-func (a Artifact) outputJsonPath() string {
+func (a Artifact) outputJSONPath() string {
 	return filepath.Join(a.OutputDir, "output.json")
 }
 

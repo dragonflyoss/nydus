@@ -27,7 +27,7 @@ func (m *mockBackend) Check(_ string) (bool, error) {
 	return false, nil
 }
 
-func (m *mockBackend) Type() backend.BackendType {
+func (m *mockBackend) Type() backend.Type {
 	return backend.OssBackend
 }
 
@@ -36,7 +36,7 @@ func Test_parseBackendConfig(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, BackendConfig{
 		Endpoint:        "mock.aliyuncs.com",
-		AccessKeyId:     "testid",
+		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
 		BucketName:      "testbucket",
 		MetaPrefix:      "test",
