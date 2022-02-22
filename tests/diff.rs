@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::prelude::*;
 use std::io::Write;
-use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -24,7 +23,7 @@ fn create_dir(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-fn create_file(path: &Path, chunks: &Vec<Vec<u8>>) {
+fn create_file(path: &Path, chunks: &[Vec<u8>]) {
     let mut file = File::create(path).unwrap();
     for chunk in chunks {
         file.write_all(&chunk).unwrap();
@@ -78,7 +77,7 @@ fn diff_build(
         output_path.to_str().unwrap(),
         chunk_dict_bootstrap
             .map(|p| format!("--chunk-dict {}", p.to_str().unwrap()))
-            .unwrap_or(String::new()),
+            .unwrap_or_default(),
         bootstraps_path.to_str().unwrap(),
         blobs_path.to_str().unwrap(),
         if with_diff_hint {
@@ -136,7 +135,7 @@ fn integration_test_diff_build_with_chunk_dict() {
 
     // Create layer 3 (dump part of the same chunk with layer 1)
     let layer_dir_3 = create_dir(&tmp_dir.as_path().join("layer-3"));
-    create_file(&layer_dir_3.join("file-5"), &vec![file_chunks_1[1].clone()]);
+    create_file(&layer_dir_3.join("file-5"), &[file_chunks_1[1].clone()]);
     let (file_chunks_3, chunk_digests_3) = generate_chunks(1);
     create_file(&layer_dir_3.join("file-6"), &file_chunks_3);
     // Create snapshot 3
@@ -155,7 +154,7 @@ fn integration_test_diff_build_with_chunk_dict() {
         vec![&layer_dir_1, &layer_dir_2, &layer_dir_3, &layer_dir_4],
         &snapshot_dir_4,
     );
-    let expected_chunk_dict_bootstrap = HashMap::<_, _>::from_iter(IntoIter::new([
+    let expected_chunk_dict_bootstrap = IntoIter::new([
         (
             PathBuf::from("/file-1"),
             vec![
@@ -187,7 +186,8 @@ fn integration_test_diff_build_with_chunk_dict() {
             vec![(2, chunk_digests_3[0].clone())],
         ),
         (PathBuf::from("/file-7"), vec![]),
-    ]));
+    ])
+    .collect();
 
     // Diff build as a chunk-dict bootstrap
     let work_dir_1 = create_dir(&tmp_dir.as_path().join("workdir-1"));
@@ -240,7 +240,7 @@ fn integration_test_diff_build_with_chunk_dict() {
     let layer_dir_5 = create_dir(&tmp_dir.as_path().join("layer-5"));
     create_file(
         &layer_dir_5.join("file-8"),
-        &vec![file_chunks_1[1].clone(), file_chunks_2[0].clone()],
+        &[file_chunks_1[1].clone(), file_chunks_2[0].clone()],
     );
     let (file_chunks_5, chunk_digests_5) = generate_chunks(2);
     create_file(&layer_dir_5.join("file-9"), &file_chunks_5);
@@ -253,12 +253,12 @@ fn integration_test_diff_build_with_chunk_dict() {
     let (file_chunks_6, chunk_digests_6) = generate_chunks(1);
     create_file(
         &layer_dir_6.join("file-10"),
-        &vec![file_chunks_6[0].clone(), file_chunks_3[0].clone()],
+        &[file_chunks_6[0].clone(), file_chunks_3[0].clone()],
     );
     // Create snapshot 6
     let snapshot_dir_6 = create_dir(&tmp_dir.as_path().join("snapshot-6"));
     overlay_mount(vec![&layer_dir_5, &layer_dir_6], &snapshot_dir_6);
-    let expected_final_bootstrap = HashMap::<_, _>::from_iter(IntoIter::new([
+    let expected_final_bootstrap = IntoIter::new([
         (
             PathBuf::from("/file-8"),
             vec![
@@ -280,7 +280,8 @@ fn integration_test_diff_build_with_chunk_dict() {
                 (3, chunk_digests_3[0].clone()),
             ],
         ),
-    ]));
+    ])
+    .collect();
 
     // Diff build based on chunk-dict bootstrap
     let chunk_dict_bootstrap_path = &work_dir_1.join("bootstraps/bootstrap-3");
