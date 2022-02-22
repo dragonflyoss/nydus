@@ -380,6 +380,20 @@ impl From<&BlobInfo> for BlobContext {
         ctx.decompressed_blob_size = blob.uncompressed_size();
         ctx.compressed_blob_size = blob.compressed_size();
 
+        if blob.meta_ci_is_valid() {
+            ctx.blob_meta_header
+                .set_ci_compressor(blob.meta_ci_compressor());
+            ctx.blob_meta_header.set_ci_entries(blob.chunk_count());
+            ctx.blob_meta_header
+                .set_ci_compressed_offset(blob.meta_ci_offset());
+            ctx.blob_meta_header
+                .set_ci_compressed_size(blob.meta_ci_compressed_size());
+            ctx.blob_meta_header
+                .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
+            ctx.blob_meta_header.set_4k_aligned(true);
+            ctx.blob_meta_info_enabled = true;
+        }
+
         ctx
     }
 }
