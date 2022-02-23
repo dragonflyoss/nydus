@@ -1237,7 +1237,7 @@ impl RafsV6Blob {
             reserved1: 0u32.to_le(),
             compressed_size: blob_info.compressed_size().to_le(),
             uncompressed_size: blob_info.uncompressed_size().to_le(),
-            meta_features: blob_info.meta_flags(),
+            meta_features: blob_info.meta_flags().to_le(),
             ci_compressor: (blob_info.meta_ci_compressor() as u32).to_le(),
             ci_offset: blob_info.meta_ci_offset().to_le(),
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
