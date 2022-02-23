@@ -696,6 +696,7 @@ impl FileSystem for Rafs {
         }
 
         let start = self.ios.latency_start();
+
         for desc in descs.iter_mut() {
             debug_assert!(desc.validate());
             debug_assert!(!desc.bi_vec.is_empty());
