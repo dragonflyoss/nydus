@@ -128,7 +128,37 @@ impl RafsSuper {
         Ok(())
     }
 
+    fn merge_chunks_io(orig: &mut BlobIoVec, more: &[BlobIoVec]) {
+        if orig.bi_vec.is_empty() {
+            return;
+        }
+
+        // safe to unwrap since it is already checked before
+        let mut cki = &orig.bi_vec.last().unwrap().chunkinfo;
+        let mut last_chunk = cki.as_base();
+
+        // caller should ensure that `window_base` won't overlap last chunk of user IO.
+        for d in more {
+            let head_ck = &d.bi_vec[0].chunkinfo.as_base();
+
+            if last_chunk.compress_offset() + last_chunk.compress_size() as u64
+                != head_ck.compress_offset()
+            {
+                break;
+            }
+
+            // Safe to unwrap since bi_vec shouldn't be empty
+            cki = &d.bi_vec.last().unwrap().chunkinfo;
+            last_chunk = cki.as_base();
+            orig.bi_vec.extend_from_slice(d.bi_vec.as_slice());
+        }
+    }
+
     // TODO: Add a UT for me.
+    // `window_base` is calculated by caller, which MUST be the chunk that does
+    // not overlap user IO's chunk.
+    // V5 rafs tries to amplify user IO by expanding more chunks to user IO and
+    // expect that those chunks are likely to be continuous with user IO's chunks.
     pub(crate) fn amplify_io(
         &self,
         max_size: u32,
@@ -139,13 +169,20 @@ impl RafsSuper {
     ) -> Result<()> {
         let inode_size = inode.size();
 
+        let last_desc = if let Some(d) = descs.last_mut() {
+            d
+        } else {
+            return Ok(());
+        };
+
         // Read left content of current file.
         if window_base < inode_size {
             let size = inode_size - window_base;
             let sz = std::cmp::min(size, window_size);
-            let mut d = inode.alloc_bio_vecs(window_base, sz as usize, false)?;
-            debug_assert!(!d.is_empty() && !d[0].bi_vec.is_empty());
-            descs.append(&mut d);
+            let amplified_io_vec = inode.alloc_bio_vecs(window_base, sz as usize, false)?;
+            debug_assert!(!amplified_io_vec.is_empty() && !amplified_io_vec[0].bi_vec.is_empty());
+            // caller should ensure that `window_base` won't overlap last chunk of user IO.
+            Self::merge_chunks_io(last_desc, &amplified_io_vec);
             window_size -= sz;
             if window_size == 0 {
                 return Ok(());
@@ -164,9 +201,12 @@ impl RafsSuper {
                     }
 
                     let sz = std::cmp::min(window_size, next_size);
-                    let mut d = ni.alloc_bio_vecs(0, sz as usize, false)?;
-                    debug_assert!(!d.is_empty() && !d[0].bi_vec.is_empty());
-                    descs.append(&mut d);
+                    let amplified_io_vec = ni.alloc_bio_vecs(0, sz as usize, false)?;
+                    debug_assert!(
+                        !amplified_io_vec.is_empty() && !amplified_io_vec[0].bi_vec.is_empty()
+                    );
+                    // caller should ensure that `window_base` won't overlap last chunk
+                    Self::merge_chunks_io(last_desc, &amplified_io_vec);
                     window_size -= sz;
                 }
             } else {
