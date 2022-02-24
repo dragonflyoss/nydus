@@ -252,6 +252,8 @@ pub struct BlobContext {
     pub chunk_data_buf: Vec<u8>,
     /// ChunkDict which would be loaded when builder start
     pub chunk_dict: Arc<dyn ChunkDict>,
+    /// Whether the blob is from chunk dict.
+    pub from_chunk_dict: bool,
 
     // Blob writer for writing to disk file.
     pub writer: Option<ArtifactBufferWriter>,
@@ -266,6 +268,32 @@ impl BlobContext {
         };
 
         Ok(Self::new_with_writer(blob_id, writer))
+    }
+
+    pub fn from(blob: &BlobInfo, from_chunk_dict: bool) -> Self {
+        let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None);
+
+        ctx.blob_readahead_size = blob.readahead_size();
+        ctx.chunk_count = blob.chunk_count();
+        ctx.decompressed_blob_size = blob.uncompressed_size();
+        ctx.compressed_blob_size = blob.compressed_size();
+        ctx.from_chunk_dict = from_chunk_dict;
+
+        if blob.meta_ci_is_valid() {
+            ctx.blob_meta_header
+                .set_ci_compressor(blob.meta_ci_compressor());
+            ctx.blob_meta_header.set_ci_entries(blob.chunk_count());
+            ctx.blob_meta_header
+                .set_ci_compressed_offset(blob.meta_ci_offset());
+            ctx.blob_meta_header
+                .set_ci_compressed_size(blob.meta_ci_compressed_size());
+            ctx.blob_meta_header
+                .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
+            ctx.blob_meta_header.set_4k_aligned(true);
+            ctx.blob_meta_info_enabled = true;
+        }
+
+        ctx
     }
 
     pub fn new_with_writer(blob_id: String, writer: Option<ArtifactBufferWriter>) -> Self {
@@ -294,6 +322,7 @@ impl BlobContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_data_buf: vec![0u8; size],
             chunk_dict: Arc::new(()),
+            from_chunk_dict: false,
 
             writer,
         }
@@ -371,33 +400,6 @@ impl BlobContext {
     }
 }
 
-impl From<&BlobInfo> for BlobContext {
-    fn from(blob: &BlobInfo) -> Self {
-        let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None);
-
-        ctx.blob_readahead_size = blob.readahead_size();
-        ctx.chunk_count = blob.chunk_count();
-        ctx.decompressed_blob_size = blob.uncompressed_size();
-        ctx.compressed_blob_size = blob.compressed_size();
-
-        if blob.meta_ci_is_valid() {
-            ctx.blob_meta_header
-                .set_ci_compressor(blob.meta_ci_compressor());
-            ctx.blob_meta_header.set_ci_entries(blob.chunk_count());
-            ctx.blob_meta_header
-                .set_ci_compressed_offset(blob.meta_ci_offset());
-            ctx.blob_meta_header
-                .set_ci_compressed_size(blob.meta_ci_compressed_size());
-            ctx.blob_meta_header
-                .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
-            ctx.blob_meta_header.set_4k_aligned(true);
-            ctx.blob_meta_info_enabled = true;
-        }
-
-        ctx
-    }
-}
-
 /// BlobManager stores all blob related information during build.
 pub struct BlobManager {
     /// Some layers may not have a blob (only have metadata), so Option
@@ -442,21 +444,22 @@ impl BlobManager {
     /// Add a blob context to manager
     ///
     /// This should be paired with Self::alloc_index() and keep in consistence.
-    pub fn add(&mut self, blob_ctx: Option<BlobContext>) -> u32 {
-        let layer_idx = self.blobs.len();
+    pub fn add(&mut self, blob_ctx: Option<BlobContext>) {
         self.blobs.push(blob_ctx);
-        layer_idx as u32
     }
 
     pub fn add_if_not_exsits(&mut self, blob_ctx: BlobContext) -> u32 {
-        for (layer_idx, blob) in self.blobs.iter().enumerate() {
+        let mut blob_idx = 0u32;
+        for blob in &self.blobs {
             if let Some(blob) = blob {
                 if blob_ctx.blob_id == blob.blob_id {
-                    return layer_idx as u32;
+                    return blob_idx as u32;
                 }
+                blob_idx += 1;
             }
         }
-        self.add(Some(blob_ctx))
+        self.add(Some(blob_ctx));
+        blob_idx
     }
 
     pub fn len(&self) -> usize {
@@ -483,7 +486,7 @@ impl BlobManager {
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
             .iter()
-            .map(|entry| Some(BlobContext::from(entry.as_ref())))
+            .map(|entry| Some(BlobContext::from(entry.as_ref(), false)))
             .collect();
     }
 
@@ -498,15 +501,29 @@ impl BlobManager {
 
     pub fn get_blob_idx_by_layer_idx(&self, layer_idx: u32) -> Option<u32> {
         let mut blob_idx = 0u32;
-        for (idx, blob) in self.blobs.iter().enumerate() {
-            if blob.is_some() {
-                if idx == layer_idx as usize {
+        let mut current_layer_idx = 0usize;
+        for blob in &self.blobs {
+            if let Some(blob) = &blob {
+                if blob.from_chunk_dict {
+                    blob_idx += 1;
+                    continue;
+                }
+                if current_layer_idx == layer_idx as usize {
                     return Some(blob_idx);
                 }
                 blob_idx += 1;
             }
+            current_layer_idx += 1;
         }
         None
+    }
+
+    pub fn get_blob_ids(&self) -> Vec<String> {
+        self.blobs
+            .iter()
+            .flatten()
+            .map(|b| b.blob_id.to_owned())
+            .collect()
     }
 
     /// Extend blobs which belong to ChunkDict and setup real_blob_idx map
@@ -521,7 +538,7 @@ impl BlobManager {
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
                 let idx = self.alloc_index()?;
-                self.add(Some(BlobContext::from(blob.as_ref())));
+                self.add(Some(BlobContext::from(blob.as_ref(), true)));
                 self.chunk_dict_ref
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
@@ -530,15 +547,10 @@ impl BlobManager {
         Ok(())
     }
 
-    pub fn to_blob_table_v5(
-        &self,
-        build_ctx: &BuildContext,
-        up_idx: Option<usize>,
-    ) -> Result<RafsV5BlobTable> {
+    pub fn to_blob_table_v5(&self, build_ctx: &BuildContext) -> Result<RafsV5BlobTable> {
         let mut blob_table = RafsV5BlobTable::new();
-        let up_idx = up_idx.unwrap_or(self.blobs.len() - 1) as usize;
 
-        for (idx, ctx) in self.blobs.iter().enumerate() {
+        for ctx in &self.blobs {
             if let Some(ctx) = ctx {
                 let blob_id = ctx.blob_id.clone();
                 let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
@@ -566,23 +578,15 @@ impl BlobManager {
                     flags,
                 );
             }
-            if idx == up_idx {
-                break;
-            }
         }
 
         Ok(blob_table)
     }
 
-    pub fn to_blob_table_v6(
-        &self,
-        build_ctx: &BuildContext,
-        up_idx: Option<usize>,
-    ) -> Result<RafsV6BlobTable> {
+    pub fn to_blob_table_v6(&self, build_ctx: &BuildContext) -> Result<RafsV6BlobTable> {
         let mut blob_table = RafsV6BlobTable::new();
-        let up_idx = up_idx.unwrap_or(self.blobs.len() - 1) as usize;
 
-        for (idx, ctx) in self.blobs.iter().enumerate() {
+        for ctx in &self.blobs {
             if let Some(ctx) = ctx {
                 let blob_id = ctx.blob_id.clone();
                 let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
@@ -610,9 +614,6 @@ impl BlobManager {
                     flags,
                     ctx.blob_meta_header,
                 );
-                if idx == up_idx {
-                    break;
-                }
             }
         }
 
@@ -633,6 +634,7 @@ pub struct BootstrapContext {
     pub offset: u64,
     /// Bootstrap file name, only be used for diff build.
     pub name: String,
+    pub blobs: Vec<BuildOutputBlob>,
     /// Bootstrap file writer.
     storage: ArtifactStorage,
 }
@@ -646,6 +648,7 @@ impl BootstrapContext {
             nodes: Vec::new(),
             offset: EROFS_BLOCK_SIZE,
             name: String::new(),
+            blobs: Vec::new(),
             storage,
         })
     }
@@ -696,8 +699,8 @@ impl BootstrapManager {
         self.bootstraps.push(bootstrap_ctx);
     }
 
-    pub fn get_bootstraps(&self) -> Vec<String> {
-        self.bootstraps.iter().map(|b| b.name.to_owned()).collect()
+    pub fn get_bootstraps(&self) -> &Vec<BootstrapContext> {
+        &self.bootstraps
     }
 
     pub fn get_last_bootstrap(&self) -> Option<String> {
@@ -792,54 +795,55 @@ impl BuildContext {
 
 #[derive(Serialize, Default, Debug, Clone)]
 pub struct BuildOutputBlob {
-    blob_id: String,
-    blob_size: u64,
+    pub blob_id: String,
+    pub blob_size: u64,
+}
+
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct BuildOutputArtifact {
+    // Bootstrap file name in this build.
+    pub bootstrap_name: String,
+    // The blobs in blob table of this bootstrap.
+    pub blobs: Vec<BuildOutputBlob>,
 }
 
 /// BuildOutput represents the output in this build.
 #[derive(Default, Debug, Clone)]
 pub struct BuildOutput {
-    /// Blob infos for all layer, some layers may not have a blob.
-    pub blobs: Vec<Option<BuildOutputBlob>>,
-    /// Bootstrap names for all layer in this build, index equals layer index.
-    pub bootstraps: Vec<String>,
+    /// Artifacts (bootstrap + blob) for all layer in this build, vector
+    /// index equals layer index.
+    pub artifacts: Vec<BuildOutputArtifact>,
+    /// Blob ids in the blob table of last bootstrap.
+    pub blobs: Vec<String>,
     /// The size of output blob in this build.
-    pub blob_size: Option<u64>,
-    /// The name of output bootstrap in this build, for the bootstrap
-    /// of last layer in diff build.
-    pub bootstrap_name: String,
+    pub last_blob_size: Option<u64>,
+    /// The name of output bootstrap in this build, in diff build, it's
+    /// the bootstrap of last layer.
+    pub last_bootstrap_name: String,
 }
 
 impl BuildOutput {
     pub fn new(blob_mgr: &BlobManager, bootstrap_mgr: &BootstrapManager) -> Result<BuildOutput> {
-        let blobs = blob_mgr
-            .get_blobs()
-            .iter()
-            .map(|blob| {
-                blob.as_ref().map(|b| BuildOutputBlob {
-                    blob_id: b.blob_id.to_owned(),
-                    blob_size: b.compressed_blob_size,
-                })
-            })
-            .collect();
         let bootstraps = bootstrap_mgr.get_bootstraps();
-        let blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
-        let bootstrap_name = bootstrap_mgr
+        let mut artifacts = Vec::new();
+        for bootstrap in bootstraps {
+            artifacts.push(BuildOutputArtifact {
+                bootstrap_name: bootstrap.name.clone(),
+                blobs: bootstrap.blobs.clone(),
+            });
+        }
+        let blobs = blob_mgr.get_blob_ids();
+
+        let last_blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
+        let last_bootstrap_name = bootstrap_mgr
             .get_last_bootstrap()
             .ok_or_else(|| anyhow!("can't get last bootstrap"))?;
-        Ok(Self {
-            blobs,
-            bootstraps,
-            blob_size,
-            bootstrap_name,
-        })
-    }
 
-    pub fn get_exists_blobs(&self) -> Vec<String> {
-        self.blobs
-            .iter()
-            .flatten()
-            .map(|b| b.blob_id.to_owned())
-            .collect()
+        Ok(Self {
+            artifacts,
+            blobs,
+            last_blob_size,
+            last_bootstrap_name,
+        })
     }
 }

@@ -122,7 +122,7 @@ use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
 use crate::core::context::{
     ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
-    BuildOutput, RafsVersion,
+    BuildOutput, BuildOutputBlob, RafsVersion,
 };
 use crate::core::node::{ChunkWrapper, Node, Overlay};
 use crate::core::tree::Tree;
@@ -550,41 +550,39 @@ impl DiffBuilder {
                             // current snapshot or lower snapshot.
                             // FIXME: the current CachedNodes implementation may have performance
                             // issue and need be optimized using a better data structure.
-                            let mut target_snapshot_idx = 0;
+                            let mut target_snapshot_idx = 0u32;
                             for (idx, cache) in caches.iter().enumerate() {
                                 if idx > snapshot_idx as usize {
                                     break;
                                 }
                                 if cache.is_some() {
-                                    target_snapshot_idx = idx;
+                                    target_snapshot_idx = idx as u32;
                                 }
                             }
                             for chunk in &mut child_node.chunks {
                                 // FIXME: this implementation may have performance issue and need be optimized.
-                                let layer_index =
-                                    if let Some(_chunk) = chunk_dict.get_chunk(chunk.id()) {
-                                        // Modify blob index for the chunk in chunk dict.
-                                        let blob = chunk_dict
-                                            .get_blobs_by_inner_idx(_chunk.blob_index())
-                                            .unwrap();
-                                        let layer_index =
-                                            blob_mgr.add_if_not_exsits(BlobContext::from(blob));
-                                        chunk.set_index(_chunk.index());
-                                        layer_index
-                                    } else {
-                                        target_snapshot_idx as u32
-                                    };
-                                // Get the blob index of chunk via current layer index.
-                                let blob_index = blob_mgr
-                                    .get_blob_idx_by_layer_idx(layer_index)
+                                if let Some(_chunk) = chunk_dict.get_chunk(chunk.id()) {
+                                    // Modify blob index for the chunk in chunk dict.
+                                    let blob = chunk_dict
+                                        .get_blobs_by_inner_idx(_chunk.blob_index())
+                                        .unwrap();
+                                    let blob_index =
+                                        blob_mgr.add_if_not_exsits(BlobContext::from(blob, true));
+                                    chunk.set_index(_chunk.index());
+                                    chunk.set_blob_index(blob_index);
+                                } else {
+                                    // Get the blob index of chunk via current layer index.
+                                    let blob_index = blob_mgr
+                                    .get_blob_idx_by_layer_idx(target_snapshot_idx)
                                     .ok_or_else(|| {
                                         anyhow!(
-                                    "failed to get blob index for file {:?}, layer index {}",
-                                    child_path,
-                                    layer_index
-                                )
+                                            "failed to get blob index for file {:?}, layer index {}",
+                                            child_path,
+                                            target_snapshot_idx
+                                        )
                                     })?;
-                                chunk.set_blob_index(blob_index);
+                                    chunk.set_blob_index(blob_index);
+                                };
                             }
                         }
                     }
@@ -624,16 +622,32 @@ impl DiffBuilder {
         bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
 
         // Dump bootstrap file
-        match ctx.fs_version {
+        bootstrap_ctx.blobs = match ctx.fs_version {
             RafsVersion::V5 => {
-                let blob_table = blob_mgr.to_blob_table_v5(ctx, Some(snapshot_idx as usize))?;
-                bootstrap.dump_rafsv5(ctx, bootstrap_ctx, &blob_table)?
+                let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
+                bootstrap.dump_rafsv5(ctx, bootstrap_ctx, &blob_table)?;
+                blob_table
+                    .get_all()
+                    .iter()
+                    .map(|b| BuildOutputBlob {
+                        blob_id: b.blob_id().to_string(),
+                        blob_size: b.compressed_size(),
+                    })
+                    .collect::<Vec<BuildOutputBlob>>()
             }
             RafsVersion::V6 => {
-                let blob_table = blob_mgr.to_blob_table_v6(ctx, Some(snapshot_idx as usize))?;
-                bootstrap.dump_rafsv6(ctx, bootstrap_ctx, &blob_table)?
+                let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
+                bootstrap.dump_rafsv6(ctx, bootstrap_ctx, &blob_table)?;
+                blob_table
+                    .get_all()
+                    .iter()
+                    .map(|b| BuildOutputBlob {
+                        blob_id: b.blob_id().to_string(),
+                        blob_size: b.compressed_size(),
+                    })
+                    .collect::<Vec<BuildOutputBlob>>()
             }
-        }
+        };
 
         Ok(())
     }
@@ -698,14 +712,14 @@ impl DiffBuilder {
             workers.push(worker);
         }
 
-        // Wait dump worker finish, then add blob context to blob manager.
-        for worker in workers {
-            let blob_ctx = worker.join().expect("panic on diff build")?;
-            blob_mgr.add(blob_ctx);
-        }
-
         // Dump bootstraps for every snapshot layer.
         for (idx, _) in paths.iter().enumerate().take(base).skip(skip) {
+            if idx >= skip {
+                // Wait dump worker finish, then add blob context to blob manager.
+                let worker = workers.remove(0);
+                let blob_ctx = worker.join().expect("panic on diff build")?;
+                blob_mgr.add(blob_ctx);
+            }
             let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
             bootstrap_ctx.name = format!("bootstrap-{}", idx);
             self.build_bootstrap(

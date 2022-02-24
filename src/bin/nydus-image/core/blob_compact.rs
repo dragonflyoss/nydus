@@ -598,10 +598,10 @@ impl BlobCompactor {
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut compactor.nodes);
         // blobs have already been dumped, dump bootstrap only
         if compactor.is_v6() {
-            let blob_table = compactor.new_blob_mgr.to_blob_table_v6(&build_ctx, None)?;
+            let blob_table = compactor.new_blob_mgr.to_blob_table_v6(&build_ctx)?;
             bootstrap.dump_rafsv6(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
         } else {
-            let blob_table = compactor.new_blob_mgr.to_blob_table_v5(&build_ctx, None)?;
+            let blob_table = compactor.new_blob_mgr.to_blob_table_v5(&build_ctx)?;
             bootstrap.dump_rafsv5(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
         }
         bootstrap_mgr.add(bootstrap_ctx);

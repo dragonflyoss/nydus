@@ -649,7 +649,7 @@ impl Builder for StargzBuilder {
         // Dump bootstrap file
         match ctx.fs_version {
             RafsVersion::V5 => {
-                let blob_table = blob_mgr.to_blob_table_v5(ctx, None)?;
+                let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
                 bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &blob_table)?
             }
             RafsVersion::V6 => todo!(),
