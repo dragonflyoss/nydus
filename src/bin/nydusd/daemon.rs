@@ -634,21 +634,18 @@ mod tests {
     #[test]
     fn it_should_add_new_backend() {
         let mut col: FsBackendCollection = Default::default();
-        if col
-            .add(
-                "test",
-                &FsBackendMountCmd {
-                    fs_type: FsBackendType::Rafs,
-                    config: "{\"config\": \"test\"}".to_string(),
-                    mountpoint: "testmonutount".to_string(),
-                    source: "testsource".to_string(),
-                    prefetch_files: Some(vec!["testfile".to_string()]),
-                },
-            )
-            .is_err()
-        {
-            panic!("failed to add backend collection")
-        }
+        let r = col.add(
+            "test",
+            &FsBackendMountCmd {
+                fs_type: FsBackendType::Rafs,
+                config: "{\"config\": \"test\"}".to_string(),
+                mountpoint: "testmonutount".to_string(),
+                source: "testsource".to_string(),
+                prefetch_files: Some(vec!["testfile".to_string()]),
+            },
+        );
+        assert!(r.is_ok(), "failed to add backend collection");
+
         assert_eq!(col.0.len(), 1);
 
         col.del("test");
@@ -657,17 +654,14 @@ mod tests {
 
     #[test]
     fn it_should_verify_prefetch_files() {
-        match input_prefetch_files_verify(&Some(vec!["/etc/passwd".to_string()])) {
-            Err(_) => panic!("failed to verify prefetch files"),
-            Ok(res) => match res {
-                Some(v) => assert_eq!(1, v.len()),
-                None => panic!("failed to get verified prefetch files"),
-            },
-        }
+        let files = input_prefetch_files_verify(&Some(vec!["/etc/passwd".to_string()]));
+        assert!(files.is_ok(), "failed to verify prefetch files");
+        assert_eq!(1, files.unwrap().unwrap().len());
 
-        if input_prefetch_files_verify(&Some(vec!["etc/passwd".to_string()])).is_ok() {
-            panic!("should not pass verify");
-        }
+        assert!(
+            input_prefetch_files_verify(&Some(vec!["etc/passwd".to_string()])).is_err(),
+            "should not pass verify"
+        );
     }
 
     #[test]

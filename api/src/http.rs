@@ -54,7 +54,7 @@ macro_rules! endpoint {
 }
 
 lazy_static! {
-    /// HTTP_ROUTES contain all the cloud-hypervisor HTTP routes.
+    /// HTTP_ROUTES contain all the nydusd HTTP routes.
     pub static ref HTTP_ROUTES: HttpRoutes = {
         let mut r = HttpRoutes {
             routes: HashMap::new(),
