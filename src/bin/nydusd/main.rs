@@ -435,7 +435,7 @@ fn main() -> Result<()> {
             d
         })
         .map_err(|e| {
-            error!("Failed in starting daemon, {}", e);
+            error!("Failed in starting daemon: {}", e);
             e
         })?
     };
@@ -481,8 +481,12 @@ fn main() -> Result<()> {
         }
     }
 
-    daemon.stop().unwrap_or_else(|e| error!("{}", e));
-    daemon.wait().unwrap_or_else(|e| error!("{}", e));
+    daemon
+        .stop()
+        .unwrap_or_else(|e| error!("failed to stop daemon: {}", e));
+    daemon
+        .wait()
+        .unwrap_or_else(|e| error!("failed to wait daemon: {}", e));
     info!("nydusd quits");
 
     Ok(())
