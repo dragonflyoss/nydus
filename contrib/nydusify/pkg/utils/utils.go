@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/archive/compression"
@@ -137,4 +138,15 @@ func UnpackFile(reader io.Reader, source, target string) error {
 	}
 
 	return nil
+}
+
+func IsEmptyString(str string) bool {
+	return strings.TrimSpace(str) == ""
+}
+
+func IsPathExists(path string) bool {
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	return false
 }
