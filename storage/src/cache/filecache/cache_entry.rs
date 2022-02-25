@@ -504,7 +504,7 @@ impl FileCacheEntry {
     // There are some assumption applied to the `bios` passed to `read_iter()`.
     // - The blob address of chunks in `bios` are continuous.
     // - There is at most one user io request in the `bios`.
-    // - The user io request may not aligned on chunk boundary.
+    // - The user io request may not be aligned on chunk boundary.
     // - The user io request may partially consume data from the first and last chunk of user io
     //   request.
     // - Optionally there may be some prefetch/read amplify requests following the user io request.
@@ -546,7 +546,9 @@ impl FileCacheEntry {
             // - the data in the file cache is uncompressed.
             // - data validation is disabled
             if is_ready && !self.is_compressed && !self.need_validate {
-                // Silently drop prefetch requests.
+                // Internal IO should not be committed to local cache region, just
+                // commit this region without pushing any chunk to avoid discontinuous
+                // chunks in a region.
                 if req.tags[i].is_user_io() {
                     state.push(
                         RegionType::CacheFast,
@@ -555,6 +557,8 @@ impl FileCacheEntry {
                         req.tags[i].clone(),
                         None,
                     )?;
+                } else {
+                    state.commit()
                 }
             } else if self.is_stargz || !self.is_direct_chunkmap || is_ready {
                 // Case to try loading data from cache
@@ -581,7 +585,7 @@ impl FileCacheEntry {
                 } else {
                     BlobIoTag::Internal(chunk.compress_offset())
                 };
-                // NOTE: Only this request region can steak more chunks from backend with user io.
+                // NOTE: Only this request region can steal more chunks from backend with user io.
                 state.push(
                     RegionType::Backend,
                     chunk.compress_offset(),
@@ -961,7 +965,7 @@ impl RegionType {
     }
 }
 
-/// A continuous region in cache file or backend storage/blob, it may contains several chunks.
+/// A continuous region in cache file or backend storage/blob, it may contain several chunks.
 struct Region {
     r#type: RegionType,
     status: RegionStatus,
@@ -1041,12 +1045,16 @@ impl Region {
 
 struct FileIoMergeState {
     regions: Vec<Region>,
+    // Whether last region can take in more io chunks. If not, a new region has to be
+    // created for following chunks.
+    last_region_joinable: bool,
 }
 
 impl FileIoMergeState {
     fn new() -> Self {
         FileIoMergeState {
             regions: Vec::with_capacity(8),
+            last_region_joinable: true,
         }
     }
 
@@ -1060,12 +1068,20 @@ impl FileIoMergeState {
     ) -> Result<()> {
         if self.regions.is_empty() || !self.joinable(region_type) {
             self.regions.push(Region::new(region_type));
+            self.last_region_joinable = true;
         }
 
         let idx = self.regions.len() - 1;
         self.regions[idx]
             .append(start, len, tag, chunk)
             .map_err(|e| einval!(e))
+    }
+
+    // Committing current region ensures a new region will be created when more
+    // chunks has to be added since `push` checks if newly pushed chunk is continuous
+    // After committing, following `push` will create a new region.
+    fn commit(&mut self) {
+        self.last_region_joinable = false;
     }
 
     fn reset(&mut self) {
@@ -1077,7 +1093,7 @@ impl FileIoMergeState {
         debug_assert!(!self.regions.is_empty());
         let idx = self.regions.len() - 1;
 
-        self.regions[idx].r#type.joinable(region_type)
+        self.regions[idx].r#type.joinable(region_type) && self.last_region_joinable
     }
 }
 
