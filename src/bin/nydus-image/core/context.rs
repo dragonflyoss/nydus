@@ -15,7 +15,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vmm_sys_util::tempfile::TempFile;
 
@@ -24,6 +24,7 @@ use nydus_utils::div_round_up;
 use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::metadata::layout::v6::RafsV6BlobTable;
 use rafs::metadata::layout::v6::EROFS_BLOCK_SIZE;
+use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::RafsSuperFlags;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWrite};
@@ -34,7 +35,7 @@ use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::layout::BlobLayout;
-use super::node::{ChunkWrapper, Node, WhiteoutSpec};
+use super::node::{ChunkSource, ChunkWrapper, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
 // TODO: select BufWriter capacity by performance testing.
@@ -253,10 +254,37 @@ pub struct BlobContext {
     /// ChunkDict which would be loaded when builder start
     pub chunk_dict: Arc<dyn ChunkDict>,
     /// Whether the blob is from chunk dict.
-    pub from_chunk_dict: bool,
+    pub chunk_source: ChunkSource,
 
     // Blob writer for writing to disk file.
     pub writer: Option<ArtifactBufferWriter>,
+}
+
+impl Clone for BlobContext {
+    fn clone(&self) -> Self {
+        Self {
+            blob_id: self.blob_id.clone(),
+            blob_hash: self.blob_hash.clone(),
+            blob_readahead_size: self.blob_readahead_size,
+            blob_layout: self.blob_layout.clone(),
+            blob_meta_info: self.blob_meta_info.clone(),
+            blob_meta_info_enabled: self.blob_meta_info_enabled,
+            blob_meta_header: self.blob_meta_header,
+
+            compressed_blob_size: self.compressed_blob_size,
+            decompressed_blob_size: self.decompressed_blob_size,
+
+            compress_offset: self.compress_offset,
+            decompress_offset: self.decompress_offset,
+
+            chunk_count: self.chunk_count,
+            chunk_size: self.chunk_size,
+            chunk_data_buf: self.chunk_data_buf.clone(),
+            chunk_dict: self.chunk_dict.clone(),
+            chunk_source: self.chunk_source.clone(),
+            writer: None,
+        }
+    }
 }
 
 impl BlobContext {
@@ -270,14 +298,14 @@ impl BlobContext {
         Ok(Self::new_with_writer(blob_id, writer))
     }
 
-    pub fn from(blob: &BlobInfo, from_chunk_dict: bool) -> Self {
+    pub fn from(blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
         let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None);
 
         ctx.blob_readahead_size = blob.readahead_size();
         ctx.chunk_count = blob.chunk_count();
         ctx.decompressed_blob_size = blob.uncompressed_size();
         ctx.compressed_blob_size = blob.compressed_size();
-        ctx.from_chunk_dict = from_chunk_dict;
+        ctx.chunk_source = chunk_source;
 
         if blob.meta_ci_is_valid() {
             ctx.blob_meta_header
@@ -322,7 +350,7 @@ impl BlobContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_data_buf: vec![0u8; size],
             chunk_dict: Arc::new(()),
-            from_chunk_dict: false,
+            chunk_source: ChunkSource::Build,
 
             writer,
         }
@@ -407,7 +435,7 @@ pub struct BlobManager {
     ///
     /// We can get blob index for a layer by using:
     /// self.blobs.iter().flatten().collect()[layer_index];
-    blobs: Vec<Option<BlobContext>>,
+    blobs: Vec<BlobContext>,
     /// Chunk dictionary from reference image or base layer.
     pub chunk_dict_ref: Arc<dyn ChunkDict>,
     /// Chunk dictionary to hold new chunks from the upper layer.
@@ -436,7 +464,7 @@ impl BlobManager {
     /// This should be paired with Self::add() and keep in consistence.
     pub fn alloc_index(&self) -> Result<u32> {
         // Rafs v6 only supports 256 blobs.
-        u8::try_from(self.blobs.iter().flatten().count())
+        u8::try_from(self.blobs.len())
             .map(|v| v as u32)
             .with_context(|| Error::msg("too many blobs"))
     }
@@ -444,22 +472,8 @@ impl BlobManager {
     /// Add a blob context to manager
     ///
     /// This should be paired with Self::alloc_index() and keep in consistence.
-    pub fn add(&mut self, blob_ctx: Option<BlobContext>) {
+    pub fn add(&mut self, blob_ctx: BlobContext) {
         self.blobs.push(blob_ctx);
-    }
-
-    pub fn add_if_not_exsits(&mut self, blob_ctx: BlobContext) -> u32 {
-        let mut blob_idx = 0u32;
-        for blob in &self.blobs {
-            if let Some(blob) = blob {
-                if blob_ctx.blob_id == blob.blob_id {
-                    return blob_idx as u32;
-                }
-                blob_idx += 1;
-            }
-        }
-        self.add(Some(blob_ctx));
-        blob_idx
     }
 
     pub fn len(&self) -> usize {
@@ -467,31 +481,31 @@ impl BlobManager {
     }
 
     /// Get all blob contexts (include the blob context that does not have a blob).
-    pub fn get_blobs(&self) -> Vec<&Option<BlobContext>> {
+    pub fn get_blobs(&self) -> Vec<&BlobContext> {
         self.blobs.iter().collect()
     }
 
     pub fn get_blob(&self, idx: usize) -> Option<&BlobContext> {
-        self.blobs.get(idx).unwrap_or(&None).as_ref()
+        self.blobs.get(idx)
     }
 
-    pub fn take_blob(&mut self, idx: usize) -> Option<BlobContext> {
-        self.blobs[idx].take()
+    pub fn take_blob(&mut self, idx: usize) -> BlobContext {
+        self.blobs.remove(idx)
     }
 
     pub fn get_last_blob(&self) -> Option<&BlobContext> {
-        self.blobs.last().unwrap_or(&None).as_ref()
+        self.blobs.last()
     }
 
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
             .iter()
-            .map(|entry| Some(BlobContext::from(entry.as_ref(), false)))
+            .map(|entry| BlobContext::from(entry.as_ref(), ChunkSource::Parent))
             .collect();
     }
 
     pub fn get_blob_idx_by_id(&self, id: &str) -> Option<u32> {
-        for (idx, blob) in self.blobs.iter().flatten().enumerate() {
+        for (idx, blob) in self.blobs.iter().enumerate() {
             if blob.blob_id.eq(id) {
                 return Some(idx as u32);
             }
@@ -499,31 +513,8 @@ impl BlobManager {
         None
     }
 
-    pub fn get_blob_idx_by_layer_idx(&self, layer_idx: u32) -> Option<u32> {
-        let mut blob_idx = 0u32;
-        let mut current_layer_idx = 0usize;
-        for blob in &self.blobs {
-            if let Some(blob) = &blob {
-                if blob.from_chunk_dict {
-                    blob_idx += 1;
-                    continue;
-                }
-                if current_layer_idx == layer_idx as usize {
-                    return Some(blob_idx);
-                }
-                blob_idx += 1;
-            }
-            current_layer_idx += 1;
-        }
-        None
-    }
-
     pub fn get_blob_ids(&self) -> Vec<String> {
-        self.blobs
-            .iter()
-            .flatten()
-            .map(|b| b.blob_id.to_owned())
-            .collect()
+        self.blobs.iter().map(|b| b.blob_id.to_owned()).collect()
     }
 
     /// Extend blobs which belong to ChunkDict and setup real_blob_idx map
@@ -538,7 +529,7 @@ impl BlobManager {
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
                 let idx = self.alloc_index()?;
-                self.add(Some(BlobContext::from(blob.as_ref(), true)));
+                self.add(BlobContext::from(blob.as_ref(), ChunkSource::Dict));
                 self.chunk_dict_ref
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
@@ -547,73 +538,52 @@ impl BlobManager {
         Ok(())
     }
 
-    pub fn to_blob_table_v5(&self, build_ctx: &BuildContext) -> Result<RafsV5BlobTable> {
-        let mut blob_table = RafsV5BlobTable::new();
+    pub fn to_blob_table(&self, build_ctx: &BuildContext) -> Result<RafsBlobTable> {
+        let mut blob_table = match build_ctx.fs_version {
+            RafsVersion::V5 => RafsBlobTable::V5(RafsV5BlobTable::new()),
+            RafsVersion::V6 => RafsBlobTable::V6(RafsV6BlobTable::new()),
+        };
 
         for ctx in &self.blobs {
-            if let Some(ctx) = ctx {
-                let blob_id = ctx.blob_id.clone();
-                let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
-                let chunk_count = ctx.chunk_count;
-                let decompressed_blob_size = ctx.decompressed_blob_size;
-                let compressed_blob_size = ctx.compressed_blob_size;
-                let blob_features = BlobFeatures::empty();
-                let mut flags = RafsSuperFlags::empty();
-                match build_ctx.fs_version {
-                    RafsVersion::V5 => {
-                        flags |= RafsSuperFlags::from(build_ctx.compressor);
-                        flags |= RafsSuperFlags::from(build_ctx.digester);
-                    }
-                    RafsVersion::V6 => todo!(),
+            let blob_id = ctx.blob_id.clone();
+            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
+            let chunk_count = ctx.chunk_count;
+            let decompressed_blob_size = ctx.decompressed_blob_size;
+            let compressed_blob_size = ctx.compressed_blob_size;
+            let blob_features = BlobFeatures::empty();
+            let mut flags = RafsSuperFlags::empty();
+            match &mut blob_table {
+                RafsBlobTable::V5(table) => {
+                    flags |= RafsSuperFlags::from(build_ctx.compressor);
+                    flags |= RafsSuperFlags::from(build_ctx.digester);
+                    table.add(
+                        blob_id,
+                        0,
+                        blob_readahead_size,
+                        ctx.chunk_size,
+                        chunk_count,
+                        decompressed_blob_size,
+                        compressed_blob_size,
+                        blob_features,
+                        flags,
+                    );
                 }
-                blob_table.add(
-                    blob_id,
-                    0,
-                    blob_readahead_size,
-                    ctx.chunk_size,
-                    chunk_count,
-                    decompressed_blob_size,
-                    compressed_blob_size,
-                    blob_features,
-                    flags,
-                );
-            }
-        }
-
-        Ok(blob_table)
-    }
-
-    pub fn to_blob_table_v6(&self, build_ctx: &BuildContext) -> Result<RafsV6BlobTable> {
-        let mut blob_table = RafsV6BlobTable::new();
-
-        for ctx in &self.blobs {
-            if let Some(ctx) = ctx {
-                let blob_id = ctx.blob_id.clone();
-                let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
-                let chunk_count = ctx.chunk_count;
-                let decompressed_blob_size = ctx.decompressed_blob_size;
-                let compressed_blob_size = ctx.compressed_blob_size;
-                let blob_features = BlobFeatures::empty();
-                let mut flags = RafsSuperFlags::empty();
-                match build_ctx.fs_version {
-                    RafsVersion::V5 => todo!(),
-                    RafsVersion::V6 => {
-                        flags |= RafsSuperFlags::from(build_ctx.compressor);
-                        flags |= RafsSuperFlags::from(build_ctx.digester);
-                    }
+                RafsBlobTable::V6(table) => {
+                    flags |= RafsSuperFlags::from(build_ctx.compressor);
+                    flags |= RafsSuperFlags::from(build_ctx.digester);
+                    table.add(
+                        blob_id,
+                        0,
+                        blob_readahead_size,
+                        ctx.chunk_size,
+                        chunk_count,
+                        decompressed_blob_size,
+                        compressed_blob_size,
+                        blob_features,
+                        flags,
+                        ctx.blob_meta_header,
+                    );
                 }
-                blob_table.add(
-                    blob_id,
-                    0,
-                    blob_readahead_size,
-                    ctx.chunk_size,
-                    chunk_count,
-                    decompressed_blob_size,
-                    compressed_blob_size,
-                    blob_features,
-                    flags,
-                    ctx.blob_meta_header,
-                );
             }
         }
 
@@ -793,13 +763,13 @@ impl BuildContext {
     }
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct BuildOutputBlob {
     pub blob_id: String,
     pub blob_size: u64,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct BuildOutputArtifact {
     // Bootstrap file name in this build.
     pub bootstrap_name: String,

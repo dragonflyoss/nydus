@@ -6,7 +6,7 @@
 //! An in-memory RAFS inode for image building and inspection.
 
 use std::ffi::{OsStr, OsString};
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
 use std::io::Read;
 use std::io::SeekFrom;
@@ -151,6 +151,39 @@ impl Display for Overlay {
     }
 }
 
+#[derive(Clone)]
+pub struct NodeChunk {
+    pub source: ChunkSource,
+    pub inner: ChunkWrapper,
+}
+
+impl Display for NodeChunk {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner,)
+    }
+}
+
+/// ChunkSource flags chunk original source in bootstrap.
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub enum ChunkSource {
+    /// Chunk from parent boostrap.
+    Parent,
+    /// Chunk from this build workflow.
+    Build,
+    /// Chunk from chunk dict bootstrap.
+    Dict,
+}
+
+impl Display for ChunkSource {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        match self {
+            Self::Parent => write!(f, "parent"),
+            Self::Build => write!(f, "build"),
+            Self::Dict => write!(f, "dict"),
+        }
+    }
+}
+
 /// Rafs inode information to support image building and parsing.
 #[derive(Clone)]
 pub struct Node {
@@ -168,7 +201,7 @@ pub struct Node {
     /// Define a disk inode structure to persist to disk.
     pub inode: InodeWrapper,
     /// Chunks info list of regular file
-    pub chunks: Vec<ChunkWrapper>,
+    pub chunks: Vec<NodeChunk>,
     /// Extended attributes.
     pub xattrs: RafsXAttrs,
     /// Symlink info of symlink file
@@ -356,7 +389,16 @@ impl Node {
                         ctx.compressor
                     );
 
-                    self.chunks.push(chunk);
+                    let source = if from_dict {
+                        ChunkSource::Dict
+                    } else {
+                        ChunkSource::Build
+                    };
+                    self.chunks.push(NodeChunk {
+                        source,
+                        inner: chunk,
+                    });
+
                     continue;
                 }
             }
@@ -407,7 +449,10 @@ impl Node {
 
             blob_ctx.add_chunk_meta_info(&chunk)?;
             chunk_dict.add_chunk(chunk.clone());
-            self.chunks.push(chunk);
+            self.chunks.push(NodeChunk {
+                source: ChunkSource::Build,
+                inner: chunk,
+            });
             blob_size += compressed_size as u64;
         }
 
@@ -454,6 +499,7 @@ impl Node {
 
             for chunk in &self.chunks {
                 let chunk_size = chunk
+                    .inner
                     .store(f_bootstrap)
                     .context("failed to dump chunk info to bootstrap")?;
                 node_size += chunk_size;
@@ -644,14 +690,15 @@ impl Node {
             for chunk in self.chunks.iter() {
                 let mut v6_chunk = RafsV6InodeChunkAddr::new();
                 // for erofs, bump id by 1 since device id 0 is bootstrap.
-                v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
-                v6_chunk.set_blob_comp_index(chunk.index());
-                v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
+                v6_chunk.set_blob_index((chunk.inner.blob_index() + 1) as u8);
+                v6_chunk.set_blob_comp_index(chunk.inner.index());
+                v6_chunk
+                    .set_block_addr((chunk.inner.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
                 trace!("name {:?} chunk {}", self.name(), chunk);
 
                 chunks.extend(v6_chunk.as_ref());
 
-                chunk_cache.add_chunk(chunk.clone());
+                chunk_cache.add_chunk(chunk.inner.clone());
             }
 
             f_bootstrap
@@ -1490,7 +1537,7 @@ impl ChunkWrapper {
         }
     }
 
-    pub fn from_chunk_info(cki: &Arc<dyn BlobChunkInfo>) -> Self {
+    pub fn from_chunk_info(cki: &dyn BlobChunkInfo) -> Self {
         if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
             ChunkWrapper::V5(to_rafsv5_chunk_info(cki_v5))
         } else if let Some(cki_v5) = cki.as_any().downcast_ref::<DirectChunkInfoV5>() {

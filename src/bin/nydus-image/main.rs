@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 use nix::unistd::{getegid, geteuid};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
@@ -52,7 +52,7 @@ mod validator;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct OutputSerializer {
     /// The binary version of builder (nydus-image).
     version: String,

@@ -111,7 +111,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{anyhow, Context, Result};
@@ -124,19 +124,17 @@ use crate::core::context::{
     ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
     BuildOutput, BuildOutputBlob, RafsVersion,
 };
-use crate::core::node::{ChunkWrapper, Node, Overlay};
+use crate::core::node::{ChunkSource, ChunkWrapper, Node, NodeChunk, Overlay};
 use crate::core::tree::Tree;
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::RAFS_ROOT_INODE;
+use rafs::metadata::layout::{RafsBlobTable, RAFS_ROOT_INODE};
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
+use storage::device::BlobChunkInfo;
 
-#[derive(Clone)]
-struct CachedNode {
-    chunks: Vec<ChunkWrapper>,
-    digest: RafsDigest,
-}
-
-type CachedNodes = Arc<RwLock<HashMap<PathBuf, Vec<Option<CachedNode>>>>>;
+/// Use ChunkMap to make the final bootstrap of image refer to the added/modified
+/// files in upper snapshot, not the files in lower snapshot.
+/// HashMap<file_path, (Vec<file_chunk>, inode_digest)>.
+type ChunkMap = HashMap<PathBuf, (Vec<NodeChunk>, RafsDigest)>;
 
 /// Compare two files to see if they are the same, file 1 should be from
 /// lower snapshot and file 2 should be from upper snapshot.
@@ -295,10 +293,9 @@ fn dump_blob(
     snapshot_idx: u32,
     blob_id: String,
     blob_storage: Option<ArtifactStorage>,
-    cached_nodes: CachedNodes,
     blob_nodes: &mut Vec<Node>,
     chunk_dict: Arc<dyn ChunkDict>,
-) -> Result<Option<BlobContext>> {
+) -> Result<(Option<BlobContext>, ChunkMap)> {
     let mut blob_ctx = BlobContext::new(blob_id, blob_storage)?;
     blob_ctx.set_chunk_dict(chunk_dict);
     blob_ctx.set_chunk_size(ctx.chunk_size);
@@ -323,34 +320,108 @@ fn dump_blob(
         None
     };
 
-    // Put the regular files from upper snapshot into CachedNodes, to make the
-    // final bootstrap of image refer to the modified files in upper snapshot,
-    // not the files in lower snapshot.
+    let mut chunk_map = HashMap::new();
     for node in blob_nodes {
         if node.is_dir() {
             continue;
         }
-        let mut cached_nodes = cached_nodes.write().unwrap();
-        let capacity = (snapshot_idx + 1) as usize;
-        if let Some(caches) = cached_nodes.get_mut(node.target()) {
-            if capacity > caches.len() {
-                caches.resize(capacity, None);
-            }
-            caches[snapshot_idx as usize] = Some(CachedNode {
-                chunks: node.chunks.clone(),
-                digest: *node.inode.digest(),
-            });
-        } else {
-            let mut caches: Vec<Option<CachedNode>> = vec![None; capacity];
-            caches[snapshot_idx as usize] = Some(CachedNode {
-                chunks: node.chunks.clone(),
-                digest: *node.inode.digest(),
-            });
-            cached_nodes.insert(node.target().clone(), caches);
+        chunk_map.insert(
+            node.target.to_path_buf(),
+            (node.chunks.clone(), *node.inode.digest()),
+        );
+    }
+
+    Ok((blob_ctx, chunk_map))
+}
+
+/// BlobMap allocates blob index for a chunk and can be converted to a final
+/// blob table by `to_blob_mgr` method. The chunk maybe come from different
+/// `ChunkSource`, the `outer_blob_idx` is the blob index in the final bootstrap.
+///
+/// ChunkSource::Build -> inner_blob_idx means snapshot index.
+/// ChunkSource::Parent -> inner_blob_idx means blob index in parent bootstrap.
+/// ChunkSource::Dict -> inner_blob_idx means blob index in chunk dict bootstrap.
+struct BlobMap {
+    /// Current allocated blob index.
+    current: u32,
+    /// For blob deduplication (in same blob id).
+    /// HashMap<blob_id, outer_blob_idx>
+    blob_idx_map: HashMap<String, u32>,
+    /// For blob index allocation of chunk.
+    /// HashMap<(inner_blob_idx, chunk_source), (Option<outer_blob_idx>, blob_ctx)>
+    blob_map: HashMap<(u32, ChunkSource), (Option<u32>, BlobContext)>,
+}
+
+impl BlobMap {
+    fn new() -> Self {
+        Self {
+            current: 0,
+            blob_idx_map: HashMap::new(),
+            blob_map: HashMap::new(),
         }
     }
 
-    Ok(blob_ctx)
+    /// Allocate blob index for a chunk.
+    fn alloc_index(&mut self, source: ChunkSource, inner: u32) -> Result<u32> {
+        let key = (inner, source.clone());
+        let blob = self
+            .blob_map
+            .get_mut(&key)
+            .ok_or_else(|| anyhow!("invalid {} blob, inner blob index {}", source, inner))?;
+
+        let blob_idx = if let Some(allocated) = blob.0 {
+            // Hits allocated blob index in cache.
+            allocated
+        } else if let Some(allocated) = self.blob_idx_map.get(&blob.1.blob_id) {
+            // Hits allocated blob index in same blob id.
+            blob.0 = Some(*allocated);
+            *allocated
+        } else {
+            // Allocate a new blob index.
+            blob.0 = Some(self.current);
+            let new_blob_idx = self.current;
+            self.blob_idx_map
+                .insert(blob.1.blob_id.clone(), new_blob_idx);
+            self.current += 1;
+            new_blob_idx
+        };
+
+        Ok(blob_idx)
+    }
+
+    /// Insert different blobs (from build, dict or parent) for blob index allocation.
+    fn insert_blob(&mut self, source: ChunkSource, inner: u32, blob: BlobContext) {
+        let key = (inner, source);
+        self.blob_map.insert(key, (None, blob));
+    }
+
+    /// Reset blob index allocation cache for a snapshot.
+    fn reset_status(&mut self) {
+        for (_, blob) in self.blob_map.iter_mut() {
+            blob.0 = None;
+        }
+        self.blob_idx_map.clear();
+        self.current = 0;
+    }
+
+    // Convert allocated blob indexes to blob table (blob manager).
+    fn to_blob_mgr(&self) -> BlobManager {
+        let mut blobs: Vec<(u32, BlobContext)> = self
+            .blob_map
+            .iter()
+            .filter_map(|(_, b)| (*b).0.map(|idx| (idx, (*b).1.clone())))
+            .collect();
+        blobs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let mut blob_mgr = BlobManager::new();
+        for (blob_idx, blob_ctx) in blobs {
+            if (blob_idx + 1) as usize > blob_mgr.len() {
+                blob_mgr.add(blob_ctx);
+            }
+        }
+
+        blob_mgr
+    }
 }
 
 pub struct DiffBuilder {
@@ -391,18 +462,14 @@ pub struct DiffBuilder {
     extra_paths: Vec<PathBuf>,
     /// Enable to speed up building (see the detail comments above).
     diff_hint: bool,
-    /// Arc<RwLock<HashMap<PathBuf, Vec<Option<CachedNode>>>>>
-    /// PathBuf used as file rootfs path, Vec index used as snapshot index.
-    ///
-    /// We need to find the chunks of a regular file in any snapshot layer
-    /// by specifying a file path.
-    ///
-    /// Use this to make the final bootstrap of image refer to the chunks of
-    /// modified files in upper snapshot, not the chunks in lower snapshot.
-    cached_nodes: CachedNodes,
     /// The index of snapshot to skip and start building from there for
     /// speeding up diff build.
     skip_snapshot_idx: Option<u32>,
+    /// Use this to allocate blob index for a chunk.
+    blob_map: BlobMap,
+    /// Use this to make the final bootstrap of image refer to the chunks of
+    /// modified files in upper snapshot, not the chunks in lower snapshot.
+    chunk_map: ChunkMap,
 }
 
 impl DiffBuilder {
@@ -420,43 +487,19 @@ impl DiffBuilder {
             None
         };
         Ok(Self {
-            skip_snapshot_idx,
             extra_paths,
             diff_hint,
-            cached_nodes: Arc::new(RwLock::new(HashMap::new())),
+            skip_snapshot_idx,
+            blob_map: BlobMap::new(),
+            chunk_map: HashMap::new(),
         })
     }
 
-    fn cache_chunks(&mut self, inode: &dyn RafsInode, path: &Path) -> Result<()> {
-        let chunk_count = inode.get_chunk_count();
-        let mut chunks = Vec::with_capacity(chunk_count as usize);
-        let mut blob_index = 0;
-        for i in 0..chunk_count {
-            let cki = inode.get_chunk_info(i)?;
-            chunks.push(ChunkWrapper::from_chunk_info(&cki));
-            blob_index = cki.blob_index();
-        }
-
-        // This logic uses CachedNodes to make the final bootstrap of image refer
-        // to the modified files in upper snapshot, not the files in lower snapshot,
-        // so here we should fill None for the lower snapshot that does not contain
-        // the file.
-        let mut cached = vec![None::<CachedNode>; blob_index as usize];
-        cached.push(Some(CachedNode {
-            chunks,
-            digest: inode.get_digest(),
-        }));
-        let mut cached_nodes = self.cached_nodes.write().unwrap();
-        cached_nodes.insert(path.to_path_buf(), cached);
-
-        Ok(())
-    }
-
-    fn load_parent_chunks(
+    fn prepare_parent_chunk_map(
         &mut self,
         bootstrap_mgr: &mut BootstrapManager,
-        blob_mgr: &mut BlobManager,
-    ) -> Result<()> {
+    ) -> Result<BlobManager> {
+        let mut blob_mgr = BlobManager::new();
         if let Some(r) = bootstrap_mgr.f_parent_bootstrap.as_mut() {
             let mut rs = RafsSuper {
                 mode: RafsMode::Cached,
@@ -470,17 +513,27 @@ impl DiffBuilder {
             rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
                                                         path: &Path|
              -> Result<()> {
-                self.cache_chunks(inode, path)
+                let mut chunks = Vec::new();
+                inode.walk_chunks(&mut |cki: &dyn BlobChunkInfo| -> Result<()> {
+                    let chunk = ChunkWrapper::from_chunk_info(cki);
+                    chunks.push(NodeChunk {
+                        source: ChunkSource::Parent,
+                        inner: chunk,
+                    });
+                    Ok(())
+                })?;
+                self.chunk_map
+                    .insert(path.to_path_buf(), (chunks, inode.get_digest()));
+                Ok(())
             })?;
         };
 
-        Ok(())
+        Ok(blob_mgr)
     }
 
     fn build_tree(
         &mut self,
         ctx: &mut BuildContext,
-        blob_mgr: &mut BlobManager,
         snapshot_idx: u32,
         snapshot_path: PathBuf,
     ) -> Result<Tree> {
@@ -494,20 +547,14 @@ impl DiffBuilder {
             true,
         )?;
         let mut tree = Tree::new(root);
-        tree.children = self.build_tree_from_children(
-            ctx,
-            blob_mgr,
-            snapshot_idx,
-            snapshot_path.clone(),
-            snapshot_path,
-        )?;
+        tree.children =
+            self.build_tree_from_children(ctx, snapshot_idx, snapshot_path.clone(), snapshot_path)?;
         Ok(tree)
     }
 
     fn build_tree_from_children(
         &mut self,
         ctx: &mut BuildContext,
-        blob_mgr: &mut BlobManager,
         snapshot_idx: u32,
         snapshot_root: PathBuf,
         snapshot_path: PathBuf,
@@ -521,7 +568,6 @@ impl DiffBuilder {
         children.sort();
 
         let mut trees = Vec::new();
-        let chunk_dict = blob_mgr.get_chunk_dict();
 
         for child_path in children {
             let mut child_node = Node::new(
@@ -538,62 +584,36 @@ impl DiffBuilder {
             let is_dir = child_node.is_dir();
 
             if !is_dir {
-                // This logic uses CachedNodes to make the final bootstrap of image refer
-                // to the modified files in upper snapshot, not the files in lower snapshot.
-                if let Some(caches) = self.cached_nodes.read().unwrap().get(child_node.target()) {
-                    if let Some(Some(cached)) = caches.last() {
-                        child_node.inode.set_child_count(cached.chunks.len() as u32);
-                        child_node.chunks = cached.chunks.clone();
-                        child_node.inode.set_digest(cached.digest);
-                        if !child_node.chunks.is_empty() {
-                            // The bootstrap of current snapshot should only reference the file in
-                            // current snapshot or lower snapshot.
-                            // FIXME: the current CachedNodes implementation may have performance
-                            // issue and need be optimized using a better data structure.
-                            let mut target_snapshot_idx = 0u32;
-                            for (idx, cache) in caches.iter().enumerate() {
-                                if idx > snapshot_idx as usize {
-                                    break;
-                                }
-                                if cache.is_some() {
-                                    target_snapshot_idx = idx as u32;
-                                }
-                            }
-                            for chunk in &mut child_node.chunks {
-                                // FIXME: this implementation may have performance issue and need be optimized.
-                                if let Some(_chunk) = chunk_dict.get_chunk(chunk.id()) {
-                                    // Modify blob index for the chunk in chunk dict.
-                                    let blob = chunk_dict
-                                        .get_blobs_by_inner_idx(_chunk.blob_index())
-                                        .unwrap();
-                                    let blob_index =
-                                        blob_mgr.add_if_not_exsits(BlobContext::from(blob, true));
-                                    chunk.set_index(_chunk.index());
-                                    chunk.set_blob_index(blob_index);
-                                } else {
-                                    // Get the blob index of chunk via current layer index.
-                                    let blob_index = blob_mgr
-                                    .get_blob_idx_by_layer_idx(target_snapshot_idx)
-                                    .ok_or_else(|| {
-                                        anyhow!(
-                                            "failed to get blob index for file {:?}, layer index {}",
-                                            child_path,
-                                            target_snapshot_idx
-                                        )
-                                    })?;
-                                    chunk.set_blob_index(blob_index);
-                                };
-                            }
-                        }
-                    }
+                let (chunks, digest) = self
+                    .chunk_map
+                    .get(child_node.target())
+                    .ok_or_else(|| anyhow!("invalid chunk map"))?;
+                let mut child_chunks = Vec::new();
+                for c in chunks {
+                    let mut chunk = c.clone();
+                    let blob_index = self
+                        .blob_map
+                        .alloc_index(chunk.source.clone(), chunk.inner.blob_index())?;
+                    debug!(
+                        "alloc blob index for {:?}: {} {} => {}, digest {}",
+                        child_path,
+                        chunk.source,
+                        chunk.inner.blob_index(),
+                        blob_index,
+                        chunk.inner.id(),
+                    );
+                    chunk.inner.set_blob_index(blob_index);
+                    child_chunks.push(chunk);
                 }
+                child_node.inode.set_child_count(chunks.len() as u32);
+                child_node.chunks = child_chunks;
+                child_node.inode.set_digest(*digest);
             }
 
             let mut child = Tree::new(child_node);
             if is_dir {
                 child.children = self.build_tree_from_children(
                     ctx,
-                    blob_mgr,
                     snapshot_idx,
                     snapshot_root.clone(),
                     child_path,
@@ -610,44 +630,36 @@ impl DiffBuilder {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
-        blob_mgr: &mut BlobManager,
         snapshot_idx: u32,
         snapshot_path: PathBuf,
     ) -> Result<()> {
         // Build tree from filesystem diff
-        let mut tree = self.build_tree(ctx, blob_mgr, snapshot_idx, snapshot_path)?;
+        let mut tree = self.build_tree(ctx, snapshot_idx, snapshot_path)?;
 
         // Build bootstrap from tree
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
 
+        let blob_mgr = self.blob_map.to_blob_mgr();
+
         // Dump bootstrap file
-        bootstrap_ctx.blobs = match ctx.fs_version {
-            RafsVersion::V5 => {
-                let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
-                bootstrap.dump_rafsv5(ctx, bootstrap_ctx, &blob_table)?;
-                blob_table
-                    .get_all()
-                    .iter()
-                    .map(|b| BuildOutputBlob {
-                        blob_id: b.blob_id().to_string(),
-                        blob_size: b.compressed_size(),
-                    })
-                    .collect::<Vec<BuildOutputBlob>>()
+        let blob_table = blob_mgr.to_blob_table(ctx)?;
+        match blob_table {
+            RafsBlobTable::V5(table) => {
+                bootstrap.dump_rafsv5(ctx, bootstrap_ctx, &table)?;
             }
-            RafsVersion::V6 => {
-                let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
-                bootstrap.dump_rafsv6(ctx, bootstrap_ctx, &blob_table)?;
-                blob_table
-                    .get_all()
-                    .iter()
-                    .map(|b| BuildOutputBlob {
-                        blob_id: b.blob_id().to_string(),
-                        blob_size: b.compressed_size(),
-                    })
-                    .collect::<Vec<BuildOutputBlob>>()
+            RafsBlobTable::V6(table) => {
+                bootstrap.dump_rafsv6(ctx, bootstrap_ctx, &table)?;
             }
         };
+        bootstrap_ctx.blobs = blob_mgr
+            .get_blobs()
+            .iter()
+            .map(|blob| BuildOutputBlob {
+                blob_id: blob.blob_id.to_string(),
+                blob_size: blob.compressed_blob_size,
+            })
+            .collect::<Vec<BuildOutputBlob>>();
 
         Ok(())
     }
@@ -656,7 +668,7 @@ impl DiffBuilder {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
-        blob_mgr: &mut BlobManager,
+        chunk_dict: Arc<dyn ChunkDict>,
     ) -> Result<BuildOutput> {
         let mut paths = vec![ctx.source_path.clone()];
         paths.append(&mut self.extra_paths);
@@ -677,61 +689,55 @@ impl DiffBuilder {
 
         // Skip specified snapshot layers.
         let skip = self.skip_snapshot_idx.map(|idx| idx + 1).unwrap_or(0) as usize;
-        // Add None blob context for snapshots which have empty blobs.
-        for _ in blob_mgr.len()..skip {
-            blob_mgr.add(None);
-        }
 
         // Dump blobs concurrently for every snapshot layer.
         for idx in skip..base {
             let blob_id = ctx.blob_id.clone();
             let blob_storage = ctx.blob_storage.clone();
             let ctx = Arc::new(ctx.clone());
-            let cached_nodes = self.cached_nodes.clone();
             let hint_path_idx = idx + base;
             let hint_path = paths[hint_path_idx].clone();
-            let chunk_dict = blob_mgr.get_chunk_dict().clone();
-            let worker = thread::spawn(move || -> Result<Option<BlobContext>> {
+            let chunk_dict = chunk_dict.clone();
+            let worker = thread::spawn(move || -> Result<(Option<BlobContext>, ChunkMap)> {
                 info!("[{}] diff building with hint {:?}", idx, hint_path);
 
                 let snapshot_idx = idx as u32;
                 let mut blob_nodes = walk_all(ctx.as_ref(), hint_path.clone(), hint_path)?;
 
-                let blob_ctx = dump_blob(
+                let (blob_ctx, chunk_map) = dump_blob(
                     ctx,
                     snapshot_idx,
                     blob_id,
                     blob_storage,
-                    cached_nodes,
                     &mut blob_nodes,
                     chunk_dict,
                 )?;
 
-                Ok(blob_ctx)
+                Ok((blob_ctx, chunk_map))
             });
             workers.push(worker);
         }
 
         // Dump bootstraps for every snapshot layer.
         for (idx, _) in paths.iter().enumerate().take(base).skip(skip) {
+            self.blob_map.reset_status();
             if idx >= skip {
-                // Wait dump worker finish, then add blob context to blob manager.
+                // Wait blob dump worker exits, then add blob to blob map.
                 let worker = workers.remove(0);
-                let blob_ctx = worker.join().expect("panic on diff build")?;
-                blob_mgr.add(blob_ctx);
+                let (blob_ctx, chunk_map) = worker.join().expect("panic on diff build")?;
+                self.chunk_map.extend(chunk_map);
+                if let Some(blob_ctx) = blob_ctx {
+                    self.blob_map
+                        .insert_blob(ChunkSource::Build, idx as u32, blob_ctx);
+                }
             }
             let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
             bootstrap_ctx.name = format!("bootstrap-{}", idx);
-            self.build_bootstrap(
-                ctx,
-                &mut bootstrap_ctx,
-                blob_mgr,
-                idx as u32,
-                paths[idx].clone(),
-            )?;
+            self.build_bootstrap(ctx, &mut bootstrap_ctx, idx as u32, paths[idx].clone())?;
             bootstrap_mgr.add(bootstrap_ctx);
         }
 
+        let blob_mgr = self.blob_map.to_blob_mgr();
         BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 
@@ -739,7 +745,7 @@ impl DiffBuilder {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
-        blob_mgr: &mut BlobManager,
+        chunk_dict: Arc<dyn ChunkDict>,
     ) -> Result<BuildOutput> {
         let mut paths = vec![None, Some(ctx.source_path.clone())];
         let mut extra_paths: Vec<_> = self.extra_paths.iter().map(|p| Some(p.clone())).collect();
@@ -752,10 +758,9 @@ impl DiffBuilder {
             let blob_id = ctx.blob_id.clone();
             let blob_storage = ctx.blob_storage.clone();
             let ctx = Arc::new(ctx.clone());
-            let cached_nodes = self.cached_nodes.clone();
             let (lower, upper) = (paths[idx].clone(), paths[idx + 1].clone());
-            let chunk_dict = blob_mgr.get_chunk_dict().clone();
-            let worker = thread::spawn(move || -> Result<Option<BlobContext>> {
+            let chunk_dict = chunk_dict.clone();
+            let worker = thread::spawn(move || -> Result<(Option<BlobContext>, ChunkMap)> {
                 info!("[{}] diff building {:?} -> {:?}", idx, lower, upper);
 
                 let snapshot_idx = idx as u32;
@@ -764,35 +769,28 @@ impl DiffBuilder {
                 let upper = upper.as_ref().unwrap().clone();
                 let mut blob_nodes = walk_diff(ctx.as_ref(), lower.clone(), upper.clone(), upper)?;
 
-                let blob_ctx = dump_blob(
+                dump_blob(
                     ctx,
                     snapshot_idx,
                     blob_id,
                     blob_storage,
-                    cached_nodes,
                     &mut blob_nodes,
                     chunk_dict,
-                )?;
-
-                Ok(blob_ctx)
+                )
             });
             workers.push(worker);
         }
 
         for (snapshot_idx, worker) in workers.into_iter().enumerate() {
-            let blob_ctx = worker.join().expect("panic on diff build")?;
-            blob_mgr.add(blob_ctx);
+            // FIXME: the behavior of build with diff is not working.
+            let (_, _) = worker.join().expect("panic on diff build")?;
             let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
             let snapshot_path = paths[snapshot_idx + 1].clone().unwrap();
-            self.build_bootstrap(
-                ctx,
-                &mut bootstrap_ctx,
-                blob_mgr,
-                snapshot_idx as u32,
-                snapshot_path,
-            )?;
+            self.build_bootstrap(ctx, &mut bootstrap_ctx, snapshot_idx as u32, snapshot_path)?;
+            todo!();
         }
 
+        let blob_mgr = self.blob_map.to_blob_mgr();
         BuildOutput::new(&blob_mgr, &bootstrap_mgr)
     }
 }
@@ -802,14 +800,37 @@ impl Builder for DiffBuilder {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
-        blob_mgr: &mut BlobManager,
+        dict_blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        self.load_parent_chunks(bootstrap_mgr, blob_mgr)
+        // Add blobs in parent bootstrap to blob map.
+        let mut parent_blob_mgr = self
+            .prepare_parent_chunk_map(bootstrap_mgr)
             .context("failed to load chunks from bootstrap")?;
+        let len = parent_blob_mgr.len();
+        if len > 0 {
+            for blob_idx in (0..len).rev() {
+                let blob_ctx = parent_blob_mgr.take_blob(blob_idx);
+                self.blob_map
+                    .insert_blob(ChunkSource::Parent, blob_idx as u32, blob_ctx);
+            }
+        }
+
+        // Add blobs in chunk dict bootstrap to blob map.
+        dict_blob_mgr.extend_blob_table_from_chunk_dict()?;
+        let len = dict_blob_mgr.len();
+        if len > 0 {
+            for blob_idx in (0..len).rev() {
+                let blob_ctx = dict_blob_mgr.take_blob(blob_idx);
+                self.blob_map
+                    .insert_blob(ChunkSource::Dict, blob_idx as u32, blob_ctx);
+            }
+        }
+
+        let chunk_dict = dict_blob_mgr.get_chunk_dict();
         if self.diff_hint {
-            self.build_with_hint(ctx, bootstrap_mgr, blob_mgr)
+            self.build_with_hint(ctx, bootstrap_mgr, chunk_dict)
         } else {
-            self.build_with_diff(ctx, bootstrap_mgr, blob_mgr)
+            self.build_with_diff(ctx, bootstrap_mgr, chunk_dict)
         }
     }
 }

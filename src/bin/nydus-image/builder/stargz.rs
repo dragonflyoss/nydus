@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::ByteSize;
 use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
-use rafs::metadata::layout::RafsXAttrs;
+use rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
 use rafs::metadata::Inode;
 use storage::device::BlobChunkFlags;
 
@@ -30,7 +30,7 @@ use crate::core::context::{
     BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
     RafsVersion,
 };
-use crate::core::node::{ChunkWrapper, InodeWrapper, Node, Overlay};
+use crate::core::node::{ChunkSource, ChunkWrapper, InodeWrapper, Node, NodeChunk, Overlay};
 use crate::core::tree::Tree;
 
 type RcTocEntry = Rc<RefCell<TocEntry>>;
@@ -343,7 +343,7 @@ impl StargzIndexTreeBuilder {
         // Map hardlink path to linked path: HashMap<<hardlink_path>, <linked_path>>
         let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
         // Map regular file path to chunks: HashMap<<file_path>, <(file_size, chunks)>>
-        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<ChunkWrapper>)> = HashMap::new();
+        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<NodeChunk>)> = HashMap::new();
         let mut nodes = Vec::new();
         let mut tree: Option<Tree> = None;
         let mut last_reg_entry: Option<&TocEntry> = None;
@@ -367,25 +367,28 @@ impl StargzIndexTreeBuilder {
 
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
                 let block_id = entry.block_id(&ctx.blob_id)?;
-                let chunk = match ctx.fs_version {
-                    RafsVersion::V5 => {
-                        ChunkWrapper::V5(RafsV5ChunkInfo {
-                            block_id,
-                            // Will be set later
-                            blob_index: 0,
-                            flags: BlobChunkFlags::COMPRESSED,
-                            // No available data on entry
-                            compress_size: 0,
-                            uncompress_size: decompress_size as u32,
-                            compress_offset: entry.offset as u64,
-                            // No available data on entry
-                            uncompress_offset: 0,
-                            file_offset: entry.chunk_offset as u64,
-                            index: 0,
-                            reserved: 0,
-                        })
-                    }
-                    RafsVersion::V6 => todo!(),
+                let chunk = NodeChunk {
+                    source: ChunkSource::Build,
+                    inner: match ctx.fs_version {
+                        RafsVersion::V5 => {
+                            ChunkWrapper::V5(RafsV5ChunkInfo {
+                                block_id,
+                                // Will be set later
+                                blob_index: 0,
+                                flags: BlobChunkFlags::COMPRESSED,
+                                // No available data on entry
+                                compress_size: 0,
+                                uncompress_size: decompress_size as u32,
+                                compress_offset: entry.offset as u64,
+                                // No available data on entry
+                                uncompress_offset: 0,
+                                file_offset: entry.chunk_offset as u64,
+                                index: 0,
+                                reserved: 0,
+                            })
+                        }
+                        RafsVersion::V6 => todo!(),
+                    },
                 };
 
                 if let Some((size, chunks)) = file_chunk_map.get_mut(&entry.path()?) {
@@ -585,11 +588,11 @@ impl StargzBuilder {
 
             for chunk in node.chunks.iter_mut() {
                 let chunk_index = blob_ctx.alloc_index()?;
-                chunk.set_index(chunk_index);
-                chunk.set_blob_index(blob_index);
-                decompressed_blob_size += chunk.uncompressed_size() as u64;
-                compressed_blob_size += chunk.compressed_size() as u64;
-                inode_hasher.digest_update(chunk.id().as_ref());
+                chunk.inner.set_index(chunk_index);
+                chunk.inner.set_blob_index(blob_index);
+                decompressed_blob_size += chunk.inner.uncompressed_size() as u64;
+                compressed_blob_size += chunk.inner.compressed_size() as u64;
+                inode_hasher.digest_update(chunk.inner.id().as_ref());
             }
 
             let digest = if node.is_symlink() {
@@ -605,11 +608,9 @@ impl StargzBuilder {
 
         blob_ctx.decompressed_blob_size = decompressed_blob_size;
         blob_ctx.compressed_blob_size = compressed_blob_size;
-        blob_mgr.add(if blob_ctx.decompressed_blob_size > 0 {
-            Some(blob_ctx)
-        } else {
-            None
-        });
+        if blob_ctx.decompressed_blob_size > 0 {
+            blob_mgr.add(blob_ctx);
+        }
 
         Ok(())
     }
@@ -647,12 +648,10 @@ impl Builder for StargzBuilder {
         self.generate_nodes(ctx, &mut bootstrap_ctx, blob_mgr)?;
 
         // Dump bootstrap file
-        match ctx.fs_version {
-            RafsVersion::V5 => {
-                let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
-                bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &blob_table)?
-            }
-            RafsVersion::V6 => todo!(),
+        let blob_table = blob_mgr.to_blob_table(ctx)?;
+        match blob_table {
+            RafsBlobTable::V5(table) => bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &table)?,
+            RafsBlobTable::V6(_) => todo!(),
         }
 
         bootstrap_mgr.add(bootstrap_ctx);

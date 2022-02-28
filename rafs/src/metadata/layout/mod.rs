@@ -36,6 +36,11 @@ pub type XattrValue = Vec<u8>;
 pub mod v5;
 pub mod v6;
 
+pub enum RafsBlobTable {
+    V5(v5::RafsV5BlobTable),
+    V6(v6::RafsV6BlobTable),
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! impl_bootstrap_converter {

@@ -191,8 +191,8 @@ impl ImageStat {
 
                 image.chunks += node.chunks.len() as u32;
                 for chunk in node.chunks.iter() {
-                    image.comp_size += chunk.compressed_size() as u64;
-                    image.uncomp_size += chunk.uncompressed_size() as u64;
+                    image.comp_size += chunk.inner.compressed_size() as u64;
+                    image.uncomp_size += chunk.inner.uncompressed_size() as u64;
                 }
 
                 for sz in 12..=20 {

@@ -16,6 +16,7 @@ use crate::core::context::{
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
+use rafs::metadata::layout::RafsBlobTable;
 
 struct FilesystemTreeBuilder {}
 
@@ -152,18 +153,15 @@ impl Builder for DirectoryBuilder {
         )?;
 
         // Add new blob to blob table
-        blob_mgr.add(if blob_exists { Some(blob_ctx) } else { None });
+        if blob_exists {
+            blob_mgr.add(blob_ctx);
+        }
 
         // Dump bootstrap file
-        match ctx.fs_version {
-            RafsVersion::V5 => {
-                let blob_table = blob_mgr.to_blob_table_v5(ctx)?;
-                bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &blob_table)?
-            }
-            RafsVersion::V6 => {
-                let blob_table = blob_mgr.to_blob_table_v6(ctx)?;
-                bootstrap.dump_rafsv6(ctx, &mut bootstrap_ctx, &blob_table)?
-            }
+        let blob_table = blob_mgr.to_blob_table(ctx)?;
+        match blob_table {
+            RafsBlobTable::V5(table) => bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &table)?,
+            RafsBlobTable::V6(table) => bootstrap.dump_rafsv6(ctx, &mut bootstrap_ctx, &table)?,
         }
 
         bootstrap_mgr.add(bootstrap_ctx);
