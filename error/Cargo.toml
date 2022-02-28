@@ -1,6 +1,6 @@
 [package]
 name = "nydus-error"
-version = "0.1.0"
+version = "0.2.0"
 description = "Error handling utilities for Nydus"
 readme = "README.md"
 repository = "https://github.com/dragonflyoss/image-service"
@@ -12,6 +12,6 @@ edition = "2018"
 backtrace = "0.3"
 httpdate = "1.0"
 libc = "0.2"
-log = "0.4.8"
+log = "0.4"
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"

@@ -1,6 +1,6 @@
 [package]
 name = "nydus-app"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["The Nydus Developers"]
 description = "Application framework and utilities for Nydus"
 readme = "README.md"
@@ -15,8 +15,8 @@ built = { version = "=0.4.3", features = ["chrono", "git2"] }
 [dependencies]
 flexi_logger = { version = "0.17" }
 libc = "0.2"
-log = "0.4.8"
+log = "0.4"
 nix = ">=0.23.0"
 serde = { version = ">=1.0.27", features = ["serde_derive"] }
 
-nydus-error = "0.1"
+nydus-error = { version = "0.2", path = "../error" }
