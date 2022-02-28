@@ -25,6 +25,8 @@ type Pusher struct {
 type PushRequest struct {
 	Meta string
 	Blob string
+
+	ParentBlobs []string
 }
 
 type PushResult struct {
@@ -69,10 +71,18 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 // and blob file name is the hash of the blobfile that is extracted from output.json
 func (p *Pusher) Push(req PushRequest) (PushResult, error) {
 	p.logger.Info("start to push meta and blob to remote backend")
-	p.logger.Infof("push blob %s", req.Blob)
 	// todo: add a suitable timeout
 	ctx := context.Background()
 	// todo: use blob desc to build manifest
+
+	for _, blob := range req.ParentBlobs {
+		// try push parent blobs
+		if _, err := p.blobBackend.Upload(ctx, blob, p.blobFilePath(blob), 0, false); err != nil {
+			return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")
+		}
+	}
+
+	p.logger.Infof("push blob %s", req.Blob)
 	if req.Blob != "" {
 		if _, err := p.blobBackend.Upload(ctx, req.Blob, p.blobFilePath(req.Blob), 0, false); err != nil {
 			return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")

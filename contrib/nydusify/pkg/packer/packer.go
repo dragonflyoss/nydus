@@ -12,7 +12,9 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/compactor"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -93,6 +95,9 @@ type PackRequest struct {
 	ChunkDict string
 	// PushBlob whether to push blob and meta to remote backend
 	PushBlob bool
+
+	TryCompact        bool
+	CompactConfigPath string
 }
 
 type PackResult struct {
@@ -198,16 +203,78 @@ func (p *Packer) getNewBlobsHash(exists []string) (string, error) {
 	return "", nil
 }
 
+func (p *Packer) dumpBlobBackendConfig(filePath string) (func(), error) {
+	file, err := os.OpenFile(filePath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	n, err := file.Write(p.BackendConfig.rawBlobBackendCfg())
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		zeros := make([]byte, n)
+		file, err = os.OpenFile(filePath, os.O_WRONLY, 0644)
+		if err != nil {
+			logrus.Errorf("open config file %s failed err = %v", filePath, err)
+			return
+		}
+		file.Write(zeros)
+		file.Close()
+		os.Remove(filePath)
+	}, nil
+}
+
+func (p *Packer) tryCompactParent(req *PackRequest) error {
+	if !req.TryCompact || req.Parent == "" || p.BackendConfig == nil {
+		return nil
+	}
+	// dumps backend config file
+	backendConfigPath := filepath.Join(p.OutputDir, "backend-config.json")
+	destroy, err := p.dumpBlobBackendConfig(backendConfigPath)
+	if err != nil {
+		return errors.Wrap(err, "dump backend config file failed")
+	}
+	// destroy backend config file, because there are secrets
+	defer destroy()
+	c, err := compactor.NewCompactor(p.nydusImagePath, p.OutputDir, req.CompactConfigPath)
+	if err != nil {
+		return errors.Wrap(err, "new compactor failed")
+	}
+	// only support oss now
+	outputBootstrap, err := c.Compact(req.Parent, req.ChunkDict, "oss", backendConfigPath)
+	if err != nil {
+		return errors.Wrap(err, "compact parent failed")
+	}
+	// check output bootstrap
+	_, err = os.Stat(outputBootstrap)
+	if err != nil && !os.IsNotExist(err) {
+		return errors.Wrapf(err, "stat target bootstrap failed")
+	}
+	if err == nil {
+		// parent --> output bootstrap
+		p.logger.Infof("compact bootstrap %s successfully, use parent %s", req.Parent, outputBootstrap)
+		req.Parent = outputBootstrap
+	}
+
+	return nil
+}
+
 func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	p.logger.Infof("start to pack source directory %q", req.TargetDir)
+	if err := p.tryCompactParent(&req); err != nil {
+		p.logger.Errorf("try compact parent bootstrap err %v", err)
+		return PackResult{}, err
+	}
 	blobPath := p.blobFilePath(blobFileName(req.Meta))
 	parentBlobs, err := p.getBlobsFromBootstrap(req.Parent)
 	if err != nil {
-		return PackResult{}, err
+		return PackResult{}, errors.Wrap(err, "get blobs from parent bootstrap failed")
 	}
 	chunkDictBlobs, err := p.getChunkDictBlobs(req.ChunkDict)
 	if err != nil {
-		return PackResult{}, err
+		return PackResult{}, errors.Wrap(err, "get blobs from chunk-dict failed")
 	}
 	if err = p.builder.Run(build.BuilderOption{
 		ParentBootstrapPath: req.Parent,
@@ -226,10 +293,9 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	}
 	if newBlobHash == "" {
 		blobPath = ""
-	}
-	if req.Parent != "" {
-		p.logger.Infof("should make sure parent blobs already exists on oss or local")
-		if newBlobHash != "" {
+	} else {
+		if req.Parent != "" || req.PushBlob {
+			p.logger.Infof("rename blob file into sha256 csum")
 			if err = os.Rename(blobPath, p.blobFilePath(newBlobHash)); err != nil {
 				return PackResult{}, errors.Wrap(err, "failed to rename blob file")
 			}
@@ -251,6 +317,8 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	pushResult, err := p.pusher.Push(PushRequest{
 		Meta: req.Meta,
 		Blob: newBlobHash,
+
+		ParentBlobs: parentBlobs,
 	})
 	if err != nil {
 		return PackResult{}, errors.Wrap(err, "failed to push pack result to remote")
