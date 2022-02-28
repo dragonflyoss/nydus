@@ -97,8 +97,9 @@ where
         self.c.is_ready(chunk)
     }
 
-    fn check_ready_and_mark_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
-        let mut ready = self.c.is_ready(chunk)?;
+    fn check_ready_and_mark_pending(&self, chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
+        let mut ready = self.c.is_ready(chunk).map_err(StorageError::CacheIndex)?;
+
         if ready {
             return Ok(true);
         }
@@ -122,14 +123,15 @@ where
                     index,
                     chunk.compress_offset()
                 );
-                Err(eio!("timeout when read data from backend"))
+
+                Err(StorageError::Timeout)
             } else {
                 self.check_ready_and_mark_pending(chunk)
             }
         } else {
             // Double check to close the window where prior slot was just removed after backend IO
             // returned.
-            if self.c.is_ready(chunk)? {
+            if self.c.is_ready(chunk).map_err(StorageError::CacheIndex)? {
                 ready = true;
             } else {
                 guard.insert(index, Arc::new(Slot::new()));

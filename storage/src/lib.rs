@@ -81,6 +81,7 @@ pub enum StorageError {
     VolatileSlice(vm_memory::VolatileMemoryError),
     MemOverflow,
     NotContinuous,
+    CacheIndex(std::io::Error),
 }
 
 impl Display for StorageError {
@@ -91,6 +92,7 @@ impl Display for StorageError {
             StorageError::MemOverflow => write!(f, "memory overflow when doing storage backend IO"),
             StorageError::NotContinuous => write!(f, "address ranges are not continuous"),
             StorageError::VolatileSlice(e) => write!(f, "{}", e),
+            StorageError::CacheIndex(e) => write!(f, "Wrong cache index {}", e),
         }
     }
 }

@@ -36,6 +36,7 @@ use std::any::Any;
 use std::io::Result;
 
 use crate::device::BlobChunkInfo;
+use crate::StorageResult;
 
 pub use blob_state_map::BlobStateMap;
 pub use digested_chunk_map::DigestedChunkMap;
@@ -58,11 +59,11 @@ pub trait ChunkMap: Any + Send + Sync {
     /// Check whether the chunk is ready for use, and mark it as pending if not ready yet.
     ///
     /// The function returns:
-    /// - Err if timeout
-    /// - Ok(true) if the the chunk is ready.
-    /// - Ok(false) and also marks the chunk as pending, either set_ready_and_clear_pending() or
+    /// - `Err(Timeout)` waiting for inflight backend IO timeouts.
+    /// - `Ok(true)` if the the chunk is ready.
+    /// - `Ok(false)` marks the chunk as pending, either set_ready_and_clear_pending() or
     ///   clear_pending() must be called to clear the pending state.
-    fn check_ready_and_mark_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<bool> {
+    fn check_ready_and_mark_pending(&self, _chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
         panic!("no support of check_ready_and_mark_pending()");
     }
 

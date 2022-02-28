@@ -537,9 +537,12 @@ impl FileCacheEntry {
 
         trace!("dispatch single io range {:?}", req);
         for (i, chunk) in req.chunks.iter().enumerate() {
-            let is_ready = self
-                .chunk_map
-                .check_ready_and_mark_pending(chunk.as_base())?;
+            let is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_base()) {
+                Ok(true) => true,
+                Ok(false) => false,
+                Err(StorageError::Timeout) => false, // Retry if waiting for inflight IO timeouts
+                Err(e) => return Err(einval!(e)),
+            };
 
             // Directly read data from the file cache into the user buffer iff:
             // - the chunk is ready in the file cache
