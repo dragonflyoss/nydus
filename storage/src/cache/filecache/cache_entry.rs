@@ -578,9 +578,12 @@ impl FileCacheEntry {
                         req.tags[i].clone(),
                         Some(req.chunks[i].clone()),
                     )?;
-                } else if !is_ready {
+                } else {
+                    state.commit();
                     // On slow path, don't try to handle internal(read amplification) IO.
-                    self.chunk_map.clear_pending(chunk.as_base());
+                    if !is_ready {
+                        self.chunk_map.clear_pending(chunk.as_base());
+                    }
                 }
             } else {
                 let tag = if let BlobIoTag::User(ref s) = req.tags[i] {
