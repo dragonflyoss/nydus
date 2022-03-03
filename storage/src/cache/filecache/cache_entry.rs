@@ -221,6 +221,15 @@ impl BlobCache for FileCacheEntry {
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
         let mut bios = bios.to_vec();
+        bios.iter_mut().for_each(|b| {
+            if let Some(ref chunks_meta) = self.meta {
+                // TODO: the first blob backend io triggers chunks array download.
+                if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
+                    let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
+                    b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+                }
+            }
+        });
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
 
