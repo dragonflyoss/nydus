@@ -597,8 +597,8 @@ impl Bootstrap {
 
         // dump devtslot
         bootstrap_writer
-            .seek_to_offset(EROFS_DEVTABLE_OFFSET as u64)
-            .context("failed to seek to devtslot")?;
+            .seek_offset(EROFS_DEVTABLE_OFFSET as u64)
+            .context("failed to seek devtslot")?;
         for slot in devtable.iter() {
             slot.store(&mut bootstrap_writer)
                 .context("failed to store device slot")?;
@@ -606,7 +606,7 @@ impl Bootstrap {
 
         // Dump blob table
         bootstrap_writer
-            .seek_to_offset(blob_table_offset as u64)
+            .seek_offset(blob_table_offset as u64)
             .context("failed seek for extended blob table offset")?;
         blob_table
             .store(&mut bootstrap_writer)
@@ -636,8 +636,8 @@ impl Bootstrap {
             ext_sb.set_prefetch_table_offset(prefetch_table_offset);
             ext_sb.set_prefetch_table_size(prefetch_table_size);
             bootstrap_writer
-                .seek_to_offset(prefetch_table_offset as u64)
-                .context("failed seek to prefetch table offset")?;
+                .seek_offset(prefetch_table_offset as u64)
+                .context("failed seek prefetch table offset")?;
 
             pt.store(&mut bootstrap_writer).unwrap();
 

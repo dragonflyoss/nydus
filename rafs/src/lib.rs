@@ -134,7 +134,7 @@ pub trait RafsIoWrite: Write + Seek + 'static {
     }
 
     /// Seek the writer to the `offset`.
-    fn seek_to_offset(&mut self, offset: u64) -> Result<u64> {
+    fn seek_offset(&mut self, offset: u64) -> Result<u64> {
         self.seek(SeekFrom::Start(offset)).map_err(|e| {
             error!("Seeking to offset {} from start fails, {}", offset, e);
             e
