@@ -878,7 +878,8 @@ impl RafsInode for OndiskInodeWrapper {
 
     /// Check whether the inode is a hardlink.
     fn is_hardlink(&self) -> bool {
-        todo!()
+        let inode = self.disk_inode();
+        inode.nlink() > 1 && self.is_reg()
     }
 
     /// Get inode number of the parent directory.
