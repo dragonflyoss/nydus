@@ -543,9 +543,22 @@ impl Bootstrap {
 
         let blob_table_entries = blob_table.entries.len();
 
+        let (prefetch_table_offset, prefetch_table_size) = if ctx.prefetch.len() > 0 {
+            // Prefetch table is very close to blob devices table
+            let offset = blob_table_offset + blob_table_size;
+            let size = ctx.prefetch.len() * size_of::<u64>() as u32;
+            trace!("prefetch table locates at offset {} size {}", offset, size);
+            (offset, size)
+        } else {
+            (0, 0)
+        };
+
         let orig_meta_addr = bootstrap_ctx.nodes[0].offset;
         let meta_addr = if blob_table_size > 0 {
-            align_offset(blob_table_offset + blob_table_size, EROFS_BLOCK_SIZE as u64)
+            align_offset(
+                blob_table_offset + blob_table_size + prefetch_table_size as u64,
+                EROFS_BLOCK_SIZE as u64,
+            )
         } else {
             orig_meta_addr
         };
@@ -613,7 +626,28 @@ impl Bootstrap {
             Result<()>
         )?;
 
-        // Erofs does not have inode table, so we lose the chance to decide if this
+        // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
+        let prefetch_table = ctx
+            .prefetch
+            .get_rafsv6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
+
+        if let Some(mut pt) = prefetch_table {
+            // Device slots are very close to extended super block.
+            ext_sb.set_prefetch_table_offset(prefetch_table_offset);
+            ext_sb.set_prefetch_table_size(prefetch_table_size);
+            bootstrap_writer
+                .seek_to_offset(prefetch_table_offset as u64)
+                .context("failed seek to prefetch table offset")?;
+
+            pt.store(&mut bootstrap_writer).unwrap();
+
+            bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
+            ext_sb
+                .store(&mut bootstrap_writer)
+                .context("failed to revise extended SB")?;
+        }
+
+        // EROFS does not have inode table, so we lose the chance to decide if this
         // image has xattr. So we have to rewrite extended super block.
         if ctx.has_xattr {
             ext_sb.set_has_xattr();

@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
 use rafs::metadata::layout::v5::RafsV5PrefetchTable;
+use rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 use crate::node::Node;
 
@@ -164,6 +165,40 @@ impl Prefetch {
             let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self.readahead_patterns.values().filter_map(|v| *v) {
                 prefetch_table.add_entry(i as u32);
+            }
+            Some(prefetch_table)
+        } else {
+            None
+        }
+    }
+
+    pub fn len(&self) -> u32 {
+        if self.policy == PrefetchPolicy::Fs {
+            self.readahead_patterns.values().len() as u32
+        } else {
+            0
+        }
+    }
+
+    pub fn get_rafsv6_prefetch_table(
+        &mut self,
+        nodes: &[Node],
+        meta_addr: u64,
+    ) -> Option<RafsV6PrefetchTable> {
+        if self.policy == PrefetchPolicy::Fs {
+            let mut prefetch_table = RafsV6PrefetchTable::new();
+            for i in self.readahead_patterns.values().filter_map(|v| *v) {
+                trace!(
+                    "v6 prefetch table: map node index {} to offset {} nid {} path {:?} name {:?}",
+                    i,
+                    nodes[i as usize].offset,
+                    calculate_nid(nodes[i as usize].offset, meta_addr),
+                    nodes[i as usize].path(),
+                    nodes[i as usize].name()
+                );
+                // 32bit nid can represent 128GB bootstrap, it is large enough, no need
+                // to worry about casting here
+                prefetch_table.add_entry(calculate_nid(nodes[i as usize].offset, meta_addr) as u32);
             }
             Some(prefetch_table)
         } else {
