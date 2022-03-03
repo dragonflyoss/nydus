@@ -464,9 +464,7 @@ impl Rafs {
         let prefetch_all = self.prefetch_all;
 
         let _ = std::thread::spawn(move || {
-            if sb.meta.is_v5() {
-                Self::do_prefetch_v5(reader, prefetch_files, prefetch_all, sb, device);
-            }
+            Self::do_prefetch(reader, prefetch_files, prefetch_all, sb, device);
         });
     }
 
@@ -479,7 +477,7 @@ impl Rafs {
         self.sb.superblock.root_ino()
     }
 
-    fn do_prefetch_v5(
+    fn do_prefetch(
         mut reader: RafsIoReader,
         prefetch_files: Option<Vec<PathBuf>>,
         prefetch_all: bool,

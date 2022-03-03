@@ -2,14 +2,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::io::Result;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use super::direct_v6::DirectSuperBlockV6;
-use super::layout::v6::{RafsV6SuperBlock, RafsV6SuperBlockExt};
+use super::layout::v6::{RafsV6PrefetchTable, RafsV6SuperBlock, RafsV6SuperBlockExt};
 use super::layout::RAFS_SUPER_VERSION_V6;
+use super::*;
 use super::{RafsMode, RafsSuper, RafsSuperBlock, RafsSuperFlags};
+
 use crate::RafsIoReader;
+use crate::{RafsError, RafsResult};
 
 impl RafsSuper {
     pub(crate) fn try_load_v6(&mut self, r: &mut RafsIoReader) -> Result<bool> {
@@ -39,6 +44,15 @@ impl RafsSuper {
         self.meta.meta_blkaddr = sb.s_meta_blkaddr;
         self.meta.root_nid = sb.s_root_nid;
 
+        self.meta.prefetch_table_entries = ext_sb.prefetch_table_size() / size_of::<u64>() as u32;
+        self.meta.prefetch_table_offset = ext_sb.prefetch_table_offset();
+
+        trace!(
+            "prefetch table offset {} entries {} ",
+            self.meta.prefetch_table_offset,
+            self.meta.prefetch_table_entries
+        );
+
         match self.mode {
             RafsMode::Direct => {
                 let mut sb_v6 = DirectSuperBlockV6::new(&self.meta, self.validate_digest);
@@ -48,6 +62,48 @@ impl RafsSuper {
             }
             RafsMode::Cached => Err(enosys!("Rafs v6 does not support cached mode")),
         }
+    }
+
+    pub(crate) fn prefetch_data_v6<F>(&self, r: &mut RafsIoReader, fetcher: F) -> RafsResult<usize>
+    where
+        F: Fn(&mut BlobIoVec),
+    {
+        let hint_entries = self.meta.prefetch_table_entries as usize;
+
+        if hint_entries == 0 {
+            return Ok(0);
+        }
+
+        let mut prefetch_table = RafsV6PrefetchTable::new();
+        let mut hardlinks: HashSet<u64> = HashSet::new();
+        let mut head_desc = BlobIoVec::new();
+
+        // Try to prefetch according to the list of files specified by the
+        // builder's `--prefetch-policy fs` option.
+        prefetch_table
+            .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
+            .map_err(|e| {
+                RafsError::Prefetch(format!(
+                    "Failed in loading hint prefetch table at offset {}. {:?}",
+                    self.meta.prefetch_table_offset, e
+                ))
+            })?;
+
+        trace!("prefetch table contents {:?}", prefetch_table);
+
+        for ino in prefetch_table.inodes {
+            // Inode number 0 is invalid, it was added because prefetch table has to be aligned.
+            if ino == 0 {
+                break;
+            }
+            debug!("hint prefetch inode {}", ino);
+            self.prefetch_data(ino as u64, &mut head_desc, &mut hardlinks, &fetcher)
+                .map_err(|e| RafsError::Prefetch(e.to_string()))?;
+        }
+        // The left chunks whose size is smaller than 4MB will be fetched here.
+        fetcher(&mut head_desc);
+
+        Ok(hint_entries)
     }
 }
 
