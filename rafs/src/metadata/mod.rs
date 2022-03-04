@@ -553,15 +553,16 @@ impl RafsSuper {
 
     /// Convert a file path to an inode number.
     pub fn ino_from_path(&self, f: &Path) -> Result<u64> {
+        let root_ino = self.superblock.root_ino();
         if f == Path::new("/") {
-            return Ok(ROOT_ID);
+            return Ok(root_ino);
         }
 
         if !f.starts_with("/") {
             return Err(einval!());
         }
 
-        let mut parent = self.get_inode(ROOT_ID, self.validate_digest)?;
+        let mut parent = self.get_inode(root_ino, self.validate_digest)?;
 
         let entries = f
             .components()
