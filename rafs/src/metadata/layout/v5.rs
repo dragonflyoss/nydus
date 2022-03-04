@@ -1207,9 +1207,9 @@ impl RafsXAttrs {
     }
 }
 
-/// Allocate a group of `BlobIoVec` to handle blob io to range `offset..ofset + size`.
+/// Allocate a group of `BlobIoVec` to handle blob io to range `offset..(offset+size)`.
 ///
-/// The range `offset..ofset + size` may be backed by multiple blobs, so a group of `BlobIoVec` will
+/// The range `offset..(offset+size)` may be backed by multiple blobs, so a group of `BlobIoVec` will
 /// be returned on success, each one covers a continuous range on a single blob.
 pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeChunkOps + RafsV5InodeOps>(
     inode: &I,
