@@ -591,10 +591,6 @@ impl Bootstrap {
         ext_sb.set_blob_table_offset(blob_table_offset);
         ext_sb.set_blob_table_size(blob_table_size as u32);
 
-        ext_sb
-            .store(&mut bootstrap_writer)
-            .context("failed to store extended SB")?;
-
         // dump devtslot
         bootstrap_writer
             .seek_offset(EROFS_DEVTABLE_OFFSET as u64)
@@ -640,22 +636,18 @@ impl Bootstrap {
                 .context("failed seek prefetch table offset")?;
 
             pt.store(&mut bootstrap_writer).unwrap();
-
-            bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
-            ext_sb
-                .store(&mut bootstrap_writer)
-                .context("failed to revise extended SB")?;
         }
 
         // EROFS does not have inode table, so we lose the chance to decide if this
         // image has xattr. So we have to rewrite extended super block.
         if ctx.has_xattr {
             ext_sb.set_has_xattr();
-            bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
-            ext_sb
-                .store(&mut bootstrap_writer)
-                .context("failed to revise extended SB")?;
         }
+
+        bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
+        ext_sb
+            .store(&mut bootstrap_writer)
+            .context("failed to write extended super block")?;
 
         // Flush remaining data in BufWriter to file
         bootstrap_writer
