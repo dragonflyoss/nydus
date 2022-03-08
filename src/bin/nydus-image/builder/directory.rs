@@ -50,6 +50,7 @@ impl FilesystemTreeBuilder {
                 Overlay::UpperAddition,
                 ctx.chunk_size,
                 parent.explicit_uidgid,
+                true,
             )
             .with_context(|| format!("failed to create node {:?}", path))?;
 
@@ -91,6 +92,7 @@ impl DirectoryBuilder {
             Overlay::UpperAddition,
             ctx.chunk_size,
             ctx.explicit_uidgid,
+            true,
         )?;
         let mut tree = Tree::new(node);
         let tree_builder = FilesystemTreeBuilder::new();
