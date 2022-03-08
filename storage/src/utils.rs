@@ -8,8 +8,10 @@ use std::io::{ErrorKind, Result};
 use std::os::unix::io::RawFd;
 use std::slice::from_raw_parts_mut;
 
+use fuse_backend_rs::abi::fuse_abi::off64_t;
 use fuse_backend_rs::transport::FileVolatileSlice;
-use libc::off64_t;
+#[cfg(target_os = "macos")]
+use libc::{fcntl, radvisory};
 use nix::sys::uio::{preadv, IoVec};
 use nydus_utils::{
     digest::{self, RafsDigest},
@@ -187,12 +189,33 @@ impl<'a> MemSliceCursor<'a> {
 ///
 /// Call libc::readahead on every 128KB range because otherwise readahead stops at kernel bdi
 /// readahead size which is 128KB by default.
+#[cfg(target_os = "linux")]
 pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
     offset = round_down_4k(offset);
     while offset < end {
         // Kernel default 128KB readahead size
         let count = std::cmp::min(128 << 10, end - offset);
         unsafe { libc::readahead(fd, offset as i64, count as usize) };
+        offset += count;
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
+    offset = round_down_4k(offset);
+    while offset < end {
+        // Kernel default 128KB readahead size
+        let count = std::cmp::min(128 << 10, end - offset);
+        unsafe {
+            fcntl(
+                fd,
+                libc::F_RDADVISE,
+                radvisory {
+                    ra_offset: offset as i64,
+                    ra_count: count as i32,
+                },
+            );
+        }
         offset += count;
     }
 }

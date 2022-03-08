@@ -12,7 +12,7 @@ use std::fmt::Debug;
 use std::io;
 use std::sync::mpsc::{RecvError, SendError};
 
-use micro_http::{Body, Method, Request, Response, StatusCode, Version};
+use dbs_uhttp::{Body, Method, Request, Response, StatusCode, Version};
 
 use serde::Deserialize;
 use serde_json::Error as SerdeError;
@@ -52,7 +52,7 @@ pub enum ApiError {
     /// Cannot mount a resource
     MountFailure(DaemonErrorKind),
     /// API request send error
-    RequestSend(SendError<ApiRequest>),
+    RequestSend(SendError<Option<ApiRequest>>),
     /// Wrong response payload type
     ResponsePayloadType,
     /// API response receive error

@@ -17,9 +17,9 @@ use std::{mem, slice};
 
 use libc::{c_void, iovec};
 use vm_memory::ByteValued;
-use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
 use super::message::*;
+use dbs_uhttp::{ScmSocket, SysError};
 use std::net::Shutdown;
 
 #[allow(clippy::enum_variant_names)]
@@ -118,7 +118,14 @@ impl Error {
     }
 }
 
-impl std::convert::From<vmm_sys_util::errno::Error> for Error {
+impl std::convert::From<std::io::Error> for Error {
+    #[allow(unreachable_patterns)] // EWOULDBLOCK equals to EGAIN on linux
+    fn from(err: std::io::Error) -> Self {
+        Error::SocketError(err)
+    }
+}
+
+impl std::convert::From<SysError> for Error {
     /// Convert raw socket errors into meaningful blob manager errors.
     ///
     /// The vmm_sys_util::errno::Error is a simple wrapper over the raw errno, which doesn't means
@@ -130,7 +137,7 @@ impl std::convert::From<vmm_sys_util::errno::Error> for Error {
     /// * - Error::SocketBroken: the underline socket is broken.
     /// * - Error::SocketError: other socket related errors.
     #[allow(unreachable_patterns)] // EWOULDBLOCK equals to EGAIN on linux
-    fn from(err: vmm_sys_util::errno::Error) -> Self {
+    fn from(err: SysError) -> Self {
         match err.errno() {
             // The socket is marked nonblocking and the requested operation would block.
             libc::EAGAIN => Error::SocketRetry(IOError::from_raw_os_error(libc::EAGAIN)),
@@ -483,6 +490,7 @@ impl Endpoint {
         iovs: &mut [iovec],
     ) -> Result<(usize, Option<Vec<File>>)> {
         let mut fd_array = vec![0; MAX_ATTACHED_FD_ENTRIES];
+
         let (bytes, fds) = self.sock.recv_with_fds(iovs, &mut fd_array)?;
 
         let files = match fds {
@@ -974,12 +982,23 @@ mod tests {
             .unwrap();
         assert_eq!(len, 4);
 
-        let (bytes, _) = slave.recv_data(5).unwrap();
+        let (bytes, _buf) = slave.recv_data(5).unwrap();
+        #[cfg(target_os = "linux")]
         assert_eq!(bytes, 5);
 
-        let (bytes, _, files) = slave.recv_into_buf(0x4).unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(bytes, 4);
+
+        let (bytes, _buf, files) = slave.recv_into_buf(0x4).unwrap();
+        #[cfg(target_os = "linux")]
         assert_eq!(bytes, 3);
+        #[cfg(target_os = "linux")]
         assert!(files.is_none());
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(bytes, 4);
+        #[cfg(target_os = "macos")]
+        assert!(files.is_some());
 
         // If the target fd array is too small, extra file descriptors will get lost.
         let len = master

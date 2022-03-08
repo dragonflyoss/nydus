@@ -488,7 +488,7 @@ impl OndiskInodeWrapper {
 
     fn mode_format_bits(&self) -> u32 {
         let i = self.disk_inode();
-        i.mode() as u32 & libc::S_IFMT
+        i.mode() as u32 & libc::S_IFMT as u32
     }
 
     fn make_chunk_io(
@@ -884,17 +884,17 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn is_dir(&self) -> bool {
-        self.mode_format_bits() == libc::S_IFDIR
+        self.mode_format_bits() == libc::S_IFDIR as u32
     }
 
     /// Check whether the inode is a symlink.
     fn is_symlink(&self) -> bool {
-        self.mode_format_bits() == libc::S_IFLNK
+        self.mode_format_bits() == libc::S_IFLNK as u32
     }
 
     /// Check whether the inode is a regular file.
     fn is_reg(&self) -> bool {
-        self.mode_format_bits() == libc::S_IFREG
+        self.mode_format_bits() == libc::S_IFREG as u32
     }
 
     /// Check whether the inode is a hardlink.

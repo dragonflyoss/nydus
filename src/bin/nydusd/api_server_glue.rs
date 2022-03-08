@@ -3,15 +3,15 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+use mio::{Events, Poll, Token, Waker};
 use std::convert::From;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
-use event_manager::{EventOps, EventSubscriber, Events};
 use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
-use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use nydus::{FsBackendType, NydusError};
 use nydus_api::http_endpoint::{
@@ -25,6 +25,7 @@ use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDae
 use crate::fusedev::FusedevDaemon;
 
 type Result<T> = ApiResult<T>;
+const API_WAKE_TOKEN: Token = Token(0);
 
 impl From<DaemonError> for DaemonErrorKind {
     fn from(e: DaemonError) -> Self {
@@ -51,22 +52,18 @@ impl From<NydusError> for DaemonError {
 
 pub struct ApiServer {
     to_http: Sender<ApiResponse>,
-    daemon: Arc<dyn NydusDaemon>,
+    daemon: Arc<dyn NydusDaemon + Send + Sync>,
 }
 
 impl ApiServer {
     pub fn new(
         to_http: Sender<ApiResponse>,
-        daemon: Arc<dyn NydusDaemon>,
+        daemon: Arc<dyn NydusDaemon + Send + Sync>,
     ) -> std::io::Result<Self> {
         Ok(ApiServer { to_http, daemon })
     }
 
-    fn process_request(&self, from_http: &Receiver<ApiRequest>) -> std::io::Result<()> {
-        let request = from_http
-            .recv()
-            .map_err(|e| epipe!(format!("receive API channel failed {}", e)))?;
-
+    fn process_request(&self, request: ApiRequest) -> std::io::Result<()> {
         let resp = match request {
             ApiRequest::DaemonInfo => self.daemon_info(),
             ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
@@ -287,58 +284,67 @@ impl ApiServer {
 }
 
 pub struct ApiSeverSubscriber {
-    event_fd: EventFd,
+    poll: Poll,
+    waker: Arc<Waker>,
     server: ApiServer,
-    api_receiver: Receiver<ApiRequest>,
+    api_receiver: Receiver<Option<ApiRequest>>,
 }
 
 impl ApiSeverSubscriber {
-    pub fn new(server: ApiServer, api_receiver: Receiver<ApiRequest>) -> std::io::Result<Self> {
-        match EventFd::new(0) {
-            Ok(fd) => Ok(Self {
-                event_fd: fd,
-                server,
-                api_receiver,
-            }),
-            Err(e) => {
-                error!("Creating event fd failed. {}", e);
-                Err(e)
-            }
-        }
+    pub fn new(
+        server: ApiServer,
+        api_receiver: Receiver<Option<ApiRequest>>,
+    ) -> std::io::Result<Self> {
+        let poll = Poll::new()?;
+        let waker = Waker::new(poll.registry(), API_WAKE_TOKEN)?;
+        Ok(Self {
+            waker: Arc::new(waker),
+            poll,
+            server,
+            api_receiver,
+        })
     }
 
-    pub fn get_event_fd(&self) -> std::io::Result<EventFd> {
-        self.event_fd.try_clone()
-    }
-}
-
-impl EventSubscriber for ApiSeverSubscriber {
-    fn process(&self, events: Events, event_ops: &mut EventOps) {
-        self.event_fd
-            .read()
-            .map(|_| ())
-            .map_err(|e| last_error!(e))
-            .unwrap_or_else(|_| {});
-        match events.event_set() {
-            EventSet::IN => {
-                self.server
-                    .process_request(&self.api_receiver)
-                    .unwrap_or_else(|e| error!("API server process events failed, {}", e));
-            }
-            EventSet::ERROR => {
-                error!("Got error on the monitored event.");
-            }
-            EventSet::HANG_UP => {
-                event_ops
-                    .remove(events)
-                    .unwrap_or_else(|e| error!("Encountered error during cleanup, {}", e));
-            }
-            _ => {}
-        }
+    pub fn get_waker(&self) -> Arc<Waker> {
+        self.waker.clone()
     }
 
-    fn init(&self, ops: &mut EventOps) {
-        ops.add(Events::new(&self.event_fd, EventSet::IN))
-            .expect("Cannot register event")
+    pub fn run(self) -> std::io::Result<JoinHandle<()>> {
+        std::thread::Builder::new()
+            .name("api-server".to_string())
+            .spawn(move || {
+                let ApiSeverSubscriber {
+                    mut poll,
+                    server,
+                    api_receiver,
+                    ..
+                } = self;
+                let mut events = Events::with_capacity(100);
+                'wait: loop {
+                    poll.poll(&mut events, None).unwrap_or_else(|e| {
+                        error!("API server poll events failed, {}", e);
+                    });
+                    for event in &events {
+                        match event.token() {
+                            API_WAKE_TOKEN => {
+                                if let Some(request) = api_receiver.recv().unwrap_or_else(|e| {
+                                    error!("API server recv failed, {}", e);
+                                    None
+                                }) {
+                                    server.process_request(request).unwrap_or_else(|e| {
+                                        error!("API server process events failed, {}", e)
+                                    });
+                                } else {
+                                    break 'wait;
+                                }
+                            }
+                            _ => {
+                                unreachable!("unknown event token");
+                            }
+                        }
+                    }
+                }
+                info!("api-server thread exits");
+            })
     }
 }

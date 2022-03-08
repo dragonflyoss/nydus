@@ -17,31 +17,30 @@ extern crate nydus_error;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "macos")]
+use std::io::Result;
+#[cfg(target_os = "linux")]
 use std::io::{Read, Result};
+use std::ops::Deref;
 use std::ops::DerefMut;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::channel,
-    Arc, Mutex,
-};
-use std::thread::{self, spawn};
+use std::sync::{mpsc::channel, Arc, Mutex};
+use std::thread;
 use std::{io, process};
 
 use clap::{App, Arg};
-use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
 use mio::Waker;
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
-use vmm_sys_util::eventfd::EventFd;
 
 use nydus::FsBackendType;
 use nydus_api::http::start_http_thread;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use self::api_server_glue::{ApiServer, ApiSeverSubscriber};
-use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
+use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemon};
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
@@ -57,10 +56,51 @@ mod daemon;
 mod upgrade;
 
 lazy_static! {
-    static ref EVENT_MANAGER_RUN: AtomicBool = AtomicBool::new(true);
-    static ref EXIT_NOTIFIER: Mutex<Option<Arc<Waker>>> = Mutex::default();
+    static ref FUSE_DAEMON: Mutex::<Option<Arc<dyn NydusDaemon + Send + Sync>>> = Mutex::default();
 }
 
+#[cfg(target_os = "macos")]
+fn get_default_rlimit_nofile() -> Result<rlim> {
+    // Our default RLIMIT_NOFILE target.
+    let mut max_fds: rlim = 1_000_000;
+    // leave at least this many fds free
+    let reserved_fds: rlim = 16_384;
+
+    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_MAXFILES];
+
+    // Reduce max_fds below the system-wide maximum, if necessary.
+    // This ensures there are fds available for other processes so we
+    // don't cause resource exhaustion.
+    let file_max = unsafe {
+        let mut file_max: rlim = 0;
+        let mut size = std::mem::size_of::<rlim>();
+        let res = nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&mut file_max) as *mut u64 as *mut nix::libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        );
+        nix::errno::Errno::result(res)?;
+        file_max
+    };
+
+    if file_max < 2 * reserved_fds {
+        return Err(io::Error::from(DaemonError::InvalidArguments(
+            "The fs.file-max sysctl is too low to allow a reasonable number of open files."
+                .to_string(),
+        )));
+    }
+
+    max_fds = std::cmp::min(file_max - reserved_fds, max_fds);
+
+    Resource::NOFILE
+        .get()
+        .map(|(curr, _)| if curr >= max_fds { 0 } else { max_fds })
+}
+
+#[cfg(target_os = "linux")]
 fn get_default_rlimit_nofile() -> Result<rlim> {
     // Our default RLIMIT_NOFILE target.
     let mut max_fds: rlim = 1_000_000;
@@ -91,14 +131,13 @@ fn get_default_rlimit_nofile() -> Result<rlim> {
         .map(|(curr, _)| if curr >= max_fds { 0 } else { max_fds })
 }
 
-pub fn exit_event_manager() {
-    EXIT_NOTIFIER
-        .lock()
-        .expect("Not poisoned lock!")
-        .as_ref()
-        .unwrap()
-        .wake()
-        .unwrap_or_else(|e| error!("Write event fd failed when exiting event manager, {}", e))
+pub fn exit_daemon() {
+    let daemon = FUSE_DAEMON.lock().expect("Not posioned lock");
+    if let Some(daemon) = daemon.deref() {
+        daemon
+            .disconnect()
+            .unwrap_or_else(|e| error!("disconnect daemon failed, {}", e));
+    }
 }
 
 extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
@@ -108,7 +147,7 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
         process::exit(0);
     } else {
         // Can't directly exit here since we want to umount rafs reflecting the signal.
-        exit_event_manager();
+        exit_daemon();
     }
 }
 
@@ -375,8 +414,6 @@ fn main() -> Result<()> {
 
     let vfs = Vfs::new(opts);
 
-    let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
-
     let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = cmd_arguments_parsed.value_of("id").map(|id| id.to_string());
@@ -437,65 +474,53 @@ fn main() -> Result<()> {
         })?
     };
 
-    let mut http_thread: Option<thread::JoinHandle<Result<()>>> = None;
-    let http_exit_evtfd = EventFd::new(0).unwrap();
+    #[allow(clippy::type_complexity)]
+    let mut http_thread_and_waker: Option<(
+        thread::JoinHandle<Result<()>>,
+        thread::JoinHandle<()>,
+        Arc<Waker>,
+    )> = None;
     if let Some(apisock) = apisock {
         let (to_api, from_http) = channel();
         let (to_http, from_api) = channel();
 
         let api_server = ApiServer::new(to_http, daemon.clone())?;
 
-        let api_server_subscriber = Arc::new(ApiSeverSubscriber::new(api_server, from_http)?);
-        let evtfd = api_server_subscriber.get_event_fd()?;
-        event_manager.add_subscriber(api_server_subscriber);
-        let ret = start_http_thread(
-            apisock,
-            evtfd,
-            to_api,
-            from_api,
-            http_exit_evtfd.try_clone().unwrap(),
-        )?;
-        http_thread = Some(ret);
+        let api_server_subscriber = ApiSeverSubscriber::new(api_server, from_http)?;
+        let api_notifier = api_server_subscriber.get_waker();
+        let api_server_thread = api_server_subscriber.run()?;
+
+        let (ret, thread_exit_waker) = start_http_thread(apisock, api_notifier, to_api, from_api)?;
+        http_thread_and_waker = Some((ret, api_server_thread, thread_exit_waker));
         info!("api server running at {}", apisock);
     }
 
-    start_daemon_monitor().unwrap();
+    *FUSE_DAEMON.lock().unwrap().deref_mut() = Some(daemon.clone());
     nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
     nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
 
-    while EVENT_MANAGER_RUN.load(Ordering::Relaxed) {
-        // If event manager dies, so does nydusd
-        event_manager.run().unwrap();
-    }
+    daemon
+        .wait()
+        .unwrap_or_else(|e| error!("failed to wait daemon {}", e));
 
-    if let Some(t) = http_thread {
-        http_exit_evtfd.write(1).unwrap();
-        if t.join()
-            .map(|r| r.map_err(|e| error!("Thread execution error. {:?}", e)))
+    if let Some((http_server_thread, api_server_thread, waker)) = http_thread_and_waker {
+        info!("wake http_thread.");
+        if waker.wake().is_err() {
+            error!("wake http thread failed.");
+        }
+        if http_server_thread
+            .join()
+            .map(|r| r.map_err(|e| error!("Http server thread execution error. {:?}", e)))
             .is_err()
         {
-            error!("Join http thread failed.");
+            error!("Join http server thread failed.");
+        }
+        if api_server_thread.join().is_err() {
+            error!("Join api server thread failed.");
         }
     }
 
-    daemon
-        .stop()
-        .unwrap_or_else(|e| error!("failed to stop daemon: {}", e));
-    daemon
-        .wait()
-        .unwrap_or_else(|e| error!("failed to wait daemon: {}", e));
     info!("nydusd quits");
-
-    Ok(())
-}
-
-fn start_daemon_monitor() -> Result<()> {
-    let mut monitor = NydusDaemonSubscriber::new()?;
-    *EXIT_NOTIFIER.lock().unwrap().deref_mut() = Some(monitor.get_notifier());
-
-    spawn(move || {
-        monitor.listen();
-    });
 
     Ok(())
 }

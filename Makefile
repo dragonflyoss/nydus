@@ -87,6 +87,12 @@ ifdef NYDUS_TEST_VIRTIOFS
 	RUST_BACKTRACE=1 cargo test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
 endif
 
+macos-ut:
+	cargo clippy --target-dir target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings
+	echo "Testing packages: ${PACKAGES}"
+	$(foreach var,$(PACKAGES),cargo test $(FUSEDEV_COMMON) -p $(var);)
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 cargo test $(FUSEDEV_COMMON) --bin nydusd -- --nocapture --test-threads=8
+
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 
 CARGO = $(shell which cargo)
