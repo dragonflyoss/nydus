@@ -13,6 +13,8 @@ build = "build.rs"
 built = { version = "=0.4.3", features = ["chrono", "git2"] }
 
 [dependencies]
+# pin regex to fix RUSTSEC-2022-0013
+regex = ">=1.5.5"
 flexi_logger = { version = "0.17" }
 libc = "0.2"
 log = "0.4"
