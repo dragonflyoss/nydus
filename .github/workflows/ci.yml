@@ -5,6 +5,9 @@ on:
     branches: ["*"]
   pull_request:
     branches: [master]
+  schedule:
+    # Run daily sanity check at 00:08 clock UTC
+    - cron: "8 0 * * *"
 
 env:
   CARGO_TERM_COLOR: always

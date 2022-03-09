@@ -2,6 +2,9 @@
 
 <p><img src="misc/logo.svg" width="170"></p>
 
+![CI](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml/badge.svg?event=schedule)
+![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)
+
 The nydus project implements a user space filesystem on top of a container image format that improves over the current OCI image specification, in terms of container launching speed, image space, and network bandwidth efficiency, as well as data integrity.
 
 The following benchmarking result shows the performance improvement compared with the OCI image for the container cold startup elapsed time on containerd. As the OCI image size increases, the container startup time of using Nydus image remains very short.
