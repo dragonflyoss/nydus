@@ -18,10 +18,12 @@ fuse-backend-rs = { version = "0.3.0" }
 
 rafs = { path = "../rafs" }
 nydus-error = { path = "../error" }
-storage = { path = "../storage", features = ["backend-localfs", "backend-oss", "backend-registry"] }
+storage = { path = "../storage", features = ["backend-localfs"] }
 
 [features]
-virtiofs = [ "fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]
+virtiofs = [ "fuse-backend-rs/virtiofs", "rafs/virtio-fs" ]
+backend-oss = ["rafs/backend-oss"]
+backend-registry = ["rafs/backend-registry"]
 
 [dev-dependencies]
-nydus-app = { path = "../app" }
+nydus-app = { version = "0.2", path = "../app" }
