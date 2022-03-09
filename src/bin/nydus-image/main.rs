@@ -458,6 +458,15 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true))
         )
         .arg(
+            Arg::with_name("log-file")
+                .long("log-file")
+                .short("o")
+                .help("Specify log file name")
+                .takes_value(true)
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::with_name("log-level")
                 .long("log-level")
                 .short("l")
@@ -471,14 +480,25 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         .get_matches()
 }
 
+fn init_log(matches: &ArgMatches) -> Result<()> {
+    let mut log_file = None;
+    if let Some(file) = matches.value_of("log-file") {
+        let path = PathBuf::from(file);
+        log_file = Some(path);
+    }
+
+    // Safe to unwrap because it has a default value and possible values are defined.
+    let level = matches.value_of("log-level").unwrap().parse().unwrap();
+
+    setup_logging(log_file, level).context("failed to setup logging")
+}
+
 fn main() -> Result<()> {
     let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
 
     let cmd = prepare_cmd_args(bti_string);
 
-    // Safe to unwrap because it has a default value and possible values are defined.
-    let level = cmd.value_of("log-level").unwrap().parse().unwrap();
-    setup_logging(None, level)?;
+    init_log(&cmd)?;
 
     register_tracer!(TraceClass::Timing, TimingTracerClass);
     register_tracer!(TraceClass::Event, EventTracerClass);
