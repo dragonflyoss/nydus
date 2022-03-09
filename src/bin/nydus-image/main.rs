@@ -19,7 +19,7 @@ use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
@@ -132,11 +132,9 @@ impl OutputSerializer {
     }
 }
 
-fn main() -> Result<()> {
-    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
-
+fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
     // TODO: Try to use yaml to define below options
-    let cmd = App::new("")
+    App::new("")
         .version(bti_string.as_str())
         .author(crate_authors!())
         .about("Build or inspect RAFS filesystems for nydus accelerated container images.")
@@ -470,7 +468,13 @@ fn main() -> Result<()> {
                 .required(false)
                 .global(true),
         )
-        .get_matches();
+        .get_matches()
+}
+
+fn main() -> Result<()> {
+    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
+
+    let cmd = prepare_cmd_args(bti_string);
 
     // Safe to unwrap because it has a default value and possible values are defined.
     let level = cmd.value_of("log-level").unwrap().parse().unwrap();
