@@ -29,15 +29,29 @@ Nydus' key features include:
 
 Currently Nydus includes following tools:
 
-| Tool                     | Description                                                                                                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| nydusd                   | Linux FUSE user-space daemon, it processes all fuse messages from host/guest kernel and parses nydus container image to fullfil those requests      |
-| nydus-image              | Convert a single layer of OCI format container image into a nydus format container image generating meta part file and data part file respectively  |
-| nydusify                 | It pulls OCI image down and unpack it, invokes `nydus-image` to convert image and then pushes the converted image back to registry and data storage |
-| nydusctl                 | Nydusd CLI client, query daemon's working status/metrics and configure it                                                                           |
-| ctr-remote               | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                        |
-| nydus-docker-graphdriver | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                 |
-| nydus-overlayfs          | `Containerd` mount helper to invoke overlayfs mount with tweaking mount options a bit. So nydus prerequisites can be passed to vm-based runtime     |
+| Tool                                                                                                                   | Description                                                                                                                                                |
+| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [nydusd](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusd.md)                                     | Linux FUSE user-space daemon, it processes all fuse messages from host/guest kernel and parses nydus container image to fullfil those requests             |
+| [nydus-image](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md)                           | Convert a single layer of OCI format container image into a nydus format container image generating meta part file and data part file respectively         |
+| [nydusify](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusify.md)                                 | It pulls OCI image down and unpack it, invokes `nydus-image create` to convert image and then pushes the converted image back to registry and data storage |
+| [nydusctl](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md)                              | Nydusd CLI client (`nydus-image inspect`), query daemon's working status/metrics and configure it                                                          |
+| [ctr-remote](https://github.com/dragonflyoss/image-service/tree/master/contrib/ctr-remote)                             | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                               |
+| [nydus-docker-graphdriver](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver) | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                        |
+| [nydus-overlayfs](https://github.com/dragonflyoss/image-service/tree/master/contrib/nydus-overlayfs)                   | `Containerd` mount helper to invoke overlayfs mount with tweaking mount options a bit. So nydus prerequisites can be passed to vm-based runtime            |
+
+Currently Nydus is supporting the following platforms in container ecosystem:
+
+| Type          | Platform                                                                                                        | Description                                                                                                                                                  | Status |
+| ------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| Storage       | Registry/OSS/NAS                                                                                                | Support for OCI-compatible distribution implementations such as Docker Hub, Harbor, Github GHCR, Aliyun ACR, NAS, and Aliyun OSS-like object storage service | ✅      |
+| Runtime       | Kubernetes                                                                                                      | Run Nydus image using CRI interface                                                                                                                          | ✅      |
+| Storage/Build | [Harbor](https://github.com/goharbor/acceleration-service)                                                      | Provides a general service for Harbor to support acceleration image conversion based on kinds of accelerator like Nydus and eStargz etc                      | ✅      |
+| Distribution  | [Dragonfly]((https://github.com/dragonflyoss/Dragonfly2))                                                       | Improve the runtime performance of Nydus image even further with the Dragonfly P2P data distribution system                                                  | ✅      |
+| Build         | [Buildkit](https://github.com/moby/buildkit/pull/2581)                                                          | Provides the ability to build and export Nydus images directly from Dockerfile                                                                               | 🚧      |
+| Runtime       | [KataContainers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/kata-nydus-design.md) | Run Nydus image in KataContainers as a native solution                                                                                                       | ✅      |
+| Runtime       | [Docker](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver)            | Run Nydus image in Docker container with graphdriver plugin                                                                                                  | ✅      |
+| Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Run Nydus image in containerd with nydus-snapshotter                                                                                                         | ✅      |
+| Runtime       | [EROFS](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)  | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | 🚧      |
 
 To try nydus image service:
 
