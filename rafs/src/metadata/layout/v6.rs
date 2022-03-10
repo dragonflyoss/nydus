@@ -1673,7 +1673,7 @@ impl RafsV6PrefetchTable {
 
     /// Get content size of the inode prefetch table.
     pub fn size(&self) -> usize {
-        self.len() * size_of::<u64>()
+        self.len() * size_of::<u32>()
     }
 
     /// Get number of entries in the prefetch table.

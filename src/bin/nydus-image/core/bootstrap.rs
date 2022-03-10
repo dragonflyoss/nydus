@@ -546,7 +546,8 @@ impl Bootstrap {
         let (prefetch_table_offset, prefetch_table_size) = if ctx.prefetch.len() > 0 {
             // Prefetch table is very close to blob devices table
             let offset = blob_table_offset + blob_table_size;
-            let size = ctx.prefetch.len() * size_of::<u64>() as u32;
+            // Each prefetched file has is nid of `u32` filled into prefetch table.
+            let size = ctx.prefetch.len() * size_of::<u32>() as u32;
             trace!("prefetch table locates at offset {} size {}", offset, size);
             (offset, size)
         } else {
