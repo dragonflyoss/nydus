@@ -218,16 +218,10 @@ impl BlobChunkInfoOndisk {
 
     /// Set uncompressed offset of the chunk.
     #[inline]
-    pub fn set_uncompressed_offset(&mut self, offset: u64, aligned_4k: bool) {
-        if aligned_4k {
-            debug_assert!(offset & !BLOB_CHUNK_UNCOMP_OFFSET_MASK == 0);
-            self.uncomp_info &= !BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-            self.uncomp_info |= offset & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-        } else {
-            debug_assert!(offset & !BLOB_CHUNK_COMP_OFFSET_MASK == 0);
-            self.uncomp_info &= !BLOB_CHUNK_COMP_OFFSET_MASK;
-            self.uncomp_info |= offset & BLOB_CHUNK_COMP_OFFSET_MASK;
-        }
+    pub fn set_uncompressed_offset(&mut self, offset: u64) {
+        debug_assert!(offset & !BLOB_CHUNK_UNCOMP_OFFSET_MASK == 0);
+        self.uncomp_info &= !BLOB_CHUNK_UNCOMP_OFFSET_MASK;
+        self.uncomp_info |= offset & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
     }
 
     /// Get uncompressed end of the chunk.
@@ -760,7 +754,7 @@ mod tests {
         assert_eq!(chunk.compressed_offset(), 0x1000);
         assert_eq!(chunk.compressed_size(), 0x100);
         assert_eq!(chunk.compressed_end(), 0x1100);
-        chunk.set_uncompressed_offset(0x2000, false);
+        chunk.set_uncompressed_offset(0x2000);
         chunk.set_uncompressed_size(0x100);
         assert_eq!(chunk.uncompressed_offset(), 0x2000);
         assert_eq!(chunk.uncompressed_size(), 0x100);

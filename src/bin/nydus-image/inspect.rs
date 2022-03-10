@@ -349,11 +349,17 @@ Blocks:             {blocks}"#,
                         let path = self.path_from_ino(inode.parent()).unwrap();
                         println!(
                             r#"
-    {:width$} Parent Path {:width$}
+    File: {:width$} Parent Path: {:width$}
+    Compressed Offset: {}, Compressed Size: {}
+    Decompressed Offset: {}, Decompressed Size: {}
     Chunk ID: {:50}, Blob ID: {}
 "#,
                             name.to_string_lossy(),
                             path.to_string_lossy(),
+                            c.compress_offset,
+                            c.compress_size,
+                            c.uncompress_offset,
+                            c.uncompress_size,
                             c.block_id,
                             if let Ok(blob_id) = self.state.get_blob_id(c.blob_index) {
                                 blob_id
@@ -733,9 +739,12 @@ impl Executor {
         inspector: &mut RafsInspector,
         input: String,
     ) -> std::result::Result<Option<Value>, ExecuteError> {
-        let mut raw = input.strip_suffix("\n").unwrap_or(&input).split(' ');
+        let mut raw = input
+            .strip_suffix("\n")
+            .unwrap_or(&input)
+            .split_ascii_whitespace();
         let cmd = raw.next().unwrap();
-        let args = raw.next();
+        let args = raw.next().map(|a| a.trim());
 
         debug!("execute {:?} {:?}", cmd, args);
 

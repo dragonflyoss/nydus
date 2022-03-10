@@ -229,6 +229,7 @@ impl Node {
         overlay: Overlay,
         chunk_size: u32,
         explicit_uidgid: bool,
+        v6_force_extended_inode: bool,
     ) -> Result<Node> {
         let target = Self::generate_target(&path, &source);
         let target_vec = Self::generate_target_vec(&target);
@@ -252,7 +253,7 @@ impl Node {
             offset: 0,
             dirents: Vec::new(),
             v6_datalayout: EROFS_INODE_FLAT_PLAIN,
-            v6_force_extended_inode: false,
+            v6_force_extended_inode,
             v6_compact_inode: false,
         };
 
@@ -1737,6 +1738,7 @@ mod tests {
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
             false,
+            false,
         )
         .unwrap();
 
@@ -1761,6 +1763,7 @@ mod tests {
             pa.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            false,
             false,
         )
         .unwrap();
@@ -1868,6 +1871,7 @@ mod tests {
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
             false,
+            false,
         )
         .unwrap();
 
@@ -1879,6 +1883,7 @@ mod tests {
             pa_pyc.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            false,
             false,
         )
         .unwrap();

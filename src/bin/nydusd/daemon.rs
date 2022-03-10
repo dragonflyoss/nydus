@@ -326,6 +326,9 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
                 e => DaemonError::Rafs(e),
             })?;
 
+        // To update mounted time and backend configurations.
+        self.backend_collection().add(&cmd.mountpoint, &cmd)?;
+
         // Update mounts opaque from UpgradeManager
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
             upgrade::update_mounts_state(&mut mgr_guard, cmd)?;

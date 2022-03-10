@@ -289,6 +289,9 @@ impl Bootstrap {
                 dirs.push(child);
             }
         }
+        /* XXX: `.' and `..' should be sorted globally too */
+        node.dirents
+            .sort_unstable_by(|a, b| a.1.as_os_str().cmp(&b.1.as_os_str()) as std::cmp::Ordering);
 
         for dir in dirs {
             self.update_dirents(nodes, dir, tree.node.offset);
