@@ -300,8 +300,11 @@ pub struct RafsV6SuperBlockExt {
     s_blob_table_size: u32,
     /// chunk size
     s_chunk_size: u32,
+    s_prefetch_table_offset: u64,
+    s_prefetch_table_size: u32,
+    s_padding: u32,
     /// Reserved
-    s_reserved: [u8; 232],
+    s_reserved: [u8; 216],
 }
 
 impl_bootstrap_converter!(RafsV6SuperBlockExt);
@@ -393,13 +396,25 @@ impl RafsV6SuperBlockExt {
         u64
     );
     impl_pub_getter_setter!(blob_table_size, set_blob_table_size, s_blob_table_size, u32);
+    impl_pub_getter_setter!(
+        prefetch_table_size,
+        set_prefetch_table_size,
+        s_prefetch_table_size,
+        u32
+    );
+    impl_pub_getter_setter!(
+        prefetch_table_offset,
+        set_prefetch_table_offset,
+        s_prefetch_table_offset,
+        u64
+    );
 }
 
 impl RafsStore for RafsV6SuperBlockExt {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        w.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
+        w.seek_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         w.write_all(self.as_ref())?;
-        w.seek_to_offset(EROFS_BLOCK_SIZE as u64)?;
+        w.seek_offset(EROFS_BLOCK_SIZE as u64)?;
 
         Ok(EROFS_BLOCK_SIZE as usize - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)
     }
@@ -412,7 +427,10 @@ impl Default for RafsV6SuperBlockExt {
             s_blob_table_offset: u64::to_le(0),
             s_blob_table_size: u32::to_le(0),
             s_chunk_size: u32::to_le(0),
-            s_reserved: [0u8; 232],
+            s_prefetch_table_offset: u64::to_le(0),
+            s_prefetch_table_size: u32::to_le(0),
+            s_padding: u32::to_le(0),
+            s_reserved: [0u8; 216],
         }
     }
 }
@@ -1637,6 +1655,75 @@ impl RafsXAttrs {
             RAFSV6_XATTR_TYPES[pos].index,
             RAFSV6_XATTR_TYPES[pos].prefix_len,
         ))
+    }
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct RafsV6PrefetchTable {
+    /// List of inode numbers for prefetch.
+    /// Note: It's not inode index of inodes table being stored here.
+    pub inodes: Vec<u32>,
+}
+
+impl RafsV6PrefetchTable {
+    /// Create a new instance of `RafsV6PrefetchTable`.
+    pub fn new() -> RafsV6PrefetchTable {
+        RafsV6PrefetchTable { inodes: vec![] }
+    }
+
+    /// Get content size of the inode prefetch table.
+    pub fn size(&self) -> usize {
+        self.len() * size_of::<u64>()
+    }
+
+    /// Get number of entries in the prefetch table.
+    pub fn len(&self) -> usize {
+        self.inodes.len()
+    }
+
+    /// Check whether the inode prefetch table is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inodes.is_empty()
+    }
+
+    /// Add an inode into the inode prefetch table.
+    pub fn add_entry(&mut self, ino: u32) {
+        self.inodes.push(ino);
+    }
+
+    /// Store the inode prefetch table to a writer.
+    pub fn store(&mut self, w: &mut dyn RafsIoWrite) -> Result<usize> {
+        // Sort prefetch table by inode index, hopefully, it can save time when mounting rafs
+        // Because file data is dumped in the order of inode index.
+        self.inodes.sort_unstable();
+
+        let (_, data, _) = unsafe { self.inodes.align_to::<u8>() };
+        w.write_all(data.as_ref())?;
+
+        // OK. Let's see if we have to align... :-(
+        // let cur_len = self.inodes.len() * size_of::<u32>();
+
+        Ok(data.len())
+    }
+
+    /// Load a inode prefetch table from a reader.
+    ///
+    /// Note: Generally, prefetch happens after loading bootstrap, so with methods operating
+    /// files with changing their offset won't bring errors. But we still use `pread` now so as
+    /// to make this method more stable and robust. Even dup(2) can't give us a separated file struct.
+    pub fn load_prefetch_table_from(
+        &mut self,
+        r: &mut RafsIoReader,
+        offset: u64,
+        entries: usize,
+    ) -> Result<usize> {
+        self.inodes = vec![0u32; entries];
+
+        let (_, data, _) = unsafe { self.inodes.align_to_mut::<u8>() };
+        r.seek_to_offset(offset)?;
+        r.read_exact(data)?;
+
+        Ok(data.len())
     }
 }
 

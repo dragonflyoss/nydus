@@ -553,15 +553,16 @@ impl RafsSuper {
 
     /// Convert a file path to an inode number.
     pub fn ino_from_path(&self, f: &Path) -> Result<u64> {
+        let root_ino = self.superblock.root_ino();
         if f == Path::new("/") {
-            return Ok(ROOT_ID);
+            return Ok(root_ino);
         }
 
         if !f.starts_with("/") {
             return Err(einval!());
         }
 
-        let mut parent = self.get_inode(ROOT_ID, self.validate_digest)?;
+        let mut parent = self.get_inode(root_ino, self.validate_digest)?;
 
         let entries = f
             .components()
@@ -637,6 +638,8 @@ impl RafsSuper {
             Ok(())
         } else if self.meta.is_v5() {
             self.prefetch_data_v5(r, fetcher).map(|_| ())
+        } else if self.meta.is_v6() {
+            self.prefetch_data_v6(r, fetcher).map(|_| ())
         } else {
             Err(RafsError::Prefetch(
                 "Unknown filesystem version, prefetch disabled".to_string(),
@@ -711,7 +714,12 @@ impl RafsSuper {
             for i in descendants.iter() {
                 Self::prefetch_inode(i, head_desc, hardlinks, try_prefetch)?;
             }
-        } else if !inode.is_empty_size() {
+        } else if !inode.is_empty_size() && inode.is_reg() {
+            // An empty regular file will also be packed into nydus image,
+            // then it has a size of zero.
+            // Moreover, for rafs v5, symlink has size of zero but non-zero size
+            // for symlink size. For rafs v6, symlink size is also represented by i_size.
+            // So we have to restrain the condition here.
             Self::prefetch_inode(&inode, head_desc, hardlinks, try_prefetch)?;
         }
 

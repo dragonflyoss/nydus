@@ -878,7 +878,8 @@ impl RafsInode for OndiskInodeWrapper {
 
     /// Check whether the inode is a hardlink.
     fn is_hardlink(&self) -> bool {
-        todo!()
+        let inode = self.disk_inode();
+        inode.nlink() > 1 && self.is_reg()
     }
 
     /// Get inode number of the parent directory.
@@ -916,7 +917,37 @@ impl RafsInode for OndiskInodeWrapper {
         &self,
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize> {
-        todo!()
+        if !self.is_dir() {
+            return Err(enotdir!());
+        }
+
+        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
+
+        // EROFS packs dot and dotdot, so skip them two.
+        self.walk_children_inodes(2, &mut |inode: Option<Arc<dyn RafsInode>>,
+                                           name: OsString,
+                                           ino,
+                                           offset| {
+            // Safe to unwrap since it must have child inode.
+            if let Some(child_inode) = inode {
+                if child_inode.is_dir() {
+                    trace!("Got dir {:?}", child_inode.name());
+                    child_dirs.push(child_inode);
+                } else if !child_inode.is_empty_size() && child_inode.is_reg() {
+                    descendants.push(child_inode);
+                }
+                Ok(PostWalkAction::Continue)
+            } else {
+                Ok(PostWalkAction::Continue)
+            }
+        })
+        .unwrap();
+
+        for d in child_dirs {
+            d.collect_descendants_inodes(descendants)?;
+        }
+
+        Ok(0)
     }
 
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
