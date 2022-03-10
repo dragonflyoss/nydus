@@ -25,7 +25,9 @@ use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs, RAFS_ROOT_INODE};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use super::chunk_dict::ChunkDict;
-use super::node::{ChunkWrapper, InodeWrapper, Node, Overlay, WhiteoutSpec, WhiteoutType};
+use super::node::{
+    ChunkSource, ChunkWrapper, InodeWrapper, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType,
+};
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
@@ -279,7 +281,7 @@ impl<'a> MetadataTreeBuilder<'a> {
 
             if child.is_reg() {
                 for chunk in &child.chunks {
-                    chunk_dict.add_chunk(chunk.clone());
+                    chunk_dict.add_chunk(chunk.inner.clone());
                 }
             }
 
@@ -301,7 +303,10 @@ impl<'a> MetadataTreeBuilder<'a> {
             let mut chunks = Vec::with_capacity(chunk_count as usize);
             for i in 0..chunk_count {
                 let cki = inode.get_chunk_info(i)?;
-                chunks.push(ChunkWrapper::from_chunk_info(&cki));
+                chunks.push(NodeChunk {
+                    source: ChunkSource::Parent,
+                    inner: ChunkWrapper::from_chunk_info(cki.as_ref()),
+                });
             }
             chunks
         } else {

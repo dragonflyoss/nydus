@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 use nix::unistd::{getegid, geteuid};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_utils::digest;
@@ -32,7 +32,7 @@ use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
 use crate::core::chunk_dict::import_chunk_dict;
 use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputBlob,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputArtifact,
     RafsVersion, SourceType,
 };
 use crate::core::node::{self, WhiteoutSpec};
@@ -52,20 +52,16 @@ mod validator;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct OutputSerializer {
     /// The binary version of builder (nydus-image).
     version: String,
+    /// Represents all artifacts(bootstrap + blob) ordered by layer.
+    artifacts: Vec<BuildOutputArtifact>,
     /// Represents all blob in blob table ordered by blob index, this field
     /// only include the layer that does have a blob, and should be deprecated
-    /// in future, use `ordered_blobs` field to replace.
+    /// in future, use `artifacts` field to replace.
     blobs: Vec<String>,
-    /// Represents all blob in blob table ordered by layer, this field
-    /// include the layer that does not have a blob.
-    ordered_blobs: Vec<Option<BuildOutputBlob>>,
-    /// Represents all bootstrap names for every snapshot in diff build,
-    /// ordered by snapshot index, not include the skipped (cached) snapshots.
-    bootstraps: Vec<String>,
     /// Performance trace info for current build.
     trace: serde_json::Map<String, serde_json::Value>,
 }
@@ -73,7 +69,7 @@ pub struct OutputSerializer {
 impl OutputSerializer {
     fn dump(
         matches: &clap::ArgMatches,
-        build_output: &BuildOutput,
+        build_output: BuildOutput,
         build_info: &BuildTimeInfo,
     ) -> Result<()> {
         let output_json: Option<PathBuf> = matches
@@ -92,9 +88,8 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
-                blobs: build_output.get_exists_blobs(),
-                ordered_blobs: build_output.blobs.clone(),
-                bootstraps: build_output.bootstraps.clone(),
+                artifacts: build_output.artifacts,
+                blobs: build_output.blobs,
                 trace,
             };
 
@@ -125,9 +120,8 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
+                artifacts: Vec::new(),
                 blobs: blob_ids,
-                ordered_blobs: Vec::new(),
-                bootstraps: Vec::new(),
                 trace,
             };
 
@@ -623,10 +617,11 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
-        let bootstrap_path = bootstrap_mgr.get_bootstrap_path(&build_output.bootstrap_name);
+        let bootstrap_path = bootstrap_mgr.get_bootstrap_path(&build_output.last_bootstrap_name);
         Self::validate_image(&matches, &bootstrap_path)?;
-        OutputSerializer::dump(matches, &build_output, &build_info)?;
         info!("build successfully: {:?}", build_output,);
+
+        OutputSerializer::dump(matches, build_output, &build_info)?;
 
         Ok(())
     }
@@ -657,7 +652,7 @@ impl Command {
         if let Some(build_output) =
             BlobCompactor::do_compact(bootstrap_path, dst_bootstrap, chunk_dict, backend, &config)?
         {
-            OutputSerializer::dump(matches, &build_output, &build_info)?;
+            OutputSerializer::dump(matches, build_output, &build_info)?;
         }
         Ok(())
     }

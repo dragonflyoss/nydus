@@ -14,6 +14,7 @@ use crate::core::tree::Tree;
 use anyhow::Result;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::try_round_up_4k;
+use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::{RafsMode, RafsSuper};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -288,30 +289,30 @@ impl BlobCompactor {
             let node = &mut self.nodes[node_idx];
             for chunk_idx in 0..node.chunks.len() {
                 let chunk = &mut node.chunks[chunk_idx];
-                let chunk_key = ChunkKey::from(chunk);
+                let chunk_key = ChunkKey::from(&chunk.inner);
                 if !matches!(
-                    self.states[chunk.blob_index() as usize],
+                    self.states[chunk.inner.blob_index() as usize],
                     Some(State::ChunkDict)
                 ) {
                     // dedup by chunk dict
-                    if let Some(c) = chunk_dict.get_chunk(chunk.id()) {
-                        apply_chunk_change(c, chunk)?;
+                    if let Some(c) = chunk_dict.get_chunk(chunk.inner.id()) {
+                        apply_chunk_change(c, &mut chunk.inner)?;
                     } else {
                         match all_chunks.get_chunk(&chunk_key) {
                             Some(c) => {
                                 // do dedup
-                                apply_chunk_change(c, chunk)?;
+                                apply_chunk_change(c, &mut chunk.inner)?;
                             }
                             None => {
-                                all_chunks.add_chunk(chunk);
+                                all_chunks.add_chunk(&chunk.inner);
                                 // add to per blob ChunkSet
-                                let blob_index = chunk.blob_index() as usize;
+                                let blob_index = chunk.inner.blob_index() as usize;
                                 if self.states[blob_index].is_none() {
                                     self.states[blob_index]
                                         .replace(State::Original(ChunkSet::new(self.version)));
                                 }
                                 if let Some(State::Original(cs)) = &mut self.states[blob_index] {
-                                    cs.add_chunk(chunk);
+                                    cs.add_chunk(&chunk.inner);
                                 }
                             }
                         };
@@ -326,10 +327,10 @@ impl BlobCompactor {
                         list.push((node_idx, chunk_idx));
                     }
                 };
-                match self.b2nodes.get_mut(&chunk.blob_index()) {
+                match self.b2nodes.get_mut(&chunk.inner.blob_index()) {
                     None => {
                         self.b2nodes
-                            .insert(chunk.blob_index(), vec![(node_idx, chunk_idx)]);
+                            .insert(chunk.inner.blob_index(), vec![(node_idx, chunk_idx)]);
                     }
                     Some(list) => {
                         list.push((node_idx, chunk_idx));
@@ -357,10 +358,12 @@ impl BlobCompactor {
         if let Some(idx_list) = self.b2nodes.get(&from) {
             for (node_idx, chunk_idx) in idx_list.iter() {
                 ensure!(
-                    self.nodes[*node_idx].chunks[*chunk_idx].blob_index() == from,
+                    self.nodes[*node_idx].chunks[*chunk_idx].inner.blob_index() == from,
                     "unexpected blob_index of chunk"
                 );
-                self.nodes[*node_idx].chunks[*chunk_idx].set_blob_index(to);
+                self.nodes[*node_idx].chunks[*chunk_idx]
+                    .inner
+                    .set_blob_index(to);
             }
         }
         Ok(())
@@ -369,7 +372,7 @@ impl BlobCompactor {
     fn apply_chunk_change(&mut self, c: &(ChunkWrapper, ChunkWrapper)) -> Result<()> {
         if let Some(idx_list) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
             for (node_idx, chunk_idx) in idx_list.iter() {
-                apply_chunk_change(&c.1, &mut self.nodes[*node_idx].chunks[*chunk_idx])?;
+                apply_chunk_change(&c.1, &mut self.nodes[*node_idx].chunks[*chunk_idx].inner)?;
             }
         }
         Ok(())
@@ -490,7 +493,6 @@ impl BlobCompactor {
         self.ori_blob_mgr
             .get_blobs()
             .into_iter()
-            .flatten()
             .map(|blob| blob.blob_id.clone())
             .collect()
     }
@@ -503,13 +505,12 @@ impl BlobCompactor {
                 State::Original(_) | State::ChunkDict => {
                     info!("do nothing to blob {}", ori_blob_ids[idx]);
                     // already exists, no need to dump
-                    if let Some(ctx) = self.ori_blob_mgr.take_blob(idx) {
-                        let blob_idx = self.new_blob_mgr.alloc_index()?;
-                        if blob_idx != idx as u32 {
-                            self.apply_blob_move(idx as u32, blob_idx)?;
-                        }
-                        self.new_blob_mgr.add(Some(ctx));
+                    let ctx = self.ori_blob_mgr.take_blob(idx);
+                    let blob_idx = self.new_blob_mgr.alloc_index()?;
+                    if blob_idx != idx as u32 {
+                        self.apply_blob_move(idx as u32, blob_idx)?;
                     }
+                    self.new_blob_mgr.add(ctx);
                 }
                 State::Delete => {
                     info!("delete blob {}", ori_blob_ids[idx]);
@@ -530,7 +531,7 @@ impl BlobCompactor {
                         self.apply_chunk_change(change_chunk)?;
                     }
                     info!("rebuild blob {} successfully", blob_ctx.blob_id);
-                    self.new_blob_mgr.add(Some(blob_ctx));
+                    self.new_blob_mgr.add(blob_ctx);
                 }
             }
         }
@@ -597,13 +598,15 @@ impl BlobCompactor {
         // give back nodes
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut compactor.nodes);
         // blobs have already been dumped, dump bootstrap only
-        if compactor.is_v6() {
-            let blob_table = compactor.new_blob_mgr.to_blob_table_v6(&build_ctx, None)?;
-            bootstrap.dump_rafsv6(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
-        } else {
-            let blob_table = compactor.new_blob_mgr.to_blob_table_v5(&build_ctx, None)?;
-            bootstrap.dump_rafsv5(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
-        }
+        let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
+        match blob_table {
+            RafsBlobTable::V5(table) => {
+                bootstrap.dump_rafsv5(&mut build_ctx, &mut bootstrap_ctx, &table)?;
+            }
+            RafsBlobTable::V6(table) => {
+                bootstrap.dump_rafsv6(&mut build_ctx, &mut bootstrap_ctx, &table)?;
+            }
+        };
         bootstrap_mgr.add(bootstrap_ctx);
         Ok(Some(BuildOutput::new(
             &compactor.new_blob_mgr,

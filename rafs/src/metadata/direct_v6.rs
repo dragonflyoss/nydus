@@ -21,6 +21,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Result, SeekFrom};
 use std::mem::size_of;
+use std::ops::Deref;
 use std::os::unix::{
     ffi::{OsStrExt, OsStringExt},
     io::{FromRawFd, IntoRawFd, RawFd},
@@ -28,12 +29,13 @@ use std::os::unix::{
 use std::slice;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
     layout::{
         bytes_to_os_str,
+        v5::RafsV5ChunkInfo,
         v6::{
             recover_namespace, RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr,
             RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry,
@@ -53,7 +55,10 @@ use nydus_utils::{
     digest::{Algorithm, RafsDigest},
     div_round_up, round_up,
 };
-use storage::device::{BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec};
+use storage::device::{
+    v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc,
+    BlobIoVec,
+};
 use storage::utils::readahead;
 
 // Safe to Send/Sync because the underlying data structures are readonly
@@ -95,22 +100,22 @@ impl DirectMappingState {
         }
     }
 
-    // /// Mmap to bootstrap ondisk data directly.
-    // fn cast_to_ref<T>(&self, base: *const u8, offset: usize) -> Result<&T> {
-    //     let start = base.wrapping_add(offset);
-    //     let end = start.wrapping_add(size_of::<T>());
+    /// Mmap to bootstrap ondisk data directly.
+    fn cast_to_ref<T>(&self, base: *const u8, offset: usize) -> Result<&T> {
+        let start = base.wrapping_add(offset);
+        let end = start.wrapping_add(size_of::<T>());
 
-    //     if start > end
-    //         || start < self.base
-    //         || end < self.base
-    //         || end > self.end
-    //         || start as usize & (std::mem::align_of::<T>() - 1) != 0
-    //     {
-    //         return Err(einval!("invalid mmap offset"));
-    //     }
+        if start > end
+            || start < self.base
+            || end < self.base
+            || end > self.end
+            || start as usize & (std::mem::align_of::<T>() - 1) != 0
+        {
+            return Err(einval!("invalid mmap offset"));
+        }
 
-    //     Ok(unsafe { &*(start as *const T) })
-    // }
+        Ok(unsafe { &*(start as *const T) })
+    }
 
     // #[inline]
     // fn validate_range(&self, offset: usize, size: usize) -> Result<()> {
@@ -310,6 +315,25 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
 
     fn root_ino(&self) -> u64 {
         self.state.load().meta.root_nid as u64
+    }
+
+    fn get_chunk_info(&self, idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
+        let state = self.state.load();
+        let unit_size = size_of::<RafsV5ChunkInfo>();
+
+        let offset = state.meta.chunk_table_offset as usize + idx * unit_size;
+        if offset + unit_size
+            > (state.meta.chunk_table_offset + state.meta.chunk_table_size) as usize
+        {
+            return Err(einval!(format!(
+                "invalid chunk offset {} chunk table {} {}",
+                offset, state.meta.chunk_table_offset, state.meta.chunk_table_size
+            )));
+        }
+
+        let chunk = state.cast_to_ref::<RafsV5ChunkInfo>(state.base, offset)?;
+        let wrapper = DirectChunkInfoV6::new(chunk, self.clone(), offset);
+        Ok(Arc::new(wrapper) as Arc<dyn BlobChunkInfo>)
     }
 }
 
@@ -1011,4 +1035,97 @@ impl RafsInode for OndiskInodeWrapper {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Impl get accessor for chunkinfo object.
+macro_rules! impl_chunkinfo_getter {
+    ($G: ident, $U: ty) => {
+        #[inline]
+        fn $G(&self) -> $U {
+            let state = self.state();
+
+            self.chunk(state.deref()).$G
+        }
+    };
+}
+
+pub struct DirectChunkInfoV6 {
+    mapping: DirectSuperBlockV6,
+    offset: usize,
+    digest: RafsDigest,
+}
+
+unsafe impl Send for DirectChunkInfoV6 {}
+unsafe impl Sync for DirectChunkInfoV6 {}
+
+// This is *direct* metadata mode in-memory chunk info object.
+impl DirectChunkInfoV6 {
+    #[inline]
+    fn new(chunk: &RafsV5ChunkInfo, mapping: DirectSuperBlockV6, offset: usize) -> Self {
+        Self {
+            mapping,
+            offset,
+            digest: chunk.block_id,
+        }
+    }
+
+    #[inline]
+    fn state(&self) -> Guard<Arc<DirectMappingState>> {
+        self.mapping.state.load()
+    }
+
+    /// Dereference the underlying OndiskChunkInfo object.
+    ///
+    /// # Safety
+    /// The OndiskChunkInfoWrapper could only be constructed from a valid OndiskChunkInfo pointer,
+    /// so it's safe to dereference the underlying OndiskChunkInfo object.
+    #[allow(clippy::cast_ptr_alignment)]
+    fn chunk<'a>(&self, state: &'a DirectMappingState) -> &'a RafsV5ChunkInfo {
+        unsafe {
+            let ptr = state.base.add(self.offset);
+            &*(ptr as *const RafsV5ChunkInfo)
+        }
+    }
+}
+
+impl BlobChunkInfo for DirectChunkInfoV6 {
+    fn chunk_id(&self) -> &RafsDigest {
+        &self.digest
+    }
+
+    fn id(&self) -> u32 {
+        self.index()
+    }
+
+    fn is_compressed(&self) -> bool {
+        self.chunk(self.state().deref())
+            .flags
+            .contains(BlobChunkFlags::COMPRESSED)
+    }
+
+    fn is_hole(&self) -> bool {
+        self.chunk(self.state().deref())
+            .flags
+            .contains(BlobChunkFlags::HOLECHUNK)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    impl_chunkinfo_getter!(blob_index, u32);
+    impl_chunkinfo_getter!(compress_offset, u64);
+    impl_chunkinfo_getter!(compress_size, u32);
+    impl_chunkinfo_getter!(uncompress_offset, u64);
+    impl_chunkinfo_getter!(uncompress_size, u32);
+}
+
+impl BlobV5ChunkInfo for DirectChunkInfoV6 {
+    fn as_base(&self) -> &dyn BlobChunkInfo {
+        self
+    }
+
+    impl_chunkinfo_getter!(index, u32);
+    impl_chunkinfo_getter!(file_offset, u64);
+    impl_chunkinfo_getter!(flags, BlobChunkFlags);
 }

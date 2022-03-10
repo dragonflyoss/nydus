@@ -59,8 +59,8 @@ impl Blob {
                         // Set blob index and inode digest for upper nodes
                         let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
                         for chunk in node.chunks.iter_mut() {
-                            chunk.set_blob_index(blob_index);
-                            inode_hasher.digest_update(chunk.id().as_ref());
+                            chunk.inner.set_blob_index(blob_index);
+                            inode_hasher.digest_update(chunk.inner.id().as_ref());
                         }
                         node.inode.set_digest(inode_hasher.digest_finalize());
                     }

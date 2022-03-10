@@ -3,11 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashMap};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use nydus_utils::digest::RafsDigest;
+use rafs::metadata::layout::v5::RafsV5ChunkInfo;
 use rafs::metadata::RafsSuper;
 use storage::device::BlobInfo;
 
@@ -18,6 +20,7 @@ pub trait ChunkDict: Sync + Send + 'static {
     fn add_chunk(&mut self, chunk: ChunkWrapper);
     fn get_chunk(&self, digest: &RafsDigest) -> Option<&ChunkWrapper>;
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
+    fn get_blobs_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo>;
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
     fn get_real_blob_idx(&self, inner_idx: u32) -> u32;
 }
@@ -31,6 +34,10 @@ impl ChunkDict for () {
 
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         Vec::new()
+    }
+
+    fn get_blobs_by_inner_idx(&self, _idx: u32) -> Option<&BlobInfo> {
+        None
     }
 
     fn set_real_blob_idx(&self, _inner_idx: u32, _out_idx: u32) {
@@ -67,6 +74,10 @@ impl ChunkDict for HashChunkDict {
         self.blobs.clone()
     }
 
+    fn get_blobs_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo> {
+        self.blobs.get(idx as usize).map(|b| b.as_ref())
+    }
+
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32) {
         self.blob_idx_m.lock().unwrap().insert(inner_idx, out_idx);
     }
@@ -91,9 +102,39 @@ impl HashChunkDict {
             blob_idx_m: Mutex::new(BTreeMap::new()),
         };
 
-        Tree::from_bootstrap(&rs, &mut d).context("failed to build tree from bootstrap")?;
+        if rs.meta.is_v5() {
+            Tree::from_bootstrap(&rs, &mut d).context("failed to build tree from bootstrap")?;
+        } else if rs.meta.is_v6() {
+            Self::load_chunk_table(&rs, &mut d).context("failed to load chunk table")?;
+        } else {
+            unimplemented!()
+        }
 
         Ok(d)
+    }
+
+    fn load_chunk_table(rs: &RafsSuper, chunk_dict: &mut dyn ChunkDict) -> Result<()> {
+        let size = rs.meta.chunk_table_size as usize;
+        if size == 0 {
+            return Ok(());
+        }
+
+        let unit_size = size_of::<RafsV5ChunkInfo>();
+        if size % unit_size != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL)).with_context(|| {
+                format!(
+                    "load_chunk_table: invalid rafs v6 chunk table size {}",
+                    size
+                )
+            });
+        }
+
+        for idx in 0..(size / unit_size) {
+            let chunk = rs.superblock.get_chunk_info(idx)?;
+            chunk_dict.add_chunk(ChunkWrapper::from_chunk_info(chunk.as_ref()));
+        }
+
+        Ok(())
     }
 }
 

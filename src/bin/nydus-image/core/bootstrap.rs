@@ -22,6 +22,7 @@ use rafs::RafsIoWrite;
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
+use super::chunk_dict::HashChunkDict;
 use super::context::{BlobManager, BootstrapContext, BootstrapManager, BuildContext, SourceType};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::tree::Tree;
@@ -590,6 +591,7 @@ impl Bootstrap {
         ext_sb.set_chunk_size(ctx.chunk_size);
         ext_sb.set_blob_table_offset(blob_table_offset);
         ext_sb.set_blob_table_size(blob_table_size as u32);
+        // we need to write extended_sb until chunk table is dumped.
 
         // dump devtslot
         bootstrap_writer
@@ -608,12 +610,21 @@ impl Bootstrap {
             .store(&mut bootstrap_writer)
             .context("failed to store extended blob table")?;
 
+        // collect all chunks in this bootstrap.
+        let mut chunk_cache = HashChunkDict::default();
+
         // Dump bootstrap
         timing_tracer!(
             {
                 for node in &mut bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v6(&mut bootstrap_writer, orig_meta_addr, meta_addr, ctx)
-                        .context("failed to dump bootstrap")?;
+                    node.dump_bootstrap_v6(
+                        &mut bootstrap_writer,
+                        orig_meta_addr,
+                        meta_addr,
+                        ctx,
+                        &mut chunk_cache,
+                    )
+                    .context("failed to dump bootstrap")?;
                 }
 
                 Ok(())
@@ -644,10 +655,38 @@ impl Bootstrap {
             ext_sb.set_has_xattr();
         }
 
+        // append chunk info table.
+        // align chunk table to EROFS_BLOCK_SIZE firstly.
+        let pos = bootstrap_writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for chunk table")?;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        bootstrap_writer
+            .write_all(&WRITE_PADDING_DATA[0..padding as usize])
+            .context("failed to write 0 to padding of bootstrap's end for chunk table")?;
+
+        let chunk_table_offset = pos + padding;
+
+        let mut chunk_table_size: u64 = 0;
+        for (_, chunk) in chunk_cache.m.iter() {
+            let chunk = &chunk.0;
+            let chunk_size = chunk
+                .store(&mut bootstrap_writer)
+                .context("failed to dump chunk table")?;
+            chunk_table_size += chunk_size as u64;
+        }
+
+        debug!(
+            "chunk_table offset {} size {}",
+            chunk_table_offset, chunk_table_size
+        );
+
+        ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
+
         bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
         ext_sb
             .store(&mut bootstrap_writer)
-            .context("failed to write extended super block")?;
+            .context("failed to store extended SB")?;
 
         // Flush remaining data in BufWriter to file
         bootstrap_writer

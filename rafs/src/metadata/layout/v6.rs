@@ -300,11 +300,15 @@ pub struct RafsV6SuperBlockExt {
     s_blob_table_size: u32,
     /// chunk size
     s_chunk_size: u32,
+    /// offset of chunk table
+    s_chunk_table_offset: u64,
+    /// size of chunk table
+    s_chunk_table_size: u64,
     s_prefetch_table_offset: u64,
     s_prefetch_table_size: u32,
     s_padding: u32,
     /// Reserved
-    s_reserved: [u8; 216],
+    s_reserved: [u8; 200],
 }
 
 impl_bootstrap_converter!(RafsV6SuperBlockExt);
@@ -387,6 +391,23 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= c.bits();
     }
 
+    pub fn set_chunk_table(&mut self, offset: u64, size: u64) {
+        self.set_chunk_table_offset(offset);
+        self.set_chunk_table_size(size);
+    }
+
+    impl_pub_getter_setter!(
+        chunk_table_offset,
+        set_chunk_table_offset,
+        s_chunk_table_offset,
+        u64
+    );
+    impl_pub_getter_setter!(
+        chunk_table_size,
+        set_chunk_table_size,
+        s_chunk_table_size,
+        u64
+    );
     impl_pub_getter_setter!(chunk_size, set_chunk_size, s_chunk_size, u32);
     impl_pub_getter_setter!(flags, set_flags, s_flags, u64);
     impl_pub_getter_setter!(
@@ -427,10 +448,12 @@ impl Default for RafsV6SuperBlockExt {
             s_blob_table_offset: u64::to_le(0),
             s_blob_table_size: u32::to_le(0),
             s_chunk_size: u32::to_le(0),
+            s_chunk_table_offset: u64::to_le(0),
+            s_chunk_table_size: u64::to_le(0),
             s_prefetch_table_offset: u64::to_le(0),
             s_prefetch_table_size: u32::to_le(0),
             s_padding: u32::to_le(0),
-            s_reserved: [0u8; 216],
+            s_reserved: [0u8; 200],
         }
     }
 }
@@ -1214,7 +1237,7 @@ impl RafsV6Blob {
             reserved1: 0u32.to_le(),
             compressed_size: blob_info.compressed_size().to_le(),
             uncompressed_size: blob_info.uncompressed_size().to_le(),
-            meta_features: blob_info.meta_flags(),
+            meta_features: blob_info.meta_flags().to_le(),
             ci_compressor: (blob_info.meta_ci_compressor() as u32).to_le(),
             ci_offset: blob_info.meta_ci_offset().to_le(),
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
@@ -1229,13 +1252,20 @@ impl RafsV6Blob {
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
-                    error!("RafsV6Blob: v.len {} is invalid", v.len());
+                    error!(
+                        "RafsV6Blob: idx {} v.len {} is invalid",
+                        blob_index,
+                        v.len()
+                    );
                     return false;
                 }
             }
 
             Err(_) => {
-                error!("RafsV6Blob: blob_id from_utf8 is invalid");
+                error!(
+                    "RafsV6Blob: idx {} blob_id from_utf8 is invalid",
+                    blob_index
+                );
                 return false;
             }
         }
@@ -1255,7 +1285,8 @@ impl RafsV6Blob {
             || c_size != chunk_size as u64
         {
             error!(
-                "RafsV6Blob: invalid c_size {}, count_ones() {}",
+                "RafsV6Blob: idx {} invalid c_size {}, count_ones() {}",
+                blob_index,
                 c_size,
                 c_size.count_ones()
             );
@@ -1264,7 +1295,8 @@ impl RafsV6Blob {
 
         if u32::from_le(self.chunk_count) >= (1u32 << 24) {
             error!(
-                "RafsV6Blob: invalid chunk_count {}",
+                "RafsV6Blob: idx {} invalid chunk_count {}",
+                blob_index,
                 u32::from_le(self.chunk_count)
             );
             return false;
@@ -1275,8 +1307,8 @@ impl RafsV6Blob {
 
         if uncompressed_blob_size > BLOB_MAX_SIZE {
             error!(
-                "RafsV6Blob: invalid uncompressed_size {}",
-                uncompressed_blob_size
+                "RafsV6Blob: idx {} invalid uncompressed_size {}",
+                blob_index, uncompressed_blob_size
             );
             return false;
         }
@@ -1286,27 +1318,27 @@ impl RafsV6Blob {
             || digest::Algorithm::try_from(u32::from_le(self.digest_algo)).is_err()
         {
             error!(
-                "RafsV6Blob: invalid compression_algo {} ci_compressor {} digest_algo {}",
-                self.compression_algo, self.ci_compressor, self.digest_algo
+                "RafsV6Blob: idx {} invalid compression_algo {} ci_compressor {} digest_algo {}",
+                blob_index, self.compression_algo, self.ci_compressor, self.digest_algo
             );
             return false;
         }
 
         if self.ci_digest != [0u8; 32] {
-            error!("RafsV6Blob: invalid ci_digest",);
+            error!("RafsV6Blob: idx {} invalid ci_digest", blob_index);
             return false;
         }
 
         // for now the uncompressed data chunk of v6 image is 4k aligned.
         if u32::from_le(self.meta_features) & BLOB_FEATURE_4K_ALIGNED == 0 {
-            error!("RafsV6Blob: invalid meta_features",);
+            error!("RafsV6Blob: idx {} invalid meta_features", blob_index);
             return false;
         }
 
         let ci_compr_size = u64::from_le(self.ci_compressed_size);
         let ci_uncompr_size = u64::from_le(self.ci_uncompressed_size);
         if ci_compr_size > ci_uncompr_size {
-            error!("RafsV6Blob: invalid fields, ci_compressed_size {} is greater than ci_uncompressed_size {}", ci_compr_size, ci_uncompr_size);
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} is greater than ci_uncompressed_size {}", blob_index, ci_compr_size, ci_uncompr_size);
             return false;
         }
 
