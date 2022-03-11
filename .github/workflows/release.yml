@@ -59,7 +59,7 @@ jobs:
       uses: actions/cache@v2
       with:
         path: /go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydus-snapshotter/go.sum', '**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
+        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go
     - name: build contrib go components
@@ -69,7 +69,6 @@ jobs:
         sudo mv contrib/docker-nydus-graphdriver/bin/nydus_graphdriver .
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
-        sudo mv contrib/nydus-snapshotter/bin/containerd-nydus-grpc .
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
