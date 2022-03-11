@@ -6,8 +6,8 @@ on:
   pull_request:
     branches: [master]
   schedule:
-    # Run daily sanity check at 00:08 clock UTC
-    - cron: "8 0 * * *"
+    # Run daily sanity check at 23:08 clock UTC
+    - cron: "8 23 * * *"
 
 env:
   CARGO_TERM_COLOR: always

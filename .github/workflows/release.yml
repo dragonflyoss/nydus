@@ -4,6 +4,9 @@ on:
   push:
     tags:
      - v[0-9]+.[0-9]+.[0-9]+*
+  schedule:
+    # Run daily sanity check at 22:08 clock UTC
+    - cron: "8 22 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -96,6 +99,7 @@ jobs:
         name: nydus-artifacts
         path: nydus-static
     - name: upload artifacts
+      if: ${{ github.event_name == 'push' }}
       run: |
         tag=$(echo $GITHUB_REF | cut -d/ -f3-)
         tarball="nydus-static-$tag-x86_64.tgz"
