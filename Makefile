@@ -110,6 +110,7 @@ docker-nydus-smoke:
 	docker build -t nydus-smoke --build-arg ARCH=${ARCH} misc/nydus-smoke
 	docker run --rm --privileged ${CARGO_BUILD_GEARS} \
 		-e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) \
+		-v ~/.cargo:/root/.cargo \
 		-v $(TEST_WORKDIR_PREFIX) \
 		-v ${current_dir}:/nydus-rs \
 		nydus-smoke
