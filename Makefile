@@ -27,7 +27,7 @@ VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
 	if [ $(DOCKER) = "true" ]; then
-		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.15 $(2)
+		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.17 $(2)
 	else
 		$(2) -C $(1)
 	fi
