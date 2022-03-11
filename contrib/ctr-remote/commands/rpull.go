@@ -27,7 +27,7 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/log"
-	"github.com/dragonflyoss/image-service/contrib/nydus-snapshotter/pkg/label"
+	"github.com/containerd/nydus-snapshotter/pkg/label"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/urfave/cli"
 )
