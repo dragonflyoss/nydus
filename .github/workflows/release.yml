@@ -17,16 +17,10 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Cache cargo
-      uses: actions/cache@v2
+      uses: Swatinem/rust-cache@v1
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target-fusedev
-          target-virtiofs
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo
+        target-dir: ./target-fusedev
+        cache-on-failure: true
     - name: Build nydus-rs
       run: |
         make docker-static
@@ -35,7 +29,7 @@ jobs:
         sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusctl .
         sudo mv target-virtiofs/x86_64-unknown-linux-musl/release/nydusd nydusd-virtiofs
         sudo cp -r misc/configs .
-        sudo chown -R $(id -un):$(id -gn) .
+        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:

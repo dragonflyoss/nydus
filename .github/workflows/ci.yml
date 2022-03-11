@@ -56,6 +56,7 @@ jobs:
           echo Cargo Home: $CARGO_HOME
           echo Running User: $(whoami)
           make docker-smoke
+          sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
 
   deny:
     name: Cargo Deny
