@@ -4,7 +4,7 @@ This document will walk through how to setup a nydus image service to work with 
 
 ## Install All Nydus Binaries
 
-Get `nydus-image`, `nydusd`, `nydusify`, `ctr-remote`, `nydus-overlayfs` and `containerd-nydus-grpc` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+Get `nydus-image`, `nydusd`, `nydusify`, `ctr-remote` and `nydus-overlayfs` binaries from [image-service release](https://github.com/dragonflyoss/image-service/releases/latest) page.
 
 ```bash
 sudo cp nydusd nydus-image /usr/local/bin
@@ -12,12 +12,18 @@ sudo cp nydusify containerd-nydus-grpc /usr/local/bin
 sudo cp ctr-remote nydus-overlayfs /usr/local/bin
 ```
 
+Get `containerd-nydus-grpc` binary from [nydus-snapshotter release](https://github.com/containerd/nydus-snapshotter/releases) page.
+
+```bash
+sudo cp nydusify containerd-nydus-grpc /usr/local/bin
+```
+
 ## Start Containerd Snapshotter for Nydus
 
 Nydus provides a containerd remote snapshotter `containerd-nydus-grpc` to prepare container rootfs with nydus formatted images. To start it, first save a `nydusd` configuration to `/etc/nydusd-config.json`:
 
 ```bash
-$ sudo cat > /etc/nydusd-config.json << EOL
+$ sudo cat > /etc/nydusd-config.json << EOF
 {
   "device": {
     "backend": {
@@ -46,7 +52,7 @@ $ sudo cat > /etc/nydusd-config.json << EOL
     "threads_count": 4
   }
 }
-EOL
+EOF
 ```
 
 Note:
