@@ -23,7 +23,7 @@ VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 # Func: build golang target in docker
 # Args:
 #   $(1): The path where go build a golang project
-#	$(2): How to build the golang project
+#   $(2): How to build the golang project
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
 	if [ $(DOCKER) = "true" ]; then
@@ -71,6 +71,10 @@ virtiofs:
 fusedev:
 	$(call build_nydus,$@,$@)
 	$(call static_check,$@,target-$@)
+
+clean:
+	cargo clean --target-dir target-virtiofs
+	cargo clean --target-dir target-fusedev
 
 PACKAGES = rafs storage
 
