@@ -11,6 +11,9 @@ Currently, Nydus includes the following tools:
 - A `nydusify` tool to convert an OCI format container image into a nydus format container image.
 - A `nydus-image` tool to convert an unpacked container image into a nydus format image.
 - A `nydusd` daemon to parse a nydus format image and expose a FUSE mountpoint for containers to access. `nydusd` can also work as a virtiofs backend, therefore, guest is capable of accessing files in the host.
+
+To work with containerd, you also need [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter/releases) for containerd:
+
 - A `containerd-nydus-grpc` daemon provides a containerd remote snapshotter plugin, allows to run nydus image in containerd.
 
 ### What will this tutorial teach me?
@@ -25,7 +28,7 @@ The getting started guide on Docker has detailed instructions for setting up Doc
 
 ### Get binaries from release page
 
-Get `nydus-image`, `nydusd`, `nydusify`, and `containerd-nydus-grpc` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+Get `nydus-image`, `nydusd`, `nydusify`, and `containerd-nydus-grpc` binaries from [image-service release](https://github.com/dragonflyoss/image-service/releases/latest) and [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter/releases).
 
 ## Build Nydus Image through nydusify
 
@@ -46,7 +49,7 @@ The registry is now ready to use. Please refer to [docker document](https://docs
 You can pull an image from Docker Hub and push it to your local registry. The following example pulls the `ubuntu:16.04` image from Docker Hub, convert to Nydus image, then pushes it to the local registry and re-tags it as `ubuntu:16.04-nydus`.
 
 ```bash
-# workdir: nydus-rs/contrib/nydusify
+# workdir: image-service/contrib/nydusify
 $ sudo nydusify convert \
   --nydus-image /path/to/nydus-image \
   --source ubuntu:16.04 \
@@ -92,7 +95,7 @@ INFO[2021-04-11T03:07:23Z] Converted to localhost:5000/ubuntu:16.04-nydus
 The Nydus image is converted layer by layer automatically under the `tmp` directory of current working directory.
 
 ```bash
-# workdir: nydus-rs/contrib/nydusify
+# workdir: image-service/contrib/nydusify
 $ sudo tree tmp -L 4
 tmp
 ├── blobs
@@ -133,9 +136,10 @@ The `Nydusd` runs with a container image registry as a storage backend. Therefor
 ```
 
 ```bash
-# workdir: nydus-rs
+# workdir: image-service
+$ mkdir mnt
 $ sudo nydusd \
-  --config  ./registry.json \
+  --config ./registry.json \
   --mountpoint ./mnt \
   --bootstrap ./contrib/nydusify/tmp/bootstraps/4-sha256:33f6d5f2e001ababe3ddac4731d9c33121e1148ef32a87a83a5b470cb401abef \
   --log-level info
@@ -144,14 +148,14 @@ $ sudo nydusd \
 2020-10-22T10:22:23+08:00 - INFO - rafs imported
 2020-10-22T10:22:23+08:00 - INFO - rafs mounted: mode=direct digest_validate=false iostats_files=false
 2020-10-22T10:22:23+08:00 - INFO - vfs mounted
-2020-10-22T10:22:23+08:00 - INFO - mount source nydusfs dest /media/nvme/user/nydus/nydus-rs/mnt with fstype fuse opts default_permissions,allow_other,fd=11,rootmode=40000,user_id=0,group_id=0 fd 11
+2020-10-22T10:22:23+08:00 - INFO - mount source nydusfs dest /media/nvme/user/nydus/image-service/mnt with fstype fuse opts default_permissions,allow_other,fd=11,rootmode=40000,user_id=0,group_id=0 fd 11
 2020-10-22T10:22:23+08:00 - INFO - starting fuse daemon
 ```
 
 And the image files are mounted on the `mnt` directory.
 
 ```bash
-# workdir: nydus-rs
+# workdir: image-service
 $ sudo ls  ./mnt/
 bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
@@ -162,19 +166,17 @@ Nydus also offers a `nydus-image` tool to convert an unpacked container image in
 The layers of an image could be rendered by the following command.
 
 ```bash
-$ sudo docker inspect ubuntu:16.04
-...
+$ sudo docker inspect -f "{{json .GraphDriver }}" ubuntu:16.04  | jq .
 "GraphDriver": {
-            "Data": {
-                "LowerDir": "/var/lib/docker/overlay2/747f5ea4b306b2cbe5c389053355653290fa749428877ec6ff0be10c28593f5b/diff:/var/lib/docker/overlay2/13d9b589b51a8a6f58eeaca6afd6ecd1bec77ce32e978ee5b037950b06
+  "Data": {
+    "LowerDir": "/var/lib/docker/overlay2/747f5ea4b306b2cbe5c389053355653290fa749428877ec6ff0be10c28593f5b/diff:/var/lib/docker/overlay2/13d9b589b51a8a6f58eeaca6afd6ecd1bec77ce32e978ee5b037950b06
 0b7909/diff:/var/lib/docker/overlay2/2d0abffedd569eb9485e95008c5c4a2344b33e2c69a26f949eff636a3132db08/diff",
-                "MergedDir": "/var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/merged",
-                "UpperDir": "/var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/diff",
-                "WorkDir": "/var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/work"
-            },
-            "Name": "overlay2"
-        }
-<output truncated>
+    "MergedDir": "/var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/merged",
+    "UpperDir": "/var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/diff",
+    "WorkDir": "/var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/work"
+  },
+  "Name": "overlay2"
+}
 ```
 
 As we can see, Docker is using the `overlay2` storage driver and has automatically created the overlay mount with the required `lowerdir`, `upperdir`, `merged`, and `workdir` constructs. The lowest layer only contains `committed`, `diff` and `link`. Each higher layer also contains `lower` and `work`. The `lower` is a file, which denotes its parent, and the `diff` is a directory which contains its contents. Please refer to the [overlay document](https://docs.docker.com/storage/storagedriver/overlayfs-driver/) for more details.
@@ -189,14 +191,8 @@ For Nydus, a directory tree (usually an image layer) is constructed into two par
 Firstly, we prepare a directory `nydus-image` under current working directory. The `blobs` directory is for each `blob` file of each layer, and the `layer#` directories are for each `bootstrap` file of each layer.
 
 ```bash
-# workdir: nydus-rs
-$ tree -L 2 ./nydus-image
-./nydus-image
-├── blobs
-├── layer1
-├── layer2
-├── layer3
-└── layer4
+# workdir: image-service
+$ mkdir -p nydus-image/{blobs,layer1,layer2,layer3,layer4}
 ```
 
 Then, we convert the lowest layer to the `layer1` directory.
@@ -205,14 +201,13 @@ Then, we convert the lowest layer to the `layer1` directory.
 $ sudo nydus-image create \
   --bootstrap ./nydus-image/layer1/bootstrap \
   --blob-dir ./nydus-image/blobs \
-  --log-level debug \
   --compressor none /var/lib/docker/overlay2/2d0abffedd569eb9485e95008c5c4a2344b33e2c69a26f949eff636a3132db08/diff
 ```
 
 And the directory `nydus-image` will look like below.
 
 ```bash
-# workdir: nydus-rs
+# workdir: image-service
 $ tree -L 2 ./nydus-image
 ./nydus-image
 ├── blobs
@@ -231,7 +226,6 @@ $ sudo nydus-image create \
   --parent-bootstrap ./nydus-image/layer1/bootstrap \
   --bootstrap ./nydus-image/layer2/bootstrap \
   --blob-dir ./nydus-image/blobs \
-  --log-level debug \
   --compressor none /var/lib/docker/overlay2/13d9b589b51a8a6f58eeaca6afd6ecd1bec77ce32e978ee5b037950b060b7909/diff
 ```
 
@@ -243,7 +237,6 @@ $ sudo nydus-image create \
   --parent-bootstrap ./nydus-image/layer2/bootstrap \
   --bootstrap ./nydus-image/layer3/bootstrap \
   --blob-dir ./nydus-image/blobs \
-  --log-level debug \
   --compressor none /var/lib/docker/overlay2/747f5ea4b306b2cbe5c389053355653290fa749428877ec6ff0be10c28593f5b/diff
 
 # fourth-lowest layer(layer4)
@@ -251,14 +244,13 @@ $ sudo nydus-image create \
   --parent-bootstrap ./nydus-image/layer3/bootstrap \
   --bootstrap ./nydus-image/layer4/bootstrap \
   --blob-dir ./nydus-image/blobs \
-  --log-level debug \
   --compressor none /var/lib/docker/overlay2/111a7c00f9da7862d99bb5017491427acad649061e30dbfc31cab8c5e68fd5b1/diff
 ```
 
 And the directory `nydus-image` will look like below.
 
 ```bash
-# workdir: nydus-rs
+# workdir: image-service
 $ tree -L 2 ./nydus-image
 ./nydus-image
 ├── blobs
@@ -295,7 +287,7 @@ $ cat localfs.json
     "backend": {
       "type": "localfs",
       "config": {
-        "dir": "/media/nvme/user/nydus/image/blobs"
+        "dir": "/<YOUR-WORK-PATH>/nydus-image/blobs"
       }
     }
   },

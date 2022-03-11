@@ -57,7 +57,7 @@ To try nydus image service:
 
 1. Convert an original OCI image to nydus image and store it somewhere like Docker/Registry, NAS or Aliyun/OSS. This can be directly done by `nydusify`. Normal users don't have to get involved with `nydus-image`.
 2. Get `nydus-snapshotter`(`containerd-nydus-grpc`) installed locally and configured properly. Or install `nydus-docker-graphdriver` plugin.
-3. Operate container in legacy approaches. For example, `docker`, `nerdctl`, `CRI` and `ctr`
+3. Operate container in legacy approaches. For example, `docker`, `nerdctl`, `crictl` and `ctr`.
 
 ## Build Binary
 
