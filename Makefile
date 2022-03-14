@@ -128,7 +128,7 @@ docker-nydusify-smoke: docker-static
 		-v $(current_dir):/nydus-rs $(dind_cache_mount) nydusify-smoke TestSmoke
 
 docker-nydusify-image-test: docker-static
-	$(call build_golang,$(NYDUSIFY_PATH),build-smoke)
+	$(call build_golang,$(NYDUSIFY_PATH),make build-smoke)
 	docker build -t nydusify-smoke misc/nydusify-smoke
 	docker run --rm --privileged \
 		-e BACKEND_TYPE=$(BACKEND_TYPE) \
