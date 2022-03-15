@@ -73,6 +73,7 @@ fusedev:
 	$(call static_check,$@,target-$@)
 
 clean:
+	cargo clean
 	cargo clean --target-dir target-virtiofs
 	cargo clean --target-dir target-fusedev
 
