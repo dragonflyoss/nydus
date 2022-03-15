@@ -72,7 +72,7 @@ fn default_amplify_io() -> u32 {
 /// Configuration information for filesystem data prefetch.
 #[derive(Clone, Default, Deserialize)]
 pub struct FsPrefetchControl {
-    /// Whether the filesystem layer data prefetch is enable or not.
+    /// Whether the filesystem layer data prefetch is enabled or not.
     #[serde(default)]
     pub enable: bool,
 

@@ -214,7 +214,7 @@ impl RafsV6SuperBlock {
         self.magic() == EROFS_SUPER_MAGIC_V1
     }
 
-    /// Get maximum ino.
+    /// Set number of inodes.
     pub fn set_inos(&mut self, inos: u64) {
         self.s_inos = inos.to_le();
     }
