@@ -453,17 +453,11 @@ impl Default for RafsSuper {
 impl RafsSuper {
     /// Create a new `RafsSuper` instance from a `RafsConfig` object.
     pub fn new(conf: &RafsConfig) -> Result<Self> {
-        let mut rs = Self::default();
-
-        match conf.mode.as_str() {
-            "direct" => rs.mode = RafsMode::Direct,
-            "cached" => rs.mode = RafsMode::Cached,
-            _ => return Err(einval!("Rafs mode should be 'direct' or 'cached'")),
-        }
-
-        rs.validate_digest = conf.digest_validate;
-
-        Ok(rs)
+        Ok(Self {
+            mode: RafsMode::from_str(&conf.mode.as_str())?,
+            validate_digest: conf.digest_validate,
+            ..Default::default()
+        })
     }
 
     /// Destroy the filesystem super block.
