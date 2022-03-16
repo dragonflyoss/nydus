@@ -95,7 +95,6 @@ impl DirectMappingState {
             base: std::ptr::null(),
             end: std::ptr::null(),
             size: 0,
-            // mmapped_inode_table: false,
             validate_digest,
         }
     }

@@ -32,7 +32,7 @@ Rafs presents to users a userspace filesystem with separating filesystem's metad
 
    * bootstrap
       * The metadata is a merkle tree whose nodes represents a regular filesystem's directory/file
-      * a leaf nodes refers to a file and contains hash value of its file data
+      * a leaf node refers to a file and contains hash value of its file data
       * Root node and internal nodes refer to directories and contain the hash value of their children nodes.
 ```
 +-----------------+-----------------+--------------+----------------+-------+-------+--------+---------------------+
@@ -86,10 +86,13 @@ As a lazily fetch solution, prefetch plays an important role to mitigate the imp
 
 The image build tool `nydusify` accepts prefetch hints from `stdin`.
 ##    5. Blob and Blob Cache
+
 * blob
+
 Blob is the data part of a container image, it consists of files' data.  Nydus has splitted a file's data into one or more fixed-length (1MB) chunks.
 
 * blob cache
+
 Nydus can be configured to set up a cache for blob, called `blobcache`.  With `blobcache`, fetched blob data is saved to a `work dir` and won't be repeatedly fetched.  Given the assumption that only a small portion of image is fetched, there is no cache eviction for `blobcache`.
 
 ##    6. Compression
@@ -316,11 +319,11 @@ pub struct OndiskBlobTable {
 # III. Manifest of Nydus Format Image
 Nydus manifest is designed to be fully compatible with OCI image spec and distribution spec by adding an extra manifest file to store the pointers of nydus bootstrap (i.e. metadata) and blobfile (i.e. data).
 
-  ## 1. Image Index
-  A typical image index enabling nydus points to two manifest files, one is the traditional OCI v1 image manifest, the other is the nydus manifest that takes advantage of `platform` and puts `os.features: ["nydus.remoteimage.v1"]` field under `platform`.
+## 1. Image Index
+A typical image index enabling nydus points to two manifest files, one is the traditional OCI v1 image manifest, the other is the nydus manifest that takes advantage of `platform` and puts `os.features: ["nydus.remoteimage.v1"]` field under `platform`.
 
 ```json
-  {
+{
   "schemaVersion": 2,
   "manifests": [
     {
@@ -347,18 +350,22 @@ Nydus manifest is designed to be fully compatible with OCI image spec and distri
   ]
 }
 ```
-  ## 2. Image Manifest
-  A typical image manifest of nydus consists of `config.json`, one nydus metadata layer (`"mediaType": "application/vnd.oci.image.layer.v1.tar.gz"`) and one or more nydus data layers (`"mediaType": "application/vnd.oci.image.layer.nydus.blob.v1"`).
-  * nydus metadata layer
-  This layer refers to the metadata part of files and directories in the image, including rafs filesystem metadata and digest for validation purpose.
-  The special part is that an annotation `"containerd.io/snapshot/nydus-bootstrap": "true"` is set and lets containerd's snapshotter know it's nydus metadata layer and do its job accordingly.
-  * nydus data layer
-  This layer refers to the data part, please note that the data layers of an image can be owned solely by this image or shared by others, similarly, each data layer is annotated with `"containerd.io/snapshot/nydus-blob": "true"`, which can be used to tell containerd's snapshotter to skip downloading them.
-  
-  The manifest is designed to be compatible with the dependency architect and garbage collection algorithm widely used by containerd and registry.
+## 2. Image Manifest
+
+A typical image manifest of nydus consists of `config.json`, one nydus metadata layer (`"mediaType": "application/vnd.oci.image.layer.v1.tar.gz"`) and one or more nydus data layers (`"mediaType": "application/vnd.oci.image.layer.nydus.blob.v1"`).
+
+* nydus metadata layer
+
+This layer refers to the metadata part of files and directories in the image, including rafs filesystem metadata and digest for validation purpose.
+The special part is that an annotation `"containerd.io/snapshot/nydus-bootstrap": "true"` is set and lets containerd's snapshotter know it's nydus metadata layer and do its job accordingly.
+
+* nydus data layer
+This layer refers to the data part, please note that the data layers of an image can be owned solely by this image or shared by others, similarly, each data layer is annotated with `"containerd.io/snapshot/nydus-blob": "true"`, which can be used to tell containerd's snapshotter to skip downloading them.
+
+The manifest is designed to be compatible with the dependency architect and garbage collection algorithm widely used by containerd and registry.
 
 ```json
-  {
+{
   "schemaVersion": 2,
   "mediaType": "",
   "config": {
