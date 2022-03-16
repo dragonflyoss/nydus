@@ -84,21 +84,12 @@ We are working on enabling cloud-hypervisor support for nydus.
       // localfs | oss | registry
       "type": "localfs",
       "config": {
-        // Access remote storage backend via P2P proxy, e.g. Dragonfly client
-        "proxy": "http://p2p-proxy:65001",
-        // Fallback to remote storage backend if P2P proxy ping failed
-        "proxy_fallback": true,
-        // Endpoint of P2P proxy health check
-        "proxy_ping_url": "http://p2p-proxy:40901/server/ping",
-        // Interval of P2P proxy checking, in seconds
-        "proxy_check_interval": 5,
         // Drop the read request once http request timeout, in seconds
         "timeout": 5,
         // Drop the read request once http connection timeout, in seconds
         "connect_timeout": 5,
         // Retry count when read request failed
         "retry_limit": 0,
-        ...
       }
     },
     "cache": {
@@ -204,6 +195,41 @@ We are working on enabling cloud-hypervisor support for nydus.
   },
   ...
 }
+```
+
+##### Enable P2P Proxy for Storage Backend
+
+Add `device.backend.config.proxy` field to enable HTTP proxy for storage backend. For example, use P2P distribution service to reduce network workload and latency in large scale container cluster using [Dragonfly](https://d7y.io/) (enable centralized dfdaemon mode).
+
+```
+{
+  "device": {
+    "backend": {
+      "type": "registry",
+      "config": {
+        "proxy": {
+          // Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL
+          "url": "http://p2p-proxy:65001",
+          // Fallback to remote storage backend if P2P proxy ping failed
+          "fallback": true,
+          // Endpoint of P2P proxy health checking
+          "ping_url": "http://p2p-proxy:40901/server/ping",
+          // Interval of P2P proxy health checking, in seconds
+          "check_interval": 5
+        },
+        ...
+      }
+    },
+    ...
+  },
+  ...
+}
+```
+
+Once the configuration is loaded successfully on nydusd starting, we will see the log as shown below:
+
+```
+INFO [storage/src/backend/connection.rs:136] backend config: CommonConfig { proxy: ProxyConfig { url: "http://p2p-proxy:65001", ping_url: "http://p2p-proxy:40901/server/ping", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, retry_limit: 0 }
 ```
 
 ### Mount Bootstrap Via API
