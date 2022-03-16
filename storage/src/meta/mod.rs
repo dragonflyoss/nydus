@@ -558,12 +558,25 @@ impl BlobMetaInfo {
                 return Err(eio!("failed to read blob metadata from backend"));
             }
 
-            compress::decompress(&buf, None, buffer, blob_info.meta_ci_compressor()).map_err(
-                |e| {
+            // Lz4 does not support concurrent decompression of the same data into
+            // the same piece of memory. There will be multiple containers mmap the
+            // same file, causing the buffer to be shared between different
+            // processes. This will cause data errors due to race issues when
+            // decompressing with lz4. We solve this problem by creating a temporary
+            // memory to hold the decompressed data.
+            //
+            // Because this process will only be executed when the blob.meta file is
+            // created for the first time, which means that a machine will only
+            // execute the process once when the blob.meta is created for the first
+            // time, the memory consumption and performance impact are relatively
+            // small.
+            let mut uncom_buf = vec![0u8; buffer.len()];
+            compress::decompress(&buf, None, &mut uncom_buf, blob_info.meta_ci_compressor())
+                .map_err(|e| {
                     error!("failed to decompress metadata: {}", e);
                     e
-                },
-            )?;
+                })?;
+            buffer.copy_from_slice(&uncom_buf);
         }
 
         // TODO: validate metadata
