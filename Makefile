@@ -77,14 +77,10 @@ clean:
 	cargo clean --target-dir target-virtiofs
 	cargo clean --target-dir target-fusedev
 
-PACKAGES = rafs storage
-
 # If virtiofs test must be performed, only run binary part
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
 ut:
-	echo "Testing packages: ${PACKAGES}"
-	$(foreach var,$(PACKAGES),cargo test $(FUSEDEV_COMMON) -p $(var);)
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 cargo test $(FUSEDEV_COMMON) --bins -- --nocapture --test-threads=8
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 cargo test --workspace $(FUSEDEV_COMMON) -- --skip integration --nocapture --test-threads=8
 ifdef NYDUS_TEST_VIRTIOFS
 # If virtiofs test must be performed, only run binary part since other package is not affected by feature - virtiofs
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
