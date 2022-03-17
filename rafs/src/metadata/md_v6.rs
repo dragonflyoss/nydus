@@ -159,6 +159,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_v6_load_invalid_superblock() {
         let t_file = TempFile::new().unwrap();
 
