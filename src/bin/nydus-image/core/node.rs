@@ -103,6 +103,8 @@ pub enum WhiteoutSpec {
     Oci,
     /// "whiteouts and opaque directories" in https://www.kernel.org/doc/Documentation/filesystems/overlayfs.txt
     Overlayfs,
+    /// No whiteout spec, which will build all `.wh.*` and `.wh..wh..opq` files into bootstrap.
+    None,
 }
 
 impl Default for WhiteoutSpec {
@@ -118,6 +120,7 @@ impl FromStr for WhiteoutSpec {
         match s {
             "oci" => Ok(Self::Oci),
             "overlayfs" => Ok(Self::Overlayfs),
+            "none" => Ok(Self::None),
             _ => Err(anyhow!("invalid whiteout spec")),
         }
     }
@@ -1021,6 +1024,9 @@ impl Node {
                 } else if self.is_overlayfs_opaque(spec) {
                     return Some(WhiteoutType::OverlayFsOpaque);
                 }
+            }
+            WhiteoutSpec::None => {
+                return None;
             }
         }
 

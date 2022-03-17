@@ -277,7 +277,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                         .required(true)
                         .default_value("oci")
-                        .possible_values(&["oci", "overlayfs"])
+                        .possible_values(&["oci", "overlayfs", "none"])
                 )
                 .arg(
                     Arg::with_name("output-json")
