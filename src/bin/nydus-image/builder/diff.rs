@@ -843,6 +843,7 @@ pub mod tests {
     use std::path::Path;
 
     use nix::sys::stat::{dev_t, makedev, mknod, Mode, SFlag};
+    use nix::unistd::geteuid;
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
@@ -913,6 +914,11 @@ pub mod tests {
 
     #[test]
     fn test_walk_diff() {
+        // Skip mount test for non-root.
+        if geteuid().as_raw() != 0 {
+            return;
+        }
+
         let tmp_dir_prefix =
             std::env::var("TEST_WORKDIR_PREFIX").expect("Please specify `TEST_WORKDIR_PREFIX` env");
 
