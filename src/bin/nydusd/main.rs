@@ -25,12 +25,13 @@ use std::sync::{
     mpsc::channel,
     Arc, Mutex,
 };
-use std::thread;
+use std::thread::{self, spawn};
 use std::{io, process};
 
 use clap::{App, Arg};
 use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
+use mio::Waker;
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
 use vmm_sys_util::eventfd::EventFd;
@@ -57,7 +58,7 @@ mod upgrade;
 
 lazy_static! {
     static ref EVENT_MANAGER_RUN: AtomicBool = AtomicBool::new(true);
-    static ref EXIT_EVTFD: Mutex::<Option<EventFd>> = Mutex::<Option<EventFd>>::default();
+    static ref EXIT_NOTIFIER: Mutex<Option<Arc<Waker>>> = Mutex::default();
 }
 
 fn get_default_rlimit_nofile() -> Result<rlim> {
@@ -91,12 +92,12 @@ fn get_default_rlimit_nofile() -> Result<rlim> {
 }
 
 pub fn exit_event_manager() {
-    EXIT_EVTFD
+    EXIT_NOTIFIER
         .lock()
         .expect("Not poisoned lock!")
         .as_ref()
         .unwrap()
-        .write(1)
+        .wake()
         .unwrap_or_else(|e| error!("Write event fd failed when exiting event manager, {}", e))
 }
 
@@ -375,10 +376,6 @@ fn main() -> Result<()> {
     let vfs = Vfs::new(opts);
 
     let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
-    let daemon_subscriber = Arc::new(NydusDaemonSubscriber::new()?);
-    // Send an event to exit from Event Manager so as to exit from nydusd
-    let exit_evtfd = daemon_subscriber.get_event_fd()?;
-    event_manager.add_subscriber(daemon_subscriber);
 
     let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
@@ -462,7 +459,7 @@ fn main() -> Result<()> {
         info!("api server running at {}", apisock);
     }
 
-    *EXIT_EVTFD.lock().unwrap().deref_mut() = Some(exit_evtfd);
+    start_daemon_monitor().unwrap();
     nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
     nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
 
@@ -488,6 +485,17 @@ fn main() -> Result<()> {
         .wait()
         .unwrap_or_else(|e| error!("failed to wait daemon: {}", e));
     info!("nydusd quits");
+
+    Ok(())
+}
+
+fn start_daemon_monitor() -> Result<()> {
+    let mut monitor = NydusDaemonSubscriber::new()?;
+    *EXIT_NOTIFIER.lock().unwrap().deref_mut() = Some(monitor.get_notifier());
+
+    spawn(move || {
+        monitor.listen();
+    });
 
     Ok(())
 }

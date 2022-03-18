@@ -22,15 +22,14 @@ use std::sync::{
 use std::thread;
 use std::{error, fmt, io};
 
-use event_manager::{EventOps, EventSubscriber, Events};
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use fuse_backend_rs::transport::Error as FuseTransportError;
 use fuse_backend_rs::Error as FuseError;
+use mio::{Events, Poll, Token, Waker};
 use rust_fsm::*;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
-use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use nydus::{FsBackendDesc, FsBackendType};
 use nydus_app::BuildTimeInfo;
@@ -413,53 +412,57 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
     }
 }
 
+const EXIT_TOKEN: Token = Token(1);
+
 pub struct NydusDaemonSubscriber {
-    event_fd: EventFd,
+    exit_notifier: Arc<Waker>,
+    exit_receiver: Poll,
 }
 
 impl NydusDaemonSubscriber {
     pub fn new() -> Result<Self> {
-        match EventFd::new(0) {
-            Ok(fd) => Ok(Self { event_fd: fd }),
-            Err(e) => {
-                error!("Creating event fd failed. {}", e);
-                Err(e)
+        let exit_receiver = Poll::new().map_err(|e| {
+            error!("Creating exit receiver failed. {}", e);
+            e
+        })?;
+
+        let exit_notifier = Waker::new(exit_receiver.registry(), EXIT_TOKEN).map_err(|e| {
+            error!("Creating exit waker failed. {}", e);
+            e
+        })?;
+
+        let subscriber = Self {
+            exit_notifier: Arc::new(exit_notifier),
+            exit_receiver,
+        };
+
+        Ok(subscriber)
+    }
+
+    pub fn get_notifier(&self) -> Arc<Waker> {
+        self.exit_notifier.clone()
+    }
+
+    pub fn listen(&mut self) {
+        let mut events = Events::with_capacity(8);
+
+        loop {
+            self.exit_receiver
+                .poll(&mut events, None)
+                .unwrap_or_else(|e| error!("failed to listen on daemon: {}", e));
+
+            for event in events.iter() {
+                if event.is_error() {
+                    error!("Got error on the monitored event.");
+                    continue;
+                }
+
+                if event.is_readable() && event.token() == EXIT_TOKEN {
+                    EVENT_MANAGER_RUN.store(false, Ordering::Relaxed);
+                    return;
+                }
             }
         }
-    }
-
-    pub fn get_event_fd(&self) -> Result<EventFd> {
-        self.event_fd.try_clone()
-    }
-}
-
-impl EventSubscriber for NydusDaemonSubscriber {
-    fn process(&self, events: Events, event_ops: &mut EventOps) {
-        self.event_fd
-            .read()
-            .map(|_| ())
-            .map_err(|e| last_error!(e))
-            .unwrap_or_else(|_| {});
-
-        match events.event_set() {
-            EventSet::IN => {
-                EVENT_MANAGER_RUN.store(false, Ordering::Relaxed);
-            }
-            EventSet::ERROR => {
-                error!("Got error on the monitored event.");
-            }
-            EventSet::HANG_UP => {
-                event_ops
-                    .remove(events)
-                    .unwrap_or_else(|e| error!("Encountered error during cleanup, {}", e));
-            }
-            _ => {}
-        }
-    }
-
-    fn init(&self, ops: &mut EventOps) {
-        ops.add(Events::new(&self.event_fd, EventSet::IN))
-            .expect("Cannot register event")
     }
 }
 
