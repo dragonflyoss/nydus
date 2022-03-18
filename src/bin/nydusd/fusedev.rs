@@ -401,7 +401,8 @@ pub fn create_nydus_daemon(
     mount_cmd: Option<FsBackendMountCmd>,
     bti: BuildTimeInfo,
 ) -> Result<Arc<dyn NydusDaemon + Send + Sync>> {
-    let session = FuseSession::new(Path::new(mountpoint), "rafs", "", readonly)?;
+    let mnt = Path::new(mountpoint).canonicalize()?;
+    let session = FuseSession::new(&mnt, "rafs", "", readonly)?;
 
     // Create upgrade manager
     let upgrade_mgr = supervisor
@@ -439,9 +440,7 @@ pub fn create_nydus_daemon(
 
     // Without api socket, nydusd can't do neither live-upgrade nor failover, so the helper
     // finding a victim is not necessary.
-    if (api_sock.as_ref().is_some()
-        && !upgrade
-        && !is_crashed(mountpoint, api_sock.as_ref().unwrap())?)
+    if (api_sock.as_ref().is_some() && !upgrade && !is_crashed(&mnt, api_sock.as_ref().unwrap())?)
         || api_sock.is_none()
     {
         if let Some(cmd) = mount_cmd {
@@ -451,9 +450,7 @@ pub fn create_nydus_daemon(
         daemon
             .on_event(DaemonStateMachineInput::Mount)
             .map_err(|e| eother!(e))?;
-        daemon
-            .conn
-            .store(calc_fuse_conn(mountpoint)?, Ordering::Relaxed);
+        daemon.conn.store(calc_fuse_conn(mnt)?, Ordering::Relaxed);
     }
 
     Ok(daemon)
