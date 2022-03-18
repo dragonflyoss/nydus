@@ -1768,6 +1768,7 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
+    #[ignore]
     fn test_super_block_load_store() {
         let mut sb = RafsV6SuperBlock::new();
         let temp = TempFile::new().unwrap();
@@ -1803,6 +1804,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_rafs_v6_inode_extended() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1868,6 +1870,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_rafs_v6_chunk_addr() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1897,6 +1900,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_rafs_v6_device() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1956,6 +1960,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_rafs_xattr_store_v6() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()

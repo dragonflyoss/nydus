@@ -777,13 +777,13 @@ mod tests {
         assert_eq!(g.block_count_read[1].count(), 1);
 
         g.global_update(StatsFop::Read, 4096, true);
-        assert_eq!(g.block_count_read[1].count(), 1);
+        assert_eq!(g.block_count_read[2].count(), 1);
 
         g.global_update(StatsFop::Read, 65535, true);
         assert_eq!(g.block_count_read[3].count(), 1);
 
         g.global_update(StatsFop::Read, 131072, true);
-        assert_eq!(g.block_count_read[4].count(), 1);
+        assert_eq!(g.block_count_read[5].count(), 1);
 
         g.global_update(StatsFop::Read, 65520, true);
         assert_eq!(g.block_count_read[3].count(), 2);
