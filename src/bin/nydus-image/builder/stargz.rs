@@ -649,10 +649,10 @@ impl Builder for StargzBuilder {
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
-        match blob_table {
-            RafsBlobTable::V5(table) => bootstrap.dump_rafsv5(ctx, &mut bootstrap_ctx, &table)?,
-            RafsBlobTable::V6(_) => todo!(),
+        if let RafsBlobTable::V6(_) = blob_table {
+            todo!();
         }
+        bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
 
         bootstrap_mgr.add(bootstrap_ctx);
         BuildOutput::new(&blob_mgr, &bootstrap_mgr)

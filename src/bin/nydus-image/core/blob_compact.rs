@@ -14,7 +14,6 @@ use crate::core::tree::Tree;
 use anyhow::Result;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::try_round_up_4k;
-use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::{RafsMode, RafsSuper};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -599,14 +598,7 @@ impl BlobCompactor {
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut compactor.nodes);
         // blobs have already been dumped, dump bootstrap only
         let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
-        match blob_table {
-            RafsBlobTable::V5(table) => {
-                bootstrap.dump_rafsv5(&mut build_ctx, &mut bootstrap_ctx, &table)?;
-            }
-            RafsBlobTable::V6(table) => {
-                bootstrap.dump_rafsv6(&mut build_ctx, &mut bootstrap_ctx, &table)?;
-            }
-        };
+        bootstrap.dump(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
         bootstrap_mgr.add(bootstrap_ctx);
         Ok(Some(BuildOutput::new(
             &compactor.new_blob_mgr,

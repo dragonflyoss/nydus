@@ -136,7 +136,7 @@ use crate::core::context::{
 use crate::core::node::{ChunkSource, ChunkWrapper, Node, NodeChunk, Overlay};
 use crate::core::tree::Tree;
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::{RafsBlobTable, RAFS_ROOT_INODE};
+use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
 use storage::device::BlobChunkInfo;
 
@@ -653,14 +653,7 @@ impl DiffBuilder {
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
-        match blob_table {
-            RafsBlobTable::V5(table) => {
-                bootstrap.dump_rafsv5(ctx, bootstrap_ctx, &table)?;
-            }
-            RafsBlobTable::V6(table) => {
-                bootstrap.dump_rafsv6(ctx, bootstrap_ctx, &table)?;
-            }
-        };
+        bootstrap.dump(ctx, bootstrap_ctx, &blob_table)?;
         bootstrap_ctx.blobs = blob_mgr
             .get_blobs()
             .iter()
