@@ -17,6 +17,7 @@ use rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
+use rafs::metadata::layout::RafsBlobTable;
 use rafs::RafsIoWrite;
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
@@ -364,8 +365,20 @@ impl Bootstrap {
         }
     }
 
+    pub fn dump(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_table: &RafsBlobTable,
+    ) -> Result<()> {
+        match blob_table {
+            RafsBlobTable::V5(table) => self.dump_rafsv5(ctx, bootstrap_ctx, &table),
+            RafsBlobTable::V6(table) => self.dump_rafsv6(ctx, bootstrap_ctx, &table),
+        }
+    }
+
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
-    pub fn dump_rafsv5(
+    fn dump_rafsv5(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
@@ -498,7 +511,7 @@ impl Bootstrap {
     }
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
-    pub fn dump_rafsv6(
+    fn dump_rafsv6(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
