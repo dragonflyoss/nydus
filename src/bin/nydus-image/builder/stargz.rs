@@ -574,7 +574,7 @@ impl StargzBuilder {
         let mut decompressed_blob_size = 0u64;
         let mut compressed_blob_size = 0u64;
         let blob_index = blob_mgr.alloc_index()?;
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone())?;
+        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone(), 0)?;
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
 

@@ -298,6 +298,13 @@ fn main() -> Result<()> {
                         .takes_value(false)
                 )
                 .arg(
+                    Arg::with_name("blob-offset")
+                        .long("blob-offset")
+                        .help("add a offset for compressed blob")
+                        .default_value("0")
+                        .takes_value(true)
+                )
+                .arg(
                     Arg::with_name("blob-dir")
                         .long("blob-dir")
                         .short("D")
@@ -523,6 +530,7 @@ impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(&matches)?;
         let chunk_size = Self::get_chunk_size(&matches)?;
+        let blob_offset = Self::get_blob_offset(&matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(&matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let extra_paths: Vec<PathBuf> = matches
@@ -576,6 +584,7 @@ impl Command {
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
+            blob_offset,
             compressor,
             digester,
             !repeatable,
@@ -891,6 +900,13 @@ impl Command {
                 }
                 Ok(chunk_size)
             }
+        }
+    }
+
+    fn get_blob_offset(matches: &clap::ArgMatches) -> Result<u64> {
+        match matches.value_of("blob-offset") {
+            None => Ok(0),
+            Some(v) => u64::from_str_radix(v, 10).context(format!("invalid blob offset {}", v)),
         }
     }
 
