@@ -551,8 +551,7 @@ impl BlobCompactor {
         backend: Arc<dyn BlobBackend + Send + Sync>,
         cfg: &Config,
     ) -> Result<Option<BuildOutput>> {
-        let rs =
-            RafsSuper::load_from_metadata(s_boostrap.to_str().unwrap(), RafsMode::Direct, true)?;
+        let rs = RafsSuper::load_from_metadata(&s_boostrap, RafsMode::Direct, true)?;
         info!("load bootstrap {:?} successfully", s_boostrap);
         let mut build_ctx = BuildContext::new(
             "".to_string(),

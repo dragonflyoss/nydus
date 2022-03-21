@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Error, Result};
+use anyhow::{Context, Result};
 use rafs::metadata::{RafsMode, RafsSuper};
 
 use crate::tree::Tree;
@@ -17,10 +17,7 @@ pub struct Validator {
 
 impl Validator {
     pub fn new(bootstrap_path: &Path) -> Result<Self> {
-        let path = bootstrap_path
-            .to_str()
-            .ok_or_else(|| Error::msg("bootstrap path is invalid"))?;
-        let sb = RafsSuper::load_from_metadata(path, RafsMode::Direct, true)?;
+        let sb = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)?;
 
         Ok(Self { sb })
     }
