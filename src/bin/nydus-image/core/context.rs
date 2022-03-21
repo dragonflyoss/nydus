@@ -284,18 +284,22 @@ impl Clone for BlobContext {
 }
 
 impl BlobContext {
-    pub fn new(blob_id: String, blob_stor: Option<ArtifactStorage>) -> Result<Self> {
+    pub fn new(
+        blob_id: String,
+        blob_stor: Option<ArtifactStorage>,
+        blob_offset: u64,
+    ) -> Result<Self> {
         let writer = if let Some(blob_stor) = blob_stor {
             Some(ArtifactBufferWriter::new(blob_stor)?)
         } else {
             None
         };
 
-        Ok(Self::new_with_writer(blob_id, writer))
+        Ok(Self::new_with_writer(blob_id, writer, blob_offset))
     }
 
     pub fn from(blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None);
+        let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None, 0);
 
         ctx.blob_readahead_size = blob.readahead_size();
         ctx.chunk_count = blob.chunk_count();
@@ -320,7 +324,11 @@ impl BlobContext {
         ctx
     }
 
-    pub fn new_with_writer(blob_id: String, writer: Option<ArtifactBufferWriter>) -> Self {
+    pub fn new_with_writer(
+        blob_id: String,
+        writer: Option<ArtifactBufferWriter>,
+        blob_offset: u64,
+    ) -> Self {
         let size = if writer.is_some() {
             RAFS_MAX_CHUNK_SIZE as usize
         } else {
@@ -339,7 +347,7 @@ impl BlobContext {
             compressed_blob_size: 0,
             decompressed_blob_size: 0,
 
-            compress_offset: 0,
+            compress_offset: blob_offset,
             decompress_offset: 0,
 
             chunk_count: 0,
@@ -687,6 +695,8 @@ pub struct BuildContext {
     /// `decompress_offset` within chunk info. Therefore, provide a new flag
     /// to image tool thus to align chunks in blob with 4k size.
     pub aligned_chunk: bool,
+    /// Add a offset for compressed blob.
+    pub blob_offset: u64,
     /// Blob chunk compress flag.
     pub compressor: compress::Algorithm,
     /// Inode and chunk digest algorithm flag.
@@ -721,6 +731,7 @@ impl BuildContext {
     pub fn new(
         blob_id: String,
         aligned_chunk: bool,
+        blob_offset: u64,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
         explicit_uidgid: bool,
@@ -733,6 +744,7 @@ impl BuildContext {
         BuildContext {
             blob_id,
             aligned_chunk,
+            blob_offset,
             compressor,
             digester,
             explicit_uidgid,
@@ -764,6 +776,7 @@ impl Default for BuildContext {
         Self {
             blob_id: String::new(),
             aligned_chunk: false,
+            blob_offset: 0,
             compressor: compress::Algorithm::default(),
             digester: digest::Algorithm::default(),
             explicit_uidgid: true,

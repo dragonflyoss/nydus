@@ -130,7 +130,11 @@ impl Builder for DirectoryBuilder {
         )?;
 
         // Dump blob file
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone())?;
+        let mut blob_ctx = BlobContext::new(
+            ctx.blob_id.clone(),
+            ctx.blob_storage.clone(),
+            ctx.blob_offset,
+        )?;
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
