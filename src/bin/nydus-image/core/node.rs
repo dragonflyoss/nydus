@@ -15,7 +15,6 @@ use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
 use nix::sys::stat;
@@ -47,7 +46,7 @@ use super::chunk_dict::ChunkDict;
 use super::context::{BlobContext, BootstrapContext, BuildContext, RafsVersion};
 use super::tree::Tree;
 
-const ROOT_PATH_NAME: &[u8] = &[b'/'];
+pub const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 /// Prefix for OCI whiteout file.
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
@@ -1188,7 +1187,7 @@ impl InodeWrapper {
         }
     }
 
-    pub fn from_inode_info(inode: &Arc<dyn RafsInode>) -> Self {
+    pub fn from_inode_info(inode: &dyn RafsInode) -> Self {
         if let Some(inode) = inode.as_any().downcast_ref::<CachedInodeV5>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
         } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapper>() {

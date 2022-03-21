@@ -682,7 +682,7 @@ impl BootstrapManager {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct BuildContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,
@@ -760,6 +760,29 @@ impl BuildContext {
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
+    }
+}
+
+impl Default for BuildContext {
+    fn default() -> Self {
+        Self {
+            blob_id: String::new(),
+            aligned_chunk: false,
+            compressor: compress::Algorithm::default(),
+            digester: digest::Algorithm::default(),
+            explicit_uidgid: true,
+            whiteout_spec: WhiteoutSpec::default(),
+
+            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
+            fs_version: RafsVersion::default(),
+
+            source_type: SourceType::default(),
+            source_path: PathBuf::new(),
+
+            prefetch: Prefetch::default(),
+            blob_storage: None,
+            has_xattr: true,
+        }
     }
 }
 

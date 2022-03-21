@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use rafs::metadata::{RafsMode, RafsSuper};
 use serde::Serialize;
 
@@ -158,12 +158,7 @@ impl ImageStat {
     }
 
     pub fn stat(&mut self, path: &Path, is_base: bool) -> Result<()> {
-        let p = match path.to_str() {
-            None => bail!("invalid path to nydus image metadata blob"),
-            Some(v) => v,
-        };
-
-        let rs = RafsSuper::load_from_metadata(p, RafsMode::Direct, false)?;
+        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, false)?;
         let mut dict = HashChunkDict::default();
         let mut hardlinks = HashSet::new();
         let tree =

@@ -850,7 +850,6 @@ pub mod tests {
 
     use super::*;
     use nydus_utils::exec;
-    use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
     fn create_dir(path: &Path) {
         fs::create_dir_all(path).unwrap();
@@ -991,10 +990,7 @@ pub mod tests {
             (Overlay::UpperAddition, PathBuf::from("/test-1-symlink")),
             (Overlay::UpperAddition, PathBuf::from("/test-2")),
         ];
-        let ctx = BuildContext {
-            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
-            ..Default::default()
-        };
+        let ctx = BuildContext::default();
         let nodes = walk_diff(&ctx, None, lower_dir.clone(), lower_dir.clone()).unwrap();
         for (i, node) in nodes.into_iter().enumerate() {
             println!("lower node: {:?} {:?}", node.overlay, node.target());

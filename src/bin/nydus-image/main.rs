@@ -38,6 +38,7 @@ use crate::core::context::{
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
+use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::validator::Validator;
 use storage::factory::{BackendConfig, BlobFactory};
@@ -47,6 +48,7 @@ mod trace;
 mod builder;
 mod core;
 mod inspect;
+mod merge;
 mod stat;
 mod validator;
 
@@ -325,6 +327,24 @@ fn main() -> Result<()> {
                 )
         )
         .subcommand(
+            SubCommand::with_name("merge")
+                .about("Merge multiple bootstraps into a overlaid bootstrap")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .short("B")
+                        .help("output path of nydus overlaid bootstrap")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("SOURCE")
+                        .help("bootstrap paths (allow one or more)")
+                        .required(true)
+                        .multiple(true),
+                )
+        )
+        .subcommand(
             SubCommand::with_name("check")
                 .about("Validates nydus image's filesystem metadata")
                 .arg(
@@ -481,6 +501,8 @@ fn main() -> Result<()> {
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         Command::create(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("merge") {
+        Command::merge(matches)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
         Command::check(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
@@ -624,6 +646,15 @@ impl Command {
         OutputSerializer::dump(matches, build_output, &build_info)?;
 
         Ok(())
+    }
+
+    fn merge(matches: &clap::ArgMatches) -> Result<()> {
+        let source_bootstrap_paths: Vec<PathBuf> = matches
+            .values_of("SOURCE")
+            .map(|paths| paths.map(PathBuf::from).collect())
+            .unwrap();
+        let target_bootstrap_path = Self::get_bootstrap(&matches)?;
+        Merger::merge(source_bootstrap_paths, target_bootstrap_path.to_path_buf())
     }
 
     fn compact(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
