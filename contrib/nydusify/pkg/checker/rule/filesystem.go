@@ -13,6 +13,7 @@ import (
 	"reflect"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
+	nydusifyTool "github.com/dragonflyoss/image-service/contrib/nydusify/pkg/nydusify/tool"
 
 	"github.com/pkg/errors"
 	"github.com/pkg/xattr"
@@ -24,7 +25,7 @@ import (
 // Mounted by Nydusd for Nydus image,
 // Mounted by Overlayfs for OCI image.
 type FilesystemRule struct {
-	NydusdConfig    tool.NydusdConfig
+	NydusdConfig    nydusifyTool.NydusdConfig
 	Source          string
 	SourceMountPath string
 }
@@ -168,7 +169,7 @@ func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
 	return image, nil
 }
 
-func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
+func (rule *FilesystemRule) mountNydusImage() (*nydusifyTool.Nydusd, error) {
 	logrus.Infof("Mounting Nydus image to %s", rule.NydusdConfig.MountPath)
 
 	if err := os.MkdirAll(rule.NydusdConfig.BlobCacheDir, 0755); err != nil {
@@ -179,7 +180,7 @@ func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 		return nil, errors.Wrap(err, "create mountpoint directory of Nydus image")
 	}
 
-	nydusd, err := tool.NewNydusd(rule.NydusdConfig)
+	nydusd, err := nydusifyTool.NewNydusd(rule.NydusdConfig)
 	if err != nil {
 		return nil, errors.Wrap(err, "create Nydusd daemon")
 	}
