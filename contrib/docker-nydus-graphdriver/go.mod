@@ -18,7 +18,7 @@ require (
 	github.com/containerd/containerd v1.6.0-beta.4 // indirect
 	github.com/containerd/continuity v0.2.2-0.20211201162329-8e53e7cac79d // indirect
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
-	github.com/docker/distribution v2.7.1+incompatible // indirect
+	github.com/docker/distribution v2.8.1+incompatible // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.4.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
