@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -19,7 +20,11 @@ use crate::core::tree::{MetadataTreeBuilder, Tree};
 pub struct Merger {}
 
 impl Merger {
-    pub fn merge(sources: Vec<PathBuf>, target: PathBuf) -> Result<()> {
+    pub fn merge(
+        sources: Vec<PathBuf>,
+        target: PathBuf,
+        chunk_dict: Option<PathBuf>,
+    ) -> Result<()> {
         if sources.is_empty() {
             bail!("please provide at least one source bootstrap");
         }
@@ -28,16 +33,33 @@ impl Merger {
 
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
+        let mut chunk_dict_blobs = HashSet::new();
 
-        let mut blob_idx = 0u32;
         for source in sources {
             let rs = RafsSuper::load_from_metadata(&source, RafsMode::Direct, true)?;
-
             let blobs = rs.superblock.get_blob_infos();
-            if blobs.len() > 0 {
-                let mut blob_ctx = BlobContext::from(blobs[0].as_ref(), ChunkSource::Parent);
-                let blob_id = source.file_name().unwrap().to_str().unwrap();
-                blob_ctx.blob_id = blob_id.to_owned();
+
+            if let Some(path) = &chunk_dict {
+                let rs = RafsSuper::load_from_metadata(&path, RafsMode::Direct, true)?;
+                for blob in rs.superblock.get_blob_infos() {
+                    chunk_dict_blobs.insert(blob.blob_id().to_string());
+                }
+            }
+
+            let blob_id = source.file_name().unwrap().to_str().unwrap();
+
+            let mut blob_idx_map = Vec::new();
+            let mut parent_blob_added = false;
+            for blob in &blobs {
+                let mut blob_ctx = BlobContext::from(blob, ChunkSource::Parent);
+                if chunk_dict_blobs.get(blob.blob_id()).is_none() {
+                    if parent_blob_added {
+                        bail!("invalid bootstrap, seems have multiple non-chunk-dict blobs in this bootstrap");
+                    }
+                    blob_ctx.blob_id = blob_id.to_owned();
+                    parent_blob_added = true;
+                }
+                blob_idx_map.push(blob_mgr.len() as u32);
                 blob_mgr.add(blob_ctx);
             }
 
@@ -48,7 +70,8 @@ impl Merger {
                  -> Result<()> {
                     let mut node = MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())?;
                     for chunk in &mut node.chunks {
-                        chunk.inner.set_blob_index(blob_idx);
+                        let origin_blob_index = chunk.inner.blob_index() as usize;
+                        chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
                     }
                     node.overlay = Overlay::UpperAddition;
                     match node.whiteout_type(WhiteoutSpec::Oci) {
@@ -66,10 +89,6 @@ impl Merger {
                 }
             } else {
                 tree = Some(Tree::from_bootstrap(&rs, &mut dict)?);
-            }
-
-            if blobs.len() > 0 {
-                blob_idx += 1;
             }
         }
 
