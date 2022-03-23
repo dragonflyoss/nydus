@@ -48,6 +48,7 @@ func Convert(option ConvertOption) error {
 		"--fs-version",
 		option.RafsVersion,
 		"--blob-offset",
+		// Add blob offset for chunk info with size_of(tar_header) * 2.
 		"1024",
 	}
 	if option.RafsVersion != "" {

@@ -17,9 +17,21 @@ use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildCont
 use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
 use crate::core::tree::{MetadataTreeBuilder, Tree};
 
+/// Merger merge multiple bootstraps (generally come from nydus tar blob of
+/// intermediate image layer) into one bootstrap (uses as final image layer).
 pub struct Merger {}
 
 impl Merger {
+    /// Merge assumes the bootstrap name as the hash of whole tar blob.
+    fn get_blob_hash(bootstrap_path: PathBuf) -> Result<String> {
+        let blob_hash = bootstrap_path
+            .file_name()
+            .ok_or_else(|| anyhow!("get file name"))?
+            .to_str()
+            .ok_or_else(|| anyhow!("convert to string"))?;
+        Ok(blob_hash.to_string())
+    }
+
     pub fn merge(
         ctx: &mut BuildContext,
         sources: Vec<PathBuf>,
@@ -27,37 +39,39 @@ impl Merger {
         chunk_dict: Option<PathBuf>,
     ) -> Result<()> {
         if sources.is_empty() {
-            bail!("please provide at least one source bootstrap");
+            bail!("please provide at least one source bootstrap path");
         }
-
-        let mut dict = HashChunkDict::default();
 
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
-        let mut chunk_dict_blobs = HashSet::new();
 
-        for source in sources {
-            let rs = RafsSuper::load_from_metadata(&source, RafsMode::Direct, true)?;
-            let blobs = rs.superblock.get_blob_infos();
-
-            if let Some(path) = &chunk_dict {
-                let rs = RafsSuper::load_from_metadata(&path, RafsMode::Direct, true)?;
+        for bootstrap_path in sources {
+            // Get the blobs come from chunk dict bootstrap.
+            let mut chunk_dict_blobs = HashSet::new();
+            if let Some(chunk_dict_path) = &chunk_dict {
+                let rs = RafsSuper::load_from_metadata(&chunk_dict_path, RafsMode::Direct, true)?;
                 for blob in rs.superblock.get_blob_infos() {
                     chunk_dict_blobs.insert(blob.blob_id().to_string());
                 }
             }
 
-            let blob_id = source.file_name().unwrap().to_str().unwrap();
-
+            let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)?;
+            let parent_blobs = rs.superblock.get_blob_infos();
+            let blob_hash = Self::get_blob_hash(bootstrap_path)?;
             let mut blob_idx_map = Vec::new();
             let mut parent_blob_added = false;
-            for blob in &blobs {
+
+            for blob in &parent_blobs {
                 let mut blob_ctx = BlobContext::from(blob, ChunkSource::Parent);
                 if chunk_dict_blobs.get(blob.blob_id()).is_none() {
+                    // Only up to one blob from the parent bootstrap, the other blobs should be
+                    // from the chunk dict image.
                     if parent_blob_added {
                         bail!("invalid bootstrap, seems have multiple non-chunk-dict blobs in this bootstrap");
                     }
-                    blob_ctx.blob_id = blob_id.to_owned();
+                    // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
+                    // runtime, should change it to the hash of whole tar blob.
+                    blob_ctx.blob_id = blob_hash.to_owned();
                     parent_blob_added = true;
                 }
                 blob_idx_map.push(blob_mgr.len() as u32);
@@ -72,15 +86,18 @@ impl Merger {
                     let mut node = MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())?;
                     for chunk in &mut node.chunks {
                         let origin_blob_index = chunk.inner.blob_index() as usize;
+                        // Set the blob index of chunk to real index in blob table of final bootstrap.
                         chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
                     }
                     node.overlay = Overlay::UpperAddition;
                     match node.whiteout_type(WhiteoutSpec::Oci) {
                         Some(_) => {
-                            nodes.insert(0, node.clone());
+                            // Insert removal operations at the head, so they will be handled first when
+                            // applying to lower layer.
+                            nodes.insert(0, node);
                         }
                         _ => {
-                            nodes.push(node.clone());
+                            nodes.push(node);
                         }
                     }
                     Ok(())
@@ -89,14 +106,15 @@ impl Merger {
                     tree.apply(node, true, WhiteoutSpec::Oci)?;
                 }
             } else {
+                let mut dict = HashChunkDict::default();
                 tree = Some(Tree::from_bootstrap(&rs, &mut dict)?);
             }
         }
 
-        // Safe to unwrap because source bootstrap is at least one.
+        // Safe to unwrap because there is at least one source bootstrap.
         let mut tree = tree.unwrap();
         let mut bootstrap = Bootstrap::new()?;
-        let storage = ArtifactStorage::SingleFile(target.clone());
+        let storage = ArtifactStorage::SingleFile(target);
         let mut bootstrap_ctx = BootstrapContext::new(storage, false)?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(&ctx)?;

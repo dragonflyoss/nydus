@@ -252,7 +252,7 @@ fn main() -> Result<()> {
                     Arg::with_name("prefetch-policy")
                         .long("prefetch-policy")
                         .short("P")
-                        .help("prefetch policy:")
+                        .help("blob data prefetch policy")
                         .takes_value(true)
                         .required(false)
                         .default_value("none")
@@ -355,7 +355,7 @@ fn main() -> Result<()> {
                     Arg::with_name("prefetch-policy")
                         .long("prefetch-policy")
                         .short("P")
-                        .help("prefetch policy:")
+                        .help("blob data prefetch policy")
                         .takes_value(true)
                         .required(false)
                         .default_value("none")
@@ -681,9 +681,10 @@ impl Command {
         } else {
             None
         };
-        let prefetch = Self::get_prefetch(matches)?;
-        let mut ctx = BuildContext::default();
-        ctx.prefetch = prefetch;
+        let mut ctx = BuildContext {
+            prefetch: Self::get_prefetch(matches)?,
+            ..Default::default()
+        };
         Merger::merge(
             &mut ctx,
             source_bootstrap_paths,
@@ -940,7 +941,9 @@ impl Command {
     fn get_blob_offset(matches: &clap::ArgMatches) -> Result<u64> {
         match matches.value_of("blob-offset") {
             None => Ok(0),
-            Some(v) => u64::from_str_radix(v, 10).context(format!("invalid blob offset {}", v)),
+            Some(v) => v
+                .parse::<u64>()
+                .context(format!("invalid blob offset {}", v)),
         }
     }
 

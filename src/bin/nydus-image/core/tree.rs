@@ -17,7 +17,6 @@
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -27,7 +26,6 @@ use rafs::metadata::{Inode, RafsInode, RafsSuper};
 use super::chunk_dict::ChunkDict;
 use super::node::{
     ChunkSource, ChunkWrapper, InodeWrapper, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType,
-    ROOT_PATH_NAME,
 };
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.

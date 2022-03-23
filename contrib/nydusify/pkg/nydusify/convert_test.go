@@ -74,6 +74,15 @@ func writeDirToTar(t *testing.T, tw *tar.Writer, name string) {
 	require.NoError(t, err)
 }
 
+func writeToFile(t *testing.T, reader io.Reader, fileName string) {
+	file, err := os.Create(fileName)
+	require.NoError(t, err)
+	defer file.Close()
+
+	_, err = io.Copy(file, reader)
+	require.NoError(t, err)
+}
+
 var expectedFileTree = map[string]string{
 	"dir-1":        "",
 	"dir-1/file-2": "lower-file-2",
@@ -154,10 +163,8 @@ func convertLayer(t *testing.T, source io.ReadCloser, chunkDict, workDir string)
 	require.NoError(t, err)
 
 	blobDigest := blobDigester.Digest()
-	file, err := os.Create(filepath.Join(workDir, blobDigest.Hex()))
-	require.NoError(t, err)
-	defer file.Close()
-	file.Write(data.Bytes())
+	tarBlobFilePath := filepath.Join(workDir, blobDigest.Hex())
+	writeToFile(t, bytes.NewReader(data.Bytes()), tarBlobFilePath)
 
 	return bufio.NewReader(&data), blobDigest
 }
@@ -232,11 +239,7 @@ func buildChunkDict(t *testing.T, workDir string) (string, string) {
 	defer finalBootstrapReader.Close()
 
 	bootstrapPath := filepath.Join(workDir, "dict-bootstrap")
-	bootstrap, err := os.Create(bootstrapPath)
-	require.NoError(t, err)
-	defer bootstrap.Close()
-	_, err = io.Copy(bootstrap, finalBootstrapReader)
-	require.NoError(t, err)
+	writeToFile(t, finalBootstrapReader, bootstrapPath)
 
 	dictBlobPath := ""
 	err = filepath.WalkDir(blobDir, func(path string, entry fs.DirEntry, err error) error {
@@ -296,11 +299,7 @@ func TestConverter(t *testing.T) {
 	defer finalBootstrapReader.Close()
 
 	bootstrapPath := filepath.Join(workDir, "bootstrap")
-	bootstrap, err := os.Create(bootstrapPath)
-	require.NoError(t, err)
-	defer bootstrap.Close()
-	_, err = io.Copy(bootstrap, finalBootstrapReader)
-	require.NoError(t, err)
+	writeToFile(t, finalBootstrapReader, bootstrapPath)
 
 	verify(t, workDir)
 	dropCache(t)
