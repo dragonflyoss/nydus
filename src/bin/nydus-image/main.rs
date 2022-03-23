@@ -30,7 +30,7 @@ use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
-use crate::core::chunk_dict::import_chunk_dict;
+use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputArtifact,
     RafsVersion, SourceType,
@@ -341,6 +341,13 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .help("output path of nydus overlaid bootstrap")
                         .required(true)
                         .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("chunk-dict")
+                        .long("chunk-dict")
+                        .short("M")
+                        .help("Specify a chunk dictionary for chunk deduplication")
+                        .takes_value(true)
                 )
                 .arg(
                     Arg::with_name("SOURCE")
@@ -687,7 +694,16 @@ impl Command {
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
         let target_bootstrap_path = Self::get_bootstrap(&matches)?;
-        Merger::merge(source_bootstrap_paths, target_bootstrap_path.to_path_buf())
+        let chunk_dict_path = if let Some(arg) = matches.value_of("chunk-dict") {
+            Some(parse_chunk_dict_arg(arg)?)
+        } else {
+            None
+        };
+        Merger::merge(
+            source_bootstrap_paths,
+            target_bootstrap_path.to_path_buf(),
+            chunk_dict_path,
+        )
     }
 
     fn compact(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {

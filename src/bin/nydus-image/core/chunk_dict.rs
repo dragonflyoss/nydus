@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -93,7 +94,7 @@ impl ChunkDict for HashChunkDict {
 }
 
 impl HashChunkDict {
-    fn from_bootstrap_file(path: &str) -> Result<Self> {
+    fn from_bootstrap_file(path: &Path) -> Result<Self> {
         let rs = RafsSuper::load_chunk_dict_from_metadata(path)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
@@ -138,7 +139,7 @@ impl HashChunkDict {
     }
 }
 
-/// Load a chunk dictionary from external source.
+/// Parse a chunk dictionary argument string.
 ///
 /// # Argument
 /// `arg` may be in inform of:
@@ -150,20 +151,26 @@ impl HashChunkDict {
 ///     image.boot
 ///     ~/image/image.boot
 ///     boltdb=/var/db/dict.db (not supported yet)
-pub(crate) fn import_chunk_dict(arg: &str) -> Result<Arc<dyn ChunkDict>> {
+pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
     let (file_type, file_path) = match arg.find('=') {
         None => ("bootstrap", arg),
         Some(idx) => (&arg[0..idx], &arg[idx + 1..]),
     };
 
-    info!("import chunk dict file {}={}", file_type, file_path);
+    info!("parse chunk dict argument {}={}", file_type, file_path);
+
     match file_type {
-        "bootstrap" => {
-            HashChunkDict::from_bootstrap_file(file_path).map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
+        "bootstrap" => Ok(PathBuf::from(file_path)),
+        _ => {
+            bail!("invalid chunk dict type {}", file_type);
         }
-        _ => Err(std::io::Error::from_raw_os_error(libc::EINVAL))
-            .with_context(|| format!("invalid chunk dict type {}", file_type)),
     }
+}
+
+/// Load a chunk dictionary from external source.
+pub(crate) fn import_chunk_dict(arg: &str) -> Result<Arc<dyn ChunkDict>> {
+    let file_path = parse_chunk_dict_arg(arg)?;
+    HashChunkDict::from_bootstrap_file(&file_path).map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
 }
 
 #[cfg(test)]

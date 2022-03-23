@@ -483,7 +483,7 @@ impl RafsSuper {
         Ok(rs)
     }
 
-    pub fn load_chunk_dict_from_metadata(path: &str) -> Result<Self> {
+    pub fn load_chunk_dict_from_metadata(path: &Path) -> Result<Self> {
         // open bootstrap file
         let file = OpenOptions::new().read(true).write(false).open(path)?;
         let mut rs = RafsSuper {
