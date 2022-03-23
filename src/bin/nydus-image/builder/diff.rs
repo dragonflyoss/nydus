@@ -6,13 +6,14 @@
 //! multiple directory paths to be passed into the builder at once as
 //! arguments, e.g.
 
-//! ```
+//! ```bash
 //! nydus-image create ... --source-type diff \
 //! /path/to/snapshot.1 /path/to/snapshot.2 ...  /path/to/snapshot.N
 //! ```
 //!
 //! or
 //!
+//! ```bash
 //! nydus-image create ... --source-type diff --diff-overlay-hint \
 //! /path/to/snapshot.1 /path/to/snapshot.2 ...  /path/to/snapshot.N \
 //! /path/to/upper.1 /path/to/upper.2 ... /path/to/upper.N
@@ -53,6 +54,7 @@
 
 //! The first build needs to dump all blobs and bootstraps:
 
+//! ```bash
 //! nydus-image create \
 //!   --source-type diff \
 //!   --diff-bootstrap-dir /path/to/bootstrap-dir \
@@ -60,9 +62,11 @@
 //!   --output-json /path/to/output.json \
 //!   /path/to/snapshot-0 \
 //!   /path/to/snapshot-1
+//! ```
 
 //! The output JSON file is like this:
 
+//! ```json
 //! {
 //!   ...
 //!   "blobs": [
@@ -75,10 +79,12 @@
 //!   ]
 //!   ...
 //! }
+//! ```
 
 //! The second build uses bootstrap-1 in the first build as parent and skip layer 0, layer 1,
 //! and only need to dump blobs and bootstraps for layer 2, layer 3:
 
+//! ```bash
 //! nydus-image create \
 //!   --source-type diff \
 //!   --diff-bootstrap-dir /path/to/bootstrap-dir \
@@ -90,9 +96,11 @@
 //!   /path/to/snapshot-1 \
 //!   /path/to/snapshot-2 \
 //!   /path/to/snapshot-3
+//! ```
 
 //! The output JSON file is like this:
 
+//! ```json
 //! {
 //!   ...
 //!   "blobs": [
@@ -105,6 +113,7 @@
 //!   ]
 //!   ...
 //! }
+//! ```
 
 use std::collections::HashMap;
 use std::ffi::OsStr;

@@ -8,7 +8,7 @@
 //! The `nydus-app` crates provides common helpers and utilities to support Nydus application:
 //! - Application Building Information: [`struct BuildTimeInfo`](struct.BuildTimeInfo.html) and
 //!   [`fn dump_program_info()`](fn.dump_program_info.html).
-//! - Logging helpers: [`fn setup_logging()`](fn.set_logging.html) and
+//! - Logging helpers: [`fn setup_logging()`](fn.setup_logging.html) and
 //!   [`fn log_level_to_verbosity()`](fn.log_level_to_verbosity.html).
 //! - Signal handling: [`fn register_signal_handler()`](signal/fn.register_signal_handler.html).
 //!
