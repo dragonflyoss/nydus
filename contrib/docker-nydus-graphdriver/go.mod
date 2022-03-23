@@ -39,6 +39,7 @@ require (
 
 replace (
 	github.com/containerd/go-runc => github.com/containerd/go-runc v1.0.0
+	github.com/docker/distribution => github.com/docker/distribution v2.8.1+incompatible
 	github.com/opencontainers/image-spec => github.com/opencontainers/image-spec v1.0.2
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.0.3
 )
