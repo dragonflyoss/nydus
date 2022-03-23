@@ -21,6 +21,7 @@ pub struct Merger {}
 
 impl Merger {
     pub fn merge(
+        ctx: &mut BuildContext,
         sources: Vec<PathBuf>,
         target: PathBuf,
         chunk_dict: Option<PathBuf>,
@@ -97,10 +98,9 @@ impl Merger {
         let mut bootstrap = Bootstrap::new()?;
         let storage = ArtifactStorage::SingleFile(target.clone());
         let mut bootstrap_ctx = BootstrapContext::new(storage, false)?;
-        let mut ctx = BuildContext::default();
-        bootstrap.build(&mut ctx, &mut bootstrap_ctx, &mut tree)?;
+        bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(&ctx)?;
-        bootstrap.dump(&mut ctx, &mut bootstrap_ctx, &blob_table)?;
+        bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
 
         Ok(())
     }
