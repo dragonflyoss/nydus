@@ -15,25 +15,27 @@
 //!
 //! The nydus-storage crate is used to manage and access chunked blobs for Rafs filesystem, which
 //! contains three layers:
-//! - [Backend](storage/backend/index.html): access raw blob objects on remote storage backends.
-//! - [Cache](storage/cache/index.html): cache remote blob contents onto local storage in forms
+//! - [Backend](backend/index.html): access raw blob objects on remote storage backends.
+//! - [Cache](cache/index.html): cache remote blob contents onto local storage in forms
 //!   optimized for performance.
-//! - [Device](storage/device/index.html): public APIs for chunked blobs
+//! - [Device](device/index.html): public APIs for chunked blobs
 //!
 //! There are several core abstractions provided by the public APIs:
-//! - [BlobInfo](struct.BlobInfo.html): provides information about blobs, which is typically
+//! - [BlobInfo](device/struct.BlobInfo.html): provides information about blobs, which is typically
 //!   constructed from the `blob array` in Rafs filesystem metadata.
-//! - [BlobDevice](struct.BlobDevice.html): provides access to all blobs of a Rafs filesystem,
-//!   which is constructed from an array of [BlobInfo] objects.
-//! - [BlobChunkInfo](trait.BlobChunkInfo.html): provides information about a data chunk, which
+//! - [BlobDevice](device/struct.BlobDevice.html): provides access to all blobs of a Rafs filesystem,
+//!   which is constructed from an array of [BlobInfo](device/struct.BlobInfo.html) objects.
+//! - [BlobChunkInfo](device/trait.BlobChunkInfo.html): provides information about a data chunk, which
 //!   is loaded from Rafs metadata.
-//! - [BlobIoDesc](struct.BlobIoDesc.html): a blob IO descriptor, containing information for a
+//! - [BlobIoDesc](device/struct.BlobIoDesc.html): a blob IO descriptor, containing information for a
 //!   continuous IO range within a chunk.
-//! - [BlobIoVec](struct.BlobIoVec.html): a scatter/gather list for blob IO operation, containing
+//! - [BlobIoVec](device/struct.BlobIoVec.html): a scatter/gather list for blob IO operation, containing
 //!   one or more blob IO descriptors
 //!
-//! To read data from the Rafs filesystem, the Rafs filesystem driver will prepare a [BlobIoVec]
-//! object and submit it to the corresponding [BlobDevice] object to actually execute the IO
+//! To read data from the Rafs filesystem, the Rafs filesystem driver will prepare a
+//! [BlobIoVec](device/struct.BlobIoVec.html)
+//! object and submit it to the corresponding [BlobDevice](device/struct.BlobDevice.html)
+//!  object to actually execute the IO
 //! operations.
 #[macro_use]
 extern crate log;

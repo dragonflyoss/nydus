@@ -23,7 +23,7 @@
 //! improve performance by caching data on local storage. The nydus-rafs itself includes two main
 //! sub modules:
 //! - [fs](fs/index.html): the Rafs core to glue fuse, storage backend and filesystem metadata.
-//! - [metadata](rafs/metadata/index.html): defines and accesses Rafs filesystem metadata.
+//! - [metadata](metadata/index.html): defines and accesses Rafs filesystem metadata.
 //!
 //! For more information, please refer to
 //! [Dragonfly Image Service](https://github.com/dragonflyoss/image-service)

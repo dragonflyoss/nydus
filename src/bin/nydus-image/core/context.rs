@@ -434,7 +434,7 @@ pub struct BlobManager {
     /// is used here, the vector index will be as the layer index.
     ///
     /// We can get blob index for a layer by using:
-    /// self.blobs.iter().flatten().collect()[layer_index];
+    /// `self.blobs.iter().flatten().collect()[layer_index];`
     blobs: Vec<BlobContext>,
     /// Chunk dictionary from reference image or base layer.
     pub chunk_dict_ref: Arc<dyn ChunkDict>,
@@ -642,7 +642,7 @@ pub struct BootstrapManager {
     bootstrap_storage: ArtifactStorage,
     /// The vector index will be as the layer index.
     /// We can get the bootstrap of a layer by using:
-    /// self.bootstraps[layer_index];
+    /// `self.bootstraps[layer_index];`
     bootstraps: Vec<BootstrapContext>,
 }
 
