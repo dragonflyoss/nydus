@@ -350,6 +350,16 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                 )
                 .arg(
+                    Arg::with_name("prefetch-policy")
+                        .long("prefetch-policy")
+                        .short("P")
+                        .help("prefetch policy:")
+                        .takes_value(true)
+                        .required(false)
+                        .default_value("none")
+                        .possible_values(&["fs", "blob", "none"]),
+                )
+                .arg(
                     Arg::with_name("SOURCE")
                         .help("bootstrap paths (allow one or more)")
                         .required(true)
@@ -606,11 +616,7 @@ impl Command {
             }
         }
 
-        let prefetch_policy = matches
-            .value_of("prefetch-policy")
-            .unwrap_or_default()
-            .parse()?;
-        let prefetch = Prefetch::new(prefetch_policy)?;
+        let prefetch = Self::get_prefetch(matches)?;
 
         let mut build_ctx = BuildContext::new(
             blob_id,
@@ -699,7 +705,11 @@ impl Command {
         } else {
             None
         };
+        let prefetch = Self::get_prefetch(matches)?;
+        let mut ctx = BuildContext::default();
+        ctx.prefetch = prefetch;
         Merger::merge(
+            &mut ctx,
             source_bootstrap_paths,
             target_bootstrap_path.to_path_buf(),
             chunk_dict_path,
@@ -941,6 +951,14 @@ impl Command {
                 Ok(chunk_size)
             }
         }
+    }
+
+    fn get_prefetch(matches: &clap::ArgMatches) -> Result<Prefetch> {
+        let prefetch_policy = matches
+            .value_of("prefetch-policy")
+            .unwrap_or_default()
+            .parse()?;
+        Prefetch::new(prefetch_policy)
     }
 
     fn get_blob_offset(matches: &clap::ArgMatches) -> Result<u64> {
