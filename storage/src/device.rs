@@ -766,9 +766,9 @@ pub struct BlobPrefetchRequest {
     /// The ID of the blob to prefetch data for.
     pub blob_id: String,
     /// Offset into the blob to prefetch data.
-    pub offset: u32,
+    pub offset: u64,
     /// Size of data to prefetch.
-    pub len: u32,
+    pub len: u64,
 }
 
 /// Trait to provide direct access to underlying uncompressed blob file.

@@ -894,8 +894,8 @@ mod tests {
 
         fn prefetch_blob_data_range(
             &self,
-            _blob_readahead_offset: u32,
-            _blob_readahead_size: u32,
+            _blob_readahead_offset: u64,
+            _blob_readahead_size: u64,
         ) -> BackendResult<()> {
             Ok(())
         }

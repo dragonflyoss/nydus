@@ -27,8 +27,6 @@ use rafs::{
 use serde::Deserialize;
 use std::any::Any;
 #[cfg(feature = "virtiofs")]
-use std::convert::TryInto;
-#[cfg(feature = "virtiofs")]
 use std::ffi::CStr;
 use std::ffi::CString;
 #[cfg(feature = "virtiofs")]
