@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -16,6 +17,7 @@ type ConvertOption struct {
 	BlobPath      string
 	RafsVersion   string
 	SourcePath    string
+	ChunkDictPath string
 }
 
 type MergeOption struct {
@@ -23,6 +25,7 @@ type MergeOption struct {
 
 	SourceBootstrapPaths []string
 	TargetBootstrapPath  string
+	ChunkDictPath        string
 }
 
 func Convert(option ConvertOption) error {
@@ -47,6 +50,9 @@ func Convert(option ConvertOption) error {
 		// FIXME: these options should be handled automatically in builder (nydus-image).
 		args = append(args, "--disable-check")
 	}
+	if option.ChunkDictPath != "" {
+		args = append(args, "--chunk-dict", fmt.Sprintf("bootstrap=%s", option.ChunkDictPath))
+	}
 	args = append(args, option.SourcePath)
 
 	logrus.Debugf("\tCommand: %s %s", option.BuilderPath, strings.Join(args[:], " "))
@@ -68,6 +74,9 @@ func Merge(option MergeOption) error {
 		"merge",
 		"--bootstrap",
 		option.TargetBootstrapPath,
+	}
+	if option.ChunkDictPath != "" {
+		args = append(args, "--chunk-dict", fmt.Sprintf("bootstrap=%s", option.ChunkDictPath))
 	}
 	args = append(args, option.SourceBootstrapPaths...)
 

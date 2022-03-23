@@ -151,7 +151,7 @@ func pack(ctx context.Context, blobPath string, bootstrapPath string) (io.ReadCl
 	return pr, nil
 }
 
-func Convert(ctx context.Context, src io.Reader) (io.ReadCloser, error) {
+func convert(ctx context.Context, src io.Reader, chunkDictPath string) (io.ReadCloser, error) {
 	workDir, err := ioutil.TempDir("", "nydus-converter-")
 	if err != nil {
 		return nil, errors.Wrap(err, "create work directory")
@@ -176,6 +176,7 @@ func Convert(ctx context.Context, src io.Reader) (io.ReadCloser, error) {
 		BlobPath:      blobPath,
 		RafsVersion:   "5",
 		SourcePath:    sourceDir,
+		ChunkDictPath: chunkDictPath,
 	}); err != nil {
 		return nil, errors.Wrapf(err, "build source %s", sourceDir)
 	}
@@ -188,7 +189,7 @@ func Convert(ctx context.Context, src io.Reader) (io.ReadCloser, error) {
 	return tr, nil
 }
 
-func Merge(ctx context.Context, layers []Layer) (io.ReadCloser, error) {
+func merge(ctx context.Context, layers []Layer, chunkDictPath string) (io.ReadCloser, error) {
 	workDir, err := ioutil.TempDir("", "nydus-converter-")
 	if err != nil {
 		return nil, errors.Wrap(err, "create work directory")
@@ -230,6 +231,7 @@ func Merge(ctx context.Context, layers []Layer) (io.ReadCloser, error) {
 
 		SourceBootstrapPaths: sourceBootstrapPaths,
 		TargetBootstrapPath:  targetBootstrapPath,
+		ChunkDictPath:        chunkDictPath,
 	}); err != nil {
 		return nil, errors.Wrap(err, "merge bootstrap")
 	}
@@ -240,4 +242,20 @@ func Merge(ctx context.Context, layers []Layer) (io.ReadCloser, error) {
 	}
 
 	return reader, nil
+}
+
+func ConvertWithChunkDict(ctx context.Context, src io.Reader, chunkDictPath string) (io.ReadCloser, error) {
+	return convert(ctx, src, chunkDictPath)
+}
+
+func Convert(ctx context.Context, src io.Reader) (io.ReadCloser, error) {
+	return convert(ctx, src, "")
+}
+
+func MergeWithChunkDict(ctx context.Context, layers []Layer, chunkDictPath string) (io.ReadCloser, error) {
+	return merge(ctx, layers, chunkDictPath)
+}
+
+func Merge(ctx context.Context, layers []Layer) (io.ReadCloser, error) {
+	return merge(ctx, layers, "")
 }
