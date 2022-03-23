@@ -13,11 +13,12 @@ var logger = logrus.WithField("module", "builder")
 type ConvertOption struct {
 	BuilderPath string
 
-	BootstrapPath string
-	BlobPath      string
-	RafsVersion   string
-	SourcePath    string
-	ChunkDictPath string
+	BootstrapPath    string
+	BlobPath         string
+	RafsVersion      string
+	SourcePath       string
+	ChunkDictPath    string
+	PrefetchPatterns string
 }
 
 type MergeOption struct {
@@ -26,6 +27,7 @@ type MergeOption struct {
 	SourceBootstrapPaths []string
 	TargetBootstrapPath  string
 	ChunkDictPath        string
+	PrefetchPatterns     string
 }
 
 func Convert(option ConvertOption) error {
@@ -33,6 +35,8 @@ func Convert(option ConvertOption) error {
 		"create",
 		"--log-level",
 		"warn",
+		"--prefetch-policy",
+		"fs",
 		"--bootstrap",
 		option.BootstrapPath,
 		"--blob",
@@ -53,6 +57,9 @@ func Convert(option ConvertOption) error {
 	if option.ChunkDictPath != "" {
 		args = append(args, "--chunk-dict", fmt.Sprintf("bootstrap=%s", option.ChunkDictPath))
 	}
+	if option.PrefetchPatterns == "" {
+		option.PrefetchPatterns = "/"
+	}
 	args = append(args, option.SourcePath)
 
 	logrus.Debugf("\tCommand: %s %s", option.BuilderPath, strings.Join(args[:], " "))
@@ -60,6 +67,7 @@ func Convert(option ConvertOption) error {
 	cmd := exec.Command(option.BuilderPath, args...)
 	cmd.Stdout = logger.Writer()
 	cmd.Stderr = logger.Writer()
+	cmd.Stdin = strings.NewReader(option.PrefetchPatterns)
 
 	if err := cmd.Run(); err != nil {
 		logrus.WithError(err).Errorf("fail to run %v %+v", option.BuilderPath, args)
@@ -72,11 +80,16 @@ func Convert(option ConvertOption) error {
 func Merge(option MergeOption) error {
 	args := []string{
 		"merge",
+		"--prefetch-policy",
+		"fs",
 		"--bootstrap",
 		option.TargetBootstrapPath,
 	}
 	if option.ChunkDictPath != "" {
 		args = append(args, "--chunk-dict", fmt.Sprintf("bootstrap=%s", option.ChunkDictPath))
+	}
+	if option.PrefetchPatterns == "" {
+		option.PrefetchPatterns = "/"
 	}
 	args = append(args, option.SourceBootstrapPaths...)
 
@@ -85,6 +98,7 @@ func Merge(option MergeOption) error {
 	cmd := exec.Command(option.BuilderPath, args...)
 	cmd.Stdout = logger.Writer()
 	cmd.Stderr = logger.Writer()
+	cmd.Stdin = strings.NewReader(option.PrefetchPatterns)
 
 	if err := cmd.Run(); err != nil {
 		logrus.WithError(err).Errorf("fail to run %v %+v", option.BuilderPath, args)

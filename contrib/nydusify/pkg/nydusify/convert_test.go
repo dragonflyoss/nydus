@@ -144,7 +144,9 @@ func convertLayer(t *testing.T, source io.ReadCloser, chunkDict, workDir string)
 	writer := bufio.NewWriter(&data)
 
 	defer source.Close()
-	nydusTarReader, err := ConvertWithChunkDict(context.TODO(), source, chunkDict)
+	nydusTarReader, err := Convert(context.TODO(), source, ConvertOption{
+		ChunkDictPath: chunkDict,
+	})
 	require.NoError(t, err)
 	defer nydusTarReader.Close()
 
@@ -164,7 +166,7 @@ func verify(t *testing.T, workDir string) {
 	mountDir := filepath.Join(workDir, "mnt")
 	blobDir := filepath.Join(workDir, "blobs")
 	config := tool.NydusdConfig{
-		EnablePrefetch: false,
+		EnablePrefetch: true,
 		NydusdPath:     "nydusd",
 		BootstrapPath:  filepath.Join(workDir, "bootstrap"),
 		ConfigPath:     filepath.Join(workDir, "nydusd-config.json"),
@@ -225,7 +227,7 @@ func buildChunkDict(t *testing.T, workDir string) (string, string) {
 		},
 	}
 
-	finalBootstrapReader, err := Merge(context.TODO(), layers)
+	finalBootstrapReader, err := Merge(context.TODO(), layers, MergeOption{})
 	require.NoError(t, err)
 	defer finalBootstrapReader.Close()
 
@@ -287,7 +289,9 @@ func TestConverter(t *testing.T) {
 		},
 	}
 
-	finalBootstrapReader, err := MergeWithChunkDict(context.TODO(), layers, chunkDictBootstrapPath)
+	finalBootstrapReader, err := Merge(context.TODO(), layers, MergeOption{
+		ChunkDictPath: chunkDictBootstrapPath,
+	})
 	require.NoError(t, err)
 	defer finalBootstrapReader.Close()
 

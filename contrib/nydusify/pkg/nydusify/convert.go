@@ -26,6 +26,16 @@ type Layer struct {
 	Reader io.Reader
 }
 
+type ConvertOption struct {
+	ChunkDictPath    string
+	PrefetchPatterns string
+}
+
+type MergeOption struct {
+	ChunkDictPath    string
+	PrefetchPatterns string
+}
+
 func unpackOciTar(ctx context.Context, dst string, reader io.Reader) error {
 	ds, err := compression.DecompressStream(reader)
 	if err != nil {
@@ -151,7 +161,7 @@ func pack(ctx context.Context, blobPath string, bootstrapPath string) (io.ReadCl
 	return pr, nil
 }
 
-func convert(ctx context.Context, src io.Reader, chunkDictPath string) (io.ReadCloser, error) {
+func Convert(ctx context.Context, src io.Reader, opt ConvertOption) (io.ReadCloser, error) {
 	workDir, err := ioutil.TempDir("", "nydus-converter-")
 	if err != nil {
 		return nil, errors.Wrap(err, "create work directory")
@@ -172,11 +182,12 @@ func convert(ctx context.Context, src io.Reader, chunkDictPath string) (io.ReadC
 	if err := tool.Convert(tool.ConvertOption{
 		BuilderPath: "nydus-image",
 
-		BootstrapPath: bootstrapPath,
-		BlobPath:      blobPath,
-		RafsVersion:   "5",
-		SourcePath:    sourceDir,
-		ChunkDictPath: chunkDictPath,
+		BootstrapPath:    bootstrapPath,
+		BlobPath:         blobPath,
+		RafsVersion:      "5",
+		SourcePath:       sourceDir,
+		ChunkDictPath:    opt.ChunkDictPath,
+		PrefetchPatterns: opt.PrefetchPatterns,
 	}); err != nil {
 		return nil, errors.Wrapf(err, "build source %s", sourceDir)
 	}
@@ -189,7 +200,7 @@ func convert(ctx context.Context, src io.Reader, chunkDictPath string) (io.ReadC
 	return tr, nil
 }
 
-func merge(ctx context.Context, layers []Layer, chunkDictPath string) (io.ReadCloser, error) {
+func Merge(ctx context.Context, layers []Layer, opt MergeOption) (io.ReadCloser, error) {
 	workDir, err := ioutil.TempDir("", "nydus-converter-")
 	if err != nil {
 		return nil, errors.Wrap(err, "create work directory")
@@ -231,7 +242,8 @@ func merge(ctx context.Context, layers []Layer, chunkDictPath string) (io.ReadCl
 
 		SourceBootstrapPaths: sourceBootstrapPaths,
 		TargetBootstrapPath:  targetBootstrapPath,
-		ChunkDictPath:        chunkDictPath,
+		ChunkDictPath:        opt.ChunkDictPath,
+		PrefetchPatterns:     opt.PrefetchPatterns,
 	}); err != nil {
 		return nil, errors.Wrap(err, "merge bootstrap")
 	}
@@ -242,20 +254,4 @@ func merge(ctx context.Context, layers []Layer, chunkDictPath string) (io.ReadCl
 	}
 
 	return reader, nil
-}
-
-func ConvertWithChunkDict(ctx context.Context, src io.Reader, chunkDictPath string) (io.ReadCloser, error) {
-	return convert(ctx, src, chunkDictPath)
-}
-
-func Convert(ctx context.Context, src io.Reader) (io.ReadCloser, error) {
-	return convert(ctx, src, "")
-}
-
-func MergeWithChunkDict(ctx context.Context, layers []Layer, chunkDictPath string) (io.ReadCloser, error) {
-	return merge(ctx, layers, chunkDictPath)
-}
-
-func Merge(ctx context.Context, layers []Layer) (io.ReadCloser, error) {
-	return merge(ctx, layers, "")
 }
