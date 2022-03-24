@@ -952,7 +952,6 @@ impl RafsInode for OndiskInodeWrapper {
             // Safe to unwrap since it must have child inode.
             if let Some(child_inode) = inode {
                 if child_inode.is_dir() {
-                    trace!("Got dir {:?}", child_inode.name());
                     child_dirs.push(child_inode);
                 } else if !child_inode.is_empty_size() && child_inode.is_reg() {
                     descendants.push(child_inode);
