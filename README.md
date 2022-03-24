@@ -39,6 +39,7 @@ Currently Nydus includes following tools:
 | [ctr-remote](https://github.com/dragonflyoss/image-service/tree/master/contrib/ctr-remote)                             | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                               |
 | [nydus-docker-graphdriver](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver) | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                        |
 | [nydus-overlayfs](https://github.com/dragonflyoss/image-service/tree/master/contrib/nydus-overlayfs)                   | `Containerd` mount helper to invoke overlayfs mount with tweaking mount options a bit. So nydus prerequisites can be passed to vm-based runtime            |
+| [nydus-backend-proxy](./contrib/nydus-backend-proxy/README.md)                                                         | A simple HTTP server to serve local directory as a blob backend for nydusd            |
 
 Currently Nydus is supporting the following platforms in container ecosystem:
 
