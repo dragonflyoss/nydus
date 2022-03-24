@@ -1,0 +1,15 @@
+[package]
+name = "nydus-backend-proxy"
+version = "0.1.0"
+authors = ["The Nydus Developers"]
+edition = "2018"
+license = "Apache-2.0 OR BSD-3-Clause"
+
+[dependencies]
+rocket = "0.5.0-rc"
+http-range = "0.1.3"
+nix = ">=0.23.0"
+clap = "2.33"
+once_cell = "1.10.0"
+
+[workspace]
