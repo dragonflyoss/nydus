@@ -344,9 +344,7 @@ pub struct OndiskInodeWrapper {
 
 impl OndiskInodeWrapper {
     fn disk_inode(&self) -> &dyn RafsV6OndiskInode {
-        let i = self.mapping.disk_inode(self.offset);
-        trace!("erofs disk inode loaded nid={} {:?}", i.ino(), i);
-        i
+        self.mapping.disk_inode(self.offset)
     }
 
     fn blocks_count(&self) -> u64 {
