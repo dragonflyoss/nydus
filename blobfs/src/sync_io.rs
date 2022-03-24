@@ -48,12 +48,6 @@ impl BlobFs {
             blob_id_full_path
         );
 
-        debug_assert!(
-            parent
-                == Path::new(self.cfg.ps_config.root_dir.as_str())
-                    .join(self.bootstrap_args.blob_cache_dir.as_str())
-        );
-
         let blob_file = Self::open_file(
             libc::AT_FDCWD,
             &blob_id_full_path.as_path(),

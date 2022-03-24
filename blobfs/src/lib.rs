@@ -163,8 +163,6 @@ impl BootstrapArgs {
 /// combination of mount namespaces and the pivot_root system call.
 pub struct BlobFs {
     pfs: PassthroughFs,
-    #[cfg(feature = "virtiofs")]
-    cfg: Config,
     #[allow(dead_code)]
     bootstrap_args: BootstrapArgs,
 }
@@ -174,14 +172,10 @@ impl BlobFs {
     pub fn new(cfg: Config) -> io::Result<BlobFs> {
         trace!("BlobFs config is: {:?}", cfg);
 
-        #[cfg(feature = "virtiofs")]
-        let cfg_bak = cfg.clone();
         let bootstrap_args = Self::load_bootstrap(&cfg)?;
         let pfs = PassthroughFs::new(cfg.ps_config)?;
         Ok(BlobFs {
             pfs,
-            #[cfg(feature = "virtiofs")]
-            cfg: cfg_bak,
             bootstrap_args,
         })
     }
