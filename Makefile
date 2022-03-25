@@ -1,5 +1,8 @@
 all: build
 
+CARGO = $(shell which cargo)
+SUDO = $(shell which sudo)
+
 TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
@@ -27,8 +30,9 @@ VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
 	if [ $(DOCKER) = "true" ]; then
-		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.17 $(2)
+		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs -e WORKDIR=/nydus-rs --workdir /nydus-rs/$(1) golang:1.17 $(2)
 	else
+		export WORKDIR=${current_dir}
 		$(2) -C $(1)
 	fi
 endef
@@ -49,6 +53,10 @@ endef
 .release_version:
 	$(eval CARGO_BUILD_FLAGS += --release)
 
+.rust_component:
+	rustup component add rustfmt
+	rustup component add clippy
+
 .format:
 	cargo fmt -- --check
 
@@ -56,11 +64,11 @@ endef
 	$(eval CARGO_BUILD_FLAGS += --target ${ARCH}-unknown-linux-musl)
 
 # Targets that are exposed to developers and users.
-build: .format fusedev virtiofs
-release: .format .release_version fusedev virtiofs
-static-release: .musl_target .format .release_version fusedev virtiofs
-fusedev-release: .format .release_version fusedev
-virtiofs-release: .format .release_version virtiofs
+build: .rust_component .format fusedev virtiofs
+release: .rust_component .format .release_version fusedev virtiofs
+static-release: .rust_component .musl_target .format .release_version fusedev virtiofs
+fusedev-release: .rust_component .format .release_version fusedev
+virtiofs-release: .rust_component .format .release_version virtiofs
 
 virtiofs:
 	# TODO: switch to --out-dir when it moves to stable
@@ -88,9 +96,6 @@ ifdef NYDUS_TEST_VIRTIOFS
 endif
 
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
-
-CARGO = $(shell which cargo)
-SUDO = $(shell which sudo)
 
 docker-static:
 	docker build -t nydus-rs-static --build-arg ARCH=${ARCH} misc/musl-static
