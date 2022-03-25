@@ -491,8 +491,8 @@ impl Rafs {
             .iter()
             .map(|b| BlobPrefetchRequest {
                 blob_id: b.blob_id().to_owned(),
-                offset: b.readahead_offset() as u32,
-                len: b.readahead_size() as u32,
+                offset: b.readahead_offset(),
+                len: b.readahead_size(),
             })
             .collect::<Vec<BlobPrefetchRequest>>();
         device.prefetch(&[], &prefetches).unwrap_or_else(|e| {

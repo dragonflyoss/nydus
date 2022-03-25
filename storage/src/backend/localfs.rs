@@ -124,7 +124,7 @@ impl BlobReader for LocalFsEntry {
             .map_err(|e| LocalFsError::ReadVecBlob(e).into())
     }
 
-    fn prefetch_blob_data_range(&self, ra_offset: u32, ra_size: u32) -> BackendResult<()> {
+    fn prefetch_blob_data_range(&self, ra_offset: u64, ra_size: u64) -> BackendResult<()> {
         if !self.readahead {
             return Ok(());
         }
@@ -153,13 +153,13 @@ impl BlobReader for LocalFsEntry {
         }
 
         // Prefetch data according to the hint if it's valid.
-        let end = ra_offset as u64 + ra_size as u64;
+        let end = ra_offset + ra_size;
         if ra_size != 0 && end <= blob_size {
             info!(
                 "kick off hinted blob readahead offset {} len {}",
                 ra_offset, ra_size
             );
-            readahead(self.file.as_raw_fd(), ra_offset as u64, end);
+            readahead(self.file.as_raw_fd(), ra_offset, end);
         }
 
         // start access logging

@@ -24,7 +24,18 @@ use storage::device::BlobPrefetchRequest;
 
 impl BlobFs {
     #[cfg(feature = "virtiofs")]
-    fn get_blob_id_and_size(&self, inode: Inode) -> io::Result<(String, i64)> {
+    fn check_st_size(blob_id: &Path, size: i64) -> io::Result<()> {
+        if size < 0 {
+            return Err(einval!(format!(
+                "load_chunks_on_demand: blob_id {:?}, size: {:?} is less than 0",
+                blob_id, size
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "virtiofs")]
+    fn get_blob_id_and_size(&self, inode: Inode) -> io::Result<(String, u64)> {
         // locate blob file that the inode refers to
         let blob_id_full_path = self.pfs.readlinkat_proc_file(inode)?;
         let parent = blob_id_full_path
@@ -35,12 +46,6 @@ impl BlobFs {
             "parent: {:?}, blob id path: {:?}",
             parent,
             blob_id_full_path
-        );
-
-        debug_assert!(
-            parent
-                == Path::new(self.cfg.ps_config.root_dir.as_str())
-                    .join(self.bootstrap_args.blob_cache_dir.as_str())
         );
 
         let blob_file = Self::open_file(
@@ -60,31 +65,32 @@ impl BlobFs {
 
         trace!("load_chunks_on_demand: blob_id {:?}", blob_id);
 
-        Ok((blob_id.to_os_string().into_string().unwrap(), st.st_size))
+        Self::check_st_size(blob_id_full_path.as_path(), st.st_size)?;
+
+        Ok((
+            blob_id.to_os_string().into_string().unwrap(),
+            st.st_size as u64,
+        ))
     }
 
     #[cfg(feature = "virtiofs")]
-    fn load_chunks_on_demand(&self, inode: Inode, foffset: u64) -> io::Result<()> {
+    fn load_chunks_on_demand(&self, inode: Inode, offset: u64) -> io::Result<()> {
         // prepare BlobPrefetchRequest and call device.prefetch().
         // Make sure prefetch doesn't use delay_persist as we need the
         // data immediately.
         let (blob_id, size) = self.get_blob_id_and_size(inode)?;
-        let offset: u32 = foffset.try_into().map_err(|_| {
-            einval!(format!(
-                "blobfs: load_chunks_on_demand: foffset {} is larger than u32::MAX",
-                foffset
-            ))
-        })?;
-        let len = (size - offset as i64).try_into().map_err(|_| {
-            einval!(format!(
-                "blobfs: load_chunks_on_demand: len {} is larger than u32::MAX",
-                (size - offset as i64)
-            ))
-        })?;
+        if size <= offset {
+            return Err(einval!(format!(
+                "load_chunks_on_demand: blob_id {:?}, offset {:?} is larger than size {:?}",
+                blob_id, offset, size
+            )));
+        }
+
+        let len = size - offset;
         let req = BlobPrefetchRequest {
             blob_id,
             offset,
-            len: min(len, 0x0020_0000_u32), // 2M range
+            len: min(len, 0x0020_0000_u64), // 2M range
         };
 
         self.bootstrap_args.fetch_range_sync(&[req]).map_err(|e| {

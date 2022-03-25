@@ -304,11 +304,8 @@ impl AsyncWorkerMgr {
                     e
                 );
             }
-        } else if offset < u32::MAX as u64 && size < u32::MAX as u64 {
-            let _ = cache.reader().prefetch_blob_data_range(
-                offset as u32,
-                std::cmp::min(size as u32, u32::MAX - offset as u32),
-            );
+        } else {
+            let _ = cache.reader().prefetch_blob_data_range(offset, size);
         }
 
         Ok(())

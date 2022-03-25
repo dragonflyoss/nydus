@@ -618,6 +618,8 @@ impl BlobMetaState {
         let mut size = self.chunk_count as usize;
         let mut left = 0;
         let mut right = size;
+        let mut start = 0;
+        let mut end = 0;
 
         while left < right {
             let mid = left + size / 2;
@@ -625,10 +627,12 @@ impl BlobMetaState {
             // - `mid >= 0`
             // - `mid < size`: `mid` is limited by `[left; right)` bound.
             let entry = unsafe { chunks.get_unchecked(mid) };
-            let (start, end) = if compressed {
-                (entry.compressed_offset(), entry.compressed_end())
+            if compressed {
+                start = entry.compressed_offset();
+                end = entry.compressed_end();
             } else {
-                (entry.uncompressed_offset(), entry.uncompressed_end())
+                start = entry.uncompressed_offset();
+                end = entry.uncompressed_end();
             };
 
             if start > addr {
@@ -642,7 +646,12 @@ impl BlobMetaState {
             size = right - left;
         }
 
-        Err(einval!())
+        // if addr == self.chunks[last].compressed_offset, return einval
+        // with error msg.
+        Err(einval!(format!(
+            "start: {}, end: {}, addr: {}",
+            start, end, addr
+        )))
     }
 }
 
@@ -885,8 +894,8 @@ mod tests {
 
         fn prefetch_blob_data_range(
             &self,
-            _blob_readahead_offset: u32,
-            _blob_readahead_size: u32,
+            _blob_readahead_offset: u64,
+            _blob_readahead_size: u64,
         ) -> BackendResult<()> {
             Ok(())
         }

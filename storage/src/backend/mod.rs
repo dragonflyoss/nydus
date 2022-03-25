@@ -180,7 +180,7 @@ pub trait BlobReader: Send + Sync {
     /// This method only prefetch blob data from storage backends, it doesn't cache data in the
     /// blob cache subsystem. So it's useful for disk and file system based storage backends, but
     /// it may not help for Registry/OSS based storage backends.
-    fn prefetch_blob_data_range(&self, ra_offset: u32, ra_size: u32) -> BackendResult<()>;
+    fn prefetch_blob_data_range(&self, ra_offset: u64, ra_size: u64) -> BackendResult<()>;
 
     /// Stop the background data prefetching tasks.
     fn stop_data_prefetch(&self) -> BackendResult<()>;
