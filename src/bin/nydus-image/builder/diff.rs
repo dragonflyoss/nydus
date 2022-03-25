@@ -706,9 +706,13 @@ impl DiffBuilder {
             let ctx = Arc::new(ctx.clone());
             let hint_path_idx = idx + base;
             let hint_path = paths[hint_path_idx].clone();
+            let snapshot_path = paths[idx].clone();
             let chunk_dict = chunk_dict.clone();
             let worker = thread::spawn(move || -> Result<(Option<BlobContext>, ChunkMap)> {
-                info!("[{}] diff building with hint {:?}", idx, hint_path);
+                info!(
+                    "[{}: {:?}] diff building with hint {:?}",
+                    idx, snapshot_path, hint_path
+                );
 
                 let snapshot_idx = idx as u32;
                 let mut blob_nodes = walk_all(ctx.as_ref(), hint_path.clone(), hint_path)?;

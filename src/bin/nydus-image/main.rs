@@ -19,7 +19,7 @@ use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
@@ -132,11 +132,9 @@ impl OutputSerializer {
     }
 }
 
-fn main() -> Result<()> {
-    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
-
+fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
     // TODO: Try to use yaml to define below options
-    let cmd = App::new("")
+    App::new("")
         .version(bti_string.as_str())
         .author(crate_authors!())
         .about("Build or inspect RAFS filesystems for nydus accelerated container images.")
@@ -460,6 +458,15 @@ fn main() -> Result<()> {
                         .takes_value(true))
         )
         .arg(
+            Arg::with_name("log-file")
+                .long("log-file")
+                .short("o")
+                .help("Specify log file name")
+                .takes_value(true)
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::with_name("log-level")
                 .long("log-level")
                 .short("l")
@@ -470,11 +477,28 @@ fn main() -> Result<()> {
                 .required(false)
                 .global(true),
         )
-        .get_matches();
+        .get_matches()
+}
+
+fn init_log(matches: &ArgMatches) -> Result<()> {
+    let mut log_file = None;
+    if let Some(file) = matches.value_of("log-file") {
+        let path = PathBuf::from(file);
+        log_file = Some(path);
+    }
 
     // Safe to unwrap because it has a default value and possible values are defined.
-    let level = cmd.value_of("log-level").unwrap().parse().unwrap();
-    setup_logging(None, level)?;
+    let level = matches.value_of("log-level").unwrap().parse().unwrap();
+
+    setup_logging(log_file, level).context("failed to setup logging")
+}
+
+fn main() -> Result<()> {
+    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
+
+    let cmd = prepare_cmd_args(bti_string);
+
+    init_log(&cmd)?;
 
     register_tracer!(TraceClass::Timing, TimingTracerClass);
     register_tracer!(TraceClass::Event, EventTracerClass);
