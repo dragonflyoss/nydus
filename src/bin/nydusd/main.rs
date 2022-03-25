@@ -28,7 +28,7 @@ use std::sync::{
 use std::thread::{self, spawn};
 use std::{io, process};
 
-use clap::{App, Arg};
+use clap::{App, Arg, ArgMatches};
 use event_manager::{EventManager, EventSubscriber, SubscriberOps};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
 use mio::Waker;
@@ -112,10 +112,8 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     }
 }
 
-fn main() -> Result<()> {
-    let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
-
-    let cmd_arguments = App::new("")
+fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
+    let cmd_arguments = App::new("nydusd")
         .version(bti_string.as_str())
         .about("Nydus Image Service")
         .arg(
@@ -168,7 +166,7 @@ fn main() -> Result<()> {
             Arg::with_name("log-file")
                 .long("log-file")
                 .short("L")
-                .help("Log messages to the file. If file extension is not specified, the default extension \".log\" will be appended.")
+                .help("Log messages to the file. Default extension \".log\" will be used if no extension specified.")
                 .takes_value(true)
                 .required(false)
                 .global(true),
@@ -237,10 +235,10 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name("hybrid-mode").long("hybrid-mode")
-            .help("run nydusd in rafs and passthroughfs hybrid mode")
-            .required(false)
-            .takes_value(false)
-            .global(true)
+                .help("run nydusd in rafs and passthroughfs hybrid mode")
+                .required(false)
+                .takes_value(false)
+                .global(true)
         );
 
     #[cfg(feature = "fusedev")]
@@ -291,30 +289,30 @@ fn main() -> Result<()> {
             .required(true),
     );
 
-    let cmd_arguments_parsed = cmd_arguments.get_matches();
+    cmd_arguments.get_matches()
+}
 
-    let logging_file = cmd_arguments_parsed.value_of("log-file").map(|l| l.into());
+fn main() -> Result<()> {
+    let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
+    let args = parse_commandline_options(bti_string);
+    let logging_file = args.value_of("log-file").map(|l| l.into());
     // Safe to unwrap because it has default value and possible values are defined
-    let level = cmd_arguments_parsed
-        .value_of("log-level")
-        .unwrap()
-        .parse()
-        .unwrap();
-    setup_logging(logging_file, level)?;
+    let level = args.value_of("log-level").unwrap().parse().unwrap();
 
+    setup_logging(logging_file, level)?;
     dump_program_info(crate_version!());
 
     // Retrieve arguments
     // shared-dir means fs passthrough
-    let shared_dir = cmd_arguments_parsed.value_of("shared-dir");
+    let shared_dir = args.value_of("shared-dir");
     // bootstrap means rafs only
-    let bootstrap = cmd_arguments_parsed.value_of("bootstrap");
+    let bootstrap = args.value_of("bootstrap");
     // safe as virtual_mountpoint default to "/"
-    let virtual_mnt = cmd_arguments_parsed.value_of("virtual-mountpoint").unwrap();
+    let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
     // apisock means admin api socket support
-    let apisock = cmd_arguments_parsed.value_of("apisock");
+    let apisock = args.value_of("apisock");
     let rlimit_nofile_default = get_default_rlimit_nofile()?;
-    let rlimit_nofile: rlim = cmd_arguments_parsed
+    let rlimit_nofile: rlim = args
         .value_of("rlimit-nofile")
         .map(|n| n.parse().unwrap_or(rlimit_nofile_default))
         .unwrap_or(rlimit_nofile_default);
@@ -343,11 +341,11 @@ fn main() -> Result<()> {
 
         Some(cmd)
     } else if let Some(b) = bootstrap {
-        let config = cmd_arguments_parsed.value_of("config").ok_or_else(|| {
+        let config = args.value_of("config").ok_or_else(|| {
             DaemonError::InvalidArguments("config file is not provided".to_string())
         })?;
 
-        let prefetch_files: Option<Vec<String>> = cmd_arguments_parsed
+        let prefetch_files: Option<Vec<String>> = args
             .values_of("prefetch-files")
             .map(|files| files.map(|s| s.to_string()).collect());
 
@@ -368,7 +366,7 @@ fn main() -> Result<()> {
     };
 
     // Enable all options required by passthroughfs
-    if cmd_arguments_parsed.is_present("hybrid-mode") {
+    if args.is_present("hybrid-mode") {
         opts.no_open = false;
         opts.killpriv_v2 = true;
     }
@@ -379,15 +377,13 @@ fn main() -> Result<()> {
 
     let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
-    let daemon_id = cmd_arguments_parsed.value_of("id").map(|id| id.to_string());
-    let supervisor = cmd_arguments_parsed
-        .value_of("supervisor")
-        .map(|s| s.to_string());
+    let daemon_id = args.value_of("id").map(|id| id.to_string());
+    let supervisor = args.value_of("supervisor").map(|s| s.to_string());
 
     #[cfg(feature = "virtiofs")]
     let daemon = {
         // sock means vhost-user-backend only
-        let vu_sock = cmd_arguments_parsed.value_of("sock").ok_or_else(|| {
+        let vu_sock = args.value_of("sock").ok_or_else(|| {
             DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
         })?;
         create_nydus_daemon(daemon_id, supervisor, vu_sock, vfs, mount_cmd, bti)?
@@ -395,12 +391,12 @@ fn main() -> Result<()> {
     #[cfg(feature = "fusedev")]
     let daemon = {
         // threads means number of fuse service threads
-        let threads: u32 = cmd_arguments_parsed
+        let threads: u32 = args
             .value_of("threads")
             .map(|n| n.parse().unwrap_or(1))
             .unwrap_or(1);
 
-        let p = cmd_arguments_parsed
+        let p = args
             .value_of("failover-policy")
             .unwrap_or("flush")
             .try_into()
@@ -410,7 +406,7 @@ fn main() -> Result<()> {
             })?;
 
         // mountpoint means fuse device only
-        let mountpoint = cmd_arguments_parsed.value_of("mountpoint").ok_or_else(|| {
+        let mountpoint = args.value_of("mountpoint").ok_or_else(|| {
             DaemonError::InvalidArguments("Mountpoint must be provided!".to_string())
         })?;
 
@@ -421,8 +417,8 @@ fn main() -> Result<()> {
             daemon_id,
             threads,
             apisock,
-            cmd_arguments_parsed.is_present("upgrade"),
-            !cmd_arguments_parsed.is_present("writable"),
+            args.is_present("upgrade"),
+            !args.is_present("writable"),
             p,
             mount_cmd,
             bti,
