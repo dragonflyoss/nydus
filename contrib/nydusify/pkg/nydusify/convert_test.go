@@ -23,6 +23,8 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/nydusify/tool"
 )
 
+const envNydusdPath = "NYDUS_NYDUSD"
+
 func hugeString(size int) string {
 	var buf strings.Builder
 	buf.Grow(size)
@@ -172,9 +174,13 @@ func convertLayer(t *testing.T, source io.ReadCloser, chunkDict, workDir string)
 func verify(t *testing.T, workDir string) {
 	mountDir := filepath.Join(workDir, "mnt")
 	blobDir := filepath.Join(workDir, "blobs")
+	nydusdPath := os.Getenv(envNydusdPath)
+	if nydusdPath == "" {
+		nydusdPath = "nydusd"
+	}
 	config := tool.NydusdConfig{
 		EnablePrefetch: true,
-		NydusdPath:     "nydusd",
+		NydusdPath:     nydusdPath,
 		BootstrapPath:  filepath.Join(workDir, "bootstrap"),
 		ConfigPath:     filepath.Join(workDir, "nydusd-config.json"),
 		BackendType:    "localfs",
