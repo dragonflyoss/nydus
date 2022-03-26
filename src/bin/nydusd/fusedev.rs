@@ -24,6 +24,7 @@ use fuse_backend_rs::abi::linux_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
 use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
+use mio::Waker;
 use nix::sys::stat::{major, minor};
 use nydus_app::BuildTimeInfo;
 use serde::Serialize;
@@ -33,8 +34,8 @@ use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
-use crate::exit_event_manager;
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
+use crate::SERVICE_CONTROLLER;
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -163,7 +164,7 @@ pub struct FusedevDaemon {
 }
 
 impl FusedevDaemon {
-    fn kick_one_server(&self) -> Result<()> {
+    fn kick_one_server(&self, waker: Arc<Waker>) -> Result<()> {
         // Clone event fd must succeed, otherwise fusedev daemon should not work.
         let evtfd = self.event_fd.try_clone()?;
         let mut s = FuseServer::new(
@@ -177,7 +178,8 @@ impl FusedevDaemon {
             .name("fuse_server".to_string())
             .spawn(move || {
                 let _ = s.svc_loop(&inflight_op);
-                exit_event_manager();
+                // Notify the daemon controller that one working thread has exited.
+                let _ = waker.wake();
                 Ok(())
             })
             .map_err(DaemonError::ThreadSpawn)?;
@@ -221,7 +223,8 @@ impl NydusDaemon for FusedevDaemon {
 
     fn start(&self) -> DaemonResult<()> {
         for _ in 0..self.threads_cnt {
-            self.kick_one_server()
+            let waker = SERVICE_CONTROLLER.alloc_waker();
+            self.kick_one_server(waker)
                 .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
         }
 

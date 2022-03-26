@@ -26,6 +26,7 @@ use nydus_utils::metrics;
 use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDaemon};
 #[cfg(fusedev)]
 use crate::fusedev::FusedevDaemon;
+use crate::SERVICE_CONTROLLER;
 
 type Result<T> = ApiResult<T>;
 
@@ -365,13 +366,13 @@ impl ApiServerController {
     pub fn start(
         &mut self,
         event_manager: &mut EventManager<Arc<dyn EventSubscriber>>,
-        daemon: Arc<dyn NydusDaemon>,
     ) -> std::io::Result<()> {
         if let Some(apisock) = self.sock.as_ref() {
             let http_exit_evtfd = EventFd::new(0)?;
             let http_exit_evtfd2 = http_exit_evtfd.try_clone()?;
             let (to_api, from_http) = channel();
             let (to_http, from_api) = channel();
+            let daemon = SERVICE_CONTROLLER.get_default_fs_service().unwrap();
             let api_server = ApiServer::new(to_http, daemon)?;
             let api_handler = ApiSeverHandler::new(api_server, from_http)?;
             let api_server_subscriber = Arc::new(api_handler);

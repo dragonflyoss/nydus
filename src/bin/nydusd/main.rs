@@ -18,26 +18,24 @@ extern crate nydus_error;
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{Read, Result};
-use std::ops::DerefMut;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
-use std::{io, process};
+use std::io::{self, Read, Result};
+use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
 use event_manager::{EventManager, EventSubscriber};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
-use mio::Waker;
+use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
 
+use crate::daemon::NydusDaemon;
 use nydus::FsBackendType;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use self::api_server_glue::ApiServerController;
-use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
+use self::daemon::{DaemonError, FsBackendMountCmd};
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
@@ -58,29 +56,115 @@ const RLIMIT_NOFILE_RESERVED: rlim = 16384;
 const RLIMIT_NOFILE_MAX: rlim = 1_000_000;
 
 lazy_static! {
-    static ref EVENT_MANAGER_RUN: AtomicBool = AtomicBool::new(true);
-    static ref EXIT_NOTIFIER: Mutex<Option<Arc<Waker>>> = Mutex::default();
+    static ref SERVICE_CONTROLLER: ServiceController = ServiceController::new();
 }
 
-pub fn exit_event_manager() {
-    EXIT_NOTIFIER
-        .lock()
-        .expect("Not poisoned lock!")
-        .as_ref()
-        .unwrap()
-        .wake()
-        .unwrap_or_else(|e| error!("Write event fd failed when exiting event manager, {}", e))
+/// Controller to manage registered filesystem/blobcache/fscache services.
+pub struct ServiceController {
+    active: AtomicBool,
+    singleton_mode: AtomicBool,
+    // For backward compatibility to support singleton fusedev/virtiofs server.
+    default_fs_service: Mutex<Option<Arc<dyn NydusDaemon>>>,
+    waker: Arc<Waker>,
+    poller: Mutex<Poll>,
+}
+
+impl ServiceController {
+    fn new() -> Self {
+        let poller = Poll::new().expect("Failed to create `ServiceController` instance");
+        let waker = Waker::new(poller.registry(), Token(1))
+            .expect("Failed to create waker for ServiceController");
+
+        Self {
+            active: AtomicBool::new(true),
+            singleton_mode: AtomicBool::new(true),
+            default_fs_service: Mutex::new(None),
+            waker: Arc::new(waker),
+            poller: Mutex::new(poller),
+        }
+    }
+
+    /// Check whether the service controller is still in active/working state.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// Allocate a waker to notify stop events.
+    pub fn alloc_waker(&self) -> Arc<Waker> {
+        self.waker.clone()
+    }
+
+    /// Enable/disable singleton mode, which will shutdown the process when any working thread exits.
+    pub fn set_singleton_mode(&self, enabled: bool) {
+        self.singleton_mode.store(enabled, Ordering::Release);
+    }
+
+    /// Set the default file system service instance.
+    pub fn set_default_fs_service(
+        &self,
+        daemon: Arc<dyn NydusDaemon>,
+    ) -> Option<Arc<dyn NydusDaemon>> {
+        self.default_fs_service.lock().unwrap().replace(daemon)
+    }
+
+    /// Get the default file system service instance.
+    pub fn get_default_fs_service(&self) -> Option<Arc<dyn NydusDaemon>> {
+        self.default_fs_service.lock().unwrap().clone()
+    }
+
+    fn shutdown(&self) {
+        // Marking exiting state.
+        self.active.store(false, Ordering::Release);
+        // Signal the `run_loop()` working thread to exit.
+        let _ = self.waker.wake();
+
+        let fs_service = self.default_fs_service.lock().unwrap().take();
+        if let Some(service) = fs_service {
+            // TODO: fix the behavior
+            if cfg!(feature = "virtiofs") {
+                // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
+                // Given the fact that we have nothing to clean up, directly exit seems fine.
+                process::exit(0);
+            }
+            if let Err(e) = service.stop() {
+                error!("failed to stop daemon: {}", e);
+            }
+            if let Err(e) = service.wait() {
+                error!("failed to wait daemon: {}", e)
+            }
+        }
+    }
+
+    fn run_loop(&self) {
+        let mut events = Events::with_capacity(8);
+
+        loop {
+            self.poller
+                .lock()
+                .unwrap()
+                .poll(&mut events, None)
+                .unwrap_or_else(|e| error!("failed to listen on daemon: {}", e));
+
+            for event in events.iter() {
+                if event.is_error() {
+                    error!("Got error on the monitored event.");
+                    continue;
+                }
+
+                if event.is_readable()
+                    && event.token() == Token(1)
+                    && self.singleton_mode.load(Ordering::Acquire)
+                {
+                    self.active.store(false, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+    }
 }
 
 extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
-    if cfg!(feature = "virtiofs") {
-        // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
-        // Given the fact that we have nothing to clean up, directly exit seems fine.
-        process::exit(0);
-    } else {
-        // Can't directly exit here since we want to umount rafs reflecting the signal.
-        exit_event_manager();
-    }
+    SERVICE_CONTROLLER.shutdown();
 }
 
 fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
@@ -155,7 +239,7 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
         .arg(
             Arg::with_name("rlimit-nofile")
                 .long("rlimit-nofile")
-                .default_value("1,000,000")
+                .default_value("1000000")
                 .help("Set rlimit for maximum file descriptor number (0 leaves it unchanged)")
                 .takes_value(true)
                 .required(false)
@@ -324,6 +408,11 @@ fn main() -> Result<()> {
     dump_program_info(crate_version!());
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
+    // Initialize and run the daemon controller event loop.
+    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
+    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+    std::thread::spawn(|| SERVICE_CONTROLLER.run_loop());
+
     // Retrieve arguments
     // shared-dir means fs passthrough
     let shared_dir = args.value_of("shared-dir");
@@ -439,40 +528,24 @@ fn main() -> Result<()> {
             e
         })?
     };
+    SERVICE_CONTROLLER.set_default_fs_service(daemon);
 
+    // Start the HTTP Administration API server
     let mut api_controller = ApiServerController::new(apisock);
-    api_controller.start(&mut event_manager, daemon.clone())?;
-    start_daemon_monitor().map(|e| {
-        api_controller.stop();
-        e
-    })?;
+    api_controller.start(&mut event_manager)?;
 
-    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
-    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
-    while EVENT_MANAGER_RUN.load(Ordering::Relaxed) {
+    // Run the main event loop
+    while SERVICE_CONTROLLER.is_active() {
         // If event manager dies, so does nydusd
-        event_manager.run().unwrap();
+        if event_manager.run().is_err() {
+            break;
+        }
     }
 
-    if let Err(e) = daemon.stop() {
-        error!("failed to stop daemon: {}", e);
-    }
-    if let Err(e) = daemon.wait() {
-        error!("failed to wait daemon: {}", e)
-    }
-    api_controller.stop();
+    // Gracefully shutdown system.
     info!("nydusd quits");
-
-    Ok(())
-}
-
-fn start_daemon_monitor() -> Result<()> {
-    let mut monitor = NydusDaemonSubscriber::new()?;
-    *EXIT_NOTIFIER.lock().unwrap().deref_mut() = Some(monitor.get_notifier());
-
-    std::thread::spawn(move || {
-        monitor.listen();
-    });
+    api_controller.stop();
+    SERVICE_CONTROLLER.shutdown();
 
     Ok(())
 }
