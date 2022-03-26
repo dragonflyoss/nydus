@@ -31,6 +31,7 @@ use fuse_backend_rs::api::Vfs;
 use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
 #[cfg(target_os = "macos")]
 use libc::statfs;
+use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
 use nydus_app::BuildTimeInfo;
@@ -40,8 +41,8 @@ use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
-use crate::exit_daemon;
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
+use crate::DAEMON_CONTROLLER;
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -168,16 +169,15 @@ pub struct FusedevDaemon {
 }
 
 impl FusedevDaemon {
-    fn kick_one_server(&self) -> Result<()> {
+    fn kick_one_server(&self, waker: Arc<Waker>) -> Result<()> {
         let mut s = FuseServer::new(self.server.clone(), self.session.lock().unwrap().deref())?;
-
         let inflight_op = self.create_inflight_op();
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
             .spawn(move || {
                 let _ = s.svc_loop(&inflight_op);
-                // quit the daemon if any fuse server thread exits
-                exit_daemon();
+                // Notify the daemon controller that one working thread has exited.
+                let _ = waker.wake();
                 Ok(())
             })
             .map_err(DaemonError::ThreadSpawn)?;
@@ -222,7 +222,8 @@ impl NydusDaemon for FusedevDaemon {
     fn start(&self) -> DaemonResult<()> {
         info!("start {} fuse servers", self.threads_cnt);
         for _ in 0..self.threads_cnt {
-            self.kick_one_server()
+            let waker = DAEMON_CONTROLLER.alloc_waker();
+            self.kick_one_server(waker)
                 .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
         }
 

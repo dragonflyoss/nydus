@@ -18,20 +18,22 @@ extern crate nydus_error;
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
-use std::ops::Deref;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
+use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
 
+use crate::daemon::NydusDaemon;
 use nydus::FsBackendType;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use self::api_server_glue::ApiServerController;
-use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemon};
+use self::daemon::{DaemonError, FsBackendMountCmd};
 
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
@@ -52,27 +54,114 @@ const RLIMIT_NOFILE_RESERVED: rlim = 16384;
 const RLIMIT_NOFILE_MAX: rlim = 1_000_000;
 
 lazy_static! {
-    static ref FUSE_DAEMON: Mutex::<Option<Arc<dyn NydusDaemon + Send + Sync>>> = Mutex::default();
+    static ref DAEMON_CONTROLLER: DaemonController = DaemonController::new();
 }
 
-pub fn exit_daemon() {
-    let daemon = FUSE_DAEMON.lock().expect("Not posioned lock");
-    if let Some(daemon) = daemon.deref() {
-        daemon
-            .stop()
-            .unwrap_or_else(|e| error!("exit daemon failed, {}", e));
+/// Controller to manage registered filesystem/blobcache/fscache services.
+pub struct DaemonController {
+    active: AtomicBool,
+    singleton_mode: AtomicBool,
+    // For backward compatibility to support singleton fusedev/virtiofs server.
+    daemon: Mutex<Option<Arc<dyn NydusDaemon>>>,
+    waker: Arc<Waker>,
+    poller: Mutex<Poll>,
+}
+
+impl DaemonController {
+    fn new() -> Self {
+        let poller = Poll::new().expect("Failed to create `ServiceController` instance");
+        let waker = Waker::new(poller.registry(), Token(1))
+            .expect("Failed to create waker for ServiceController");
+
+        Self {
+            active: AtomicBool::new(true),
+            singleton_mode: AtomicBool::new(true),
+            daemon: Mutex::new(None),
+            waker: Arc::new(waker),
+            poller: Mutex::new(poller),
+        }
+    }
+
+    /// Check whether the service controller is still in active/working state.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// Allocate a waker to notify stop events.
+    pub fn alloc_waker(&self) -> Arc<Waker> {
+        self.waker.clone()
+    }
+
+    /// Enable/disable singleton mode, which will shutdown the process when any working thread exits.
+    pub fn set_singleton_mode(&self, enabled: bool) {
+        self.singleton_mode.store(enabled, Ordering::Release);
+    }
+
+    /// Set the daemon service object.
+    pub fn set_daemon(&self, daemon: Arc<dyn NydusDaemon>) -> Option<Arc<dyn NydusDaemon>> {
+        self.daemon.lock().unwrap().replace(daemon)
+    }
+
+    /// Get the daemon service object.
+    ///
+    /// Panic if called before `set_daemon()` has been called.
+    pub fn get_daemon(&self) -> Arc<dyn NydusDaemon> {
+        self.daemon.lock().unwrap().clone().unwrap()
+    }
+
+    fn shutdown(&self) {
+        // Marking exiting state.
+        self.active.store(false, Ordering::Release);
+        // Signal the `run_loop()` working thread to exit.
+        let _ = self.waker.wake();
+
+        let fs_service = self.daemon.lock().unwrap().take();
+        if let Some(service) = fs_service {
+            // TODO: fix the behavior
+            if cfg!(feature = "virtiofs") {
+                // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
+                // Given the fact that we have nothing to clean up, directly exit seems fine.
+                process::exit(0);
+            }
+            if let Err(e) = service.stop() {
+                error!("failed to stop daemon: {}", e);
+            }
+            if let Err(e) = service.wait() {
+                error!("failed to wait daemon: {}", e)
+            }
+        }
+    }
+
+    fn run_loop(&self) {
+        let mut events = Events::with_capacity(8);
+
+        loop {
+            match self.poller.lock().unwrap().poll(&mut events, None) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => error!("failed to receive notification from waker: {}", e),
+                Ok(_) => {}
+            }
+
+            for event in events.iter() {
+                if event.is_error() {
+                    error!("Got error on the monitored event.");
+                    continue;
+                }
+
+                if event.is_readable()
+                    && event.token() == Token(1)
+                    && self.singleton_mode.load(Ordering::Acquire)
+                {
+                    self.active.store(false, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
     }
 }
 
 extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
-    if cfg!(feature = "virtiofs") {
-        // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
-        // Given the fact that we have nothing to clean up, directly exit seems fine.
-        process::exit(0);
-    } else {
-        // Can't directly exit here since we want to umount rafs reflecting the signal.
-        exit_daemon();
-    }
+    DAEMON_CONTROLLER.shutdown();
 }
 
 fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
@@ -339,6 +428,10 @@ fn main() -> Result<()> {
     dump_program_info(crate_version!());
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
+    // Initialize and run the daemon controller event loop.
+    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
+    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+
     // Retrieve arguments
     // shared-dir means fs passthrough
     let shared_dir = args.value_of("shared-dir");
@@ -452,22 +545,21 @@ fn main() -> Result<()> {
             e
         })?
     };
+    DAEMON_CONTROLLER.set_daemon(daemon);
 
+    // Start the HTTP Administration API server
     let mut api_controller = ApiServerController::new(apisock);
-    api_controller.start(daemon.clone())?;
+    api_controller.start(DAEMON_CONTROLLER.get_daemon())?;
 
-    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
-    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
-    // TODO
+    // Run the main event loop
+    if DAEMON_CONTROLLER.is_active() {
+        DAEMON_CONTROLLER.run_loop();
+    }
 
-    if let Err(e) = daemon.stop() {
-        error!("failed to stop daemon: {}", e);
-    }
-    if let Err(e) = daemon.wait() {
-        error!("failed to wait daemon: {}", e)
-    }
-    api_controller.stop();
+    // Gracefully shutdown system.
     info!("nydusd quits");
+    api_controller.stop();
+    DAEMON_CONTROLLER.shutdown();
 
     Ok(())
 }
