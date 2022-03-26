@@ -1,28 +1,25 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2020 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2020-2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-use mio::{Events, Poll, Token, Waker};
 use std::convert::From;
+use std::io::Result;
 use std::str::FromStr;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use mio::Waker;
+
 use nydus::{FsBackendType, NydusError};
 use nydus_api::http::{
-    ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
-    DaemonErrorKind, MetricsErrorKind,
+    start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
+    ApiResult, DaemonConf, DaemonErrorKind, MetricsErrorKind,
 };
 use nydus_utils::metrics;
 
 use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDaemon};
-#[cfg(fusedev)]
-use crate::fusedev::FusedevDaemon;
-
-type Result<T> = ApiResult<T>;
-const API_WAKE_TOKEN: Token = Token(0);
 
 impl From<DaemonError> for DaemonErrorKind {
     fn from(e: DaemonError) -> Self {
@@ -47,7 +44,7 @@ impl From<NydusError> for DaemonError {
     }
 }
 
-pub struct ApiServer {
+struct ApiServer {
     to_http: Sender<ApiResponse>,
     daemon: Arc<dyn NydusDaemon + Send + Sync>,
 }
@@ -60,7 +57,7 @@ impl ApiServer {
         Ok(ApiServer { to_http, daemon })
     }
 
-    fn process_request(&self, request: ApiRequest) -> std::io::Result<()> {
+    fn process_request(&self, request: ApiRequest) -> Result<()> {
         let resp = match request {
             ApiRequest::DaemonInfo => self.daemon_info(),
             ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
@@ -97,7 +94,7 @@ impl ApiServer {
         Ok(())
     }
 
-    fn respond(&self, resp: Result<ApiResponsePayload>) {
+    fn respond(&self, resp: ApiResult<ApiResponsePayload>) {
         if let Err(e) = self.to_http.send(resp) {
             error!("send API response failed {}", e);
         }
@@ -299,74 +296,112 @@ impl ApiServer {
     }
 }
 
-pub struct ApiSeverSubscriber {
-    poll: Poll,
-    waker: Arc<Waker>,
+struct ApiServerHandler {
     server: ApiServer,
     api_receiver: Receiver<Option<ApiRequest>>,
 }
 
-impl ApiSeverSubscriber {
-    pub fn new(
-        server: ApiServer,
-        api_receiver: Receiver<Option<ApiRequest>>,
-    ) -> std::io::Result<Self> {
-        let poll = Poll::new()?;
-        let waker = Waker::new(poll.registry(), API_WAKE_TOKEN)?;
+impl ApiServerHandler {
+    fn new(server: ApiServer, api_receiver: Receiver<Option<ApiRequest>>) -> Result<Self> {
         Ok(Self {
-            waker: Arc::new(waker),
-            poll,
             server,
             api_receiver,
         })
     }
 
-    pub fn get_waker(&self) -> Arc<Waker> {
-        self.waker.clone()
-    }
-
-    pub fn run(self) -> std::io::Result<JoinHandle<()>> {
-        std::thread::Builder::new()
-            .name("api-server".to_string())
-            .spawn(move || {
-                let ApiSeverSubscriber {
-                    mut poll,
-                    server,
-                    api_receiver,
-                    ..
-                } = self;
-                let mut events = Events::with_capacity(100);
-                'wait: loop {
-                    match poll.poll(&mut events, None) {
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(e) => {
-                            error!("API server poll events failed, {}", e);
-                            return;
-                        }
-                        Ok(_) => {}
-                    }
-
-                    for event in &events {
-                        match event.token() {
-                            API_WAKE_TOKEN => {
-                                if let Some(request) = api_receiver.recv().unwrap_or_else(|e| {
-                                    error!("API server recv failed, {}", e);
-                                    None
-                                }) {
-                                    server.process_request(request).unwrap_or_else(|e| {
-                                        error!("API server process events failed, {}", e)
-                                    });
-                                } else {
-                                    break 'wait;
-                                }
-                            }
-                            _ => {
-                                unreachable!("unknown event token");
-                            }
-                        }
+    fn handle_requests_from_router(&self) {
+        loop {
+            match self.api_receiver.recv() {
+                Ok(request) => {
+                    if let Some(req) = request {
+                        self.server.process_request(req).unwrap_or_else(|e| {
+                            error!("HTTP handler failed to process request, {}", e)
+                        });
+                    } else {
+                        debug!("Received exit notification from the HTTP router");
+                        return;
                     }
                 }
-                info!("api-server thread exits");
+                Err(_e) => {
+                    error!("Failed to receive request from the HTTP router");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// HTTP API server to serve the administration socket.
+pub struct ApiServerController {
+    http_handler_thread: Option<JoinHandle<Result<()>>>,
+    http_router_thread: Option<JoinHandle<Result<()>>>,
+    sock: Option<String>,
+    waker: Option<Arc<Waker>>,
+}
+
+impl ApiServerController {
+    /// Create a new instance of `ApiServerController`.
+    pub fn new(sock: Option<&str>) -> Self {
+        ApiServerController {
+            sock: sock.map(|v| v.to_string()),
+            http_handler_thread: None,
+            http_router_thread: None,
+            waker: None,
+        }
+    }
+
+    /// Try to start the HTTP working thread.
+    pub fn start(&mut self, daemon: Arc<dyn NydusDaemon + Send + Sync>) -> Result<()> {
+        if self.sock.is_none() {
+            return Ok(());
+        }
+
+        // Safe to unwrap() because self.sock is valid.
+        let apisock = self.sock.as_ref().unwrap();
+        let (to_handler, from_router) = channel();
+        let (to_router, from_handler) = channel();
+        let api_server = ApiServer::new(to_router, daemon)?;
+        let api_handler = ApiServerHandler::new(api_server, from_router)?;
+        let (router_thread, waker) = start_http_thread(apisock, None, to_handler, from_handler)?;
+
+        info!("HTTP API server running at {}", apisock);
+        let handler_thread = std::thread::Builder::new()
+            .name("api-server".to_string())
+            .spawn(move || {
+                api_handler.handle_requests_from_router();
+                info!("HTTP api-server handler thread exits");
+                Ok(())
             })
+            .map_err(|_e| einval!("Failed to start work thread for HTTP handler"))?;
+
+        self.waker = Some(waker);
+        self.http_handler_thread = Some(handler_thread);
+        self.http_router_thread = Some(router_thread);
+
+        Ok(())
+    }
+
+    /// Stop the HTTP working thread.
+    pub fn stop(&mut self) {
+        // Signal the HTTP router thread to exit, which will then notify the HTTP handler thread.
+        if let Some(waker) = self.waker.take() {
+            let _ = waker.wake();
+        }
+        if let Some(t) = self.http_handler_thread.take() {
+            if let Err(e) = t.join() {
+                error!(
+                    "Failed to join the HTTP handler thread, execution error. {:?}",
+                    e
+                );
+            }
+        }
+        if let Some(t) = self.http_router_thread.take() {
+            if let Err(e) = t.join() {
+                error!(
+                    "Failed to join the HTTP router thread, execution error. {:?}",
+                    e
+                );
+            }
+        }
     }
 }
