@@ -48,14 +48,11 @@ impl From<NydusError> for DaemonError {
 
 struct ApiServer {
     to_http: Sender<ApiResponse>,
-    daemon: Arc<dyn NydusDaemon + Send + Sync>,
+    daemon: Arc<dyn NydusDaemon>,
 }
 
 impl ApiServer {
-    pub fn new(
-        to_http: Sender<ApiResponse>,
-        daemon: Arc<dyn NydusDaemon + Send + Sync>,
-    ) -> std::io::Result<Self> {
+    pub fn new(to_http: Sender<ApiResponse>, daemon: Arc<dyn NydusDaemon>) -> Result<Self> {
         Ok(ApiServer { to_http, daemon })
     }
 
