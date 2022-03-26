@@ -18,22 +18,19 @@ extern crate nydus_error;
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::process;
-use std::sync::{mpsc::channel, Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
-use mio::Waker;
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
 
 use nydus::FsBackendType;
-use nydus_api::http::start_http_thread;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
-use self::api_server_glue::{ApiServer, ApiSeverSubscriber};
+use self::api_server_glue::ApiServerController;
 use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemon};
 
 #[cfg(feature = "virtiofs")]
@@ -88,7 +85,8 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
                 .short("A")
                 .help("Administration API socket")
                 .takes_value(true)
-                .required(false),
+                .required(false)
+                .global(true),
         )
         .arg(
             Arg::with_name("config")
@@ -335,6 +333,7 @@ fn main() -> Result<()> {
     let logging_file = args.value_of("log-file").map(|l| l.into());
     // Safe to unwrap because it has default value and possible values are defined
     let level = args.value_of("log-level").unwrap().parse().unwrap();
+    let apisock = args.value_of("apisock");
 
     setup_logging(logging_file, level)?;
     dump_program_info(crate_version!());
@@ -347,8 +346,6 @@ fn main() -> Result<()> {
     let bootstrap = args.value_of("bootstrap");
     // safe as virtual_mountpoint default to "/"
     let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
-    // apisock means admin api socket support
-    let apisock = args.value_of("apisock");
 
     let mut opts = VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
@@ -456,53 +453,20 @@ fn main() -> Result<()> {
         })?
     };
 
-    #[allow(clippy::type_complexity)]
-    let mut http_thread_and_waker: Option<(
-        thread::JoinHandle<Result<()>>,
-        thread::JoinHandle<()>,
-        Arc<Waker>,
-    )> = None;
-    if let Some(apisock) = apisock {
-        let (to_api, from_http) = channel();
-        let (to_http, from_api) = channel();
+    let mut api_controller = ApiServerController::new(apisock);
+    api_controller.start(daemon.clone())?;
 
-        let api_server = ApiServer::new(to_http, daemon.clone())?;
-
-        let api_server_subscriber = ApiSeverSubscriber::new(api_server, from_http)?;
-        let api_notifier = api_server_subscriber.get_waker();
-        let api_server_thread = api_server_subscriber.run()?;
-
-        let (ret, thread_exit_waker) =
-            start_http_thread(apisock, Some(api_notifier), to_api, from_api)?;
-        http_thread_and_waker = Some((ret, api_server_thread, thread_exit_waker));
-        info!("api server running at {}", apisock);
-    }
-
-    *FUSE_DAEMON.lock().unwrap().deref_mut() = Some(daemon.clone());
     nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
     nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+    // TODO
 
-    daemon
-        .wait()
-        .unwrap_or_else(|e| error!("failed to wait daemon {}", e));
-
-    if let Some((http_server_thread, api_server_thread, waker)) = http_thread_and_waker {
-        info!("wake http_thread.");
-        if waker.wake().is_err() {
-            error!("wake http thread failed.");
-        }
-        if http_server_thread
-            .join()
-            .map(|r| r.map_err(|e| error!("Http server thread execution error. {:?}", e)))
-            .is_err()
-        {
-            error!("Join http server thread failed.");
-        }
-        if api_server_thread.join().is_err() {
-            error!("Join api server thread failed.");
-        }
+    if let Err(e) = daemon.stop() {
+        error!("failed to stop daemon: {}", e);
     }
-
+    if let Err(e) = daemon.wait() {
+        error!("failed to wait daemon: {}", e)
+    }
+    api_controller.stop();
     info!("nydusd quits");
 
     Ok(())
