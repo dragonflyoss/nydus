@@ -48,14 +48,11 @@ impl From<NydusError> for DaemonError {
 
 struct ApiServer {
     to_http: Sender<ApiResponse>,
-    daemon: Arc<dyn NydusDaemon + Send + Sync>,
+    daemon: Arc<dyn NydusDaemon>,
 }
 
 impl ApiServer {
-    pub fn new(
-        to_http: Sender<ApiResponse>,
-        daemon: Arc<dyn NydusDaemon + Send + Sync>,
-    ) -> std::io::Result<Self> {
+    pub fn new(to_http: Sender<ApiResponse>, daemon: Arc<dyn NydusDaemon>) -> Result<Self> {
         Ok(ApiServer { to_http, daemon })
     }
 
@@ -341,7 +338,7 @@ impl ApiServerController {
     }
 
     /// Try to start the HTTP working thread.
-    pub fn start(&mut self, daemon: Arc<dyn NydusDaemon + Send + Sync>) -> Result<()> {
+    pub fn start(&mut self, daemon: Arc<dyn NydusDaemon>) -> Result<()> {
         if self.sock.is_none() {
             return Ok(());
         }
