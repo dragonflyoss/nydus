@@ -14,10 +14,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::id;
 use std::str::FromStr;
-use std::sync::{
-    mpsc::{Receiver, Sender},
-    Arc, MutexGuard,
-};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::{error, fmt, io};
 
@@ -227,7 +225,7 @@ impl FsBackendCollection {
     }
 }
 
-pub trait NydusDaemon: DaemonStateMachineSubscriber {
+pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     fn start(&self) -> DaemonResult<()>;
     fn wait(&self) -> DaemonResult<()>;
     fn stop(&self) -> DaemonResult<()> {
