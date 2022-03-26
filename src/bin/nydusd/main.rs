@@ -22,25 +22,21 @@ use std::io::{Read, Result};
 use std::ops::DerefMut;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::channel,
     Arc, Mutex,
 };
-use std::thread::{self, spawn};
 use std::{io, process};
 
 use clap::{App, Arg, ArgMatches};
-use event_manager::{EventManager, EventSubscriber, SubscriberOps};
+use event_manager::{EventManager, EventSubscriber};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
 use mio::Waker;
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
-use vmm_sys_util::eventfd::EventFd;
 
 use nydus::FsBackendType;
-use nydus_api::http::start_http_thread;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
-use self::api_server_glue::{ApiServer, ApiSeverSubscriber};
+use self::api_server_glue::ApiServerController;
 use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemonSubscriber};
 
 #[cfg(feature = "virtiofs")]
@@ -97,7 +93,8 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
                 .short("A")
                 .help("Administration API socket")
                 .takes_value(true)
-                .required(false),
+                .required(false)
+                .global(true),
         )
         .arg(
             Arg::with_name("config")
@@ -321,6 +318,7 @@ fn main() -> Result<()> {
     let logging_file = args.value_of("log-file").map(|l| l.into());
     // Safe to unwrap because it has default value and possible values are defined
     let level = args.value_of("log-level").unwrap().parse().unwrap();
+    let apisock = args.value_of("apisock");
 
     setup_logging(logging_file, level)?;
     dump_program_info(crate_version!());
@@ -333,8 +331,6 @@ fn main() -> Result<()> {
     let bootstrap = args.value_of("bootstrap");
     // safe as virtual_mountpoint default to "/"
     let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
-    // apisock means admin api socket support
-    let apisock = args.value_of("apisock");
 
     let mut opts = VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
@@ -444,53 +440,27 @@ fn main() -> Result<()> {
         })?
     };
 
-    let mut http_thread: Option<thread::JoinHandle<Result<()>>> = None;
-    let http_exit_evtfd = EventFd::new(0).unwrap();
-    if let Some(apisock) = apisock {
-        let (to_api, from_http) = channel();
-        let (to_http, from_api) = channel();
+    let mut api_controller = ApiServerController::new(apisock);
+    api_controller.start(&mut event_manager, daemon.clone())?;
+    start_daemon_monitor().map(|e| {
+        api_controller.stop();
+        e
+    })?;
 
-        let api_server = ApiServer::new(to_http, daemon.clone())?;
-
-        let api_server_subscriber = Arc::new(ApiSeverSubscriber::new(api_server, from_http)?);
-        let evtfd = api_server_subscriber.get_event_fd()?;
-        event_manager.add_subscriber(api_server_subscriber);
-        let ret = start_http_thread(
-            apisock,
-            evtfd,
-            to_api,
-            from_api,
-            http_exit_evtfd.try_clone().unwrap(),
-        )?;
-        http_thread = Some(ret);
-        info!("api server running at {}", apisock);
-    }
-
-    start_daemon_monitor().unwrap();
     nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
     nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
-
     while EVENT_MANAGER_RUN.load(Ordering::Relaxed) {
         // If event manager dies, so does nydusd
         event_manager.run().unwrap();
     }
 
-    if let Some(t) = http_thread {
-        http_exit_evtfd.write(1).unwrap();
-        if t.join()
-            .map(|r| r.map_err(|e| error!("Thread execution error. {:?}", e)))
-            .is_err()
-        {
-            error!("Join http thread failed.");
-        }
+    if let Err(e) = daemon.stop() {
+        error!("failed to stop daemon: {}", e);
     }
-
-    daemon
-        .stop()
-        .unwrap_or_else(|e| error!("failed to stop daemon: {}", e));
-    daemon
-        .wait()
-        .unwrap_or_else(|e| error!("failed to wait daemon: {}", e));
+    if let Err(e) = daemon.wait() {
+        error!("failed to wait daemon: {}", e)
+    }
+    api_controller.stop();
     info!("nydusd quits");
 
     Ok(())
@@ -500,7 +470,7 @@ fn start_daemon_monitor() -> Result<()> {
     let mut monitor = NydusDaemonSubscriber::new()?;
     *EXIT_NOTIFIER.lock().unwrap().deref_mut() = Some(monitor.get_notifier());
 
-    spawn(move || {
+    std::thread::spawn(move || {
         monitor.listen();
     });
 

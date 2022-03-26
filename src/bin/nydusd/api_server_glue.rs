@@ -1,19 +1,22 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2020 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2020-2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 use std::convert::From;
 use std::str::FromStr;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
-use event_manager::{EventOps, EventSubscriber, Events};
+use event_manager::{EventManager, EventOps, EventSubscriber, Events, SubscriberOps};
 use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
+//use vm_memory::Bytes;
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 use nydus::{FsBackendType, NydusError};
+use nydus_api::http::start_http_thread;
 use nydus_api::http_endpoint::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
     DaemonErrorKind, MetricsErrorKind,
@@ -49,7 +52,7 @@ impl From<NydusError> for DaemonError {
     }
 }
 
-pub struct ApiServer {
+struct ApiServer {
     to_http: Sender<ApiResponse>,
     daemon: Arc<dyn NydusDaemon>,
 }
@@ -286,17 +289,17 @@ impl ApiServer {
     }
 }
 
-pub struct ApiSeverSubscriber {
+struct ApiSeverHandler {
     event_fd: EventFd,
     server: ApiServer,
     api_receiver: Receiver<ApiRequest>,
 }
 
-impl ApiSeverSubscriber {
-    pub fn new(server: ApiServer, api_receiver: Receiver<ApiRequest>) -> std::io::Result<Self> {
+impl ApiSeverHandler {
+    fn new(server: ApiServer, api_receiver: Receiver<ApiRequest>) -> std::io::Result<Self> {
         match EventFd::new(0) {
-            Ok(fd) => Ok(Self {
-                event_fd: fd,
+            Ok(event_fd) => Ok(Self {
+                event_fd,
                 server,
                 api_receiver,
             }),
@@ -307,27 +310,25 @@ impl ApiSeverSubscriber {
         }
     }
 
-    pub fn get_event_fd(&self) -> std::io::Result<EventFd> {
+    fn get_event_fd(&self) -> std::io::Result<EventFd> {
         self.event_fd.try_clone()
     }
 }
 
-impl EventSubscriber for ApiSeverSubscriber {
+impl EventSubscriber for ApiSeverHandler {
     fn process(&self, events: Events, event_ops: &mut EventOps) {
-        self.event_fd
-            .read()
-            .map(|_| ())
-            .map_err(|e| last_error!(e))
-            .unwrap_or_else(|_| {});
         match events.event_set() {
             EventSet::IN => {
+                // Consume notification from the EventFd, which should always be valid.
+                let _ = self
+                    .event_fd
+                    .read()
+                    .expect("failed to read data from HTTP API EventFd");
                 self.server
                     .process_request(&self.api_receiver)
-                    .unwrap_or_else(|e| error!("API server process events failed, {}", e));
+                    .unwrap_or_else(|e| error!("API server failed to process event, {}", e));
             }
-            EventSet::ERROR => {
-                error!("Got error on the monitored event.");
-            }
+            EventSet::ERROR => error!("Unexpected error from HTTP API EventFd."),
             EventSet::HANG_UP => {
                 event_ops
                     .remove(events)
@@ -339,6 +340,63 @@ impl EventSubscriber for ApiSeverSubscriber {
 
     fn init(&self, ops: &mut EventOps) {
         ops.add(Events::new(&self.event_fd, EventSet::IN))
-            .expect("Cannot register event")
+            .expect("Failed to register HTTP API EventFd to event manager")
+    }
+}
+
+/// HTTP API server to serve the administration socket.
+pub struct ApiServerController {
+    sock: Option<String>,
+    eventfd: Option<EventFd>,
+    thread: Option<JoinHandle<std::io::Result<()>>>,
+}
+
+impl ApiServerController {
+    /// Create a new instance of `ApiServerController`.
+    pub fn new(sock: Option<&str>) -> Self {
+        ApiServerController {
+            sock: sock.map(|v| v.to_string()),
+            eventfd: None,
+            thread: None,
+        }
+    }
+
+    /// Try to start the HTTP working thread.
+    pub fn start(
+        &mut self,
+        event_manager: &mut EventManager<Arc<dyn EventSubscriber>>,
+        daemon: Arc<dyn NydusDaemon>,
+    ) -> std::io::Result<()> {
+        if let Some(apisock) = self.sock.as_ref() {
+            let http_exit_evtfd = EventFd::new(0)?;
+            let http_exit_evtfd2 = http_exit_evtfd.try_clone()?;
+            let (to_api, from_http) = channel();
+            let (to_http, from_api) = channel();
+            let api_server = ApiServer::new(to_http, daemon)?;
+            let api_handler = ApiSeverHandler::new(api_server, from_http)?;
+            let api_server_subscriber = Arc::new(api_handler);
+            let evtfd = api_server_subscriber.get_event_fd()?;
+
+            event_manager.add_subscriber(api_server_subscriber);
+            let ret = start_http_thread(apisock, evtfd, to_api, from_api, http_exit_evtfd2)?;
+            info!("api server running at {}", apisock);
+
+            self.thread = Some(ret);
+            self.eventfd = Some(http_exit_evtfd);
+        }
+
+        Ok(())
+    }
+
+    /// Stop the HTTP working thread.
+    pub fn stop(&mut self) {
+        if let Some(eventfd) = self.eventfd.take() {
+            let _ = eventfd.write(1);
+        }
+        if let Some(t) = self.thread.take() {
+            if let Err(e) = t.join() {
+                error!("Failed to join the HTTP thread, execution error. {:?}", e);
+            }
+        }
     }
 }
