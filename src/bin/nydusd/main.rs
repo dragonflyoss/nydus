@@ -1,8 +1,8 @@
+// Copyright 2022 Alibaba Cloud. All rights reserved.
 // Copyright 2020 Ant Group. All rights reserved.
 // Copyright 2019 Intel Corporation. All Rights Reserved.
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
-
 #![deny(warnings)]
 #[macro_use(crate_version)]
 extern crate clap;
@@ -17,17 +17,11 @@ extern crate nydus_error;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
-#[cfg(target_os = "linux")]
-use std::fs::File;
-#[cfg(target_os = "macos")]
-use std::io::Result;
-#[cfg(target_os = "linux")]
-use std::io::{Read, Result};
-use std::ops::Deref;
-use std::ops::DerefMut;
+use std::io::{Error, ErrorKind, Result};
+use std::ops::{Deref, DerefMut};
+use std::process;
 use std::sync::{mpsc::channel, Arc, Mutex};
 use std::thread;
-use std::{io, process};
 
 use clap::{App, Arg, ArgMatches};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
@@ -55,80 +49,13 @@ mod api_server_glue;
 mod daemon;
 mod upgrade;
 
+/// Minimal number of file descriptors reserved for system.
+const RLIMIT_NOFILE_RESERVED: rlim = 16384;
+/// Default number of file descriptors.
+const RLIMIT_NOFILE_MAX: rlim = 1_000_000;
+
 lazy_static! {
     static ref FUSE_DAEMON: Mutex::<Option<Arc<dyn NydusDaemon + Send + Sync>>> = Mutex::default();
-}
-
-#[cfg(target_os = "macos")]
-fn get_default_rlimit_nofile() -> Result<rlim> {
-    // Our default RLIMIT_NOFILE target.
-    let mut max_fds: rlim = 1_000_000;
-    // leave at least this many fds free
-    let reserved_fds: rlim = 16_384;
-
-    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_MAXFILES];
-
-    // Reduce max_fds below the system-wide maximum, if necessary.
-    // This ensures there are fds available for other processes so we
-    // don't cause resource exhaustion.
-    let file_max = unsafe {
-        let mut file_max: rlim = 0;
-        let mut size = std::mem::size_of::<rlim>();
-        let res = nix::libc::sysctl(
-            mib.as_mut_ptr(),
-            2,
-            (&mut file_max) as *mut u64 as *mut nix::libc::c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        );
-        nix::errno::Errno::result(res)?;
-        file_max
-    };
-
-    if file_max < 2 * reserved_fds {
-        return Err(io::Error::from(DaemonError::InvalidArguments(
-            "The fs.file-max sysctl is too low to allow a reasonable number of open files."
-                .to_string(),
-        )));
-    }
-
-    max_fds = std::cmp::min(file_max - reserved_fds, max_fds);
-
-    Resource::NOFILE
-        .get()
-        .map(|(curr, _)| if curr >= max_fds { 0 } else { max_fds })
-}
-
-#[cfg(target_os = "linux")]
-fn get_default_rlimit_nofile() -> Result<rlim> {
-    // Our default RLIMIT_NOFILE target.
-    let mut max_fds: rlim = 1_000_000;
-    // leave at least this many fds free
-    let reserved_fds: rlim = 16_384;
-
-    // Reduce max_fds below the system-wide maximum, if necessary.
-    // This ensures there are fds available for other processes so we
-    // don't cause resource exhaustion.
-    let mut file_max = String::new();
-    let mut f = File::open("/proc/sys/fs/file-max")?;
-    f.read_to_string(&mut file_max)?;
-    let file_max = file_max
-        .trim()
-        .parse::<rlim>()
-        .map_err(|_| DaemonError::InvalidArguments("read fs.file-max sysctl wrong".to_string()))?;
-    if file_max < 2 * reserved_fds {
-        return Err(io::Error::from(DaemonError::InvalidArguments(
-            "The fs.file-max sysctl is too low to allow a reasonable number of open files."
-                .to_string(),
-        )));
-    }
-
-    max_fds = std::cmp::min(file_max - reserved_fds, max_fds);
-
-    Resource::NOFILE
-        .get()
-        .map(|(curr, _)| if curr >= max_fds { 0 } else { max_fds })
 }
 
 pub fn exit_daemon() {
@@ -222,8 +149,8 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
         .arg(
             Arg::with_name("rlimit-nofile")
                 .long("rlimit-nofile")
-                .default_value("1,000,000")
-                .help("Tune the maximum number of file descriptors (0 leaves rlimit unchanged)")
+                .default_value("1000000")
+                .help("Set rlimit for maximum file descriptor number (0 leaves it unchanged)")
                 .takes_value(true)
                 .required(false)
                 .global(true),
@@ -331,6 +258,77 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
     cmd_arguments.get_matches()
 }
 
+#[cfg(target_os = "macos")]
+fn get_max_rlimit_nofile() -> Result<rlim> {
+    let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_MAXFILES];
+    let mut file_max: rlim = 0;
+    let mut size = std::mem::size_of::<rlim>();
+    // Safe because the arguments are valid and we have checked the result.
+    let res = unsafe {
+        nix::libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&mut file_max) as *mut u64 as *mut nix::libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    nix::errno::Errno::result(res)?;
+    Ok(file_max)
+}
+
+#[cfg(target_os = "linux")]
+fn get_max_rlimit_nofile() -> Result<rlim> {
+    let file_max = std::fs::read_to_string("/proc/sys/fs/file-max")?;
+    file_max
+        .trim()
+        .parse::<rlim>()
+        .map_err(|_| eother!("invalid content from fs.file-max"))
+}
+
+/// Handle command line option to tune rlimit for maximum file descriptor number.
+fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<()> {
+    // `rlimit-nofile` has a default value, so safe to unwrap().
+    let rlimit_nofile: rlim = args.value_of(option_name).unwrap().parse().map_err(|_e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "invalid value for option `rlimit-nofile`",
+        )
+    })?;
+
+    if rlimit_nofile != 0 {
+        // Ensures there are fds available for other processes so we don't cause resource exhaustion.
+        let rlimit_nofile_max = get_max_rlimit_nofile()?;
+        if rlimit_nofile_max < 2 * RLIMIT_NOFILE_RESERVED {
+            return Err(eother!(
+                "The fs.file-max sysctl is too low to allow a reasonable number of open files."
+            ));
+        }
+
+        // Reduce max_fds below the system-wide maximum, if necessary.
+        let rlimit_nofile_max = std::cmp::min(
+            rlimit_nofile_max - RLIMIT_NOFILE_RESERVED,
+            RLIMIT_NOFILE_MAX,
+        );
+        let rlimit_nofile_max = Resource::NOFILE.get().map(|(curr, _)| {
+            if curr >= rlimit_nofile_max {
+                curr
+            } else {
+                rlimit_nofile_max
+            }
+        })?;
+        let rlimit_nofile = std::cmp::min(rlimit_nofile, rlimit_nofile_max);
+        info!(
+            "Set rlimit-nofile to {}, maximum {}",
+            rlimit_nofile, rlimit_nofile_max
+        );
+        Resource::NOFILE.set(rlimit_nofile, rlimit_nofile)?;
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
     let args = parse_commandline_options(bti_string);
@@ -340,6 +338,7 @@ fn main() -> Result<()> {
 
     setup_logging(logging_file, level)?;
     dump_program_info(crate_version!());
+    handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
     // Retrieve arguments
     // shared-dir means fs passthrough
@@ -350,22 +349,9 @@ fn main() -> Result<()> {
     let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
     // apisock means admin api socket support
     let apisock = args.value_of("apisock");
-    let rlimit_nofile_default = get_default_rlimit_nofile()?;
-    let rlimit_nofile: rlim = args
-        .value_of("rlimit-nofile")
-        .map(|n| n.parse().unwrap_or(rlimit_nofile_default))
-        .unwrap_or(rlimit_nofile_default);
 
     let mut opts = VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
-        if rlimit_nofile != 0 {
-            info!(
-                "set rlimit {}, default {}",
-                rlimit_nofile, rlimit_nofile_default
-            );
-            Resource::NOFILE.set(rlimit_nofile, rlimit_nofile)?;
-        }
-
         let cmd = FsBackendMountCmd {
             fs_type: FsBackendType::PassthroughFs,
             source: shared_dir.to_string(),
