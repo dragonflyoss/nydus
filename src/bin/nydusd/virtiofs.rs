@@ -362,7 +362,7 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscr
     }
 }
 
-pub fn create_nydus_daemon(
+pub fn create_virtiofs_daemon(
     id: Option<String>,
     supervisor: Option<String>,
     sock: &str,

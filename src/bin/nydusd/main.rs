@@ -2,7 +2,6 @@
 // Copyright 2019 Intel Corporation. All Rights Reserved.
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
-
 #![deny(warnings)]
 #[macro_use(crate_version)]
 extern crate clap;
@@ -10,8 +9,6 @@ extern crate clap;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
-extern crate rafs;
-extern crate serde_json;
 #[macro_use]
 extern crate nydus_error;
 
@@ -23,28 +20,23 @@ use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clap::{App, Arg, ArgMatches};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use event_manager::{EventManager, EventSubscriber};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
 use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::{rlim, Resource};
 
-use crate::daemon::NydusDaemon;
 use nydus::FsBackendType;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use self::api_server_glue::ApiServerController;
-use self::daemon::{DaemonError, FsBackendMountCmd};
+use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemon};
 
-#[cfg(feature = "virtiofs")]
-mod virtiofs;
-#[cfg(feature = "virtiofs")]
-use self::virtiofs::create_nydus_daemon;
 #[cfg(feature = "fusedev")]
 mod fusedev;
-#[cfg(feature = "fusedev")]
-use self::fusedev::create_nydus_daemon;
+#[cfg(feature = "virtiofs")]
+mod virtiofs;
 
 mod api_server_glue;
 mod daemon;
@@ -102,9 +94,9 @@ impl ServiceController {
     /// Set the default file system service instance.
     pub fn set_default_fs_service(
         &self,
-        daemon: Arc<dyn NydusDaemon>,
+        fs_service: Arc<dyn NydusDaemon>,
     ) -> Option<Arc<dyn NydusDaemon>> {
-        self.default_fs_service.lock().unwrap().replace(daemon)
+        self.default_fs_service.lock().unwrap().replace(fs_service)
     }
 
     /// Get the default file system service instance.
@@ -127,10 +119,10 @@ impl ServiceController {
                 process::exit(0);
             }
             if let Err(e) = service.stop() {
-                error!("failed to stop daemon: {}", e);
+                error!("failed to stop default fs service: {}", e);
             }
             if let Err(e) = service.wait() {
-                error!("failed to wait daemon: {}", e)
+                error!("failed to wait for default fs service: {}", e)
             }
         }
     }
@@ -143,7 +135,7 @@ impl ServiceController {
                 .lock()
                 .unwrap()
                 .poll(&mut events, None)
-                .unwrap_or_else(|e| error!("failed to listen on daemon: {}", e));
+                .unwrap_or_else(|e| error!("failed to receive notification from waker: {}", e));
 
             for event in events.iter() {
                 if event.is_error() {
@@ -167,10 +159,157 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     SERVICE_CONTROLLER.shutdown();
 }
 
-fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
-    let cmd_arguments = App::new("nydusd")
-        .version(bti_string.as_str())
-        .about("Nydus Image Service")
+#[cfg(any(feature = "fusedev", feature = "virtiofs"))]
+fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    app.arg(
+        Arg::with_name("bootstrap")
+            .long("bootstrap")
+            .short("B")
+            .help("Bootstrap/metadata file for rafs filesystem, which also enables rafs mode")
+            .takes_value(true)
+            .requires("config")
+            .conflicts_with("shared-dir"),
+    )
+    .arg(
+        Arg::with_name("config")
+            .long("config")
+            .short("C")
+            .help("Configuration file")
+            .required(false)
+            .takes_value(true),
+    )
+    .arg(
+        Arg::with_name("prefetch-files")
+            .long("prefetch-files")
+            .short("P")
+            .help("List of file/directory to prefetch")
+            .takes_value(true)
+            .required(false)
+            .requires("bootstrap")
+            .multiple(true),
+    )
+    .arg(
+        Arg::with_name("virtual-mountpoint")
+            .long("virtual-mountpoint")
+            .short("m")
+            .help("Path inside FUSE/virtiofs virtual filesystem to mount the rafs/passthroughfs instance")
+            .takes_value(true)
+            .default_value("/")
+            .required(false),
+    )
+}
+
+#[cfg(feature = "fusedev")]
+fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    app.arg(
+        Arg::with_name("mountpoint")
+            .long("mountpoint")
+            .short("M")
+            .help("Path to mount the FUSE filesystem, target for `mount.fuse`")
+            .takes_value(true)
+            .required(true),
+    )
+    .arg(
+        Arg::with_name("failover-policy")
+            .long("failover-policy")
+            .short("F")
+            .default_value("resend")
+            .help("FUSE server failover policy")
+            .possible_values(&["resend", "flush"])
+            .takes_value(true)
+            .required(false),
+    )
+    .arg(
+        Arg::with_name("threads")
+            .long("thread-num")
+            .short("T")
+            .default_value("1")
+            .help("Number of working threads to serve FUSE IO requests")
+            .takes_value(true)
+            .required(false)
+            .validator(|v| {
+                if let Ok(t) = v.parse::<i32>() {
+                    if t > 0 && t <= 1024 {
+                        Ok(())
+                    } else {
+                        Err("Invalid working thread number {}, valid values: [1-1024]".to_string())
+                    }
+                } else {
+                    Err("Input thread number is invalid".to_string())
+                }
+            }),
+    )
+    .arg(
+        Arg::with_name("writable")
+            .long("writable")
+            .short("W")
+            .help("Mount FUSE filesystem in rw mode")
+            .takes_value(false),
+    )
+}
+
+#[cfg(feature = "fusedev1")]
+fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    let subcmd = SubCommand::with_name("fuse").about("Run as a dedicated FUSE server");
+    let subcmd = append_fuse_options(subcmd);
+    let subcmd = append_fs_options(subcmd);
+    app.subcommand(subcmd)
+}
+
+#[cfg(feature = "virtiofs")]
+fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    app.arg(
+        Arg::with_name("hybrid-mode")
+            .long("hybrid-mode")
+            .short("H")
+            .help("Enable support for both rafs and passthroughfs modes")
+            .required(false)
+            .takes_value(false),
+    )
+    .arg(
+        Arg::with_name("shared-dir")
+            .long("shared-dir")
+            .short("s")
+            .help("Directory shared by host and guest for passthroughfs, which also enables pathroughfs mode")
+            .takes_value(true)
+            .conflicts_with("bootstrap"),
+    )
+    .arg(
+        Arg::with_name("sock")
+            .long("sock")
+            .short("v")
+            .help("Vhost-user API socket")
+            .takes_value(true)
+            .required(true),
+    )
+}
+
+#[cfg(feature = "virtiofs1")]
+fn append_virtiofs_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    let subcmd = SubCommand::with_name("virtiofs").about("Run as a dedicated virtiofs server");
+    let subcmd = append_virtiofs_options(subcmd);
+    let subcmd = append_fs_options(subcmd);
+    app.subcommand(subcmd)
+}
+
+fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    let subcmd = SubCommand::with_name("daemon")
+        .about("Run as a global daemon hosting multiple blobcache/fscache/virtiofs services.")
+        .arg(
+            Arg::with_name("fscache")
+                .long("fscache")
+                .short("F")
+                .help("Control device for fscache, which also enables fscache service")
+                .takes_value(true)
+                .default_value("/dev/cachefiles"),
+        );
+
+    app.subcommand(subcmd)
+}
+
+fn prepare_commandline_options() -> App<'static, 'static> {
+    let cmdline = App::new("nydusd")
+        .about("Nydus BlobCache/FsCache/Image Service")
         .arg(
             Arg::with_name("apisock")
                 .long("apisock")
@@ -181,27 +320,10 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
                 .global(true),
         )
         .arg(
-            Arg::with_name("config")
-                .long("config")
-                .short("C")
-                .help("Configuration file")
-                .takes_value(true)
-                .required(false)
-        )
-        .arg(
-            Arg::with_name("failover-policy")
-                .long("failover-policy")
-                .default_value("resend")
-                .help("Nydus image service failover policy")
-                .possible_values(&["resend", "flush"])
-                .takes_value(true)
-                .required(false)
-                .global(true),
-        )
-        .arg(
             Arg::with_name("id")
                 .long("id")
-                .help("Nydus image service identifier")
+                .short("I")
+                .help("Service instance identifier")
                 .takes_value(true)
                 .required(false)
                 .requires("supervisor")
@@ -222,23 +344,15 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
             Arg::with_name("log-file")
                 .long("log-file")
                 .short("L")
-                .help("Log messages to the file. Default extension \".log\" will be used if no extension specified.")
+                .help("Log file, \".log\" will be appended if no file extension specified")
                 .takes_value(true)
                 .required(false)
-                .global(true),
-        )
-        .arg(
-            Arg::with_name("prefetch-files")
-                .long("prefetch-files")
-                .help("List of file/directory to prefetch")
-                .takes_value(true)
-                .required(false)
-                .multiple(true)
                 .global(true),
         )
         .arg(
             Arg::with_name("rlimit-nofile")
                 .long("rlimit-nofile")
+                .short("R")
                 .default_value("1000000")
                 .help("Set rlimit for maximum file descriptor number (0 leaves it unchanged)")
                 .takes_value(true)
@@ -263,89 +377,21 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
                 .takes_value(false)
                 .required(false)
                 .global(true),
-        )
-        .arg(
-            Arg::with_name("virtual-mountpoint")
-                .long("virtual-mountpoint")
-                .short("V")
-                .help("Virtual mountpoint for the filesystem")
-                .takes_value(true)
-                .default_value("/")
-                .required(false)
-                .global(true),
-        ).arg(
-            Arg::with_name("bootstrap")
-                .long("bootstrap")
-                .short("B")
-                .help("Rafs filesystem bootstrap/metadata file")
-                .takes_value(true)
-                .conflicts_with("shared-dir")
-        )
-        .arg(
-            Arg::with_name("shared-dir")
-                .long("shared-dir")
-                .short("s")
-                .help("Directory to pass through to the guest VM")
-                .takes_value(true)
-                .conflicts_with("bootstrap"),
-        )
-        .arg(
-            Arg::with_name("hybrid-mode").long("hybrid-mode")
-                .help("run nydusd in rafs and passthroughfs hybrid mode")
-                .required(false)
-                .takes_value(false)
-                .global(true)
         );
+
+    //#[cfg(feature = "fusedev")]
+    //let cmdline = append_fuse_subcmd_options(cmdline);
+    //#[cfg(feature = "virtiofs")]
+    //let cmdline = append_virtiofs_subcmd_options(cmdline);
 
     #[cfg(feature = "fusedev")]
-    let cmd_arguments = cmd_arguments
-        .arg(
-            Arg::with_name("mountpoint")
-                .long("mountpoint")
-                .short("M")
-                .help("Fuse mount point")
-                .takes_value(true)
-                .required(true),
-        )
-        .arg(
-            Arg::with_name("threads")
-                .long("thread-num")
-                .short("T")
-                .default_value("1")
-                .help("Number of working threads to serve IO requests")
-                .takes_value(true)
-                .required(false)
-                .global(true)
-                .validator(|v| {
-                    if let Ok(t) = v.parse::<i32>() {
-                        if t > 0 && t <= 1024 {
-                            Ok(())
-                        } else {
-                            Err("Invalid working thread number {}, valid values: [1-1024]"
-                                .to_string())
-                        }
-                    } else {
-                        Err("Input thread number is not legal".to_string())
-                    }
-                }),
-        )
-        .arg(
-            Arg::with_name("writable")
-                .long("writable")
-                .help("set fuse mountpoint non-readonly")
-                .takes_value(false),
-        );
-
+    let cmdline = append_fuse_options(cmdline);
     #[cfg(feature = "virtiofs")]
-    let cmd_arguments = cmd_arguments.arg(
-        Arg::with_name("sock")
-            .long("sock")
-            .help("Vhost-user API socket")
-            .takes_value(true)
-            .required(true),
-    );
+    let cmdline = append_virtiofs_options(cmdline);
+    #[cfg(any(feature = "fusedev", feature = "virtiofs"))]
+    let cmdline = append_fs_options(cmdline);
 
-    cmd_arguments.get_matches()
+    append_services_subcmd_options(cmdline)
 }
 
 fn get_max_rlimit_nofile() -> std::io::Result<rlim> {
@@ -378,7 +424,7 @@ fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<(
     let rlimit_nofile: rlim = args.value_of(option_name).unwrap().parse().map_err(|_e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "invalid value for option rlmit-nofile",
+            "invalid value for option rlimit-nofile",
         )
     })?;
 
@@ -396,30 +442,19 @@ fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<(
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
-    let args = parse_commandline_options(bti_string);
-    let logging_file = args.value_of("log-file").map(|l| l.into());
-    // Safe to unwrap because it has default value and possible values are defined
-    let level = args.value_of("log-level").unwrap().parse().unwrap();
-    let apisock = args.value_of("apisock");
-
-    setup_logging(logging_file, level)?;
-    dump_program_info(crate_version!());
-    handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
-
-    // Initialize and run the daemon controller event loop.
-    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
-    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
-    std::thread::spawn(|| SERVICE_CONTROLLER.run_loop());
-
-    // Retrieve arguments
+fn process_default_fs_service(
+    args: &ArgMatches,
+    subargs: &ArgMatches,
+    bti: BuildTimeInfo,
+    apisock: Option<&str>,
+    is_fuse: bool,
+) -> Result<()> {
     // shared-dir means fs passthrough
-    let shared_dir = args.value_of("shared-dir");
+    let shared_dir = subargs.value_of("shared-dir");
     // bootstrap means rafs only
-    let bootstrap = args.value_of("bootstrap");
+    let bootstrap = subargs.value_of("bootstrap");
     // safe as virtual_mountpoint default to "/"
-    let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
+    let virtual_mnt = subargs.value_of("virtual-mountpoint").unwrap();
 
     let mut opts = VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
@@ -468,24 +503,13 @@ fn main() -> Result<()> {
     }
 
     let vfs = Vfs::new(opts);
-
-    let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
-
     let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = args.value_of("id").map(|id| id.to_string());
     let supervisor = args.value_of("supervisor").map(|s| s.to_string());
 
-    #[cfg(feature = "virtiofs")]
-    let daemon = {
-        // sock means vhost-user-backend only
-        let vu_sock = args.value_of("sock").ok_or_else(|| {
-            DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
-        })?;
-        create_nydus_daemon(daemon_id, supervisor, vu_sock, vfs, mount_cmd, bti)?
-    };
     #[cfg(feature = "fusedev")]
-    let daemon = {
+    if is_fuse {
         // threads means number of fuse service threads
         let threads: u32 = args
             .value_of("threads")
@@ -503,32 +527,97 @@ fn main() -> Result<()> {
 
         // mountpoint means fuse device only
         let mountpoint = args.value_of("mountpoint").ok_or_else(|| {
-            DaemonError::InvalidArguments("Mountpoint must be provided!".to_string())
+            DaemonError::InvalidArguments(
+                "Mountpoint must be provided for FUSE server!".to_string(),
+            )
         })?;
 
-        create_nydus_daemon(
-            mountpoint,
-            vfs,
-            supervisor,
-            daemon_id,
-            threads,
-            apisock,
-            args.is_present("upgrade"),
-            !args.is_present("writable"),
-            p,
-            mount_cmd,
-            bti,
-        )
-        .map(|d| {
-            info!("Fuse daemon started!");
-            d
-        })
-        .map_err(|e| {
-            error!("Failed in starting daemon: {}", e);
-            e
-        })?
-    };
-    SERVICE_CONTROLLER.set_default_fs_service(daemon);
+        let daemon = {
+            fusedev::create_fuse_daemon(
+                mountpoint,
+                vfs,
+                supervisor,
+                daemon_id,
+                threads,
+                apisock,
+                args.is_present("upgrade"),
+                !args.is_present("writable"),
+                p,
+                mount_cmd,
+                bti,
+            )
+            .map(|d| {
+                info!("Fuse daemon started!");
+                d
+            })
+            .map_err(|e| {
+                error!("Failed in starting daemon: {}", e);
+                e
+            })?
+        };
+        SERVICE_CONTROLLER.set_default_fs_service(daemon);
+    }
+
+    #[cfg(feature = "virtiofs")]
+    if !is_fuse {
+        let vu_sock = args.value_of("sock").ok_or_else(|| {
+            DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
+        })?;
+        let _ = apisock.as_ref();
+        SERVICE_CONTROLLER.set_default_fs_service(virtiofs::create_virtiofs_daemon(
+            daemon_id, supervisor, vu_sock, vfs, mount_cmd, bti,
+        )?);
+    }
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
+    let cmd_options = prepare_commandline_options().version(bti_string.as_str());
+    let args = cmd_options.clone().get_matches();
+    let logging_file = args.value_of("log-file").map(|l| l.into());
+    // Safe to unwrap because it has default value and possible values are defined
+    let level = args.value_of("log-level").unwrap().parse().unwrap();
+    let apisock = args.value_of("apisock");
+    let mut event_manager = EventManager::<Arc<dyn EventSubscriber>>::new().unwrap();
+
+    setup_logging(logging_file, level)?;
+    dump_program_info(crate_version!());
+    handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
+
+    // Initialize and run the daemon controller event loop.
+    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
+    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+    std::thread::spawn(|| SERVICE_CONTROLLER.run_loop());
+
+    match args.subcommand_name() {
+        Some("daemon") => {
+            todo!("surppot services");
+        }
+        Some("fuse") => {
+            // Safe to unwrap because the subcommand is `fuse`.
+            let subargs = args.subcommand_matches("fuse").unwrap();
+            process_default_fs_service(&args, subargs, bti, apisock, true)?;
+        }
+        Some("virtiofs") => {
+            // Safe to unwrap because the subcommand is `virtiofs`.
+            let subargs = args.subcommand_matches("virtiofs").unwrap();
+            process_default_fs_service(&args, subargs, bti, apisock, false)?;
+        }
+        _ => {
+            #[cfg(feature = "fusedev")]
+            process_default_fs_service(&args, &args, bti, apisock, true)?;
+            #[cfg(feature = "virtiofs")]
+            process_default_fs_service(&args, &args, bti, apisock, false)?;
+            /*
+            cmd_options
+                .print_help()
+                .map_err(|_e| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+             */
+        }
+    }
 
     // Start the HTTP Administration API server
     let mut api_controller = ApiServerController::new(apisock);
