@@ -28,7 +28,9 @@ use crate::backend::oss;
 #[cfg(feature = "backend-registry")]
 use crate::backend::registry;
 use crate::backend::{localfs, BlobBackend};
-use crate::cache::{BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr};
+use crate::cache::{
+    BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr, FsCacheMgr,
+};
 use crate::device::BlobInfo;
 
 lazy_static! {
@@ -166,6 +168,16 @@ impl BlobFactory {
         let mgr = match key.config.cache.cache_type.as_str() {
             "blobcache" => {
                 let mgr = FileCacheMgr::new(
+                    config.cache.clone(),
+                    backend,
+                    ASYNC_RUNTIME.clone(),
+                    &config.id,
+                )?;
+                mgr.init()?;
+                Arc::new(mgr) as Arc<dyn BlobCacheMgr>
+            }
+            "fscache" => {
+                let mgr = FsCacheMgr::new(
                     config.cache.clone(),
                     backend,
                     ASYNC_RUNTIME.clone(),
