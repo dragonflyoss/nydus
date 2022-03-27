@@ -11,7 +11,7 @@ use std::convert::From;
 use std::fmt::{Display, Formatter};
 use std::io::Result;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::id;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
@@ -349,31 +349,28 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     }
 }
 
-/// Validate prefetch file list command line parameter.
+/// Validate prefetch file list from user input.
 ///
-/// A string including multiple directories and regular files should be separated by white-spaces, e.g.
-///      <path1> <path2> <path3>
-/// And each path should be relative to rafs root, e.g.
-///      /foo1/bar1 /foo2/bar2
-/// Specifying both regular file and directory simultaneously is supported.
-fn input_prefetch_files_verify(input: &Option<Vec<String>>) -> DaemonResult<Option<Vec<PathBuf>>> {
-    let prefetch_files: Option<Vec<PathBuf>> = input
-        .as_ref()
-        .map(|files| files.iter().map(PathBuf::from).collect());
-
-    if let Some(files) = &prefetch_files {
-        for f in files.iter() {
-            if !f.starts_with(Path::new("/")) {
+/// Validation rules:
+/// - an item may be file or directroy.
+/// - items must be separated by space, such as "<path1> <path2> <path3>".
+/// - each item must be absolute path, such as "/foo1/bar1 /foo2/bar2".
+fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> DaemonResult<Option<Vec<PathBuf>>> {
+    if let Some(list) = input {
+        let list: Vec<PathBuf> = list.iter().map(PathBuf::from).collect();
+        for elem in list.iter() {
+            if !elem.is_absolute() {
                 return Err(DaemonError::Common("Illegal prefetch list".to_string()));
             }
         }
+        Ok(Some(list))
+    } else {
+        Ok(None)
     }
-
-    Ok(prefetch_files)
 }
 
 fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
-    let prefetch_files = input_prefetch_files_verify(&cmd.prefetch_files)?;
+    let prefetch_files = validate_prefetch_file_list(&cmd.prefetch_files)?;
 
     match cmd.fs_type {
         FsBackendType::Rafs => {
@@ -418,7 +415,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
 
 // State machine for Nydus daemon workflow.
 //
-// Valid states:
+// State machine for FUSE:
 // - `Init` means nydusd is just started and potentially configured well but not
 //    yet negotiate with kernel the capabilities of both sides. It even does not try
 //    to set up fuse session by mounting `/fuse/dev`(in case of `fusedev` backend).
@@ -428,7 +425,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
 // - `Upgrading` state means the nydus daemon is being live-upgraded. There's no need
 //   to do kernel mount again to set up a session but try to reuse a fuse fd from somewhere else.
 //   In this state, we try to push `Successful` event to state machine to trigger state transition.
-// - `Interrupt` state means nydusd has shutdown fuse server, which means no more message will
+// - `Interrupted` state means nydusd has shutdown fuse server, which means no more message will
 //    be read from kernel and handled and no pending and in-flight fuse message exists. But the
 //    nydusd daemon should be alive and wait for coming events.
 // - `Die` state means the whole nydusd process is going to die.
@@ -444,7 +441,7 @@ state_machine! {
         Stop => Die[Umount],
     },
     Running => {
-        Exit => Interrupted [TerminateFuseService],
+        Exit => Interrupted [TerminateService],
         Stop => Die[Umount],
     },
     Upgrading(Successful) => Running [StartService],
@@ -514,15 +511,14 @@ impl DaemonStateMachineContext {
                             d.set_state(DaemonState::RUNNING);
                             r
                         }),
-                        TerminateFuseService => {
+                        TerminateService => {
                             d.interrupt();
                             d.set_state(DaemonState::INTERRUPTED);
                             Ok(())
                         }
                         Umount => d.disconnect().map(|r| {
-                            // Always interrupt fuse service loop after shutdown connection to kernel.
-                            // In case that kernel does not really shutdown the session due to some reasons
-                            // causing service loop keep waiting of `/dev/fuse`.
+                            // Always call `d.interrupt()`, which helps FUSE service loop to
+                            // shutdown the FUSE session with fuse driver.
                             d.interrupt();
                             d.set_state(DaemonState::STOPPED);
                             r
@@ -610,12 +606,12 @@ mod tests {
 
     #[test]
     fn it_should_verify_prefetch_files() {
-        let files = input_prefetch_files_verify(&Some(vec!["/etc/passwd".to_string()]));
+        let files = validate_prefetch_file_list(&Some(vec!["/etc/passwd".to_string()]));
         assert!(files.is_ok(), "failed to verify prefetch files");
         assert_eq!(1, files.unwrap().unwrap().len());
 
         assert!(
-            input_prefetch_files_verify(&Some(vec!["etc/passwd".to_string()])).is_err(),
+            validate_prefetch_file_list(&Some(vec!["etc/passwd".to_string()])).is_err(),
             "should not pass verify"
         );
     }

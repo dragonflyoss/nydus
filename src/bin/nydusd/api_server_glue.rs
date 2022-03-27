@@ -22,6 +22,7 @@ use nydus_api::http::{
 use nydus_utils::metrics;
 
 use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDaemon};
+use crate::DAEMON_CONTROLLER;
 
 impl From<DaemonError> for DaemonErrorKind {
     fn from(e: DaemonError) -> Self {
@@ -48,12 +49,11 @@ impl From<NydusError> for DaemonError {
 
 struct ApiServer {
     to_http: Sender<ApiResponse>,
-    daemon: Arc<dyn NydusDaemon>,
 }
 
 impl ApiServer {
-    pub fn new(to_http: Sender<ApiResponse>, daemon: Arc<dyn NydusDaemon>) -> Result<Self> {
-        Ok(ApiServer { to_http, daemon })
+    pub fn new(to_http: Sender<ApiResponse>) -> Result<Self> {
+        Ok(ApiServer { to_http })
     }
 
     fn process_request(&self, request: ApiRequest) -> Result<()> {
@@ -100,7 +100,7 @@ impl ApiServer {
     }
 
     fn daemon_info(&self) -> ApiResponse {
-        let d = self.daemon.as_ref();
+        let d = self.get_daemon_object()?;
         let info = d
             .export_info()
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?;
@@ -108,7 +108,7 @@ impl ApiServer {
     }
 
     fn backend_info(&self, mountpoint: &str) -> ApiResponse {
-        let d = self.daemon.as_ref();
+        let d = self.get_daemon_object()?;
         let info = d
             .export_backend_info(mountpoint)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?;
@@ -192,7 +192,7 @@ impl ApiServer {
     /// It means 3 threads are processing inflight requests.
     fn export_inflight_metrics(&self) -> ApiResponse {
         // TODO: Implement automatic error conversion between DaemonError and ApiError.
-        let d = self.daemon.as_ref();
+        let d = self.get_daemon_object()?;
         if let Some(ops) = d
             .export_inflight_ops()
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?
@@ -210,7 +210,7 @@ impl ApiServer {
     /// has absolutely stopped. Otherwise, multiple processes might read from single
     /// fuse session simultaneously.
     fn do_exit(&self) -> ApiResponse {
-        let d = self.daemon.as_ref();
+        let d = self.get_daemon_object()?;
         d.trigger_exit()
             .map(|_| {
                 info!("exit daemon by http request");
@@ -224,45 +224,49 @@ impl ApiServer {
         Ok(ApiResponsePayload::Empty)
     }
 
+    fn get_daemon_object(&self) -> std::result::Result<Arc<dyn NydusDaemon>, ApiError> {
+        Ok(DAEMON_CONTROLLER.get_daemon())
+    }
+
     fn do_mount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
             .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
-        self.daemon
-            .mount(FsBackendMountCmd {
-                fs_type,
-                mountpoint,
-                config: cmd.config,
-                source: cmd.source,
-                prefetch_files: cmd.prefetch_files,
-            })
-            .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::MountFilesystem(e.into()))
+        let d = self.get_daemon_object()?;
+        d.mount(FsBackendMountCmd {
+            fs_type,
+            mountpoint,
+            config: cmd.config,
+            source: cmd.source,
+            prefetch_files: cmd.prefetch_files,
+        })
+        .map(|_| ApiResponsePayload::Empty)
+        .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn do_remount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
             .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
-        self.daemon
-            .remount(FsBackendMountCmd {
-                fs_type,
-                mountpoint,
-                config: cmd.config,
-                source: cmd.source,
-                prefetch_files: cmd.prefetch_files,
-            })
-            .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::MountFilesystem(e.into()))
+        let d = self.get_daemon_object()?;
+        d.remount(FsBackendMountCmd {
+            fs_type,
+            mountpoint,
+            config: cmd.config,
+            source: cmd.source,
+            prefetch_files: cmd.prefetch_files,
+        })
+        .map(|_| ApiResponsePayload::Empty)
+        .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn do_umount(&self, mountpoint: String) -> ApiResponse {
-        self.daemon
-            .umount(FsBackendUmountCmd { mountpoint })
+        let d = self.get_daemon_object()?;
+        d.umount(FsBackendUmountCmd { mountpoint })
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn send_fuse_fd(&self) -> ApiResponse {
-        let d = self.daemon.as_ref();
+        let d = self.get_daemon_object()?;
 
         d.save()
             .map(|_| ApiResponsePayload::Empty)
@@ -276,7 +280,7 @@ impl ApiServer {
     /// procedure. Supervisor has to continuously query the state of Nydusd until it gets
     /// to *RUNNING*, which means new Nydusd has successfully served as a fuse server.
     fn do_takeover(&self) -> ApiResponse {
-        let d = self.daemon.as_ref();
+        let d = self.get_daemon_object()?;
         d.trigger_takeover()
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::DaemonAbnormal(e.into()))
@@ -338,7 +342,7 @@ impl ApiServerController {
     }
 
     /// Try to start the HTTP working thread.
-    pub fn start(&mut self, daemon: Arc<dyn NydusDaemon>) -> Result<()> {
+    pub fn start(&mut self) -> Result<()> {
         if self.sock.is_none() {
             return Ok(());
         }
@@ -347,9 +351,10 @@ impl ApiServerController {
         let apisock = self.sock.as_ref().unwrap();
         let (to_handler, from_router) = channel();
         let (to_router, from_handler) = channel();
-        let api_server = ApiServer::new(to_router, daemon)?;
+        let api_server = ApiServer::new(to_router)?;
         let api_handler = ApiServerHandler::new(api_server, from_router)?;
         let (router_thread, waker) = start_http_thread(apisock, None, to_handler, from_handler)?;
+        let daemon_waker = DAEMON_CONTROLLER.waker.clone();
 
         info!("HTTP API server running at {}", apisock);
         let handler_thread = std::thread::Builder::new()
@@ -357,6 +362,7 @@ impl ApiServerController {
             .spawn(move || {
                 api_handler.handle_requests_from_router();
                 info!("HTTP api-server handler thread exits");
+                let _ = daemon_waker.wake();
                 Ok(())
             })
             .map_err(|_e| einval!("Failed to start work thread for HTTP handler"))?;
