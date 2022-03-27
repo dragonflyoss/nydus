@@ -13,8 +13,8 @@ use tokio::runtime::{Builder, Runtime};
 
 use nydus_utils::metrics::BlobcacheMetrics;
 
-use self::cache_entry::FileCacheEntry;
 use crate::backend::BlobBackend;
+use crate::cache::cachedfile::FileCacheEntry;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::BlobInfo;
