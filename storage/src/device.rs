@@ -22,6 +22,7 @@
 use std::any::Any;
 use std::cmp;
 use std::fmt::{Debug, Formatter};
+use std::fs::File;
 use std::io::{self, Error};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -97,6 +98,8 @@ pub struct BlobInfo {
     meta_ci_compressed_size: u64,
     /// V6: Size of the uncompressed chunk information array.
     meta_ci_uncompressed_size: u64,
+
+    fs_cache_file: Option<Arc<File>>,
 }
 
 impl BlobInfo {
@@ -130,6 +133,8 @@ impl BlobInfo {
             meta_ci_offset: 0,
             meta_ci_compressed_size: 0,
             meta_ci_uncompressed_size: 0,
+
+            fs_cache_file: None,
         };
 
         blob_info.compute_features();
@@ -317,6 +322,16 @@ impl BlobInfo {
         self.meta_ci_offset != 0
             && self.meta_ci_compressed_size != 0
             && self.meta_ci_uncompressed_size != 0
+    }
+
+    /// Set the associated `File` object provided by Linux fscache subsystem.
+    pub fn set_fscache_file(&mut self, file: Option<Arc<File>>) {
+        self.fs_cache_file = file;
+    }
+
+    /// Get the associated `File` object provided by Linux fscache subsystem.
+    pub fn get_fscache_file(&self) -> Option<Arc<File>> {
+        self.fs_cache_file.clone()
     }
 }
 
