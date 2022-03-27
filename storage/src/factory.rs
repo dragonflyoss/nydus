@@ -15,10 +15,13 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Result as IOResult;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
 use serde::Deserialize;
 use serde_json::value::Value;
+use tokio::runtime::{Builder, Runtime};
 
 #[cfg(feature = "backend-oss")]
 use crate::backend::oss;
@@ -27,6 +30,21 @@ use crate::backend::registry;
 use crate::backend::{localfs, BlobBackend};
 use crate::cache::{BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr};
 use crate::device::BlobInfo;
+
+lazy_static! {
+    static ref ASYNC_RUNTIME: Arc<Runtime> = {
+        let runtime = Builder::new_multi_thread()
+                .worker_threads(1) // Limit the number of worker thread to 1 since this runtime is generally used to do blocking IO.
+                .thread_keep_alive(Duration::from_secs(10))
+                .max_blocking_threads(8)
+                .thread_name("cache-flusher")
+                .build();
+        match runtime {
+            Ok(v) => Arc::new(v),
+            Err(e) => panic!("failed to create tokio async runtime, {}", e),
+        }
+    };
+}
 
 /// Configuration information for storage backend.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,7 +165,12 @@ impl BlobFactory {
         let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
         let mgr = match key.config.cache.cache_type.as_str() {
             "blobcache" => {
-                let mgr = FileCacheMgr::new(config.cache.clone(), backend, &config.id)?;
+                let mgr = FileCacheMgr::new(
+                    config.cache.clone(),
+                    backend,
+                    ASYNC_RUNTIME.clone(),
+                    &config.id,
+                )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
