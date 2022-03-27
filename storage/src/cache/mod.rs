@@ -23,9 +23,6 @@ use std::slice;
 use std::sync::Arc;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
-
-pub use dummycache::DummyCacheMgr;
-pub use filecache::FileCacheMgr;
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
@@ -40,9 +37,14 @@ use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 mod cachedfile;
 mod dummycache;
 mod filecache;
+mod fscache;
 mod worker;
 
 pub mod state;
+
+pub use dummycache::DummyCacheMgr;
+pub use filecache::FileCacheMgr;
+pub use fscache::FsCacheMgr;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
