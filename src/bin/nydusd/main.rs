@@ -40,6 +40,7 @@ mod virtiofs;
 
 mod api_server_glue;
 mod daemon;
+mod fscache;
 mod upgrade;
 
 /// Minimal number of file descriptors reserved for system.
