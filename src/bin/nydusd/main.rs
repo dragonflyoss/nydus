@@ -40,6 +40,7 @@ mod virtiofs;
 
 mod api_server_glue;
 mod daemon;
+mod fs_cache;
 mod fs_service;
 mod upgrade;
 
