@@ -435,7 +435,7 @@ fn calc_fuse_conn(mp: impl AsRef<Path>) -> Result<u64> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn create_nydus_daemon(
+pub fn create_fuse_daemon(
     mountpoint: &str,
     vfs: Arc<Vfs>,
     supervisor: Option<String>,
