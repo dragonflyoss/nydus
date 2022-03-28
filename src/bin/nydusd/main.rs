@@ -32,6 +32,7 @@ use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use self::api_server_glue::ApiServerController;
 use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemon};
+use self::service::ServiceContoller;
 
 #[cfg(feature = "fusedev")]
 mod fusedev;
@@ -41,6 +42,7 @@ mod virtiofs;
 mod api_server_glue;
 mod daemon;
 mod fscache;
+mod service;
 mod upgrade;
 
 /// Minimal number of file descriptors reserved for system.
@@ -58,6 +60,7 @@ pub struct ServiceController {
     singleton_mode: AtomicBool,
     // For backward compatibility to support singleton fusedev/virtiofs server.
     default_fs_service: Mutex<Option<Arc<dyn NydusDaemon>>>,
+    services: Arc<ServiceContoller>,
     waker: Arc<Waker>,
     poller: Mutex<Poll>,
 }
@@ -72,6 +75,7 @@ impl ServiceController {
             active: AtomicBool::new(true),
             singleton_mode: AtomicBool::new(true),
             default_fs_service: Mutex::new(None),
+            services: Arc::new(ServiceContoller::new()),
             waker: Arc::new(waker),
             poller: Mutex::new(poller),
         }
@@ -105,6 +109,11 @@ impl ServiceController {
         self.default_fs_service.lock().unwrap().clone()
     }
 
+    fn start(&self) -> Result<()> {
+        self.services.start_services()?;
+        Ok(())
+    }
+
     fn shutdown(&self) {
         // Marking exiting state.
         self.active.store(false, Ordering::Release);
@@ -126,6 +135,8 @@ impl ServiceController {
                 error!("failed to wait for default fs service: {}", e)
             }
         }
+
+        self.services.stop_services();
     }
 
     fn run_loop(&self) {
@@ -172,14 +183,6 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
             .conflicts_with("shared-dir"),
     )
     .arg(
-        Arg::with_name("config")
-            .long("config")
-            .short("C")
-            .help("Configuration file")
-            .required(false)
-            .takes_value(true),
-    )
-    .arg(
         Arg::with_name("prefetch-files")
             .long("prefetch-files")
             .short("P")
@@ -208,7 +211,7 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
             .short("M")
             .help("Path to mount the FUSE filesystem, target for `mount.fuse`")
             .takes_value(true)
-            .required(true),
+            .required(false),
     )
     .arg(
         Arg::with_name("failover-policy")
@@ -319,6 +322,15 @@ fn prepare_commandline_options() -> App<'static, 'static> {
                 .takes_value(true)
                 .required(false)
                 .global(true),
+        )
+        .arg(
+            Arg::with_name("config")
+                .long("config")
+                .short("C")
+                .help("Configuration file")
+                .required(false)
+                .global(true)
+                .takes_value(true),
         )
         .arg(
             Arg::with_name("id")
@@ -594,7 +606,11 @@ fn main() -> Result<()> {
 
     match args.subcommand_name() {
         Some("daemon") => {
-            todo!("surppot services");
+            // Safe to unwrap because the subcommand is `daemon`.
+            let subargs = args.subcommand_matches("daemon").unwrap();
+            SERVICE_CONTROLLER
+                .services
+                .process_arguments(&args, subargs, apisock)?;
         }
         Some("fuse") => {
             // Safe to unwrap because the subcommand is `fuse`.
@@ -619,6 +635,9 @@ fn main() -> Result<()> {
              */
         }
     }
+
+    // Start all services
+    SERVICE_CONTROLLER.start()?;
 
     // Start the HTTP Administration API server
     let mut api_controller = ApiServerController::new(apisock);
