@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime};
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
-use fuse_backend_rs::abi::linux_abi::Attr;
+use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};

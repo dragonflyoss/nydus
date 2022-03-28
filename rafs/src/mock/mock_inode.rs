@@ -10,7 +10,7 @@ use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-use fuse_backend_rs::abi::linux_abi;
+use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::{digest::RafsDigest, ByteSize};
 
@@ -94,8 +94,8 @@ impl RafsInode for MockInode {
     }
 
     #[inline]
-    fn get_attr(&self) -> linux_abi::Attr {
-        linux_abi::Attr {
+    fn get_attr(&self) -> fuse_abi::Attr {
+        fuse_abi::Attr {
             ino: self.i_ino,
             size: self.i_size,
             blocks: self.i_blocks,

@@ -20,7 +20,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fuse_backend_rs::abi::linux_abi::{InHeader, OutHeader};
+use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
 use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
@@ -97,10 +97,10 @@ struct FuseServer {
 }
 
 impl FuseServer {
-    fn new(server: Arc<Server<Arc<Vfs>>>, se: &FuseSession, evtfd: EventFd) -> Result<FuseServer> {
+    fn new(server: Arc<Server<Arc<Vfs>>>, se: &FuseSession, _evtfd: EventFd) -> Result<FuseServer> {
         Ok(FuseServer {
             server,
-            ch: se.new_channel(evtfd)?,
+            ch: se.new_channel()?,
         })
     }
 

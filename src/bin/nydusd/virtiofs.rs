@@ -26,7 +26,7 @@ use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use virtio_queue::DescriptorChain;
-use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
+use vm_memory::{GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -96,11 +96,6 @@ impl VhostUserFsBackend {
     // to handle it.
     fn process_queue(&mut self, vring_state: &mut MutexGuard<VringState>) -> Result<bool> {
         let mut used_any = false;
-        let mem = self
-            .mem
-            .as_ref()
-            .ok_or(DaemonError::NoMemoryConfigured)?
-            .memory();
 
         let avail_chains: Vec<DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>> = vring_state
             .get_queue_mut()
@@ -113,10 +108,12 @@ impl VhostUserFsBackend {
 
             let head_index = chain.head_index();
 
+            let mem = chain.memory();
+
             let reader =
-                Reader::new(&mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
+                Reader::new(mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
             let writer =
-                Writer::new(&mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
+                Writer::new(mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
 
             self.server
                 .handle_message(

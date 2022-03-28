@@ -12,7 +12,7 @@ use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 
-use fuse_backend_rs::abi::linux_abi::ROOT_ID;
+use fuse_backend_rs::abi::fuse_abi::ROOT_ID;
 use nydus_utils::ByteSize;
 
 use crate::metadata::layout::v5::RAFSV5_ALIGNMENT;
