@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
-use std::io::{Error, ErrorKind, Result, Write};
+use std::io::{Error, ErrorKind, Result};
 use std::mem::size_of;
 use std::ops::Deref;
 use std::os::unix::fs::OpenOptionsExt;
@@ -15,7 +15,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -217,7 +217,7 @@ struct FsCacheState {
 /// the communication session and serves all requests from the fscache driver.
 pub struct FsCacheHandler {
     active: AtomicBool,
-    path: String,
+    barrier: Barrier,
     file: File,
     poller: Mutex<Poll>,
     waker: Arc<Waker>,
@@ -231,7 +231,7 @@ impl FsCacheHandler {
             Poll::new().map_err(|_e| eother!("Failed to create poller for fscache service"))?;
         let waker = Waker::new(poller.registry(), Token(TOKEN_EVENT_WAKER))
             .map_err(|_e| eother!("Failed to create waker for fscache service"))?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .read(true)
             .create(false)
@@ -246,6 +246,8 @@ impl FsCacheHandler {
             )
             .map_err(|_e| eother!("Failed to register fd for fscache service"))?;
 
+        println!("{} {}", dir, tag.unwrap_or_default());
+        /*
         let msg = format!("dir {}", dir);
         file.write_all(msg.as_bytes())?;
         if let Some(tag) = tag {
@@ -253,10 +255,11 @@ impl FsCacheHandler {
             file.write_all(msg.as_bytes())?;
         }
         file.write_all("bind ondemand".as_bytes())?;
+         */
 
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
-            path: path.to_string(),
+            barrier: Barrier::new(2),
             file,
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
@@ -287,6 +290,15 @@ impl FsCacheHandler {
         }
     }
 
+    /// Stop the fscache event loop.
+    pub fn stop(&self) {
+        self.active.store(false, Ordering::Release);
+        if let Err(e) = self.waker.wake() {
+            error!("Failed to signal fscache worker thread to exit, {}", e);
+        }
+        self.barrier.wait();
+    }
+
     /// Run the event loop to handle all requests from kernel fscache driver.
     ///
     /// This method should only be invoked by a single thread, which will poll the fscache fd
@@ -315,6 +327,7 @@ impl FsCacheHandler {
                     && event.token() == Token(TOKEN_EVENT_WAKER)
                     && !self.active.load(Ordering::Acquire)
                 {
+                    self.barrier.wait();
                     return Ok(());
                 }
             }
