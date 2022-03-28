@@ -14,8 +14,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::read_unaligned;
 use std::string::String;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token, Waker};
 use storage::cache::BlobCache;
 use storage::device::BlobInfo;
 use storage::factory::{FactoryConfig, BLOB_FACTORY};
@@ -27,6 +30,9 @@ const MSG_OPEN_SIZE: usize = 16;
 const MSG_CLOSE_SIZE: usize = size_of::<FsCacheMsgClose>();
 const MSG_READ_SIZE: usize = size_of::<FsCacheMsgRead>();
 const CACHEFILES_OPEN_WANT_CACHE_SIZE: u32 = 0x1;
+
+const TOKEN_EVENT_WAKER: usize = 1;
+const TOKEN_EVENT_FSCACHE: usize = 2;
 
 #[repr(u32)]
 #[derive(Debug, Eq, PartialEq)]
@@ -210,20 +216,35 @@ struct FsCacheState {
 /// The `FsCacheHandler` create a communication channel with the Linux fscache driver, configure
 /// the communication session and serves all requests from the fscache driver.
 pub struct FsCacheHandler {
+    active: AtomicBool,
     path: String,
     file: File,
+    poller: Mutex<Poll>,
+    waker: Arc<Waker>,
     state: Arc<Mutex<FsCacheState>>,
 }
 
 impl FsCacheHandler {
     /// Create a new instance of `FsCacheService`.
     pub fn new(path: &str, dir: &str, tag: Option<&str>) -> Result<Self> {
+        let poller =
+            Poll::new().map_err(|_e| eother!("Failed to create poller for fscache service"))?;
+        let waker = Waker::new(poller.registry(), Token(TOKEN_EVENT_WAKER))
+            .map_err(|_e| eother!("Failed to create waker for fscache service"))?;
         let mut file = OpenOptions::new()
             .write(true)
             .read(true)
             .create(false)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)?;
+        poller
+            .registry()
+            .register(
+                &mut SourceFd(&file.as_raw_fd()),
+                Token(TOKEN_EVENT_FSCACHE),
+                Interest::READABLE,
+            )
+            .map_err(|_e| eother!("Failed to register fd for fscache service"))?;
 
         let msg = format!("dir {}", dir);
         file.write_all(msg.as_bytes())?;
@@ -234,8 +255,11 @@ impl FsCacheHandler {
         file.write_all("bind ondemand".as_bytes())?;
 
         Ok(FsCacheHandler {
+            active: AtomicBool::new(true),
             path: path.to_string(),
             file,
+            poller: Mutex::new(poller),
+            waker: Arc::new(waker),
             state: Arc::new(Mutex::new(FsCacheState::default())),
         })
     }
@@ -264,8 +288,37 @@ impl FsCacheHandler {
     }
 
     /// Run the event loop to handle all requests from kernel fscache driver.
+    ///
+    /// This method should only be invoked by a single thread, which will poll the fscache fd
+    /// and dispatch requests from fscache fd to other working threads.
     pub fn run_loop(&self) -> Result<()> {
+        let mut events = Events::with_capacity(64);
         let mut buf = [0u8; MIN_DATA_BUF_SIZE];
+
+        loop {
+            self.poller
+                .lock()
+                .unwrap()
+                .poll(&mut events, None)
+                .map_err(|_e| eother!("Failed to poll events for fscache service"))?;
+
+            for event in events.iter() {
+                if event.is_error() {
+                    error!("Got error event for fscache poller");
+                    continue;
+                }
+                if event.token() == Token(TOKEN_EVENT_FSCACHE) {
+                    if event.is_readable() {
+                        self.handle_requests(&mut buf)?;
+                    }
+                } else if event.is_readable()
+                    && event.token() == Token(TOKEN_EVENT_WAKER)
+                    && !self.active.load(Ordering::Acquire)
+                {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// Read and process all requests from fscache driver until no data available.
@@ -274,13 +327,13 @@ impl FsCacheHandler {
             let ret = unsafe {
                 libc::read(
                     self.file.as_raw_fd(),
-                    buf as *mut u8 as *mut libc::c_void,
+                    buf.as_ptr() as *mut u8 as *mut libc::c_void,
                     buf.len(),
                 )
             };
             // TODO: confirm how to handle ret == 0?
             if ret > 0 {
-                self.handle_one_request(&buf[0..ret])?;
+                self.handle_one_request(&buf[0..ret as usize])?;
             } else {
                 let err = Error::last_os_error();
                 match err.kind() {
@@ -332,10 +385,10 @@ impl FsCacheHandler {
                         {
                             format!("cinit {},{}", hdr.id, -libc::EALREADY)
                         } else {
-                            state.fd_to_blob_map.insert(msg.fd, blob);
                             state
                                 .id_to_fd_map
                                 .insert(blob.blob_id().to_string(), msg.fd);
+                            state.fd_to_blob_map.insert(msg.fd, blob);
                             if need_size {
                                 format!("cinit {},{}", hdr.id, blob_size)
                             } else {
