@@ -16,7 +16,6 @@ extern crate nydus_error;
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
-use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +31,7 @@ use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 use crate::api_server_glue::ApiServerController;
 use crate::daemon::{DaemonError, NydusDaemon};
 use crate::fs_service::{FsBackendMountCmd, FsService};
+use crate::service_controller::create_daemon;
 
 #[cfg(feature = "fusedev")]
 mod fusedev;
@@ -42,6 +42,7 @@ mod api_server_glue;
 mod daemon;
 mod fs_cache;
 mod fs_service;
+mod service_controller;
 mod upgrade;
 
 /// Minimal number of file descriptors reserved for system.
@@ -125,12 +126,14 @@ impl DaemonController {
 
         let daemon = self.daemon.lock().unwrap().take();
         if let Some(d) = daemon {
+            /*
             // TODO: fix the behavior
             if cfg!(feature = "virtiofs") {
                 // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
                 // Given the fact that we have nothing to clean up, directly exit seems fine.
                 process::exit(0);
             }
+             */
             if let Err(e) = d.stop() {
                 error!("failed to stop daemon: {}", e);
             }
@@ -183,14 +186,6 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
             .takes_value(true)
             .requires("config")
             .conflicts_with("shared-dir"),
-    )
-    .arg(
-        Arg::with_name("config")
-            .long("config")
-            .short("C")
-            .help("Configuration file")
-            .required(false)
-            .takes_value(true),
     )
     .arg(
         Arg::with_name("prefetch-files")
@@ -332,6 +327,15 @@ fn prepare_commandline_options() -> App<'static, 'static> {
                 .takes_value(true)
                 .required(false)
                 .global(true),
+        )
+        .arg(
+            Arg::with_name("config")
+                .long("config")
+                .short("C")
+                .help("Configuration file")
+                .required(false)
+                .global(true)
+                .takes_value(true),
         )
         .arg(
             Arg::with_name("id")
@@ -639,6 +643,16 @@ fn process_default_fs_service(
     Ok(())
 }
 
+fn process_daemon_arguments(
+    subargs: &SubCmdArgs,
+    _apisock: Option<&str>,
+    bti: BuildTimeInfo,
+) -> Result<()> {
+    let daemon = create_daemon(subargs, bti)?;
+    DAEMON_CONTROLLER.set_daemon(daemon);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
     let cmd_options = prepare_commandline_options().version(bti_string.as_str());
@@ -654,7 +668,10 @@ fn main() -> Result<()> {
 
     match args.subcommand_name() {
         Some("daemon") => {
-            todo!("surppot services");
+            // Safe to unwrap because the subcommand is `daemon`.
+            let subargs = args.subcommand_matches("daemon").unwrap();
+            let subargs = SubCmdArgs::new(&args, subargs);
+            process_daemon_arguments(&subargs, apisock, bti)?;
         }
         Some("fuse") => {
             // Safe to unwrap because the subcommand is `fuse`.
