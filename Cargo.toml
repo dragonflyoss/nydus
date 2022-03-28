@@ -63,7 +63,7 @@ nydus-utils = { path = "utils" }
 rafs = { path = "rafs", features = ["backend-registry", "backend-oss"] }
 storage = { path = "storage" }
 blobfs = { path = "blobfs", features = ["virtiofs"], optional = true }
-mio = { version = "0.8", features = ["os-poll"] }
+mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 
 [dev-dependencies]
 sendfd = "0.3.3"
