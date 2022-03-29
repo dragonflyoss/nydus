@@ -3,7 +3,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::{File, OpenOptions};
+//! Common cached file object for `FileCacheMgr` and `FsCacheMgr`.
+//!
+//! The `FileCacheEntry` manages local cached blob objects from remote backends to improve
+//! performance. It may be used by both the userspace `FileCacheMgr` or the `FsCacheMgr` based
+//! on the in-kernel fscache system.
+
+use std::fs::File;
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -19,149 +25,48 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
-use crate::cache::filecache::FileCacheMgr;
-use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
+use crate::cache::state::ChunkMap;
 use crate::cache::worker::{
     AsyncPrefetchConfig, AsyncRequestMessage, AsyncRequestState, AsyncWorkerMgr,
 };
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
-    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment,
-    BlobIoTag, BlobIoVec, BlobObject, BlobPrefetchRequest,
+    BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
+    BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
 
 pub(crate) struct FileCacheEntry {
-    blob_info: Arc<BlobInfo>,
-    chunk_map: Arc<dyn ChunkMap>,
-    file: Arc<File>,
-    meta: Option<Arc<BlobMetaInfo>>,
-    metrics: Arc<BlobcacheMetrics>,
-    prefetch_state: Arc<AtomicU32>,
-    reader: Arc<dyn BlobReader>,
-    runtime: Arc<Runtime>,
-    workers: Arc<AsyncWorkerMgr>,
+    pub(crate) blob_info: Arc<BlobInfo>,
+    pub(crate) chunk_map: Arc<dyn ChunkMap>,
+    pub(crate) file: Arc<File>,
+    pub(crate) meta: Option<Arc<BlobMetaInfo>>,
+    pub(crate) metrics: Arc<BlobcacheMetrics>,
+    pub(crate) prefetch_state: Arc<AtomicU32>,
+    pub(crate) reader: Arc<dyn BlobReader>,
+    pub(crate) runtime: Arc<Runtime>,
+    pub(crate) workers: Arc<AsyncWorkerMgr>,
 
-    blob_size: u64,
-    compressor: compress::Algorithm,
-    digester: digest::Algorithm,
+    pub(crate) blob_size: u64,
+    pub(crate) compressor: compress::Algorithm,
+    pub(crate) digester: digest::Algorithm,
     // Whether `get_blob_object()` is supported.
-    is_get_blob_object_supported: bool,
+    pub(crate) is_get_blob_object_supported: bool,
     // The compressed data instead of uncompressed data is cached if `compressed` is true.
-    is_compressed: bool,
+    pub(crate) is_compressed: bool,
     // Whether direct chunkmap is used.
-    is_direct_chunkmap: bool,
+    pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
-    is_stargz: bool,
+    pub(crate) is_stargz: bool,
     // Data from the file cache should be validated before use.
-    need_validate: bool,
-    prefetch_config: Arc<AsyncPrefetchConfig>,
+    pub(crate) need_validate: bool,
+    pub(crate) prefetch_config: Arc<AsyncPrefetchConfig>,
 }
 
 impl FileCacheEntry {
-    pub fn new(
-        mgr: &FileCacheMgr,
-        blob_info: Arc<BlobInfo>,
-        prefetch_config: Arc<AsyncPrefetchConfig>,
-        runtime: Arc<Runtime>,
-        workers: Arc<AsyncWorkerMgr>,
-    ) -> Result<Self> {
-        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(&blob_file_path)?;
-        let (chunk_map, is_direct_chunkmap) =
-            Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
-        let reader = mgr
-            .backend
-            .get_reader(blob_info.blob_id())
-            .map_err(|_e| eio!("failed to get blob reader"))?;
-
-        let blob_size = Self::get_blob_size(&reader, &blob_info)?;
-        let compressor = blob_info.compressor();
-        let digester = blob_info.digester();
-        let is_stargz = blob_info.is_stargz();
-        let is_compressed = mgr.is_compressed || is_stargz;
-        let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_stargz;
-        let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap && !is_stargz;
-
-        trace!(
-            "comp {} direct {} startgz {}",
-            mgr.is_compressed,
-            is_direct_chunkmap,
-            is_stargz
-        );
-        let meta = if is_get_blob_object_supported && blob_info.meta_ci_is_valid() {
-            // Set cache file to its expected size.
-            let file_size = file.metadata()?.len();
-            if file_size == 0 {
-                file.set_len(blob_info.uncompressed_size())?;
-            } else {
-                assert_eq!(file_size, blob_info.uncompressed_size());
-            }
-
-            Some(Arc::new(BlobMetaInfo::new(
-                &blob_file_path,
-                &blob_info,
-                Some(&reader),
-            )?))
-        } else {
-            None
-        };
-
-        Ok(FileCacheEntry {
-            blob_info,
-            chunk_map,
-            file: Arc::new(file),
-            meta,
-            metrics: mgr.metrics.clone(),
-            prefetch_state: Arc::new(AtomicU32::new(AsyncRequestState::Init as u32)),
-            reader,
-            runtime,
-            workers,
-
-            blob_size,
-            compressor,
-            digester,
-            is_get_blob_object_supported,
-            is_compressed,
-            is_direct_chunkmap,
-            is_stargz,
-            need_validate,
-            prefetch_config,
-        })
-    }
-
-    fn create_chunk_map(
-        mgr: &FileCacheMgr,
-        blob_info: &BlobInfo,
-        blob_file: &str,
-    ) -> Result<(Arc<dyn ChunkMap>, bool)> {
-        let mut direct_chunkmap = true;
-        // The builder now records the number of chunks in the blob table, so we can
-        // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
-        // need downgrade to use DigestedChunkMap as a compatible solution.
-        let chunk_map: Arc<dyn ChunkMap> = if mgr.disable_indexed_map
-            || blob_info.is_stargz()
-            || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
-        {
-            direct_chunkmap = false;
-            Arc::new(BlobStateMap::from(DigestedChunkMap::new()))
-        } else {
-            Arc::new(BlobStateMap::from(IndexedChunkMap::new(
-                blob_file,
-                blob_info.chunk_count(),
-            )?))
-        };
-
-        Ok((chunk_map, direct_chunkmap))
-    }
-
-    fn get_blob_size(reader: &Arc<dyn BlobReader>, blob_info: &BlobInfo) -> Result<u64> {
+    pub(crate) fn get_blob_size(reader: &Arc<dyn BlobReader>, blob_info: &BlobInfo) -> Result<u64> {
         // Stargz needs blob size information, so hacky!
         let size = if blob_info.is_stargz() {
             reader.blob_size().map_err(|e| einval!(e))?
@@ -170,6 +75,12 @@ impl FileCacheEntry {
         };
 
         Ok(size)
+    }
+}
+
+impl AsRawFd for FileCacheEntry {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 }
 
@@ -361,6 +272,7 @@ impl BlobCache for FileCacheEntry {
 
         if let Some(ref chunks_meta) = self.meta {
             // TODO: the first blob backend io triggers chunks array download.
+            // Convert `BlocIoChunk::Address` to `BlobIoChunk::Base`.
             for b in iovec.bi_vec.iter_mut() {
                 if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
                     let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
@@ -380,12 +292,6 @@ impl BlobCache for FileCacheEntry {
         } else {
             self.read_iter(&mut iovec.bi_vec, buffers)
         }
-    }
-}
-
-impl AsRawFd for FileCacheEntry {
-    fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
     }
 }
 
@@ -438,7 +344,11 @@ impl BlobObject for FileCacheEntry {
 
 impl FileCacheEntry {
     fn do_fetch_chunks(&self, chunks: &[BlobIoChunk]) -> Result<usize> {
-        let bitmap = self.chunk_map.as_range_map().ok_or_else(|| einval!())?;
+        debug_assert!(!chunks.is_empty());
+        let bitmap = self
+            .chunk_map
+            .as_range_map()
+            .ok_or_else(|| einval!("invalid chunk_map for do_fetch_chunks()"))?;
         let chunk_index = chunks[0].id();
         let count = chunks.len() as u32;
 
@@ -467,6 +377,7 @@ impl FileCacheEntry {
             let blob_end =
                 chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
+
             match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
                 Ok(v) => {
                     total_size += blob_size;

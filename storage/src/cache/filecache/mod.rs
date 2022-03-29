@@ -4,37 +4,36 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Result;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
-
-use tokio::runtime::{Builder, Runtime};
 
 use nydus_utils::metrics::BlobcacheMetrics;
+use tokio::runtime::Runtime;
 
-use self::cache_entry::FileCacheEntry;
 use crate::backend::BlobBackend;
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
+use crate::cache::cachedfile::FileCacheEntry;
+use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
+use crate::cache::worker::{AsyncPrefetchConfig, AsyncRequestState, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::BlobInfo;
+use crate::device::{BlobFeatures, BlobInfo};
 use crate::factory::CacheConfig;
-
-mod cache_entry;
+use crate::meta::BlobMetaInfo;
 
 fn default_work_dir() -> String {
     ".".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct BlobCacheConfig {
+struct FileCacheConfig {
     #[serde(default = "default_work_dir")]
     work_dir: String,
     #[serde(default)]
     disable_indexed_map: bool,
 }
 
-impl BlobCacheConfig {
+impl FileCacheConfig {
     fn get_work_dir(&self) -> Result<&str> {
         let path = fs::metadata(&self.work_dir)
             .or_else(|_| {
@@ -43,7 +42,7 @@ impl BlobCacheConfig {
             })
             .map_err(|e| {
                 last_error!(format!(
-                    "fail to stat blobcache work_dir {}: {}",
+                    "fail to stat filecache work_dir {}: {}",
                     self.work_dir, e
                 ))
             })?;
@@ -52,7 +51,7 @@ impl BlobCacheConfig {
             Ok(&self.work_dir)
         } else {
             Err(enoent!(format!(
-                "blobcache work_dir {} is not a directory",
+                "filecache work_dir {} is not a directory",
                 self.work_dir
             )))
         }
@@ -80,21 +79,13 @@ impl FileCacheMgr {
     pub fn new(
         config: CacheConfig,
         backend: Arc<dyn BlobBackend>,
+        runtime: Arc<Runtime>,
         id: &str,
     ) -> Result<FileCacheMgr> {
-        let blob_config: BlobCacheConfig =
+        let blob_config: FileCacheConfig =
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
         let work_dir = blob_config.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
-        let runtime = Arc::new(
-            Builder::new_multi_thread()
-                .worker_threads(1) // Limit the number of worker thread to 1 since this runtime is generally used to do blocking IO.
-                .thread_keep_alive(Duration::from_secs(10))
-                .max_blocking_threads(8)
-                .thread_name("cache-flusher")
-                .build()
-                .map_err(|e| eother!(e))?,
-        );
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
@@ -124,7 +115,7 @@ impl FileCacheMgr {
             return Ok(entry);
         }
 
-        let entry = FileCacheEntry::new(
+        let entry = FileCacheEntry::new_file_cache(
             &self,
             blob.clone(),
             self.prefetch_config.clone(),
@@ -191,6 +182,108 @@ impl BlobCacheMgr for FileCacheMgr {
     }
 }
 
+impl FileCacheEntry {
+    fn new_file_cache(
+        mgr: &FileCacheMgr,
+        blob_info: Arc<BlobInfo>,
+        prefetch_config: Arc<AsyncPrefetchConfig>,
+        runtime: Arc<Runtime>,
+        workers: Arc<AsyncWorkerMgr>,
+    ) -> Result<Self> {
+        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&blob_file_path)?;
+        let (chunk_map, is_direct_chunkmap) =
+            Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
+        let reader = mgr
+            .backend
+            .get_reader(blob_info.blob_id())
+            .map_err(|_e| eio!("failed to get blob reader"))?;
+
+        let blob_size = Self::get_blob_size(&reader, &blob_info)?;
+        let compressor = blob_info.compressor();
+        let digester = blob_info.digester();
+        let is_stargz = blob_info.is_stargz();
+        let is_compressed = mgr.is_compressed || is_stargz;
+        let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_stargz;
+        let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap && !is_stargz;
+
+        trace!(
+            "comp {} direct {} startgz {}",
+            mgr.is_compressed,
+            is_direct_chunkmap,
+            is_stargz
+        );
+        let meta = if is_get_blob_object_supported && blob_info.meta_ci_is_valid() {
+            // Set cache file to its expected size.
+            let file_size = file.metadata()?.len();
+            if file_size == 0 {
+                file.set_len(blob_info.uncompressed_size())?;
+            } else {
+                assert_eq!(file_size, blob_info.uncompressed_size());
+            }
+
+            Some(Arc::new(BlobMetaInfo::new(
+                &blob_file_path,
+                &blob_info,
+                Some(&reader),
+            )?))
+        } else {
+            None
+        };
+
+        Ok(FileCacheEntry {
+            blob_info,
+            chunk_map,
+            file: Arc::new(file),
+            meta,
+            metrics: mgr.metrics.clone(),
+            prefetch_state: Arc::new(AtomicU32::new(AsyncRequestState::Init as u32)),
+            reader,
+            runtime,
+            workers,
+
+            blob_size,
+            compressor,
+            digester,
+            is_get_blob_object_supported,
+            is_compressed,
+            is_direct_chunkmap,
+            is_stargz,
+            need_validate,
+            prefetch_config,
+        })
+    }
+
+    fn create_chunk_map(
+        mgr: &FileCacheMgr,
+        blob_info: &BlobInfo,
+        blob_file: &str,
+    ) -> Result<(Arc<dyn ChunkMap>, bool)> {
+        let mut direct_chunkmap = true;
+        // The builder now records the number of chunks in the blob table, so we can
+        // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
+        // need downgrade to use DigestedChunkMap as a compatible solution.
+        let chunk_map: Arc<dyn ChunkMap> = if mgr.disable_indexed_map
+            || blob_info.is_stargz()
+            || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
+        {
+            direct_chunkmap = false;
+            Arc::new(BlobStateMap::from(DigestedChunkMap::new()))
+        } else {
+            Arc::new(BlobStateMap::from(IndexedChunkMap::new(
+                blob_file,
+                blob_info.chunk_count(),
+            )?))
+        };
+
+        Ok((chunk_map, direct_chunkmap))
+    }
+}
+
 #[cfg(test)]
 pub mod blob_cache_tests {
     /*
@@ -235,7 +328,7 @@ pub mod blob_cache_tests {
             dir
         );
 
-        let mut blob_config: BlobCacheConfig = serde_json::from_str(&s).unwrap();
+        let mut blob_config: FileCacheConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(blob_config.disable_indexed_map, false);
         assert_eq!(blob_config.work_dir, dir.to_str().unwrap());
         /*
