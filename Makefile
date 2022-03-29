@@ -41,7 +41,7 @@ endef
 
 define static_check
 	# Cargo will skip checking if it is already checked
-	cargo clippy --features=$(1) --workspace --bins --tests --target-dir target-$(1) -- -Dclippy::all
+	cargo clippy --features=$(1) --workspace --bins --tests --target-dir target-$(1) -- -Dwarnings
 endef
 
 .PHONY: all .release_version .format .musl_target build release static-release fusedev-release virtiofs-release virtiofs fusedev
