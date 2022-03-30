@@ -20,9 +20,9 @@ type BuilderOption struct {
 	RootfsPath          string
 	BackendType         string
 	BackendConfig       string
-	PrefetchDir         string
 	WhiteoutSpec        string
 	OutputJSONPath      string
+	PrefetchPatterns    string
 	// A regular file or fifo into which commands nydus-image to dump contents.
 	BlobPath     string
 	AlignedChunk bool
@@ -52,22 +52,13 @@ func NewBuilder(binaryPath string) *Builder {
 	}
 }
 
-func (builder *Builder) run(args []string, stdinInfo ...string) error {
+func (builder *Builder) run(args []string, prefetchPatterns string) error {
 	logrus.Debugf("\tCommand: %s %s", builder.binaryPath, strings.Join(args[:], " "))
 
 	cmd := exec.Command(builder.binaryPath, args...)
 	cmd.Stdout = builder.stdout
 	cmd.Stderr = builder.stderr
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	for _, s := range stdinInfo {
-		io.WriteString(stdin, s)
-	}
-	stdin.Close()
+	cmd.Stdin = strings.NewReader(prefetchPatterns)
 
 	if err := cmd.Run(); err != nil {
 		logrus.WithError(err).Errorf("fail to run %v %+v", builder.binaryPath, args)
@@ -93,7 +84,7 @@ func (builder *Builder) Compact(option CompactOption) error {
 	if option.ChunkDict != "" {
 		args = append(args, "--chunk-dict", option.ChunkDict)
 	}
-	return builder.run(args)
+	return builder.run(args, "")
 }
 
 // Run exec nydus-image CLI to build layer
@@ -132,9 +123,9 @@ func (builder *Builder) Run(option BuilderOption) error {
 		option.RootfsPath,
 	)
 
-	if option.PrefetchDir != "" {
+	if len(option.PrefetchPatterns) > 0 {
 		args = append(args, "--prefetch-policy", "fs")
 	}
 
-	return builder.run(args, option.PrefetchDir)
+	return builder.run(args, option.PrefetchPatterns)
 }

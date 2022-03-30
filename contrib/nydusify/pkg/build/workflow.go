@@ -17,10 +17,10 @@ import (
 )
 
 type WorkflowOption struct {
-	ChunkDict      string
-	TargetDir      string
-	NydusImagePath string
-	PrefetchDir    string
+	ChunkDict        string
+	TargetDir        string
+	NydusImagePath   string
+	PrefetchPatterns string
 }
 
 type Workflow struct {
@@ -88,10 +88,6 @@ func NewWorkflow(option WorkflowOption) (*Workflow, error) {
 	backendConfig := fmt.Sprintf(`{"dir": "%s"}`, blobsDir)
 	builder := NewBuilder(option.NydusImagePath)
 
-	if option.PrefetchDir == "" {
-		option.PrefetchDir = "/"
-	}
-
 	return &Workflow{
 		WorkflowOption: option,
 		blobsDir:       blobsDir,
@@ -116,7 +112,7 @@ func (workflow *Workflow) Build(
 		ParentBootstrapPath: workflow.parentBootstrapPath,
 		BootstrapPath:       workflow.bootstrapPath,
 		RootfsPath:          layerDir,
-		PrefetchDir:         workflow.PrefetchDir,
+		PrefetchPatterns:    workflow.PrefetchPatterns,
 		WhiteoutSpec:        whiteoutSpec,
 		OutputJSONPath:      workflow.buildOutputJSONPath(),
 		BlobPath:            blobPath,
