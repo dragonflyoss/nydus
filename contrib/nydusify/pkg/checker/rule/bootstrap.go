@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"reflect"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -54,6 +53,16 @@ func (rule *BootstrapRule) Validate() error {
 		return nil
 	}
 
+	// Parse blob list from blob layers in Nydus manifest
+	blobListInLayer := map[string]bool{}
+	layers := rule.Parsed.NydusImage.Manifest.Layers
+	for i, layer := range layers {
+		if i != len(layers)-1 {
+			blobListInLayer[layer.Digest.Hex()] = true
+		}
+	}
+
+	// Parse blob list from blob table of bootstrap
 	var bootstrap bootstrapDebug
 	bootstrapBytes, err := ioutil.ReadFile(rule.DebugOutputPath)
 	if err != nil {
@@ -62,27 +71,26 @@ func (rule *BootstrapRule) Validate() error {
 	if err := json.Unmarshal(bootstrapBytes, &bootstrap); err != nil {
 		return errors.Wrap(err, "unmarshal bootstrap output JSON")
 	}
-
-	// Parse blob list from blob layers in Nydus manifest
-	var blobListInLayer []string
-	layers := rule.Parsed.NydusImage.Manifest.Layers
-	for i, layer := range layers {
-		if i != len(layers)-1 {
-			blobListInLayer = append(blobListInLayer, layer.Digest.Hex())
+	blobListInBootstrap := map[string]bool{}
+	lostInLayer := false
+	for _, blobID := range bootstrap.Blobs {
+		blobListInBootstrap[blobID] = true
+		if !blobListInLayer[blobID] {
+			lostInLayer = true
 		}
 	}
 
-	// Blob list recorded in manifest annotation should be equal with
-	// the blob list recorded in blob table of bootstrap
-	if !reflect.DeepEqual(bootstrap.Blobs, blobListInLayer) {
-		return fmt.Errorf(
-			"nydus blob list in bootstrap(%d) does not match with manifest(%d)'s, %v != %v",
-			len(bootstrap.Blobs),
-			len(blobListInLayer),
-			bootstrap.Blobs,
-			blobListInLayer,
-		)
+	if !lostInLayer {
+		return nil
 	}
 
-	return nil
+	// The blobs recorded in blob table of bootstrap should all appear
+	// in the layers.
+	return fmt.Errorf(
+		"nydus blobs in the blob table of bootstrap(%d) should all appear in the layers of manifest(%d), %v != %v",
+		len(blobListInBootstrap),
+		len(blobListInLayer),
+		blobListInBootstrap,
+		blobListInLayer,
+	)
 }
