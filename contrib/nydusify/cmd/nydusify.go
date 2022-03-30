@@ -172,7 +172,7 @@ func main() {
 				&cli.BoolFlag{Name: "prefetch-patterns", Value: false, Usage: "Prefetched file path patterns from STDIN, specify absolute/relative path of rootfs line by line", EnvVars: []string{"PREFETCH_PATTERNS"}},
 				&cli.StringFlag{Name: "nydus-image", Value: "nydus-image", Usage: "The nydus-image binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUS_IMAGE"}},
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Merge OCI & Nydus manifest to manifest index for target image, please ensure that OCI manifest already exists in target image", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
+				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `linux/amd64` or `linux/arm64`"},
 				&cli.BoolFlag{Name: "docker-v2-format", Value: false, Usage: "Use docker image manifest v2, schema 2 format", EnvVars: []string{"DOCKER_V2_FORMAT"}},
 				&cli.StringFlag{Name: "backend-type", Value: "registry", Usage: "Specify Nydus blob storage backend type", EnvVars: []string{"BACKEND_TYPE"}},
 				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},

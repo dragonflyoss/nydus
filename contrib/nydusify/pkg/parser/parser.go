@@ -118,7 +118,7 @@ func (parser *Parser) pullIndex(ctx context.Context, desc *ocispec.Descriptor) (
 }
 
 func (parser *Parser) parseImage(
-	ctx context.Context, desc *ocispec.Descriptor, onlyManifest *ocispec.Manifest,
+	ctx context.Context, desc *ocispec.Descriptor, onlyManifest *ocispec.Manifest, ignoreArch bool,
 ) (*Image, error) {
 	var manifest *ocispec.Manifest
 	var err error
@@ -136,12 +136,22 @@ func (parser *Parser) parseImage(
 	}
 
 	if config.OS == "" || config.Architecture == "" {
-		return nil, errors.New("Source image configuration does not have os or architecture")
+		err = errors.New("Source image configuration does not have os or architecture")
+		if ignoreArch {
+			logrus.WithError(err).Warn("Ignore image arch")
+		} else {
+			return nil, err
+		}
 	}
 
 	// Just give user a simple hint telling option was ignored.
 	if config.Architecture != parser.interestedArch {
-		return nil, errors.Errorf("Specified %s architecture was not found", parser.interestedArch)
+		err = errors.Errorf("Found arch %s, but the specified target arch (--platform) is %s", config.Architecture, parser.interestedArch)
+		if ignoreArch {
+			logrus.WithError(err).Warn("Ignore image arch, attempting to continue converting")
+		} else {
+			return nil, err
+		}
 	}
 
 	return &Image{
@@ -185,6 +195,7 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 	var ociDesc *ocispec.Descriptor
 	var nydusDesc *ocispec.Descriptor
 	var onlyManifest *ocispec.Manifest
+	var ignoreArch bool
 
 	switch imageDesc.MediaType {
 	// Handle image manifest
@@ -202,6 +213,10 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 		} else {
 			ociDesc = imageDesc
 		}
+		// For a single manifest image, we just ignore the arch, so that allowing
+		// to do a default conversion on a different arch's host, for example
+		// converting an arm64 image on an amd64 host.
+		ignoreArch = true
 
 	// Handle image manifest index
 	case ocispec.MediaTypeImageIndex, images.MediaTypeDockerSchema2ManifestList:
@@ -232,16 +247,16 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 	}
 
 	if ociDesc != nil {
-		parsed.OCIImage, err = parser.parseImage(ctx, ociDesc, onlyManifest)
+		parsed.OCIImage, err = parser.parseImage(ctx, ociDesc, onlyManifest, ignoreArch)
 		if err != nil {
-			return nil, errors.Wrap(err, "parse OCI image")
+			return nil, errors.Wrap(err, "Parse OCI image")
 		}
 	}
 
 	if nydusDesc != nil {
-		parsed.NydusImage, err = parser.parseImage(ctx, nydusDesc, onlyManifest)
+		parsed.NydusImage, err = parser.parseImage(ctx, nydusDesc, onlyManifest, ignoreArch)
 		if err != nil {
-			return nil, errors.Wrap(err, "parse Nydus image")
+			return nil, errors.Wrap(err, "Parse Nydus image")
 		}
 	}
 
