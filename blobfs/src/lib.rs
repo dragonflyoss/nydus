@@ -29,6 +29,7 @@ use std::any::Any;
 #[cfg(feature = "virtiofs")]
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::fs::create_dir_all;
 #[cfg(feature = "virtiofs")]
 use std::fs::File;
 use std::io;
@@ -168,6 +169,25 @@ pub struct BlobFs {
 }
 
 impl BlobFs {
+    fn ensure_path_exist(path: &Path) -> io::Result<()> {
+        if path.as_os_str().is_empty() {
+            return Err(einval!("path is empty"));
+        }
+        if !path.exists() {
+            create_dir_all(path).map_err(|e| {
+                error!(
+                    "create dir error. directory is {:?}. {}:{}",
+                    path,
+                    file!(),
+                    line!()
+                );
+                e
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Create a Blob file system instance.
     pub fn new(cfg: Config) -> io::Result<BlobFs> {
         trace!("BlobFs config is: {:?}", cfg);
@@ -184,9 +204,10 @@ impl BlobFs {
         let blob_ondemand_conf = BlobOndemandConfig::from_str(&cfg.blob_ondemand_cfg)?;
         // check if blob cache dir exists.
         let path = Path::new(blob_ondemand_conf.blob_cache_dir.as_str());
-        if !path.exists() || blob_ondemand_conf.blob_cache_dir == String::default() {
-            return Err(einval!("no valid blob cache dir"));
-        }
+        Self::ensure_path_exist(path).map_err(|e| {
+            error!("blob_cache_dir not exist");
+            e
+        })?;
 
         let path = Path::new(blob_ondemand_conf.bootstrap_path.as_str());
         if !path.exists() || blob_ondemand_conf.bootstrap_path == String::default() {
