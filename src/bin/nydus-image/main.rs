@@ -135,6 +135,20 @@ impl OutputSerializer {
 }
 
 fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
+    let arg_chunk_dict = Arg::with_name("chunk-dict")
+        .long("chunk-dict")
+        .short("M")
+        .help("Specify a chunk dictionary for chunk deduplication")
+        .takes_value(true);
+    let arg_prefetch_policy = Arg::with_name("prefetch-policy")
+        .long("prefetch-policy")
+        .short("P")
+        .help("blob data prefetch policy")
+        .takes_value(true)
+        .required(false)
+        .default_value("none")
+        .possible_values(&["fs", "blob", "none"]);
+
     // TODO: Try to use yaml to define below options
     App::new("")
         .version(bti_string.as_str())
@@ -247,14 +261,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .required(false),
                 )
                 .arg(
-                    Arg::with_name("prefetch-policy")
-                        .long("prefetch-policy")
-                        .short("P")
-                        .help("blob data prefetch policy")
-                        .takes_value(true)
-                        .required(false)
-                        .default_value("none")
-                        .possible_values(&["fs", "blob", "none"]),
+                    arg_prefetch_policy.clone(),
                 )
                 .arg(
                     Arg::with_name("repeatable")
@@ -310,11 +317,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                 )
                 .arg(
-                    Arg::with_name("chunk-dict")
-                        .long("chunk-dict")
-                        .short("M")
-                        .help("Specify a chunk dictionary for chunk deduplication")
-                        .takes_value(true)
+                    arg_chunk_dict.clone(),
                 )
                 .arg(
                     Arg::with_name("backend-type")
@@ -343,21 +346,10 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true),
                 )
                 .arg(
-                    Arg::with_name("chunk-dict")
-                        .long("chunk-dict")
-                        .short("M")
-                        .help("Specify a chunk dictionary for chunk deduplication")
-                        .takes_value(true)
+                    arg_chunk_dict,
                 )
                 .arg(
-                    Arg::with_name("prefetch-policy")
-                        .long("prefetch-policy")
-                        .short("P")
-                        .help("blob data prefetch policy")
-                        .takes_value(true)
-                        .required(false)
-                        .default_value("none")
-                        .possible_values(&["fs", "blob", "none"]),
+                    arg_prefetch_policy,
                 )
                 .arg(
                     Arg::with_name("SOURCE")

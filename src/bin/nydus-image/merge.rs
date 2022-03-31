@@ -46,17 +46,19 @@ impl Merger {
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
 
-        for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            // Get the blobs come from chunk dict bootstrap.
-            let mut chunk_dict_blobs = HashSet::new();
-            if let Some(chunk_dict_path) = &chunk_dict {
-                let rs = RafsSuper::load_from_metadata(&chunk_dict_path, RafsMode::Direct, true)?;
-                for blob in rs.superblock.get_blob_infos() {
-                    chunk_dict_blobs.insert(blob.blob_id().to_string());
-                }
+        // Get the blobs come from chunk dict bootstrap.
+        let mut chunk_dict_blobs = HashSet::new();
+        if let Some(chunk_dict_path) = &chunk_dict {
+            let rs = RafsSuper::load_from_metadata(&chunk_dict_path, RafsMode::Direct, true)
+                .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            for blob in rs.superblock.get_blob_infos() {
+                chunk_dict_blobs.insert(blob.blob_id().to_string());
             }
+        }
 
-            let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)?;
+        for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
+            let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)
+                .context(format!("load bootstrap {:?}", bootstrap_path))?;
             let parent_blobs = rs.superblock.get_blob_infos();
             let blob_hash = Self::get_blob_hash(bootstrap_path)?;
             let mut blob_idx_map = Vec::new();
@@ -65,8 +67,9 @@ impl Merger {
             for blob in &parent_blobs {
                 let mut blob_ctx = BlobContext::from(blob, ChunkSource::Parent);
                 if chunk_dict_blobs.get(blob.blob_id()).is_none() {
-                    // Only up to one blob from the parent bootstrap, the other blobs should be
-                    // from the chunk dict image.
+                    // It is assumed that the `nydus-image create` at each layer and `nydus-image merge` commands
+                    // use the same chunk dict bootstrap. So the parent bootstrap includes multiple blobs, but
+                    // only at most one new blob, the other blobs should be from the chunk dict image.
                     if parent_blob_added {
                         bail!("invalid bootstrap, seems have multiple non-chunk-dict blobs in this bootstrap");
                     }
@@ -84,7 +87,8 @@ impl Merger {
                 rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
                                                             path: &Path|
                  -> Result<()> {
-                    let mut node = MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())?;
+                    let mut node = MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
+                        .context(format!("parse node from bootstrap {:?}", bootstrap_path))?;
                     for chunk in &mut node.chunks {
                         let origin_blob_index = chunk.inner.blob_index() as usize;
                         // Set the blob index of chunk to real index in blob table of final bootstrap.
@@ -100,7 +104,7 @@ impl Merger {
                     node.overlay = Overlay::UpperAddition;
                     match node.whiteout_type(WhiteoutSpec::Oci) {
                         Some(_) => {
-                            // Insert removal operations at the head, so they will be handled first when
+                            // Insert whiteouts at the head, so they will be handled first when
                             // applying to lower layer.
                             nodes.insert(0, node);
                         }
@@ -122,11 +126,13 @@ impl Merger {
         // Safe to unwrap because there is at least one source bootstrap.
         let mut tree = tree.unwrap();
         let mut bootstrap = Bootstrap::new()?;
-        let storage = ArtifactStorage::SingleFile(target);
+        let storage = ArtifactStorage::SingleFile(target.clone());
         let mut bootstrap_ctx = BootstrapContext::new(storage, false)?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(&ctx)?;
-        bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
+        bootstrap
+            .dump(ctx, &mut bootstrap_ctx, &blob_table)
+            .context(format!("dump bootstrap to {:?}", target))?;
 
         Ok(())
     }
