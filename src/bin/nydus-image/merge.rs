@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
@@ -23,7 +24,7 @@ pub struct Merger {}
 
 impl Merger {
     /// Merge assumes the bootstrap name as the hash of whole tar blob.
-    fn get_blob_hash(bootstrap_path: PathBuf) -> Result<String> {
+    fn get_blob_hash(bootstrap_path: &Path) -> Result<String> {
         let blob_hash = bootstrap_path
             .file_name()
             .ok_or_else(|| anyhow!("get file name"))?
@@ -45,7 +46,7 @@ impl Merger {
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
 
-        for bootstrap_path in sources {
+        for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
             // Get the blobs come from chunk dict bootstrap.
             let mut chunk_dict_blobs = HashSet::new();
             if let Some(chunk_dict_path) = &chunk_dict {
@@ -89,6 +90,13 @@ impl Merger {
                         // Set the blob index of chunk to real index in blob table of final bootstrap.
                         chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
                     }
+                    // Set node's layer index to distinguish same inode number (from bootstrap)
+                    // between different layers.
+                    node.layer_idx = u16::try_from(layer_idx).context(format!(
+                        "too many layers {}, limited to {}",
+                        layer_idx,
+                        u16::MAX
+                    ))?;
                     node.overlay = Overlay::UpperAddition;
                     match node.whiteout_type(WhiteoutSpec::Oci) {
                         Some(_) => {

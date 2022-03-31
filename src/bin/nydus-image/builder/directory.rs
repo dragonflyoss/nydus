@@ -30,6 +30,7 @@ impl FilesystemTreeBuilder {
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
         parent: &mut Node,
+        layer_idx: u16,
     ) -> Result<Vec<Tree>> {
         let mut result = Vec::new();
         if !parent.is_dir() {
@@ -43,7 +44,7 @@ impl FilesystemTreeBuilder {
         event_tracer!("load_from_directory", +children.len());
         for child in children {
             let path = child.path();
-            let child = Node::new(
+            let mut child = Node::new(
                 ctx.fs_version,
                 ctx.source_path.clone(),
                 path.clone(),
@@ -53,6 +54,7 @@ impl FilesystemTreeBuilder {
                 true,
             )
             .with_context(|| format!("failed to create node {:?}", path))?;
+            child.layer_idx = layer_idx;
 
             // as per OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
@@ -64,7 +66,7 @@ impl FilesystemTreeBuilder {
             }
 
             let mut child = Tree::new(child);
-            child.children = self.load_children(ctx, bootstrap_ctx, &mut child.node)?;
+            child.children = self.load_children(ctx, bootstrap_ctx, &mut child.node, layer_idx)?;
             result.push(child);
         }
 
@@ -84,6 +86,7 @@ impl DirectoryBuilder {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
+        layer_idx: u16,
     ) -> Result<Tree> {
         let node = Node::new(
             ctx.fs_version,
@@ -98,7 +101,7 @@ impl DirectoryBuilder {
         let tree_builder = FilesystemTreeBuilder::new();
 
         tree.children = timing_tracer!(
-            { tree_builder.load_children(ctx, bootstrap_ctx, &mut tree.node) },
+            { tree_builder.load_children(ctx, bootstrap_ctx, &mut tree.node, layer_idx) },
             "load_from_directory"
         )?;
 
@@ -115,7 +118,8 @@ impl Builder for DirectoryBuilder {
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         // Scan source directory to build upper layer tree.
-        let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx)?;
+        let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
+        let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx, layer_idx)?;
         let mut bootstrap = Bootstrap::new()?;
         if bootstrap_ctx.layered {
             // Merge with lower layer if there's one, do not prepare `prefetch` list during merging.

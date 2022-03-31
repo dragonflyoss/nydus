@@ -350,6 +350,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             chunks,
             symlink,
             xattrs,
+            layer_idx: 0,
             ctime: 0,
             offset: 0,
             dirents: Vec::<(u64, OsString, u32)>::new(),

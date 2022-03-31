@@ -599,9 +599,8 @@ impl BlobManager {
 pub struct BootstrapContext {
     /// This build has a parent bootstrap.
     pub layered: bool,
-    /// Cache node index for hardlinks, HashMap<(real_inode, dev), Vec<index>>.
-    pub lower_inode_map: HashMap<(Inode, u64), Vec<u64>>,
-    pub upper_inode_map: HashMap<(Inode, u64), Vec<u64>>,
+    /// Cache node index for hardlinks, HashMap<(layer_index, real_inode, dev), Vec<index>>.
+    pub inode_map: HashMap<(u16, Inode, u64), Vec<u64>>,
     /// Store all nodes in ascendant ordor, indexed by (node.index - 1).
     pub nodes: Vec<Node>,
     /// Current position to write in f_bootstrap
@@ -617,8 +616,7 @@ impl BootstrapContext {
     pub fn new(storage: ArtifactStorage, layered: bool) -> Result<Self> {
         Ok(Self {
             layered,
-            lower_inode_map: HashMap::new(),
-            upper_inode_map: HashMap::new(),
+            inode_map: HashMap::new(),
             nodes: Vec::new(),
             offset: EROFS_BLOCK_SIZE,
             name: String::new(),

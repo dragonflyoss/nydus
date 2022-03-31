@@ -749,24 +749,20 @@ impl RafsSuper {
         cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let inode = self.get_inode(ino, false)?;
-        if !inode.is_dir() {
-            return Ok(());
-        }
-        let parent_path = if let Some(parent) = parent {
+        let path = if let Some(parent) = parent {
             parent.join(inode.name())
         } else {
             PathBuf::from("/")
         };
+        cb(inode.as_ref(), &path)?;
+        if !inode.is_dir() {
+            return Ok(());
+        }
         let child_count = inode.get_child_count();
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
-            if child.is_dir() {
-                self.walk_inodes(child_ino, Some(&parent_path), cb)?;
-            } else {
-                let child_path = parent_path.join(child.name());
-                cb(child.as_ref(), &child_path)?;
-            }
+            self.walk_inodes(child_ino, Some(&path), cb)?;
         }
         Ok(())
     }

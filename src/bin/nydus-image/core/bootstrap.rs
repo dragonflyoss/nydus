@@ -67,13 +67,8 @@ impl Bootstrap {
         // user to pass the source root as prefetch hint. Check it here.
         ctx.prefetch.insert_if_need(&tree.node);
 
-        let inode_map = if tree.node.overlay.is_lower_layer() {
-            &mut bootstrap_ctx.lower_inode_map
-        } else {
-            &mut bootstrap_ctx.upper_inode_map
-        };
-        inode_map.insert(
-            (tree.node.src_ino, tree.node.src_dev),
+        bootstrap_ctx.inode_map.insert(
+            (tree.node.layer_idx, tree.node.src_ino, tree.node.src_dev),
             vec![tree.node.index],
         );
 
@@ -121,8 +116,7 @@ impl Bootstrap {
         )?;
 
         // Clear all cached states for next upper layer build.
-        bootstrap_ctx.lower_inode_map.clear();
-        bootstrap_ctx.upper_inode_map.clear();
+        bootstrap_ctx.inode_map.clear();
         ctx.prefetch.clear();
 
         Ok(tree)
@@ -170,12 +164,11 @@ impl Bootstrap {
             // Hardlink handle, all hardlink nodes' ino, nlink should be the same,
             // because the real_ino may be conflicted between different layers,
             // so we need to find hardlink node index list in the layer where the node is located.
-            let inode_map = if child.node.overlay.is_lower_layer() {
-                &mut bootstrap_ctx.lower_inode_map
-            } else {
-                &mut bootstrap_ctx.upper_inode_map
-            };
-            if let Some(indexes) = inode_map.get_mut(&(child.node.src_ino, child.node.src_dev)) {
+            if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&(
+                child.node.layer_idx,
+                child.node.src_ino,
+                child.node.src_dev,
+            )) {
                 let nlink = indexes.len() as u32 + 1;
                 let first_index = indexes[0];
                 child.node.inode.set_ino(first_index);
@@ -189,8 +182,8 @@ impl Bootstrap {
                 child.node.inode.set_ino(index);
                 child.node.inode.set_nlink(1);
                 // Store inode real ino
-                inode_map.insert(
-                    (child.node.src_ino, child.node.src_dev),
+                bootstrap_ctx.inode_map.insert(
+                    (child.node.layer_idx, child.node.src_ino, child.node.src_dev),
                     vec![child.node.index],
                 );
             }
@@ -413,8 +406,7 @@ impl Bootstrap {
 
         // Set super block
         let mut super_block = RafsV5SuperBlock::new();
-        let inodes_count =
-            (bootstrap_ctx.lower_inode_map.len() + bootstrap_ctx.upper_inode_map.len()) as u64;
+        let inodes_count = bootstrap_ctx.inode_map.len() as u64;
         super_block.set_inodes_count(inodes_count);
         super_block.set_inode_table_offset(super_block_size as u64);
         super_block.set_inode_table_entries(inode_table_entries);

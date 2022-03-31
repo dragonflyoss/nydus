@@ -224,6 +224,8 @@ pub struct Node {
     pub(crate) target: PathBuf,
     /// Parsed version of `target`.
     pub(crate) target_vec: Vec<OsString>,
+    /// Layer index where node located.
+    pub layer_idx: u16,
     /// Last status change time of the file, in nanoseconds.
     pub ctime: i64,
     /// Used by rafsv6 inode datalayout
@@ -285,6 +287,7 @@ impl Node {
             symlink: None,
             xattrs: RafsXAttrs::default(),
             explicit_uidgid,
+            layer_idx: 0,
             ctime: 0,
             offset: 0,
             dirents: Vec::new(),

@@ -333,7 +333,7 @@ impl StargzIndexTreeBuilder {
         Ok(())
     }
 
-    fn build(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
+    fn build(&mut self, ctx: &mut BuildContext, layer_idx: u16) -> Result<Tree> {
         // Parse stargz TOC index from a file
         let toc_index = TocIndex::load(&ctx.source_path)?;
         if toc_index.entries.is_empty() {
@@ -411,7 +411,7 @@ impl StargzIndexTreeBuilder {
             let mut lost_dirs = Vec::new();
             self.make_lost_dirs(&entry, &mut lost_dirs)?;
             for dir in &lost_dirs {
-                let node = self.parse_node(dir, ctx.explicit_uidgid, ctx.fs_version)?;
+                let node = self.parse_node(dir, ctx.explicit_uidgid, ctx.fs_version, layer_idx)?;
                 nodes.push(node);
             }
 
@@ -419,7 +419,7 @@ impl StargzIndexTreeBuilder {
                 hardlink_map.insert(entry.path()?, entry.hardlink_link_path());
             }
 
-            let node = self.parse_node(entry, ctx.explicit_uidgid, ctx.fs_version)?;
+            let node = self.parse_node(entry, ctx.explicit_uidgid, ctx.fs_version, layer_idx)?;
             if entry.path()? == PathBuf::from("/") {
                 tree = Some(Tree::new(node.clone()));
             }
@@ -448,6 +448,7 @@ impl StargzIndexTreeBuilder {
         entry: &TocEntry,
         explicit_uidgid: bool,
         version: RafsVersion,
+        layer_idx: u16,
     ) -> Result<Node> {
         let chunks = Vec::new();
         let entry_path = entry.path()?;
@@ -548,6 +549,7 @@ impl StargzIndexTreeBuilder {
             chunks,
             symlink,
             xattrs,
+            layer_idx,
             ctime: 0,
             offset: 0,
             dirents: Vec::<(u64, OsString, u32)>::new(),
@@ -615,10 +617,10 @@ impl StargzBuilder {
         Ok(())
     }
 
-    fn build_tree_from_index(&mut self, ctx: &mut BuildContext) -> Result<Tree> {
+    fn build_tree_from_index(&mut self, ctx: &mut BuildContext, layer_idx: u16) -> Result<Tree> {
         let mut tree_builder = StargzIndexTreeBuilder::new();
         tree_builder
-            .build(ctx)
+            .build(ctx, layer_idx)
             .context("failed to build tree from stargz index")
     }
 }
@@ -632,7 +634,8 @@ impl Builder for StargzBuilder {
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         // Build tree from source
-        let mut tree = self.build_tree_from_index(ctx)?;
+        let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
+        let mut tree = self.build_tree_from_index(ctx, layer_idx)?;
         let mut bootstrap = Bootstrap::new()?;
         if bootstrap_mgr.f_parent_bootstrap.is_some() {
             // Merge with lower layer if there's one.
