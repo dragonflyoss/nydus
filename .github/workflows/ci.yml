@@ -58,6 +58,15 @@ jobs:
           make docker-smoke
           sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
 
+  macos-ut:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: build and check
+        run: |
+          rustup component add rustfmt && rustup component add clippy
+          make macos-ut
+
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest

@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::process::id;
 use std::str::FromStr;
 use std::sync::{
-    atomic::Ordering,
     mpsc::{Receiver, Sender},
     Arc, MutexGuard,
 };
@@ -23,10 +22,10 @@ use std::thread;
 use std::{error, fmt, io};
 
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
+#[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use fuse_backend_rs::transport::Error as FuseTransportError;
 use fuse_backend_rs::Error as FuseError;
-use mio::{Events, Poll, Token, Waker};
 use rust_fsm::*;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Error as SerdeError;
@@ -39,7 +38,6 @@ use rafs::{
 };
 
 use crate::upgrade::{self, UpgradeManager, UpgradeMgrError};
-use crate::EVENT_MANAGER_RUN;
 
 //TODO: Try to public below type from fuse-rs thus no need to redefine it here.
 type BackFileSystem = Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>;
@@ -389,78 +387,32 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
             Ok(Box::new(rafs))
         }
         FsBackendType::PassthroughFs => {
-            // Vfs by default enables no_open and writeback, passthroughfs
-            // needs to specify them explicitly.
-            // TODO(liubo): enable no_open_dir.
-            let fs_cfg = Config {
-                root_dir: cmd.source.to_string(),
-                do_import: false,
-                writeback: true,
-                no_open: true,
-                xattr: true,
-                ..Default::default()
-            };
-            // TODO: Passthrough Fs needs to enlarge rlimit against host. We can exploit `MountCmd`
-            // `config` field to pass such a configuration into here.
-            let passthrough_fs = PassthroughFs::new(fs_cfg).map_err(DaemonError::PassthroughFs)?;
-            passthrough_fs
-                .import()
-                .map_err(DaemonError::PassthroughFs)?;
-            info!("PassthroughFs imported");
-            Ok(Box::new(passthrough_fs))
-        }
-    }
-}
-
-const EXIT_TOKEN: Token = Token(1);
-
-pub struct NydusDaemonSubscriber {
-    exit_notifier: Arc<Waker>,
-    exit_receiver: Poll,
-}
-
-impl NydusDaemonSubscriber {
-    pub fn new() -> Result<Self> {
-        let exit_receiver = Poll::new().map_err(|e| {
-            error!("Creating exit receiver failed. {}", e);
-            e
-        })?;
-
-        let exit_notifier = Waker::new(exit_receiver.registry(), EXIT_TOKEN).map_err(|e| {
-            error!("Creating exit waker failed. {}", e);
-            e
-        })?;
-
-        let subscriber = Self {
-            exit_notifier: Arc::new(exit_notifier),
-            exit_receiver,
-        };
-
-        Ok(subscriber)
-    }
-
-    pub fn get_notifier(&self) -> Arc<Waker> {
-        self.exit_notifier.clone()
-    }
-
-    pub fn listen(&mut self) {
-        let mut events = Events::with_capacity(8);
-
-        loop {
-            self.exit_receiver
-                .poll(&mut events, None)
-                .unwrap_or_else(|e| error!("failed to listen on daemon: {}", e));
-
-            for event in events.iter() {
-                if event.is_error() {
-                    error!("Got error on the monitored event.");
-                    continue;
-                }
-
-                if event.is_readable() && event.token() == EXIT_TOKEN {
-                    EVENT_MANAGER_RUN.store(false, Ordering::Relaxed);
-                    return;
-                }
+            #[cfg(target_os = "macos")]
+            return Err(DaemonError::InvalidArguments(String::from(
+                "not support passthroughfs",
+            )));
+            #[cfg(target_os = "linux")]
+            {
+                // Vfs by default enables no_open and writeback, passthroughfs
+                // needs to specify them explicitly.
+                // TODO(liubo): enable no_open_dir.
+                let fs_cfg = Config {
+                    root_dir: cmd.source.to_string(),
+                    do_import: false,
+                    writeback: true,
+                    no_open: true,
+                    xattr: true,
+                    ..Default::default()
+                };
+                // TODO: Passthrough Fs needs to enlarge rlimit against host. We can exploit `MountCmd`
+                // `config` field to pass such a configuration into here.
+                let passthrough_fs =
+                    PassthroughFs::new(fs_cfg).map_err(DaemonError::PassthroughFs)?;
+                passthrough_fs
+                    .import()
+                    .map_err(DaemonError::PassthroughFs)?;
+                info!("PassthroughFs imported");
+                Ok(Box::new(passthrough_fs))
             }
         }
     }

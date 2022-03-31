@@ -171,6 +171,7 @@ mod tests {
         let sb = RafsV6SuperBlock::new();
         let mut writer = BufWriter::new(file);
         sb.store(&mut writer).unwrap();
+        writer.flush().unwrap();
 
         let file = OpenOptions::new()
             .read(true)

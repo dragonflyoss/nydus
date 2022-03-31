@@ -4,6 +4,8 @@
 
 //! Storage backend driver to access blobs on local filesystems.
 
+#[cfg(target_os = "macos")]
+use libc::{fcntl, radvisory};
 use std::collections::HashMap;
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{Error, Result};
@@ -462,6 +464,37 @@ impl Prefetcher {
         })
     }
 
+    #[cfg(target_os = "macos")]
+    fn do_readahead(&self) -> Result<()> {
+        info!("starting localfs blob readahead");
+
+        for &(offset, len, zero) in self.records.iter() {
+            let end: u64 = offset
+                .checked_add(len as u64)
+                .ok_or_else(|| einval!("invalid length"))?;
+            if offset > self.blob_size || end > self.blob_size || zero != 0 {
+                return Err(einval!(format!(
+                    "invalid readahead entry ({}, {}), blob size {}",
+                    offset, len, self.blob_size
+                )));
+            }
+
+            unsafe {
+                fcntl(
+                    self.blob_file.as_raw_fd(),
+                    libc::F_RDADVISE,
+                    radvisory {
+                        ra_offset: offset as i64,
+                        ra_count: len as i32,
+                    },
+                );
+            };
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn do_readahead(&self) -> Result<()> {
         info!("starting localfs blob readahead");
 

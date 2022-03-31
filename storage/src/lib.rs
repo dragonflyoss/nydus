@@ -45,6 +45,7 @@ extern crate serde;
 extern crate bitflags;
 #[macro_use]
 extern crate nydus_error;
+extern crate dbs_uhttp;
 
 use std::fmt::{Display, Formatter};
 

@@ -4,19 +4,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
 
 use http::uri::Uri;
 use url::Url;
-use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 
-use micro_http::{HttpServer, MediaType, Request, Response, StatusCode};
-use vmm_sys_util::eventfd::EventFd;
+use dbs_uhttp::{HttpServer, MediaType, Request, Response, ServerError, StatusCode};
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token, Waker};
 
 use crate::http_endpoint::{
     error_response, ApiError, ApiRequest, ApiResponse, EventsHandler, ExitHandler, FsBackendInfo,
@@ -26,6 +27,8 @@ use crate::http_endpoint::{
 };
 
 const HTTP_ROOT: &str = "/api/v1";
+const EXIT_TOKEN: Token = Token(usize::MAX);
+const REQUEST_TOKEN: Token = Token(1);
 
 /// An HTTP endpoint handler interface
 pub trait EndpointHandler: Sync + Send {
@@ -78,13 +81,13 @@ lazy_static! {
 }
 
 fn kick_api_server(
-    api_evt: &EventFd,
-    to_api: &Sender<ApiRequest>,
+    api_evt: Arc<Waker>,
+    to_api: Sender<Option<ApiRequest>>,
     from_api: &Receiver<ApiResponse>,
     request: ApiRequest,
 ) -> ApiResponse {
-    to_api.send(request).map_err(ApiError::RequestSend)?;
-    api_evt.write(1).map_err(ApiError::EventFdWrite)?;
+    to_api.send(Some(request)).map_err(ApiError::RequestSend)?;
+    api_evt.wake().map_err(ApiError::EventFdWrite)?;
     from_api.recv().map_err(ApiError::ResponseRecv)?
 }
 
@@ -93,14 +96,10 @@ fn kick_api_server(
 // --> GET / 200 835ms 746b
 //
 
-fn trace_api_begin(request: &micro_http::Request) {
+fn trace_api_begin(request: &dbs_uhttp::Request) {
     info!("<--- {:?} {:?}", request.method(), request.uri());
 }
-fn trace_api_end(
-    response: &micro_http::Response,
-    method: micro_http::Method,
-    recv_time: SystemTime,
-) {
+fn trace_api_end(response: &dbs_uhttp::Response, method: dbs_uhttp::Method, recv_time: SystemTime) {
     let elapse = SystemTime::now().duration_since(recv_time);
     info!(
         "---> {:?} Status Code: {:?}, Elapse: {:?}, Body Size: {:?}",
@@ -111,10 +110,19 @@ fn trace_api_end(
     );
 }
 
+fn exit_api_server(
+    api_notifier: Arc<Waker>,
+    to_api: &Sender<Option<ApiRequest>>,
+) -> std::result::Result<(), ApiError> {
+    to_api.send(None).map_err(ApiError::RequestSend)?;
+    api_notifier.wake().map_err(ApiError::EventFdWrite)?;
+    Ok(())
+}
+
 fn handle_http_request(
     request: &Request,
-    api_notifier: &EventFd,
-    to_api: &Sender<ApiRequest>,
+    api_notifier: Arc<Waker>,
+    to_api: &Sender<Option<ApiRequest>>,
     from_api: &Receiver<ApiResponse>,
 ) -> Response {
     trace_api_begin(request);
@@ -127,7 +135,7 @@ fn handle_http_request(
         Ok(uri) => match HTTP_ROUTES.routes.get(uri.path()) {
             Some(route) => route
                 .handle_request(&request, &|r| {
-                    kick_api_server(api_notifier, to_api, from_api, r)
+                    kick_api_server(api_notifier.clone(), to_api.clone(), from_api, r)
                 })
                 .unwrap_or_else(|err| error_response(err, StatusCode::BadRequest)),
             None => error_response(HttpError::NoRoute, StatusCode::NotFound),
@@ -170,9 +178,6 @@ pub fn extract_query_part(req: &Request, key: &str) -> Option<String> {
     v
 }
 
-const EVENT_UNIX_SOCKET: u64 = 1;
-const EVENT_HTTP_DIE: u64 = 2;
-
 /// Start a HTTP server parsing http requests and send to nydus API server a concrete
 /// request to operate nydus or fetch working status.
 /// The HTTP server sends request by `to_api` channel and wait for response from `from_api` channel
@@ -183,48 +188,52 @@ const EVENT_HTTP_DIE: u64 = 2;
 /// the server thread to exit.
 pub fn start_http_thread(
     path: &str,
-    api_notifier: EventFd,
-    to_api: Sender<ApiRequest>,
+    api_notifier: Arc<Waker>,
+    to_api: Sender<Option<ApiRequest>>,
     from_api: Receiver<ApiResponse>,
-    exit_evtfd: EventFd,
-) -> Result<thread::JoinHandle<Result<()>>> {
+) -> Result<(thread::JoinHandle<Result<()>>, Arc<Waker>)> {
     // Try to remove existed unix domain socket
     std::fs::remove_file(path).unwrap_or_default();
     let socket_path = PathBuf::from(path);
+    let mut pool = Poll::new()?;
+    let waker = Waker::new(pool.registry(), EXIT_TOKEN)?;
+    let waker = Arc::new(waker);
+    let mut server = HttpServer::new(socket_path).map_err(|e| {
+        if let ServerError::IOError(e) = e {
+            e
+        } else {
+            Error::new(ErrorKind::Other, format!("{:?}", e))
+        }
+    })?;
+    pool.registry().register(
+        &mut SourceFd(&server.epoll().as_raw_fd()),
+        REQUEST_TOKEN,
+        Interest::READABLE,
+    )?;
 
     let thread = thread::Builder::new()
         .name("http-server".to_string())
         .spawn(move || {
-            let epoll_fd = Epoll::new().unwrap();
+            let api_notifier = api_notifier.clone();
 
-            let mut server = HttpServer::new(socket_path).unwrap();
             // Must start the server successfully or just die by panic
             server.start_server().unwrap();
-            epoll_fd.ctl(
-                ControlOperation::Add,
-                server.epoll().as_raw_fd(),
-                EpollEvent::new(EventSet::IN, EVENT_UNIX_SOCKET),
-            )?;
-
-            epoll_fd.ctl(
-                ControlOperation::Add,
-                exit_evtfd.as_raw_fd(),
-                EpollEvent::new(EventSet::IN, EVENT_HTTP_DIE),
-            )?;
-
-            let mut events = vec![EpollEvent::new(EventSet::empty(), 0); 100];
+            let mut events = Events::with_capacity(100);
 
             info!("http server started");
 
             'wait: loop {
-                let num = epoll_fd.wait(-1, events.as_mut_slice()).map_err(|e| {
-                    error!("Wait event error. {:?}", e);
-                    e
-                })?;
-
-                for event in &events[..num] {
-                    match event.data() {
-                        EVENT_UNIX_SOCKET => match server.requests() {
+                pool.poll(&mut events, None)?;
+                for event in &events {
+                    match event.token() {
+                        EXIT_TOKEN => {
+                            exit_api_server(api_notifier, &to_api).unwrap_or_else(|e| {
+                                error!("exit api server failed: {:?}", e);
+                            });
+                            info!("http-server thread exits");
+                            break 'wait Ok(());
+                        }
+                        REQUEST_TOKEN => match server.requests() {
                             Ok(request_vec) => {
                                 for server_request in request_vec {
                                     // Ignore error when sending response
@@ -232,7 +241,7 @@ pub fn start_http_thread(
                                         .respond(server_request.process(|request| {
                                             handle_http_request(
                                                 request,
-                                                &api_notifier,
+                                                api_notifier.clone(),
                                                 &to_api,
                                                 &from_api,
                                             )
@@ -249,12 +258,13 @@ pub fn start_http_thread(
                                 );
                             }
                         },
-                        EVENT_HTTP_DIE => break 'wait Ok(()),
-                        _ => error!("Invalid event"),
+                        _ => {
+                            unreachable!("unknown token.");
+                        }
                     }
                 }
             }
         })?;
 
-    Ok(thread)
+    Ok((thread, waker))
 }

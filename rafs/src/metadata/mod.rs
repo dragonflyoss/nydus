@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fuse_backend_rs::abi::linux_abi::Attr;
+use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;

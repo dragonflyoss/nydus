@@ -986,19 +986,19 @@ impl RafsV5Inode {
     /// Check whether the inode is a directory.
     #[inline]
     pub fn is_dir(&self) -> bool {
-        self.i_mode & libc::S_IFMT == libc::S_IFDIR
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
     }
 
     /// Check whether the inode is a symlink.
     #[inline]
     pub fn is_symlink(&self) -> bool {
-        self.i_mode & libc::S_IFMT == libc::S_IFLNK
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
     }
 
     /// Check whether the inode is a regular file.
     #[inline]
     pub fn is_reg(&self) -> bool {
-        self.i_mode & libc::S_IFMT == libc::S_IFREG
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
     }
 
     /// Check whether the inode is a hardlink.

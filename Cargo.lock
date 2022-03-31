@@ -265,7 +265,16 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a89e2ae426ea83155dccf10c0fa6b1463ef6d5fcb44cee0b224a408fa640a62"
 dependencies = [
- "core-foundation-sys",
+ "core-foundation-sys 0.8.2",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation-sys"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "065a5d7ffdcbc8fa145d6f0746f3555025b9097a9e9cda59f7467abae670c78d"
+dependencies = [
  "libc",
 ]
 
@@ -356,12 +365,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-uhttp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b773f7f1b9088438e9746890c7c0836b133b07935812867a33e06e81c92c0cdc"
+dependencies = [
+ "libc",
+ "mio 0.8.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3dd60d1080a57a05ab032377049e0591415d2b31afd7028356dbf3cc6dcb066"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "diskarbitration-sys"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f82432ae94d42f160b6e17389d6e1c1eee29827b99ad32d35a0a96bb98bedb5"
+dependencies = [
+ "core-foundation-sys 0.2.3",
+ "libc",
 ]
 
 [[package]]
@@ -488,16 +517,19 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff1447465e2b0d1f40830f9cb214b16845d5e06e7e6ac2ad1f1896b17a64d623"
+checksum = "0c3be1c08fddde81df5502239ce031cca69529a444f259da3252dec67d99f324"
 dependencies = [
  "arc-swap 1.5.0",
  "bitflags",
  "caps",
+ "core-foundation-sys 0.2.3",
+ "diskarbitration-sys",
  "lazy_static",
  "libc",
  "log",
+ "mio 0.8.2",
  "nix 0.22.2",
  "vhost",
  "virtio-queue",
@@ -970,15 +1002,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "micro_http"
-version = "0.2.0"
-source = "git+https://github.com/cloud-hypervisor/micro-http.git?branch=master#f4405cb5afb092e86204c26d589e8c9448721bf0"
-dependencies = [
- "libc",
- "vmm-sys-util",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1143,10 +1166,11 @@ checksum = "b8f8bdf33df195859076e54ab11ee78a1b208382d3a26ec40d142ffc1ecc49ef"
 name = "nydus-api"
 version = "0.1.0"
 dependencies = [
+ "dbs-uhttp",
  "http",
  "lazy_static",
  "log",
- "micro_http",
+ "mio 0.8.2",
  "nydus-utils",
  "serde",
  "serde_derive",
@@ -1649,7 +1673,7 @@ checksum = "23a2ac85147a3a11d77ecf1bc7166ec0b92febfa4461c37944e180f319ece467"
 dependencies = [
  "bitflags",
  "core-foundation",
- "core-foundation-sys",
+ "core-foundation-sys 0.8.2",
  "libc",
  "security-framework-sys",
 ]
@@ -1660,7 +1684,7 @@ version = "2.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9dd14d83160b528b7bfd66439110573efcfbe281b17fc2ca9f39f550d619c7e"
 dependencies = [
- "core-foundation-sys",
+ "core-foundation-sys 0.8.2",
  "libc",
 ]
 
@@ -1816,6 +1840,7 @@ dependencies = [
  "arc-swap 0.4.8",
  "base64",
  "bitflags",
+ "dbs-uhttp",
  "flate2",
  "fuse-backend-rs",
  "futures",

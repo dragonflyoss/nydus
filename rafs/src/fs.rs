@@ -14,6 +14,7 @@
 //! data. There are also [FsPrefetchControl](struct.FsPrefetchControl.html) and
 //! [RafsConfig](struct.RafsConfig.html) to configure an [Rafs] instance.
 
+use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
 use std::any::Any;
 use std::cmp;
 use std::convert::TryFrom;
@@ -30,7 +31,7 @@ use std::time::{Duration, SystemTime};
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
-use fuse_backend_rs::abi::linux_abi::Attr;
+use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
@@ -617,7 +618,7 @@ impl FileSystem for Rafs {
         _ctx: &Context,
         ino: u64,
         _handle: Option<u64>,
-    ) -> Result<(libc::stat64, Duration)> {
+    ) -> Result<(stat64, Duration)> {
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
 
         let attr = self.get_inode_attr(ino).map(|r| {
@@ -737,16 +738,24 @@ impl FileSystem for Rafs {
         Ok(())
     }
 
-    fn statfs(&self, _ctx: &Context, _inode: u64) -> Result<libc::statvfs64> {
+    fn statfs(&self, _ctx: &Context, _inode: u64) -> Result<statvfs64> {
         // Safe because we are zero-initializing a struct with only POD fields.
-        let mut st: libc::statvfs64 = unsafe { std::mem::zeroed() };
+        let mut st: statvfs64 = unsafe { std::mem::zeroed() };
 
         // This matches the behavior of libfuse as it returns these values if the
         // filesystem doesn't implement this method.
         st.f_namemax = 255;
         st.f_bsize = 512;
         st.f_fsid = self.sb.meta.magic as u64;
-        st.f_files = self.sb.meta.inodes_count;
+        #[cfg(target_os = "macos")]
+        {
+            st.f_files = self.sb.meta.inodes_count as u32;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            st.f_files = self.sb.meta.inodes_count;
+        }
 
         Ok(st)
     }

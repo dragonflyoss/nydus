@@ -4,7 +4,6 @@
 
 pub use self::client::RemoteBlobMgr;
 pub use self::server::Server;
-
 mod client;
 mod connection;
 mod message;

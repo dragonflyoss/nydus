@@ -6,10 +6,15 @@
 use std::any::Any;
 use std::ffi::{CStr, CString};
 use std::fs::metadata;
-use std::io::Result;
+use std::io::{Error, Result};
 use std::ops::Deref;
+#[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{
@@ -20,20 +25,22 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fuse_backend_rs::abi::linux_abi::{InHeader, OutHeader};
+use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
 use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
+#[cfg(target_os = "macos")]
+use libc::statfs;
+#[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
 use nydus_app::BuildTimeInfo;
 use serde::Serialize;
-use vmm_sys_util::eventfd::EventFd;
 
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
 };
-use crate::exit_event_manager;
+use crate::exit_daemon;
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 
 #[derive(Serialize)]
@@ -97,22 +104,22 @@ struct FuseServer {
 }
 
 impl FuseServer {
-    fn new(server: Arc<Server<Arc<Vfs>>>, se: &FuseSession, evtfd: EventFd) -> Result<FuseServer> {
+    fn new(server: Arc<Server<Arc<Vfs>>>, se: &FuseSession) -> Result<FuseServer> {
         Ok(FuseServer {
             server,
-            ch: se.new_channel(evtfd)?,
+            ch: se.new_channel()?,
         })
     }
 
     fn svc_loop(&mut self, metrics_hook: &dyn MetricsHook) -> Result<()> {
         // Given error EBADF, it means kernel has shut down this session.
-        let _ebadf = std::io::Error::from_raw_os_error(libc::EBADF);
+        let _ebadf = Error::from_raw_os_error(libc::EBADF);
 
         loop {
             if let Some((reader, writer)) = self
                 .ch
                 .get_request()
-                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?
+                .map_err(|_| Error::from_raw_os_error(libc::EINVAL))?
             {
                 if let Err(e) = self
                     .server
@@ -150,7 +157,6 @@ pub struct FusedevDaemon {
     vfs: Arc<Vfs>,
     threads_cnt: u32,
 
-    event_fd: EventFd,
     state: AtomicI32,
     server: Arc<Server<Arc<Vfs>>>,
     upgrade_mgr: Option<Mutex<UpgradeManager>>,
@@ -164,20 +170,14 @@ pub struct FusedevDaemon {
 
 impl FusedevDaemon {
     fn kick_one_server(&self) -> Result<()> {
-        // Clone event fd must succeed, otherwise fusedev daemon should not work.
-        let evtfd = self.event_fd.try_clone()?;
-        let mut s = FuseServer::new(
-            self.server.clone(),
-            self.session.lock().unwrap().deref(),
-            evtfd,
-        )?;
+        let mut s = FuseServer::new(self.server.clone(), self.session.lock().unwrap().deref())?;
 
         let inflight_op = self.create_inflight_op();
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
             .spawn(move || {
                 let _ = s.svc_loop(&inflight_op);
-                exit_event_manager();
+                exit_daemon();
                 Ok(())
             })
             .map_err(DaemonError::ThreadSpawn)?;
@@ -236,7 +236,7 @@ impl NydusDaemon for FusedevDaemon {
                 .join()
                 .map_err(|e| {
                     DaemonError::WaitDaemon(
-                        *e.downcast::<std::io::Error>()
+                        *e.downcast::<Error>()
                             .unwrap_or_else(|e| Box::new(eother!(e))),
                     )
                 })?
@@ -247,11 +247,10 @@ impl NydusDaemon for FusedevDaemon {
     }
 
     fn disconnect(&self) -> DaemonResult<()> {
-        self.session
-            .lock()
-            .expect("Not expect poisoned lock.")
-            .umount()
-            .map_err(DaemonError::SessionShutdown)
+        let mut session = self.session.lock().expect("Not expect poisoned lock.");
+        session.umount().map_err(DaemonError::SessionShutdown)?;
+        session.wake().map_err(DaemonError::SessionShutdown)?;
+        Ok(())
     }
 
     #[inline]
@@ -266,7 +265,9 @@ impl NydusDaemon for FusedevDaemon {
 
     #[inline]
     fn interrupt(&self) {
-        self.event_fd.write(1).expect("Stop fuse service loop");
+        if let Err(e) = self.disconnect() {
+            error!("disconnect daemon failed: {:?}", e);
+        }
     }
 
     #[inline]
@@ -323,7 +324,36 @@ impl NydusDaemon for FusedevDaemon {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn is_mounted(mp: impl AsRef<Path>) -> Result<bool> {
+    let mp = mp
+        .as_ref()
+        .to_str()
+        .ok_or_else(|| Error::from_raw_os_error(libc::EINVAL))?;
+    let mp = CString::new(String::from(mp)).map_err(|_| Error::from_raw_os_error(libc::EINVAL))?;
+    let mut mpb: Vec<statfs> = Vec::new();
+    let mut mpb_ptr = mpb.as_mut_ptr();
+    let mpb_ptr = &mut mpb_ptr;
+
+    let mpb: Vec<statfs> = unsafe {
+        let res = libc::getmntinfo(mpb_ptr, libc::MNT_NOWAIT);
+        if res < 0 {
+            return Err(Error::from_raw_os_error(res));
+        }
+        let size = res as usize;
+        Vec::from_raw_parts(*mpb_ptr, size, size)
+    };
+    let match_mp = mpb.iter().find(|mp_stat| unsafe {
+        let mp_name = CStr::from_ptr(&mp_stat.f_mntonname as *const i8);
+        let mp = CStr::from_ptr(mp.as_ptr());
+        mp.eq(&mp_name)
+    });
+
+    Ok(match_mp.is_some())
+}
+
 // TODO: Perhaps, we can't rely on `/proc/self/mounts` to tell if it is mounted.
+#[cfg(target_os = "linux")]
 fn is_mounted(mp: impl AsRef<Path>) -> Result<bool> {
     let mounts = CString::new("/proc/self/mounts").unwrap();
     let ty = CString::new("r").unwrap();
@@ -375,6 +405,16 @@ fn is_crashed(path: impl AsRef<Path>, sock: &impl AsRef<Path>) -> Result<bool> {
     Ok(false)
 }
 
+#[cfg(target_os = "macos")]
+fn calc_fuse_conn(mp: impl AsRef<Path>) -> Result<u64> {
+    let st = metadata(mp.as_ref()).map_err(|e| {
+        error!("Stat mountpoint {:?}, {}", mp.as_ref(), &e);
+        e
+    })?;
+    Ok(st.dev())
+}
+
+#[cfg(target_os = "linux")]
 fn calc_fuse_conn(mp: impl AsRef<Path>) -> Result<u64> {
     let st = metadata(mp.as_ref()).map_err(|e| {
         error!("Stat mountpoint {:?}, {}", mp.as_ref(), &e);
@@ -423,7 +463,6 @@ pub fn create_nydus_daemon(
         threads_cnt,
         vfs: vfs.clone(),
 
-        event_fd: EventFd::new(0).unwrap(),
         state: AtomicI32::new(DaemonState::INIT as i32),
         server: Arc::new(Server::new(vfs)),
         upgrade_mgr,

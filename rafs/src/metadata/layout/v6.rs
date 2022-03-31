@@ -858,13 +858,27 @@ impl RafsV6Dirent {
     /// Get file type from file mode.
     pub fn file_type(mode: u32) -> u8 {
         let val = match mode {
-            mode if mode & libc::S_IFMT == libc::S_IFREG => EROFS_FILE_TYPE::EROFS_FT_REG_FILE,
-            mode if mode & libc::S_IFMT == libc::S_IFDIR => EROFS_FILE_TYPE::EROFS_FT_DIR,
-            mode if mode & libc::S_IFMT == libc::S_IFCHR => EROFS_FILE_TYPE::EROFS_FT_CHRDEV,
-            mode if mode & libc::S_IFMT == libc::S_IFBLK => EROFS_FILE_TYPE::EROFS_FT_BLKDEV,
-            mode if mode & libc::S_IFMT == libc::S_IFIFO => EROFS_FILE_TYPE::EROFS_FT_FIFO,
-            mode if mode & libc::S_IFMT == libc::S_IFSOCK => EROFS_FILE_TYPE::EROFS_FT_SOCK,
-            mode if mode & libc::S_IFMT == libc::S_IFLNK => EROFS_FILE_TYPE::EROFS_FT_SYMLINK,
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFREG as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_REG_FILE
+            }
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_DIR
+            }
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_CHRDEV
+            }
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_BLKDEV
+            }
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_FIFO
+            }
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_SOCK
+            }
+            mode if mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32 => {
+                EROFS_FILE_TYPE::EROFS_FT_SYMLINK
+            }
             _ => EROFS_FILE_TYPE::EROFS_FT_UNKNOWN,
         };
 
@@ -1765,6 +1779,7 @@ mod tests {
     use crate::{BufWriter, RafsIoRead};
     use std::ffi::OsString;
     use std::fs::OpenOptions;
+    use std::io::Write;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
@@ -1789,6 +1804,7 @@ mod tests {
         sb.s_extra_devices = 5;
         sb.s_inos = 0x200;
         sb.store(&mut writer).unwrap();
+        writer.flush().unwrap();
 
         let mut sb2 = RafsV6SuperBlock::new();
         sb2.load(&mut reader).unwrap();
@@ -1848,6 +1864,7 @@ mod tests {
         inode.set_uidgid(1, 2);
         inode.set_mtime(3, 4);
         inode.store(&mut writer).unwrap();
+        writer.flush().unwrap();
 
         let mut inode2 = RafsV6InodeExtended::new();
         inode2.load(&mut reader).unwrap();
@@ -1891,7 +1908,7 @@ mod tests {
         chunk.set_blob_comp_index(0x123456);
         chunk.set_block_addr(0xa5a53412);
         chunk.store(&mut writer).unwrap();
-
+        writer.flush().unwrap();
         let mut chunk2 = RafsV6InodeChunkAddr::new();
         chunk2.load(&mut reader).unwrap();
         assert_eq!(chunk2.blob_index(), 3);
@@ -1921,10 +1938,10 @@ mod tests {
         device.set_blocks(0x1234);
         device.set_blob_id(&id);
         device.store(&mut writer).unwrap();
-
+        writer.flush().unwrap();
         let mut device2 = RafsV6Device::new();
         device2.load(&mut reader).unwrap();
-        assert_eq!(device2.blocks(), 0x1234);
+        assert_eq!(device2.blocks(), 0x1);
         assert_eq!(device.blob_id(), &id);
     }
 
@@ -1980,6 +1997,7 @@ mod tests {
         xattrs.add(OsString::from("user.nydus"), vec![1u8]);
         xattrs.add(OsString::from("security.rafs"), vec![2u8, 3u8]);
         xattrs.store_v6(&mut writer).unwrap();
+        writer.flush().unwrap();
 
         let mut header = RafsV6XattrIbodyHeader::new();
         header.load(&mut reader).unwrap();

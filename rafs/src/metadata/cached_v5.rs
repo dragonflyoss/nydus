@@ -18,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use fuse_backend_rs::abi::linux_abi;
+use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::digest::Algorithm;
 use nydus_utils::{digest::RafsDigest, ByteSize};
@@ -399,8 +399,8 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_attr(&self) -> linux_abi::Attr {
-        linux_abi::Attr {
+    fn get_attr(&self) -> fuse_abi::Attr {
+        fuse_abi::Attr {
             ino: self.i_ino,
             size: self.i_size,
             blocks: self.i_blocks,
@@ -546,17 +546,17 @@ impl RafsInode for CachedInodeV5 {
 
     #[inline]
     fn is_dir(&self) -> bool {
-        self.i_mode & libc::S_IFMT == libc::S_IFDIR
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
     }
 
     #[inline]
     fn is_symlink(&self) -> bool {
-        self.i_mode & libc::S_IFMT == libc::S_IFLNK
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
     }
 
     #[inline]
     fn is_reg(&self) -> bool {
-        self.i_mode & libc::S_IFMT == libc::S_IFREG
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
     }
 
     #[inline]
@@ -813,7 +813,7 @@ mod cached_tests {
         ondisk_inode.i_ino = 3;
         ondisk_inode.i_parent = 0;
         ondisk_inode.i_size = 8192;
-        ondisk_inode.i_mode = libc::S_IFREG;
+        ondisk_inode.i_mode = libc::S_IFREG as u32;
         ondisk_inode.i_nlink = 1;
         let mut chunk = RafsV5ChunkInfo::new();
         chunk.uncompress_size = 8192;
@@ -881,7 +881,7 @@ mod cached_tests {
         ondisk_inode.i_parent = 0;
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_symlink_size = symlink_name.byte_size() as u16;
-        ondisk_inode.i_mode = libc::S_IFLNK;
+        ondisk_inode.i_mode = libc::S_IFLNK as u32;
 
         let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
@@ -921,7 +921,7 @@ mod cached_tests {
         ondisk_inode.i_parent = 0;
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_child_count = 4;
-        ondisk_inode.i_mode = libc::S_IFREG;
+        ondisk_inode.i_mode = libc::S_IFREG as u32;
         ondisk_inode.i_size = 1024 * 1024 * 3 + 8192;
 
         let inode = RafsV5InodeWrapper {
