@@ -1,3 +1,4 @@
+// Copyright 2022 Alibaba Cloud. All rights reserved.
 // Copyright 2020 Ant Group. All rights reserved.
 // Copyright © 2019 Intel Corporation
 //
@@ -26,6 +27,7 @@ use crate::http_endpoint_v1::{
     MetricsBlobcacheHandler, MetricsFilesHandler, MetricsHandler, MetricsInflightHandler,
     MetricsPatternHandler, MountHandler, SendFuseFdHandler, TakeoverHandler, HTTP_ROOT_V1,
 };
+use crate::http_endpoint_v2::{BlobObjectListHandlerV2, InfoHandlerV2, HTTP_ROOT_V2};
 
 const EXIT_TOKEN: Token = Token(usize::MAX);
 const REQUEST_TOKEN: Token = Token(1);
@@ -50,6 +52,16 @@ pub struct DaemonConf {
     pub log_level: String,
 }
 
+#[derive(Clone, Deserialize, Debug)]
+pub struct BlobObjectConf {
+    pub blob_id: String,
+}
+
+#[derive(Clone, Deserialize, Debug)]
+pub struct BlobObjectParam {
+    pub blob_id: String,
+}
+
 #[derive(Debug)]
 pub enum ApiRequest {
     // Common requests
@@ -57,6 +69,13 @@ pub enum ApiRequest {
 
     // Nydus API v1 requests
     DaemonInfo,
+
+    // Nydus API v2
+    DaemonInfoV2,
+    CreateBlobObject(BlobObjectConf),
+    GetBlobObject(BlobObjectParam),
+    DeleteBlobObject(BlobObjectParam),
+    ListBlobObject,
 
     Events,
     Mount(String, ApiMountCmd),
@@ -127,6 +146,10 @@ pub enum ApiResponsePayload {
     Empty,
     /// Daemon version, configuration and status information in json.
     DaemonInfo(String),
+
+    /// List of blob objects, v2
+    BlobObjectList(String),
+
     Events(String),
     FsBackendInfo(String),
     /// Nydus filesystem global metrics
@@ -167,6 +190,12 @@ pub enum HttpError {
     BackendMetrics(ApiError),
     FsBackendInfo(ApiError),
     InflightMetrics(ApiError),
+    /// Failed to create blob object
+    CreateBlobObject(ApiError),
+    /// Failed to create blob object
+    DeleteBlobObject(ApiError),
+    /// Failed to list existing blob objects
+    GetBlobObjects(ApiError),
 }
 
 /// This is the response sent by the API server through the mpsc channel.
@@ -277,6 +306,12 @@ macro_rules! endpoint_v1 {
     };
 }
 
+macro_rules! endpoint_v2 {
+    ($path:expr) => {
+        format!("{}{}", HTTP_ROOT_V2, $path)
+    };
+}
+
 lazy_static! {
     /// HTTP_ROUTES contain all the nydusd HTTP routes.
     pub static ref HTTP_ROUTES: HttpRoutes = {
@@ -298,6 +333,10 @@ lazy_static! {
         r.routes.insert(endpoint_v1!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/inflight"), Box::new(MetricsInflightHandler{}));
+
+        // Nydus API, v2
+        r.routes.insert(endpoint_v2!("/daemon"), Box::new(InfoHandlerV2{}));
+        r.routes.insert(endpoint_v2!("/blob_objects"), Box::new(BlobObjectListHandlerV2{}));
 
         r
     };
@@ -497,6 +536,11 @@ mod tests {
             .get("/api/v1/metrics/blobcache")
             .is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/inflight").is_some());
+    }
+
+    #[test]
+    fn test_http_api_routes_v2() {
+        assert!(HTTP_ROUTES.routes.get("/api/v2/daemon").is_some());
     }
 
     #[test]
