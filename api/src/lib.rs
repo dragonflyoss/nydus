@@ -11,3 +11,4 @@ extern crate lazy_static;
 
 pub mod http;
 pub mod http_endpoint_v1;
+pub mod http_endpoint_v2;

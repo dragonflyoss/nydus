@@ -17,6 +17,8 @@ use crate::http::{
 
 pub const HTTP_ROOT_V1: &str = "/api/v1";
 
+// Convert an ApiResponse to a HTTP response.
+//
 // API server has successfully processed the request, but can't fulfill that. Therefore,
 // a `error_response` is generated whose status code is 4XX or 5XX. With error response,
 // it still returns Ok(error_response) to http request handling framework, which means
@@ -36,6 +38,7 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
                 BlobcacheMetrics(d) => success_response(Some(d)),
                 FsBackendInfo(d) => success_response(Some(d)),
                 InflightMetrics(d) => success_response(Some(d)),
+                _ => panic!("Unexpected response message from API service"),
             }
         }
         Err(e) => {
