@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use nydus_utils::digest::{self};
 use rafs::metadata::layout::RAFS_ROOT_INODE;
-use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
+use rafs::metadata::{RafsInode, RafsMode, RafsSuper, RafsSuperMeta};
+use storage::compress;
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
@@ -17,6 +19,32 @@ use crate::core::context::ArtifactStorage;
 use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext};
 use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
 use crate::core::tree::{MetadataTreeBuilder, Tree};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Flags {
+    explicit_uidgid: bool,
+    has_xattr: bool,
+    compressor: compress::Algorithm,
+    digester: digest::Algorithm,
+}
+
+impl Flags {
+    fn from_meta(meta: &RafsSuperMeta) -> Self {
+        Self {
+            explicit_uidgid: meta.explicit_uidgid(),
+            has_xattr: meta.has_xattr(),
+            compressor: meta.get_compressor(),
+            digester: meta.get_digester(),
+        }
+    }
+
+    fn set_to_ctx(&self, ctx: &mut BuildContext) {
+        ctx.explicit_uidgid = self.explicit_uidgid;
+        ctx.has_xattr = self.has_xattr;
+        ctx.compressor = self.compressor;
+        ctx.digester = self.digester;
+    }
+}
 
 /// Merger merge multiple bootstraps (generally come from nydus tar blob of
 /// intermediate image layer) into one bootstrap (uses as final image layer).
@@ -45,6 +73,7 @@ impl Merger {
 
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
+        let mut flags: Option<Flags> = None;
 
         // Get the blobs come from chunk dict bootstrap.
         let mut chunk_dict_blobs = HashSet::new();
@@ -59,6 +88,22 @@ impl Merger {
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
             let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
+
+            let current_flags = Flags::from_meta(&rs.meta);
+            if let Some(flags) = &flags {
+                if flags != &current_flags {
+                    bail!(
+                        "inconsistent flags between bootstraps, current bootstrap {:?}, flags {:?}",
+                        bootstrap_path,
+                        current_flags,
+                    );
+                }
+            } else {
+                // Keep final bootstrap following superblock flags of source bootstraps.
+                current_flags.set_to_ctx(ctx);
+                flags = Some(current_flags);
+            }
+
             let parent_blobs = rs.superblock.get_blob_infos();
             let blob_hash = Self::get_blob_hash(bootstrap_path)?;
             let mut blob_idx_map = Vec::new();
