@@ -83,6 +83,13 @@ impl ApiServer {
 
             ApiRequest::SendFuseFd => self.send_fuse_fd(),
             ApiRequest::Takeover => self.do_takeover(),
+
+            // Nydus API v2
+            ApiRequest::DaemonInfoV2 => todo!(),
+            ApiRequest::GetBlobObject(_param) => todo!(),
+            ApiRequest::CreateBlobObject(_cfg) => todo!(),
+            ApiRequest::DeleteBlobObject(_param) => todo!(),
+            ApiRequest::ListBlobObject => todo!(),
         };
 
         self.respond(resp);
