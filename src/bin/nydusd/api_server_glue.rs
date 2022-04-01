@@ -14,7 +14,7 @@ use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
 use nydus::{FsBackendType, NydusError};
-use nydus_api::http_endpoint::{
+use nydus_api::http_endpoint_v1::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
     DaemonErrorKind, MetricsErrorKind,
 };
