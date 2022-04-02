@@ -14,7 +14,7 @@ use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
 use nydus::{FsBackendType, NydusError};
-use nydus_api::http_endpoint::{
+use nydus_api::http::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
     DaemonErrorKind, MetricsErrorKind,
 };
@@ -226,7 +226,7 @@ impl ApiServer {
 
     fn do_mount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
-            .map_err(|e| ApiError::MountFailure(DaemonError::from(e).into()))?;
+            .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
         self.daemon
             .mount(FsBackendMountCmd {
                 fs_type,
@@ -236,12 +236,12 @@ impl ApiServer {
                 prefetch_files: cmd.prefetch_files,
             })
             .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::MountFailure(e.into()))
+            .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn do_remount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
-            .map_err(|e| ApiError::MountFailure(DaemonError::from(e).into()))?;
+            .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
         self.daemon
             .remount(FsBackendMountCmd {
                 fs_type,
@@ -251,14 +251,14 @@ impl ApiServer {
                 prefetch_files: cmd.prefetch_files,
             })
             .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::MountFailure(e.into()))
+            .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn do_umount(&self, mountpoint: String) -> ApiResponse {
         self.daemon
             .umount(FsBackendUmountCmd { mountpoint })
             .map(|_| ApiResponsePayload::Empty)
-            .map_err(|e| ApiError::MountFailure(e.into()))
+            .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn send_fuse_fd(&self) -> ApiResponse {

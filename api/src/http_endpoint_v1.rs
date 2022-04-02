@@ -8,202 +8,14 @@
 //! to export running metrics. So it will be easier to wrap different crates' Error
 //! into.
 
-use std::fmt::Debug;
-use std::io;
-use std::sync::mpsc::{RecvError, SendError};
+use dbs_uhttp::{Method, Request, Response};
 
-use dbs_uhttp::{Body, Method, Request, Response, StatusCode, Version};
+use crate::http::{
+    error_response, extract_query_part, parse_body, success_response, translate_status_code,
+    ApiError, ApiRequest, ApiResponse, ApiResponsePayload, EndpointHandler, HttpError, HttpResult,
+};
 
-use serde::Deserialize;
-use serde_json::Error as SerdeError;
-
-use crate::http::{extract_query_part, EndpointHandler};
-
-use nydus_utils::metrics::IoStatsError;
-
-#[derive(Debug)]
-pub enum DaemonErrorKind {
-    NotReady,
-    UpgradeManager,
-    Unsupported,
-    Connect(io::Error),
-    SendFd,
-    RecvFd,
-    Disconnect(io::Error),
-    Channel,
-    Serde(SerdeError),
-    UnexpectedEvent(String),
-    Other(String),
-}
-
-#[derive(Debug)]
-pub enum MetricsErrorKind {
-    // Errors about daemon working status
-    Daemon(DaemonErrorKind),
-    // Errors about metrics/stats recorders
-    Stats(IoStatsError),
-}
-
-/// API errors are sent back from the Nydusd API server through the ApiResponse.
-#[derive(Debug)]
-pub enum ApiError {
-    /// Cannot write to EventFd.
-    EventFdWrite(io::Error),
-    /// Cannot mount a resource
-    MountFailure(DaemonErrorKind),
-    /// API request send error
-    RequestSend(SendError<Option<ApiRequest>>),
-    /// Wrong response payload type
-    ResponsePayloadType,
-    /// API response receive error
-    ResponseRecv(RecvError),
-    DaemonAbnormal(DaemonErrorKind),
-    Events(String),
-    Metrics(MetricsErrorKind),
-}
-pub type ApiResult<T> = std::result::Result<T, ApiError>;
-
-#[derive(Serialize)]
-pub enum ApiResponsePayload {
-    /// No data is sent on the channel.
-    Empty,
-    /// Nydus daemon general working information.
-    DaemonInfo(String),
-    Events(String),
-    FsBackendInfo(String),
-    /// Nydus filesystem global metrics
-    FsGlobalMetrics(String),
-    /// Nydus filesystem per-file metrics
-    FsFilesMetrics(String),
-    FsFilesPatterns(String),
-    BackendMetrics(String),
-    BlobcacheMetrics(String),
-    InflightMetrics(String),
-}
-
-/// This is the response sent by the API server through the mpsc channel.
-pub type ApiResponse = std::result::Result<ApiResponsePayload, ApiError>;
-pub type HttpResult = std::result::Result<Response, HttpError>;
-
-#[derive(Debug)]
-pub enum ApiRequest {
-    DaemonInfo,
-    Events,
-    Mount(String, ApiMountCmd),
-    Remount(String, ApiMountCmd),
-    Umount(String),
-    ConfigureDaemon(DaemonConf),
-    ExportGlobalMetrics(Option<String>),
-    ExportFilesMetrics(Option<String>, bool),
-    ExportAccessPatterns(Option<String>),
-    ExportBackendMetrics(Option<String>),
-    ExportBlobcacheMetrics(Option<String>),
-    ExportInflightMetrics,
-    ExportFsBackendInfo(String),
-    SendFuseFd,
-    Takeover,
-    Exit,
-}
-
-#[derive(Clone, Deserialize, Debug)]
-pub struct ApiMountCmd {
-    pub source: String,
-    #[serde(default)]
-    pub fs_type: String,
-    pub config: String,
-    #[serde(default)]
-    pub prefetch_files: Option<Vec<String>>,
-}
-
-#[derive(Clone, Deserialize, Debug)]
-pub struct ApiUmountCmd {
-    pub mountpoint: String,
-}
-
-fn parse_body<'a, F: Deserialize<'a>>(b: &'a Body) -> Result<F, HttpError> {
-    serde_json::from_slice::<F>(b.raw()).map_err(HttpError::ParseBody)
-}
-
-#[derive(Clone, Deserialize, Debug)]
-pub struct DaemonConf {
-    pub log_level: String,
-}
-
-/// Errors associated with Nydus management
-#[derive(Debug)]
-pub enum HttpError {
-    NoRoute,
-    BadRequest,
-    QueryString(String),
-    /// API request receive error
-    SerdeJsonDeserialize(SerdeError),
-    SerdeJsonSerialize(SerdeError),
-    ParseBody(SerdeError),
-    /// Could not query daemon info
-    Info(ApiError),
-    Events(ApiError),
-    /// Could not mount resource
-    Mount(ApiError),
-    GlobalMetrics(ApiError),
-    FsFilesMetrics(ApiError),
-    Pattern(ApiError),
-    Configure(ApiError),
-    Upgrade(ApiError),
-    BlobcacheMetrics(ApiError),
-    BackendMetrics(ApiError),
-    FsBackendInfo(ApiError),
-    InflightMetrics(ApiError),
-}
-
-fn success_response(body: Option<String>) -> Response {
-    let status_code = if body.is_some() {
-        StatusCode::OK
-    } else {
-        StatusCode::NoContent
-    };
-    let mut r = Response::new(Version::Http11, status_code);
-    if let Some(b) = body {
-        r.set_body(Body::new(b));
-    }
-    r
-}
-
-#[derive(Serialize, Debug)]
-struct ErrorMessage {
-    code: String,
-    message: String,
-}
-
-impl From<ErrorMessage> for Vec<u8> {
-    fn from(msg: ErrorMessage) -> Self {
-        // Safe to unwrap since `ErrorMessage` must succeed in serialization
-        serde_json::to_vec(&msg).unwrap()
-    }
-}
-
-pub fn error_response(error: HttpError, status: StatusCode) -> Response {
-    let mut response = Response::new(Version::Http11, status);
-
-    let err_msg = ErrorMessage {
-        code: "UNDEFINED".to_string(),
-        message: format!("{:?}", error),
-    };
-    response.set_body(Body::new(err_msg));
-    response
-}
-
-fn translate_status_code(e: &ApiError) -> StatusCode {
-    match e {
-        ApiError::DaemonAbnormal(kind) | ApiError::MountFailure(kind) => match kind {
-            DaemonErrorKind::NotReady => StatusCode::ServiceUnavailable,
-            DaemonErrorKind::Unsupported => StatusCode::NotImplemented,
-            DaemonErrorKind::UnexpectedEvent(_) => StatusCode::BadRequest,
-            _ => StatusCode::InternalServerError,
-        },
-        ApiError::Metrics(MetricsErrorKind::Stats(IoStatsError::NoCounter)) => StatusCode::NotFound,
-        _ => StatusCode::InternalServerError,
-    }
-}
+pub const HTTP_ROOT_V1: &str = "/api/v1";
 
 // API server has successfully processed the request, but can't fulfill that. Therefore,
 // a `error_response` is generated whose status code is 4XX or 5XX. With error response,
@@ -227,8 +39,8 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
             }
         }
         Err(e) => {
-            let sc = translate_status_code(&e);
-            error_response(op(e), sc)
+            let status_code = translate_status_code(&e);
+            error_response(op(e), status_code)
         }
     }
 }
@@ -243,7 +55,7 @@ impl EndpointHandler for InfoHandler {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
                 let r = kicker(ApiRequest::DaemonInfo);
-                Ok(convert_to_response(r, HttpError::Info))
+                Ok(convert_to_response(r, HttpError::DaemonInfo))
             }
             (Method::Put, Some(body)) => {
                 let conf = parse_body(body)?;

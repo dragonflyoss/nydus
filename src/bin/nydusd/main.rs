@@ -472,7 +472,8 @@ fn main() -> Result<()> {
         let api_notifier = api_server_subscriber.get_waker();
         let api_server_thread = api_server_subscriber.run()?;
 
-        let (ret, thread_exit_waker) = start_http_thread(apisock, api_notifier, to_api, from_api)?;
+        let (ret, thread_exit_waker) =
+            start_http_thread(apisock, Some(api_notifier), to_api, from_api)?;
         http_thread_and_waker = Some((ret, api_server_thread, thread_exit_waker));
         info!("api server running at {}", apisock);
     }
