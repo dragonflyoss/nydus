@@ -26,10 +26,10 @@ VIRIOFS_COMMON = --target-dir target-virtiofs --features=virtiofs --release
 #   $(2): How to build the golang project
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
-	if [ $(DOCKER) = "true" ]; then
-		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.17 $(2)
-	else
-		$(2) -C $(1)
+	if [ $(DOCKER) = "true" ]; then \
+		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.17 $(2) ;\
+	else \
+		$(2) -C $(1); \
 	fi
 endef
 
@@ -81,11 +81,9 @@ clean:
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
 ut:
 	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 cargo test --workspace $(FUSEDEV_COMMON) -- --skip integration --nocapture --test-threads=8
-ifdef NYDUS_TEST_VIRTIOFS
 # If virtiofs test must be performed, only run binary part since other package is not affected by feature - virtiofs
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
 	RUST_BACKTRACE=1 cargo test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
-endif
 
 macos-ut:
 	cargo clippy --target-dir target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings
@@ -189,8 +187,6 @@ all-contrib-static-release: nydusify-static ctr-remote-static \
 all-contrib-test: nydusify-test ctr-remote-test \
 				nydus-overlayfs-test docker-nydus-graphdriver-test
 
-# https://www.gnu.org/software/make/manual/html_node/One-Shell.html
-.ONESHELL:
 docker-example: all-static-release
 	cp ${current_dir}/target-fusedev/${ARCH}-unknown-linux-musl/release/nydusd misc/example
 	cp ${current_dir}/target-fusedev/${ARCH}-unknown-linux-musl/release/nydus-image misc/example
