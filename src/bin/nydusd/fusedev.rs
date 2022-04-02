@@ -36,8 +36,9 @@ use serde::Serialize;
 
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
-    DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon,
+    DaemonStateMachineSubscriber, NydusDaemon,
 };
+use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsService};
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 use crate::DAEMON_CONTROLLER;
 
@@ -142,33 +143,116 @@ impl FuseServer {
     }
 }
 
-pub struct FusedevDaemon {
-    bti: BuildTimeInfo,
-    id: Option<String>,
-    request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
-    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
-    state: AtomicI32,
-    supervisor: Option<String>,
-
+pub struct FusedevFsService {
     /// Fuse connection ID which usually equals to `st_dev`
     pub conn: AtomicU64,
     pub failover_policy: FailoverPolicy,
     pub session: Mutex<FuseSession>,
 
+    server: Arc<Server<Arc<Vfs>>>,
     upgrade_mgr: Option<Mutex<UpgradeManager>>,
     vfs: Arc<Vfs>,
-    threads_cnt: u32,
-    server: Arc<Server<Arc<Vfs>>>,
 
     backend_collection: Mutex<FsBackendCollection>,
     inflight_ops: Mutex<Vec<FuseOpWrapper>>,
+}
+
+impl FusedevFsService {
+    fn new(
+        vfs: Arc<Vfs>,
+        mnt: &Path,
+        supervisor: Option<&String>,
+        fp: FailoverPolicy,
+        readonly: bool,
+    ) -> Result<Self> {
+        let session = FuseSession::new(&mnt, "rafs", "", readonly)?;
+        let upgrade_mgr = supervisor
+            .as_ref()
+            .map(|s| Mutex::new(UpgradeManager::new(s.to_string().into())));
+
+        Ok(FusedevFsService {
+            vfs: vfs.clone(),
+            conn: AtomicU64::new(0),
+            failover_policy: fp,
+            session: Mutex::new(session),
+            server: Arc::new(Server::new(vfs)),
+            upgrade_mgr,
+
+            backend_collection: Default::default(),
+            inflight_ops: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn create_fuse_server(&self) -> Result<FuseServer> {
+        FuseServer::new(self.server.clone(), self.session.lock().unwrap().deref())
+    }
+
+    fn create_inflight_op(&self) -> FuseOpWrapper {
+        let inflight_op = FuseOpWrapper::default();
+
+        // "Not expected poisoned lock"
+        self.inflight_ops.lock().unwrap().push(inflight_op.clone());
+
+        inflight_op
+    }
+
+    fn disconnect(&self) -> DaemonResult<()> {
+        let mut session = self.session.lock().expect("Not expect poisoned lock.");
+        session.umount().map_err(DaemonError::SessionShutdown)?;
+        session.wake().map_err(DaemonError::SessionShutdown)?;
+        Ok(())
+    }
+}
+
+impl FsService for FusedevFsService {
+    #[inline]
+    fn get_vfs(&self) -> &Vfs {
+        &self.vfs
+    }
+
+    #[inline]
+    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+        self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
+    }
+
+    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
+        self.backend_collection.lock().unwrap()
+    }
+
+    fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
+        let ops = self.inflight_ops.lock().unwrap();
+
+        let r = ops
+            .iter()
+            .filter(|w| w.op.lock().unwrap().is_some())
+            .map(|w| &w.op)
+            .collect::<Vec<&Arc<Mutex<Option<FuseOp>>>>>();
+
+        if r.is_empty() {
+            Ok(None)
+        } else {
+            let resp = serde_json::to_string(&r).map_err(DaemonError::Serde)?;
+            Ok(Some(resp))
+        }
+    }
+}
+
+pub struct FusedevDaemon {
+    bti: BuildTimeInfo,
+    id: Option<String>,
+    request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
+    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    service: Arc<FusedevFsService>,
+    state: AtomicI32,
+    supervisor: Option<String>,
+    threads_cnt: u32,
     threads: Mutex<Vec<JoinHandle<Result<()>>>>,
 }
 
 impl FusedevDaemon {
     fn kick_one_server(&self, waker: Arc<Waker>) -> Result<()> {
-        let mut s = FuseServer::new(self.server.clone(), self.session.lock().unwrap().deref())?;
-        let inflight_op = self.create_inflight_op();
+        let mut s = self.service.create_fuse_server()?;
+        let inflight_op = self.service.create_inflight_op();
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
             .spawn(move || {
@@ -182,15 +266,6 @@ impl FusedevDaemon {
         self.threads.lock().unwrap().push(thread);
 
         Ok(())
-    }
-
-    fn create_inflight_op(&self) -> FuseOpWrapper {
-        let inflight_op = FuseOpWrapper::default();
-
-        // "Not expected poisoned lock"
-        self.inflight_ops.lock().unwrap().push(inflight_op.clone());
-
-        inflight_op
     }
 }
 
@@ -221,8 +296,9 @@ impl NydusDaemon for FusedevDaemon {
         self.id.clone()
     }
 
-    fn version(&self) -> BuildTimeInfo {
-        self.bti.clone()
+    #[inline]
+    fn get_state(&self) -> DaemonState {
+        self.state.load(Ordering::Relaxed).into()
     }
 
     #[inline]
@@ -230,9 +306,8 @@ impl NydusDaemon for FusedevDaemon {
         self.state.store(state as i32, Ordering::Relaxed);
     }
 
-    #[inline]
-    fn get_state(&self) -> DaemonState {
-        self.state.load(Ordering::Relaxed).into()
+    fn version(&self) -> BuildTimeInfo {
+        self.bti.clone()
     }
 
     fn start(&self) -> DaemonResult<()> {
@@ -247,15 +322,16 @@ impl NydusDaemon for FusedevDaemon {
     }
 
     fn disconnect(&self) -> DaemonResult<()> {
-        let mut session = self.session.lock().expect("Not expect poisoned lock.");
-        session.umount().map_err(DaemonError::SessionShutdown)?;
-        session.wake().map_err(DaemonError::SessionShutdown)?;
-        Ok(())
+        self.service.disconnect()
     }
 
     #[inline]
     fn interrupt(&self) {
-        let session = self.session.lock().expect("Not expect poisoned lock.");
+        let session = self
+            .service
+            .session
+            .lock()
+            .expect("Not expect poisoned lock.");
         if let Err(e) = session.wake().map_err(DaemonError::SessionShutdown) {
             error!("stop fuse service thread failed: {:?}", e);
         }
@@ -296,35 +372,8 @@ impl NydusDaemon for FusedevDaemon {
         upgrade::fusedev_upgrade::restore(self)
     }
 
-    #[inline]
-    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
-        self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
-    }
-
-    #[inline]
-    fn get_vfs(&self) -> &Vfs {
-        &self.vfs
-    }
-
-    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
-        self.backend_collection.lock().unwrap()
-    }
-
-    fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
-        let ops = self.inflight_ops.lock().unwrap();
-
-        let r = ops
-            .iter()
-            .filter(|w| w.op.lock().unwrap().is_some())
-            .map(|w| &w.op)
-            .collect::<Vec<&Arc<Mutex<Option<FuseOp>>>>>();
-
-        if r.is_empty() {
-            Ok(None)
-        } else {
-            let resp = serde_json::to_string(&r).map_err(DaemonError::Serde)?;
-            Ok(Some(resp))
-        }
+    fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
+        Some(self.service.clone())
     }
 }
 
@@ -446,38 +495,21 @@ pub fn create_fuse_daemon(
     bti: BuildTimeInfo,
 ) -> Result<Arc<dyn NydusDaemon + Send + Sync>> {
     let mnt = Path::new(mountpoint).canonicalize()?;
-    let session = FuseSession::new(&mnt, "rafs", "", readonly)?;
-
-    // Create upgrade manager
-    let upgrade_mgr = supervisor
-        .as_ref()
-        .map(|s| Mutex::new(UpgradeManager::new(s.to_string().into())));
-
     let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
     let (result_sender, result_receiver) = channel::<DaemonResult<()>>();
-
+    let service = FusedevFsService::new(vfs, &mnt, supervisor.as_ref(), fp, readonly)?;
     let daemon = Arc::new(FusedevDaemon {
-        conn: AtomicU64::new(0),
-        failover_policy: fp,
-        session: Mutex::new(session),
-
         bti,
         id,
         supervisor,
         threads_cnt,
-        vfs: vfs.clone(),
 
         state: AtomicI32::new(DaemonState::INIT as i32),
-        server: Arc::new(Server::new(vfs)),
-        upgrade_mgr,
-
-        backend_collection: Default::default(),
-        inflight_ops: Mutex::new(Vec::new()),
         result_receiver: Mutex::new(result_receiver),
         request_sender: Arc::new(Mutex::new(trigger)),
+        service: Arc::new(service),
         threads: Mutex::new(Vec::new()),
     });
-
     let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
     let machine_thread = machine.kick_state_machine()?;
     daemon.threads.lock().unwrap().push(machine_thread);
@@ -488,13 +520,16 @@ pub fn create_fuse_daemon(
         || api_sock.is_none()
     {
         if let Some(cmd) = mount_cmd {
-            daemon.mount(cmd)?;
+            daemon.service.mount(cmd)?;
         }
-        daemon.session.lock().unwrap().mount()?;
+        daemon.service.session.lock().unwrap().mount()?;
         daemon
             .on_event(DaemonStateMachineInput::Mount)
             .map_err(|e| eother!(e))?;
-        daemon.conn.store(calc_fuse_conn(mnt)?, Ordering::Relaxed);
+        daemon
+            .service
+            .conn
+            .store(calc_fuse_conn(mnt)?, Ordering::Relaxed);
     }
 
     Ok(daemon)
