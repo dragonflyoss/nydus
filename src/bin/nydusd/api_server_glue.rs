@@ -21,7 +21,8 @@ use nydus_api::http::{
 };
 use nydus_utils::metrics;
 
-use crate::daemon::{DaemonError, FsBackendMountCmd, FsBackendUmountCmd, NydusDaemon};
+use crate::daemon::{DaemonError, NydusDaemon};
+use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd, FsService};
 use crate::DAEMON_CONTROLLER;
 
 impl From<DaemonError> for DaemonErrorKind {
@@ -195,8 +196,8 @@ impl ApiServer {
     }
 
     fn backend_info(&self, mountpoint: &str) -> ApiResponse {
-        let d = self.get_daemon_object()?;
-        let info = d
+        let info = self
+            .get_default_fs_service()?
             .export_backend_info(mountpoint)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?;
         Ok(ApiResponsePayload::FsBackendInfo(info))
@@ -230,8 +231,8 @@ impl ApiServer {
     /// It means 3 threads are processing inflight requests.
     fn export_inflight_metrics(&self) -> ApiResponse {
         // TODO: Implement automatic error conversion between DaemonError and ApiError.
-        let d = self.get_daemon_object()?;
-        if let Some(ops) = d
+        let fs = self.get_default_fs_service()?;
+        if let Some(ops) = fs
             .export_inflight_ops()
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?
         {
@@ -244,8 +245,8 @@ impl ApiServer {
     fn do_mount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
             .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
-        let d = self.get_daemon_object()?;
-        d.mount(FsBackendMountCmd {
+        let fs = self.get_default_fs_service()?;
+        fs.mount(FsBackendMountCmd {
             fs_type,
             mountpoint,
             config: cmd.config,
@@ -259,21 +260,21 @@ impl ApiServer {
     fn do_remount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
             .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
-        let d = self.get_daemon_object()?;
-        d.remount(FsBackendMountCmd {
-            fs_type,
-            mountpoint,
-            config: cmd.config,
-            source: cmd.source,
-            prefetch_files: cmd.prefetch_files,
-        })
-        .map(|_| ApiResponsePayload::Empty)
-        .map_err(|e| ApiError::MountFilesystem(e.into()))
+        self.get_default_fs_service()?
+            .remount(FsBackendMountCmd {
+                fs_type,
+                mountpoint,
+                config: cmd.config,
+                source: cmd.source,
+                prefetch_files: cmd.prefetch_files,
+            })
+            .map(|_| ApiResponsePayload::Empty)
+            .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
 
     fn do_umount(&self, mountpoint: String) -> ApiResponse {
-        let d = self.get_daemon_object()?;
-        d.umount(FsBackendUmountCmd { mountpoint })
+        self.get_default_fs_service()?
+            .umount(FsBackendUmountCmd { mountpoint })
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::MountFilesystem(e.into()))
     }
@@ -284,6 +285,10 @@ impl ApiServer {
         d.save()
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::DaemonAbnormal(e.into()))
+    }
+
+    fn get_default_fs_service(&self) -> std::result::Result<Arc<dyn FsService>, ApiError> {
+        todo!();
     }
 }
 

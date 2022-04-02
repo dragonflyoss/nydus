@@ -2,7 +2,9 @@ use std::convert::TryFrom;
 #[cfg(feature = "fusedev")]
 use std::path::PathBuf;
 
-use crate::daemon::{DaemonResult, FsBackendMountCmd, FsBackendUmountCmd};
+use crate::daemon::DaemonResult;
+use crate::fs_service::FsBackendUmountCmd;
+use crate::FsBackendMountCmd;
 
 #[derive(Debug)]
 pub enum UpgradeMgrError {}
