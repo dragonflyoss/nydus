@@ -12,14 +12,13 @@ use std::ops::Deref;
 use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicI32, AtomicU64, Ordering},
-    mpsc::{channel, Receiver},
+    mpsc::{channel, Receiver, Sender},
     Arc, Mutex, MutexGuard,
 };
 use std::thread::{self, JoinHandle};
@@ -29,8 +28,6 @@ use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
 use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
-#[cfg(target_os = "macos")]
-use libc::statfs;
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
@@ -39,7 +36,7 @@ use serde::Serialize;
 
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
-    DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
+    DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon,
 };
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 use crate::DAEMON_CONTROLLER;
@@ -146,25 +143,25 @@ impl FuseServer {
 }
 
 pub struct FusedevDaemon {
+    bti: BuildTimeInfo,
+    id: Option<String>,
+    request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
+    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    state: AtomicI32,
+    supervisor: Option<String>,
+
     /// Fuse connection ID which usually equals to `st_dev`
     pub conn: AtomicU64,
     pub failover_policy: FailoverPolicy,
     pub session: Mutex<FuseSession>,
 
-    bti: BuildTimeInfo,
-    id: Option<String>,
-    supervisor: Option<String>,
+    upgrade_mgr: Option<Mutex<UpgradeManager>>,
     vfs: Arc<Vfs>,
     threads_cnt: u32,
-
-    state: AtomicI32,
     server: Arc<Server<Arc<Vfs>>>,
-    upgrade_mgr: Option<Mutex<UpgradeManager>>,
 
     backend_collection: Mutex<FsBackendCollection>,
     inflight_ops: Mutex<Vec<FuseOpWrapper>>,
-    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
-    trigger: Arc<Mutex<Trigger>>,
     threads: Mutex<Vec<JoinHandle<Result<()>>>>,
 }
 
@@ -199,7 +196,7 @@ impl FusedevDaemon {
 
 impl DaemonStateMachineSubscriber for FusedevDaemon {
     fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
-        self.trigger
+        self.request_sender
             .lock()
             .unwrap()
             .send(event)
@@ -219,6 +216,25 @@ impl NydusDaemon for FusedevDaemon {
         self
     }
 
+    #[inline]
+    fn id(&self) -> Option<String> {
+        self.id.clone()
+    }
+
+    fn version(&self) -> BuildTimeInfo {
+        self.bti.clone()
+    }
+
+    #[inline]
+    fn set_state(&self, state: DaemonState) {
+        self.state.store(state as i32, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn get_state(&self) -> DaemonState {
+        self.state.load(Ordering::Relaxed).into()
+    }
+
     fn start(&self) -> DaemonResult<()> {
         info!("start {} fuse servers", self.threads_cnt);
         for _ in 0..self.threads_cnt {
@@ -228,6 +244,21 @@ impl NydusDaemon for FusedevDaemon {
         }
 
         Ok(())
+    }
+
+    fn disconnect(&self) -> DaemonResult<()> {
+        let mut session = self.session.lock().expect("Not expect poisoned lock.");
+        session.umount().map_err(DaemonError::SessionShutdown)?;
+        session.wake().map_err(DaemonError::SessionShutdown)?;
+        Ok(())
+    }
+
+    #[inline]
+    fn interrupt(&self) {
+        let session = self.session.lock().expect("Not expect poisoned lock.");
+        if let Err(e) = session.wake().map_err(DaemonError::SessionShutdown) {
+            error!("stop fuse service thread failed: {:?}", e);
+        }
     }
 
     fn wait(&self) -> DaemonResult<()> {
@@ -252,39 +283,9 @@ impl NydusDaemon for FusedevDaemon {
         Ok(())
     }
 
-    fn disconnect(&self) -> DaemonResult<()> {
-        let mut session = self.session.lock().expect("Not expect poisoned lock.");
-        session.umount().map_err(DaemonError::SessionShutdown)?;
-        session.wake().map_err(DaemonError::SessionShutdown)?;
-        Ok(())
-    }
-
-    #[inline]
-    fn id(&self) -> Option<String> {
-        self.id.clone()
-    }
-
     #[inline]
     fn supervisor(&self) -> Option<String> {
         self.supervisor.clone()
-    }
-
-    #[inline]
-    fn interrupt(&self) {
-        let session = self.session.lock().expect("Not expect poisoned lock.");
-        if let Err(e) = session.wake().map_err(DaemonError::SessionShutdown) {
-            error!("stop fuse service thread failed: {:?}", e);
-        }
-    }
-
-    #[inline]
-    fn set_state(&self, state: DaemonState) {
-        self.state.store(state as i32, Ordering::Relaxed);
-    }
-
-    #[inline]
-    fn get_state(&self) -> DaemonState {
-        self.state.load(Ordering::Relaxed).into()
     }
 
     fn save(&self) -> DaemonResult<()> {
@@ -296,21 +297,17 @@ impl NydusDaemon for FusedevDaemon {
     }
 
     #[inline]
-    fn get_vfs(&self) -> &Vfs {
-        &self.vfs
-    }
-
-    #[inline]
     fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
         self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
     }
 
-    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
-        self.backend_collection.lock().unwrap()
+    #[inline]
+    fn get_vfs(&self) -> &Vfs {
+        &self.vfs
     }
 
-    fn version(&self) -> BuildTimeInfo {
-        self.bti.clone()
+    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
+        self.backend_collection.lock().unwrap()
     }
 
     fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
@@ -338,11 +335,11 @@ fn is_mounted(mp: impl AsRef<Path>) -> Result<bool> {
         .to_str()
         .ok_or_else(|| Error::from_raw_os_error(libc::EINVAL))?;
     let mp = CString::new(String::from(mp)).map_err(|_| Error::from_raw_os_error(libc::EINVAL))?;
-    let mut mpb: Vec<statfs> = Vec::new();
+    let mut mpb: Vec<libc::statfs> = Vec::new();
     let mut mpb_ptr = mpb.as_mut_ptr();
     let mpb_ptr = &mut mpb_ptr;
 
-    let mpb: Vec<statfs> = unsafe {
+    let mpb: Vec<libc::statfs> = unsafe {
         let res = libc::getmntinfo(mpb_ptr, libc::MNT_NOWAIT);
         if res < 0 {
             return Err(Error::from_raw_os_error(res));
@@ -477,7 +474,7 @@ pub fn create_fuse_daemon(
         backend_collection: Default::default(),
         inflight_ops: Mutex::new(Vec::new()),
         result_receiver: Mutex::new(result_receiver),
-        trigger: Arc::new(Mutex::new(trigger)),
+        request_sender: Arc::new(Mutex::new(trigger)),
         threads: Mutex::new(Vec::new()),
     });
 
