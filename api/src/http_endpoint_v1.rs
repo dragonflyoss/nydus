@@ -28,14 +28,16 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
         Ok(r) => {
             use ApiResponsePayload::*;
             match r {
+                // Daemon Common
                 Empty => success_response(None),
                 DaemonInfo(d) => success_response(Some(d)),
                 Events(d) => success_response(Some(d)),
-                FsFilesMetrics(d) => success_response(Some(d)),
-                FsGlobalMetrics(d) => success_response(Some(d)),
-                FsFilesPatterns(d) => success_response(Some(d)),
                 BackendMetrics(d) => success_response(Some(d)),
                 BlobcacheMetrics(d) => success_response(Some(d)),
+                FsFilesMetrics(d) => success_response(Some(d)),
+                FsFilesPatterns(d) => success_response(Some(d)),
+                FsGlobalMetrics(d) => success_response(Some(d)),
+                // Filesystem Specific
                 FsBackendInfo(d) => success_response(Some(d)),
                 InflightMetrics(d) => success_response(Some(d)),
                 _ => panic!("Unexpected response message from API service"),
@@ -87,30 +89,17 @@ impl EndpointHandler for EventsHandler {
     }
 }
 
-pub struct MountHandler {}
-impl EndpointHandler for MountHandler {
+pub struct ExitHandler {}
+impl EndpointHandler for ExitHandler {
     fn handle_request(
         &self,
         req: &Request,
         kicker: &dyn Fn(ApiRequest) -> ApiResponse,
     ) -> HttpResult {
-        let mountpoint = extract_query_part(req, "mountpoint").ok_or_else(|| {
-            HttpError::QueryString("'mountpoint' should be specified in query string".to_string())
-        })?;
         match (req.method(), req.body.as_ref()) {
-            (Method::Post, Some(body)) => {
-                let cmd = parse_body(body)?;
-                let r = kicker(ApiRequest::Mount(mountpoint, cmd));
-                Ok(convert_to_response(r, HttpError::Mount))
-            }
-            (Method::Put, Some(body)) => {
-                let cmd = parse_body(body)?;
-                let r = kicker(ApiRequest::Remount(mountpoint, cmd));
-                Ok(convert_to_response(r, HttpError::Mount))
-            }
-            (Method::Delete, None) => {
-                let r = kicker(ApiRequest::Umount(mountpoint));
-                Ok(convert_to_response(r, HttpError::Mount))
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::Exit);
+                Ok(convert_to_response(r, HttpError::Upgrade))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -129,6 +118,42 @@ impl EndpointHandler for MetricsHandler {
                 let id = extract_query_part(req, "id");
                 let r = kicker(ApiRequest::ExportGlobalMetrics(id));
                 Ok(convert_to_response(r, HttpError::GlobalMetrics))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct MetricsBackendHandler {}
+impl EndpointHandler for MetricsBackendHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportBackendMetrics(id));
+                Ok(convert_to_response(r, HttpError::BackendMetrics))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct MetricsBlobcacheHandler {}
+impl EndpointHandler for MetricsBlobcacheHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportBlobcacheMetrics(id));
+                Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -173,36 +198,47 @@ impl EndpointHandler for MetricsPatternHandler {
     }
 }
 
-pub struct MetricsBackendHandler {}
-impl EndpointHandler for MetricsBackendHandler {
+pub struct TakeoverHandler {}
+impl EndpointHandler for TakeoverHandler {
     fn handle_request(
         &self,
         req: &Request,
         kicker: &dyn Fn(ApiRequest) -> ApiResponse,
     ) -> HttpResult {
         match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportBackendMetrics(id));
-                Ok(convert_to_response(r, HttpError::BackendMetrics))
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::Takeover);
+                Ok(convert_to_response(r, HttpError::Upgrade))
             }
             _ => Err(HttpError::BadRequest),
         }
     }
 }
 
-pub struct MetricsBlobcacheHandler {}
-impl EndpointHandler for MetricsBlobcacheHandler {
+pub struct MountHandler {}
+impl EndpointHandler for MountHandler {
     fn handle_request(
         &self,
         req: &Request,
         kicker: &dyn Fn(ApiRequest) -> ApiResponse,
     ) -> HttpResult {
+        let mountpoint = extract_query_part(req, "mountpoint").ok_or_else(|| {
+            HttpError::QueryString("'mountpoint' should be specified in query string".to_string())
+        })?;
         match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportBlobcacheMetrics(id));
-                Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
+            (Method::Post, Some(body)) => {
+                let cmd = parse_body(body)?;
+                let r = kicker(ApiRequest::Mount(mountpoint, cmd));
+                Ok(convert_to_response(r, HttpError::Mount))
+            }
+            (Method::Put, Some(body)) => {
+                let cmd = parse_body(body)?;
+                let r = kicker(ApiRequest::Remount(mountpoint, cmd));
+                Ok(convert_to_response(r, HttpError::Mount))
+            }
+            (Method::Delete, None) => {
+                let r = kicker(ApiRequest::Umount(mountpoint));
+                Ok(convert_to_response(r, HttpError::Mount))
             }
             _ => Err(HttpError::BadRequest),
         }
@@ -226,59 +262,7 @@ impl EndpointHandler for MetricsInflightHandler {
     }
 }
 
-pub struct SendFuseFdHandler {}
-impl EndpointHandler for SendFuseFdHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::SendFuseFd);
-                Ok(convert_to_response(r, HttpError::Upgrade))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct TakeoverHandler {}
-impl EndpointHandler for TakeoverHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::Takeover);
-                Ok(convert_to_response(r, HttpError::Upgrade))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct ExitHandler {}
-impl EndpointHandler for ExitHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::Exit);
-                Ok(convert_to_response(r, HttpError::Upgrade))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
 pub struct FsBackendInfo {}
-
 impl EndpointHandler for FsBackendInfo {
     fn handle_request(
         &self,
@@ -294,6 +278,23 @@ impl EndpointHandler for FsBackendInfo {
                 })?;
                 let r = kicker(ApiRequest::ExportFsBackendInfo(mountpoint));
                 Ok(convert_to_response(r, HttpError::FsBackendInfo))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+pub struct SendFuseFdHandler {}
+impl EndpointHandler for SendFuseFdHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::SendFuseFd);
+                Ok(convert_to_response(r, HttpError::Upgrade))
             }
             _ => Err(HttpError::BadRequest),
         }

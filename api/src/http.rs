@@ -27,7 +27,7 @@ use crate::http_endpoint_v1::{
     MetricsBlobcacheHandler, MetricsFilesHandler, MetricsHandler, MetricsInflightHandler,
     MetricsPatternHandler, MountHandler, SendFuseFdHandler, TakeoverHandler, HTTP_ROOT_V1,
 };
-use crate::http_endpoint_v2::{BlobObjectListHandlerV2, InfoHandlerV2, HTTP_ROOT_V2};
+use crate::http_endpoint_v2::{BlobObjectListHandlerV2, HTTP_ROOT_V2};
 
 const EXIT_TOKEN: Token = Token(usize::MAX);
 const REQUEST_TOKEN: Token = Token(1);
@@ -69,6 +69,22 @@ pub enum ApiRequest {
 
     // Nydus API v1 requests
     DaemonInfo,
+    Events,
+    ExportGlobalMetrics(Option<String>),
+    ExportAccessPatterns(Option<String>),
+    ExportBackendMetrics(Option<String>),
+    ExportBlobcacheMetrics(Option<String>),
+    ExportFilesMetrics(Option<String>, bool),
+    Exit,
+    Takeover,
+
+    // Filesystem Related
+    Mount(String, ApiMountCmd),
+    Remount(String, ApiMountCmd),
+    Umount(String),
+    ExportFsBackendInfo(String),
+    ExportInflightMetrics,
+    SendFuseFd,
 
     // Nydus API v2
     DaemonInfoV2,
@@ -76,36 +92,16 @@ pub enum ApiRequest {
     GetBlobObject(BlobObjectParam),
     DeleteBlobObject(BlobObjectParam),
     ListBlobObject,
-
-    Events,
-    Mount(String, ApiMountCmd),
-    Remount(String, ApiMountCmd),
-    Umount(String),
-    ExportGlobalMetrics(Option<String>),
-    ExportFilesMetrics(Option<String>, bool),
-    ExportAccessPatterns(Option<String>),
-    ExportBackendMetrics(Option<String>),
-    ExportBlobcacheMetrics(Option<String>),
-    ExportInflightMetrics,
-    ExportFsBackendInfo(String),
-    SendFuseFd,
-    Takeover,
-    Exit,
 }
 
 #[derive(Debug)]
 pub enum DaemonErrorKind {
     NotReady,
-    UpgradeManager,
-    Unsupported,
-    Connect(io::Error),
-    SendFd,
-    RecvFd,
-    Disconnect(io::Error),
-    Channel,
+    Other(String),
     Serde(SerdeError),
     UnexpectedEvent(String),
-    Other(String),
+    UpgradeManager,
+    Unsupported,
 }
 
 #[derive(Debug)]
@@ -142,24 +138,31 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 #[derive(Serialize)]
 pub enum ApiResponsePayload {
-    /// No data is sent on the channel.
-    Empty,
     /// Daemon version, configuration and status information in json.
     DaemonInfo(String),
+    /// No data is sent on the channel.
+    Empty,
+
+    /// Filesystem backend metrics.
+    BackendMetrics(String),
+    /// Blobcache metrics.
+    BlobcacheMetrics(String),
+    /// Global events.
+    Events(String),
+    /// Filesystem global metrics.
+    FsGlobalMetrics(String),
+    /// Filesystem per-file metrics.
+    FsFilesMetrics(String),
+    /// Filesystem access pattern trace log.
+    FsFilesPatterns(String),
+
+    // Filesystem Backend Information
+    FsBackendInfo(String),
+    // Filesystem Inflight Requests
+    InflightMetrics(String),
 
     /// List of blob objects, v2
     BlobObjectList(String),
-
-    Events(String),
-    FsBackendInfo(String),
-    /// Nydus filesystem global metrics
-    FsGlobalMetrics(String),
-    /// Nydus filesystem per-file metrics
-    FsFilesMetrics(String),
-    FsFilesPatterns(String),
-    BackendMetrics(String),
-    BlobcacheMetrics(String),
-    InflightMetrics(String),
 }
 
 /// HTTP error messages sent back to the clients.
@@ -168,28 +171,45 @@ pub enum ApiResponsePayload {
 /// So unfortunately it implicitly becomes parts of the API, please keep it stable.
 #[derive(Debug)]
 pub enum HttpError {
-    /// No handler registered for HTTP request URI
-    NoRoute,
+    // Daemon common related errors
     /// Invalid HTTP request
     BadRequest,
-    /// Query parameter is missed from the HTTP request.
-    QueryString(String),
-    /// Failed to parse HTTP request message body
-    ParseBody(SerdeError),
+    /// Failed to configure the daemon.
+    Configure(ApiError),
     /// Failed to query information about daemon.
     DaemonInfo(ApiError),
+    /// No handler registered for HTTP request URI
+    NoRoute,
+    /// Failed to parse HTTP request message body
+    ParseBody(SerdeError),
+    /// Query parameter is missed from the HTTP request.
+    QueryString(String),
+
+    // Metrics related errors
+    /// Failed to query global events.
     Events(ApiError),
-    /// Could not mount resource
-    Mount(ApiError),
-    GlobalMetrics(ApiError),
-    FsFilesMetrics(ApiError),
-    Pattern(ApiError),
-    Configure(ApiError),
-    Upgrade(ApiError),
-    BlobcacheMetrics(ApiError),
+    /// Failed to get backend metrics.
     BackendMetrics(ApiError),
+    /// Failed to get blobcache metrics.
+    BlobcacheMetrics(ApiError),
+    /// Failed to get global metrics.
+    GlobalMetrics(ApiError),
+    /// Failed to get filesystem per-file metrics.
+    FsFilesMetrics(ApiError),
+    /// Failed to get filesystem file access trace.
+    Pattern(ApiError),
+
+    // Filesystem related errors (v1)
+    /// Failed to get filesystem backend information
     FsBackendInfo(ApiError),
+    /// Failed to get information about inflight request
     InflightMetrics(ApiError),
+    /// Failed to mount filesystem.
+    Mount(ApiError),
+    /// Failed to remount filesystem.
+    Upgrade(ApiError),
+
+    // Blob cache management related errors (v2)
     /// Failed to create blob object
     CreateBlobObject(ApiError),
     /// Failed to create blob object
@@ -198,7 +218,7 @@ pub enum HttpError {
     GetBlobObjects(ApiError),
 }
 
-/// This is the response sent by the API server through the mpsc channel.
+// This is the response sent by the API server through the mpsc channel.
 pub type ApiResponse = std::result::Result<ApiResponsePayload, ApiError>;
 pub type HttpResult = std::result::Result<Response, HttpError>;
 
@@ -319,23 +339,32 @@ lazy_static! {
             routes: HashMap::new(),
         };
 
-        // Nydus API, v1
+        // Global
         r.routes.insert(endpoint_v1!("/daemon"), Box::new(InfoHandler{}));
-        r.routes.insert(endpoint_v1!("/daemon/events"), Box::new(EventsHandler{}));
+        r.routes.insert(endpoint_v2!("/daemon"), Box::new(InfoHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/backend"), Box::new(FsBackendInfo{}));
+        r.routes.insert(endpoint_v2!("/daemon/backend"), Box::new(FsBackendInfo{}));
+        r.routes.insert(endpoint_v1!("/daemon/events"), Box::new(EventsHandler{}));
+        r.routes.insert(endpoint_v2!("/daemon/events"), Box::new(EventsHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/exit"), Box::new(ExitHandler{}));
-        r.routes.insert(endpoint_v1!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
-        r.routes.insert(endpoint_v1!("/daemon/fuse/takeover"), Box::new(TakeoverHandler{}));
+        r.routes.insert(endpoint_v2!("/daemon/exit"), Box::new(ExitHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
+        r.routes.insert(endpoint_v2!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
+        r.routes.insert(endpoint_v2!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/files"), Box::new(MetricsFilesHandler{}));
+        r.routes.insert(endpoint_v2!("/metrics/files"), Box::new(MetricsFilesHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/pattern"), Box::new(MetricsPatternHandler{}));
+        r.routes.insert(endpoint_v2!("/metrics/pattern"), Box::new(MetricsPatternHandler{}));
+
+        // Nydus API, v1
         r.routes.insert(endpoint_v1!("/mount"), Box::new(MountHandler{}));
         r.routes.insert(endpoint_v1!("/metrics"), Box::new(MetricsHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/files"), Box::new(MetricsFilesHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/pattern"), Box::new(MetricsPatternHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/inflight"), Box::new(MetricsInflightHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/fuse/takeover"), Box::new(TakeoverHandler{}));
 
         // Nydus API, v2
-        r.routes.insert(endpoint_v2!("/daemon"), Box::new(InfoHandlerV2{}));
         r.routes.insert(endpoint_v2!("/blob_objects"), Box::new(BlobObjectListHandlerV2{}));
 
         r
@@ -421,12 +450,7 @@ fn handle_http_request(
 
 /// Start a HTTP server parsing http requests and send to nydus API server a concrete
 /// request to operate nydus or fetch working status.
-/// The HTTP server sends request by `to_api` channel and wait for response from `from_api` channel
-/// `api_notifier` is used to notify an execution context to fetch above request and handle it.
-/// We can't forward signal to native rust thread, so we rely on `exit_evtfd` to notify
-/// the server to exit. Therefore, it adds the unix domain socket fd receiving http request
-/// to a global epoll_fd associated with a event_fd which will be used later to notify
-/// the server thread to exit.
+/// The HTTP server sends request by `to_api` channel and wait for response from `from_api` channel.
 pub fn start_http_thread(
     path: &str,
     api_notifier: Option<Arc<Waker>>,
