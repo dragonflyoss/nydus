@@ -524,7 +524,7 @@ pub fn create_fuse_daemon(
         }
         daemon.service.session.lock().unwrap().mount()?;
         daemon
-            .on_event(DaemonStateMachineInput::Mount)
+            .on_event(DaemonStateMachineInput::Start)
             .map_err(|e| eother!(e))?;
         daemon
             .service
