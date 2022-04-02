@@ -7,10 +7,9 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result, Write};
 use std::mem::size_of;
 use std::ops::Deref;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::read_unaligned;
 use std::string::String;
@@ -30,7 +29,6 @@ const MSG_HEADER_SIZE: usize = size_of::<FsCacheMsgHeader>();
 const MSG_OPEN_SIZE: usize = 16;
 const MSG_CLOSE_SIZE: usize = size_of::<FsCacheMsgClose>();
 const MSG_READ_SIZE: usize = size_of::<FsCacheMsgRead>();
-const CACHEFILES_OPEN_WANT_CACHE_SIZE: u32 = 0x1;
 
 const TOKEN_EVENT_WAKER: usize = 1;
 const TOKEN_EVENT_FSCACHE: usize = 2;
@@ -280,7 +278,6 @@ struct FsCacheBootStrap {
 }
 
 #[derive(Clone)]
-#[allow(unused)]
 enum FsCacheObject {
     DataBlob(Arc<dyn BlobCache>),
     Bootstrap(Arc<FsCacheBootStrap>),
@@ -309,16 +306,21 @@ pub struct FsCacheHandler {
 impl FsCacheHandler {
     /// Create a new instance of `FsCacheService`.
     pub fn new(path: &str, dir: &str, tag: Option<&str>) -> Result<Self> {
+        info!(
+            "create FsCacheHandler with dir {}, tag {}",
+            dir,
+            tag.unwrap_or("<None>")
+        );
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(false)
+            .open(path)?;
         let poller =
             Poll::new().map_err(|_e| eother!("Failed to create poller for fscache service"))?;
         let waker = Waker::new(poller.registry(), Token(TOKEN_EVENT_WAKER))
             .map_err(|_e| eother!("Failed to create waker for fscache service"))?;
-        let file = OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create(false)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)?;
         poller
             .registry()
             .register(
@@ -328,24 +330,23 @@ impl FsCacheHandler {
             )
             .map_err(|_e| eother!("Failed to register fd for fscache service"))?;
 
-        println!("{} {}", dir, tag.unwrap_or_default());
-        /*
-        let msg = format!("dir {}", dir);
-        file.write_all(msg.as_bytes())?;
+        // Initialize the fscache session
+        file.write_all(format!("dir {}", dir).as_bytes())?;
+        file.flush()?;
         if let Some(tag) = tag {
-            let msg = format!("tag {}", tag);
-            file.write_all(msg.as_bytes())?;
+            file.write_all(format!("tag {}", tag).as_bytes())?;
+            file.flush()?;
         }
-        file.write_all("bind ondemand".as_bytes())?;
-         */
+        file.write_all(b"bind ondemand")?;
+        file.flush()?;
 
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
             barrier: Barrier::new(2),
             file,
+            state: Arc::new(Mutex::new(FsCacheState::default())),
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
-            state: Arc::new(Mutex::new(FsCacheState::default())),
         })
     }
 
@@ -395,6 +396,7 @@ impl FsCacheHandler {
         let config = FsCacheObjectConfig::new_bootstrap_blob(
             domain_id.clone(),
             id.to_string(),
+            path.to_string(),
             factory_config.clone(),
         );
         let mut state = self.get_state();
@@ -405,6 +407,9 @@ impl FsCacheHandler {
                 "blob configuration information already exists",
             ))
         } else {
+            state
+                .id_to_config_map
+                .insert(config.get_key().to_string(), config);
             // Try to add the referenced data blob object if it doesn't exist yet.
             for bi in rs.superblock.get_blob_infos() {
                 let data_blob = FsCacheObjectConfig::new_data_blob(
@@ -418,9 +423,6 @@ impl FsCacheHandler {
                         .insert(data_blob.get_key().to_string(), data_blob);
                 }
             }
-            state
-                .id_to_config_map
-                .insert(config.get_key().to_string(), config);
             Ok(())
         }
     }
@@ -520,69 +522,42 @@ impl FsCacheHandler {
     }
 
     fn handle_open_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgOpen) {
-        let info = self.get_config(&msg.volume_key);
-        let msg = match info {
+        let key = msg.volume_key.clone() + "-" + &msg.cookie_key;
+        let config = self.get_config(&key);
+        let msg = match config {
             None => format!("cinit {},{}", hdr.id, -libc::ENOENT),
-            Some(info) => {
-                let need_size = msg.flags & CACHEFILES_OPEN_WANT_CACHE_SIZE != 0;
-                match self.create_data_blob_object(info, hdr.id, msg.fd, need_size) {
-                    Err(s) => s,
-                    Ok((blob, blob_size)) => {
-                        let mut state = self.get_state();
-                        if state.fd_to_object_map.contains_key(&msg.fd) {
-                            format!("cinit {},{}", hdr.id, -libc::EALREADY)
-                        } else {
-                            state
-                                .fd_to_object_map
-                                .insert(msg.fd, FsCacheObject::DataBlob(blob));
-                            if need_size {
-                                format!("cinit {},{}", hdr.id, blob_size)
-                            } else {
-                                format!("cinit {}", hdr.id)
-                            }
-                        }
-                    }
+            Some(info) => match info {
+                FsCacheObjectConfig::DataBlob(config) => {
+                    self.handle_open_data_blob(hdr, msg, config)
                 }
-            }
-        };
-        self.reply(&msg);
-    }
-
-    // TODO: extend the kernel ABI to return result, otherwise kernel does not when it's safe to
-    // close the fd. Assume the fscache driver will get notified when we close the fd, but there
-    // is no way to return error still.
-    fn handle_close_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
-        let blob = self.get_object(msg.fd);
-        let msg = match blob {
-            None => format!("cfini {},{}", hdr.id, -libc::ENOENT),
-            Some(_blob) => {
-                todo!()
-            }
-        };
-        self.reply(&msg);
-    }
-
-    // TODO: extend the kernel ABI to return error code.
-    fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
-        let object = self.get_object(msg.fd);
-        let msg = match object {
-            None => format!("cread {},{}", hdr.id, -libc::ENOENT),
-            Some(FsCacheObject::DataBlob(blob)) => match blob.get_blob_object() {
-                None => {
-                    //panic!("All blob used by fscache should support BlobObject interface")
-                    format!("cread {},{}", hdr.id, -libc::ENOSYS)
+                FsCacheObjectConfig::Bootstrap(config) => {
+                    self.handle_open_bootstrap(hdr, msg, config)
                 }
-                Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
-                    Ok(v) if v == msg.len as usize => format!("cread {}", hdr.id),
-                    Ok(_v) => format!("cread {},{}", hdr.id, -libc::EIO),
-                    Err(_e) => format!("cread {},{}", hdr.id, -libc::EIO),
-                },
             },
-            Some(FsCacheObject::Bootstrap(_bs)) => {
-                todo!();
-            }
         };
         self.reply(&msg);
+    }
+
+    fn handle_open_data_blob(
+        &self,
+        hdr: &FsCacheMsgHeader,
+        msg: &FsCacheMsgOpen,
+        info: Arc<FsCacheDataBlobConfig>,
+    ) -> String {
+        match self.create_data_blob_object(&info, hdr.id, msg.fd) {
+            Err(s) => s,
+            Ok((blob, blob_size)) => {
+                let mut state = self.state.lock().unwrap();
+                if state.fd_to_object_map.contains_key(&msg.fd) {
+                    format!("cinit {},{}", hdr.id, -libc::EALREADY)
+                } else {
+                    state
+                        .fd_to_object_map
+                        .insert(msg.fd, FsCacheObject::DataBlob(blob));
+                    format!("cinit {},{}", hdr.id, blob_size)
+                }
+            }
+        }
     }
 
     /// The `fscache` factory essentially creates a namespace for blob objects cached by the
@@ -591,33 +566,123 @@ impl FsCacheHandler {
     /// way to share blob/chunkamp files with filecache manager.
     fn create_data_blob_object(
         &self,
-        info: FsCacheObjectConfig,
+        info: &FsCacheDataBlobConfig,
         id: u32,
         fd: u32,
-        need_size: bool,
     ) -> std::result::Result<(Arc<dyn BlobCache>, u64), String> {
-        let blob_info = info.get_blob_info().expect("info is not a data blob");
-        let mut blob_info = blob_info.deref().clone();
+        let mut blob_info = info.blob_info.deref().clone();
+        // `BlobInfo` from the configuration cache should not have fscache file associated with it.
         assert!(blob_info.get_fscache_file().is_none());
+
         // Safe because we trust the kernel fscache driver.
         let file = unsafe { File::from_raw_fd(fd as RawFd) };
         blob_info.set_fscache_file(Some(Arc::new(file)));
         let blob_ref = Arc::new(blob_info);
 
-        match BLOB_FACTORY.new_blob_cache(&info.get_factory_config(), &blob_ref) {
+        match BLOB_FACTORY.new_blob_cache(&info.factory_config, &blob_ref) {
             Err(_e) => Err(format!("cinit {},{}", id, -libc::ENOENT)),
             Ok(blob) => {
-                let blob_size = if need_size {
-                    match blob.blob_size() {
-                        Err(_e) => return Err(format!("cinit {},{}", id, -libc::EIO)),
-                        Ok(v) => v,
-                    }
-                } else {
-                    0
+                let blob_size = match blob.blob_size() {
+                    Err(_e) => return Err(format!("cinit {},{}", id, -libc::EIO)),
+                    Ok(v) => v,
                 };
                 Ok((blob, blob_size))
             }
         }
+    }
+
+    fn handle_open_bootstrap(
+        &self,
+        hdr: &FsCacheMsgHeader,
+        msg: &FsCacheMsgOpen,
+        info: Arc<FsCacheBootstrapConfig>,
+    ) -> String {
+        let mut state = self.get_state();
+        if state.fd_to_object_map.contains_key(&msg.fd) {
+            return format!("copen {},{}", hdr.id, -libc::EALREADY);
+        }
+
+        match OpenOptions::new().read(true).open(&info.path) {
+            Err(e) => {
+                warn!("Failed to open bootstrap file {}, {}", info.path, e);
+                format!("copen {},{}", hdr.id, -libc::ENOENT)
+            }
+            Ok(f) => match f.metadata() {
+                Err(e) => {
+                    warn!("Failed to open bootstrap file {}, {}", info.path, e);
+                    format!("copen {},{}", hdr.id, -libc::ENOENT)
+                }
+                Ok(md) => {
+                    let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
+                    let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
+                        bootstrap_file: f,
+                        cache_file,
+                    }));
+                    state.fd_to_object_map.insert(msg.fd, object);
+                    format!("copen {},{}", hdr.id, md.len())
+                }
+            },
+        }
+    }
+
+    fn handle_close_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
+        let mut state = self.get_state();
+        let msg = match state.fd_to_object_map.remove(&msg.fd) {
+            None => format!("cfini {},{}", hdr.id, -libc::ENOENT),
+            Some(FsCacheObject::Bootstrap(_bs)) => format!("cfini {}", hdr.id),
+            Some(FsCacheObject::DataBlob(_blob)) => {
+                // TODO: gc the blob cache object
+                format!("cfini {}", hdr.id)
+            }
+        };
+        self.reply(&msg);
+    }
+
+    fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
+        let object = self.get_object(msg.fd);
+        let msg = match object {
+            None => format!("cread {},{}", hdr.id, -libc::ENOENT),
+            Some(FsCacheObject::DataBlob(blob)) => match blob.get_blob_object() {
+                None => format!("cread {},{}", hdr.id, -libc::ENOSYS),
+                Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
+                    Ok(v) if v == msg.len as usize => format!("cread {}", hdr.id),
+                    Ok(_v) => format!("cread {},{}", hdr.id, -libc::EIO),
+                    Err(_e) => format!("cread {},{}", hdr.id, -libc::EIO),
+                },
+            },
+            Some(FsCacheObject::Bootstrap(bs)) => {
+                // TODO: should we feed the bootstrap at together to improve performance?
+                let base = unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        msg.len as usize,
+                        libc::PROT_READ,
+                        libc::MAP_SHARED,
+                        bs.bootstrap_file.as_raw_fd(),
+                        msg.off as libc::off_t,
+                    )
+                };
+                if base == libc::MAP_FAILED {
+                    format!("cread {},{}", hdr.id, -libc::EIO)
+                } else {
+                    let ret = unsafe {
+                        libc::pwrite(
+                            bs.cache_file.as_raw_fd(),
+                            base,
+                            msg.len as usize,
+                            msg.off as libc::off_t,
+                        )
+                    };
+                    let _ = unsafe { libc::munmap(base, msg.len as usize) };
+                    if ret < 0 {
+                        format!("cread {},{}", hdr.id, -libc::EIO)
+                    } else {
+                        format!("cread {}", hdr.id)
+                    }
+                }
+            }
+        };
+        self.reply(&msg);
     }
 
     #[inline]
