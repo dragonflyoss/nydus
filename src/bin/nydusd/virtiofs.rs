@@ -399,11 +399,8 @@ pub fn create_virtiofs_daemon(
     if let Some(cmd) = mount_cmd {
         daemon.service.mount(cmd)?;
     }
-    // TODO: In fact, for virtiofs, below event triggers virtio-queue setup and some other
-    // preparation/connection work. So this event name `Mount` might not be suggestive.
-    // I'd like to rename it someday.
     daemon
-        .on_event(DaemonStateMachineInput::Mount)
+        .on_event(DaemonStateMachineInput::Start)
         .map_err(|e| eother!(e))?;
 
     Ok(daemon)
