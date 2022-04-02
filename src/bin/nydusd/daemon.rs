@@ -242,7 +242,7 @@ state_machine! {
     // FIXME: It's possible that failover does not succeed or resource is not capable to
     // be passed. To handle event `Stop` when being `Init`.
     Init => {
-        Mount => Running [StartService],
+        Start => Running [StartService],
         Takeover => Upgrading [Restore],
         Stop => Die[Umount],
     },
