@@ -56,8 +56,8 @@ lazy_static! {
 pub struct DaemonController {
     active: AtomicBool,
     singleton_mode: AtomicBool,
-    // For backward compatibility to support singleton fusedev/virtiofs server.
     daemon: Mutex<Option<Arc<dyn NydusDaemon>>>,
+    // For backward compatibility to support singleton fusedev/virtiofs server.
     fs_service: Mutex<Option<Arc<dyn FsService>>>,
     waker: Arc<Waker>,
     poller: Mutex<Poll>,
@@ -122,18 +122,18 @@ impl DaemonController {
         // Signal the `run_loop()` working thread to exit.
         let _ = self.waker.wake();
 
-        let fs_service = self.daemon.lock().unwrap().take();
-        if let Some(service) = fs_service {
+        let daemon = self.daemon.lock().unwrap().take();
+        if let Some(d) = daemon {
             // TODO: fix the behavior
             if cfg!(feature = "virtiofs") {
                 // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
                 // Given the fact that we have nothing to clean up, directly exit seems fine.
                 process::exit(0);
             }
-            if let Err(e) = service.stop() {
+            if let Err(e) = d.stop() {
                 error!("failed to stop daemon: {}", e);
             }
-            if let Err(e) = service.wait() {
+            if let Err(e) = d.wait() {
                 error!("failed to wait daemon: {}", e)
             }
         }
@@ -293,7 +293,7 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
             .short("v")
             .help("Vhost-user API socket")
             .takes_value(true)
-            .required(true),
+            .required(false),
     )
 }
 
@@ -478,7 +478,7 @@ fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<(
     Ok(())
 }
 
-struct SubCmdArgs<'a> {
+pub struct SubCmdArgs<'a> {
     args: &'a ArgMatches<'a>,
     subargs: &'a ArgMatches<'a>,
 }
@@ -488,7 +488,7 @@ impl<'a> SubCmdArgs<'a> {
         SubCmdArgs { args, subargs }
     }
 
-    fn value_of(&self, key: &str) -> Option<&str> {
+    pub fn value_of(&self, key: &str) -> Option<&str> {
         if let Some(v) = self.subargs.value_of(key) {
             Some(v)
         } else {
@@ -496,7 +496,7 @@ impl<'a> SubCmdArgs<'a> {
         }
     }
 
-    fn values_of(&self, key: &str) -> Option<Values> {
+    pub fn values_of(&self, key: &str) -> Option<Values> {
         if let Some(v) = self.subargs.values_of(key) {
             Some(v)
         } else {
@@ -504,7 +504,7 @@ impl<'a> SubCmdArgs<'a> {
         }
     }
 
-    fn is_present(&self, key: &str) -> bool {
+    pub fn is_present(&self, key: &str) -> bool {
         self.subargs.is_present(key) || self.args.is_present(key)
     }
 }
