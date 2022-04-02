@@ -6,6 +6,7 @@
 
 use std::any::Any;
 use std::io::Result;
+use std::sync::mpsc::Sender;
 use std::sync::{
     atomic::{AtomicI32, Ordering},
     mpsc::{channel, Receiver},
@@ -13,11 +14,8 @@ use std::sync::{
 };
 use std::thread;
 
-use libc::EFD_NONBLOCK;
-
 use fuse_backend_rs::api::{server::Server, Vfs};
 use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, Writer};
-
 use vhost::vhost_user::{message::*, Listener, SlaveFsCacheReq};
 use vhost_user_backend::{
     VhostUserBackend, VhostUserBackendMut, VhostUserDaemon, VringMutex, VringState, VringT,
@@ -34,7 +32,7 @@ use nydus_app::BuildTimeInfo;
 
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
-    DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon, Trigger,
+    DaemonStateMachineSubscriber, FsBackendCollection, FsBackendMountCmd, NydusDaemon,
 };
 use crate::upgrade::UpgradeManager;
 
@@ -49,12 +47,13 @@ const REQ_QUEUE_EVENT: u16 = 1;
 // The device has been dropped.
 // const KILL_EVENT: u16 = 2;
 
-type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
+type VhostUserBackendResult<T> = std::io::Result<T>;
 
 struct VhostUserFsBackendHandler {
     backend: Mutex<VhostUserFsBackend>,
 }
 
+//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 struct VhostUserFsBackend {
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     kill_evt: EventFd,
@@ -68,7 +67,7 @@ impl VhostUserFsBackendHandler {
     fn new(vfs: Arc<Vfs>) -> Result<Self> {
         let backend = VhostUserFsBackend {
             mem: None,
-            kill_evt: EventFd::new(EFD_NONBLOCK).map_err(DaemonError::Epoll)?,
+            kill_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(DaemonError::Epoll)?,
             event_idx: false,
             server: Arc::new(Server::new(vfs)),
             vu_req: None,
@@ -244,22 +243,47 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
         self.backend.lock().unwrap().vu_req = Some(vu_req);
     }
 }
+//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 struct VirtiofsDaemon<S: 'static + VhostUserBackend<VringMutex> + Clone> {
+    bti: BuildTimeInfo,
+    id: Option<String>,
+    request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
+    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    state: AtomicI32,
+    supervisor: Option<String>,
+
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    upgrade_mgr: Option<Mutex<UpgradeManager>>,
     vfs: Arc<Vfs>,
     daemon: Arc<Mutex<VhostUserDaemon<S, VringMutex>>>,
     sock: String,
-    id: Option<String>,
-    supervisor: Option<String>,
-    upgrade_mgr: Option<Mutex<UpgradeManager>>,
-    trigger: Arc<Mutex<Trigger>>,
-    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
     backend_collection: Mutex<FsBackendCollection>,
-    bti: BuildTimeInfo,
-    state: AtomicI32,
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
 
 impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn id(&self) -> Option<String> {
+        self.id.clone()
+    }
+
+    fn get_state(&self) -> DaemonState {
+        self.state.load(Ordering::Relaxed).into()
+    }
+
+    fn set_state(&self, state: DaemonState) {
+        self.state.store(state as i32, Ordering::Relaxed);
+    }
+
+    fn version(&self) -> BuildTimeInfo {
+        self.bti.clone()
+    }
+
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     fn start(&self) -> DaemonResult<()> {
         let listener = Listener::new(&self.sock, true)
             .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
@@ -278,6 +302,11 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
 
         Ok(())
     }
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>.
+
+    fn disconnect(&self) -> DaemonResult<()> {
+        Ok(())
+    }
 
     fn wait(&self) -> DaemonResult<()> {
         self.daemon
@@ -287,28 +316,8 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
             .map_err(|e| DaemonError::WaitDaemon(eother!(e)))
     }
 
-    fn disconnect(&self) -> DaemonResult<()> {
-        Ok(())
-    }
-
-    fn id(&self) -> Option<String> {
-        self.id.clone()
-    }
-
     fn supervisor(&self) -> Option<String> {
         self.supervisor.clone()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn get_state(&self) -> DaemonState {
-        self.state.load(Ordering::Relaxed).into()
-    }
-
-    fn set_state(&self, state: DaemonState) {
-        self.state.store(state as i32, Ordering::Relaxed);
     }
 
     fn save(&self) -> DaemonResult<()> {
@@ -319,32 +328,30 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
         unimplemented!();
     }
 
-    fn get_vfs(&self) -> &Vfs {
-        &self.vfs
-    }
-
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
         self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
+    }
+
+    fn get_vfs(&self) -> &Vfs {
+        &self.vfs
     }
 
     fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
         self.backend_collection.lock().unwrap()
     }
 
-    fn version(&self) -> BuildTimeInfo {
-        self.bti.clone()
-    }
-
     fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
         Err(DaemonError::Unsupported)
     }
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
 
 impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscriber
     for VirtiofsDaemon<S>
 {
     fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
-        self.trigger
+        self.request_sender
             .lock()
             .unwrap()
             .send(event)
@@ -358,6 +365,7 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscr
     }
 }
 
+//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<,
 pub fn create_virtiofs_daemon(
     id: Option<String>,
     supervisor: Option<String>,
@@ -383,7 +391,7 @@ pub fn create_virtiofs_daemon(
         id,
         supervisor,
         upgrade_mgr: None,
-        trigger: Arc::new(Mutex::new(trigger)),
+        request_sender: Arc::new(Mutex::new(trigger)),
         result_receiver: Mutex::new(result_receiver),
         bti,
         backend_collection: Default::default(),
@@ -406,3 +414,4 @@ pub fn create_virtiofs_daemon(
 
     Ok(daemon)
 }
+//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
