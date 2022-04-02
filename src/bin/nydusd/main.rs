@@ -29,8 +29,9 @@ use rlimit::{rlim, Resource};
 use nydus::FsBackendType;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
-use self::api_server_glue::ApiServerController;
-use self::daemon::{DaemonError, FsBackendMountCmd, NydusDaemon};
+use crate::api_server_glue::ApiServerController;
+use crate::daemon::{DaemonError, NydusDaemon};
+use crate::fs_service::FsBackendMountCmd;
 
 #[cfg(feature = "fusedev")]
 mod fusedev;
@@ -39,6 +40,7 @@ mod virtiofs;
 
 mod api_server_glue;
 mod daemon;
+mod fs_service;
 mod upgrade;
 
 /// Minimal number of file descriptors reserved for system.
