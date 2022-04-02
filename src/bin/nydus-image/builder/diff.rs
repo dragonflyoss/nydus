@@ -523,14 +523,16 @@ impl DiffBuilder {
                                                         path: &Path|
              -> Result<()> {
                 let mut chunks = Vec::new();
-                inode.walk_chunks(&mut |cki: &dyn BlobChunkInfo| -> Result<()> {
-                    let chunk = ChunkWrapper::from_chunk_info(cki);
-                    chunks.push(NodeChunk {
-                        source: ChunkSource::Parent,
-                        inner: chunk,
-                    });
-                    Ok(())
-                })?;
+                if inode.is_reg() {
+                    inode.walk_chunks(&mut |cki: &dyn BlobChunkInfo| -> Result<()> {
+                        let chunk = ChunkWrapper::from_chunk_info(cki);
+                        chunks.push(NodeChunk {
+                            source: ChunkSource::Parent,
+                            inner: chunk,
+                        });
+                        Ok(())
+                    })?;
+                }
                 self.chunk_map
                     .insert(path.to_path_buf(), (chunks, inode.get_digest()));
                 Ok(())

@@ -228,6 +228,7 @@ fn integration_test_diff_build_with_chunk_dict() {
         &snapshot_dir_4,
     ));
     let expected_chunk_dict_bootstrap = IntoIter::new([
+        (PathBuf::from("/"), vec![]),
         (
             PathBuf::from("/file-1"),
             vec![
@@ -324,21 +325,23 @@ fn integration_test_diff_build_with_chunk_dict() {
     let mut reader = Box::new(file) as RafsIoReader;
     rs.load(&mut reader).unwrap();
     let mut actual = HashMap::new();
+    let blobs = rs.superblock.get_blob_infos();
     rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
                                                 path: &Path|
      -> Result<()> {
         let mut chunks = Vec::new();
-        let blobs = rs.superblock.get_blob_infos();
-        inode
-            .walk_chunks(&mut |chunk: &dyn BlobChunkInfo| -> Result<()> {
-                chunks.push((
-                    chunk.blob_index(),
-                    blobs[chunk.blob_index() as usize].blob_id().to_string(),
-                    format!("{}", chunk.chunk_id()),
-                ));
-                Ok(())
-            })
-            .unwrap();
+        if inode.is_reg() {
+            inode
+                .walk_chunks(&mut |chunk: &dyn BlobChunkInfo| -> Result<()> {
+                    chunks.push((
+                        chunk.blob_index(),
+                        blobs[chunk.blob_index() as usize].blob_id().to_string(),
+                        format!("{}", chunk.chunk_id()),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+        }
         actual.insert(path.to_path_buf(), chunks);
         Ok(())
     })
@@ -386,6 +389,7 @@ fn integration_test_diff_build_with_chunk_dict() {
         &snapshot_dir_6,
     ));
     let expected_bootstrap = IntoIter::new([
+        (PathBuf::from("/"), vec![]),
         (
             PathBuf::from("/file-8"),
             vec![
@@ -460,21 +464,23 @@ fn integration_test_diff_build_with_chunk_dict() {
     let mut reader = Box::new(file) as RafsIoReader;
     rs.load(&mut reader).unwrap();
     let mut actual = HashMap::new();
+    let blobs = rs.superblock.get_blob_infos();
     rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
                                                 path: &Path|
      -> Result<()> {
         let mut chunks = Vec::new();
-        let blobs = rs.superblock.get_blob_infos();
-        inode
-            .walk_chunks(&mut |chunk: &dyn BlobChunkInfo| -> Result<()> {
-                chunks.push((
-                    chunk.blob_index(),
-                    blobs[chunk.blob_index() as usize].blob_id().to_string(),
-                    format!("{}", chunk.chunk_id()),
-                ));
-                Ok(())
-            })
-            .unwrap();
+        if inode.is_reg() {
+            inode
+                .walk_chunks(&mut |chunk: &dyn BlobChunkInfo| -> Result<()> {
+                    chunks.push((
+                        chunk.blob_index(),
+                        blobs[chunk.blob_index() as usize].blob_id().to_string(),
+                        format!("{}", chunk.chunk_id()),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+        }
         actual.insert(path.to_path_buf(), chunks);
         Ok(())
     })
@@ -539,6 +545,7 @@ fn integration_test_diff_build_with_chunk_dict() {
     ));
 
     let expected_bootstrap = IntoIter::new([
+        (PathBuf::from("/"), vec![]),
         (
             PathBuf::from("/file-1"),
             vec![
@@ -678,21 +685,23 @@ fn integration_test_diff_build_with_chunk_dict() {
     let mut reader = Box::new(file) as RafsIoReader;
     rs.load(&mut reader).unwrap();
     let mut actual = HashMap::new();
+    let blobs = rs.superblock.get_blob_infos();
     rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
                                                 path: &Path|
      -> Result<()> {
         let mut chunks = Vec::new();
-        let blobs = rs.superblock.get_blob_infos();
-        inode
-            .walk_chunks(&mut |chunk: &dyn BlobChunkInfo| -> Result<()> {
-                chunks.push((
-                    chunk.blob_index(),
-                    blobs[chunk.blob_index() as usize].blob_id().to_string(),
-                    format!("{}", chunk.chunk_id()),
-                ));
-                Ok(())
-            })
-            .unwrap();
+        if inode.is_reg() {
+            inode
+                .walk_chunks(&mut |chunk: &dyn BlobChunkInfo| -> Result<()> {
+                    chunks.push((
+                        chunk.blob_index(),
+                        blobs[chunk.blob_index() as usize].blob_id().to_string(),
+                        format!("{}", chunk.chunk_id()),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+        }
         actual.insert(path.to_path_buf(), chunks);
         Ok(())
     })

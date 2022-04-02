@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use nydus_utils::compress;
 use nydus_utils::digest::{self};
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper, RafsSuperMeta};
-use storage::compress;
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
