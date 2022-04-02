@@ -31,7 +31,7 @@ use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
 use crate::daemon::{DaemonError, NydusDaemon};
-use crate::fs_service::FsBackendMountCmd;
+use crate::fs_service::{FsBackendMountCmd, FsService};
 
 #[cfg(feature = "fusedev")]
 mod fusedev;
@@ -58,6 +58,7 @@ pub struct DaemonController {
     singleton_mode: AtomicBool,
     // For backward compatibility to support singleton fusedev/virtiofs server.
     daemon: Mutex<Option<Arc<dyn NydusDaemon>>>,
+    fs_service: Mutex<Option<Arc<dyn FsService>>>,
     waker: Arc<Waker>,
     poller: Mutex<Poll>,
 }
@@ -72,6 +73,7 @@ impl DaemonController {
             active: AtomicBool::new(true),
             singleton_mode: AtomicBool::new(true),
             daemon: Mutex::new(None),
+            fs_service: Mutex::new(None),
             waker: Arc::new(waker),
             poller: Mutex::new(poller),
         }
@@ -102,6 +104,16 @@ impl DaemonController {
     /// Panic if called before `set_daemon()` has been called.
     pub fn get_daemon(&self) -> Arc<dyn NydusDaemon> {
         self.daemon.lock().unwrap().clone().unwrap()
+    }
+
+    /// Set the default fs service object.
+    pub fn set_fs_service(&self, service: Arc<dyn FsService>) -> Option<Arc<dyn FsService>> {
+        self.fs_service.lock().unwrap().replace(service)
+    }
+
+    /// Get the default fs service object.
+    pub fn get_fs_service(&self) -> Option<Arc<dyn FsService>> {
+        self.fs_service.lock().unwrap().clone()
     }
 
     fn shutdown(&self) {
@@ -479,20 +491,16 @@ impl<'a> SubCmdArgs<'a> {
     fn value_of(&self, key: &str) -> Option<&str> {
         if let Some(v) = self.subargs.value_of(key) {
             Some(v)
-        } else if let Some(v) = self.args.value_of(key) {
-            Some(v)
         } else {
-            None
+            self.args.value_of(key)
         }
     }
 
     fn values_of(&self, key: &str) -> Option<Values> {
         if let Some(v) = self.subargs.values_of(key) {
             Some(v)
-        } else if let Some(v) = self.args.values_of(key) {
-            Some(v)
         } else {
-            None
+            self.args.values_of(key)
         }
     }
 
@@ -666,6 +674,11 @@ fn main() -> Result<()> {
             #[cfg(feature = "virtiofs")]
             process_default_fs_service(subargs, bti, apisock, false)?;
         }
+    }
+
+    let daemon = DAEMON_CONTROLLER.get_daemon();
+    if let Some(fs) = daemon.get_default_fs_service() {
+        DAEMON_CONTROLLER.set_fs_service(fs);
     }
 
     // Start the HTTP Administration API server
