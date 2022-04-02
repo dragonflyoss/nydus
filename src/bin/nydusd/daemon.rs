@@ -372,9 +372,7 @@ pub trait DaemonStateMachineSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs_service::FsBackendMountCmd;
     use nydus::FsBackendType;
-    use rafs::fs::Rafs;
 
     #[test]
     fn it_should_convert_int_to_daemonstate() {
@@ -397,82 +395,5 @@ mod tests {
         assert!(backend_type == FsBackendType::PassthroughFs);
 
         assert!("xxxxxxxxxxxxx".parse::<FsBackendType>().is_err());
-    }
-
-    #[test]
-    fn it_should_add_new_backend() {
-        let mut col: FsBackendCollection = Default::default();
-        let r = col.add(
-            "test",
-            &FsBackendMountCmd {
-                fs_type: FsBackendType::Rafs,
-                config: "{\"config\": \"test\"}".to_string(),
-                mountpoint: "testmonutount".to_string(),
-                source: "testsource".to_string(),
-                prefetch_files: Some(vec!["testfile".to_string()]),
-            },
-        );
-        assert!(r.is_ok(), "failed to add backend collection");
-
-        assert_eq!(col.0.len(), 1);
-
-        col.del("test");
-        assert_eq!(col.0.len(), 0);
-    }
-
-    #[test]
-    fn it_should_verify_prefetch_files() {
-        let files = validate_prefetch_file_list(&Some(vec!["/etc/passwd".to_string()]));
-        assert!(files.is_ok(), "failed to verify prefetch files");
-        assert_eq!(1, files.unwrap().unwrap().len());
-
-        assert!(
-            validate_prefetch_file_list(&Some(vec!["etc/passwd".to_string()])).is_err(),
-            "should not pass verify"
-        );
-    }
-
-    #[test]
-    fn it_should_create_rafs_backend() {
-        let config = r#"
-        {
-            "device": {
-              "backend": {
-                "type": "oss",
-                "config": {
-                  "endpoint": "test",
-                  "access_key_id": "test",
-                  "access_key_secret": "test",
-                  "bucket_name": "antsys-nydus",
-                  "object_prefix":"nydus_v2/",
-                  "scheme": "http"
-                }
-              }
-            },
-            "mode": "direct",
-            "digest_validate": false,
-            "enable_xattr": true,
-            "fs_prefetch": {
-              "enable": true,
-              "threads_count": 10,
-              "merging_size": 131072,
-              "bandwidth_rate": 10485760
-            }
-          }"#;
-        let bootstrap = "./tests/texture/bootstrap/nydusd_daemon_test_bootstrap";
-        if fs_backend_factory(&FsBackendMountCmd {
-            fs_type: FsBackendType::Rafs,
-            config: config.to_string(),
-            mountpoint: "testmountpoint".to_string(),
-            source: bootstrap.to_string(),
-            prefetch_files: Some(vec!["/testfile".to_string()]),
-        })
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Rafs>()
-        .is_none()
-        {
-            panic!("failed to create rafs backend")
-        }
     }
 }

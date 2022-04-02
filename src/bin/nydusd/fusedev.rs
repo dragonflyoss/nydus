@@ -484,7 +484,7 @@ pub fn create_fuse_daemon(
     fp: FailoverPolicy,
     mount_cmd: Option<FsBackendMountCmd>,
     bti: BuildTimeInfo,
-) -> Result<Arc<dyn NydusDaemon + Send + Sync>> {
+) -> Result<Arc<dyn NydusDaemon>> {
     let mnt = Path::new(mountpoint).canonicalize()?;
     let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
     let (result_sender, result_receiver) = channel::<DaemonResult<()>>();
