@@ -117,7 +117,7 @@ impl ApiServer {
         self.get_daemon_object()?
             .export_info(include_fs_info)
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))
-            .map(|info| ApiResponsePayload::DaemonInfo(info))
+            .map(ApiResponsePayload::DaemonInfo)
     }
 
     /// External supervisor wants this instance to exit. But it can't just die leave
@@ -288,7 +288,9 @@ impl ApiServer {
     }
 
     fn get_default_fs_service(&self) -> std::result::Result<Arc<dyn FsService>, ApiError> {
-        todo!();
+        DAEMON_CONTROLLER
+            .get_fs_service()
+            .ok_or(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported))
     }
 }
 
