@@ -334,11 +334,11 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
     }
 
     fn save(&self) -> DaemonResult<()> {
-        unimplemented!();
+        Err(DaemonError::Unsupported)
     }
 
     fn restore(&self) -> DaemonResult<()> {
-        unimplemented!();
+        Err(DaemonError::Unsupported)
     }
 
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
@@ -371,7 +371,7 @@ pub fn create_virtiofs_daemon(
     vfs: Arc<Vfs>,
     mount_cmd: Option<FsBackendMountCmd>,
     bti: BuildTimeInfo,
-) -> Result<Arc<dyn NydusDaemon + Send + Sync>> {
+) -> Result<Arc<dyn NydusDaemon>> {
     let vu_daemon = VhostUserDaemon::new(
         String::from("vhost-user-fs-backend"),
         Arc::new(RwLock::new(VhostUserFsBackendHandler::new(vfs.clone())?)),
