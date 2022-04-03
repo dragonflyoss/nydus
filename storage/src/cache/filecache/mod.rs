@@ -149,10 +149,12 @@ impl BlobCacheMgr for FileCacheMgr {
         self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
     }
 
-    fn gc(&self) {
+    fn gc(&self, id: Option<&str>) {
         let mut reclaim = Vec::new();
 
-        {
+        if let Some(blob_id) = id {
+            reclaim.push(blob_id.to_string());
+        } else {
             let guard = self.blobs.write().unwrap();
             for (id, entry) in guard.iter() {
                 if Arc::strong_count(entry) == 1 {

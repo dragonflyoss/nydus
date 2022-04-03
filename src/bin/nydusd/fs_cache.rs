@@ -288,6 +288,7 @@ enum FsCacheObject {
 #[derive(Default)]
 struct FsCacheState {
     fd_to_object_map: HashMap<u32, FsCacheObject>,
+    fd_to_config_map: HashMap<u32, Arc<FsCacheDataBlobConfig>>,
     id_to_config_map: HashMap<String, FsCacheObjectConfig>,
 }
 
@@ -548,9 +549,9 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        info: Arc<FsCacheDataBlobConfig>,
+        config: Arc<FsCacheDataBlobConfig>,
     ) -> String {
-        match self.create_data_blob_object(&info, hdr.id, msg.fd) {
+        match self.create_data_blob_object(&config, hdr.id, msg.fd) {
             Err(s) => s,
             Ok((blob, blob_size)) => {
                 let mut state = self.state.lock().unwrap();
@@ -560,6 +561,7 @@ impl FsCacheHandler {
                     state
                         .fd_to_object_map
                         .insert(msg.fd, FsCacheObject::DataBlob(blob));
+                    state.fd_to_config_map.insert(msg.fd, config.clone());
                     format!("cinit {},{}", hdr.id, blob_size)
                 }
             }
@@ -634,7 +636,10 @@ impl FsCacheHandler {
     fn handle_close_request(&self, _hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
         let mut state = self.get_state();
 
-        state.fd_to_object_map.remove(&msg.fd);
+        if let Some(FsCacheObject::DataBlob(blob)) = state.fd_to_object_map.remove(&msg.fd) {
+            let config = state.fd_to_config_map.remove(&msg.fd).unwrap();
+            BLOB_FACTORY.gc(Some((&config.factory_config, blob.blob_id())));
+        }
     }
 
     fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
