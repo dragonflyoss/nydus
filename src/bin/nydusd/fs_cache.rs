@@ -443,11 +443,14 @@ impl FsCacheHandler {
         let mut buf = [0u8; MIN_DATA_BUF_SIZE];
 
         loop {
-            self.poller
-                .lock()
-                .unwrap()
-                .poll(&mut events, None)
-                .map_err(|_e| eother!("Failed to poll events for fscache service"))?;
+            match self.poller.lock().unwrap().poll(&mut events, None) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    warn!("Failed to poll events for fscache service");
+                    return Err(e);
+                }
+            }
 
             for event in events.iter() {
                 if event.is_error() {
@@ -479,9 +482,10 @@ impl FsCacheHandler {
                     buf.len(),
                 )
             };
-            // TODO: confirm how to handle ret == 0?
             if ret > 0 {
                 self.handle_one_request(&buf[0..ret as usize])?;
+            } else if ret == 0 {
+                return Ok(());
             } else {
                 let err = Error::last_os_error();
                 match err.kind() {
