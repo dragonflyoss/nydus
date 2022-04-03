@@ -202,17 +202,8 @@ impl FileCacheEntry {
             .backend
             .get_reader(blob_info.blob_id())
             .map_err(|_e| eio!("failed to get blob reader"))?;
-        let blob_size = Self::get_blob_size(&reader, &blob_info)?;
-
+        let blob_size = blob_info.uncompressed_size();
         let meta = if blob_info.meta_ci_is_valid() {
-            // Set cache file to its expected size.
-            let file_size = file.metadata()?.len();
-            if file_size == 0 {
-                file.set_len(blob_info.uncompressed_size())?;
-            } else {
-                assert_eq!(file_size, blob_info.uncompressed_size());
-            }
-
             Some(Arc::new(BlobMetaInfo::new(
                 &blob_file_path,
                 &blob_info,
