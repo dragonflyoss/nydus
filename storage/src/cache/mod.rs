@@ -344,7 +344,9 @@ pub trait BlobCacheMgr: Send + Sync {
     fn destroy(&self);
 
     /// Garbage-collect unused resources.
-    fn gc(&self) {}
+    fn gc(&self, _id: Option<&str>) {
+        todo!()
+    }
 
     /// Get the underlying `BlobBackend` object of the blob cache object.
     fn backend(&self) -> &(dyn BlobBackend);

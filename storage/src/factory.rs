@@ -200,8 +200,18 @@ impl BlobFactory {
     }
 
     /// Garbage-collect unused blob cache managers and blob caches.
-    pub fn gc(&self) {
-        unimplemented!("TODO")
+    pub fn gc(&self, victim: Option<(&Arc<FactoryConfig>, &str)>) {
+        if let Some((config, id)) = victim {
+            let key = BlobCacheMgrKey {
+                config: config.clone(),
+            };
+            let mgr = self.mgrs.lock().unwrap().get(&key).cloned();
+            if let Some(mgr) = mgr {
+                mgr.gc(Some(id));
+            }
+        } else {
+            unimplemented!("TODO")
+        }
     }
 
     /// Create a storage backend for the blob with id `blob_id`.
