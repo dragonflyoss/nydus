@@ -9,17 +9,13 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use nydus_app::BuildTimeInfo;
-use serde_json::Value;
-use storage::device::{BlobFeatures, BlobInfo};
-use storage::factory::FactoryConfig;
 
 use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
 };
-use crate::fs_cache::FsCacheHandler;
-use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
+use crate::{FsService, NydusDaemon, SubCmdArgs};
 
 pub struct ServiceContoller {
     bti: BuildTimeInfo,
@@ -30,14 +26,18 @@ pub struct ServiceContoller {
     supervisor: Option<String>,
 
     blob_cache_mgr: Arc<BlobCacheMgr>,
+
     fscache_enabled: AtomicBool,
-    fscache: Mutex<Option<Arc<FsCacheHandler>>>,
+    #[cfg(target_os = "linux")]
+    fscache: Mutex<Option<Arc<crate::fs_cache::FsCacheHandler>>>,
 }
 
 impl ServiceContoller {
     /// Start all enabled services.
     fn start_services(&self) -> Result<()> {
         info!("Starting all Nydus services...");
+
+        #[cfg(target_os = "linux")]
         if self.fscache_enabled.load(Ordering::Acquire) {
             if let Some(fscache) = self.fscache.lock().unwrap().clone() {
                 std::thread::spawn(move || {
@@ -45,7 +45,7 @@ impl ServiceContoller {
                         error!("Failed to run fscache service loop, {}", e);
                     }
                     // Notify the global service controller that one working thread is exiting.
-                    if let Err(e) = DAEMON_CONTROLLER.waker.wake() {
+                    if let Err(e) = crate::DAEMON_CONTROLLER.waker.wake() {
                         error!("Failed to notify the global service controller, {}", e);
                     }
                 });
@@ -58,27 +58,42 @@ impl ServiceContoller {
     /// Stop all enabled services.
     fn stop_services(&self) {
         info!("Stopping all Nydus services...");
+
+        #[cfg(target_os = "linux")]
         if self.fscache_enabled.load(Ordering::Acquire) {
             if let Some(fscache) = self.fscache.lock().unwrap().take() {
                 fscache.stop();
             }
         }
     }
+}
 
-    fn initialize_fscache_service(&self, path: &str, config: &Option<Value>) -> Result<()> {
-        let fscache = FsCacheHandler::new(path, "/tmp/fscache", None, self.blob_cache_mgr.clone())?;
+#[cfg(target_os = "linux")]
+impl ServiceContoller {
+    fn initialize_fscache_service(
+        &self,
+        path: &str,
+        config: &Option<serde_json::Value>,
+    ) -> Result<()> {
+        let fscache = crate::fs_cache::FsCacheHandler::new(
+            path,
+            "/tmp/fscache",
+            None,
+            self.blob_cache_mgr.clone(),
+        )?;
 
         if let Some(config) = config {
-            let factory_config: FactoryConfig = serde_json::from_value(config.to_owned())
-                .map_err(|_e| eother!("invalid configuration file"))?;
-            let blob_info = BlobInfo::new(
+            let factory_config: storage::factory::FactoryConfig =
+                serde_json::from_value(config.to_owned())
+                    .map_err(|_e| eother!("invalid configuration file"))?;
+            let blob_info = storage::device::BlobInfo::new(
                 1,
                 "blob_id".to_string(),
                 0x10000,
                 0x8000,
                 0x1000,
                 1,
-                BlobFeatures::empty(),
+                storage::device::BlobFeatures::empty(),
             );
             self.blob_cache_mgr.add_blob_object(
                 String::default(),
@@ -164,6 +179,7 @@ impl DaemonStateMachineSubscriber for ServiceContoller {
 pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn NydusDaemon>> {
     let id = subargs.value_of("id").map(|id| id.to_string());
     let supervisor = subargs.value_of("supervisor").map(|s| s.to_string());
+    #[cfg(target_os = "linux")]
     let config = match subargs.value_of("config") {
         None => None,
         Some(path) => {
@@ -185,10 +201,13 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
         supervisor,
 
         blob_cache_mgr: Arc::new(BlobCacheMgr::new()),
-        fscache: Mutex::new(None),
+
         fscache_enabled: AtomicBool::new(false),
+        #[cfg(target_os = "linux")]
+        fscache: Mutex::new(None),
     };
 
+    #[cfg(target_os = "linux")]
     if let Some(path) = subargs.value_of("fscache") {
         daemon.initialize_fscache_service(path, &config)?;
     }

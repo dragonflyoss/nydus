@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Result, Write};
-use std::mem::size_of;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::read_unaligned;
@@ -29,10 +28,10 @@ ioctl_write_int!(fscache_cread, 0x98, 1);
 
 /// Maximum size of fscache request message from kernel.
 const MIN_DATA_BUF_SIZE: usize = 1024;
-const MSG_HEADER_SIZE: usize = size_of::<FsCacheMsgHeader>();
+const MSG_HEADER_SIZE: usize = 12;
 const MSG_OPEN_SIZE: usize = 16;
-const MSG_CLOSE_SIZE: usize = size_of::<FsCacheMsgClose>();
-const MSG_READ_SIZE: usize = size_of::<FsCacheMsgRead>();
+const MSG_CLOSE_SIZE: usize = 4;
+const MSG_READ_SIZE: usize = 20;
 
 const TOKEN_EVENT_WAKER: usize = 1;
 const TOKEN_EVENT_FSCACHE: usize = 2;
@@ -363,16 +362,16 @@ impl FsCacheHandler {
                     buf.len(),
                 )
             };
-            if ret > 0 {
-                self.handle_one_request(&buf[0..ret as usize])?;
-            } else if ret == 0 {
-                return Ok(());
-            } else {
-                let err = Error::last_os_error();
-                match err.kind() {
-                    ErrorKind::Interrupted => continue,
-                    ErrorKind::WouldBlock => return Ok(()),
-                    _ => return Err(err),
+            match ret {
+                0 => return Ok(()),
+                _i if _i > 0 => self.handle_one_request(&buf[0..ret as usize])?,
+                _ => {
+                    let err = Error::last_os_error();
+                    match err.kind() {
+                        ErrorKind::Interrupted => continue,
+                        ErrorKind::WouldBlock => return Ok(()),
+                        _ => return Err(err),
+                    }
                 }
             }
         }
@@ -626,22 +625,19 @@ mod tests {
     }
 
     #[test]
-    fn test_msg_size() {
-        assert_eq!(MSG_HEADER_SIZE, 12);
-        assert_eq!(MSG_READ_SIZE, 20);
-        assert_eq!(MSG_CLOSE_SIZE, 4);
-    }
-
-    #[test]
     fn test_msg_header() {
-        let hdr = FsCacheMsgHeader::try_from(&[0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 13, 0]).unwrap();
+        let hdr =
+            FsCacheMsgHeader::try_from(vec![1u8, 0, 0, 0, 2, 0, 0, 0, 13, 0, 0, 0, 0].as_slice())
+                .unwrap();
         assert_eq!(hdr.id, 0x1);
         assert_eq!(hdr.opcode, FsCacheOpCode::Read);
         assert_eq!(hdr.len, 0xd);
 
-        FsCacheMsgHeader::try_from(&[0u8, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 13, 0]).unwrap_err();
-        FsCacheMsgHeader::try_from(&[0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 13]).unwrap_err();
-        FsCacheMsgHeader::try_from(&[0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0]).unwrap_err();
-        FsCacheMsgHeader::try_from(&[]).unwrap_err();
+        FsCacheMsgHeader::try_from(vec![0u8, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 13, 0].as_slice())
+            .unwrap_err();
+        FsCacheMsgHeader::try_from(vec![0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 13].as_slice())
+            .unwrap_err();
+        FsCacheMsgHeader::try_from(vec![0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0].as_slice()).unwrap_err();
+        FsCacheMsgHeader::try_from(vec![].as_slice()).unwrap_err();
     }
 }
