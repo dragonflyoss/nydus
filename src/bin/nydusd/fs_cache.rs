@@ -24,6 +24,8 @@ use storage::cache::BlobCache;
 use storage::device::BlobInfo;
 use storage::factory::{FactoryConfig, BLOB_FACTORY};
 
+ioctl_write_int!(fscache_cread, 0x98, 1);
+
 /// Maximum size of fscache request message from kernel.
 const MIN_DATA_BUF_SIZE: usize = 1024;
 const MSG_HEADER_SIZE: usize = size_of::<FsCacheMsgHeader>();
@@ -636,15 +638,15 @@ impl FsCacheHandler {
     }
 
     fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
-        let object = self.get_object(msg.fd);
-        let msg = match object {
-            None => format!("cread {},{}", hdr.id, -libc::ENOENT),
+        match self.get_object(msg.fd) {
+            None => warn!("No cached file object found for fd {}", msg.fd),
             Some(FsCacheObject::DataBlob(blob)) => match blob.get_blob_object() {
-                None => format!("cread {},{}", hdr.id, -libc::ENOSYS),
+                None => {
+                    warn!("Internal error: blob object used by fscache is not BlobCache objects")
+                }
                 Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
-                    Ok(v) if v == msg.len as usize => format!("cread {}", hdr.id),
-                    Ok(_v) => format!("cread {},{}", hdr.id, -libc::EIO),
-                    Err(_e) => format!("cread {},{}", hdr.id, -libc::EIO),
+                    Ok(v) if v == msg.len as usize => {}
+                    _ => debug!("Failed to read data from blob object"),
                 },
             },
             Some(FsCacheObject::Bootstrap(bs)) => {
@@ -660,7 +662,10 @@ impl FsCacheHandler {
                     )
                 };
                 if base == libc::MAP_FAILED {
-                    format!("cread {},{}", hdr.id, -libc::EIO)
+                    warn!(
+                        "Failed to mmap bootstrap file, {}",
+                        std::io::Error::last_os_error()
+                    );
                 } else {
                     let ret = unsafe {
                         libc::pwrite(
@@ -672,14 +677,16 @@ impl FsCacheHandler {
                     };
                     let _ = unsafe { libc::munmap(base, msg.len as usize) };
                     if ret < 0 {
-                        format!("cread {},{}", hdr.id, -libc::EIO)
-                    } else {
-                        format!("cread {}", hdr.id)
+                        warn!(
+                            "Failed to write bootstrap blob data to cached file, {}",
+                            std::io::Error::last_os_error()
+                        );
                     }
                 }
             }
-        };
-        self.reply(&msg);
+        }
+
+        unsafe { fscache_cread(msg.fd as i32, hdr.id as u64).unwrap() };
     }
 
     #[inline]
