@@ -11,6 +11,8 @@ extern crate log;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
+extern crate nix;
+#[macro_use]
 extern crate nydus_error;
 
 #[cfg(feature = "fusedev")]
