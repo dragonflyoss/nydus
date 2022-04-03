@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 // Blob cache manager to manage all cached blob objects.
-
 use rafs::metadata::{RafsMode, RafsSuper};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};

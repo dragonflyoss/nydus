@@ -4,16 +4,19 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 #![deny(warnings)]
+#![allow(dead_code)]
 #[macro_use(crate_version)]
 extern crate clap;
 #[macro_use]
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
+#[cfg(target_os = "linux")]
 #[macro_use]
 extern crate nix;
 #[macro_use]
 extern crate nydus_error;
+extern crate core;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
@@ -43,6 +46,7 @@ mod virtiofs;
 mod api_server_glue;
 mod blob_cache;
 mod daemon;
+#[cfg(target_os = "linux")]
 mod fs_cache;
 mod fs_service;
 mod service_controller;
