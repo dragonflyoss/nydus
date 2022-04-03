@@ -11,7 +11,6 @@ use std::io::{Error, ErrorKind, Result, Write};
 use std::mem::size_of;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::path::Path;
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,10 +18,12 @@ use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use rafs::metadata::{RafsMode, RafsSuper};
 use storage::cache::BlobCache;
-use storage::device::BlobInfo;
-use storage::factory::{FactoryConfig, BLOB_FACTORY};
+use storage::factory::BLOB_FACTORY;
+
+use crate::blob_cache::{
+    BlobCacheMgr, FsCacheBootstrapConfig, FsCacheDataBlobConfig, FsCacheObjectConfig,
+};
 
 ioctl_write_int!(fscache_cread, 0x98, 1);
 
@@ -215,64 +216,6 @@ impl TryFrom<&[u8]> for FsCacheMsgRead {
     }
 }
 
-#[derive(Clone)]
-struct FsCacheBootstrapConfig {
-    blob_id: String,
-    scoped_blob_id: String,
-    path: String,
-    factory_config: Arc<FactoryConfig>,
-}
-
-#[derive(Clone)]
-struct FsCacheDataBlobConfig {
-    blob_info: Arc<BlobInfo>,
-    scoped_blob_id: String,
-    factory_config: Arc<FactoryConfig>,
-}
-
-#[derive(Clone)]
-enum FsCacheObjectConfig {
-    DataBlob(Arc<FsCacheDataBlobConfig>),
-    Bootstrap(Arc<FsCacheBootstrapConfig>),
-}
-
-impl FsCacheObjectConfig {
-    fn new_data_blob(
-        domain_id: String,
-        blob_info: Arc<BlobInfo>,
-        factory_config: Arc<FactoryConfig>,
-    ) -> Self {
-        let scoped_blob_id = domain_id + "-" + blob_info.blob_id();
-        FsCacheObjectConfig::DataBlob(Arc::new(FsCacheDataBlobConfig {
-            blob_info,
-            scoped_blob_id,
-            factory_config,
-        }))
-    }
-
-    fn new_bootstrap_blob(
-        domain_id: String,
-        blob_id: String,
-        path: String,
-        factory_config: Arc<FactoryConfig>,
-    ) -> Self {
-        let scoped_blob_id = domain_id + "-" + &blob_id;
-        FsCacheObjectConfig::Bootstrap(Arc::new(FsCacheBootstrapConfig {
-            blob_id,
-            scoped_blob_id,
-            path,
-            factory_config,
-        }))
-    }
-
-    fn get_key(&self) -> &str {
-        match self {
-            FsCacheObjectConfig::Bootstrap(o) => &o.scoped_blob_id,
-            FsCacheObjectConfig::DataBlob(o) => &o.scoped_blob_id,
-        }
-    }
-}
-
 struct FsCacheBootStrap {
     bootstrap_file: File,
     cache_file: File,
@@ -289,7 +232,7 @@ enum FsCacheObject {
 struct FsCacheState {
     fd_to_object_map: HashMap<u32, FsCacheObject>,
     fd_to_config_map: HashMap<u32, Arc<FsCacheDataBlobConfig>>,
-    id_to_config_map: HashMap<String, FsCacheObjectConfig>,
+    blob_cache_mgr: Arc<BlobCacheMgr>,
 }
 
 /// Handler to cooperate with Linux fscache driver to manage cached blob objects.
@@ -307,7 +250,12 @@ pub struct FsCacheHandler {
 
 impl FsCacheHandler {
     /// Create a new instance of `FsCacheService`.
-    pub fn new(path: &str, dir: &str, tag: Option<&str>) -> Result<Self> {
+    pub fn new(
+        path: &str,
+        dir: &str,
+        tag: Option<&str>,
+        blob_cache_mgr: Arc<BlobCacheMgr>,
+    ) -> Result<Self> {
         info!(
             "create FsCacheHandler with dir {}, tag {}",
             dir,
@@ -342,91 +290,20 @@ impl FsCacheHandler {
         file.write_all(b"bind ondemand")?;
         file.flush()?;
 
+        let state = FsCacheState {
+            fd_to_object_map: Default::default(),
+            fd_to_config_map: Default::default(),
+            blob_cache_mgr,
+        };
+
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
             barrier: Barrier::new(2),
             file,
-            state: Arc::new(Mutex::new(FsCacheState::default())),
+            state: Arc::new(Mutex::new(state)),
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
         })
-    }
-
-    /// Add a blob object to be managed by the `FsCacheHandler`.
-    ///
-    /// The `domain_id` and `blob_id` forms a unique identifier to identify cached objects.
-    /// That means `domain_id` is used to divide cached objects into groups and blobs with the same
-    /// `blob_id` may exist in different groups.
-    pub fn add_blob_object(
-        &self,
-        domain_id: String,
-        blob_info: Arc<BlobInfo>,
-        factory_config: Arc<FactoryConfig>,
-    ) -> Result<()> {
-        let config = FsCacheObjectConfig::new_data_blob(domain_id, blob_info, factory_config);
-        let mut state = self.get_state();
-        if state.id_to_config_map.contains_key(config.get_key()) {
-            Err(Error::new(
-                ErrorKind::AlreadyExists,
-                "blob configuration information already exists",
-            ))
-        } else {
-            state
-                .id_to_config_map
-                .insert(config.get_key().to_string(), config);
-            Ok(())
-        }
-    }
-
-    /// Add a metadata blob object to be managed by the `FsCacheHandler`.
-    ///
-    /// When adding a rafs metadata blob to the manager, all data blobs referenced by it will
-    /// also be added to the manager. It's convenient to support rafs image filesystem.
-    ///
-    /// The `domain_id` and `id` forms a unique identifier to identify cached bootstrap objects.
-    /// That means `domain_id` is used to divide cached objects into groups and blobs with the
-    /// same `id` may exist in different groups.
-    #[allow(unused)]
-    pub fn add_bootstrap_object(
-        &self,
-        domain_id: String,
-        id: &str,
-        path: &Path,
-        factory_config: Arc<FactoryConfig>,
-    ) -> Result<()> {
-        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, true)?;
-        let config = FsCacheObjectConfig::new_bootstrap_blob(
-            domain_id.clone(),
-            id.to_string(),
-            path.to_str().unwrap().to_string(),
-            factory_config.clone(),
-        );
-        let mut state = self.get_state();
-
-        if state.id_to_config_map.contains_key(config.get_key()) {
-            Err(Error::new(
-                ErrorKind::AlreadyExists,
-                "blob configuration information already exists",
-            ))
-        } else {
-            state
-                .id_to_config_map
-                .insert(config.get_key().to_string(), config);
-            // Try to add the referenced data blob object if it doesn't exist yet.
-            for bi in rs.superblock.get_blob_infos() {
-                let data_blob = FsCacheObjectConfig::new_data_blob(
-                    domain_id.clone(),
-                    bi,
-                    factory_config.clone(),
-                );
-                if !state.id_to_config_map.contains_key(data_blob.get_key()) {
-                    state
-                        .id_to_config_map
-                        .insert(data_blob.get_key().to_string(), data_blob);
-                }
-            }
-            Ok(())
-        }
     }
 
     /// Stop the fscache event loop.
@@ -574,11 +451,11 @@ impl FsCacheHandler {
     /// way to share blob/chunkamp files with filecache manager.
     fn create_data_blob_object(
         &self,
-        info: &FsCacheDataBlobConfig,
+        config: &FsCacheDataBlobConfig,
         id: u32,
         fd: u32,
     ) -> std::result::Result<(Arc<dyn BlobCache>, u64), String> {
-        let mut blob_info = info.blob_info.deref().clone();
+        let mut blob_info = config.blob_info().deref().clone();
         // `BlobInfo` from the configuration cache should not have fscache file associated with it.
         assert!(blob_info.get_fscache_file().is_none());
 
@@ -587,7 +464,7 @@ impl FsCacheHandler {
         blob_info.set_fscache_file(Some(Arc::new(file)));
         let blob_ref = Arc::new(blob_info);
 
-        match BLOB_FACTORY.new_blob_cache(&info.factory_config, &blob_ref) {
+        match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
             Err(_e) => Err(format!("cinit {},{}", id, -libc::ENOENT)),
             Ok(blob) => {
                 let blob_size = match blob.blob_size() {
@@ -603,21 +480,21 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        info: Arc<FsCacheBootstrapConfig>,
+        config: Arc<FsCacheBootstrapConfig>,
     ) -> String {
         let mut state = self.get_state();
         if state.fd_to_object_map.contains_key(&msg.fd) {
             return format!("copen {},{}", hdr.id, -libc::EALREADY);
         }
 
-        match OpenOptions::new().read(true).open(&info.path) {
+        match OpenOptions::new().read(true).open(config.path()) {
             Err(e) => {
-                warn!("Failed to open bootstrap file {}, {}", info.path, e);
+                warn!("Failed to open bootstrap file {}, {}", config.path(), e);
                 format!("copen {},{}", hdr.id, -libc::ENOENT)
             }
             Ok(f) => match f.metadata() {
                 Err(e) => {
-                    warn!("Failed to open bootstrap file {}, {}", info.path, e);
+                    warn!("Failed to open bootstrap file {}, {}", config.path(), e);
                     format!("copen {},{}", hdr.id, -libc::ENOENT)
                 }
                 Ok(md) => {
@@ -638,7 +515,7 @@ impl FsCacheHandler {
 
         if let Some(FsCacheObject::DataBlob(blob)) = state.fd_to_object_map.remove(&msg.fd) {
             let config = state.fd_to_config_map.remove(&msg.fd).unwrap();
-            BLOB_FACTORY.gc(Some((&config.factory_config, blob.blob_id())));
+            BLOB_FACTORY.gc(Some((config.factory_config(), blob.blob_id())));
         }
     }
 
@@ -726,7 +603,7 @@ impl FsCacheHandler {
 
     #[inline]
     fn get_config(&self, key: &str) -> Option<FsCacheObjectConfig> {
-        self.get_state().id_to_config_map.get(key).cloned()
+        self.get_state().blob_cache_mgr.get_config(key)
     }
 }
 

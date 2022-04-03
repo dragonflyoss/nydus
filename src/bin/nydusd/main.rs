@@ -41,6 +41,7 @@ mod fusedev;
 mod virtiofs;
 
 mod api_server_glue;
+mod blob_cache;
 mod daemon;
 mod fs_cache;
 mod fs_service;
