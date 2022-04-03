@@ -193,7 +193,7 @@ impl FileCacheEntry {
         }
         let file = blob_info
             .get_fscache_file()
-            .ok_or(einval!("No fscache file associated with the blob_info"))?;
+            .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
 
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
         let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
