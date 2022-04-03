@@ -316,9 +316,15 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
             Arg::with_name("fscache")
                 .long("fscache")
                 .short("F")
-                .help("Control device for fscache, which also enables fscache service")
+                .help("Working directory fscache driver to cache files")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("fscache-tag")
+                .long("fscache-tag")
+                .help("Fscache tag to identify the fs daemon instance")
                 .takes_value(true)
-                .default_value("/dev/cachefiles"),
+                .requires("fscache"),
         );
 
     app.subcommand(subcmd)
