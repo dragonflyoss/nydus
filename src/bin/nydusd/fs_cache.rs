@@ -15,10 +15,11 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use rafs::metadata::{RafsMode, RafsSuper};
 use storage::cache::BlobCache;
 use storage::device::BlobInfo;
 use storage::factory::{FactoryConfig, BLOB_FACTORY};
@@ -34,6 +35,7 @@ const CACHEFILES_OPEN_WANT_CACHE_SIZE: u32 = 0x1;
 const TOKEN_EVENT_WAKER: usize = 1;
 const TOKEN_EVENT_FSCACHE: usize = 2;
 
+/// Command code in requests from fscache driver.
 #[repr(u32)]
 #[derive(Debug, Eq, PartialEq)]
 enum FsCacheOpCode {
@@ -55,14 +57,15 @@ impl TryFrom<u32> for FsCacheOpCode {
     }
 }
 
+/// Common header for request messages.
 #[repr(C)]
 #[derive(Debug, Eq, PartialEq)]
 struct FsCacheMsgHeader {
-    /// Message id to identifying position of this message in the fscache internal radix tree.
+    /// Message identifier to associate reply with request by the fscache driver.
     id: u32,
-    /// message type, CACHEFILE_OP_*
+    /// Message operation code.
     opcode: FsCacheOpCode,
-    /// message length, including message header and following data.
+    /// Message length, including message header and message body.
     len: u32,
 }
 
@@ -94,6 +97,10 @@ impl TryFrom<&[u8]> for FsCacheMsgHeader {
     }
 }
 
+/// Request message to open a file.
+///
+/// The opened file should be kept valid until corresponding `CLOSE` message has been received
+/// from the fscache driver.
 #[derive(Default, Debug, Eq, PartialEq)]
 struct FsCacheMsgOpen {
     fd: u32,
@@ -123,7 +130,9 @@ impl TryFrom<&[u8]> for FsCacheMsgOpen {
                 .checked_add(MSG_OPEN_SIZE as u32)
                 .is_none()
         {
-            return Err(einval!("invalid volume/cookie key length"));
+            return Err(einval!(
+                "invalid volume/cookie key length in fscache OPEN request"
+            ));
         }
         let total_sz = (volume_key_size + cookie_key_size) as usize + MSG_OPEN_SIZE;
         if value.len() < total_sz {
@@ -146,6 +155,12 @@ impl TryFrom<&[u8]> for FsCacheMsgOpen {
     }
 }
 
+/// Request message to close a file.
+///
+/// Once replied a `CLOSE` message, a following `READ` requests against the same file should be
+/// rejected. The corresponding file descriptor may be actually closed after sending the reply
+/// message. But it should be close in limited delay to avoid conflicting when re-opening the
+/// same file again.
 #[repr(C)]
 #[derive(Default, Debug, Eq, PartialEq)]
 struct FsCacheMsgClose {
@@ -170,6 +185,7 @@ impl TryFrom<&[u8]> for FsCacheMsgClose {
     }
 }
 
+/// Request message to feed requested data into the cache file.
 #[repr(C)]
 #[derive(Default, Debug, Eq, PartialEq)]
 struct FsCacheMsgRead {
@@ -199,16 +215,80 @@ impl TryFrom<&[u8]> for FsCacheMsgRead {
 }
 
 #[derive(Clone)]
-struct FsCacheBlobInfo {
-    blob_info: Arc<BlobInfo>,
+struct FsCacheBootstrapConfig {
+    blob_id: String,
+    scoped_blob_id: String,
+    path: String,
     factory_config: Arc<FactoryConfig>,
 }
 
+#[derive(Clone)]
+struct FsCacheDataBlobConfig {
+    blob_info: Arc<BlobInfo>,
+    scoped_blob_id: String,
+    factory_config: Arc<FactoryConfig>,
+}
+
+#[derive(Clone)]
+enum FsCacheObjectConfig {
+    DataBlob(Arc<FsCacheDataBlobConfig>),
+    Bootstrap(Arc<FsCacheBootstrapConfig>),
+}
+
+impl FsCacheObjectConfig {
+    fn new_data_blob(
+        domain_id: String,
+        blob_info: Arc<BlobInfo>,
+        factory_config: Arc<FactoryConfig>,
+    ) -> Self {
+        let scoped_blob_id = domain_id + "-" + blob_info.blob_id();
+        FsCacheObjectConfig::DataBlob(Arc::new(FsCacheDataBlobConfig {
+            blob_info,
+            scoped_blob_id,
+            factory_config,
+        }))
+    }
+
+    fn new_bootstrap_blob(
+        domain_id: String,
+        blob_id: String,
+        path: String,
+        factory_config: Arc<FactoryConfig>,
+    ) -> Self {
+        let scoped_blob_id = domain_id + "-" + &blob_id;
+        FsCacheObjectConfig::Bootstrap(Arc::new(FsCacheBootstrapConfig {
+            blob_id,
+            scoped_blob_id,
+            path,
+            factory_config,
+        }))
+    }
+
+    fn get_key(&self) -> &str {
+        match self {
+            FsCacheObjectConfig::Bootstrap(o) => &o.scoped_blob_id,
+            FsCacheObjectConfig::DataBlob(o) => &o.scoped_blob_id,
+        }
+    }
+}
+
+struct FsCacheBootStrap {
+    bootstrap_file: File,
+    cache_file: File,
+}
+
+#[derive(Clone)]
+#[allow(unused)]
+enum FsCacheObject {
+    DataBlob(Arc<dyn BlobCache>),
+    Bootstrap(Arc<FsCacheBootStrap>),
+}
+
+/// Struct to maintain cached file objects.
 #[derive(Default)]
 struct FsCacheState {
-    fd_to_blob_map: HashMap<u32, Arc<dyn BlobCache>>,
-    id_to_fd_map: HashMap<String, u32>,
-    id_to_info_map: HashMap<String, Arc<FsCacheBlobInfo>>,
+    fd_to_object_map: HashMap<u32, FsCacheObject>,
+    id_to_config_map: HashMap<String, FsCacheObjectConfig>,
 }
 
 /// Handler to cooperate with Linux fscache driver to manage cached blob objects.
@@ -219,9 +299,9 @@ pub struct FsCacheHandler {
     active: AtomicBool,
     barrier: Barrier,
     file: File,
+    state: Arc<Mutex<FsCacheState>>,
     poller: Mutex<Poll>,
     waker: Arc<Waker>,
-    state: Arc<Mutex<FsCacheState>>,
 }
 
 impl FsCacheHandler {
@@ -268,24 +348,77 @@ impl FsCacheHandler {
     }
 
     /// Add a blob object to be managed by the `FsCacheHandler`.
+    ///
+    /// The `domain_id` and `blob_id` forms a unique identifier to identify cached objects.
+    /// That means `domain_id` is used to divide cached objects into groups and blobs with the same
+    /// `blob_id` may exist in different groups.
     pub fn add_blob_object(
         &self,
+        domain_id: String,
         blob_info: Arc<BlobInfo>,
         factory_config: Arc<FactoryConfig>,
     ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if state.id_to_info_map.contains_key(blob_info.blob_id()) {
+        let config = FsCacheObjectConfig::new_data_blob(domain_id, blob_info, factory_config);
+        let mut state = self.get_state();
+        if state.id_to_config_map.contains_key(config.get_key()) {
             Err(Error::new(
                 ErrorKind::AlreadyExists,
                 "blob configuration information already exists",
             ))
         } else {
-            let blob_id = blob_info.blob_id().to_string();
-            let info = Arc::new(FsCacheBlobInfo {
-                blob_info,
-                factory_config,
-            });
-            state.id_to_info_map.insert(blob_id, info);
+            state
+                .id_to_config_map
+                .insert(config.get_key().to_string(), config);
+            Ok(())
+        }
+    }
+
+    /// Add a metadata blob object to be managed by the `FsCacheHandler`.
+    ///
+    /// When adding a rafs metadata blob to the manager, all data blobs referenced by it will
+    /// also be added to the manager. It's convenient to support rafs image filesystem.
+    ///
+    /// The `domain_id` and `id` forms a unique identifier to identify cached bootstrap objects.
+    /// That means `domain_id` is used to divide cached objects into groups and blobs with the
+    /// same `id` may exist in different groups.
+    #[allow(unused)]
+    pub fn add_bootstrap_object(
+        &self,
+        domain_id: String,
+        id: &str,
+        path: &str,
+        factory_config: Arc<FactoryConfig>,
+    ) -> Result<()> {
+        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, true)?;
+        let config = FsCacheObjectConfig::new_bootstrap_blob(
+            domain_id.clone(),
+            id.to_string(),
+            factory_config.clone(),
+        );
+        let mut state = self.get_state();
+
+        if state.id_to_config_map.contains_key(config.get_key()) {
+            Err(Error::new(
+                ErrorKind::AlreadyExists,
+                "blob configuration information already exists",
+            ))
+        } else {
+            // Try to add the referenced data blob object if it doesn't exist yet.
+            for bi in rs.superblock.get_blob_infos() {
+                let data_blob = FsCacheObjectConfig::new_data_blob(
+                    domain_id.clone(),
+                    bi,
+                    factory_config.clone(),
+                );
+                if !state.id_to_config_map.contains_key(data_blob.get_key()) {
+                    state
+                        .id_to_config_map
+                        .insert(data_blob.get_key().to_string(), data_blob);
+                }
+            }
+            state
+                .id_to_config_map
+                .insert(config.get_key().to_string(), config);
             Ok(())
         }
     }
@@ -380,28 +513,22 @@ impl FsCacheHandler {
         Ok(())
     }
 
-    // TODO: extend the kernel ABI to return error code.
-    // TODO: confirm that once the fd is passed to userspace, the userspace has ownership of the
-    // fd, and should close the fd when needed.
     fn handle_open_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgOpen) {
-        let info = self.get_blob_info(&msg.volume_key);
+        let info = self.get_config(&msg.volume_key);
         let msg = match info {
             None => format!("cinit {},{}", hdr.id, -libc::ENOENT),
             Some(info) => {
                 let need_size = msg.flags & CACHEFILES_OPEN_WANT_CACHE_SIZE != 0;
-                match self.create_blob_object(info, hdr.id, msg.fd, need_size) {
+                match self.create_data_blob_object(info, hdr.id, msg.fd, need_size) {
                     Err(s) => s,
                     Ok((blob, blob_size)) => {
-                        let mut state = self.state.lock().unwrap();
-                        if state.fd_to_blob_map.contains_key(&msg.fd)
-                            || state.id_to_fd_map.contains_key(blob.blob_id())
-                        {
+                        let mut state = self.get_state();
+                        if state.fd_to_object_map.contains_key(&msg.fd) {
                             format!("cinit {},{}", hdr.id, -libc::EALREADY)
                         } else {
                             state
-                                .id_to_fd_map
-                                .insert(blob.blob_id().to_string(), msg.fd);
-                            state.fd_to_blob_map.insert(msg.fd, blob);
+                                .fd_to_object_map
+                                .insert(msg.fd, FsCacheObject::DataBlob(blob));
                             if need_size {
                                 format!("cinit {},{}", hdr.id, blob_size)
                             } else {
@@ -415,16 +542,16 @@ impl FsCacheHandler {
         self.reply(&msg);
     }
 
-    fn handle_close_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
+    fn handle_close_request(&self, _hdr: &FsCacheMsgHeader, _msg: &FsCacheMsgClose) {
         todo!()
     }
 
     // TODO: extend the kernel ABI to return error code.
     fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
-        let blob = self.get_blob_from_fd(msg.fd);
-        let msg = match blob {
+        let object = self.get_object(msg.fd);
+        let msg = match object {
             None => format!("cread {},{}", hdr.id, -libc::ENOENT),
-            Some(blob) => match blob.get_blob_object() {
+            Some(FsCacheObject::DataBlob(blob)) => match blob.get_blob_object() {
                 None => {
                     //panic!("All blob used by fscache should support BlobObject interface")
                     format!("cread {},{}", hdr.id, -libc::ENOSYS)
@@ -435,6 +562,9 @@ impl FsCacheHandler {
                     Err(_e) => format!("cread {},{}", hdr.id, -libc::EIO),
                 },
             },
+            Some(FsCacheObject::Bootstrap(_bs)) => {
+                todo!();
+            }
         };
         self.reply(&msg);
     }
@@ -443,21 +573,22 @@ impl FsCacheHandler {
     /// fscache subsystem. The data blob files will be managed the in kernel fscache driver,
     /// the chunk map file will be managed by the userspace daemon. We need to figure out the
     /// way to share blob/chunkamp files with filecache manager.
-    fn create_blob_object(
+    fn create_data_blob_object(
         &self,
-        info: Arc<FsCacheBlobInfo>,
+        info: FsCacheObjectConfig,
         id: u32,
         fd: u32,
         need_size: bool,
     ) -> std::result::Result<(Arc<dyn BlobCache>, u64), String> {
-        let mut blob_info = info.blob_info.deref().clone();
+        let blob_info = info.get_blob_info().expect("info is not a data blob");
+        let mut blob_info = blob_info.deref().clone();
         assert!(blob_info.get_fscache_file().is_none());
         // Safe because we trust the kernel fscache driver.
         let file = unsafe { File::from_raw_fd(fd as RawFd) };
         blob_info.set_fscache_file(Some(Arc::new(file)));
         let blob_ref = Arc::new(blob_info);
 
-        match BLOB_FACTORY.new_blob_cache(&info.factory_config, &blob_ref) {
+        match BLOB_FACTORY.new_blob_cache(&info.get_factory_config(), &blob_ref) {
             Err(_e) => Err(format!("cinit {},{}", id, -libc::ENOENT)),
             Ok(blob) => {
                 let blob_size = if need_size {
@@ -471,16 +602,6 @@ impl FsCacheHandler {
                 Ok((blob, blob_size))
             }
         }
-    }
-
-    #[inline]
-    fn get_blob_from_fd(&self, fd: u32) -> Option<Arc<dyn BlobCache>> {
-        self.state.lock().unwrap().fd_to_blob_map.get(&fd).cloned()
-    }
-
-    #[inline]
-    fn get_blob_info(&self, key: &str) -> Option<Arc<FsCacheBlobInfo>> {
-        self.state.lock().unwrap().id_to_info_map.get(key).cloned()
     }
 
     #[inline]
@@ -501,6 +622,21 @@ impl FsCacheHandler {
                 std::io::Error::last_os_error()
             );
         }
+    }
+
+    #[inline]
+    fn get_state(&self) -> MutexGuard<FsCacheState> {
+        self.state.lock().unwrap()
+    }
+
+    #[inline]
+    fn get_object(&self, fd: u32) -> Option<FsCacheObject> {
+        self.get_state().fd_to_object_map.get(&fd).cloned()
+    }
+
+    #[inline]
+    fn get_config(&self, key: &str) -> Option<FsCacheObjectConfig> {
+        self.get_state().id_to_config_map.get(key).cloned()
     }
 }
 
