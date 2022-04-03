@@ -78,7 +78,11 @@ impl ServiceContoller {
                 1,
                 BlobFeatures::empty(),
             );
-            fscache.add_blob_object(Arc::new(blob_info), Arc::new(factory_config))?;
+            fscache.add_blob_object(
+                String::default(),
+                Arc::new(blob_info),
+                Arc::new(factory_config),
+            )?;
         }
 
         *self.fscache.lock().unwrap() = Some(Arc::new(fscache));
