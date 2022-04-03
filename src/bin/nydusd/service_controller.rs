@@ -13,6 +13,7 @@ use serde_json::Value;
 use storage::device::{BlobFeatures, BlobInfo};
 use storage::factory::FactoryConfig;
 
+use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
@@ -28,6 +29,7 @@ pub struct ServiceContoller {
     state: AtomicI32,
     supervisor: Option<String>,
 
+    blob_cache_mgr: Arc<BlobCacheMgr>,
     fscache_enabled: AtomicBool,
     fscache: Mutex<Option<Arc<FsCacheHandler>>>,
 }
@@ -64,7 +66,7 @@ impl ServiceContoller {
     }
 
     fn initialize_fscache_service(&self, path: &str, config: &Option<Value>) -> Result<()> {
-        let fscache = FsCacheHandler::new(path, "/tmp/fscache", None)?;
+        let fscache = FsCacheHandler::new(path, "/tmp/fscache", None, self.blob_cache_mgr.clone())?;
 
         if let Some(config) = config {
             let factory_config: FactoryConfig = serde_json::from_value(config.to_owned())
@@ -78,7 +80,7 @@ impl ServiceContoller {
                 1,
                 BlobFeatures::empty(),
             );
-            fscache.add_blob_object(
+            self.blob_cache_mgr.add_blob_object(
                 String::default(),
                 Arc::new(blob_info),
                 Arc::new(factory_config),
@@ -182,6 +184,7 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
         state: Default::default(),
         supervisor,
 
+        blob_cache_mgr: Arc::new(BlobCacheMgr::new()),
         fscache: Mutex::new(None),
         fscache_enabled: AtomicBool::new(false),
     };
