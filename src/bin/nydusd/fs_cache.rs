@@ -21,7 +21,7 @@ use storage::cache::BlobCache;
 use storage::factory::BLOB_FACTORY;
 
 use crate::blob_cache::{
-    BlobCacheMgr, FsCacheBootstrapConfig, FsCacheDataBlobConfig, FsCacheObjectConfig,
+    BlobCacheConfigBootstrap, BlobCacheConfigDataBlob, BlobCacheMgr, BlobCacheObjectConfig,
 };
 
 ioctl_write_int!(fscache_cread, 0x98, 1);
@@ -230,7 +230,7 @@ enum FsCacheObject {
 #[derive(Default)]
 struct FsCacheState {
     fd_to_object_map: HashMap<u32, FsCacheObject>,
-    fd_to_config_map: HashMap<u32, Arc<FsCacheDataBlobConfig>>,
+    fd_to_config_map: HashMap<u32, Arc<BlobCacheConfigDataBlob>>,
     blob_cache_mgr: Arc<BlobCacheMgr>,
 }
 
@@ -410,10 +410,10 @@ impl FsCacheHandler {
         let msg = match config {
             None => format!("cinit {},{}", hdr.id, -libc::ENOENT),
             Some(info) => match info {
-                FsCacheObjectConfig::DataBlob(config) => {
+                BlobCacheObjectConfig::DataBlob(config) => {
                     self.handle_open_data_blob(hdr, msg, config)
                 }
-                FsCacheObjectConfig::Bootstrap(config) => {
+                BlobCacheObjectConfig::Bootstrap(config) => {
                     self.handle_open_bootstrap(hdr, msg, config)
                 }
             },
@@ -425,7 +425,7 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        config: Arc<FsCacheDataBlobConfig>,
+        config: Arc<BlobCacheConfigDataBlob>,
     ) -> String {
         match self.create_data_blob_object(&config, hdr.id, msg.fd) {
             Err(s) => s,
@@ -450,7 +450,7 @@ impl FsCacheHandler {
     /// way to share blob/chunkamp files with filecache manager.
     fn create_data_blob_object(
         &self,
-        config: &FsCacheDataBlobConfig,
+        config: &BlobCacheConfigDataBlob,
         id: u32,
         fd: u32,
     ) -> std::result::Result<(Arc<dyn BlobCache>, u64), String> {
@@ -479,7 +479,7 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        config: Arc<FsCacheBootstrapConfig>,
+        config: Arc<BlobCacheConfigBootstrap>,
     ) -> String {
         let mut state = self.get_state();
         if state.fd_to_object_map.contains_key(&msg.fd) {
@@ -601,7 +601,7 @@ impl FsCacheHandler {
     }
 
     #[inline]
-    fn get_config(&self, key: &str) -> Option<FsCacheObjectConfig> {
+    fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
         self.get_state().blob_cache_mgr.get_config(key)
     }
 }

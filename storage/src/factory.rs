@@ -86,7 +86,7 @@ impl BackendConfig {
 }
 
 /// Configuration information for blob cache manager.
-#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CacheConfig {
     /// Type of blob cache.
     #[serde(default, rename = "type")]
@@ -106,7 +106,7 @@ pub struct CacheConfig {
 }
 
 /// Configuration information to create blob cache manager.
-#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FactoryConfig {
     /// Id of the factory.
     #[serde(default)]
@@ -126,6 +126,7 @@ struct BlobCacheMgrKey {
 #[allow(clippy::derive_hash_xor_eq)]
 impl Hash for BlobCacheMgrKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.config.id.hash(state);
         self.config.backend.backend_type.hash(state);
         self.config.cache.cache_type.hash(state);
         self.config.cache.prefetch_config.hash(state);
