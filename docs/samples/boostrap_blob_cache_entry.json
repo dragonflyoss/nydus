@@ -1,0 +1,17 @@
+{
+  "type": "bootstrap",
+  "id": "bootstrap1",
+  "domain_id": "userid1",
+  "config": {
+    "id": "factory1",
+    "backend_type": "localfs",
+    "backend_config": {
+      "blob_file": "bootstrap1",
+      "dir": "/tmp/nydus"
+    },
+    "cache_type": "fscache",
+    "cache_config": {
+      "work_dir": "/tmp/nydus"
+    }
+  }
+}
