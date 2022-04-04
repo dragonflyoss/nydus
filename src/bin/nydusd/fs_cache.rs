@@ -403,10 +403,9 @@ impl FsCacheHandler {
 
     fn handle_open_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgOpen) {
         let key = msg.volume_key.clone() + "-" + &msg.cookie_key;
-        let config = self.get_config(&key);
-        let msg = match config {
+        let msg = match self.get_config(&key) {
             None => format!("cinit {},{}", hdr.id, -libc::ENOENT),
-            Some(info) => match info {
+            Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
                     self.handle_open_data_blob(hdr, msg, config)
                 }
@@ -485,12 +484,20 @@ impl FsCacheHandler {
 
         match OpenOptions::new().read(true).open(config.path()) {
             Err(e) => {
-                warn!("Failed to open bootstrap file {}, {}", config.path(), e);
+                warn!(
+                    "Failed to open bootstrap file {}, {}",
+                    config.path().display(),
+                    e
+                );
                 format!("copen {},{}", hdr.id, -libc::ENOENT)
             }
             Ok(f) => match f.metadata() {
                 Err(e) => {
-                    warn!("Failed to open bootstrap file {}, {}", config.path(), e);
+                    warn!(
+                        "Failed to open bootstrap file {}, {}",
+                        config.path().display(),
+                        e
+                    );
                     format!("copen {},{}", hdr.id, -libc::ENOENT)
                 }
                 Ok(md) => {

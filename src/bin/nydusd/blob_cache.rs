@@ -5,23 +5,26 @@
 // Blob cache manager to manage all cached blob objects.
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nydus_api::http::BlobCacheList;
+use nydus_api::http::{BlobCacheEntry, BlobCacheList, BLOB_CACHE_TYPE_BOOTSTRAP};
 use rafs::metadata::{RafsMode, RafsSuper};
+use storage::backend::LocalFsConfig;
+use storage::cache::FsCacheConfig;
 use storage::device::BlobInfo;
-use storage::factory::FactoryConfig;
+use storage::factory::{BackendConfig, CacheConfig, FactoryConfig};
 
 #[derive(Clone)]
 pub struct BlobCacheConfigBootstrap {
     blob_id: String,
     scoped_blob_id: String,
-    path: String,
+    path: PathBuf,
     factory_config: Arc<FactoryConfig>,
 }
 
 impl BlobCacheConfigBootstrap {
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -55,7 +58,11 @@ impl BlobCacheObjectConfig {
         blob_info: Arc<BlobInfo>,
         factory_config: Arc<FactoryConfig>,
     ) -> Self {
-        let scoped_blob_id = domain_id + "-" + blob_info.blob_id();
+        let scoped_blob_id = if domain_id.is_empty() {
+            blob_info.blob_id().to_string()
+        } else {
+            domain_id + "-" + blob_info.blob_id()
+        };
         BlobCacheObjectConfig::DataBlob(Arc::new(BlobCacheConfigDataBlob {
             blob_info,
             scoped_blob_id,
@@ -66,10 +73,14 @@ impl BlobCacheObjectConfig {
     fn new_bootstrap_blob(
         domain_id: String,
         blob_id: String,
-        path: String,
+        path: PathBuf,
         factory_config: Arc<FactoryConfig>,
     ) -> Self {
-        let scoped_blob_id = domain_id + "-" + &blob_id;
+        let scoped_blob_id = if domain_id.is_empty() {
+            blob_id.clone()
+        } else {
+            domain_id + "-" + &blob_id
+        };
         BlobCacheObjectConfig::Bootstrap(Arc::new(BlobCacheConfigBootstrap {
             blob_id,
             scoped_blob_id,
@@ -144,16 +155,16 @@ impl BlobCacheMgr {
     #[allow(unused)]
     pub fn add_bootstrap_object(
         &self,
-        domain_id: String,
+        domain_id: &str,
         id: &str,
-        path: &str,
+        path: PathBuf,
         factory_config: Arc<FactoryConfig>,
     ) -> Result<()> {
-        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, true)?;
+        let rs = RafsSuper::load_from_metadata(&path, RafsMode::Direct, true)?;
         let config = BlobCacheObjectConfig::new_bootstrap_blob(
-            domain_id.clone(),
+            domain_id.to_string(),
             id.to_string(),
-            path.to_string(),
+            path,
             factory_config.clone(),
         );
         let mut state = self.get_state();
@@ -170,7 +181,7 @@ impl BlobCacheMgr {
             // Try to add the referenced data blob object if it doesn't exist yet.
             for bi in rs.superblock.get_blob_infos() {
                 let data_blob = BlobCacheObjectConfig::new_data_blob(
-                    domain_id.clone(),
+                    domain_id.to_string(),
                     bi,
                     factory_config.clone(),
                 );
@@ -184,33 +195,28 @@ impl BlobCacheMgr {
         }
     }
 
-    /// Add a list of bootstrap and/or data blobs.
-    pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
-        for _entry in blobs.blobs.iter() {
-            /*
-            if let Err(e) = entry.validate() {
-                warn!("Invalid blob config entry: {:?}", entry);
+    /// Add an entry of bootstrap and/or data blobs.
+    pub fn add_blob_entry(&self, entry: &BlobCacheEntry) -> Result<()> {
+        if entry.blob_type == BLOB_CACHE_TYPE_BOOTSTRAP {
+            let (path, factory_config) = self.get_bootstrap_info(entry)?;
+            if let Err(e) =
+                self.add_bootstrap_object(&entry.domain_id, &entry.blob_id, path, factory_config)
+            {
+                warn!("Failed to add cache entry for bootstrap blob: {:?}", entry);
                 return Err(e);
             }
-            if entry.blob_type == BLOB_CACHE_TYPE_BOOTSTRAP
-                && entry.blob_config.cache_type == "fscache"
-            {
-                let path = entry.blob_path.as_ref().unwrap();
-                if let Err(e) = self.add_bootstrap_object(
-                    entry.domain_id.clone(),
-                    &entry.blob_id,
-                    path,
-                    Arc::new(entry.blob_config.clone()),
-                ) {
-                    warn!("Failed to add bootstrap entry: {:?}", entry);
-                    return Err(e);
-                }
-            } else {
-                warn!("Unsupported blob config entry: {:?}", entry);
-                return Err(einval!("unsupported blob configuration entry"));
-            }
-             */
-            todo!();
+        } else {
+            warn!("Invalid blob cache entry: {:?}", entry);
+            return Err(einval!("Invalid blob cache entry"));
+        }
+
+        Ok(())
+    }
+
+    /// Add a list of bootstrap and/or data blobs.
+    pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
+        for entry in blobs.blobs.iter() {
+            self.add_blob_entry(entry)?;
         }
 
         Ok(())
@@ -225,59 +231,121 @@ impl BlobCacheMgr {
     fn get_state(&self) -> MutexGuard<BlobCacheState> {
         self.state.lock().unwrap()
     }
+
+    fn get_bootstrap_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<FactoryConfig>)> {
+        // Validate type of backend and cache.
+        let config = &entry.blob_config;
+        if config.backend_type != "localfs" || config.cache_type != "fscache" {
+            return Err(einval!(
+                "`config.backend_type/cache_type` for metadata blob is invalid"
+            ));
+        }
+        let backend_config =
+            match serde_json::from_value::<LocalFsConfig>(config.backend_config.clone()) {
+                Err(_e) => {
+                    return Err(einval!(
+                        "`config.backend_config` for metadata blob is invalid"
+                    ))
+                }
+                Ok(v) => v,
+            };
+        let cache_config =
+            serde_json::from_value::<FsCacheConfig>(entry.blob_config.cache_config.clone())
+                .map_err(|_e| {
+                    eother!("Invalid configuration of `FsCacheConfig` in blob cache entry")
+                })?;
+
+        // Validate path for the metadata blob file
+        let path = if backend_config.dir.is_empty() {
+            if backend_config.blob_file.is_empty() {
+                return Err(einval!("`config.backend_config.blob_file` is empty"));
+            }
+            Path::new(&backend_config.blob_file).to_path_buf()
+        } else {
+            Path::new(&backend_config.dir).join(&backend_config.blob_file)
+        };
+        let path = path
+            .canonicalize()
+            .map_err(|_e| einval!("`config.backend_config.blob_file` is invalid"))?;
+        if !path.is_file() {
+            return Err(einval!("`config.backend_config.blob_file` is not a file"));
+        }
+
+        // Validate the working directory for fscache
+        let path2 = Path::new(&cache_config.work_dir);
+        let path2 = path2
+            .canonicalize()
+            .map_err(|_e| eio!("`config.cache_config.work_dir` is invalid"))?;
+        if !path2.is_dir() {
+            return Err(einval!("`config.cache_config.work_dir` is not a directory"));
+        }
+
+        let factory_config = Arc::new(FactoryConfig {
+            id: entry.blob_config.id.clone(),
+            backend: BackendConfig {
+                backend_type: entry.blob_config.backend_type.clone(),
+                backend_config: entry.blob_config.backend_config.clone(),
+            },
+            cache: CacheConfig {
+                cache_type: entry.blob_config.cache_type.clone(),
+                cache_compressed: false,
+                cache_config: entry.blob_config.cache_config.clone(),
+                cache_validate: false,
+                prefetch_config: Default::default(),
+            },
+        });
+
+        Ok((path, factory_config))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vmm_sys_util::tempdir::TempDir;
 
     #[test]
     fn test_blob_cache_entry() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = tmpdir.as_path().join("bootstrap1");
+        std::fs::write(&path, "metadata").unwrap();
+
         let config = r#"
         {
-            "domain_id": "domain1",
-            "id": "blob1",
             "type": "bootstrap",
-            "path": "/tmp/file1",
+            "id": "bootstrap1",
+            "domain_id": "userid1",
             "config": {
                 "id": "factory1",
-                "backend": {
-                    "type": "oss",
-                    "config": {
-                        "endpoint": "test",
-                        "access_key_id": "test",
-                        "access_key_secret": "test",
-                        "bucket_name": "antsys-nydus",
-                        "object_prefix":"nydus_v2/",
-                        "scheme": "http"
-                    }
+                "backend_type": "localfs",
+                "backend_config": {
+                    "blob_file": "bootstrap1",
+                    "dir": "/tmp/nydus"
                 },
-                "cache": {
-                    "type": "fscache",
-                    "compressed": false,
-                    "config": {}
+                "cache_type": "fscache",
+                "cache_config": {
+                    "work_dir": "/tmp/nydus"
                 }
             }
           }"#;
-        let mut entry: BlobCacheEntry = serde_json::from_str(config).unwrap();
+        let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
+        let entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
 
-        assert_eq!(&entry.domain_id, "domain1");
-        assert_eq!(&entry.blob_id, "blob1");
         assert_eq!(&entry.blob_type, "bootstrap");
-        assert_eq!(entry.blob_path, Some("/tmp/file1".to_string()));
+        assert_eq!(&entry.blob_id, "bootstrap1");
+        assert_eq!(&entry.domain_id, "userid1");
         assert_eq!(&entry.blob_config.id, "factory1");
-        assert_eq!(&entry.blob_config.backend.backend_type, "oss");
-        assert_eq!(&entry.blob_config.cache.cache_type, "fscache");
-        assert_eq!(entry.blob_config.cache.cache_compressed, false);
-        assert!(entry.blob_config.backend.backend_config.is_object());
-        entry.validate().unwrap();
+        assert_eq!(&entry.blob_config.backend_type, "localfs");
+        assert_eq!(&entry.blob_config.cache_type, "fscache");
+        assert!(entry.blob_config.backend_config.is_object());
+        assert!(entry.blob_config.cache_config.is_object());
 
-        let path = entry.blob_path.take();
-        entry.validate().unwrap_err();
-        entry.blob_path = path;
-        entry.validate().unwrap();
-        entry.blob_type = "unknown".to_string();
-        entry.validate().unwrap_err();
+        let mgr = BlobCacheMgr::new();
+        let (path, factory_config) = mgr.get_bootstrap_info(&entry).unwrap();
+        assert_eq!(path, tmpdir.as_path().join("bootstrap1"));
+        assert_eq!(&factory_config.id, "factory1");
+        assert_eq!(&factory_config.backend.backend_type, "localfs");
+        assert_eq!(&factory_config.cache.cache_type, "fscache");
     }
 
     #[test]
@@ -286,69 +354,50 @@ mod tests {
          {
             "blobs" : [
                 {
-                    "domain_id": "domain1",
-                    "id": "blob1",
-        		    "type": "bootstrap",
-        		    "path": "/tmp/file1",
-        		    "config": {
-        			    "id": "factory1",
-        			    "backend": {
-        				    "type": "oss",
-        				    "config": {
-        					    "endpoint": "test",
-        					    "access_key_id": "test",
-        					    "access_key_secret": "test",
-        					    "bucket_name": "antsys-nydus",
-        					    "object_prefix": "nydus_v2/",
-        					    "scheme": "http"
-        				    }
-        			    },
-        			    "cache": {
-        				    "type": "fscache",
-        				    "compressed": false,
-        				    "config": {}
-        			    }
-        		    }
-        	    },
-        	    {
-                    "domain_id": "domain1",
-                    "id": "blob2",
-        		    "type": "bootstrap",
-        		    "path": "/tmp/file2",
-        		    "config": {
-        			    "id": "factory2",
-        			    "backend": {
-        				    "type": "oss",
-        				    "config": {
-        					    "endpoint": "test",
-        					    "access_key_id": "test",
-        					    "access_key_secret": "test",
-        					    "bucket_name": "antsys-nydus",
-        					    "object_prefix": "nydus_v2/",
-        					    "scheme": "http"
-        				    }
-        			    },
-        			    "cache": {
-        				    "type": "fscache",
-        				    "compressed": false,
-        				    "config": {}
-        			    }
-        		    }
-        	    }
+                    "type": "bootstrap",
+                    "id": "bootstrap1",
+                    "domain_id": "userid1",
+                    "config": {
+                        "id": "factory1",
+                        "backend_type": "localfs",
+                        "backend_config": {
+                            "blob_file": "bootstrap1",
+                            "dir": "/tmp/nydus"
+                        },
+                        "cache_type": "fscache",
+                        "cache_config": {
+                            "work_dir": "/tmp/nydus"
+                        }
+                    }
+                },
+                {
+                    "type": "bootstrap",
+                    "id": "bootstrap2",
+                    "domain_id": "userid2",
+                    "config": {
+                        "id": "factory1",
+                        "backend_type": "localfs",
+                        "backend_config": {
+                            "blob_file": "bootstrap2",
+                            "dir": "/tmp/nydus"
+                        },
+                        "cache_type": "fscache",
+                        "cache_config": {
+                            "work_dir": "/tmp/nydus"
+                        }
+                    }
+                }
             ]
          }"#;
         let list: BlobCacheList = serde_json::from_str(config).unwrap();
 
         assert_eq!(list.blobs.len(), 2);
         assert_eq!(&list.blobs[0].blob_type, "bootstrap");
-        assert_eq!(list.blobs[0].blob_path, Some("/tmp/file1".to_string()));
+        assert_eq!(&list.blobs[0].blob_id, "bootstrap1");
         assert_eq!(&list.blobs[0].blob_config.id, "factory1");
-        assert_eq!(&list.blobs[0].blob_config.backend.backend_type, "oss");
-        assert_eq!(&list.blobs[0].blob_config.cache.cache_type, "fscache");
-        assert_eq!(list.blobs[0].blob_config.cache.cache_compressed, false);
-        assert!(list.blobs[0].blob_config.backend.backend_config.is_object());
-        list.blobs[0].validate().unwrap();
-        assert_eq!(list.blobs[1].blob_path, Some("/tmp/file2".to_string()));
-        list.blobs[1].validate().unwrap();
+        assert_eq!(&list.blobs[0].blob_config.backend_type, "localfs");
+        assert_eq!(&list.blobs[0].blob_config.cache_type, "fscache");
+        assert_eq!(&list.blobs[1].blob_type, "bootstrap");
+        assert_eq!(&list.blobs[1].blob_id, "bootstrap2");
     }
 }
