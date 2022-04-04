@@ -32,12 +32,12 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
                 FsFilesPatterns(d) => success_response(Some(d)),
                 FsGlobalMetrics(d) => success_response(Some(d)),
 
-                /*
-                       FsBackendInfo(d) => success_response(Some(d)),
-                       InflightMetrics(d) => success_response(Some(d)),
-                */
+                // Nydus API v1
+                FsBackendInfo(d) => success_response(Some(d)),
+                InflightMetrics(d) => success_response(Some(d)),
+
+                // Nydus API v2
                 BlobObjectList(d) => success_response(Some(d)),
-                _ => panic!("Unexpected response message from API service"),
             }
         }
         Err(e) => {

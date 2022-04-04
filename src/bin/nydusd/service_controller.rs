@@ -17,7 +17,7 @@ use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
 };
-use crate::{FsService, NydusDaemon, SubCmdArgs};
+use crate::{DAEMON_CONTROLLER, FsService, NydusDaemon, SubCmdArgs};
 
 pub struct ServiceContoller {
     bti: BuildTimeInfo,
@@ -70,6 +70,8 @@ impl ServiceContoller {
     }
 
     fn initialize_blob_cache(&self, config: &Option<serde_json::Value>) -> Result<()> {
+        DAEMON_CONTROLLER.set_blob_cache_mgr(self.blob_cache_mgr.clone());
+
         // Create blob cache objects configured by the configuration file.
         if let Some(config) = config {
             if let Some(config1) = config.as_object() {

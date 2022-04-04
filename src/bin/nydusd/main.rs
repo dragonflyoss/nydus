@@ -673,6 +673,7 @@ fn process_daemon_arguments(
     _apisock: Option<&str>,
     bti: BuildTimeInfo,
 ) -> Result<()> {
+    info!("Start Nydus in daemon mode!");
     let daemon = create_daemon(subargs, bti)?;
     DAEMON_CONTROLLER.set_daemon(daemon);
     Ok(())
