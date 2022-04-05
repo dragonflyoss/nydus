@@ -4,10 +4,12 @@
 
 use std::any::Any;
 use std::io::Result;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use nydus_api::http::BlobCacheList;
 use nydus_app::BuildTimeInfo;
 
 use crate::blob_cache::BlobCacheMgr;
@@ -15,7 +17,7 @@ use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
 };
-use crate::{FsService, NydusDaemon, SubCmdArgs};
+use crate::{DAEMON_CONTROLLER, FsService, NydusDaemon, SubCmdArgs};
 
 pub struct ServiceContoller {
     bti: BuildTimeInfo,
@@ -66,42 +68,65 @@ impl ServiceContoller {
             }
         }
     }
+
+    fn initialize_blob_cache(&self, config: &Option<serde_json::Value>) -> Result<()> {
+        DAEMON_CONTROLLER.set_blob_cache_mgr(self.blob_cache_mgr.clone());
+
+        // Create blob cache objects configured by the configuration file.
+        if let Some(config) = config {
+            if let Some(config1) = config.as_object() {
+                if config1.contains_key("blobs") {
+                    if let Ok(v) = serde_json::from_value::<BlobCacheList>(config.clone()) {
+                        if let Err(e) = self.blob_cache_mgr.add_blob_list(&v) {
+                            error!("Failed to add blob list: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl ServiceContoller {
-    fn initialize_fscache_service(
-        &self,
-        path: &str,
-        config: &Option<serde_json::Value>,
-    ) -> Result<()> {
+    fn initialize_fscache_service(&self, subargs: &SubCmdArgs, path: &str) -> Result<()> {
+        // Validate --fscache option value is an existing directory.
+        let p = match Path::new(&path).canonicalize() {
+            Err(e) => {
+                error!("--fscache option needs a directory to cache files");
+                return Err(e);
+            }
+            Ok(v) => {
+                if !v.is_dir() {
+                    error!("--fscache options needs a directory to cache files");
+                    return Err(einval!("--fscache options is not a directory"));
+                }
+                v
+            }
+        };
+        let p = match p.to_str() {
+            Some(v) => v,
+            None => {
+                error!("--fscache option contains invalid characters");
+                return Err(einval!("--fscache option contains invalid characters"));
+            }
+        };
+        let tag = subargs.value_of("fscache-tag");
+
+        info!(
+            "Create fscache instance at {} with tag {}",
+            p,
+            tag.clone().unwrap_or("<none>")
+        );
         let fscache = crate::fs_cache::FsCacheHandler::new(
-            path,
-            "/tmp/fscache",
-            None,
+            "/dev/cachefiles",
+            p,
+            tag,
             self.blob_cache_mgr.clone(),
         )?;
-
-        if let Some(config) = config {
-            let factory_config: storage::factory::FactoryConfig =
-                serde_json::from_value(config.to_owned())
-                    .map_err(|_e| eother!("invalid configuration file"))?;
-            let blob_info = storage::device::BlobInfo::new(
-                1,
-                "blob_id".to_string(),
-                0x10000,
-                0x8000,
-                0x1000,
-                1,
-                storage::device::BlobFeatures::empty(),
-            );
-            self.blob_cache_mgr.add_blob_object(
-                String::default(),
-                Arc::new(blob_info),
-                Arc::new(factory_config),
-            )?;
-        }
-
         *self.fscache.lock().unwrap() = Some(Arc::new(fscache));
         self.fscache_enabled.store(true, Ordering::Release);
 
@@ -179,7 +204,6 @@ impl DaemonStateMachineSubscriber for ServiceContoller {
 pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn NydusDaemon>> {
     let id = subargs.value_of("id").map(|id| id.to_string());
     let supervisor = subargs.value_of("supervisor").map(|s| s.to_string());
-    #[cfg(target_os = "linux")]
     let config = match subargs.value_of("config") {
         None => None,
         Some(path) => {
@@ -192,7 +216,7 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
 
     let (to_sm, from_client) = channel::<DaemonStateMachineInput>();
     let (to_client, from_sm) = channel::<DaemonResult<()>>();
-    let daemon = ServiceContoller {
+    let service_controller = ServiceContoller {
         bti,
         id,
         request_sender: Arc::new(Mutex::new(to_sm)),
@@ -207,12 +231,13 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
         fscache: Mutex::new(None),
     };
 
+    service_controller.initialize_blob_cache(&config)?;
     #[cfg(target_os = "linux")]
     if let Some(path) = subargs.value_of("fscache") {
-        daemon.initialize_fscache_service(path, &config)?;
+        service_controller.initialize_fscache_service(subargs, path)?;
     }
 
-    let daemon = Arc::new(daemon);
+    let daemon = Arc::new(service_controller);
     let machine = DaemonStateMachineContext::new(daemon.clone(), from_client, to_client);
     machine.kick_state_machine()?;
     daemon

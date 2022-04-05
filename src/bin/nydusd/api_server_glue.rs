@@ -17,7 +17,7 @@ use nix::unistd::Pid;
 use nydus::{FsBackendType, NydusError};
 use nydus_api::http::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
-    ApiResult, DaemonConf, DaemonErrorKind, MetricsErrorKind,
+    ApiResult, BlobCacheEntry, DaemonConf, DaemonErrorKind, MetricsErrorKind,
 };
 use nydus_utils::metrics;
 
@@ -84,7 +84,7 @@ impl ApiServer {
             // Nydus API v2
             ApiRequest::DaemonInfoV2 => self.daemon_info(false),
             ApiRequest::GetBlobObject(_param) => todo!(),
-            ApiRequest::CreateBlobObject(_cfg) => todo!(),
+            ApiRequest::CreateBlobObject(entry) => self.create_blob_cache_entry(&entry),
             ApiRequest::DeleteBlobObject(_param) => todo!(),
             ApiRequest::ListBlobObject => todo!(),
         };
@@ -291,6 +291,20 @@ impl ApiServer {
         DAEMON_CONTROLLER
             .get_fs_service()
             .ok_or(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported))
+    }
+
+    // HTTP API v2
+    fn create_blob_cache_entry(&self, entry: &BlobCacheEntry) -> ApiResponse {
+        match DAEMON_CONTROLLER.get_blob_cache_mgr() {
+            None => Err(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported)),
+            Some(mgr) => {
+                if let Err(e) = mgr.add_blob_entry(entry) {
+                    Err(ApiError::DaemonAbnormal(DaemonErrorKind::Other(format!("{}", e))))
+                } else {
+                    Ok(ApiResponsePayload::Empty)
+                }
+            }
+        }
     }
 }
 

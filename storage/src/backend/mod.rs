@@ -30,6 +30,9 @@ pub mod oss;
 #[cfg(feature = "backend-registry")]
 pub mod registry;
 
+#[cfg(feature = "backend-localfs")]
+pub use localfs::LocalFsConfig;
+
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
 pub enum BackendError {
@@ -52,13 +55,20 @@ pub enum BackendError {
 pub type BackendResult<T> = std::result::Result<T, BackendError>;
 
 /// Configuration information for network proxy.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProxyConfig {
-    url: String,
-    ping_url: String,
-    fallback: bool,
-    check_interval: u64,
+    /// URL for proxy server
+    pub url: String,
+    /// URL for keep alive.
+    pub ping_url: String,
+    /// Fallback to normal connection without proxy.
+    pub fallback: bool,
+    /// Time interval to check for keepalive.
+    pub check_interval: u64,
 }
 
 impl Default for ProxyConfig {
@@ -73,13 +83,20 @@ impl Default for ProxyConfig {
 }
 
 /// Generic configuration for storage backends.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommonConfig {
-    proxy: ProxyConfig,
-    timeout: u64,
-    connect_timeout: u64,
-    retry_limit: u8,
+    /// Configuration information for network proxy.
+    pub proxy: ProxyConfig,
+    /// Timeout value for data communication.
+    pub timeout: u64,
+    /// Timeout value for connection setup.
+    pub connect_timeout: u64,
+    /// Number of times to retry connection.
+    pub retry_limit: u8,
 }
 
 impl Default for CommonConfig {

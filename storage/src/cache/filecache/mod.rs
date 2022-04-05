@@ -25,12 +25,18 @@ fn default_work_dir() -> String {
     ".".to_string()
 }
 
+/// Configuration information for file cache.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct FileCacheConfig {
+pub struct FileCacheConfig {
+    /// Working directory to keep cached files.
     #[serde(default = "default_work_dir")]
-    work_dir: String,
+    pub work_dir: String,
+    /// Legacy: disable index mapping, keep it as false when possible.
     #[serde(default)]
-    disable_indexed_map: bool,
+    pub disable_indexed_map: bool,
 }
 
 impl FileCacheConfig {

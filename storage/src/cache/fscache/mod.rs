@@ -24,10 +24,15 @@ fn default_work_dir() -> String {
     ".".to_string()
 }
 
+/// Configuration information for fscache.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct FsCacheConfig {
+pub struct FsCacheConfig {
+    /// Working directory to keep cached files.
     #[serde(default = "default_work_dir")]
-    work_dir: String,
+    pub work_dir: String,
 }
 
 impl FsCacheConfig {

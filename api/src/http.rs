@@ -19,7 +19,7 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use nydus_utils::metrics::IoStatsError;
 use serde::Deserialize;
-use serde_json::Error as SerdeError;
+use serde_json::{Error as SerdeError, Value};
 use url::Url;
 
 use crate::http_endpoint_v1::{
@@ -52,9 +52,53 @@ pub struct DaemonConf {
     pub log_level: String,
 }
 
-#[derive(Clone, Deserialize, Debug)]
-pub struct BlobObjectConf {
+/// Configuration information for a cached blob, corresponding to `storage::FactoryConfig`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlobCacheEntryConfig {
+    /// Identifier for the blob cache configuration: corresponding to `FactoryConfig::id`.
+    #[serde(default)]
+    pub id: String,
+    /// Type of storage backend, corresponding to `FactoryConfig::BackendConfig::backend_type`.
+    pub backend_type: String,
+    /// Configuration for storage backend, corresponding to `FactoryConfig::BackendConfig::backend_config`.
+    /// One of `LocalFsConfig`, `CommonConfig`.
+    pub backend_config: Value,
+    /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
+    #[serde(default)]
+    pub cache_type: String,
+    /// Configuration for blob cache, corresponding to `FactoryConfig::CacheConfig::cache_config`.
+    /// One of `FileCacheConfig`, `FsCacheConfig`, or empty.
+    #[serde(default)]
+    pub cache_config: Value,
+}
+
+/// Blob cache object type for nydus/rafs bootstrap blob.
+pub const BLOB_CACHE_TYPE_BOOTSTRAP: &str = "bootstrap";
+/// Blob cache object type for nydus/rafs data blob.
+pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
+
+/// Configuration information for a cached blob.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BlobCacheEntry {
+    /// Type of blob object, bootstrap or data blob.
+    #[serde(rename = "type")]
+    pub blob_type: String,
+    /// Blob id.
+    #[serde(rename = "id")]
     pub blob_id: String,
+    /// Configuration information to generate blob cache object.
+    #[serde(rename = "config")]
+    pub blob_config: BlobCacheEntryConfig,
+    /// Domain id for the blob, which is used to group cached blobs into management domains.
+    #[serde(default)]
+    pub domain_id: String,
+}
+
+/// Configuration information for a list of cached blob objects.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct BlobCacheList {
+    /// List of blob configuration information.
+    pub blobs: Vec<BlobCacheEntry>,
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -88,7 +132,7 @@ pub enum ApiRequest {
 
     // Nydus API v2
     DaemonInfoV2,
-    CreateBlobObject(BlobObjectConf),
+    CreateBlobObject(BlobCacheEntry),
     GetBlobObject(BlobObjectParam),
     DeleteBlobObject(BlobObjectParam),
     ListBlobObject,
@@ -365,7 +409,7 @@ lazy_static! {
         r.routes.insert(endpoint_v1!("/daemon/fuse/takeover"), Box::new(TakeoverHandler{}));
 
         // Nydus API, v2
-        r.routes.insert(endpoint_v2!("/blob_objects"), Box::new(BlobObjectListHandlerV2{}));
+        r.routes.insert(endpoint_v2!("/blobs"), Box::new(BlobObjectListHandlerV2{}));
 
         r
     };
