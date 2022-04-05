@@ -94,24 +94,28 @@ impl HashCache {
     }
 }
 
+/// Container registry configuration information to access blobs.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Deserialize, Serialize)]
-struct RegistryConfig {
+pub struct RegistryConfig {
     #[serde(default = "default_http_scheme")]
-    scheme: String,
-    host: String,
-    repo: String,
+    pub scheme: String,
+    pub host: String,
+    pub repo: String,
     // Base64_encoded(username:password), the field should be
     // sent to registry auth server to get a bearer token.
     #[serde(default)]
-    auth: Option<String>,
+    pub auth: Option<String>,
     // The field is a bearer token to be sent to registry
     // to authorize registry requests.
     #[serde(default)]
-    registry_token: Option<String>,
+    pub registry_token: Option<String>,
     #[serde(default)]
-    blob_url_scheme: String,
+    pub blob_url_scheme: String,
     #[serde(default)]
-    blob_redirected_host: String,
+    pub blob_redirected_host: String,
 }
 
 #[derive(Clone, Deserialize)]

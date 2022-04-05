@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use nydus_api::http::{BlobCacheEntry, BlobCacheList, BLOB_CACHE_TYPE_BOOTSTRAP};
 use rafs::metadata::{RafsMode, RafsSuper};
-use storage::backend::LocalFsConfig;
 use storage::cache::FsCacheConfig;
 use storage::device::BlobInfo;
 use storage::factory::{BackendConfig, CacheConfig, FactoryConfig};
@@ -235,36 +234,20 @@ impl BlobCacheMgr {
     fn get_bootstrap_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<FactoryConfig>)> {
         // Validate type of backend and cache.
         let config = &entry.blob_config;
-        if config.backend_type != "localfs" || config.cache_type != "fscache" {
-            return Err(einval!(
-                "`config.backend_type/cache_type` for metadata blob is invalid"
-            ));
+        if config.cache_type != "fscache" {
+            return Err(einval!("`config.cache_type` for metadata blob is invalid"));
         }
-        let backend_config =
-            match serde_json::from_value::<LocalFsConfig>(config.backend_config.clone()) {
-                Err(_e) => {
-                    return Err(einval!(
-                        "`config.backend_config` for metadata blob is invalid"
-                    ))
-                }
-                Ok(v) => v,
-            };
         let cache_config =
             serde_json::from_value::<FsCacheConfig>(entry.blob_config.cache_config.clone())
                 .map_err(|_e| {
                     eother!("Invalid configuration of `FsCacheConfig` in blob cache entry")
                 })?;
 
-        // Validate path for the metadata blob file
-        let path = if backend_config.dir.is_empty() {
-            if backend_config.blob_file.is_empty() {
-                return Err(einval!("`config.backend_config.blob_file` is empty"));
-            }
-            Path::new(&backend_config.blob_file).to_path_buf()
-        } else {
-            Path::new(&backend_config.dir).join(&backend_config.blob_file)
-        };
-        let path = path
+        let path = config.metadata_path.clone().unwrap_or_default();
+        if path.is_empty() {
+            return Err(einval!("`config.metadata_path` for metadata blob is empty"));
+        }
+        let path = Path::new(&path)
             .canonicalize()
             .map_err(|_e| einval!("`config.backend_config.blob_file` is invalid"))?;
         if !path.is_file() {
@@ -319,13 +302,13 @@ mod tests {
                 "id": "factory1",
                 "backend_type": "localfs",
                 "backend_config": {
-                    "blob_file": "bootstrap1",
                     "dir": "/tmp/nydus"
                 },
                 "cache_type": "fscache",
                 "cache_config": {
                     "work_dir": "/tmp/nydus"
-                }
+                },
+                "metadata_path": "/tmp/nydus/bootstrap1"
             }
           }"#;
         let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
@@ -361,13 +344,13 @@ mod tests {
                         "id": "factory1",
                         "backend_type": "localfs",
                         "backend_config": {
-                            "blob_file": "bootstrap1",
                             "dir": "/tmp/nydus"
                         },
                         "cache_type": "fscache",
                         "cache_config": {
                             "work_dir": "/tmp/nydus"
-                        }
+                        },
+                        "metadata_path": "/tmp/nydus/bootstrap1"
                     }
                 },
                 {
@@ -378,13 +361,13 @@ mod tests {
                         "id": "factory1",
                         "backend_type": "localfs",
                         "backend_config": {
-                            "blob_file": "bootstrap2",
                             "dir": "/tmp/nydus"
                         },
                         "cache_type": "fscache",
                         "cache_config": {
                             "work_dir": "/tmp/nydus"
-                        }
+                        },
+                        "metadata_path": "/tmp/nydus/bootstrap2"
                     }
                 }
             ]

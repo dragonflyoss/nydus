@@ -299,7 +299,10 @@ impl ApiServer {
             None => Err(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported)),
             Some(mgr) => {
                 if let Err(e) = mgr.add_blob_entry(entry) {
-                    Err(ApiError::DaemonAbnormal(DaemonErrorKind::Other(format!("{}", e))))
+                    Err(ApiError::DaemonAbnormal(DaemonErrorKind::Other(format!(
+                        "{}",
+                        e
+                    ))))
                 } else {
                     Ok(ApiResponsePayload::Empty)
                 }

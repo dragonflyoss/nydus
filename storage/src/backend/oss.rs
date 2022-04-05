@@ -41,20 +41,24 @@ impl From<OssError> for BackendError {
     }
 }
 
+/// OSS configuration information to access blobs.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Deserialize, Serialize)]
-struct OssConfig {
-    endpoint: String,
-    access_key_id: String,
-    access_key_secret: String,
-    bucket_name: String,
+pub struct OssConfig {
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub access_key_secret: String,
+    pub bucket_name: String,
     #[serde(default = "default_http_scheme")]
-    scheme: String,
+    pub scheme: String,
     /// Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
     /// - object_key: sha256:xxx
     /// - object_prefix: nydus/
     /// - object_key with object_prefix: nydus/sha256:xxx
     #[serde(default)]
-    object_prefix: String,
+    pub object_prefix: String,
 }
 
 // `OssState` is almost identical to `OssConfig`, but let's keep them separated.
