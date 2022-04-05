@@ -466,9 +466,16 @@ impl RafsSuper {
     }
 
     /// Load Rafs super block from a metadata file.
-    pub fn load_from_metadata(path: &Path, mode: RafsMode, validate_digest: bool) -> Result<Self> {
+    pub fn load_from_metadata<P: AsRef<Path>>(
+        path: P,
+        mode: RafsMode,
+        validate_digest: bool,
+    ) -> Result<Self> {
         // open bootstrap file
-        let file = OpenOptions::new().read(true).write(false).open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path.as_ref())?;
         let mut rs = RafsSuper {
             mode,
             validate_digest,

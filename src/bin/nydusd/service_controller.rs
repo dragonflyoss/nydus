@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use nydus_api::http::BlobCacheList;
 use nydus_app::BuildTimeInfo;
 
-use crate::blob_cache::{BlobCacheConfigList, BlobCacheMgr};
+use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
@@ -73,7 +74,7 @@ impl ServiceContoller {
         if let Some(config) = config {
             if let Some(config1) = config.as_object() {
                 if config1.contains_key("blobs") {
-                    if let Ok(v) = serde_json::from_value::<BlobCacheConfigList>(config.clone()) {
+                    if let Ok(v) = serde_json::from_value::<BlobCacheList>(config.clone()) {
                         if let Err(e) = self.blob_cache_mgr.add_blob_list(&v) {
                             error!("Failed to add blob list: {}", e);
                             return Err(e);

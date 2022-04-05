@@ -16,8 +16,6 @@ extern crate lazy_static;
 extern crate nix;
 #[macro_use]
 extern crate nydus_error;
-#[macro_use]
-extern crate serde;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;
