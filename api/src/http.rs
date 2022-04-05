@@ -70,6 +70,9 @@ pub struct BlobCacheEntryConfig {
     /// One of `FileCacheConfig`, `FsCacheConfig`, or empty.
     #[serde(default)]
     pub cache_config: Value,
+    /// Optional file path for metadata blobs.
+    #[serde(default)]
+    pub metadata_path: Option<String>,
 }
 
 /// Blob cache object type for nydus/rafs bootstrap blob.
