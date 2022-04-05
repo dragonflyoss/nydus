@@ -43,8 +43,8 @@ mod worker;
 pub mod state;
 
 pub use dummycache::DummyCacheMgr;
-pub use filecache::FileCacheMgr;
-pub use fscache::FsCacheMgr;
+pub use filecache::{FileCacheConfig, FileCacheMgr};
+pub use fscache::{FsCacheConfig, FsCacheMgr};
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;

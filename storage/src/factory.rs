@@ -49,6 +49,9 @@ lazy_static! {
 }
 
 /// Configuration information for storage backend.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendConfig {
     /// Type of storage backend.
@@ -86,6 +89,9 @@ impl BackendConfig {
 }
 
 /// Configuration information for blob cache manager.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CacheConfig {
     /// Type of blob cache.
@@ -106,6 +112,9 @@ pub struct CacheConfig {
 }
 
 /// Configuration information to create blob cache manager.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FactoryConfig {
     /// Id of the factory.

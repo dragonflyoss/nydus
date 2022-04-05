@@ -52,6 +52,9 @@ pub enum BackendError {
 pub type BackendResult<T> = std::result::Result<T, BackendError>;
 
 /// Configuration information for network proxy.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProxyConfig {
@@ -77,6 +80,9 @@ impl Default for ProxyConfig {
 }
 
 /// Generic configuration for storage backends.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommonConfig {
