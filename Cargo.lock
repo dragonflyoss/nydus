@@ -1258,14 +1258,17 @@ name = "nydus-utils"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "fuse-backend-rs",
  "lazy_static",
  "libc",
  "log",
+ "lz4-sys",
  "nydus-error",
  "serde",
  "serde_json",
  "sha2",
+ "vmm-sys-util",
 ]
 
 [[package]]
@@ -1841,7 +1844,6 @@ dependencies = [
  "base64",
  "bitflags",
  "dbs-uhttp",
- "flate2",
  "fuse-backend-rs",
  "futures",
  "governor",
@@ -1850,7 +1852,6 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "lz4-sys",
  "nix 0.23.1",
  "nydus-error",
  "nydus-utils",

@@ -17,6 +17,7 @@ pub use self::exec::*;
 pub use self::inode_bitmap::InodeBitmap;
 pub use self::types::*;
 
+pub mod compress;
 pub mod digest;
 pub mod exec;
 pub mod inode_bitmap;

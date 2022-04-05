@@ -19,18 +19,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vmm_sys_util::tempfile::TempFile;
 
-use nydus_utils::digest;
-use nydus_utils::div_round_up;
+use nydus_utils::{compress, digest, div_round_up};
 use rafs::metadata::layout::v5::RafsV5BlobTable;
-use rafs::metadata::layout::v6::RafsV6BlobTable;
-use rafs::metadata::layout::v6::EROFS_BLOCK_SIZE;
+use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE};
 use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::RafsSuperFlags;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWrite};
-use storage::compress;
-use storage::device::BlobFeatures;
-use storage::device::BlobInfo;
+use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};

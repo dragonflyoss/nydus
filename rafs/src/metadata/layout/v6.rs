@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use lazy_static::lazy_static;
 
-use nydus_utils::{digest, round_up, ByteSize};
+use nydus_utils::{compress, digest, round_up, ByteSize};
 use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::{BlobMetaHeaderOndisk, BLOB_FEATURE_4K_ALIGNED};
-use storage::{compress, RAFS_MAX_CHUNK_SIZE};
+use storage::RAFS_MAX_CHUNK_SIZE;
 
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
