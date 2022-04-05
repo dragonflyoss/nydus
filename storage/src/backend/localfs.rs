@@ -58,18 +58,21 @@ fn default_readahead_sec() -> u32 {
 }
 
 /// Configuration information for localfs storage backend.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
 #[derive(Clone, Deserialize, Serialize)]
-struct LocalFsConfig {
+pub struct LocalFsConfig {
     #[serde(default)]
-    readahead: bool,
+    pub readahead: bool,
     #[serde(default = "default_readahead_sec")]
-    readahead_sec: u32,
+    pub readahead_sec: u32,
     #[serde(default)]
-    blob_file: String,
+    pub blob_file: String,
     #[serde(default)]
-    dir: String,
+    pub dir: String,
     #[serde(default)]
-    alt_dirs: Vec<String>,
+    pub alt_dirs: Vec<String>,
 }
 
 struct LocalFsEntry {
