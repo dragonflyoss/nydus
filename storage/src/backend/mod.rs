@@ -30,6 +30,9 @@ pub mod oss;
 #[cfg(feature = "backend-registry")]
 pub mod registry;
 
+#[cfg(feature = "backend-localfs")]
+pub use localfs::LocalFsConfig;
+
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
 pub enum BackendError {
