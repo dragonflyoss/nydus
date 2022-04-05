@@ -8,16 +8,21 @@ edition = "2018"
 license = "Apache-2.0 OR BSD-3-Clause"
 
 [dependencies]
+blake3 = "1.0"
+flate2 = { version = "1.0", features = ["miniz-sys"], default-features = false }
+fuse-backend-rs = { version = "0.4.0" }
 log = "0.4"
 lazy_static = "1.4"
 libc = "0.2"
-sha2 = "0.9.1"
-blake3 = "1.0"
+lz4-sys = "1.9.2"
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"
-fuse-backend-rs = { version = "0.4.0" }
+sha2 = "0.9.1"
 
 nydus-error = { version = "0.2", path = "../error" }
+
+[dev-dependencies]
+vmm-sys-util = ">=0.9.0"
 
 [features]
 fusedev = ["fuse-backend-rs/fusedev"]

@@ -43,8 +43,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
-use nydus_utils::ByteSize;
-use storage::compress;
+use nydus_utils::{compress, ByteSize};
 use storage::device::{BlobFeatures, BlobIoDesc, BlobIoVec};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER_VERSION_V5};

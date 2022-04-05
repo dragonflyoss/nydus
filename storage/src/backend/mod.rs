@@ -25,13 +25,16 @@ use crate::StorageError;
 pub mod connection;
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
-#[cfg(feature = "backend-oss")]
-pub mod oss;
-#[cfg(feature = "backend-registry")]
-pub mod registry;
-
 #[cfg(feature = "backend-localfs")]
 pub use localfs::LocalFsConfig;
+#[cfg(feature = "backend-oss")]
+pub mod oss;
+#[cfg(feature = "backend-oss")]
+pub use oss::OssConfig;
+#[cfg(feature = "backend-registry")]
+pub mod registry;
+#[cfg(feature = "backend-registry")]
+pub use registry::RegistryConfig;
 
 /// Error codes related to storage backend operations.
 #[derive(Debug)]

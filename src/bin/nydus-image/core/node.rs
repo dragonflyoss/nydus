@@ -22,6 +22,7 @@ use nix::sys::stat;
 use sha2::digest::Digest;
 
 use nydus_utils::{
+    compress,
     digest::{DigestHasher, RafsDigest},
     div_round_up, try_round_up_4k, ByteSize,
 };
@@ -39,7 +40,6 @@ use rafs::metadata::layout::v6::{
 use rafs::metadata::layout::RafsXAttrs;
 use rafs::metadata::{Inode, RafsInode, RafsStore};
 use rafs::RafsIoWrite;
-use storage::compress;
 use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkFlags, BlobChunkInfo};
 

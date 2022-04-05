@@ -5,9 +5,9 @@
 use std::os::unix::ffi::OsStrExt;
 
 use anyhow::{Context, Result};
+use nydus_utils::compress;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use sha2::Digest;
-use storage::compress;
 use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::chunk_dict::ChunkDict;
