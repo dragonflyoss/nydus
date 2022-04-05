@@ -35,6 +35,7 @@ use nydus::FsBackendType;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
+use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{DaemonError, NydusDaemon};
 use crate::fs_service::{FsBackendMountCmd, FsService};
 use crate::service_controller::create_daemon;
@@ -67,6 +68,7 @@ pub struct DaemonController {
     active: AtomicBool,
     singleton_mode: AtomicBool,
     daemon: Mutex<Option<Arc<dyn NydusDaemon>>>,
+    blob_cache_mgr: Mutex<Option<Arc<BlobCacheMgr>>>,
     // For backward compatibility to support singleton fusedev/virtiofs server.
     fs_service: Mutex<Option<Arc<dyn FsService>>>,
     waker: Arc<Waker>,
@@ -83,6 +85,7 @@ impl DaemonController {
             active: AtomicBool::new(true),
             singleton_mode: AtomicBool::new(true),
             daemon: Mutex::new(None),
+            blob_cache_mgr: Mutex::new(None),
             fs_service: Mutex::new(None),
             waker: Arc::new(waker),
             poller: Mutex::new(poller),
@@ -114,6 +117,16 @@ impl DaemonController {
     /// Panic if called before `set_daemon()` has been called.
     pub fn get_daemon(&self) -> Arc<dyn NydusDaemon> {
         self.daemon.lock().unwrap().clone().unwrap()
+    }
+
+    /// Get the optional blob cache manager.
+    pub fn get_blob_cache_mgr(&self) -> Option<Arc<BlobCacheMgr>> {
+        self.blob_cache_mgr.lock().unwrap().clone()
+    }
+
+    /// Set the optional blob cache manager.
+    pub fn set_blob_cache_mgr(&self, mgr: Arc<BlobCacheMgr>) -> Option<Arc<BlobCacheMgr>> {
+        self.blob_cache_mgr.lock().unwrap().replace(mgr)
     }
 
     /// Set the default fs service object.
