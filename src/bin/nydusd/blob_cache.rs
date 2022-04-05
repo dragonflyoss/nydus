@@ -3,60 +3,14 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 // Blob cache manager to manage all cached blob objects.
-use rafs::metadata::{RafsMode, RafsSuper};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use nydus_api::http::BlobCacheList;
+use rafs::metadata::{RafsMode, RafsSuper};
 use storage::device::BlobInfo;
 use storage::factory::FactoryConfig;
-
-pub const BLOB_CACHE_TYPE_BOOTSTRAP: &str = "bootstrap";
-pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
-
-/// Configuration for a blob to be cached.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct BlobCacheConfigEntry {
-    /// Domain id for the blob.
-    /// #[serde(default)]
-    pub domain_id: String,
-    /// Blob id.
-    #[serde(rename = "id")]
-    pub blob_id: String,
-    /// Type of blob object, bootstrap or data blob.
-    #[serde(rename = "type")]
-    pub blob_type: String,
-    /// Configuration information to generate blob cache object.
-    #[serde(rename = "config")]
-    pub blob_config: FactoryConfig,
-    /// Optional path for bootstrap blob.
-    #[serde(default, rename = "path")]
-    pub blob_path: Option<String>,
-}
-
-impl BlobCacheConfigEntry {
-    pub fn validate(&self) -> Result<()> {
-        match self.blob_type.as_str() {
-            BLOB_CACHE_TYPE_BOOTSTRAP => {
-                if self.blob_path.is_none() {
-                    Err(einval!("`path` is needed for a bootstrap blob"))
-                } else {
-                    Ok(())
-                }
-            }
-            BLOB_CACHE_TYPE_DATA_BLOB => {
-                todo!();
-            }
-            _ => Err(einval!("invalid blob type from `BlobCacheConfigEntry")),
-        }
-    }
-}
-
-/// Configuration for a list of blobs to be cached.
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct BlobCacheConfigList {
-    /// List of blob configuration entries.
-    pub blobs: Vec<BlobCacheConfigEntry>,
-}
 
 #[derive(Clone)]
 pub struct BlobCacheConfigBootstrap {
@@ -231,15 +185,15 @@ impl BlobCacheMgr {
     }
 
     /// Add a list of bootstrap and/or data blobs.
-    pub fn add_blob_list(&self, blobs: &BlobCacheConfigList) -> Result<()> {
-        for entry in blobs.blobs.iter() {
+    pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
+        for _entry in blobs.blobs.iter() {
+            /*
             if let Err(e) = entry.validate() {
                 warn!("Invalid blob config entry: {:?}", entry);
                 return Err(e);
             }
             if entry.blob_type == BLOB_CACHE_TYPE_BOOTSTRAP
-                && entry.blob_config.cache.cache_type == "fscache"
-                && entry.blob_path.is_some()
+                && entry.blob_config.cache_type == "fscache"
             {
                 let path = entry.blob_path.as_ref().unwrap();
                 if let Err(e) = self.add_bootstrap_object(
@@ -255,6 +209,8 @@ impl BlobCacheMgr {
                 warn!("Unsupported blob config entry: {:?}", entry);
                 return Err(einval!("unsupported blob configuration entry"));
             }
+             */
+            todo!();
         }
 
         Ok(())
@@ -303,7 +259,7 @@ mod tests {
                 }
             }
           }"#;
-        let mut entry: BlobCacheConfigEntry = serde_json::from_str(config).unwrap();
+        let mut entry: BlobCacheEntry = serde_json::from_str(config).unwrap();
 
         assert_eq!(&entry.domain_id, "domain1");
         assert_eq!(&entry.blob_id, "blob1");
@@ -381,7 +337,7 @@ mod tests {
         	    }
             ]
          }"#;
-        let list: BlobCacheConfigList = serde_json::from_str(config).unwrap();
+        let list: BlobCacheList = serde_json::from_str(config).unwrap();
 
         assert_eq!(list.blobs.len(), 2);
         assert_eq!(&list.blobs[0].blob_type, "bootstrap");
