@@ -17,7 +17,7 @@ use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
 };
-use crate::{DAEMON_CONTROLLER, FsService, NydusDaemon, SubCmdArgs};
+use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
 
 pub struct ServiceContoller {
     bti: BuildTimeInfo,
