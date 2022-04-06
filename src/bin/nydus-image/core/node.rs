@@ -810,8 +810,15 @@ impl Node {
         self.src_dev = meta.st_dev();
         self.rdev = meta.st_rdev();
         self.ctime = meta.st_ctime();
+
+        // Usually the root directory is created by the build tool (nydusify/buildkit/acceld)
+        // and the mtime of the root directory is different for each build, which makes it
+        // completely impossible to achieve repeatable builds, especially in a tar build scenario
+        // (blob + bootstrap in one tar layer), which causes the layer hash to change and wastes
+        // registry storage space, so the mtime of the root directory is forced to be ignored here.
+        let ignore_mtime = self.is_root();
         self.inode
-            .set_inode_info(&meta, &self.xattrs, self.explicit_uidgid);
+            .set_inode_info(&meta, &self.xattrs, self.explicit_uidgid, ignore_mtime);
 
         Ok(())
     }
@@ -842,6 +849,10 @@ impl Node {
         self.path
             .symlink_metadata()
             .with_context(|| format!("failed to get metadata from {:?}", self.path))
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.target() == OsStr::from_bytes(ROOT_PATH_NAME)
     }
 
     pub fn is_dir(&self) -> bool {
@@ -1466,6 +1477,7 @@ impl InodeWrapper {
         meta: &T,
         xattrs: &RafsXAttrs,
         explicit_uidgid: bool,
+        ignore_mtime: bool,
     ) {
         match self {
             InodeWrapper::V5(i) => {
@@ -1474,8 +1486,10 @@ impl InodeWrapper {
                     i.i_uid = meta.st_uid();
                     i.i_gid = meta.st_gid();
                 }
-                i.i_mtime = meta.st_mtime() as u64;
-                i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
+                if !ignore_mtime {
+                    i.i_mtime = meta.st_mtime() as u64;
+                    i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
+                }
                 i.i_projid = 0;
                 i.i_size = meta.st_size();
                 i.i_rdev = meta.st_rdev() as u32;
@@ -1495,8 +1509,10 @@ impl InodeWrapper {
                     i.i_uid = meta.st_uid();
                     i.i_gid = meta.st_gid();
                 }
-                i.i_mtime = meta.st_mtime() as u64;
-                i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
+                if !ignore_mtime {
+                    i.i_mtime = meta.st_mtime() as u64;
+                    i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
+                }
                 i.i_projid = 0;
                 i.i_size = meta.st_size();
                 i.i_rdev = meta.st_rdev() as u32;

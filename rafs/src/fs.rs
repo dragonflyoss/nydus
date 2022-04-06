@@ -411,8 +411,8 @@ impl Rafs {
             attr.gid = self.i_gid;
         }
 
-        // Older rafs image doesn't include mtime, in such case we use
-        // runtime timestamp.
+        // Older rafs image or the root inode doesn't include mtime, in such cases
+        // we use runtime timestamp.
         if attr.mtime == 0 {
             attr.atime = self.i_time;
             attr.ctime = self.i_time;
