@@ -104,8 +104,6 @@ impl TryFrom<&[u8]> for FsCacheMsgHeader {
 /// from the fscache driver.
 #[derive(Default, Debug, Eq, PartialEq)]
 struct FsCacheMsgOpen {
-    volume_key_len: u32,
-    cookie_key_len: u32,
     fd: u32,
     flags: u32,
     volume_key: String,
@@ -124,12 +122,12 @@ impl TryFrom<&[u8]> for FsCacheMsgOpen {
         }
 
         // Safe because we have verified buffer size.
-        let volume_key_len = unsafe { read_unaligned(value[0..4].as_ptr() as *const u32) };
-        let cookie_key_len = unsafe { read_unaligned(value[4..8].as_ptr() as *const u32) };
+        let volume_key_size = unsafe { read_unaligned(value[0..4].as_ptr() as *const u32) };
+        let cookie_key_size = unsafe { read_unaligned(value[4..8].as_ptr() as *const u32) };
         let fd = unsafe { read_unaligned(value[8..12].as_ptr() as *const u32) };
         let flags = unsafe { read_unaligned(value[12..16].as_ptr() as *const u32) };
-        if volume_key_len.checked_add(cookie_key_len).is_none()
-            || (volume_key_len + cookie_key_len)
+        if volume_key_size.checked_add(cookie_key_size).is_none()
+            || (volume_key_size + cookie_key_size)
                 .checked_add(MSG_OPEN_SIZE as u32)
                 .is_none()
         {
@@ -137,19 +135,19 @@ impl TryFrom<&[u8]> for FsCacheMsgOpen {
                 "invalid volume/cookie key length in fscache OPEN request"
             ));
         }
-        let total_sz = (volume_key_len + cookie_key_len) as usize + MSG_OPEN_SIZE;
+        let total_sz = (volume_key_size + cookie_key_size) as usize + MSG_OPEN_SIZE;
         if value.len() < total_sz {
             return Err(einval!("invalid message length for fscache OPEN request"));
         }
-        let pos = MSG_OPEN_SIZE + volume_key_len as usize;
+        let pos = MSG_OPEN_SIZE + volume_key_size as usize;
         let volume_key = String::from_utf8(value[MSG_OPEN_SIZE..pos].to_vec())
-            .map_err(|_e| einval!("invalid volume key in fscache OPEN request"))?;
-        let cookie_key = String::from_utf8(value[pos..pos + cookie_key_len as usize].to_vec())
+            .map_err(|_e| einval!("invalid volume key in fscache OPEN request"))?
+            .trim_end_matches('\0')
+            .to_string();
+        let cookie_key = String::from_utf8(value[pos..pos + cookie_key_size as usize].to_vec())
             .map_err(|_e| einval!("invalid cookie key in fscache OPEN request"))?;
 
         Ok(FsCacheMsgOpen {
-            volume_key_len,
-            cookie_key_len,
             fd,
             flags,
             volume_key,
@@ -402,9 +400,19 @@ impl FsCacheHandler {
     }
 
     fn handle_open_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgOpen) {
-        let key = msg.volume_key.clone() + "-" + &msg.cookie_key;
+        // Drop the 'erofs,' prefix if any
+        let domain_id = match msg.volume_key.clone().strip_prefix("erofs,") {
+            None => msg.volume_key.clone(),
+            Some(str) => str.to_string(),
+        };
+        let key = domain_id.clone() + "-" + &msg.cookie_key;
         let msg = match self.get_config(&key) {
-            None => format!("cinit {},{}", hdr.id, -libc::ENOENT),
+            None => {
+                unsafe {
+                    libc::close(msg.fd as i32);
+                }
+                format!("copen {},{}", hdr.id, -libc::ENOENT)
+            }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
                     self.handle_open_data_blob(hdr, msg, config)
@@ -423,18 +431,22 @@ impl FsCacheHandler {
         msg: &FsCacheMsgOpen,
         config: Arc<BlobCacheConfigDataBlob>,
     ) -> String {
-        match self.create_data_blob_object(&config, hdr.id, msg.fd) {
-            Err(s) => s,
-            Ok((blob, blob_size)) => {
-                let mut state = self.state.lock().unwrap();
-                if state.fd_to_object_map.contains_key(&msg.fd) {
-                    format!("cinit {},{}", hdr.id, -libc::EALREADY)
-                } else {
+        let mut state = self.state.lock().unwrap();
+
+        if state.fd_to_object_map.contains_key(&msg.fd) {
+            unsafe {
+                libc::close(msg.fd as i32);
+            };
+            format!("copen {},{}", hdr.id, -libc::EALREADY)
+        } else {
+            match self.create_data_blob_object(&config, hdr.id, msg.fd) {
+                Err(s) => s,
+                Ok((blob, blob_size)) => {
                     state
                         .fd_to_object_map
                         .insert(msg.fd, FsCacheObject::DataBlob(blob));
                     state.fd_to_config_map.insert(msg.fd, config.clone());
-                    format!("cinit {},{}", hdr.id, blob_size)
+                    format!("copen {},{}", hdr.id, blob_size)
                 }
             }
         }
@@ -460,10 +472,10 @@ impl FsCacheHandler {
         let blob_ref = Arc::new(blob_info);
 
         match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
-            Err(_e) => Err(format!("cinit {},{}", id, -libc::ENOENT)),
+            Err(_e) => Err(format!("copen {},{}", id, -libc::ENOENT)),
             Ok(blob) => {
                 let blob_size = match blob.blob_size() {
-                    Err(_e) => return Err(format!("cinit {},{}", id, -libc::EIO)),
+                    Err(_e) => return Err(format!("copen {},{}", id, -libc::EIO)),
                     Ok(v) => v,
                 };
                 Ok((blob, blob_size))
@@ -478,53 +490,55 @@ impl FsCacheHandler {
         config: Arc<BlobCacheConfigBootstrap>,
     ) -> String {
         let mut state = self.get_state();
-        if state.fd_to_object_map.contains_key(&msg.fd) {
-            return format!("copen {},{}", hdr.id, -libc::EALREADY);
-        }
-
-        match OpenOptions::new().read(true).open(config.path()) {
-            Err(e) => {
-                warn!(
-                    "Failed to open bootstrap file {}, {}",
-                    config.path().display(),
-                    e
-                );
-                format!("copen {},{}", hdr.id, -libc::ENOENT)
-            }
-            Ok(f) => match f.metadata() {
+        let ret: i64 = if state.fd_to_object_map.contains_key(&msg.fd) {
+            -libc::EALREADY as i64
+        } else {
+            match OpenOptions::new().read(true).open(config.path()) {
                 Err(e) => {
                     warn!(
                         "Failed to open bootstrap file {}, {}",
                         config.path().display(),
                         e
                     );
-                    format!("copen {},{}", hdr.id, -libc::ENOENT)
+                    -libc::ENOENT as i64
                 }
-                Ok(md) => {
-                    let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
-                    let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
-                        bootstrap_file: f,
-                        cache_file,
-                    }));
-                    state.fd_to_object_map.insert(msg.fd, object);
-                    format!("copen {},{}", hdr.id, md.len())
-                }
-            },
-        }
-    }
-
-    fn handle_close_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
-        let mut state = self.get_state();
-        let msg = match state.fd_to_object_map.remove(&msg.fd) {
-            None => format!("cfini {},{}", hdr.id, -libc::ENOENT),
-            Some(FsCacheObject::Bootstrap(_bs)) => format!("cfini {}", hdr.id),
-            Some(FsCacheObject::DataBlob(blob)) => {
-                let config = state.fd_to_config_map.remove(&msg.fd).unwrap();
-                BLOB_FACTORY.gc(Some((config.factory_config(), blob.blob_id())));
-                format!("cfini {}", hdr.id)
+                Ok(f) => match f.metadata() {
+                    Err(e) => {
+                        warn!(
+                            "Failed to open bootstrap file {}, {}",
+                            config.path().display(),
+                            e
+                        );
+                        -libc::ENOENT as i64
+                    }
+                    Ok(md) => {
+                        let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
+                        let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
+                            bootstrap_file: f,
+                            cache_file,
+                        }));
+                        state.fd_to_object_map.insert(msg.fd, object);
+                        md.len() as i64
+                    }
+                },
             }
         };
-        self.reply(&msg);
+
+        if ret < 0 {
+            unsafe {
+                libc::close(msg.fd as i32);
+            }
+        }
+        format!("copen {},{}", hdr.id, ret)
+    }
+
+    fn handle_close_request(&self, _hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
+        let mut state = self.get_state();
+
+        if let Some(FsCacheObject::DataBlob(blob)) = state.fd_to_object_map.remove(&msg.fd) {
+            let config = state.fd_to_config_map.remove(&msg.fd).unwrap();
+            BLOB_FACTORY.gc(Some((config.factory_config(), blob.blob_id())));
+        }
     }
 
     fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
@@ -590,7 +604,13 @@ impl FsCacheHandler {
                 result.len(),
             )
         };
-        assert_eq!(ret, result.len() as isize);
+        if ret as usize != result.len() {
+            warn!(
+                "Failed to reply \"{}\", {}",
+                result,
+                std::io::Error::last_os_error()
+            );
+        }
     }
 
     #[inline]

@@ -179,6 +179,7 @@ impl BlobCacheMgr {
                 .insert(config.get_key().to_string(), config);
             // Try to add the referenced data blob object if it doesn't exist yet.
             for bi in rs.superblock.get_blob_infos() {
+                debug!("Found blob {} on domain {}", &bi.blob_id(), domain_id);
                 let data_blob = BlobCacheObjectConfig::new_data_blob(
                     domain_id.to_string(),
                     bi,
