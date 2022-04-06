@@ -407,7 +407,12 @@ impl FsCacheHandler {
         };
         let key = domain_id + "-" + &msg.cookie_key;
         let msg = match self.get_config(&key) {
-            None => format!("cinit {},{}", hdr.id, -libc::ENOENT),
+            None => {
+                unsafe {
+                    libc::close(msg.fd as i32);
+                }
+                format!("copen {},{}", hdr.id, -libc::ENOENT)
+            }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
                     self.handle_open_data_blob(hdr, msg, config)
@@ -426,18 +431,22 @@ impl FsCacheHandler {
         msg: &FsCacheMsgOpen,
         config: Arc<BlobCacheConfigDataBlob>,
     ) -> String {
-        match self.create_data_blob_object(&config, hdr.id, msg.fd) {
-            Err(s) => s,
-            Ok((blob, blob_size)) => {
-                let mut state = self.state.lock().unwrap();
-                if state.fd_to_object_map.contains_key(&msg.fd) {
-                    format!("cinit {},{}", hdr.id, -libc::EALREADY)
-                } else {
+        let mut state = self.state.lock().unwrap();
+
+        if state.fd_to_object_map.contains_key(&msg.fd) {
+            unsafe {
+                libc::close(msg.fd as i32);
+            };
+            format!("copen {},{}", hdr.id, -libc::EALREADY)
+        } else {
+            match self.create_data_blob_object(&config, hdr.id, msg.fd) {
+                Err(s) => s,
+                Ok((blob, blob_size)) => {
                     state
                         .fd_to_object_map
                         .insert(msg.fd, FsCacheObject::DataBlob(blob));
                     state.fd_to_config_map.insert(msg.fd, config.clone());
-                    format!("cinit {},{}", hdr.id, blob_size)
+                    format!("copen {},{}", hdr.id, blob_size)
                 }
             }
         }
@@ -463,10 +472,10 @@ impl FsCacheHandler {
         let blob_ref = Arc::new(blob_info);
 
         match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
-            Err(_e) => Err(format!("cinit {},{}", id, -libc::ENOENT)),
+            Err(_e) => Err(format!("copen {},{}", id, -libc::ENOENT)),
             Ok(blob) => {
                 let blob_size = match blob.blob_size() {
-                    Err(_e) => return Err(format!("cinit {},{}", id, -libc::EIO)),
+                    Err(_e) => return Err(format!("copen {},{}", id, -libc::EIO)),
                     Ok(v) => v,
                 };
                 Ok((blob, blob_size))
@@ -481,39 +490,47 @@ impl FsCacheHandler {
         config: Arc<BlobCacheConfigBootstrap>,
     ) -> String {
         let mut state = self.get_state();
-        if state.fd_to_object_map.contains_key(&msg.fd) {
-            return format!("copen {},{}", hdr.id, -libc::EALREADY);
-        }
-
-        match OpenOptions::new().read(true).open(config.path()) {
-            Err(e) => {
-                warn!(
-                    "Failed to open bootstrap file {}, {}",
-                    config.path().display(),
-                    e
-                );
-                format!("copen {},{}", hdr.id, -libc::ENOENT)
-            }
-            Ok(f) => match f.metadata() {
+        use std::collections::hash_map::Entry::Vacant;
+        let ret: i64 = if let Vacant(e) = state.fd_to_object_map.entry(msg.fd) {
+            match OpenOptions::new().read(true).open(config.path()) {
                 Err(e) => {
                     warn!(
                         "Failed to open bootstrap file {}, {}",
                         config.path().display(),
                         e
                     );
-                    format!("copen {},{}", hdr.id, -libc::ENOENT)
+                    -libc::ENOENT as i64
                 }
-                Ok(md) => {
-                    let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
-                    let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
-                        bootstrap_file: f,
-                        cache_file,
-                    }));
-                    state.fd_to_object_map.insert(msg.fd, object);
-                    format!("copen {},{}", hdr.id, md.len())
-                }
-            },
+                Ok(f) => match f.metadata() {
+                    Err(e) => {
+                        warn!(
+                            "Failed to open bootstrap file {}, {}",
+                            config.path().display(),
+                            e
+                        );
+                        -libc::ENOENT as i64
+                    }
+                    Ok(md) => {
+                        let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
+                        let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
+                            bootstrap_file: f,
+                            cache_file,
+                        }));
+                        e.insert(object);
+                        md.len() as i64
+                    }
+                },
+            }
+        } else {
+            -libc::EALREADY as i64
+        };
+
+        if ret < 0 {
+            unsafe {
+                libc::close(msg.fd as i32);
+            }
         }
+        format!("copen {},{}", hdr.id, ret)
     }
 
     fn handle_close_request(&self, _hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
