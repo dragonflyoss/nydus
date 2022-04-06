@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
+use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
-use storage::compress;
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};

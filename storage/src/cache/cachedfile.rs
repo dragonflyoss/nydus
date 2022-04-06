@@ -20,8 +20,8 @@ use std::sync::Arc;
 use fuse_backend_rs::transport::FileVolatileSlice;
 use nix::sys::uio;
 use nix::unistd::dup;
-use nydus_utils::digest;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
+use nydus_utils::{compress, digest};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
@@ -36,7 +36,7 @@ use crate::device::{
 };
 use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::{compress, StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::{StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
 
 pub(crate) struct FileCacheEntry {
     pub(crate) blob_info: Arc<BlobInfo>,

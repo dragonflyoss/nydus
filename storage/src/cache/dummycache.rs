@@ -22,7 +22,7 @@ use std::io::Result;
 use std::sync::Arc;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
-use nydus_utils::digest;
+use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
@@ -30,7 +30,7 @@ use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
 use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
-use crate::{compress, StorageError, StorageResult};
+use crate::{StorageError, StorageResult};
 
 struct DummyCache {
     blob_id: String,

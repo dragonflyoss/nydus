@@ -26,7 +26,7 @@ use fuse_backend_rs::transport::FileVolatileSlice;
 
 pub use dummycache::DummyCacheMgr;
 pub use filecache::FileCacheMgr;
-use nydus_utils::digest;
+use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::ChunkMap;
@@ -35,7 +35,7 @@ use crate::device::{
     BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, digest_check};
-use crate::{compress, StorageResult, RAFS_MAX_CHUNK_SIZE};
+use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 
 mod cachedfile;
 mod dummycache;

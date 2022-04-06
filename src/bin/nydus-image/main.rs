@@ -24,9 +24,9 @@ use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
 use nydus_app::{setup_logging, BuildTimeInfo};
-use nydus_utils::digest;
+use nydus_utils::{compress, digest};
 use rafs::RafsIoReader;
-use storage::{compress, RAFS_DEFAULT_CHUNK_SIZE};
+use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;

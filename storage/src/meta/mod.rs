@@ -21,10 +21,10 @@ use std::ops::{Add, BitAnd, Not};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
+use nydus_utils::compress;
 use nydus_utils::digest::RafsDigest;
 
 use crate::backend::BlobReader;
-use crate::compress;
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk};
 use std::any::Any;
 
