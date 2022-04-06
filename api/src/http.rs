@@ -425,7 +425,10 @@ pub fn start_http_thread(
             'wait: loop {
                 match pool.poll(&mut events, None) {
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        error!("http server poll events failed, {}", e);
+                        return Err(e);
+                    }
                     Ok(_) => {}
                 }
 
