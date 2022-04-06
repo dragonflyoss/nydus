@@ -4,6 +4,7 @@
 
 use std::any::Any;
 use std::io::Result;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
