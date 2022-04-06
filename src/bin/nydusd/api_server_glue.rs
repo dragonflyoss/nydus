@@ -321,9 +321,15 @@ impl ApiSeverSubscriber {
                 } = self;
                 let mut events = Events::with_capacity(100);
                 'wait: loop {
-                    poll.poll(&mut events, None).unwrap_or_else(|e| {
-                        error!("API server poll events failed, {}", e);
-                    });
+                    match poll.poll(&mut events, None) {
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            error!("API server poll events failed, {}", e);
+                            return;
+                        }
+                        Ok(_) => {}
+                    }
+
                     for event in &events {
                         match event.token() {
                             API_WAKE_TOKEN => {
