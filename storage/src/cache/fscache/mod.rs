@@ -148,27 +148,26 @@ impl BlobCacheMgr for FsCacheMgr {
     }
 
     fn gc(&self, id: Option<&str>) {
-        let mut reclaim = Vec::new();
-
         if let Some(blob_id) = id {
-            reclaim.push(blob_id.to_string());
+            self.blobs.write().unwrap().remove(blob_id);
         } else {
+            let mut reclaim = Vec::new();
             let guard = self.blobs.write().unwrap();
             for (id, entry) in guard.iter() {
                 if Arc::strong_count(entry) == 1 {
                     reclaim.push(id.to_owned());
                 }
             }
-        }
+            drop(guard);
 
-        for key in reclaim.iter() {
-            let mut guard = self.blobs.write().unwrap();
-            if let Some(entry) = guard.get(key) {
-                if Arc::strong_count(entry) > 1 {
-                    continue;
+            for key in reclaim.iter() {
+                let mut guard = self.blobs.write().unwrap();
+                if let Some(entry) = guard.get(key) {
+                    if Arc::strong_count(entry) == 1 {
+                        guard.remove(key);
+                    }
                 }
             }
-            guard.remove(key);
         }
     }
 
