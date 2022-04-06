@@ -403,7 +403,12 @@ impl BlobMetaInfo {
     /// - `start` is bigger than blob size.
     /// - some portion of the range [start, start + size) is not covered by chunks.
     /// - the blob metadata is invalid.
-    pub fn get_chunks_uncompressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
+    pub fn get_chunks_uncompressed(
+        &self,
+        start: u64,
+        size: u64,
+        batch_size: u64,
+    ) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.uncompressed_size {
             return Err(einval!(format!(
@@ -411,6 +416,14 @@ impl BlobMetaInfo {
                 end, self.state.uncompressed_size
             )));
         }
+        let batch_end = if batch_size <= size {
+            end
+        } else {
+            std::cmp::min(
+                start.checked_add(batch_size).unwrap_or(end),
+                self.state.uncompressed_size,
+            )
+        };
 
         let infos = &*self.state.chunks;
         let mut index = self.state.get_chunk_index_nocheck(start, false)?;
@@ -429,7 +442,7 @@ impl BlobMetaInfo {
         vec.push(BlobMetaChunk::new(index, &self.state));
 
         let mut last_end = entry.aligned_uncompressed_end();
-        if last_end >= end {
+        if last_end >= batch_end {
             Ok(vec)
         } else {
             while index + 1 < infos.len() {
@@ -445,9 +458,14 @@ impl BlobMetaInfo {
                     )));
                 }
 
+                // Avoid read amplify if next chunk is too big.
+                if last_end >= end && entry.aligned_uncompressed_end() > batch_end {
+                    return Ok(vec);
+                }
+
                 vec.push(BlobMetaChunk::new(index, &self.state));
                 last_end = entry.aligned_uncompressed_end();
-                if last_end >= end {
+                if last_end >= batch_end {
                     return Ok(vec);
                 }
             }
@@ -467,7 +485,12 @@ impl BlobMetaInfo {
     /// - `start` is bigger than blob size.
     /// - some portion of the range [start, start + size) is not covered by chunks.
     /// - the blob metadata is invalid.
-    pub fn get_chunks_compressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
+    pub fn get_chunks_compressed(
+        &self,
+        start: u64,
+        size: u64,
+        batch_size: u64,
+    ) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.compressed_size {
             return Err(einval!(format!(
@@ -475,6 +498,14 @@ impl BlobMetaInfo {
                 end, self.state.compressed_size
             )));
         }
+        let batch_end = if batch_size <= size {
+            end
+        } else {
+            std::cmp::min(
+                start.checked_add(batch_size).unwrap_or(end),
+                self.state.uncompressed_size,
+            )
+        };
 
         let infos = &*self.state.chunks;
         let mut index = self.state.get_chunk_index_nocheck(start, true)?;
@@ -486,7 +517,7 @@ impl BlobMetaInfo {
         vec.push(BlobMetaChunk::new(index, &self.state));
 
         let mut last_end = entry.compressed_end();
-        if last_end >= end {
+        if last_end >= batch_end {
             Ok(vec)
         } else {
             while index + 1 < infos.len() {
@@ -497,9 +528,14 @@ impl BlobMetaInfo {
                     return Err(einval!());
                 }
 
+                // Avoid read amplify if next chunk is too big.
+                if last_end >= end && entry.compressed_end() > batch_end {
+                    return Ok(vec);
+                }
+
                 vec.push(BlobMetaChunk::new(index, &self.state));
                 last_end = entry.compressed_end();
-                if last_end >= end {
+                if last_end >= batch_end {
                     return Ok(vec);
                 }
             }
@@ -825,7 +861,7 @@ mod tests {
             state: Arc::new(state),
         };
 
-        let vec = info.get_chunks_uncompressed(0x0, 0x1001).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x1001, 0).unwrap();
         assert_eq!(vec.len(), 1);
         assert_eq!(vec[0].blob_index(), 1);
         assert_eq!(vec[0].id(), 0);
@@ -836,7 +872,7 @@ mod tests {
         assert_eq!(vec[0].is_compressed(), true);
         assert_eq!(vec[0].is_hole(), false);
 
-        let vec = info.get_chunks_uncompressed(0x0, 0x4000).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x4000, 0).unwrap();
         assert_eq!(vec.len(), 2);
         assert_eq!(vec[1].blob_index(), 1);
         assert_eq!(vec[1].id(), 1);
@@ -847,24 +883,24 @@ mod tests {
         assert_eq!(vec[1].is_compressed(), false);
         assert_eq!(vec[1].is_hole(), false);
 
-        let vec = info.get_chunks_uncompressed(0x0, 0x4001).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x4001, 0).unwrap();
         assert_eq!(vec.len(), 3);
 
-        let vec = info.get_chunks_uncompressed(0x100000, 0x2000).unwrap();
+        let vec = info.get_chunks_uncompressed(0x100000, 0x2000, 0).unwrap();
         assert_eq!(vec.len(), 1);
 
-        assert!(info.get_chunks_uncompressed(0x0, 0x6001).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0xfffff).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x100000).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x104000).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x104001).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x2001).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x4000).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x4001).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x6001, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0xfffff, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x100000, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x104000, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x104001, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x2001, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x4000, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x4001, 0).is_err());
         assert!(info
-            .get_chunks_uncompressed(0x102000, 0xffff_ffff_ffff_ffff)
+            .get_chunks_uncompressed(0x102000, 0xffff_ffff_ffff_ffff, 0)
             .is_err());
-        assert!(info.get_chunks_uncompressed(0x104000, 0x1).is_err());
+        assert!(info.get_chunks_uncompressed(0x104000, 0x1, 0).is_err());
     }
 
     #[test]
