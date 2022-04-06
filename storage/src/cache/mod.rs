@@ -25,7 +25,6 @@ use std::sync::Arc;
 use fuse_backend_rs::transport::FileVolatileSlice;
 use nydus_utils::{compress, digest};
 
-
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::ChunkMap;
 use crate::device::{
