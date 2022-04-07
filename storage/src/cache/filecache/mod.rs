@@ -253,6 +253,7 @@ impl FileCacheEntry {
             is_compressed,
             is_direct_chunkmap,
             is_stargz,
+            dio_enabled: false,
             need_validate,
             prefetch_config,
         })
