@@ -403,7 +403,12 @@ impl BlobMetaInfo {
     /// - `start` is bigger than blob size.
     /// - some portion of the range [start, start + size) is not covered by chunks.
     /// - the blob metadata is invalid.
-    pub fn get_chunks_uncompressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
+    pub fn get_chunks_uncompressed(
+        &self,
+        start: u64,
+        size: u64,
+        batch_size: u64,
+    ) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.uncompressed_size {
             return Err(einval!(format!(
@@ -411,6 +416,14 @@ impl BlobMetaInfo {
                 end, self.state.uncompressed_size
             )));
         }
+        let batch_end = if batch_size <= size {
+            end
+        } else {
+            std::cmp::min(
+                start.checked_add(batch_size).unwrap_or(end),
+                self.state.uncompressed_size,
+            )
+        };
 
         let infos = &*self.state.chunks;
         let mut index = self.state.get_chunk_index_nocheck(start, false)?;
@@ -429,7 +442,7 @@ impl BlobMetaInfo {
         vec.push(BlobMetaChunk::new(index, &self.state));
 
         let mut last_end = entry.aligned_uncompressed_end();
-        if last_end >= end {
+        if last_end >= batch_end {
             Ok(vec)
         } else {
             while index + 1 < infos.len() {
@@ -445,9 +458,14 @@ impl BlobMetaInfo {
                     )));
                 }
 
+                // Avoid read amplify if next chunk is too big.
+                if last_end >= end && entry.aligned_uncompressed_end() > batch_end {
+                    return Ok(vec);
+                }
+
                 vec.push(BlobMetaChunk::new(index, &self.state));
                 last_end = entry.aligned_uncompressed_end();
-                if last_end >= end {
+                if last_end >= batch_end {
                     return Ok(vec);
                 }
             }
@@ -467,7 +485,12 @@ impl BlobMetaInfo {
     /// - `start` is bigger than blob size.
     /// - some portion of the range [start, start + size) is not covered by chunks.
     /// - the blob metadata is invalid.
-    pub fn get_chunks_compressed(&self, start: u64, size: u64) -> Result<Vec<BlobIoChunk>> {
+    pub fn get_chunks_compressed(
+        &self,
+        start: u64,
+        size: u64,
+        batch_size: u64,
+    ) -> Result<Vec<BlobIoChunk>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.compressed_size {
             return Err(einval!(format!(
@@ -475,6 +498,14 @@ impl BlobMetaInfo {
                 end, self.state.compressed_size
             )));
         }
+        let batch_end = if batch_size <= size {
+            end
+        } else {
+            std::cmp::min(
+                start.checked_add(batch_size).unwrap_or(end),
+                self.state.uncompressed_size,
+            )
+        };
 
         let infos = &*self.state.chunks;
         let mut index = self.state.get_chunk_index_nocheck(start, true)?;
@@ -486,7 +517,7 @@ impl BlobMetaInfo {
         vec.push(BlobMetaChunk::new(index, &self.state));
 
         let mut last_end = entry.compressed_end();
-        if last_end >= end {
+        if last_end >= batch_end {
             Ok(vec)
         } else {
             while index + 1 < infos.len() {
@@ -497,9 +528,14 @@ impl BlobMetaInfo {
                     return Err(einval!());
                 }
 
+                // Avoid read amplify if next chunk is too big.
+                if last_end >= end && entry.compressed_end() > batch_end {
+                    return Ok(vec);
+                }
+
                 vec.push(BlobMetaChunk::new(index, &self.state));
                 last_end = entry.compressed_end();
-                if last_end >= end {
+                if last_end >= batch_end {
                     return Ok(vec);
                 }
             }
