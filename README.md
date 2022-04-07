@@ -113,6 +113,10 @@ Browse the documentation to learn more. Here are some topics you may be interest
 - Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
 - [Nydus Design Doc](./docs/nydus-design.md)
 
+## Run with macos
+
+- Nydus can also run with macfuse(a.k.a osxfuse).For more details please read [nydus with macos](./docs/nydus_with_macos.md).
+
 ## Community
 
 Nydus aims to form a **vendor-neutral opensource** image distribution solution to all communities.
