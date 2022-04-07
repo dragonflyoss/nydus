@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Utility helpers to supprt the storage subsystem.
+use std::alloc::{alloc, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, Result};
 use std::os::unix::io::RawFd;
@@ -222,9 +223,12 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
 
 /// A customized buf allocator that avoids zeroing
 pub fn alloc_buf(size: usize) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(size);
-    unsafe { buf.set_len(size) };
-    buf
+    debug_assert!(size < isize::MAX as usize);
+    let layout = Layout::from_size_align(size, 0x1000)
+        .unwrap()
+        .pad_to_align();
+    let ptr = unsafe { alloc(layout) };
+    unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
 }
 
 /// Check hash of data matches provided one
