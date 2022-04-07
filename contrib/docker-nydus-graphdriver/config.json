@@ -24,20 +24,5 @@
       }
     ]
   },
-  "PropagatedMount": "/home",
-  "Mounts": [
-    {
-      "Name": "NYDUS_CONFIG",
-      "Source": "/var/lib/nydus/config.json",
-      "Destination": "/nydus/config.json",
-      "Type": "none",
-      "Options": [
-        "bind",
-        "ro"
-      ],
-      "Settable": [
-        "source"
-      ]
-    }
-  ]
+  "PropagatedMount": "/home"
 }
