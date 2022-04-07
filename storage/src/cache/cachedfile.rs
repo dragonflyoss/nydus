@@ -60,6 +60,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
     pub(crate) is_stargz: bool,
+    // True if direct IO is enabled for the `self.file`, supported for fscache only.
+    pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
     pub(crate) need_validate: bool,
     pub(crate) prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -379,7 +381,7 @@ impl FileCacheEntry {
             let blob_size = (blob_end - blob_offset) as usize;
 
             match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
-                Ok(v) => {
+                Ok(mut v) => {
                     total_size += blob_size;
                     trace!(
                         "range persist chunk start {} {} pending {} {}",
@@ -394,10 +396,14 @@ impl FileCacheEntry {
                         } else {
                             chunks[idx].uncompress_offset()
                         };
+                        let buf = &mut v[idx - start_idx];
+                        if self.dio_enabled {
+                            self.adjust_buffer_for_dio(buf)
+                        }
                         trace!("persist_chunk idx {}", idx);
-                        Self::persist_chunk(&self.file, offset, &v[idx - start_idx]).map_err(
-                            |e| eio!(format!("do_fetch_chunk failed to persist {:?}", e)),
-                        )?;
+                        Self::persist_chunk(&self.file, offset, &buf).map_err(|e| {
+                            eio!(format!("do_fetch_chunk failed to persist {:?}", e))
+                        })?;
                     }
 
                     bitmap
@@ -416,6 +422,14 @@ impl FileCacheEntry {
             Err(eio!("failed to read data from storage backend"))
         } else {
             Ok(total_size)
+        }
+    }
+
+    fn adjust_buffer_for_dio(&self, buf: &mut Vec<u8>) {
+        debug_assert!(buf.capacity() % 0x1000 == 0);
+        if buf.len() != buf.capacity() {
+            // Padding with 0 for direct IO.
+            buf.resize(buf.capacity(), 0);
         }
     }
 }
