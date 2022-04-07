@@ -15,7 +15,6 @@ use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
 use nix::sys::stat;
@@ -47,7 +46,7 @@ use super::chunk_dict::ChunkDict;
 use super::context::{BlobContext, BootstrapContext, BuildContext, RafsVersion};
 use super::tree::Tree;
 
-const ROOT_PATH_NAME: &[u8] = &[b'/'];
+pub const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 /// Prefix for OCI whiteout file.
 pub const OCISPEC_WHITEOUT_PREFIX: &str = ".wh.";
@@ -103,6 +102,8 @@ pub enum WhiteoutSpec {
     Oci,
     /// "whiteouts and opaque directories" in https://www.kernel.org/doc/Documentation/filesystems/overlayfs.txt
     Overlayfs,
+    /// No whiteout spec, which will build all `.wh.*` and `.wh..wh..opq` files into bootstrap.
+    None,
 }
 
 impl Default for WhiteoutSpec {
@@ -118,6 +119,7 @@ impl FromStr for WhiteoutSpec {
         match s {
             "oci" => Ok(Self::Oci),
             "overlayfs" => Ok(Self::Overlayfs),
+            "none" => Ok(Self::None),
             _ => Err(anyhow!("invalid whiteout spec")),
         }
     }
@@ -222,6 +224,8 @@ pub struct Node {
     pub(crate) target: PathBuf,
     /// Parsed version of `target`.
     pub(crate) target_vec: Vec<OsString>,
+    /// Layer index where node located.
+    pub layer_idx: u16,
     /// Last status change time of the file, in nanoseconds.
     pub ctime: i64,
     /// Used by rafsv6 inode datalayout
@@ -283,6 +287,7 @@ impl Node {
             symlink: None,
             xattrs: RafsXAttrs::default(),
             explicit_uidgid,
+            layer_idx: 0,
             ctime: 0,
             offset: 0,
             dirents: Vec::new(),
@@ -1022,6 +1027,9 @@ impl Node {
                     return Some(WhiteoutType::OverlayFsOpaque);
                 }
             }
+            WhiteoutSpec::None => {
+                return None;
+            }
         }
 
         None
@@ -1193,7 +1201,7 @@ impl InodeWrapper {
         }
     }
 
-    pub fn from_inode_info(inode: &Arc<dyn RafsInode>) -> Self {
+    pub fn from_inode_info(inode: &dyn RafsInode) -> Self {
         if let Some(inode) = inode.as_any().downcast_ref::<CachedInodeV5>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
         } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapper>() {

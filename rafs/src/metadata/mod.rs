@@ -468,7 +468,7 @@ impl RafsSuper {
     }
 
     /// Load Rafs super block from a metadata file.
-    pub fn load_from_metadata(path: &str, mode: RafsMode, validate_digest: bool) -> Result<Self> {
+    pub fn load_from_metadata(path: &Path, mode: RafsMode, validate_digest: bool) -> Result<Self> {
         // open bootstrap file
         let file = OpenOptions::new().read(true).write(false).open(path)?;
         let mut rs = RafsSuper {
@@ -483,7 +483,7 @@ impl RafsSuper {
         Ok(rs)
     }
 
-    pub fn load_chunk_dict_from_metadata(path: &str) -> Result<Self> {
+    pub fn load_chunk_dict_from_metadata(path: &Path) -> Result<Self> {
         // open bootstrap file
         let file = OpenOptions::new().read(true).write(false).open(path)?;
         let mut rs = RafsSuper {
@@ -749,24 +749,20 @@ impl RafsSuper {
         cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let inode = self.get_inode(ino, false)?;
-        if !inode.is_dir() {
-            return Ok(());
-        }
-        let parent_path = if let Some(parent) = parent {
+        let path = if let Some(parent) = parent {
             parent.join(inode.name())
         } else {
             PathBuf::from("/")
         };
+        cb(inode.as_ref(), &path)?;
+        if !inode.is_dir() {
+            return Ok(());
+        }
         let child_count = inode.get_child_count();
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
-            if child.is_dir() {
-                self.walk_inodes(child_ino, Some(&parent_path), cb)?;
-            } else {
-                let child_path = parent_path.join(child.name());
-                cb(child.as_ref(), &child_path)?;
-            }
+            self.walk_inodes(child_ino, Some(&path), cb)?;
         }
         Ok(())
     }

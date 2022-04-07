@@ -136,7 +136,7 @@ use crate::core::context::{
 use crate::core::node::{ChunkSource, ChunkWrapper, Node, NodeChunk, Overlay};
 use crate::core::tree::Tree;
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::{RafsBlobTable, RAFS_ROOT_INODE};
+use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
 use storage::device::BlobChunkInfo;
 
@@ -305,7 +305,7 @@ fn dump_blob(
     blob_nodes: &mut Vec<Node>,
     chunk_dict: Arc<dyn ChunkDict>,
 ) -> Result<(Option<BlobContext>, ChunkMap)> {
-    let mut blob_ctx = BlobContext::new(blob_id, blob_storage)?;
+    let mut blob_ctx = BlobContext::new(blob_id, blob_storage, ctx.blob_offset)?;
     blob_ctx.set_chunk_dict(chunk_dict);
     blob_ctx.set_chunk_size(ctx.chunk_size);
     blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
@@ -523,14 +523,16 @@ impl DiffBuilder {
                                                         path: &Path|
              -> Result<()> {
                 let mut chunks = Vec::new();
-                inode.walk_chunks(&mut |cki: &dyn BlobChunkInfo| -> Result<()> {
-                    let chunk = ChunkWrapper::from_chunk_info(cki);
-                    chunks.push(NodeChunk {
-                        source: ChunkSource::Parent,
-                        inner: chunk,
-                    });
-                    Ok(())
-                })?;
+                if inode.is_reg() {
+                    inode.walk_chunks(&mut |cki: &dyn BlobChunkInfo| -> Result<()> {
+                        let chunk = ChunkWrapper::from_chunk_info(cki);
+                        chunks.push(NodeChunk {
+                            source: ChunkSource::Parent,
+                            inner: chunk,
+                        });
+                        Ok(())
+                    })?;
+                }
                 self.chunk_map
                     .insert(path.to_path_buf(), (chunks, inode.get_digest()));
                 Ok(())
@@ -653,14 +655,7 @@ impl DiffBuilder {
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
-        match blob_table {
-            RafsBlobTable::V5(table) => {
-                bootstrap.dump_rafsv5(ctx, bootstrap_ctx, &table)?;
-            }
-            RafsBlobTable::V6(table) => {
-                bootstrap.dump_rafsv6(ctx, bootstrap_ctx, &table)?;
-            }
-        };
+        bootstrap.dump(ctx, bootstrap_ctx, &blob_table)?;
         bootstrap_ctx.blobs = blob_mgr
             .get_blobs()
             .iter()
@@ -861,7 +856,6 @@ pub mod tests {
 
     use super::*;
     use nydus_utils::exec;
-    use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
     fn create_dir(path: &Path) {
         fs::create_dir_all(path).unwrap();
@@ -1002,10 +996,7 @@ pub mod tests {
             (Overlay::UpperAddition, PathBuf::from("/test-1-symlink")),
             (Overlay::UpperAddition, PathBuf::from("/test-2")),
         ];
-        let ctx = BuildContext {
-            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
-            ..Default::default()
-        };
+        let ctx = BuildContext::default();
         let nodes = walk_diff(&ctx, None, lower_dir.clone(), lower_dir.clone()).unwrap();
         for (i, node) in nodes.into_iter().enumerate() {
             println!("lower node: {:?} {:?}", node.overlay, node.target());

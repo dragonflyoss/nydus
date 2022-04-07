@@ -30,7 +30,7 @@ use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
-use crate::core::chunk_dict::import_chunk_dict;
+use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputArtifact,
     RafsVersion, SourceType,
@@ -38,6 +38,7 @@ use crate::core::context::{
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
+use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::validator::Validator;
 use storage::factory::{BackendConfig, BlobFactory};
@@ -47,6 +48,7 @@ mod trace;
 mod builder;
 mod core;
 mod inspect;
+mod merge;
 mod stat;
 mod validator;
 
@@ -133,6 +135,20 @@ impl OutputSerializer {
 }
 
 fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
+    let arg_chunk_dict = Arg::with_name("chunk-dict")
+        .long("chunk-dict")
+        .short("M")
+        .help("Specify a chunk dictionary for chunk deduplication")
+        .takes_value(true);
+    let arg_prefetch_policy = Arg::with_name("prefetch-policy")
+        .long("prefetch-policy")
+        .short("P")
+        .help("blob data prefetch policy")
+        .takes_value(true)
+        .required(false)
+        .default_value("none")
+        .possible_values(&["fs", "blob", "none"]);
+
     // TODO: Try to use yaml to define below options
     App::new("")
         .version(bti_string.as_str())
@@ -245,14 +261,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .required(false),
                 )
                 .arg(
-                    Arg::with_name("prefetch-policy")
-                        .long("prefetch-policy")
-                        .short("P")
-                        .help("prefetch policy:")
-                        .takes_value(true)
-                        .required(false)
-                        .default_value("none")
-                        .possible_values(&["fs", "blob", "none"]),
+                    arg_prefetch_policy.clone(),
                 )
                 .arg(
                     Arg::with_name("repeatable")
@@ -277,7 +286,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                         .required(true)
                         .default_value("oci")
-                        .possible_values(&["oci", "overlayfs"])
+                        .possible_values(&["oci", "overlayfs", "none"])
                 )
                 .arg(
                     Arg::with_name("output-json")
@@ -294,6 +303,13 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(false)
                 )
                 .arg(
+                    Arg::with_name("blob-offset")
+                        .long("blob-offset")
+                        .help("add an offset for compressed blob (is only used to put the blob in the tarball)")
+                        .default_value("0")
+                        .takes_value(true)
+                )
+                .arg(
                     Arg::with_name("blob-dir")
                         .long("blob-dir")
                         .short("D")
@@ -301,11 +317,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                 )
                 .arg(
-                    Arg::with_name("chunk-dict")
-                        .long("chunk-dict")
-                        .short("M")
-                        .help("Specify a chunk dictionary for chunk deduplication")
-                        .takes_value(true)
+                    arg_chunk_dict.clone(),
                 )
                 .arg(
                     Arg::with_name("backend-type")
@@ -320,6 +332,30 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .long("backend-config")
                         .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility")
                         .takes_value(true)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("merge")
+                .about("Merge multiple bootstraps into a overlaid bootstrap")
+                .arg(
+                    Arg::with_name("bootstrap")
+                        .long("bootstrap")
+                        .short("B")
+                        .help("output path of nydus overlaid bootstrap")
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    arg_chunk_dict,
+                )
+                .arg(
+                    arg_prefetch_policy,
+                )
+                .arg(
+                    Arg::with_name("SOURCE")
+                        .help("bootstrap paths (allow one or more)")
+                        .required(true)
+                        .multiple(true),
                 )
         )
         .subcommand(
@@ -505,6 +541,8 @@ fn main() -> Result<()> {
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         Command::create(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("merge") {
+        Command::merge(matches)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
         Command::check(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
@@ -525,6 +563,7 @@ impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(&matches)?;
         let chunk_size = Self::get_chunk_size(&matches)?;
+        let blob_offset = Self::get_blob_offset(&matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(&matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let extra_paths: Vec<PathBuf> = matches
@@ -569,15 +608,12 @@ impl Command {
             }
         }
 
-        let prefetch_policy = matches
-            .value_of("prefetch-policy")
-            .unwrap_or_default()
-            .parse()?;
-        let prefetch = Prefetch::new(prefetch_policy)?;
+        let prefetch = Self::get_prefetch(matches)?;
 
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
+            blob_offset,
             compressor,
             digester,
             !repeatable,
@@ -648,6 +684,29 @@ impl Command {
         OutputSerializer::dump(matches, build_output, &build_info)?;
 
         Ok(())
+    }
+
+    fn merge(matches: &clap::ArgMatches) -> Result<()> {
+        let source_bootstrap_paths: Vec<PathBuf> = matches
+            .values_of("SOURCE")
+            .map(|paths| paths.map(PathBuf::from).collect())
+            .unwrap();
+        let target_bootstrap_path = Self::get_bootstrap(&matches)?;
+        let chunk_dict_path = if let Some(arg) = matches.value_of("chunk-dict") {
+            Some(parse_chunk_dict_arg(arg)?)
+        } else {
+            None
+        };
+        let mut ctx = BuildContext {
+            prefetch: Self::get_prefetch(matches)?,
+            ..Default::default()
+        };
+        Merger::merge(
+            &mut ctx,
+            source_bootstrap_paths,
+            target_bootstrap_path.to_path_buf(),
+            chunk_dict_path,
+        )
     }
 
     fn compact(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
@@ -884,6 +943,23 @@ impl Command {
                 }
                 Ok(chunk_size)
             }
+        }
+    }
+
+    fn get_prefetch(matches: &clap::ArgMatches) -> Result<Prefetch> {
+        let prefetch_policy = matches
+            .value_of("prefetch-policy")
+            .unwrap_or_default()
+            .parse()?;
+        Prefetch::new(prefetch_policy)
+    }
+
+    fn get_blob_offset(matches: &clap::ArgMatches) -> Result<u64> {
+        match matches.value_of("blob-offset") {
+            None => Ok(0),
+            Some(v) => v
+                .parse::<u64>()
+                .context(format!("invalid blob offset {}", v)),
         }
     }
 
