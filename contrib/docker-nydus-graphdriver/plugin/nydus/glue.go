@@ -13,10 +13,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -86,6 +88,17 @@ func getDaemonStatus(socket string) error {
 		return errors.Errorf("nydus is not ready. current stat %s", info.State)
 	}
 
+	return nil
+}
+
+func (nydus *Nydus) MountErofs(fsid string, devices []string, mountpoint string) error {
+	mount := unix.Mount
+
+	opts := "fsid=" + fsid + ",device=" + strings.Join(devices, ",device=")
+	logrus.Infof("Mount erofs with %s", opts)
+	if e := mount("erofs", mountpoint, "erofs", 0, opts); e != nil {
+		return errors.Wrapf(e, "failed to mount erofs")
+	}
 	return nil
 }
 

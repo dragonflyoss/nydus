@@ -7,7 +7,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -v .
 
 FROM alpine:3.13.6
 RUN mkdir -p /plugin; mkdir -p /nydus
-ARG NYDUSD_PATH=./nydusd
+#ARG NYDUSD_PATH=./nydusd
 COPY --from=0 /app/nydus_graphdriver /plugin/nydus_graphdriver
-COPY ${NYDUSD_PATH} /nydus
+#COPY ${NYDUSD_PATH} /nydus
 ENTRYPOINT [ "/plugin/nydus_graphdriver" ]

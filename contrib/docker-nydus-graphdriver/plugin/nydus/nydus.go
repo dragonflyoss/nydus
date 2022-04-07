@@ -7,6 +7,7 @@ package nydus
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -242,6 +243,44 @@ func (d *Driver) Remove(id string) error {
 	return nil
 }
 
+func GetErofsDevices(path string) ([] string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to open bootstrap")
+	}
+	defer f.Close()
+
+	devices := make([]string, 0)
+	f.Seek(1024, os.SEEK_SET)
+	byte4 := make([]byte, 4)
+	_, err = f.Read(byte4)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read super magic")
+	}
+	if binary.LittleEndian.Uint32(byte4) != 0xe0f5e1e2 {
+		return nil, errors.New("bad erofs magic")
+	}
+	f.Seek(1024 + 86, os.SEEK_SET)
+	_, err = f.Read(byte4)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read devt_slotoff")
+	}
+	nr_devices := binary.LittleEndian.Uint16(byte4[0:2])
+	pos := int64(binary.LittleEndian.Uint16(byte4[2:4])) * 128
+	for nr_devices > 0 {
+		tag := make([]byte, 64)
+		f.Seek(pos, os.SEEK_SET)
+		_, err = f.Read(tag)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to read device tag")
+		}
+		devices = append(devices, string(tag))
+		nr_devices = nr_devices - 1
+		pos = pos + 128
+	}
+	return devices, nil
+}
+
 // Get creates and mounts the required file system for the given id and returns the mount path.
 // The `id` is mount-id.
 func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, retErr error) {
@@ -282,11 +321,19 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, retErr 
 					return nil, errors.Wrap(err, "failed in creating nydus mountpoint")
 				}
 
-				nydus := New()
-				// Keep it, so we can wait for process termination.
-				d.nydus = nydus
-				if e := nydus.Mount(bootstrapPath, absMountpoint); e != nil {
-					return nil, e
+				if devices, e := GetErofsDevices(bootstrapPath); e == nil {
+					fsid := "demo"
+					nydus := New()
+					if e := nydus.MountErofs(fsid, devices, absMountpoint); e != nil {
+						return nil, e
+					}
+				} else {
+					nydus := New()
+					// Keep it, so we can wait for process termination.
+					d.nydus = nydus
+					if e := nydus.Mount(bootstrapPath, absMountpoint); e != nil {
+						return nil, e
+					}
 				}
 
 			} else if err != nil {
