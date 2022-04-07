@@ -44,7 +44,9 @@ jobs:
       - name: Cache Nydus
         uses: Swatinem/rust-cache@v1
         with:
-          target-dir: ./target-fusedev
+          target-dir: |
+            ./target-fusedev
+            ./target-virtiofs
           cache-on-failure: true
       - name: Cache Docker Layers
         uses: satackey/action-docker-layer-caching@v0.0.11
