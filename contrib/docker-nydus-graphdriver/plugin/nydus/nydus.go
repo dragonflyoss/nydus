@@ -258,8 +258,10 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, retErr 
 		return
 	}
 
+	newlowers := make([]string, 0)
 	for _, l := range lowers {
 		if l == id {
+			newlowers = append(newlowers, id)
 			break
 		}
 
@@ -297,11 +299,11 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, retErr 
 		// Relative path
 		nydusRelaMountpoint := path.Join(l, nydusDirName)
 		if _, err := os.Stat(path.Join(d.home, nydusRelaMountpoint)); err == nil {
-			lowers = append(lowers, nydusRelaMountpoint)
+			newlowers = append(newlowers, nydusRelaMountpoint)
 		} else {
 			diffDir := path.Join(l, "diff")
 			if _, err := os.Stat(diffDir); err == nil {
-				lowers = append(lowers, diffDir)
+				newlowers = append(newlowers, diffDir)
 			}
 		}
 	}
@@ -330,7 +332,7 @@ func (d *Driver) Get(id, mountLabel string) (fs containerfs.ContainerFS, retErr 
 
 	upperDir := path.Join(id, diffDirName)
 	workDir := path.Join(id, workDirName)
-	opts := "lowerdir=" + strings.Join(lowers, ":") + ",upperdir=" + upperDir + ",workdir=" + workDir
+	opts := "lowerdir=" + strings.Join(newlowers, ":") + ",upperdir=" + upperDir + ",workdir=" + workDir
 
 	mountData := label.FormatMountLabel(opts, mountLabel)
 	mount := unix.Mount
