@@ -237,6 +237,7 @@ impl FileCacheEntry {
             is_compressed: false,
             is_direct_chunkmap: true,
             is_stargz: false,
+            dio_enabled: true,
             need_validate: mgr.validate,
             prefetch_config,
         })
