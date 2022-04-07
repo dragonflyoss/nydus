@@ -224,9 +224,11 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
 /// A customized buf allocator that avoids zeroing
 pub fn alloc_buf(size: usize) -> Vec<u8> {
     debug_assert!(size < isize::MAX as usize);
-    let layout = Layout::from_size_align(size, 0x1000).unwrap();
+    let layout = Layout::from_size_align(size, 0x1000)
+        .unwrap()
+        .pad_to_align();
     let ptr = unsafe { alloc(layout) };
-    unsafe { Vec::from_raw_parts(ptr, size, size) }
+    unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
 }
 
 /// Check hash of data matches provided one
