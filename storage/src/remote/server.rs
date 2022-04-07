@@ -346,7 +346,7 @@ impl AsRawFd for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use vmm_sys_util::tempdir::TempDir;
 
     #[test]
@@ -398,6 +398,14 @@ mod tests {
 
         server.stop();
         std::thread::sleep(Duration::from_secs(4));
+        let starttime = Instant::now();
+        /* give 10secs more to try */
+        while starttime.elapsed() < Duration::from_secs(10) {
+            if server.state.active_workers.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
         assert_eq!(server.state.active_workers.load(Ordering::Relaxed), 0);
         drop(server);
 
