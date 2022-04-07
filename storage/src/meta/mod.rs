@@ -861,7 +861,7 @@ mod tests {
             state: Arc::new(state),
         };
 
-        let vec = info.get_chunks_uncompressed(0x0, 0x1001).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x1001, 0).unwrap();
         assert_eq!(vec.len(), 1);
         assert_eq!(vec[0].blob_index(), 1);
         assert_eq!(vec[0].id(), 0);
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(vec[0].is_compressed(), true);
         assert_eq!(vec[0].is_hole(), false);
 
-        let vec = info.get_chunks_uncompressed(0x0, 0x4000).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x4000, 0).unwrap();
         assert_eq!(vec.len(), 2);
         assert_eq!(vec[1].blob_index(), 1);
         assert_eq!(vec[1].id(), 1);
@@ -883,24 +883,24 @@ mod tests {
         assert_eq!(vec[1].is_compressed(), false);
         assert_eq!(vec[1].is_hole(), false);
 
-        let vec = info.get_chunks_uncompressed(0x0, 0x4001).unwrap();
+        let vec = info.get_chunks_uncompressed(0x0, 0x4001, 0).unwrap();
         assert_eq!(vec.len(), 3);
 
-        let vec = info.get_chunks_uncompressed(0x100000, 0x2000).unwrap();
+        let vec = info.get_chunks_uncompressed(0x100000, 0x2000, 0).unwrap();
         assert_eq!(vec.len(), 1);
 
-        assert!(info.get_chunks_uncompressed(0x0, 0x6001).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0xfffff).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x100000).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x104000).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x104001).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x2001).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x4000).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x4001).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x6001, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0xfffff, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x100000, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x104000, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x0, 0x104001, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x2001, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x4000, 0).is_err());
+        assert!(info.get_chunks_uncompressed(0x100000, 0x4001, 0).is_err());
         assert!(info
-            .get_chunks_uncompressed(0x102000, 0xffff_ffff_ffff_ffff)
+            .get_chunks_uncompressed(0x102000, 0xffff_ffff_ffff_ffff, 0)
             .is_err());
-        assert!(info.get_chunks_uncompressed(0x104000, 0x1).is_err());
+        assert!(info.get_chunks_uncompressed(0x104000, 0x1, 0).is_err());
     }
 
     #[test]
