@@ -55,9 +55,13 @@ pub type BackendResult<T> = std::result::Result<T, BackendError>;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProxyConfig {
+    /// Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL.
     url: String,
+    /// Endpoint of P2P proxy health checking.
     ping_url: String,
+    /// Fallback to remote storage backend if P2P proxy ping failed.
     fallback: bool,
+    /// Interval of P2P proxy health checking, in seconds.
     check_interval: u64,
 }
 
@@ -76,9 +80,15 @@ impl Default for ProxyConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommonConfig {
+    /// Enable HTTP proxy for the read request.
     proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
     timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
     connect_timeout: u64,
+    /// Retry count when read request failed.
     retry_limit: u8,
 }
 
@@ -86,6 +96,7 @@ impl Default for CommonConfig {
     fn default() -> Self {
         Self {
             proxy: ProxyConfig::default(),
+            skip_verify: false,
             timeout: 5,
             connect_timeout: 5,
             retry_limit: 0,

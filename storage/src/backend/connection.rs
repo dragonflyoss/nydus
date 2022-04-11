@@ -277,6 +277,10 @@ impl Connection {
             .connect_timeout(connect_timeout)
             .redirect(Policy::none());
 
+        if config.skip_verify {
+            cb = cb.danger_accept_invalid_certs(true);
+        }
+
         if !proxy.is_empty() {
             cb = cb.proxy(reqwest::Proxy::all(proxy).map_err(|e| einval!(e))?)
         }
