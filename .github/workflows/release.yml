@@ -19,7 +19,9 @@ jobs:
     - name: Cache cargo
       uses: Swatinem/rust-cache@v1
       with:
-        target-dir: ./target-fusedev
+        target-dir: |
+          ./target-fusedev
+          ./target-virtiofs
         cache-on-failure: true
     - name: Build nydus-rs
       run: |
@@ -42,16 +44,13 @@ jobs:
           configs
   build-contrib:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: [1.17.x]
     env:
       DOCKER: false
     steps:
     - uses: actions/checkout@v2
     - uses: actions/setup-go@v2
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.17'
     - name: cache go mod
       uses: actions/cache@v2
       with:
@@ -99,5 +98,12 @@ jobs:
         tarball="nydus-static-$tag-x86_64.tgz"
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
-        echo "uploading ${tarball} for tag $tag ..."
-        GITHUB_TOKEN=${{ secrets.HUB_UPLOAD_TOKEN }} hub release create -m "Nydus Image Service $tag" -m "Nydus Image Service $tag release" -a "${tarball}" "$tag"
+        echo "tag=$tag" >> $GITHUB_ENV
+        echo "tarball=$tarball" >> $GITHUB_ENV
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: "Nydus Image Service ${{ env.tag }}"
+        generate_release_notes: true
+        files:
+          ${{ env.tarball }}
