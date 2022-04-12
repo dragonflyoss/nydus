@@ -30,6 +30,7 @@ $ sudo cat > /etc/nydusd-config.json << EOF
       "type": "registry",
       "config": {
         "scheme": "http",
+        "skip_verify": false,
         "timeout": 5,
         "connect_timeout": 5,
         "retry_limit": 2,
