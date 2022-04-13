@@ -62,8 +62,8 @@ pub fn exit_daemon() {
     let daemon = FUSE_DAEMON.lock().expect("Not posioned lock");
     if let Some(daemon) = daemon.deref() {
         daemon
-            .disconnect()
-            .unwrap_or_else(|e| error!("disconnect daemon failed, {}", e));
+            .stop()
+            .unwrap_or_else(|e| error!("exit daemon failed, {}", e));
     }
 }
 
