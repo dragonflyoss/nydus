@@ -23,7 +23,6 @@ use crate::core::tree::{MetadataTreeBuilder, Tree};
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Flags {
     explicit_uidgid: bool,
-    has_xattr: bool,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
 }
@@ -32,7 +31,6 @@ impl Flags {
     fn from_meta(meta: &RafsSuperMeta) -> Self {
         Self {
             explicit_uidgid: meta.explicit_uidgid(),
-            has_xattr: meta.has_xattr(),
             compressor: meta.get_compressor(),
             digester: meta.get_digester(),
         }
@@ -40,7 +38,6 @@ impl Flags {
 
     fn set_to_ctx(&self, ctx: &mut BuildContext) {
         ctx.explicit_uidgid = self.explicit_uidgid;
-        ctx.has_xattr = self.has_xattr;
         ctx.compressor = self.compressor;
         ctx.digester = self.digester;
     }
@@ -93,9 +90,10 @@ impl Merger {
             if let Some(flags) = &flags {
                 if flags != &current_flags {
                     bail!(
-                        "inconsistent flags between bootstraps, current bootstrap {:?}, flags {:?}",
+                        "inconsistent flags between bootstraps, current bootstrap {:?}, flags {:?}, expected flags {:?}",
                         bootstrap_path,
                         current_flags,
+                        flags,
                     );
                 }
             } else {
