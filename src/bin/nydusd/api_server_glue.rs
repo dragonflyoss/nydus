@@ -402,22 +402,24 @@ impl ApiServerController {
     pub fn stop(&mut self) {
         // Signal the HTTP router thread to exit, which will then notify the HTTP handler thread.
         if let Some(waker) = self.waker.take() {
-            let _ = waker.wake();
-        }
-        if let Some(t) = self.http_handler_thread.take() {
-            if let Err(e) = t.join() {
-                error!(
-                    "Failed to join the HTTP handler thread, execution error. {:?}",
-                    e
-                );
+            if let Err(e) = waker.wake() {
+                error!("Failed to signal http router thread for exiting, {}", e);
             }
-        }
-        if let Some(t) = self.http_router_thread.take() {
-            if let Err(e) = t.join() {
-                error!(
-                    "Failed to join the HTTP router thread, execution error. {:?}",
-                    e
-                );
+            if let Some(t) = self.http_router_thread.take() {
+                if let Err(e) = t.join() {
+                    error!(
+                        "Failed to join the HTTP router thread, execution error. {:?}",
+                        e
+                    );
+                }
+            }
+            if let Some(t) = self.http_handler_thread.take() {
+                if let Err(e) = t.join() {
+                    error!(
+                        "Failed to join the HTTP handler thread, execution error. {:?}",
+                        e
+                    );
+                }
             }
         }
     }

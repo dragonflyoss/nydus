@@ -179,7 +179,7 @@ impl DaemonController {
                 }
 
                 if event.is_readable() && event.token() == Token(1) {
-                    if self.active.load(Ordering::Acquire) {
+                    if !self.active.load(Ordering::Acquire) {
                         return;
                     } else if self.singleton_mode.load(Ordering::Acquire) {
                         self.active.store(false, Ordering::Relaxed);
