@@ -419,10 +419,12 @@ pub fn start_http_thread(
         .spawn(move || {
             // Must start the server successfully or just die by panic
             server.start_server().unwrap();
+            let mut events = Events::with_capacity(100);
+            let mut do_exit = false;
+
             info!("http server started");
 
-            let mut events = Events::with_capacity(100);
-            'wait: loop {
+            loop {
                 match pool.poll(&mut events, None) {
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => {
@@ -434,10 +436,7 @@ pub fn start_http_thread(
 
                 for event in &events {
                     match event.token() {
-                        EXIT_TOKEN => {
-                            exit_api_server(api_notifier.clone(), &to_api);
-                            break 'wait;
-                        }
+                        EXIT_TOKEN => do_exit = true,
                         REQUEST_TOKEN => match server.requests() {
                             Ok(request_vec) => {
                                 for server_request in request_vec {
@@ -461,6 +460,11 @@ pub fn start_http_thread(
                         },
                         _ => unreachable!("unknown poll token."),
                     }
+                }
+
+                if do_exit {
+                    exit_api_server(api_notifier, &to_api);
+                    break;
                 }
             }
             info!("http-server thread exits");
