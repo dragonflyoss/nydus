@@ -439,8 +439,8 @@ impl FsCacheHandler {
             };
             format!("copen {},{}", hdr.id, -libc::EALREADY)
         } else {
-            match self.create_data_blob_object(&config, hdr.id, msg.fd) {
-                Err(s) => s,
+            match self.create_data_blob_object(&config, msg.fd) {
+                Err(s) => format!("copen {},{}", hdr.id, s),
                 Ok((blob, blob_size)) => {
                     state
                         .fd_to_object_map
@@ -459,9 +459,8 @@ impl FsCacheHandler {
     fn create_data_blob_object(
         &self,
         config: &BlobCacheConfigDataBlob,
-        id: u32,
         fd: u32,
-    ) -> std::result::Result<(Arc<dyn BlobCache>, u64), String> {
+    ) -> std::result::Result<(Arc<dyn BlobCache>, u64), i32> {
         let mut blob_info = config.blob_info().deref().clone();
         // `BlobInfo` from the configuration cache should not have fscache file associated with it.
         assert!(blob_info.get_fscache_file().is_none());
@@ -472,10 +471,10 @@ impl FsCacheHandler {
         let blob_ref = Arc::new(blob_info);
 
         match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
-            Err(_e) => Err(format!("copen {},{}", id, -libc::ENOENT)),
+            Err(_e) => Err(-libc::ENOENT),
             Ok(blob) => {
                 let blob_size = match blob.blob_size() {
-                    Err(_e) => return Err(format!("copen {},{}", id, -libc::EIO)),
+                    Err(_e) => return Err(-libc::EIO),
                     Ok(v) => v,
                 };
                 Ok((blob, blob_size))
