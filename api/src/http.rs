@@ -399,8 +399,8 @@ pub fn start_http_thread(
     let socket_path = PathBuf::from(path);
 
     let mut pool = Poll::new()?;
-    let waker = Waker::new(pool.registry(), EXIT_TOKEN)?;
-    let waker = Arc::new(waker);
+    let waker = Arc::new(Waker::new(pool.registry(), EXIT_TOKEN)?);
+    let waker2 = waker.clone();
     let mut server = HttpServer::new(socket_path).map_err(|e| {
         if let ServerError::IOError(e) = e {
             e
@@ -463,8 +463,9 @@ pub fn start_http_thread(
                     }
                 }
             }
-
             info!("http-server thread exits");
+            // Keep the Waker alive to match the lifetime of the poll loop above
+            drop(waker2);
             Ok(())
         })?;
 
