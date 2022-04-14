@@ -28,10 +28,9 @@ ioctl_write_int!(fscache_cread, 0x98, 1);
 
 /// Maximum size of fscache request message from kernel.
 const MIN_DATA_BUF_SIZE: usize = 1024;
-const MSG_HEADER_SIZE: usize = 12;
+const MSG_HEADER_SIZE: usize = 16;
 const MSG_OPEN_SIZE: usize = 16;
-const MSG_CLOSE_SIZE: usize = 4;
-const MSG_READ_SIZE: usize = 20;
+const MSG_READ_SIZE: usize = 16;
 
 const TOKEN_EVENT_WAKER: usize = 1;
 const TOKEN_EVENT_FSCACHE: usize = 2;
@@ -63,11 +62,13 @@ impl TryFrom<u32> for FsCacheOpCode {
 #[derive(Debug, Eq, PartialEq)]
 struct FsCacheMsgHeader {
     /// Message identifier to associate reply with request by the fscache driver.
-    id: u32,
+    msg_id: u32,
     /// Message operation code.
     opcode: FsCacheOpCode,
     /// Message length, including message header and message body.
     len: u32,
+    /// A unique ID identifying the cache file operated on.
+    object_id: u32,
 }
 
 impl TryFrom<&[u8]> for FsCacheMsgHeader {
@@ -82,10 +83,11 @@ impl TryFrom<&[u8]> for FsCacheMsgHeader {
         }
 
         // Safe because we have verified buffer size.
-        let id = unsafe { read_unaligned(value[0..4].as_ptr() as *const u32) };
+        let msg_id = unsafe { read_unaligned(value[0..4].as_ptr() as *const u32) };
         let opcode = unsafe { read_unaligned(value[4..8].as_ptr() as *const u32) };
         let len = unsafe { read_unaligned(value[8..12].as_ptr() as *const u32) };
         let opcode = FsCacheOpCode::try_from(opcode)?;
+        let object_id = unsafe { read_unaligned(value[12..16].as_ptr() as *const u32) };
         if len as usize != value.len() {
             return Err(einval!(format!(
                 "message length {} does not match length from message header {}",
@@ -94,7 +96,12 @@ impl TryFrom<&[u8]> for FsCacheMsgHeader {
             )));
         }
 
-        Ok(FsCacheMsgHeader { id, opcode, len })
+        Ok(FsCacheMsgHeader {
+            msg_id,
+            opcode,
+            len,
+            object_id,
+        })
     }
 }
 
@@ -104,10 +111,10 @@ impl TryFrom<&[u8]> for FsCacheMsgHeader {
 /// from the fscache driver.
 #[derive(Default, Debug, Eq, PartialEq)]
 struct FsCacheMsgOpen {
-    fd: u32,
-    flags: u32,
     volume_key: String,
     cookie_key: String,
+    fd: u32,
+    flags: u32,
 }
 
 impl TryFrom<&[u8]> for FsCacheMsgOpen {
@@ -148,41 +155,11 @@ impl TryFrom<&[u8]> for FsCacheMsgOpen {
             .map_err(|_e| einval!("invalid cookie key in fscache OPEN request"))?;
 
         Ok(FsCacheMsgOpen {
-            fd,
-            flags,
             volume_key,
             cookie_key,
+            fd,
+            flags,
         })
-    }
-}
-
-/// Request message to close a file.
-///
-/// Once replied a `CLOSE` message, a following `READ` requests against the same file should be
-/// rejected. The corresponding file descriptor may be actually closed after sending the reply
-/// message. But it should be close in limited delay to avoid conflicting when re-opening the
-/// same file again.
-#[repr(C)]
-#[derive(Default, Debug, Eq, PartialEq)]
-struct FsCacheMsgClose {
-    fd: u32,
-}
-
-impl TryFrom<&[u8]> for FsCacheMsgClose {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-        if value.len() < MSG_CLOSE_SIZE {
-            return Err(einval!(format!(
-                "fscache request message size is too small, {}",
-                value.len()
-            )));
-        }
-
-        // Safe because we have verified buffer size.
-        let fd = unsafe { read_unaligned(value[0..4].as_ptr() as *const u32) };
-
-        Ok(FsCacheMsgClose { fd })
     }
 }
 
@@ -192,7 +169,6 @@ impl TryFrom<&[u8]> for FsCacheMsgClose {
 struct FsCacheMsgRead {
     off: u64,
     len: u64,
-    fd: u32,
 }
 
 impl TryFrom<&[u8]> for FsCacheMsgRead {
@@ -209,9 +185,8 @@ impl TryFrom<&[u8]> for FsCacheMsgRead {
         // Safe because we have verified buffer size.
         let off = unsafe { read_unaligned(value[0..8].as_ptr() as *const u64) };
         let len = unsafe { read_unaligned(value[8..16].as_ptr() as *const u64) };
-        let fd = unsafe { read_unaligned(value[16..20].as_ptr() as *const u32) };
 
-        Ok(FsCacheMsgRead { off, len, fd })
+        Ok(FsCacheMsgRead { off, len })
     }
 }
 
@@ -229,8 +204,8 @@ enum FsCacheObject {
 /// Struct to maintain cached file objects.
 #[derive(Default)]
 struct FsCacheState {
-    fd_to_object_map: HashMap<u32, FsCacheObject>,
-    fd_to_config_map: HashMap<u32, Arc<BlobCacheConfigDataBlob>>,
+    id_to_object_map: HashMap<u32, (FsCacheObject, u32)>,
+    id_to_config_map: HashMap<u32, Arc<BlobCacheConfigDataBlob>>,
     blob_cache_mgr: Arc<BlobCacheMgr>,
 }
 
@@ -290,8 +265,8 @@ impl FsCacheHandler {
         file.flush()?;
 
         let state = FsCacheState {
-            fd_to_object_map: Default::default(),
-            fd_to_config_map: Default::default(),
+            id_to_object_map: Default::default(),
+            id_to_config_map: Default::default(),
             blob_cache_mgr,
         };
 
@@ -387,8 +362,7 @@ impl FsCacheHandler {
                 self.handle_open_request(&hdr, &msg);
             }
             FsCacheOpCode::Close => {
-                let msg = FsCacheMsgClose::try_from(buf)?;
-                self.handle_close_request(&hdr, &msg);
+                self.handle_close_request(&hdr);
             }
             FsCacheOpCode::Read => {
                 let msg = FsCacheMsgRead::try_from(buf)?;
@@ -411,7 +385,7 @@ impl FsCacheHandler {
                 unsafe {
                     libc::close(msg.fd as i32);
                 }
-                format!("copen {},{}", hdr.id, -libc::ENOENT)
+                format!("copen {},{}", hdr.msg_id, -libc::ENOENT)
             }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
@@ -433,20 +407,20 @@ impl FsCacheHandler {
     ) -> String {
         let mut state = self.state.lock().unwrap();
 
-        if state.fd_to_object_map.contains_key(&msg.fd) {
+        if state.id_to_object_map.contains_key(&hdr.object_id) {
             unsafe {
                 libc::close(msg.fd as i32);
             };
-            format!("copen {},{}", hdr.id, -libc::EALREADY)
+            format!("copen {},{}", hdr.msg_id, -libc::EALREADY)
         } else {
             match self.create_data_blob_object(&config, msg.fd) {
-                Err(s) => format!("copen {},{}", hdr.id, s),
+                Err(s) => format!("copen {},{}", hdr.msg_id, s),
                 Ok((blob, blob_size)) => {
                     state
-                        .fd_to_object_map
-                        .insert(msg.fd, FsCacheObject::DataBlob(blob));
-                    state.fd_to_config_map.insert(msg.fd, config.clone());
-                    format!("copen {},{}", hdr.id, blob_size)
+                        .id_to_object_map
+                        .insert(hdr.object_id, (FsCacheObject::DataBlob(blob), msg.fd));
+                    state.id_to_config_map.insert(hdr.object_id, config.clone());
+                    format!("copen {},{}", hdr.msg_id, blob_size)
                 }
             }
         }
@@ -490,7 +464,7 @@ impl FsCacheHandler {
     ) -> String {
         let mut state = self.get_state();
         use std::collections::hash_map::Entry::Vacant;
-        let ret: i64 = if let Vacant(e) = state.fd_to_object_map.entry(msg.fd) {
+        let ret: i64 = if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
             match OpenOptions::new().read(true).open(config.path()) {
                 Err(e) => {
                     warn!(
@@ -515,7 +489,7 @@ impl FsCacheHandler {
                             bootstrap_file: f,
                             cache_file,
                         }));
-                        e.insert(object);
+                        e.insert((object, msg.fd));
                         md.len() as i64
                     }
                 },
@@ -529,32 +503,44 @@ impl FsCacheHandler {
                 libc::close(msg.fd as i32);
             }
         }
-        format!("copen {},{}", hdr.id, ret)
+        format!("copen {},{}", hdr.msg_id, ret)
     }
 
-    fn handle_close_request(&self, _hdr: &FsCacheMsgHeader, msg: &FsCacheMsgClose) {
+    fn handle_close_request(&self, hdr: &FsCacheMsgHeader) {
         let mut state = self.get_state();
 
-        if let Some(FsCacheObject::DataBlob(blob)) = state.fd_to_object_map.remove(&msg.fd) {
-            let config = state.fd_to_config_map.remove(&msg.fd).unwrap();
+        if let Some((FsCacheObject::DataBlob(blob), _)) =
+            state.id_to_object_map.remove(&hdr.object_id)
+        {
+            let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
             BLOB_FACTORY.gc(Some((config.factory_config(), blob.blob_id())));
         }
     }
 
     fn handle_read_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgRead) {
-        match self.get_object(msg.fd) {
-            None => warn!("No cached file object found for fd {}", msg.fd),
-            Some(FsCacheObject::DataBlob(blob)) => match blob.get_blob_object() {
-                None => {
-                    warn!("Internal error: blob object used by fscache is not BlobCache objects")
+        let fd: u32;
+        match self.get_object(hdr.object_id) {
+            None => {
+                warn!("No cached file object found for obj_id {}", hdr.object_id);
+                return;
+            }
+            Some((FsCacheObject::DataBlob(blob), u)) => {
+                fd = u;
+                match blob.get_blob_object() {
+                    None => {
+                        warn!(
+                            "Internal error: blob object used by fscache is not BlobCache objects"
+                        )
+                    }
+                    Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
+                        Ok(v) if v == msg.len as usize => {}
+                        _ => debug!("Failed to read data from blob object"),
+                    },
                 }
-                Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
-                    Ok(v) if v == msg.len as usize => {}
-                    _ => debug!("Failed to read data from blob object"),
-                },
-            },
-            Some(FsCacheObject::Bootstrap(bs)) => {
+            }
+            Some((FsCacheObject::Bootstrap(bs), u)) => {
                 // TODO: should we feed the bootstrap at together to improve performance?
+                fd = u;
                 let base = unsafe {
                     libc::mmap(
                         std::ptr::null_mut(),
@@ -589,8 +575,7 @@ impl FsCacheHandler {
                 }
             }
         }
-
-        unsafe { fscache_cread(msg.fd as i32, hdr.id as u64).unwrap() };
+        unsafe { fscache_cread(fd as i32, hdr.msg_id as u64).unwrap() };
     }
 
     #[inline]
@@ -619,8 +604,8 @@ impl FsCacheHandler {
     }
 
     #[inline]
-    fn get_object(&self, fd: u32) -> Option<FsCacheObject> {
-        self.get_state().fd_to_object_map.get(&fd).cloned()
+    fn get_object(&self, object_id: u32) -> Option<(FsCacheObject, u32)> {
+        self.get_state().id_to_object_map.get(&object_id).cloned()
     }
 
     #[inline]
@@ -649,12 +634,14 @@ mod tests {
 
     #[test]
     fn test_msg_header() {
-        let hdr =
-            FsCacheMsgHeader::try_from(vec![1u8, 0, 0, 0, 2, 0, 0, 0, 13, 0, 0, 0, 0].as_slice())
-                .unwrap();
-        assert_eq!(hdr.id, 0x1);
+        let hdr = FsCacheMsgHeader::try_from(
+            vec![1u8, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 2u8, 0, 0, 0, 0].as_slice(),
+        )
+        .unwrap();
+        assert_eq!(hdr.msg_id, 0x1);
         assert_eq!(hdr.opcode, FsCacheOpCode::Read);
-        assert_eq!(hdr.len, 0xd);
+        assert_eq!(hdr.len, 17);
+        assert_eq!(hdr.object_id, 0x2);
 
         FsCacheMsgHeader::try_from(vec![0u8, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 13, 0].as_slice())
             .unwrap_err();
