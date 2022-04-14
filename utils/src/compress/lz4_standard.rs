@@ -15,7 +15,7 @@ pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
     }
 
     let mut dst_buf = Vec::with_capacity(compress_bound as usize);
-    let dec_size = unsafe {
+    let cmp_size = unsafe {
         LZ4_compress_default(
             src.as_ptr() as *const c_char,
             dst_buf.as_mut_ptr() as *mut c_char,
@@ -23,12 +23,12 @@ pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
             compress_bound,
         )
     };
-    if dec_size <= 0 {
-        return Err(eio!("decompression failed"));
+    if cmp_size <= 0 {
+        return Err(eio!("compression failed"));
     }
 
-    assert!(dec_size as usize <= dst_buf.capacity());
-    unsafe { dst_buf.set_len(dec_size as usize) };
+    assert!(cmp_size as usize <= dst_buf.capacity());
+    unsafe { dst_buf.set_len(cmp_size as usize) };
 
     Ok(dst_buf)
 }

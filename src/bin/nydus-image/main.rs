@@ -231,7 +231,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                         .required(false)
                         .default_value("lz4_block")
-                        .possible_values(&["none", "lz4_block", "gzip"]),
+                        .possible_values(&["none", "lz4_block", "gzip", "zstd"]),
                 )
                 .arg(
                     Arg::with_name("digester")

@@ -334,7 +334,8 @@ impl RafsV6SuperBlockExt {
         let mut flags = self.flags();
         flags &= RafsSuperFlags::COMPRESS_NONE.bits()
             | RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits()
-            | RafsSuperFlags::COMPRESS_GZIP.bits();
+            | RafsSuperFlags::COMPRESS_GZIP.bits()
+            | RafsSuperFlags::COMPRESS_ZSTD.bits();
         if flags.count_ones() != 1 {
             return Err(einval!(format!(
                 "invalid flags {:#x} related to compression algorithm in Rafs v6 extended superblock",
@@ -375,6 +376,7 @@ impl RafsV6SuperBlockExt {
         self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
         self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
         self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESS_ZSTD.bits();
         self.s_flags |= c.bits();
     }
 
