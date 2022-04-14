@@ -429,6 +429,7 @@ pub fn start_http_thread(
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => {
                         error!("http server poll events failed, {}", e);
+                        exit_api_server(api_notifier, &to_api);
                         return Err(e);
                     }
                     Ok(_) => {}
