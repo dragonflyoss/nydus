@@ -456,13 +456,13 @@ pub(crate) mod tests {
         let skip_index = 77;
 
         let indexed_chunk_map1 = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(&blob_path, chunk_count).unwrap(),
+            IndexedChunkMap::new(&blob_path, chunk_count, true).unwrap(),
         ));
         let indexed_chunk_map2 = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(&blob_path, chunk_count).unwrap(),
+            IndexedChunkMap::new(&blob_path, chunk_count, true).unwrap(),
         ));
         let indexed_chunk_map3 = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(&blob_path, chunk_count).unwrap(),
+            IndexedChunkMap::new(&blob_path, chunk_count, true).unwrap(),
         ));
 
         let now = Instant::now();
@@ -552,7 +552,7 @@ pub(crate) mod tests {
         }
 
         let indexed_chunk_map =
-            BlobStateMap::from(IndexedChunkMap::new(&blob_path, chunk_count).unwrap());
+            BlobStateMap::from(IndexedChunkMap::new(&blob_path, chunk_count, true).unwrap());
         let now = Instant::now();
         iterate(&chunks, &indexed_chunk_map as &dyn ChunkMap, chunk_count);
         let elapsed1 = now.elapsed().as_millis();
@@ -585,7 +585,7 @@ pub(crate) mod tests {
         // indexed ChunkMap
         let tmp_file = TempFile::new().unwrap();
         let index_map = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10, true).unwrap(),
         ));
         index_map
             .check_ready_and_mark_pending(chunk_1.as_ref())
@@ -676,7 +676,7 @@ pub(crate) mod tests {
     fn test_inflight_tracer_race() {
         let tmp_file = TempFile::new().unwrap();
         let map = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10, true).unwrap(),
         ));
 
         let chunk_4: Arc<dyn BlobChunkInfo> = Arc::new({
@@ -744,7 +744,7 @@ pub(crate) mod tests {
     fn test_inflight_tracer_timeout() {
         let tmp_file = TempFile::new().unwrap();
         let map = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10, true).unwrap(),
         ));
 
         let chunk_4: Arc<dyn BlobChunkInfo> = Arc::new({
@@ -788,7 +788,7 @@ pub(crate) mod tests {
     fn test_inflight_tracer_race_range() {
         let tmp_file = TempFile::new().unwrap();
         let map = Arc::new(BlobStateMap::from(
-            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10).unwrap(),
+            IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10, true).unwrap(),
         ));
 
         assert_eq!(map.is_range_all_ready(), false);

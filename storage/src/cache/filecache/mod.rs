@@ -286,6 +286,7 @@ impl FileCacheEntry {
             Arc::new(BlobStateMap::from(IndexedChunkMap::new(
                 blob_file,
                 blob_info.chunk_count(),
+                true,
             )?))
         };
 
