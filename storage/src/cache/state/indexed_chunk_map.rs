@@ -34,17 +34,17 @@ pub struct IndexedChunkMap {
 
 impl IndexedChunkMap {
     /// Create a new instance of `IndexedChunkMap`.
-    pub fn new(blob_path: &str, chunk_count: u32) -> Result<Self> {
+    pub fn new(blob_path: &str, chunk_count: u32, persist: bool) -> Result<Self> {
         let filename = format!("{}.{}", blob_path, FILE_SUFFIX);
 
-        PersistMap::open(&filename, chunk_count, true).map(|map| IndexedChunkMap { map })
+        PersistMap::open(&filename, chunk_count, true, persist).map(|map| IndexedChunkMap { map })
     }
 
     /// Create a new instance of `IndexedChunkMap` from an existing chunk map file.
     pub fn open(blob_info: &BlobInfo, workdir: &str) -> Result<Self> {
         let filename = format!("{}/{}.{}", workdir, blob_info.blob_id(), FILE_SUFFIX);
 
-        PersistMap::open(&filename, blob_info.chunk_count(), false)
+        PersistMap::open(&filename, blob_info.chunk_count(), false, true)
             .map(|map| IndexedChunkMap { map })
     }
 }
@@ -159,7 +159,7 @@ mod tests {
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
 
-        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+        assert!(IndexedChunkMap::new(&blob_path, 0, false).is_err());
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         let mut file = OpenOptions::new()
@@ -179,7 +179,7 @@ mod tests {
         let chunk = MockChunkInfo::new();
         assert_eq!(chunk.id(), 0);
 
-        assert!(IndexedChunkMap::new(&blob_path, 1).is_err());
+        assert!(IndexedChunkMap::new(&blob_path, 1, true).is_err());
     }
 
     #[test]
@@ -188,7 +188,7 @@ mod tests {
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
 
-        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+        assert!(IndexedChunkMap::new(&blob_path, 0, true).is_err());
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         let _file = OpenOptions::new()
@@ -207,7 +207,7 @@ mod tests {
         let chunk = MockChunkInfo::new();
         assert_eq!(chunk.id(), 0);
 
-        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.map.count, 1);
         assert_eq!(map.map.size, 0x1001);
@@ -223,7 +223,7 @@ mod tests {
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
 
-        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+        assert!(IndexedChunkMap::new(&blob_path, 0, true).is_err());
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         let file = OpenOptions::new()
@@ -243,7 +243,7 @@ mod tests {
         let chunk = MockChunkInfo::new();
         assert_eq!(chunk.id(), 0);
 
-        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.map.count, 1);
         assert_eq!(map.map.size, 0x1001);
@@ -259,7 +259,7 @@ mod tests {
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
 
-        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+        assert!(IndexedChunkMap::new(&blob_path, 0, true).is_err());
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         let mut file = OpenOptions::new()
@@ -289,7 +289,7 @@ mod tests {
         let chunk = MockChunkInfo::new();
         assert_eq!(chunk.id(), 0);
 
-        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.is_range_all_ready(), true);
         assert_eq!(map.map.count, 1);
         assert_eq!(map.map.size, 0x1001);
@@ -304,7 +304,7 @@ mod tests {
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
 
-        assert!(IndexedChunkMap::new(&blob_path, 0).is_err());
+        assert!(IndexedChunkMap::new(&blob_path, 0, true).is_err());
 
         let cache_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         let mut file = OpenOptions::new()
@@ -334,7 +334,7 @@ mod tests {
         let chunk = MockChunkInfo::new();
         assert_eq!(chunk.id(), 0);
 
-        let map = IndexedChunkMap::new(&blob_path, 1).unwrap();
+        let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.map.count, 1);
         assert_eq!(map.map.size, 0x1001);

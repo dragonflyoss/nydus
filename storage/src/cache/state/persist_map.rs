@@ -49,7 +49,7 @@ pub(crate) struct PersistMap {
 }
 
 impl PersistMap {
-    pub fn open(filename: &str, chunk_count: u32, create: bool) -> Result<Self> {
+    pub fn open(filename: &str, chunk_count: u32, create: bool, persist: bool) -> Result<Self> {
         if chunk_count == 0 {
             return Err(einval!("chunk count should be greater than 0"));
         }
@@ -58,6 +58,7 @@ impl PersistMap {
             .read(true)
             .write(create)
             .create(create)
+            .truncate(!persist)
             .open(filename)
             .map_err(|err| {
                 einval!(format!(
@@ -157,6 +158,9 @@ impl PersistMap {
         }
 
         readahead(fd, 0, expected_size);
+        if !persist {
+            let _ = std::fs::remove_file(filename);
+        }
 
         Ok(Self {
             count: chunk_count,
