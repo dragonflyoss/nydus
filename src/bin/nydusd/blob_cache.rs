@@ -8,7 +8,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nydus_api::http::{BlobCacheEntry, BlobCacheList, BLOB_CACHE_TYPE_BOOTSTRAP};
+use nydus_api::http::{BlobCacheEntry, BlobCacheList, BlobObjectParam, BLOB_CACHE_TYPE_BOOTSTRAP};
 use rafs::metadata::{RafsMode, RafsSuper};
 use storage::cache::FsCacheConfig;
 use storage::device::BlobInfo;
@@ -99,6 +99,20 @@ impl BlobCacheObjectConfig {
 #[derive(Default)]
 struct BlobCacheState {
     id_to_config_map: HashMap<String, BlobCacheObjectConfig>,
+}
+
+impl BlobCacheState {
+    fn remove(&mut self, domain_id: &str) {
+        let scoped_blob_prefix = format!("{}-", domain_id);
+        self.id_to_config_map.retain(|_k, v| match v {
+            BlobCacheObjectConfig::Bootstrap(o) => {
+                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
+            }
+            BlobCacheObjectConfig::DataBlob(o) => {
+                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
+            }
+        })
+    }
 }
 
 /// Struct to maintain cached file objects.
@@ -210,6 +224,12 @@ impl BlobCacheMgr {
             return Err(einval!("Invalid blob cache entry"));
         }
 
+        Ok(())
+    }
+
+    pub fn remove_blob_entry(&self, param: &BlobObjectParam) -> Result<()> {
+        let mut state = self.get_state();
+        state.remove(&param.domain_id);
         Ok(())
     }
 
