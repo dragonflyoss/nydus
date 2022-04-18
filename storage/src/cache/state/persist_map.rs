@@ -49,11 +49,7 @@ pub(crate) struct PersistMap {
 }
 
 impl PersistMap {
-    pub fn open(filename: &str, chunk_count: u32, create: bool) -> Result<Self> {
-        if chunk_count == 0 {
-            return Err(einval!("chunk count should be greater than 0"));
-        }
-
+    pub fn open_file(filename: &str, chunk_count: u32, create: bool) -> Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(create)
@@ -164,6 +160,42 @@ impl PersistMap {
             base: base as *const u8,
             not_ready_count: AtomicU32::new(not_ready_count),
         })
+    }
+
+    pub fn open(filename: &str, chunk_count: u32, create: bool) -> Result<Self> {
+        if chunk_count == 0 {
+            return Err(einval!("chunk count should be greater than 0"));
+        }
+
+        if !filename.is_empty() {
+            Self::open_file(filename, chunk_count, create)
+        } else {
+            let bitmap_size = div_round_up(chunk_count as u64, 8u64);
+            let expected_size = HEADER_SIZE as u64 + bitmap_size;
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    expected_size as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                    -1,
+                    0,
+                )
+            };
+
+            if base == libc::MAP_FAILED {
+                return Err(last_error!("failed to mmap blob chunk_map"));
+            } else if base.is_null() {
+                return Err(ebadf!("failed to mmap blob chunk_map"));
+            }
+
+            Ok(Self {
+                count: chunk_count,
+                size: expected_size as usize,
+                base: base as *const u8,
+                not_ready_count: AtomicU32::new(chunk_count),
+            })
+        }
     }
 
     fn write_header(file: &mut File, size: u64) -> Result<()> {

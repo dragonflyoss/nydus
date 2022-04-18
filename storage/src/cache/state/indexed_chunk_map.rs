@@ -35,7 +35,11 @@ pub struct IndexedChunkMap {
 impl IndexedChunkMap {
     /// Create a new instance of `IndexedChunkMap`.
     pub fn new(blob_path: &str, chunk_count: u32) -> Result<Self> {
-        let filename = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let filename = if !blob_path.is_empty() {
+            format!("{}.{}", blob_path, FILE_SUFFIX)
+        } else {
+            "".to_string()
+        };
 
         PersistMap::open(&filename, chunk_count, true).map(|map| IndexedChunkMap { map })
     }

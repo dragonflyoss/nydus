@@ -201,7 +201,7 @@ impl FileCacheEntry {
 
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
         let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
-            &blob_file_path,
+            "",
             blob_info.chunk_count(),
         )?));
         let reader = mgr
