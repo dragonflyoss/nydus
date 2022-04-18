@@ -28,7 +28,7 @@ impl BlobRangeMap {
         let filename = format!("{}.{}", blob_path, FILE_SUFFIX);
         debug_assert!(shift < 64);
 
-        PersistMap::open(&filename, count, true).map(|map| BlobRangeMap { shift, map })
+        PersistMap::open(&filename, count, true, true).map(|map| BlobRangeMap { shift, map })
     }
 
     /// Create a new instance of `BlobRangeMap` from an existing chunk map file.
@@ -36,7 +36,7 @@ impl BlobRangeMap {
         let filename = format!("{}/{}.{}", workdir, blob_id, FILE_SUFFIX);
         debug_assert!(shift < 64);
 
-        PersistMap::open(&filename, count, false).map(|map| BlobRangeMap { shift, map })
+        PersistMap::open(&filename, count, false, true).map(|map| BlobRangeMap { shift, map })
     }
 
     pub(crate) fn get_range(&self, start: u64, count: u64) -> Result<(u32, u32)> {
