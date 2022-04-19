@@ -4,7 +4,7 @@ This guide shows you how to use fscache-based EROFS nydus image service to launc
 
 **Please be careful**, currently, the user-space daemon only implements _the basic functionality_ and it's aimed to test the fscache on-demand kernel code as a real end-to-end workload for container use cases, so it may take more extra steps compared with existing well-done solutions. This guide can be _frequently updated_ due to the overall implementation changes, so please make sure that you're now referring to the latest document version.
 
-Currently only docker graphdriver is supported since it's much easier to integrate than containerd nydus-snapshotter, we will complete nydus-snapshotter together with the fscache on-demand download upstream process. You could help us if you're also interested in it, so much appreciated!
+Currently docker runtime (with graphdriver plugin) and containerd runtime (with nydus-snapshotter) is supported.
 
 ## Prepare the kernel
 
@@ -44,17 +44,21 @@ CONFIG_EROFS_FS_ONDEMAND=y
 3. Build nydusd with \
 ``cargo build --target x86_64-unknown-linux-gnu --features=fusedev --release --target-dir target-fusedev --bin nydusd``
 
-4. Mkdir a cache directory for fscache with \
+## Run container with docker graph driver
+
+### Prepare fscache and work directory
+
+1. Mkdir a cache directory for fscache with \
 ``mkdir ~/fscachedir``
 
-5. (For now) Mkdir a nydus working directory with \
+2. (For now) Mkdir a nydus working directory with \
 ``mkdir [nydusdir]/workdir``
 
-6. Launch nydusd with \
+3. Launch nydusd with \
 ``target-fusedev/x86_64-unknown-linux-gnu/release/nydusd daemon --apisock /var/run/nydusd.sock --fscache ~/fscachedir``
    and you should keep it running while the entire testing.
 
-## Install the nydus graphdriver
+### Install the nydus graphdriver
 
 1. ``docker plugin install hsiangkao/nydus-erofs-graphdriver:0.3.0``
 
@@ -70,7 +74,7 @@ CONFIG_EROFS_FS_ONDEMAND=y
 
 4. ``systemctl restart docker.service`` or ``service docker restart``
 
-## Try with existing nydus container images
+### Try with existing nydus container images
 
 1. Get the nydus bootstrap files with \
    ``docker pull hsiangkao/wordpress:5.7-rafs-v6-docker`` or ``hsiangkao/ubuntu:20.04-rafs-v6-docker`` \
@@ -110,6 +114,60 @@ CONFIG_EROFS_FS_ONDEMAND=y
 
 5. ``docker run``, and you can see EROFS has already been mounted if ``mount | grep erofs`` is typed. Good luck!
 
-## Try to convert a new container image
+## Run container with nydus snapshotter
+
+For more information on how to configure containerd to use nydus snapshotter please refer to [here](./containerd-env-setup.md).
+
+1. Get nydus snapshotter with erofs supported.
+  ```shell
+  # clone code
+  git clone https://github.com/imeoer/nydus-snapshotter.git -b erofs-with-fscache-support
+  # compile binary to ./bin/containerd-nydus-grpc
+  make
+  ```
+
+2. Prepare a configuration json like below, named to `/path/nydus-erofs-config.json`.
+
+```json
+{
+  "type": "bootstrap",
+  "config": {
+    "backend_type": "registry",
+    "backend_config": {
+      "scheme": "https"
+    },
+    "cache_type": "fscache"
+  }
+}
+```
+
+3. Start nydus snapshotter with command below:
+
+```
+./bin/containerd-nydus-grpc \
+ --config-path /path/nydus-erofs-config.json \
+ --daemon-mode shared \
+ --daemon-backend erofs \
+ --log-level info \
+ --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
+ --cache-dir /var/lib/nydus/cache \
+ --address /run/containerd/containerd-nydus-grpc.sock \
+ --nydusd-path /path/to/nydusd \
+ --nydusimg-path /path/to/nydus-image \
+ --log-to-stdout
+```
+
+4. Run container with [ctr-remote](../contrib/ctr-remote)
+
+```shell
+# pull nydus image
+ctr-remote images rpull hsiangkao/ubuntu:20.04-rafs-v6-docker
+# run nydus image
+ctr-remote run --rm -t --snapshotter=nydus hsiangkao/ubuntu:20.04-rafs-v6-docker ubuntu /bin/bash
+# remove nydus image
+ctr-remote images rm hsiangkao/ubuntu:20.04-rafs-v6-docker
+```
+
+## Try to convert a new nydus image
 
 TBD
