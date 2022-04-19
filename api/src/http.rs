@@ -106,7 +106,7 @@ pub struct BlobCacheList {
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct BlobObjectParam {
-    pub blob_id: String,
+    pub domain_id: String,
 }
 
 #[derive(Debug)]
@@ -259,7 +259,7 @@ pub enum HttpError {
     // Blob cache management related errors (v2)
     /// Failed to create blob object
     CreateBlobObject(ApiError),
-    /// Failed to create blob object
+    /// Failed to delete blob object
     DeleteBlobObject(ApiError),
     /// Failed to list existing blob objects
     GetBlobObjects(ApiError),

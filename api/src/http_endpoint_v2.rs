@@ -56,24 +56,25 @@ impl EndpointHandler for BlobObjectListHandlerV2 {
     ) -> HttpResult {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
-                if let Some(blob_id) = extract_query_part(req, "blob_id") {
-                    let param = BlobObjectParam { blob_id };
+                if let Some(domain_id) = extract_query_part(req, "domain_id") {
+                    let param = BlobObjectParam { domain_id };
                     let r = kicker(ApiRequest::GetBlobObject(param));
-                    Ok(convert_to_response(r, HttpError::GetBlobObjects))
-                } else {
-                    let r = kicker(ApiRequest::ListBlobObject);
-                    Ok(convert_to_response(r, HttpError::GetBlobObjects))
+                    return Ok(convert_to_response(r, HttpError::GetBlobObjects));
                 }
+                Err(HttpError::BadRequest)
             }
             (Method::Put, Some(body)) => {
                 let conf = parse_body(body)?;
                 let r = kicker(ApiRequest::CreateBlobObject(conf));
                 Ok(convert_to_response(r, HttpError::CreateBlobObject))
             }
-            (Method::Delete, Some(body)) => {
-                let param = parse_body(body)?;
-                let r = kicker(ApiRequest::DeleteBlobObject(param));
-                Ok(convert_to_response(r, HttpError::DeleteBlobObject))
+            (Method::Delete, None) => {
+                if let Some(domain_id) = extract_query_part(req, "domain_id") {
+                    let param = BlobObjectParam { domain_id };
+                    let r = kicker(ApiRequest::DeleteBlobObject(param));
+                    return Ok(convert_to_response(r, HttpError::DeleteBlobObject));
+                }
+                Err(HttpError::BadRequest)
             }
             _ => Err(HttpError::BadRequest),
         }
