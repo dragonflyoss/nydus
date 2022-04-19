@@ -102,6 +102,12 @@ struct BlobCacheState {
 }
 
 impl BlobCacheState {
+    fn new() -> Self {
+        Self {
+            id_to_config_map: HashMap::new(),
+        }
+    }
+
     fn remove(&mut self, domain_id: &str) {
         let scoped_blob_prefix = format!("{}-", domain_id);
         self.id_to_config_map.retain(|_k, v| match v {
@@ -112,6 +118,22 @@ impl BlobCacheState {
                 !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
             }
         })
+    }
+
+    fn try_add(&mut self, config: BlobCacheObjectConfig) -> Result<()> {
+        let key = config.get_key();
+        if self.id_to_config_map.contains_key(key) {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                "blob configuration information already exists",
+            ));
+        }
+        self.id_to_config_map.insert(key.to_owned(), config);
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> Option<BlobCacheObjectConfig> {
+        self.id_to_config_map.get(key).cloned()
     }
 }
 
@@ -125,35 +147,7 @@ impl BlobCacheMgr {
     /// Create a new instance of `BlobCacheMgr`.
     pub fn new() -> Self {
         BlobCacheMgr {
-            state: Mutex::new(BlobCacheState {
-                id_to_config_map: HashMap::new(),
-            }),
-        }
-    }
-
-    /// Add a blob object to be managed by the `FsCacheHandler`.
-    ///
-    /// The `domain_id` and `blob_id` forms a unique identifier to identify cached objects.
-    /// That means `domain_id` is used to divide cached objects into groups and blobs with the same
-    /// `blob_id` may exist in different groups.
-    pub fn add_blob_object(
-        &self,
-        domain_id: String,
-        blob_info: Arc<BlobInfo>,
-        factory_config: Arc<FactoryConfig>,
-    ) -> Result<()> {
-        let config = BlobCacheObjectConfig::new_data_blob(domain_id, blob_info, factory_config);
-        let mut state = self.get_state();
-        if state.id_to_config_map.contains_key(config.get_key()) {
-            Err(Error::new(
-                ErrorKind::AlreadyExists,
-                "blob configuration information already exists",
-            ))
-        } else {
-            state
-                .id_to_config_map
-                .insert(config.get_key().to_string(), config);
-            Ok(())
+            state: Mutex::new(BlobCacheState::new()),
         }
     }
 
@@ -165,8 +159,7 @@ impl BlobCacheMgr {
     /// The `domain_id` and `id` forms a unique identifier to identify cached bootstrap objects.
     /// That means `domain_id` is used to divide cached objects into groups and blobs with the
     /// same `id` may exist in different groups.
-    #[allow(unused)]
-    pub fn add_bootstrap_object(
+    fn add_bootstrap_object(
         &self,
         domain_id: &str,
         id: &str,
@@ -174,39 +167,28 @@ impl BlobCacheMgr {
         factory_config: Arc<FactoryConfig>,
     ) -> Result<()> {
         let rs = RafsSuper::load_from_metadata(&path, RafsMode::Direct, true)?;
-        let config = BlobCacheObjectConfig::new_bootstrap_blob(
+        let meta_config = BlobCacheObjectConfig::new_bootstrap_blob(
             domain_id.to_string(),
             id.to_string(),
             path,
             factory_config.clone(),
         );
-        let mut state = self.get_state();
 
-        if state.id_to_config_map.contains_key(config.get_key()) {
-            Err(Error::new(
-                ErrorKind::AlreadyExists,
-                "blob configuration information already exists",
-            ))
-        } else {
-            state
-                .id_to_config_map
-                .insert(config.get_key().to_string(), config);
-            // Try to add the referenced data blob object if it doesn't exist yet.
-            for bi in rs.superblock.get_blob_infos() {
-                debug!("Found blob {} on domain {}", &bi.blob_id(), domain_id);
-                let data_blob = BlobCacheObjectConfig::new_data_blob(
-                    domain_id.to_string(),
-                    bi,
-                    factory_config.clone(),
-                );
-                if !state.id_to_config_map.contains_key(data_blob.get_key()) {
-                    state
-                        .id_to_config_map
-                        .insert(data_blob.get_key().to_string(), data_blob);
-                }
-            }
-            Ok(())
+        let mut state = self.get_state();
+        state.try_add(meta_config)?;
+
+        // Try to add the referenced data blob object if it doesn't exist yet.
+        for bi in rs.superblock.get_blob_infos() {
+            debug!("Found blob {} on domain {}", &bi.blob_id(), domain_id);
+            let blob_config = BlobCacheObjectConfig::new_data_blob(
+                domain_id.to_string(),
+                bi,
+                factory_config.clone(),
+            );
+            state.try_add(blob_config)?;
         }
+
+        Ok(())
     }
 
     /// Add an entry of bootstrap and/or data blobs.
@@ -244,7 +226,7 @@ impl BlobCacheMgr {
 
     /// Get blob configuration for blob with `key`.
     pub fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
-        self.get_state().id_to_config_map.get(key).cloned()
+        self.get_state().get(key)
     }
 
     #[inline]
