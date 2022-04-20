@@ -32,9 +32,9 @@ CONFIG_EROFS_FS_ONDEMAND=y
 
 9.  ``[ -c /dev/cachefiles ] && echo ok``
 
-## Get the fscache-supported nydusd
+## Get ctr-remote and the fscache-supported nydusd
 
-1. Make sure you have installed _rust 1.52.1_ version
+1. Make sure you have installed _rust 1.52.1_ version and golang.
 
 2. Check out the latest nydus source code with \
 ``git clone https://github.com/dragonflyoss/image-service.git -b fscache``
@@ -42,11 +42,18 @@ CONFIG_EROFS_FS_ONDEMAND=y
 3. Build nydusd with \
 ``cargo build --target x86_64-unknown-linux-gnu --features=fusedev --release --target-dir target-fusedev --bin nydusd``
 
+4. Build ctr-remote with
+
+``` bash
+cd contrib/ctr-remote
+make
+```
+
 ## Run container with nydus snapshotter
 
-For more information on how to configure containerd to use nydus snapshotter please refer to [here](./containerd-env-setup.md).
+1. Make sure your containerd version is 1.4 or above.
 
-1. Get nydus snapshotter with erofs supported.
+2. Get nydus snapshotter with erofs supported:
   ```shell
   # clone code
   git clone https://github.com/imeoer/nydus-snapshotter.git -b erofs-with-fscache-support
@@ -55,7 +62,7 @@ For more information on how to configure containerd to use nydus snapshotter ple
   make
   ```
 
-2. Prepare a configuration json like below, named to `/path/nydus-erofs-config.json`.
+3. Prepare a configuration json like below, named as `/path/nydus-erofs-config.json`:
 
 ```json
 {
@@ -70,7 +77,7 @@ For more information on how to configure containerd to use nydus snapshotter ple
 }
 ```
 
-3. Start nydus snapshotter with command below:
+4. Start nydus snapshotter with the command below:
 
 ```
 ./bin/containerd-nydus-grpc \
@@ -85,20 +92,49 @@ For more information on how to configure containerd to use nydus snapshotter ple
  --log-to-stdout
 ```
 
-4. Run container with [ctr-remote](../contrib/ctr-remote)
+5. Configure containerd to use `nydus-snapshotter` by editing
+   `/etc/containerd/config.toml` like below:
 
-```shell
-# pull nydus image
-ctr-remote images rpull hsiangkao/ubuntu:20.04-rafs-v6-docker
+``` toml
+version = 2
 
-# run nydus image
-ctr-remote run --rm -t --snapshotter=nydus hsiangkao/ubuntu:20.04-rafs-v6-docker ubuntu /bin/bash
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    [plugins."io.containerd.grpc.v1.cri".cni]
+      bin_dir = "/usr/lib/cni"
+      conf_dir = "/etc/cni/net.d"
+  [plugins."io.containerd.internal.v1.opt"]
+    path = "/var/lib/containerd/opt"
 
-# remove nydus image
-ctr-remote images rm hsiangkao/ubuntu:20.04-rafs-v6-docker
+[proxy_plugins]
+  [proxy_plugins.nydus]
+    type = "snapshot"
+    address = "/run/containerd/containerd-nydus-grpc.sock"
+
+[plugins."io.containerd.grpc.v1.cri".containerd]
+   snapshotter = "nydus"
+   disable_snapshot_annotations = false
 ```
 
-## Try to convert a new nydus image
+For more information on how to configure containerd to use nydus snapshotter please refer to [here](./containerd-env-setup.md).
+
+6. Restart containerd with
+   `service containerd restart`
+
+7. Run container with [ctr-remote](../contrib/ctr-remote)
+
+``` shell
+# pull nydus image
+contrib/ctr-remote/bin/ctr-remote images rpull docker.io/hsiangkao/ubuntu:20.04-rafs-v6-docker
+
+# run nydus image
+ctr run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6-docker ubuntu /bin/bash
+
+# remove nydus image
+ctr images rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6-docker
+```
+
+## Try to convert a new image to RAFS v6
 
 1. Get nydus image conversion tool `accelctl`
 
@@ -111,11 +147,11 @@ cd acceleration-service
 make
 ```
 
-2. Convert OCIv1 image to nydus image
+2. Convert to nydus image
 
-Edit `./misc/config/config.yaml.nydus.tmpl` configuration file, make sure that the `rafs_version` option in `converter.driver.config` is changed to `6` and the registry auth have been configured in `provider.source`.
+Duplicate `./misc/config/config.yaml.nydus.tmpl` configuration file as `path/to/config.yaml`, make sure that the `rafs_version` option in `converter.driver.config` is changed to `6` and the registry auth have been configured in `provider.source`.
 
 ``` shell
 # convert to nydus image
-./accelctl convert --config ./misc/config/config.yaml.nydus.tmpl <your-registry-address>/ubuntu:latest
+./accelctl convert --config path/to/config.yaml <your-registry-address>/ubuntu:latest
 ```
