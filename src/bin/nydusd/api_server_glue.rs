@@ -10,9 +10,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use nix::sys::signal::{kill, SIGTERM};
-use nix::unistd::Pid;
-
 use nydus::{FsBackendType, NydusError};
 use nydus_api::http::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
@@ -232,9 +229,6 @@ impl ApiServer {
                 error!("wait for fuse service failed {:}", e);
                 ApiError::DaemonAbnormal(e.into())
             })?;
-
-        // Should be reliable since this Api server works under event manager.
-        kill(Pid::this(), SIGTERM).unwrap_or_else(|e| error!("Send signal error. {}", e));
 
         Ok(ApiResponsePayload::Empty)
     }
