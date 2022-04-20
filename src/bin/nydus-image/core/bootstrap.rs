@@ -5,7 +5,8 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Seek;
+use std::io::{SeekFrom, Write};
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
@@ -18,7 +19,6 @@ use rafs::metadata::layout::v6::{
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
 use rafs::metadata::layout::RafsBlobTable;
-use rafs::RafsIoWrite;
 
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
@@ -458,36 +458,36 @@ impl Bootstrap {
 
         // Dump super block
         super_block
-            .store(&mut bootstrap_writer)
+            .store(bootstrap_writer.as_mut())
             .context("failed to store superblock")?;
 
         // Dump inode table
         inode_table
-            .store(&mut bootstrap_writer)
+            .store(bootstrap_writer.as_mut())
             .context("failed to store inode table")?;
 
         // Dump prefetch table
         if let Some(mut prefetch_table) = ctx.prefetch.get_rafsv5_prefetch_table() {
             prefetch_table
-                .store(&mut bootstrap_writer)
+                .store(bootstrap_writer.as_mut())
                 .context("failed to store prefetch table")?;
         }
 
         // Dump blob table
         blob_table
-            .store(&mut bootstrap_writer)
+            .store(bootstrap_writer.as_mut())
             .context("failed to store blob table")?;
 
         // Dump extended blob table
         blob_table
-            .store_extended(&mut bootstrap_writer)
+            .store_extended(bootstrap_writer.as_mut())
             .context("failed to store extended blob table")?;
 
         // Dump inodes and chunks
         timing_tracer!(
             {
                 for node in &bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v5(&ctx, &mut bootstrap_writer)
+                    node.dump_bootstrap_v5(&ctx, bootstrap_writer.as_mut())
                         .context("failed to dump bootstrap")?;
                 }
 
@@ -497,7 +497,7 @@ impl Bootstrap {
             Result<()>
         )?;
 
-        bootstrap_writer.release(Some(bootstrap_ctx.name.as_str()))?;
+        bootstrap_writer.finalize(Some(bootstrap_ctx.name.as_str()))?;
 
         Ok(())
     }
@@ -591,10 +591,10 @@ impl Bootstrap {
 
         sb.set_extra_devices(blob_table_entries as u16);
 
-        sb.store(&mut bootstrap_writer)
+        sb.store(bootstrap_writer.as_mut())
             .context("failed to store SB")?;
 
-        let ext_sb_offset = bootstrap_writer.file.stream_position()?;
+        let ext_sb_offset = bootstrap_writer.seek_current(0)?;
 
         // Dump extended superblock
         let mut ext_sb = RafsV6SuperBlockExt::new();
@@ -610,7 +610,7 @@ impl Bootstrap {
             .seek_offset(EROFS_DEVTABLE_OFFSET as u64)
             .context("failed to seek devtslot")?;
         for slot in devtable.iter() {
-            slot.store(&mut bootstrap_writer)
+            slot.store(bootstrap_writer.as_mut())
                 .context("failed to store device slot")?;
         }
 
@@ -619,7 +619,7 @@ impl Bootstrap {
             .seek_offset(blob_table_offset as u64)
             .context("failed seek for extended blob table offset")?;
         blob_table
-            .store(&mut bootstrap_writer)
+            .store(bootstrap_writer.as_mut())
             .context("failed to store extended blob table")?;
 
         // collect all chunks in this bootstrap.
@@ -630,7 +630,7 @@ impl Bootstrap {
             {
                 for node in &mut bootstrap_ctx.nodes {
                     node.dump_bootstrap_v6(
-                        &mut bootstrap_writer,
+                        bootstrap_writer.as_mut(),
                         orig_meta_addr,
                         meta_addr,
                         ctx,
@@ -658,7 +658,7 @@ impl Bootstrap {
                 .seek_offset(prefetch_table_offset as u64)
                 .context("failed seek prefetch table offset")?;
 
-            pt.store(&mut bootstrap_writer).unwrap();
+            pt.store(bootstrap_writer.as_mut()).unwrap();
         }
 
         // EROFS does not have inode table, so we lose the chance to decide if this
@@ -683,7 +683,7 @@ impl Bootstrap {
         for (_, chunk) in chunk_cache.m.iter() {
             let chunk = &chunk.0;
             let chunk_size = chunk
-                .store(&mut bootstrap_writer)
+                .store(bootstrap_writer.as_mut())
                 .context("failed to dump chunk table")?;
             chunk_table_size += chunk_size as u64;
         }
@@ -695,9 +695,9 @@ impl Bootstrap {
 
         ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
 
-        bootstrap_writer.file.seek(SeekFrom::Start(ext_sb_offset))?;
+        bootstrap_writer.seek(SeekFrom::Start(ext_sb_offset))?;
         ext_sb
-            .store(&mut bootstrap_writer)
+            .store(bootstrap_writer.as_mut())
             .context("failed to store extended SB")?;
 
         // Flush remaining data in BufWriter to file
@@ -716,7 +716,7 @@ impl Bootstrap {
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
 
-        bootstrap_writer.release(Some(bootstrap_ctx.name.as_str()))?;
+        bootstrap_writer.finalize(Some(bootstrap_ctx.name.as_str()))?;
 
         Ok(())
     }

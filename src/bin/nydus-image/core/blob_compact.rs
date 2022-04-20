@@ -2,6 +2,20 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
+
+use nydus_utils::digest::RafsDigest;
+use nydus_utils::try_round_up_4k;
+use rafs::metadata::{RafsMode, RafsSuper};
+use storage::backend::BlobBackend;
+use storage::utils::alloc_buf;
+
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
@@ -11,17 +25,6 @@ use crate::core::context::{
 };
 use crate::core::node::{ChunkWrapper, Node, WhiteoutSpec};
 use crate::core::tree::Tree;
-use anyhow::Result;
-use nydus_utils::digest::RafsDigest;
-use nydus_utils::try_round_up_4k;
-use rafs::metadata::{RafsMode, RafsSuper};
-use serde::{Deserialize, Serialize};
-use sha2::Digest;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use storage::backend::BlobBackend;
-use storage::utils::alloc_buf;
 
 const DEFAULT_COMPACT_BLOB_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_COMPACT_SIZE: usize = 100 * 1024 * 1024;
@@ -172,7 +175,7 @@ impl ChunkSet {
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
         Blob::new().dump_meta_data(new_blob_ctx)?;
-        new_blob_ctx.flush()?;
+        new_blob_ctx.finalize()?;
         Ok(chunks_change)
     }
 }

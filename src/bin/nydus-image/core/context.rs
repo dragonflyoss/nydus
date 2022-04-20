@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -109,25 +109,50 @@ impl ArtifactStorage {
     }
 }
 
-/// ArtifactBufferWriter provides a writer to allow writing bootstrap
+pub struct ArtifactFileWriter(ArtifactWriter);
+
+impl RafsIoWrite for ArtifactFileWriter {
+    fn as_any(&self) -> &dyn Any {
+        &self.0
+    }
+
+    fn finalize(&mut self, name: Option<&str>) -> Result<()> {
+        self.0.finalize(name)
+    }
+}
+
+impl std::io::Seek for ArtifactFileWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.file.seek(pos)
+    }
+}
+
+impl std::io::Write for ArtifactFileWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// ArtifactWriter provides a writer to allow writing bootstrap
 /// or blob data to a single file or in a directory.
-pub struct ArtifactBufferWriter {
-    pub file: BufWriter<File>,
+pub struct ArtifactWriter {
+    pos: usize,
+    file: BufWriter<File>,
     storage: ArtifactStorage,
     // Keep this because tmp file will be removed automatically when it is dropped.
     // But we will rename/link the tmp file before it is removed.
     tmp_file: Option<TempFile>,
 }
 
-impl RafsIoWrite for ArtifactBufferWriter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl std::io::Write for ArtifactBufferWriter {
+impl std::io::Write for ArtifactWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.file.write(bytes)
+        let n = self.file.write(bytes)?;
+        self.pos += n;
+        Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -135,13 +160,7 @@ impl std::io::Write for ArtifactBufferWriter {
     }
 }
 
-impl std::io::Seek for ArtifactBufferWriter {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(pos)
-    }
-}
-
-impl ArtifactBufferWriter {
+impl ArtifactWriter {
     pub fn new(storage: ArtifactStorage) -> Result<Self> {
         match storage {
             ArtifactStorage::SingleFile(ref p) => {
@@ -155,6 +174,7 @@ impl ArtifactBufferWriter {
                         .with_context(|| format!("failed to open file {:?}", p))?,
                 );
                 Ok(Self {
+                    pos: 0,
                     file: b,
                     storage,
                     tmp_file: None,
@@ -167,6 +187,7 @@ impl ArtifactBufferWriter {
                     .with_context(|| format!("failed to create temp file in {:?}", p))?;
                 let tmp2 = tmp.as_file().try_clone()?;
                 Ok(Self {
+                    pos: 0,
                     file: BufWriter::with_capacity(BUF_WRITER_CAPACITY, tmp2),
                     storage,
                     tmp_file: Some(tmp),
@@ -179,15 +200,12 @@ impl ArtifactBufferWriter {
         self.file.write_all(buf).map_err(|e| anyhow!(e))
     }
 
-    pub fn get_pos(&mut self) -> Result<u64> {
-        let pos = self.file.seek(SeekFrom::Current(0))?;
-
-        Ok(pos)
+    pub fn pos(&mut self) -> Result<u64> {
+        Ok(self.pos as u64)
     }
 
-    pub fn release(self, name: Option<&str>) -> Result<()> {
-        let mut f = self.file.into_inner()?;
-        f.flush()?;
+    pub fn finalize(&mut self, name: Option<&str>) -> Result<()> {
+        self.file.flush()?;
 
         if let Some(n) = name {
             if let ArtifactStorage::FileDir(s) = &self.storage {
@@ -196,15 +214,15 @@ impl ArtifactBufferWriter {
                     return Ok(());
                 }
 
-                // Safe to unwrap as `FileDir` must have `tmp_file` created.
-                let tmp_file = self.tmp_file.unwrap();
-                rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
-                    format!(
-                        "failed to rename blob {:?} to {:?}",
-                        tmp_file.as_path(),
-                        might_exist_path
-                    )
-                })?;
+                if let Some(tmp_file) = &self.tmp_file {
+                    rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
+                        format!(
+                            "failed to rename blob {:?} to {:?}",
+                            tmp_file.as_path(),
+                            might_exist_path
+                        )
+                    })?;
+                }
             }
         } else if let ArtifactStorage::SingleFile(s) = &self.storage {
             // `new_name` is None means no blob is really built, perhaps due to dedup.
@@ -253,7 +271,7 @@ pub struct BlobContext {
     pub chunk_source: ChunkSource,
 
     // Blob writer for writing to disk file.
-    pub writer: Option<ArtifactBufferWriter>,
+    pub writer: Option<ArtifactWriter>,
 }
 
 impl Clone for BlobContext {
@@ -290,7 +308,7 @@ impl BlobContext {
         blob_offset: u64,
     ) -> Result<Self> {
         let writer = if let Some(blob_stor) = blob_stor {
-            Some(ArtifactBufferWriter::new(blob_stor)?)
+            Some(ArtifactWriter::new(blob_stor)?)
         } else {
             None
         };
@@ -326,7 +344,7 @@ impl BlobContext {
 
     pub fn new_with_writer(
         blob_id: String,
-        writer: Option<ArtifactBufferWriter>,
+        writer: Option<ArtifactWriter>,
         blob_offset: u64,
     ) -> Self {
         let size = if writer.is_some() {
@@ -417,15 +435,15 @@ impl BlobContext {
         }
     }
 
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn finalize(&mut self) -> Result<()> {
         let blob_id = if self.compressed_blob_size > 0 {
             Some(self.blob_id.as_str())
         } else {
             None
         };
 
-        if let Some(writer) = self.writer.take() {
-            writer.release(blob_id)?;
+        if let Some(mut writer) = self.writer.take() {
+            writer.finalize(blob_id)?;
         }
 
         Ok(())
@@ -661,8 +679,10 @@ impl BootstrapContext {
         0
     }
 
-    pub fn create_writer(&self) -> Result<ArtifactBufferWriter> {
-        ArtifactBufferWriter::new(self.storage.clone())
+    pub fn create_writer(&self) -> Result<Box<dyn RafsIoWrite>> {
+        Ok(Box::new(ArtifactFileWriter(ArtifactWriter::new(
+            self.storage.clone(),
+        )?)))
     }
 
     // Append the block that `offset` belongs to corresponding deque.

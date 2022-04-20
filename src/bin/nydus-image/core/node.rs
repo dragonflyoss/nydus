@@ -8,8 +8,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
-use std::io::Read;
-use std::io::SeekFrom;
+use std::io::{Read, SeekFrom};
 use std::mem::size_of;
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
