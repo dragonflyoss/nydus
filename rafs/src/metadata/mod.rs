@@ -254,6 +254,8 @@ bitflags! {
         const HAS_XATTR = 0x0000_0020;
         // V5: Data chunks are compressed with gzip
         const COMPRESS_GZIP = 0x0000_0040;
+        // V5: Data chunks are compressed with zstd
+        const COMPRESS_ZSTD = 0x0000_0080;
     }
 }
 

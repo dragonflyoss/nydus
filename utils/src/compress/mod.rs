@@ -16,6 +16,9 @@ use flate2::Compression;
 mod lz4_standard;
 use self::lz4_standard::*;
 
+mod zstd_standard;
+use self::zstd_standard::*;
+
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -23,6 +26,7 @@ pub enum Algorithm {
     None,
     Lz4Block,
     GZip,
+    Zstd,
 }
 
 impl Default for Algorithm {
@@ -45,6 +49,7 @@ impl FromStr for Algorithm {
             "none" => Ok(Self::None),
             "lz4_block" => Ok(Self::Lz4Block),
             "gzip" => Ok(Self::GZip),
+            "zstd" => Ok(Self::Zstd),
             _ => Err(einval!("compression algorithm should be none or lz4_block")),
         }
     }
@@ -60,6 +65,8 @@ impl TryFrom<u32> for Algorithm {
             Ok(Algorithm::Lz4Block)
         } else if value == Algorithm::GZip as u32 {
             Ok(Algorithm::GZip)
+        } else if value == Algorithm::Zstd as u32 {
+            Ok(Algorithm::Zstd)
         } else {
             Err(())
         }
@@ -94,6 +101,7 @@ pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
             gz.write_all(src)?;
             gz.finish()?
         }
+        Algorithm::Zstd => zstd_compress(src)?,
     };
 
     // Abandon compressed data when compression ratio greater than COMPRESSION_MINIMUM_RATIO
@@ -127,6 +135,7 @@ pub fn decompress(
             };
             Ok(dst.len())
         }
+        Algorithm::Zstd => zstd_decompress(src, dst),
     }
 }
 
@@ -280,6 +289,111 @@ mod tests {
             None,
             decompressed.as_mut_slice(),
             Algorithm::Lz4Block,
+        )
+        .unwrap();
+
+        assert_eq!(sz, 4097);
+        assert_eq!(buf, decompressed);
+    }
+
+    #[test]
+    fn test_zstd_compress_decompress_1_byte() {
+        let buf = vec![0x1u8];
+        let compressed = zstd_compress(&buf).unwrap();
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::Zstd,
+        )
+        .unwrap();
+
+        assert_eq!(sz, 1);
+        assert_eq!(buf, decompressed);
+    }
+
+    #[test]
+    fn test_zstd_compress_decompress_2_bytes() {
+        let buf = vec![0x2u8, 0x3u8];
+        let compressed = zstd_compress(&buf).unwrap();
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::Zstd,
+        )
+        .unwrap();
+
+        assert_eq!(sz, 2);
+        assert_eq!(buf, decompressed);
+    }
+
+    #[test]
+    fn test_zstd_compress_decompress_16_bytes() {
+        let buf = [
+            0x1u8, 0x2u8, 0x3u8, 0x4u8, 0x1u8, 0x2u8, 0x3u8, 0x4u8, 0x1u8, 0x2u8, 0x3u8, 0x4u8,
+            0x1u8, 0x2u8, 0x3u8, 0x4u8,
+        ];
+        let compressed = zstd_compress(&buf).unwrap();
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::Zstd,
+        )
+        .unwrap();
+
+        assert_eq!(sz, 16);
+        assert_eq!(&buf, decompressed.as_slice());
+    }
+
+    #[test]
+    fn test_zstd_compress_decompress_4095_bytes() {
+        let buf = vec![0x2u8; 4095];
+        let compressed = zstd_compress(&buf).unwrap();
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::Zstd,
+        )
+        .unwrap();
+
+        assert_eq!(sz, 4095);
+        assert_eq!(buf, decompressed);
+    }
+
+    #[test]
+    fn test_zstd_compress_decompress_4096_bytes() {
+        let buf = vec![0x2u8; 4096];
+        let compressed = zstd_compress(&buf).unwrap();
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::Zstd,
+        )
+        .unwrap();
+
+        assert_eq!(sz, 4096);
+        assert_eq!(buf, decompressed);
+    }
+
+    #[test]
+    fn test_zstd_compress_decompress_4097_bytes() {
+        let buf = vec![0x2u8; 4097];
+        let compressed = zstd_compress(&buf).unwrap();
+        let mut decompressed = vec![0; buf.len()];
+        let sz = decompress(
+            &compressed,
+            None,
+            decompressed.as_mut_slice(),
+            Algorithm::Zstd,
         )
         .unwrap();
 
