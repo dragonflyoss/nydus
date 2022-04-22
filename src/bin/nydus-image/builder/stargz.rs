@@ -633,7 +633,7 @@ impl Builder for StargzBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         // Build tree from source
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut tree = self.build_tree_from_index(ctx, layer_idx)?;

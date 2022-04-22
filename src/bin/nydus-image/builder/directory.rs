@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::fs::DirEntry;
+use std::io::Write;
 
 use anyhow::{Context, Result};
 
@@ -11,8 +12,8 @@ use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
-    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
-    RafsVersion,
+    ArtifactMemoryWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager,
+    BuildContext, BuildOutput, RafsVersion,
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
@@ -116,7 +117,7 @@ impl Builder for DirectoryBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         // Scan source directory to build upper layer tree.
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx, layer_idx)?;
@@ -158,6 +159,9 @@ impl Builder for DirectoryBuilder {
             },
             "dump_blob"
         )?;
+        if !ctx.inline_bootstrap {
+            blob_ctx.finalize()?;
+        }
 
         // Add new blob to blob table
         if blob_exists {
@@ -167,6 +171,23 @@ impl Builder for DirectoryBuilder {
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
+
+        if ctx.inline_bootstrap {
+            // Safe to unwrap because we ensured blob_ctx exists.
+            let blob_ctx = blob_mgr.get_last_blob_mut().unwrap();
+            if let Some(bootstrap_writer) = bootstrap_ctx
+                .writer
+                .as_any()
+                .downcast_ref::<ArtifactMemoryWriter>()
+            {
+                blob_ctx
+                    .writer
+                    .as_mut()
+                    .unwrap()
+                    .write(bootstrap_writer.data())?;
+            }
+            blob_ctx.finalize()?;
+        }
 
         bootstrap_mgr.add(bootstrap_ctx);
         BuildOutput::new(&blob_mgr, &bootstrap_mgr)

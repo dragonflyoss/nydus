@@ -209,6 +209,12 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .required_unless("blob-dir")
                         .takes_value(true)
                 ).arg(
+                    Arg::with_name("inline-bootstrap")
+                        .long("inline-bootstrap")
+                        .help("append bootstrap data to blob")
+                        .takes_value(false)
+                        .required(false),
+                ).arg(
                     Arg::with_name("blob-id")
                         .long("blob-id")
                         .help("blob id (as object id in backend/oss)")
@@ -609,6 +615,7 @@ impl Command {
         }
 
         let prefetch = Self::get_prefetch(matches)?;
+        let inline_bootstrap = matches.is_present("inline-bootstrap");
 
         let mut build_ctx = BuildContext::new(
             blob_id,
@@ -622,6 +629,7 @@ impl Command {
             source_path,
             prefetch,
             blob_stor,
+            inline_bootstrap,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);

@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Cursor, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -106,6 +106,38 @@ impl ArtifactStorage {
             Self::SingleFile(path) => path.to_path_buf(),
             Self::FileDir(base) => base.join(name),
         }
+    }
+}
+
+/// ArtifactMemoryWriter provides a writer to allow writing bootstrap
+/// data to a byte slice in memory.
+pub struct ArtifactMemoryWriter(Cursor<Vec<u8>>);
+
+impl ArtifactMemoryWriter {
+    pub fn data(&self) -> &[u8] {
+        self.0.get_ref()
+    }
+}
+
+impl RafsIoWrite for ArtifactMemoryWriter {
+    fn as_any(&self) -> &dyn Any {
+        &self.0
+    }
+}
+
+impl std::io::Seek for ArtifactMemoryWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl std::io::Write for ArtifactMemoryWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
     }
 }
 
@@ -519,6 +551,10 @@ impl BlobManager {
         self.blobs.last()
     }
 
+    pub fn get_last_blob_mut(&mut self) -> Option<&mut BlobContext> {
+        self.blobs.last_mut()
+    }
+
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
             .iter()
@@ -626,14 +662,18 @@ pub struct BootstrapContext {
     /// Bootstrap file name, only be used for diff build.
     pub name: String,
     pub blobs: Vec<BuildOutputBlob>,
-    /// Bootstrap file writer.
-    storage: ArtifactStorage,
     /// Not fully used blocks
     pub available_blocks: Vec<VecDeque<u64>>,
+    pub writer: Box<dyn RafsIoWrite>,
 }
 
 impl BootstrapContext {
-    pub fn new(storage: ArtifactStorage, layered: bool) -> Result<Self> {
+    pub fn new(storage: ArtifactStorage, layered: bool, inline_bootstrap: bool) -> Result<Self> {
+        let writer = if inline_bootstrap {
+            Box::new(ArtifactMemoryWriter(Cursor::new(Vec::new()))) as Box<dyn RafsIoWrite>
+        } else {
+            Box::new(ArtifactFileWriter(ArtifactWriter::new(storage)?)) as Box<dyn RafsIoWrite>
+        };
         Ok(Self {
             layered,
             inode_map: HashMap::new(),
@@ -641,11 +681,11 @@ impl BootstrapContext {
             offset: EROFS_BLOCK_SIZE,
             name: String::new(),
             blobs: Vec::new(),
-            storage,
             available_blocks: vec![
                 VecDeque::new();
                 EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
             ],
+            writer,
         })
     }
 
@@ -677,12 +717,6 @@ impl BootstrapContext {
         }
 
         0
-    }
-
-    pub fn create_writer(&self) -> Result<Box<dyn RafsIoWrite>> {
-        Ok(Box::new(ArtifactFileWriter(ArtifactWriter::new(
-            self.storage.clone(),
-        )?)))
     }
 
     // Append the block that `offset` belongs to corresponding deque.
@@ -720,10 +754,11 @@ impl BootstrapManager {
         }
     }
 
-    pub fn create_ctx(&self) -> Result<BootstrapContext> {
+    pub fn create_ctx(&self, inline_bootstrap: bool) -> Result<BootstrapContext> {
         BootstrapContext::new(
             self.bootstrap_storage.clone(),
             self.f_parent_bootstrap.is_some(),
+            inline_bootstrap,
         )
     }
 
@@ -781,6 +816,7 @@ pub struct BuildContext {
 
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
+    pub inline_bootstrap: bool,
     pub has_xattr: bool,
 }
 
@@ -798,6 +834,7 @@ impl BuildContext {
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
+        inline_bootstrap: bool,
     ) -> Self {
         BuildContext {
             blob_id,
@@ -816,6 +853,7 @@ impl BuildContext {
 
             prefetch,
             blob_storage,
+            inline_bootstrap,
             has_xattr: false,
         }
     }
@@ -849,6 +887,7 @@ impl Default for BuildContext {
             prefetch: Prefetch::default(),
             blob_storage: None,
             has_xattr: true,
+            inline_bootstrap: false,
         }
     }
 }

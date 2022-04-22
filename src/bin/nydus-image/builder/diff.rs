@@ -324,6 +324,7 @@ fn dump_blob(
         blob_nodes,
         &mut chunk_cache,
     )? {
+        blob_ctx.finalize()?;
         Some(blob_ctx)
     } else {
         None
@@ -739,7 +740,7 @@ impl DiffBuilder {
                         .insert_blob(ChunkSource::Build, idx as u32, blob_ctx);
                 }
             }
-            let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+            let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
             bootstrap_ctx.name = format!("bootstrap-{}", idx);
             self.build_bootstrap(ctx, &mut bootstrap_ctx, idx as u32, paths[idx].clone())?;
             bootstrap_mgr.add(bootstrap_ctx);
@@ -792,7 +793,7 @@ impl DiffBuilder {
         for (snapshot_idx, worker) in workers.into_iter().enumerate() {
             // FIXME: the behavior of build with diff is not working.
             let (_, _) = worker.join().expect("panic on diff build")?;
-            let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+            let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
             let snapshot_path = paths[snapshot_idx + 1].clone().unwrap();
             self.build_bootstrap(ctx, &mut bootstrap_ctx, snapshot_idx as u32, snapshot_path)?;
             todo!();

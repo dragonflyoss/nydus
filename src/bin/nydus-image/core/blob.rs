@@ -74,7 +74,6 @@ impl Blob {
         }
 
         blob_ctx.set_blob_readahead_size(ctx);
-        blob_ctx.finalize()?;
 
         let blob_exists = blob_ctx.compressed_blob_size > 0;
 

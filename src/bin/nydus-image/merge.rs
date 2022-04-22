@@ -170,7 +170,7 @@ impl Merger {
         let mut tree = tree.unwrap();
         let mut bootstrap = Bootstrap::new()?;
         let storage = ArtifactStorage::SingleFile(target.clone());
-        let mut bootstrap_ctx = BootstrapContext::new(storage, false)?;
+        let mut bootstrap_ctx = BootstrapContext::new(storage, false, false)?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(&ctx)?;
         bootstrap

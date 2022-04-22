@@ -1860,7 +1860,7 @@ mod tests {
 
         let bootstrap_path = TempFile::new().unwrap();
         let storage = ArtifactStorage::SingleFile(bootstrap_path.as_path().to_path_buf());
-        let mut bootstrap_ctx = BootstrapContext::new(storage, false).unwrap();
+        let mut bootstrap_ctx = BootstrapContext::new(storage, false, false).unwrap();
         bootstrap_ctx.offset = 0;
 
         // reg file.

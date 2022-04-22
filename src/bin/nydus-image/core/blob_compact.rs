@@ -569,10 +569,11 @@ impl BlobCompactor {
             PathBuf::from(""),
             Default::default(),
             None,
+            false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(ArtifactStorage::SingleFile(d_bootstrap), None);
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
         let mut ori_blob_mgr = BlobManager::new();
         ori_blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
         if let Some(dict) = chunk_dict {
