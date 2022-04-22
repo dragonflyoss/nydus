@@ -10,9 +10,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use nix::sys::signal::{kill, SIGTERM};
-use nix::unistd::Pid;
-
 use nydus::{FsBackendType, NydusError};
 use nydus_api::http::{
     ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload, ApiResult, DaemonConf,
@@ -203,8 +200,8 @@ impl ApiServer {
         }
     }
 
-    /// External supervisor wants this instance to exit. But it can't just die leave
-    /// some pending or in-flight fuse messages un-handled. So this method guarantees
+    /// External supervisor wants this instance to exit without umounting rafs. We can't
+    /// leave some in-flight fuse messages un-handled. So this method guarantees
     /// all fuse messages read from kernel are handled and replies are sent back.
     /// Before http response are sent back, this must can ensure that current process
     /// has absolutely stopped. Otherwise, multiple processes might read from single
@@ -216,10 +213,22 @@ impl ApiServer {
                 info!("exit daemon by http request");
                 ApiResponsePayload::Empty
             })
-            .map_err(|e| ApiError::DaemonAbnormal(e.into()))?;
+            .map_err(|e| {
+                error!("exit fuse service failed {:}", e);
+                ApiError::DaemonAbnormal(e.into())
+            })?;
 
-        // Should be reliable since this Api server works under event manager.
-        kill(Pid::this(), SIGTERM).unwrap_or_else(|e| error!("Send signal error. {}", e));
+        // Ensure both fuse and state machine threads have been terminated thus this
+        // nydusd won't race fuse messages when upgrading.
+        d.wait()
+            .map(|_| {
+                info!("fuse service exited by http request");
+                ApiResponsePayload::Empty
+            })
+            .map_err(|e| {
+                error!("wait for fuse service failed {:}", e);
+                ApiError::DaemonAbnormal(e.into())
+            })?;
 
         Ok(ApiResponsePayload::Empty)
     }

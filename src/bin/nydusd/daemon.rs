@@ -18,7 +18,7 @@ use std::sync::{
     mpsc::{Receiver, Sender},
     Arc, MutexGuard,
 };
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::{error, fmt, io};
 
 use fuse_backend_rs::api::{vfs::VfsError, BackendFileSystem, Vfs};
@@ -231,19 +231,24 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
     fn start(&self) -> DaemonResult<()>;
     fn wait(&self) -> DaemonResult<()>;
     fn stop(&self) -> DaemonResult<()> {
-        self.on_event(DaemonStateMachineInput::Stop)
+        let s = self.get_state();
+        if s != DaemonState::INTERRUPTED && s != DaemonState::STOPPED {
+            return self.on_event(DaemonStateMachineInput::Stop);
+        }
+        Ok(())
     }
+    /// close the current FUSE connection to properly shutdown
+    /// the FUSE server daemon.
     fn disconnect(&self) -> DaemonResult<()>;
-    fn as_any(&self) -> &dyn Any;
+    /// close the FUSE server without closing the FUSE connection
+    /// so that another FUSE server daemon can take over the same
+    /// FUSE connection and continue to serve the incoming FUSE requests.
     fn interrupt(&self) {}
+    fn as_any(&self) -> &dyn Any;
     fn get_state(&self) -> DaemonState;
     fn set_state(&self, s: DaemonState);
     fn trigger_exit(&self) -> DaemonResult<()> {
-        self.on_event(DaemonStateMachineInput::Exit)?;
-        // Ensure all fuse threads have be terminated thus this nydusd won't
-        // race fuse messages when upgrading.
-        self.wait().map_err(|_| DaemonError::ServiceStop)?;
-        Ok(())
+        self.on_event(DaemonStateMachineInput::Exit)
     }
     fn trigger_takeover(&self) -> DaemonResult<()> {
         self.on_event(DaemonStateMachineInput::Takeover)?;
@@ -443,6 +448,7 @@ state_machine! {
     Init => {
         Mount => Running [StartService],
         Takeover => Upgrading [Restore],
+        Exit => Die[StopStateMachine],
         Stop => Die[Umount],
     },
     Running => {
@@ -451,7 +457,7 @@ state_machine! {
     },
     Upgrading(Successful) => Running [StartService],
     // Quit from daemon but not disconnect from fuse front-end.
-    Interrupted(Stop) => Die,
+    Interrupted(Stop) => Die[StopStateMachine],
 }
 
 pub struct DaemonStateMachineContext {
@@ -477,79 +483,84 @@ impl DaemonStateMachineContext {
         }
     }
 
-    pub fn kick_state_machine(mut self) -> Result<()> {
-        thread::Builder::new()
+    pub fn kick_state_machine(mut self) -> Result<JoinHandle<Result<()>>> {
+        let thread = thread::Builder::new()
             .name("state_machine".to_string())
-            .spawn(move || loop {
-                use DaemonStateMachineOutput::*;
-                let event = self
-                    .event_collector
-                    .recv()
-                    .expect("Event channel can't be broken!");
-                let last = self.sm.state().clone();
-                let sm_rollback = StateMachine::<DaemonStateMachine>::from_state(last.clone());
-                let input = &event;
+            .spawn(move || {
+                loop {
+                    use DaemonStateMachineOutput::*;
+                    let event = self
+                        .event_collector
+                        .recv()
+                        .expect("Event channel can't be broken!");
+                    let last = self.sm.state().clone();
+                    let input = &event;
 
-                let action = if let Ok(a) = self.sm.consume(&event) {
-                    a
-                } else {
-                    error!(
-                        "Wrong event input. Event={:?}, CurrentState={:?}",
-                        input, &last
+                    let action = if let Ok(a) = self.sm.consume(&event) {
+                        a
+                    } else {
+                        error!(
+                            "Wrong event input. Event={:?}, CurrentState={:?}",
+                            input, &last
+                        );
+                        // Safe to unwrap because channel is never closed
+                        self.result_sender
+                            .send(Err(DaemonError::UnexpectedEvent(input.clone())))
+                            .unwrap();
+                        continue;
+                    };
+
+                    let d = self.daemon.as_ref();
+                    let cur = self.sm.state();
+                    info!(
+                        "State machine(pid={}): from {:?} to {:?}, input [{:?}], output [{:?}]",
+                        &self.pid, last, cur, input, &action
                     );
+                    let r = match action {
+                        Some(a) => match a {
+                            StartService => d.start().map(|r| {
+                                d.set_state(DaemonState::RUNNING);
+                                r
+                            }),
+                            TerminateFuseService => {
+                                d.interrupt();
+                                d.set_state(DaemonState::INTERRUPTED);
+                                Ok(())
+                            }
+                            Umount => d.disconnect().map(|r| {
+                                // Always interrupt fuse service loop after shutdown connection to kernel.
+                                // In case that kernel does not really shutdown the session due to some reasons
+                                // causing service loop keep waiting of `/dev/fuse`.
+                                d.interrupt();
+                                d.set_state(DaemonState::STOPPED);
+                                r
+                            }),
+                            Restore => {
+                                d.set_state(DaemonState::UPGRADING);
+                                d.restore()
+                            }
+                            StopStateMachine => {
+                                d.set_state(DaemonState::STOPPED);
+                                Ok(())
+                            }
+                        },
+                        _ => Ok(()), // With no output action involved, caller should also have reply back
+                    };
+
                     // Safe to unwrap because channel is never closed
-                    self.result_sender
-                        .send(Err(DaemonError::UnexpectedEvent(input.clone())))
-                        .unwrap();
-                    continue;
-                };
-
-                let d = self.daemon.as_ref();
-                let cur = self.sm.state();
-                info!(
-                    "State machine(pid={}): from {:?} to {:?}, input [{:?}], output [{:?}]",
-                    &self.pid, last, cur, input, &action
-                );
-                let r = match action {
-                    Some(a) => match a {
-                        StartService => d.start().map(|r| {
-                            d.set_state(DaemonState::RUNNING);
-                            r
-                        }),
-                        TerminateFuseService => {
-                            d.interrupt();
-                            d.set_state(DaemonState::INTERRUPTED);
-                            Ok(())
-                        }
-                        Umount => d.disconnect().map(|r| {
-                            // Always interrupt fuse service loop after shutdown connection to kernel.
-                            // In case that kernel does not really shutdown the session due to some reasons
-                            // causing service loop keep waiting of `/dev/fuse`.
-                            d.interrupt();
-                            d.set_state(DaemonState::STOPPED);
-                            r
-                        }),
-                        Restore => {
-                            d.set_state(DaemonState::UPGRADING);
-                            d.restore()
-                        }
-                    },
-                    _ => Ok(()), // With no output action involved, caller should also have reply back
+                    self.result_sender.send(r).unwrap();
+                    // Quit state machine thread if interrupted or stopped
+                    if d.get_state() == DaemonState::INTERRUPTED
+                        || d.get_state() == DaemonState::STOPPED
+                    {
+                        break;
+                    }
                 }
-                .map_err(|e| {
-                    error!(
-                        "Handle action failed, {:?}. Rollback machine to State {:?}",
-                        e,
-                        sm_rollback.state()
-                    );
-                    self.sm = sm_rollback;
-                    e
-                });
-
-                // Safe to unwrap because channel is never closed
-                self.result_sender.send(r).unwrap();
+                info!("state_machine thread exits");
+                Ok(())
             })
-            .map(|_| ())
+            .map_err(DaemonError::ThreadSpawn)?;
+        Ok(thread)
     }
 }
 

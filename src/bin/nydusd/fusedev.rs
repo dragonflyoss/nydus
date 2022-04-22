@@ -116,11 +116,10 @@ impl FuseServer {
         let _ebadf = Error::from_raw_os_error(libc::EBADF);
 
         loop {
-            if let Some((reader, writer)) = self
-                .ch
-                .get_request()
-                .map_err(|_| Error::from_raw_os_error(libc::EINVAL))?
-            {
+            if let Some((reader, writer)) = self.ch.get_request().map_err(|e| {
+                warn!("get fuse request failed: {:?}", e);
+                Error::from_raw_os_error(libc::EINVAL)
+            })? {
                 if let Err(e) = self
                     .server
                     .handle_message(reader, writer, None, Some(metrics_hook))
@@ -177,6 +176,7 @@ impl FusedevDaemon {
             .name("fuse_server".to_string())
             .spawn(move || {
                 let _ = s.svc_loop(&inflight_op);
+                // quit the daemon if any fuse server thread exits
                 exit_daemon();
                 Ok(())
             })
@@ -220,6 +220,7 @@ impl NydusDaemon for FusedevDaemon {
     }
 
     fn start(&self) -> DaemonResult<()> {
+        info!("start {} fuse servers", self.threads_cnt);
         for _ in 0..self.threads_cnt {
             self.kick_one_server()
                 .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
@@ -229,18 +230,22 @@ impl NydusDaemon for FusedevDaemon {
     }
 
     fn wait(&self) -> DaemonResult<()> {
-        let mut guard = self.threads.lock().unwrap();
-
-        while let Some(handle) = guard.pop() {
-            handle
-                .join()
-                .map_err(|e| {
-                    DaemonError::WaitDaemon(
-                        *e.downcast::<Error>()
-                            .unwrap_or_else(|e| Box::new(eother!(e))),
-                    )
-                })?
-                .map_err(DaemonError::WaitDaemon)?;
+        loop {
+            let handle = self.threads.lock().unwrap().pop();
+            if let Some(handle) = handle {
+                handle
+                    .join()
+                    .map_err(|e| {
+                        DaemonError::WaitDaemon(
+                            *e.downcast::<Error>()
+                                .unwrap_or_else(|e| Box::new(eother!(e))),
+                        )
+                    })?
+                    .map_err(DaemonError::WaitDaemon)?;
+            } else {
+                // No more handles to wait
+                break;
+            }
         }
 
         Ok(())
@@ -265,8 +270,9 @@ impl NydusDaemon for FusedevDaemon {
 
     #[inline]
     fn interrupt(&self) {
-        if let Err(e) = self.disconnect() {
-            error!("disconnect daemon failed: {:?}", e);
+        let session = self.session.lock().expect("Not expect poisoned lock.");
+        if let Err(e) = session.wake().map_err(DaemonError::SessionShutdown) {
+            error!("stop fuse service thread failed: {:?}", e);
         }
     }
 
@@ -475,7 +481,8 @@ pub fn create_nydus_daemon(
     });
 
     let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
-    machine.kick_state_machine()?;
+    let machine_thread = machine.kick_state_machine()?;
+    daemon.threads.lock().unwrap().push(machine_thread);
 
     // Without api socket, nydusd can't do neither live-upgrade nor failover, so the helper
     // finding a victim is not necessary.
