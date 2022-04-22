@@ -23,31 +23,31 @@ path = "src/lib.rs"
 rlimit = "0.3.0"
 log = "0.4.8"
 libc = "0.2"
-vmm-sys-util = ">=0.9.0"
+vmm-sys-util = "0.9.0"
 clap = "2.33"
 flexi_logger = { version = "0.17" }
 # pin regex to fix RUSTSEC-2022-0013
-regex = ">=1.5.5"
-serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
+regex = "1.5.5"
+serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
 serde_with = { version = "1.6.0", features = ["macros"] }
 sha2 = "0.9.1"
 lazy_static = "1.4.0"
 xattr = "0.2.2"
-nix = ">=0.23.0"
+nix = "0.23.1"
 anyhow = "1.0.35"
-base64 = { version = ">=0.12.0" }
+base64 = "0.13.0"
 rust-fsm = "0.6.0"
 vm-memory = { version = "0.7.0", features = ["backend-mmap"], optional = true }
 chrono = "0.4.19"
 openssl = { version = "0.10.38", features = ["vendored"] }
 hyperlocal = "0.8.0"
-tokio = { version = ">=1.13.1", features = ["macros"] }
+tokio = { version = "1.16.1", features = ["macros"] }
 hyper = "0.14.11"
 # pin openssl-src to bring in fix for RUSTSEC-2021-0098 and RUSTSEC-2022-0014
 openssl-src = "=111.18.0"
 # pin rand_core to bring in fix for RUSTSEC-2021-0023
-rand_core = ">=0.6.2"
+rand_core = "0.6.2"
 
 fuse-backend-rs = { version = "0.4.0", optional = true }
 vhost = { version = "0.3.0", features = ["vhost-user-slave"], optional = true }
@@ -69,7 +69,7 @@ event-manager = "0.2.1"
 
 [dev-dependencies]
 sendfd = "0.3.3"
-vmm-sys-util = ">=0.9.0"
+vmm-sys-util = "0.9.0"
 env_logger = "0.8.2"
 rand = "0.8.5"
 
