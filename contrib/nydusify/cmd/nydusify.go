@@ -35,6 +35,8 @@ var versionGitCommit string
 var versionBuildTime string
 var maxCacheMaxRecords uint = 50
 
+const defaultLogLevel = logrus.InfoLevel
+
 func isPossibleValue(excepted []string, value string) bool {
 	for _, v := range excepted {
 		if value == v {
@@ -154,6 +156,24 @@ func main() {
 		Version: version,
 	}
 
+	// global options
+	app.Flags = []cli.Flag{
+		&cli.StringFlag{
+			Name:    "log-level",
+			Aliases: []string{"l"},
+			Value:   "info",
+			Usage:   "Set log level (panic, fatal, error, warn, info, debug, trace)",
+			EnvVars: []string{"LOG_LEVEL"},
+		},
+		&cli.BoolFlag{
+			Name:     "debug",
+			Aliases:  []string{"D"},
+			Required: false,
+			Value:    false,
+			Usage:    "Enable debug log level(will overwrite `log-level` option)",
+			EnvVars:  []string{"DEBUG_LOG_LEVEL"}},
+	}
+
 	logrus.Infof("Version: %s\n", version)
 
 	app.Commands = []*cli.Command{
@@ -161,7 +181,6 @@ func main() {
 			Name:  "convert",
 			Usage: "Convert source image to nydus image",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "log-level", Value: "info", Usage: "Set log level (panic, fatal, error, warn, info, debug, trace)", EnvVars: []string{"LOG_LEVEL"}},
 				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
 				&cli.StringFlag{Name: "target", Required: false, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
 				&cli.StringFlag{Name: "target-suffix", Required: false, Usage: "Add suffix to source image reference as target image reference, conflict with --target", EnvVars: []string{"TARGET_SUFFIX"}},
@@ -193,11 +212,7 @@ func main() {
 				&cli.UintFlag{Name: "build-cache-max-records", Value: maxCacheMaxRecords, Usage: "Maximum cache records in cache image", EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"}},
 			},
 			Action: func(c *cli.Context) error {
-				logLevel, err := logrus.ParseLevel(c.String("log-level"))
-				if err != nil {
-					return err
-				}
-				logrus.SetLevel(logLevel)
+				setupLogLevel(c)
 
 				target, err := getTargetReference(c)
 				if err != nil {
@@ -335,6 +350,8 @@ func main() {
 				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
 			},
 			Action: func(c *cli.Context) error {
+				setupLogLevel(c)
+
 				backendType := c.String("backend-type")
 				backendConfig := ""
 				if backendType != "" {
@@ -376,13 +393,6 @@ func main() {
 			Name:  "pack",
 			Usage: "Pack a directory to nydus bootstrap and blob",
 			Flags: []cli.Flag{
-				&cli.StringFlag{
-					Name:    "log-level",
-					Aliases: []string{"l"},
-					Value:   "info",
-					Usage:   "Set log level (panic, fatal, error, warn, info, debug, trace)",
-					EnvVars: []string{"LOG_LEVEL"},
-				},
 				&cli.StringFlag{
 					Name:     "source-dir",
 					Aliases:  []string{"target-dir"}, // for compatibility
@@ -488,8 +498,10 @@ func main() {
 					backendConfig = &cfg
 				}
 
+				setupLogLevel(c)
+
 				if p, err = packer.New(packer.Opt{
-					LogLevel:       c.String("log-level"),
+					LogLevel:       logrus.GetLevel(),
 					NydusImagePath: c.String("nydus-image"),
 					OutputDir:      c.String("output-dir"),
 					BackendConfig:  backendConfig,
@@ -527,4 +539,21 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		logrus.Fatal(err)
 	}
+}
+
+func setupLogLevel(c *cli.Context) {
+	// global `-D` has the highest priority
+	if c.Bool("D") {
+		logrus.SetLevel(logrus.DebugLevel)
+		return
+	}
+
+	lvl := c.String("log-level")
+	logLevel, err := logrus.ParseLevel(lvl)
+	if err != nil {
+		logrus.Warnf("failed to parse log level(%s): %+v\ndefault log level(info) will be used", lvl, err)
+		logLevel = defaultLogLevel
+	}
+
+	logrus.SetLevel(logLevel)
 }
