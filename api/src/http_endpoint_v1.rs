@@ -245,6 +245,23 @@ impl EndpointHandler for MountHandler {
     }
 }
 
+pub struct StartHandler {}
+impl EndpointHandler for StartHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::Start);
+                Ok(convert_to_response(r, HttpError::Upgrade))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
 pub struct MetricsInflightHandler {}
 impl EndpointHandler for MetricsInflightHandler {
     fn handle_request(

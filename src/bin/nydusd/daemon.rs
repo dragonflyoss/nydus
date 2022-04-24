@@ -35,10 +35,9 @@ use crate::upgrade::UpgradeMgrError;
 pub enum DaemonState {
     INIT = 1,
     RUNNING = 2,
-    UPGRADING = 3,
-    INTERRUPTED = 4,
-    STOPPED = 5,
-    UNKNOWN = 6,
+    READY = 3,
+    STOPPED = 4,
+    UNKNOWN = 5,
 }
 
 impl Display for DaemonState {
@@ -52,9 +51,8 @@ impl From<i32> for DaemonState {
         match i {
             1 => DaemonState::INIT,
             2 => DaemonState::RUNNING,
-            3 => DaemonState::UPGRADING,
-            4 => DaemonState::INTERRUPTED,
-            5 => DaemonState::STOPPED,
+            3 => DaemonState::READY,
+            4 => DaemonState::STOPPED,
             _ => DaemonState::UNKNOWN,
         }
     }
@@ -196,23 +194,49 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     fn interrupt(&self) {}
     fn stop(&self) -> DaemonResult<()> {
         let s = self.get_state();
-        if s != DaemonState::INTERRUPTED && s != DaemonState::STOPPED {
-            return self.on_event(DaemonStateMachineInput::Stop);
+
+        if s == DaemonState::STOPPED {
+            return Ok(());
         }
-        Ok(())
+
+        if s == DaemonState::RUNNING {
+            self.on_event(DaemonStateMachineInput::Stop)?;
+        }
+
+        self.on_event(DaemonStateMachineInput::Stop)
     }
     fn wait(&self) -> DaemonResult<()>;
+    fn wait_service(&self) -> DaemonResult<()> {
+        Ok(())
+    }
+    fn wait_state_machine(&self) -> DaemonResult<()> {
+        Ok(())
+    }
     fn trigger_exit(&self) -> DaemonResult<()> {
+        let s = self.get_state();
+
+        if s == DaemonState::STOPPED {
+            return Ok(());
+        }
+
+        if s == DaemonState::INIT {
+            return self.on_event(DaemonStateMachineInput::Stop);
+        }
+
+        if s == DaemonState::RUNNING {
+            self.on_event(DaemonStateMachineInput::Stop)?;
+        }
+
         self.on_event(DaemonStateMachineInput::Exit)
     }
-
     fn supervisor(&self) -> Option<String>;
     fn save(&self) -> DaemonResult<()>;
     fn restore(&self) -> DaemonResult<()>;
     fn trigger_takeover(&self) -> DaemonResult<()> {
-        self.on_event(DaemonStateMachineInput::Takeover)?;
-        self.on_event(DaemonStateMachineInput::Successful)?;
-        Ok(())
+        self.on_event(DaemonStateMachineInput::Takeover)
+    }
+    fn trigger_start(&self) -> DaemonResult<()> {
+        self.on_event(DaemonStateMachineInput::Start)
     }
 
     // For backward compatibility.
@@ -225,35 +249,28 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
 // - `Init` means nydusd is just started and potentially configured well but not
 //    yet negotiate with kernel the capabilities of both sides. It even does not try
 //    to set up fuse session by mounting `/fuse/dev`(in case of `fusedev` backend).
+// - `Ready` means nydusd is ready for start or die. Fuse session is created.
 // - `Running` means nydusd has successfully prepared all the stuff needed to work as a
 //   user-space fuse filesystem, however, the essential capabilities negotiation might not be
 //   done yet. It relies on `fuse-rs` to tell if capability negotiation is done.
-// - `Upgrading` state means the nydus daemon is being live-upgraded. There's no need
-//   to do kernel mount again to set up a session but try to reuse a fuse fd from somewhere else.
-//   In this state, we try to push `Successful` event to state machine to trigger state transition.
-// - `Interrupted` state means nydusd has shutdown fuse server, which means no more message will
-//    be read from kernel and handled and no pending and in-flight fuse message exists. But the
-//    nydusd daemon should be alive and wait for coming events.
 // - `Die` state means the whole nydusd process is going to die.
 state_machine! {
     derive(Debug, Clone)
     pub DaemonStateMachine(Init)
 
-    // FIXME: It's possible that failover does not succeed or resource is not capable to
-    // be passed. To handle event `Stop` when being `Init`.
     Init => {
-        Start => Running [StartService],
-        Takeover => Upgrading [Restore],
-        Exit => Die[StopStateMachine],
+        Mount => Ready,
+        Takeover => Ready[Restore],
+        Stop => Die[StopStateMachine],
+    },
+    Ready => {
+        Start => Running[StartService],
         Stop => Die[Umount],
+        Exit => Die[StopStateMachine],
     },
     Running => {
-        Exit => Interrupted [TerminateService],
-        Stop => Die[Umount],
+        Stop => Ready [TerminateService],
     },
-    Upgrading(Successful) => Running [StartService],
-    // Quit from daemon but not disconnect from fuse front-end.
-    Interrupted(Stop) => Die[StopStateMachine],
 }
 
 /// Implementation of the state machine defined by `DaemonStateMachine`.
@@ -322,20 +339,30 @@ impl DaemonStateMachineContext {
                             }),
                             TerminateService => {
                                 d.interrupt();
-                                d.set_state(DaemonState::INTERRUPTED);
-                                Ok(())
+                                let res = d.wait_service();
+                                if res.is_ok() {
+                                    d.set_state(DaemonState::READY);
+                                }
+
+                                res
                             }
                             Umount => d.disconnect().map(|r| {
                                 // Always interrupt fuse service loop after shutdown connection to kernel.
                                 // In case that kernel does not really shutdown the session due to some reasons
                                 // causing service loop keep waiting of `/dev/fuse`.
                                 d.interrupt();
+                                d.wait_service()
+                                    .unwrap_or_else(|e| error!("failed to wait service {}", e));
+                                // at least all fuse thread stopped, no matter what error each thread got
                                 d.set_state(DaemonState::STOPPED);
                                 r
                             }),
                             Restore => {
-                                d.set_state(DaemonState::UPGRADING);
-                                d.restore()
+                                let res = d.restore();
+                                if res.is_ok() {
+                                    d.set_state(DaemonState::READY);
+                                }
+                                res
                             }
                             StopStateMachine => {
                                 d.set_state(DaemonState::STOPPED);
@@ -348,9 +375,7 @@ impl DaemonStateMachineContext {
                     // Safe to unwrap because channel is never closed
                     self.result_sender.send(r).unwrap();
                     // Quit state machine thread if interrupted or stopped
-                    if d.get_state() == DaemonState::INTERRUPTED
-                        || d.get_state() == DaemonState::STOPPED
-                    {
+                    if d.get_state() == DaemonState::STOPPED {
                         break;
                     }
                 }
@@ -380,10 +405,19 @@ mod tests {
         let stat = DaemonState::from(1);
         assert_eq!(stat, DaemonState::INIT);
 
-        let stat = DaemonState::from(6);
+        let stat = DaemonState::from(2);
+        assert_eq!(stat, DaemonState::RUNNING);
+
+        let stat = DaemonState::from(3);
+        assert_eq!(stat, DaemonState::READY);
+
+        let stat = DaemonState::from(4);
+        assert_eq!(stat, DaemonState::STOPPED);
+
+        let stat = DaemonState::from(5);
         assert_eq!(stat, DaemonState::UNKNOWN);
 
-        let stat = DaemonState::from(7);
+        let stat = DaemonState::from(8);
         assert_eq!(stat, DaemonState::UNKNOWN);
     }
 

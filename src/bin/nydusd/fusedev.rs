@@ -246,7 +246,8 @@ pub struct FusedevDaemon {
     state: AtomicI32,
     supervisor: Option<String>,
     threads_cnt: u32,
-    threads: Mutex<Vec<JoinHandle<Result<()>>>>,
+    state_machine_thread: Mutex<Option<JoinHandle<Result<()>>>>,
+    fuse_service_threads: Mutex<Vec<JoinHandle<Result<()>>>>,
 }
 
 impl FusedevDaemon {
@@ -256,14 +257,19 @@ impl FusedevDaemon {
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
             .spawn(move || {
-                let _ = s.svc_loop(&inflight_op);
+                if let Err(err) = s.svc_loop(&inflight_op) {
+                    warn!("fuse server exits with err: {:?}, exiting daemon", err);
+                    if let Err(err) = waker.wake() {
+                        error!("fail to exit daemon, error: {:?}", err);
+                    }
+                }
                 // Notify the daemon controller that one working thread has exited.
-                let _ = waker.wake();
+
                 Ok(())
             })
             .map_err(DaemonError::ThreadSpawn)?;
 
-        self.threads.lock().unwrap().push(thread);
+        self.fuse_service_threads.lock().unwrap().push(thread);
 
         Ok(())
     }
@@ -338,8 +344,32 @@ impl NydusDaemon for FusedevDaemon {
     }
 
     fn wait(&self) -> DaemonResult<()> {
+        self.wait_state_machine()?;
+        self.wait_service()
+    }
+
+    fn wait_state_machine(&self) -> DaemonResult<()> {
+        let mut guard = self.state_machine_thread.lock().unwrap();
+        if guard.is_some() {
+            guard
+                .take()
+                .unwrap()
+                .join()
+                .map_err(|e| {
+                    DaemonError::WaitDaemon(
+                        *e.downcast::<Error>()
+                            .unwrap_or_else(|e| Box::new(eother!(e))),
+                    )
+                })?
+                .map_err(DaemonError::WaitDaemon)?;
+        }
+
+        Ok(())
+    }
+
+    fn wait_service(&self) -> DaemonResult<()> {
         loop {
-            let handle = self.threads.lock().unwrap().pop();
+            let handle = self.fuse_service_threads.lock().unwrap().pop();
             if let Some(handle) = handle {
                 handle
                     .join()
@@ -508,11 +538,12 @@ pub fn create_fuse_daemon(
         result_receiver: Mutex::new(result_receiver),
         request_sender: Arc::new(Mutex::new(trigger)),
         service: Arc::new(service),
-        threads: Mutex::new(Vec::new()),
+        state_machine_thread: Mutex::new(None),
+        fuse_service_threads: Mutex::new(Vec::new()),
     });
     let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
     let machine_thread = machine.kick_state_machine()?;
-    daemon.threads.lock().unwrap().push(machine_thread);
+    *daemon.state_machine_thread.lock().unwrap() = Some(machine_thread);
 
     // Without api socket, nydusd can't do neither live-upgrade nor failover, so the helper
     // finding a victim is not necessary.
@@ -523,6 +554,9 @@ pub fn create_fuse_daemon(
             daemon.service.mount(cmd)?;
         }
         daemon.service.session.lock().unwrap().mount()?;
+        daemon
+            .on_event(DaemonStateMachineInput::Mount)
+            .map_err(|e| eother!(e))?;
         daemon
             .on_event(DaemonStateMachineInput::Start)
             .map_err(|e| eother!(e))?;
