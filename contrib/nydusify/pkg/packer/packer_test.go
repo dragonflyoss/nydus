@@ -31,7 +31,7 @@ func TestNew(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()
 	_, err := New(Opt{
-		LogLevel:       "info",
+		LogLevel:       logrus.InfoLevel,
 		OutputDir:      tmpDir,
 		NydusImagePath: filepath.Join(tmpDir, "nydus-image"),
 	})
@@ -56,7 +56,7 @@ func TestPacker_Pack(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()
 	p, err := New(Opt{
-		LogLevel:       "info",
+		LogLevel:       logrus.InfoLevel,
 		OutputDir:      tmpDir,
 		NydusImagePath: filepath.Join(tmpDir, "nydus-image"),
 	})

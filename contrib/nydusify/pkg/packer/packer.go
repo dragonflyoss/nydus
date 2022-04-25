@@ -13,7 +13,6 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/compactor"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -22,7 +21,6 @@ import (
 const (
 	nydusBinaryName  = "nydus-image"
 	defaultOutputDir = "./.nydus-build-output"
-	defaultLogLevel  = "info"
 )
 
 var (
@@ -32,7 +30,7 @@ var (
 )
 
 type Opt struct {
-	LogLevel       string
+	LogLevel       logrus.Level
 	NydusImagePath string
 	OutputDir      string
 	BackendConfig  *BackendConfig
@@ -357,16 +355,9 @@ func blobFileName(meta string) string {
 	return fmt.Sprintf("%s.blob", strings.TrimSuffix(meta, filepath.Ext(meta)))
 }
 
-func initLogger(logLevel string) (*logrus.Logger, error) {
-	if utils.IsEmptyString(logLevel) {
-		logLevel = defaultLogLevel
-	}
-	level, err := logrus.ParseLevel(logLevel)
-	if err != nil {
-		return nil, err
-	}
+func initLogger(logLevel logrus.Level) (*logrus.Logger, error) {
 	logger := logrus.New()
-	logger.SetLevel(level)
+	logger.SetLevel(logLevel)
 	logger.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
