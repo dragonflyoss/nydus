@@ -7,6 +7,7 @@ on:
   schedule:
     # Run daily sanity check at 22:08 clock UTC
     - cron: "8 22 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +15,9 @@ env:
 jobs:
   build-nydus-rs:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     steps:
     - uses: actions/checkout@v2
     - name: Cache cargo
@@ -23,19 +27,24 @@ jobs:
           ./target-fusedev
           ./target-virtiofs
         cache-on-failure: true
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: Build nydus-rs
       run: |
-        make docker-static
-        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydus-image .
-        sudo mv target-fusedev/x86_64-unknown-linux-musl/release/nydusctl .
-        sudo mv target-virtiofs/x86_64-unknown-linux-musl/release/nydusd nydusd-virtiofs
+        declare -A rust_arch_map=( ["amd64"]="x86_64" ["arm64"]="aarch64")
+        arch=${rust_arch_map[${{ matrix.arch }}]}
+        cargo install cross
+        rustup component add rustfmt && rustup component add clippy
+        make -e ARCH=$arch -e CARGO=cross static-release
+        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
+        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
+        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusctl .
+        sudo mv target-virtiofs/$arch-unknown-linux-musl/release/nydusd nydusd-virtiofs
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
-        name: nydus-artifacts
+        name: nydus-artifacts-${{ matrix.arch }}
         path: |
           nydusd-fusedev
           nydusd-virtiofs
@@ -44,6 +53,9 @@ jobs:
           configs
   build-contrib:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     env:
       DOCKER: false
     steps:
@@ -60,7 +72,7 @@ jobs:
           ${{ runner.os }}-go
     - name: build contrib go components
       run: |
-        make all-contrib-static-release
+        make -e GOARCH=${{ matrix.arch }} all-contrib-static-release
         sudo mv contrib/ctr-remote/bin/ctr-remote .
         sudo mv contrib/docker-nydus-graphdriver/bin/nydus_graphdriver .
         sudo mv contrib/nydusify/cmd/nydusify .
@@ -68,7 +80,7 @@ jobs:
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
-        name: nydus-artifacts
+        name: nydus-artifacts-${{ matrix.arch }}
         path: |
           ctr-remote
           nydus_graphdriver
@@ -77,6 +89,9 @@ jobs:
           containerd-nydus-grpc
   upload-artifacts:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     needs: [build-nydus-rs, build-contrib]
     steps:
     - uses: actions/checkout@v2
@@ -89,13 +104,13 @@ jobs:
     - name: download artifacts
       uses: actions/download-artifact@v2
       with:
-        name: nydus-artifacts
+        name: nydus-artifacts-${{ matrix.arch }}
         path: nydus-static
     - name: upload artifacts
       if: ${{ github.event_name == 'push' }}
       run: |
         tag=$(echo $GITHUB_REF | cut -d/ -f3-)
-        tarball="nydus-static-$tag-x86_64.tgz"
+        tarball="nydus-static-$tag-linux-${{ matrix.arch }}.tgz"
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
         echo "tag=$tag" >> $GITHUB_ENV

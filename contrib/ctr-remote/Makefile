@@ -1,10 +1,11 @@
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
+GOARCH ?= amd64
 
 all:clear build
 
 .PHONY: build
 build:
-	GOOS=linux go build -v -o bin/ctr-remote ./cmd/main.go
+	GOOS=linux GOARCH=${GOARCH} go build -v -o bin/ctr-remote ./cmd/main.go
 
 .PHONY: clear
 clear:
@@ -12,7 +13,7 @@ clear:
 
 .PHONY: static-release
 static-release:
-	GOOS=linux go build -ldflags '-s -w -extldflags "-static"' -v -o bin/ctr-remote ./cmd/main.go
+	GOOS=linux GOARCH=${GOARCH} go build -ldflags '-s -w -extldflags "-static"' -v -o bin/ctr-remote ./cmd/main.go
 
 .PHONY: test
 test: build

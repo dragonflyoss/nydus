@@ -44,8 +44,6 @@ openssl = { version = "0.10.38", features = ["vendored"] }
 hyperlocal = "0.8.0"
 tokio = { version = "1.16.1", features = ["macros"] }
 hyper = "0.14.11"
-# pin openssl-src to bring in fix for RUSTSEC-2021-0098 and RUSTSEC-2022-0014
-openssl-src = "=111.18.0"
 # pin rand_core to bring in fix for RUSTSEC-2021-0023
 rand_core = "0.6.2"
 

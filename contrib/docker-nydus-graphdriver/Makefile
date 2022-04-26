@@ -1,10 +1,11 @@
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
+GOARCH ?= amd64
 
 all:clear build
 
 .PHONY: build
 build:
-	GOOS=linux go build -v -o bin/nydus_graphdriver .
+	GOOS=linux GOARCH=${GOARCH} go build -v -o bin/nydus_graphdriver .
 
 .PHONY: clear
 clear:
@@ -12,7 +13,7 @@ clear:
 
 .PHONY: static-release
 static-release:
-	GOOS=linux go build -ldflags '-s -w -extldflags "-static"' -v -o bin/nydus_graphdriver .
+	GOOS=linux GOARCH=${GOARCH} go build -ldflags '-s -w -extldflags "-static"' -v -o bin/nydus_graphdriver .
 
 .PHONY: test
 test: build
