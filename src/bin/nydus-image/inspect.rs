@@ -179,7 +179,7 @@ impl RafsInspector {
         let mut chunks = None;
 
         if inode.has_xattr() {
-            let xattr_header_offset = inode_offset + inode.size() as u32;
+            let xattr_header_offset = inode_offset + inode.inode_size() as u32;
             r.seek_to_offset(xattr_header_offset as u64)?;
             // TODO: implement `load()` for `OndiskXattr`
             let mut xattrs_header = RafsV5XAttrsTable::new();
@@ -187,7 +187,7 @@ impl RafsInspector {
             xattr_pairs_aligned_size = xattrs_header.aligned_size() as u32 + 8;
         }
 
-        let chunks_offset = inode_offset + inode.size() as u32 + xattr_pairs_aligned_size;
+        let chunks_offset = inode_offset + inode.inode_size() as u32 + xattr_pairs_aligned_size;
 
         r.seek_to_offset(chunks_offset as u64)?;
 
