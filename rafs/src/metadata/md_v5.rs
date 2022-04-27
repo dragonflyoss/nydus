@@ -200,13 +200,21 @@ impl RafsSuper {
                         break;
                     }
 
+                    if next_size == 0 {
+                        continue;
+                    }
+
                     let sz = std::cmp::min(window_size, next_size);
                     let amplified_io_vec = ni.alloc_bio_vecs(0, sz as usize, false)?;
                     debug_assert!(
                         !amplified_io_vec.is_empty() && !amplified_io_vec[0].bi_vec.is_empty()
                     );
-                    // caller should ensure that `window_base` won't overlap last chunk
-                    Self::merge_chunks_io(last_desc, &amplified_io_vec);
+                    if last_desc.has_same_blob(&amplified_io_vec[0]) {
+                        // caller should ensure that `window_base` won't overlap last chunk
+                        Self::merge_chunks_io(last_desc, &amplified_io_vec);
+                    } else {
+                        break;
+                    }
                     window_size -= sz;
                 }
             } else {
