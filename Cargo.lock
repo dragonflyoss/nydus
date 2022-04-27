@@ -517,9 +517,9 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.4.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c3be1c08fddde81df5502239ce031cca69529a444f259da3252dec67d99f324"
+checksum = "3d3b5f5152b9c1a058c9df5dbba0a549935e2bd115b52aebc3088b92c4da9bd3"
 dependencies = [
  "arc-swap 1.5.0",
  "bitflags",
@@ -530,7 +530,7 @@ dependencies = [
  "libc",
  "log",
  "mio 0.8.2",
- "nix 0.22.2",
+ "nix",
  "vhost",
  "virtio-queue",
  "vm-memory",
@@ -1082,19 +1082,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3bb9a13fa32bc5aeb64150cd3f32d6cf4c748f8f8a417cce5d2eb976a8370ba"
-dependencies = [
- "bitflags",
- "cc",
- "cfg-if 1.0.0",
- "libc",
- "memoffset",
-]
-
-[[package]]
-name = "nix"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f866317acbd3a240710c63f065ffb1e4fd466259045ccb504130b7f668f35c6"
@@ -1187,7 +1174,7 @@ dependencies = [
  "flexi_logger",
  "libc",
  "log",
- "nix 0.23.1",
+ "nix",
  "nydus-error",
  "regex",
  "serde",
@@ -1207,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rs"
-version = "2.0.0-rc.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1224,7 +1211,7 @@ dependencies = [
  "libc",
  "log",
  "mio 0.8.2",
- "nix 0.23.1",
+ "nix",
  "nydus-api",
  "nydus-app",
  "nydus-error",
@@ -1472,7 +1459,7 @@ dependencies = [
  "libc",
  "log",
  "lz4-sys",
- "nix 0.23.1",
+ "nix",
  "nydus-error",
  "nydus-utils",
  "serde",
@@ -1853,7 +1840,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "nix 0.23.1",
+ "nix",
  "nydus-error",
  "nydus-utils",
  "reqwest",
