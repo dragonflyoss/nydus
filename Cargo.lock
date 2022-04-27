@@ -1217,7 +1217,6 @@ dependencies = [
  "nydus-error",
  "nydus-utils",
  "openssl",
- "openssl-src",
  "rafs",
  "rand",
  "rand_core",
