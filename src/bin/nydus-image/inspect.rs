@@ -632,7 +632,7 @@ Blocks:             {blocks}"#,
     Blob ID:            {blob_id}
     Readahead Offset:   {readahead_offset}
     Readahead Size:     {readahead_size}
-    "#,
+"#,
                             blob_id = b.blob_id(),
                             readahead_offset = b.readahead_offset(),
                             readahead_size = b.readahead_size(),
@@ -640,9 +640,9 @@ Blocks:             {blocks}"#,
 
                         if let Some(et) = extended {
                             print!(
-                                r#"Cache Size:         {cache_size}
+                                r#"    Cache Size:         {cache_size}
     Compressed Size:    {compressed_size}
-    "#,
+"#,
                                 cache_size = et.entries[i].uncompressed_size,
                                 compressed_size = et.entries[i].compressed_size
                             )
@@ -743,7 +743,10 @@ impl Executor {
             .strip_suffix("\n")
             .unwrap_or(&input)
             .split_ascii_whitespace();
-        let cmd = raw.next().unwrap();
+        let cmd = match raw.next() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
         let args = raw.next().map(|a| a.trim());
 
         debug!("execute {:?} {:?}", cmd, args);
