@@ -28,7 +28,7 @@ sha-1 = { version = "0.9.1", optional = true }
 spmc = "0.3.0"
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.7.0"
-fuse-backend-rs = { version = "0.8.0" }
+fuse-backend-rs = { version = "0.9.0" }
 
 nydus-utils = { path = "../utils" }
 nydus-error = { path = "../error" }
