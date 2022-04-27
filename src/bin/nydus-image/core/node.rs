@@ -1207,7 +1207,7 @@ impl InodeWrapper {
         } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapper>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
         } else {
-            panic!("unknown chunk information struct");
+            panic!("unknown inode information struct");
         }
     }
 
