@@ -1095,7 +1095,7 @@ pub mod v5 {
     ///
     /// Rafs filesystem stores filesystem metadata in a single metadata blob, and stores file
     /// content in zero or more data blobs, which are separated from the metadata blob.
-    /// A `Rafsv5ChunkInfo` object describes how a Rafs v5 chunk is located within a data blob.
+    /// A `BlobV5ChunkInfo` object describes how a Rafs v5 chunk is located within a data blob.
     /// It is abstracted because Rafs have several ways to load metadata from metadata blob.
     pub trait BlobV5ChunkInfo: BlobChunkInfo {
         /// Get the chunk index in the Rafs v5 metadata's chunk info array.
