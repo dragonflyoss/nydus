@@ -600,8 +600,9 @@ impl Node {
                         entry.set_name_offset(nameoff as u16);
                         dir_data.extend(entry.as_ref());
                         entry_names.push(*name);
-
-                        nameoff += name.len() as u64;
+                        // Use length in byte, instead of length in character.
+                        // Because some characters could occupy more than one byte.
+                        nameoff += name.as_bytes().len() as u64;
                     }
 
                     for name in entry_names.iter() {
@@ -1073,13 +1074,16 @@ impl Node {
 
     pub(crate) fn get_dir_d_size(&self, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
-
-        let mut d_size: u64 =
-            (1 + size_of::<RafsV6Dirent>() + 2 + size_of::<RafsV6Dirent>()) as u64;
+        // Use length in byte, instead of length in character.
+        // Because some characters could occupy more than one byte.
+        let mut d_size: u64 = (".".as_bytes().len()
+            + size_of::<RafsV6Dirent>()
+            + "..".as_bytes().len()
+            + size_of::<RafsV6Dirent>()) as u64;
 
         // Safe as we have check tree above.
         for child in tree.children.iter() {
-            let len = child.node.name().len() + size_of::<RafsV6Dirent>();
+            let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
             // erofs disk format requires dirent to be aligned with 4096.
             if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
                 d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE) * EROFS_BLOCK_SIZE;
