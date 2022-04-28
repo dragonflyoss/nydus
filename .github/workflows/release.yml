@@ -116,6 +116,7 @@ jobs:
         echo "tag=$tag" >> $GITHUB_ENV
         echo "tarball=$tarball" >> $GITHUB_ENV
     - name: Release
+      if: ${{ github.event_name == 'push' }}
       uses: softprops/action-gh-release@v1
       with:
         name: "Nydus Image Service ${{ env.tag }}"
