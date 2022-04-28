@@ -560,7 +560,13 @@ impl Bootstrap {
             (0, 0)
         };
 
-        let orig_meta_addr = bootstrap_ctx.nodes[0].offset;
+        // Make the superblock's meta_blkaddr one block ahead of the inode table,
+        // to avoid using 0 as root nid.
+        // inode offset = meta_blkaddr * block_size + 32 * nid
+        // When using nid 0 as root nid,
+        // the root directory will not be shown by glibc's getdents/readdir.
+        // Because in some OS, ino == 0 represents corresponding file is deleted.
+        let orig_meta_addr = bootstrap_ctx.nodes[0].offset - EROFS_BLOCK_SIZE;
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
