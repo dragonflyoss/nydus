@@ -21,8 +21,8 @@ jobs:
       - name: Install Nydus binaries
         run: |
           NYDUS_VERSION=$(curl --silent "https://api.github.com/repos/dragonflyoss/image-service/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
-          wget https://github.com/dragonflyoss/image-service/releases/download/$NYDUS_VERSION/nydus-static-$NYDUS_VERSION-x86_64.tgz
-          tar xzf nydus-static-$NYDUS_VERSION-x86_64.tgz
+          wget https://github.com/dragonflyoss/image-service/releases/download/$NYDUS_VERSION/nydus-static-$NYDUS_VERSION-linux-amd64.tgz
+          tar xzf nydus-static-$NYDUS_VERSION-linux-amd64.tgz
           sudo cp nydus-static/nydusify nydus-static/nydus-image /usr/local/bin/
       - name: Log in to the container registry
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
