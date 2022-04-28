@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -175,7 +176,10 @@ impl ChunkSet {
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
         Blob::new().dump_meta_data(new_blob_ctx)?;
-        new_blob_ctx.finalize()?;
+        let blob_id = new_blob_ctx.blob_id();
+        if let Some(writer) = &mut new_blob_ctx.writer {
+            writer.finalize(blob_id)?;
+        }
         Ok(chunks_change)
     }
 }
@@ -519,7 +523,8 @@ impl BlobCompactor {
                 }
                 State::Rebuild(cs) => {
                     let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
-                    let mut blob_ctx = BlobContext::new(String::from(""), Some(blob_storage), 0)?;
+                    let mut blob_ctx =
+                        BlobContext::new(String::from(""), Some(blob_storage), 0, false)?;
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
                     let new_chunks = cs.dump(
@@ -572,7 +577,7 @@ impl BlobCompactor {
             false,
         );
         let mut bootstrap_mgr =
-            BootstrapManager::new(ArtifactStorage::SingleFile(d_bootstrap), None);
+            BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
         let mut ori_blob_mgr = BlobManager::new();
         ori_blob_mgr.from_blob_table(rs.superblock.get_blob_infos());

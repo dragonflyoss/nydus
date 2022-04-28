@@ -496,7 +496,7 @@ impl Bootstrap {
 
         bootstrap_ctx
             .writer
-            .finalize(Some(bootstrap_ctx.name.as_str()))?;
+            .finalize(Some(bootstrap_ctx.name.to_string()))?;
 
         Ok(())
     }
@@ -724,7 +724,7 @@ impl Bootstrap {
 
         bootstrap_ctx
             .writer
-            .finalize(Some(bootstrap_ctx.name.as_str()))?;
+            .finalize(Some(bootstrap_ctx.name.to_string()))?;
 
         Ok(())
     }

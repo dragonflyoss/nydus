@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 
 use anyhow::{Context, Result};

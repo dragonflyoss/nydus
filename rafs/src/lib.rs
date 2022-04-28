@@ -147,8 +147,13 @@ pub trait RafsIoWrite: Write + Seek + 'static {
     }
 
     /// Do some finalization works.
-    fn finalize(&mut self, _name: Option<&str>) -> anyhow::Result<()> {
+    fn finalize(&mut self, _name: Option<String>) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Get all data has been written.
+    fn data(&self) -> &[u8] {
+        unimplemented!();
     }
 }
 

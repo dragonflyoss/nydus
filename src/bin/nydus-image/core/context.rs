@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
@@ -113,15 +114,13 @@ impl ArtifactStorage {
 /// data to a byte slice in memory.
 pub struct ArtifactMemoryWriter(Cursor<Vec<u8>>);
 
-impl ArtifactMemoryWriter {
-    pub fn data(&self) -> &[u8] {
-        self.0.get_ref()
-    }
-}
-
 impl RafsIoWrite for ArtifactMemoryWriter {
     fn as_any(&self) -> &dyn Any {
         &self.0
+    }
+
+    fn data(&self) -> &[u8] {
+        self.0.get_ref()
     }
 }
 
@@ -148,7 +147,7 @@ impl RafsIoWrite for ArtifactFileWriter {
         &self.0
     }
 
-    fn finalize(&mut self, name: Option<&str>) -> Result<()> {
+    fn finalize(&mut self, name: Option<String>) -> Result<()> {
         self.0.finalize(name)
     }
 }
@@ -193,15 +192,19 @@ impl std::io::Write for ArtifactWriter {
 }
 
 impl ArtifactWriter {
-    pub fn new(storage: ArtifactStorage) -> Result<Self> {
+    pub fn new(storage: ArtifactStorage, fifo: bool) -> Result<Self> {
         match storage {
             ArtifactStorage::SingleFile(ref p) => {
+                let mut opener = &mut OpenOptions::new();
+                opener = opener.write(true).create(true);
+                // Make it as the writer side of FIFO file, no truncate flag because it has
+                // been created by the reader side.
+                if !fifo {
+                    opener = opener.truncate(true);
+                }
                 let b = BufWriter::with_capacity(
                     BUF_WRITER_CAPACITY,
-                    OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
+                    opener
                         .open(p)
                         .with_context(|| format!("failed to open file {:?}", p))?,
                 );
@@ -228,15 +231,35 @@ impl ArtifactWriter {
         }
     }
 
-    pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        self.file.write_all(buf).map_err(|e| anyhow!(e))
+    // The `inline-bootstrap` option merges the blob and bootstrap into one
+    // file. We need some header to index the location of the blob and bootstrap,
+    // write_tar_header uses tar header that arranges the data as follows:
+
+    // blob_data | blob_tar_header | bootstrap_data | boostrap_tar_header
+
+    // This is a tar-like structure, except that we put the tar header after the
+    // data. The advantage is that we do not need to determine the size of the data
+    // first, so that we can write the blob data by stream without seek to improve
+    // the performance of the blob dump by using fifo, if we need to read the bootstrap
+    // data quickly, first need to read the 512 bytes tar header from the end of blob
+    // file first, and then seek offset to read bootstrap data.
+    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<()> {
+        let mut header = Header::new_gnu();
+        header.set_path(Path::new(name))?;
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(size);
+        // The checksum must be set to ensure that the tar reader implementation
+        // in golang can correctly parse the header.
+        header.set_cksum();
+        self.write_all(header.as_bytes())?;
+        Ok(())
     }
 
-    pub fn pos(&mut self) -> Result<u64> {
+    pub fn pos(&self) -> Result<u64> {
         Ok(self.pos as u64)
     }
 
-    pub fn finalize(&mut self, name: Option<&str>) -> Result<()> {
+    pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
         self.file.flush()?;
 
         if let Some(n) = name {
@@ -338,9 +361,10 @@ impl BlobContext {
         blob_id: String,
         blob_stor: Option<ArtifactStorage>,
         blob_offset: u64,
+        fifo: bool,
     ) -> Result<Self> {
         let writer = if let Some(blob_stor) = blob_stor {
-            Some(ArtifactWriter::new(blob_stor)?)
+            Some(ArtifactWriter::new(blob_stor, fifo)?)
         } else {
             None
         };
@@ -467,18 +491,12 @@ impl BlobContext {
         }
     }
 
-    pub fn finalize(&mut self) -> Result<()> {
-        let blob_id = if self.compressed_blob_size > 0 {
-            Some(self.blob_id.as_str())
+    pub fn blob_id(&mut self) -> Option<String> {
+        if self.compressed_blob_size > 0 {
+            Some(self.blob_id.to_string())
         } else {
             None
-        };
-
-        if let Some(mut writer) = self.writer.take() {
-            writer.finalize(blob_id)?;
         }
-
-        Ok(())
     }
 }
 
@@ -549,10 +567,6 @@ impl BlobManager {
 
     pub fn get_last_blob(&self) -> Option<&BlobContext> {
         self.blobs.last()
-    }
-
-    pub fn get_last_blob_mut(&mut self) -> Option<&mut BlobContext> {
-        self.blobs.last_mut()
     }
 
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
@@ -668,11 +682,12 @@ pub struct BootstrapContext {
 }
 
 impl BootstrapContext {
-    pub fn new(storage: ArtifactStorage, layered: bool, inline_bootstrap: bool) -> Result<Self> {
-        let writer = if inline_bootstrap {
-            Box::new(ArtifactMemoryWriter(Cursor::new(Vec::new()))) as Box<dyn RafsIoWrite>
+    pub fn new(storage: Option<ArtifactStorage>, layered: bool, fifo: bool) -> Result<Self> {
+        let writer = if let Some(storage) = storage {
+            Box::new(ArtifactFileWriter(ArtifactWriter::new(storage, fifo)?))
+                as Box<dyn RafsIoWrite>
         } else {
-            Box::new(ArtifactFileWriter(ArtifactWriter::new(storage)?)) as Box<dyn RafsIoWrite>
+            Box::new(ArtifactMemoryWriter(Cursor::new(Vec::new()))) as Box<dyn RafsIoWrite>
         };
         Ok(Self {
             layered,
@@ -735,7 +750,7 @@ impl BootstrapContext {
 pub struct BootstrapManager {
     /// Parent bootstrap file reader.
     pub f_parent_bootstrap: Option<RafsIoReader>,
-    bootstrap_storage: ArtifactStorage,
+    bootstrap_storage: Option<ArtifactStorage>,
     /// The vector index will be as the layer index.
     /// We can get the bootstrap of a layer by using:
     /// `self.bootstraps[layer_index];`
@@ -744,7 +759,7 @@ pub struct BootstrapManager {
 
 impl BootstrapManager {
     pub fn new(
-        bootstrap_storage: ArtifactStorage,
+        bootstrap_storage: Option<ArtifactStorage>,
         f_parent_bootstrap: Option<RafsIoReader>,
     ) -> Self {
         Self {
@@ -754,11 +769,11 @@ impl BootstrapManager {
         }
     }
 
-    pub fn create_ctx(&self, inline_bootstrap: bool) -> Result<BootstrapContext> {
+    pub fn create_ctx(&self, fifo: bool) -> Result<BootstrapContext> {
         BootstrapContext::new(
             self.bootstrap_storage.clone(),
             self.f_parent_bootstrap.is_some(),
-            inline_bootstrap,
+            fifo,
         )
     }
 
@@ -774,8 +789,8 @@ impl BootstrapManager {
         self.bootstraps.last().map(|b| b.name.to_owned())
     }
 
-    pub fn get_bootstrap_path(&self, name: &str) -> PathBuf {
-        self.bootstrap_storage.get_path(name)
+    pub fn get_bootstrap_path(&self, name: &str) -> Option<PathBuf> {
+        self.bootstrap_storage.as_ref().map(|s| s.get_path(name))
     }
 }
 

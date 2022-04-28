@@ -12,11 +12,14 @@ use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
-    ArtifactMemoryWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager,
-    BuildContext, BuildOutput, RafsVersion,
+    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    RafsVersion,
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
+
+const TAR_BLOB_NAME: &str = "image.blob";
+const TAR_BOOTSTRAP_NAME: &str = "image.boot";
 
 struct FilesystemTreeBuilder {}
 
@@ -139,6 +142,7 @@ impl Builder for DirectoryBuilder {
             ctx.blob_id.clone(),
             ctx.blob_storage.clone(),
             ctx.blob_offset,
+            ctx.inline_bootstrap,
         )?;
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
@@ -159,12 +163,19 @@ impl Builder for DirectoryBuilder {
             },
             "dump_blob"
         )?;
-        if !ctx.inline_bootstrap {
-            blob_ctx.finalize()?;
-        }
 
-        // Add new blob to blob table
+        // Safe to unwrap because we ensured the writer exists.
+        let mut blob_writer = blob_ctx.writer.take().unwrap();
+        let blob_id = blob_ctx.blob_id();
         if blob_exists {
+            if ctx.inline_bootstrap {
+                if let Some(blob_writer) = &mut blob_ctx.writer {
+                    blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
+                }
+            } else {
+                blob_writer.finalize(blob_id.clone())?;
+            }
+            // Add new blob to blob table.
             blob_mgr.add(blob_ctx);
         }
 
@@ -173,20 +184,10 @@ impl Builder for DirectoryBuilder {
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
 
         if ctx.inline_bootstrap {
-            // Safe to unwrap because we ensured blob_ctx exists.
-            let blob_ctx = blob_mgr.get_last_blob_mut().unwrap();
-            if let Some(bootstrap_writer) = bootstrap_ctx
-                .writer
-                .as_any()
-                .downcast_ref::<ArtifactMemoryWriter>()
-            {
-                blob_ctx
-                    .writer
-                    .as_mut()
-                    .unwrap()
-                    .write(bootstrap_writer.data())?;
-            }
-            blob_ctx.finalize()?;
+            let bootstrap_data = bootstrap_ctx.writer.data();
+            blob_writer.write_all(bootstrap_data)?;
+            blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, bootstrap_data.len() as u64)?;
+            blob_writer.finalize(blob_id)?;
         }
 
         bootstrap_mgr.add(bootstrap_ctx);

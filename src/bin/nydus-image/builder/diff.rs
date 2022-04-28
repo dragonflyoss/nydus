@@ -305,7 +305,8 @@ fn dump_blob(
     blob_nodes: &mut Vec<Node>,
     chunk_dict: Arc<dyn ChunkDict>,
 ) -> Result<(Option<BlobContext>, ChunkMap)> {
-    let mut blob_ctx = BlobContext::new(blob_id, blob_storage, ctx.blob_offset)?;
+    let mut blob_ctx =
+        BlobContext::new(blob_id, blob_storage, ctx.blob_offset, ctx.inline_bootstrap)?;
     blob_ctx.set_chunk_dict(chunk_dict);
     blob_ctx.set_chunk_size(ctx.chunk_size);
     blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
@@ -324,7 +325,10 @@ fn dump_blob(
         blob_nodes,
         &mut chunk_cache,
     )? {
-        blob_ctx.finalize()?;
+        let blob_id = blob_ctx.blob_id();
+        if let Some(writer) = &mut blob_ctx.writer {
+            writer.finalize(blob_id)?;
+        }
         Some(blob_ctx)
     } else {
         None

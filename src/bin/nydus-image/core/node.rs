@@ -8,7 +8,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
-use std::io::{Read, SeekFrom};
+use std::io::{Read, SeekFrom, Write};
 use std::mem::size_of;
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
@@ -1860,7 +1860,7 @@ mod tests {
 
         let bootstrap_path = TempFile::new().unwrap();
         let storage = ArtifactStorage::SingleFile(bootstrap_path.as_path().to_path_buf());
-        let mut bootstrap_ctx = BootstrapContext::new(storage, false, false).unwrap();
+        let mut bootstrap_ctx = BootstrapContext::new(Some(storage), false, false).unwrap();
         bootstrap_ctx.offset = 0;
 
         // reg file.
