@@ -17,6 +17,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
+
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::compress;
@@ -744,27 +746,40 @@ impl RafsSuper {
         Ok(())
     }
 
-    pub fn walk_inodes(
+    /// Walkthrough the file tree rooted at ino, calling cb for each file or directory
+    /// in the tree by DFS order, including ino, please ensure ino is a directory.
+    pub fn walk_dir(
         &self,
         ino: Inode,
         parent: Option<&PathBuf>,
         cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let inode = self.get_inode(ino, false)?;
+        if !inode.is_dir() {
+            bail!("inode {} is not a directory", ino);
+        }
+        self.walk_dir_inner(inode.as_ref(), parent, cb)
+    }
+
+    fn walk_dir_inner(
+        &self,
+        inode: &dyn RafsInode,
+        parent: Option<&PathBuf>,
+        cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         let path = if let Some(parent) = parent {
             parent.join(inode.name())
         } else {
             PathBuf::from("/")
         };
-        cb(inode.as_ref(), &path)?;
+        cb(inode, &path)?;
         if !inode.is_dir() {
             return Ok(());
         }
         let child_count = inode.get_child_count();
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
-            let child_ino = child.ino();
-            self.walk_inodes(child_ino, Some(&path), cb)?;
+            self.walk_dir_inner(child.as_ref(), Some(&path), cb)?;
         }
         Ok(())
     }

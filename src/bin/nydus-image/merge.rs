@@ -127,8 +127,8 @@ impl Merger {
 
             if let Some(tree) = &mut tree {
                 let mut nodes = Vec::new();
-                rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
-                                                            path: &Path|
+                rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
+                                                         path: &Path|
                  -> Result<()> {
                     let mut node = MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
                         .context(format!("parse node from bootstrap {:?}", bootstrap_path))?;
