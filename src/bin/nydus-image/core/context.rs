@@ -5,7 +5,7 @@
 //! Struct to maintain context information for the image builder.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vmm_sys_util::tempfile::TempFile;
 
-use nydus_utils::{compress, digest, div_round_up};
+use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 use rafs::metadata::layout::v5::RafsV5BlobTable;
-use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE};
+use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::RafsSuperFlags;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
@@ -610,6 +610,8 @@ pub struct BootstrapContext {
     pub blobs: Vec<BuildOutputBlob>,
     /// Bootstrap file writer.
     storage: ArtifactStorage,
+    /// Not fully used blocks
+    pub available_blocks: Vec<VecDeque<u64>>,
 }
 
 impl BootstrapContext {
@@ -622,6 +624,10 @@ impl BootstrapContext {
             name: String::new(),
             blobs: Vec::new(),
             storage,
+            available_blocks: vec![
+                VecDeque::new();
+                EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
+            ],
         })
     }
 
@@ -631,8 +637,42 @@ impl BootstrapContext {
         }
     }
 
+    // Only used to allocate space for metadata(inode / inode + inline data).
+    // Try to find an used block with no less than `size` space left.
+    // If found it, return the offset where we can store data.
+    // If not, return 0.
+    pub fn allocate_available_block(&mut self, size: u64) -> u64 {
+        if size >= EROFS_BLOCK_SIZE {
+            return 0;
+        }
+
+        let min_idx = div_round_up(size, EROFS_INODE_SLOT_SIZE as u64) as usize;
+        let max_idx = div_round_up(EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE as u64) as usize;
+
+        for idx in min_idx..max_idx {
+            let blocks = &mut self.available_blocks[idx];
+            if let Some(mut offset) = blocks.pop_front() {
+                offset += EROFS_BLOCK_SIZE - (idx * EROFS_INODE_SLOT_SIZE) as u64;
+                self.append_available_block(offset + (min_idx * EROFS_INODE_SLOT_SIZE) as u64);
+                return offset;
+            }
+        }
+
+        0
+    }
+
     pub fn create_writer(&self) -> Result<ArtifactBufferWriter> {
         ArtifactBufferWriter::new(self.storage.clone())
+    }
+
+    // Append the block that `offset` belongs to corresponding deque.
+    pub fn append_available_block(&mut self, offset: u64) {
+        if offset % EROFS_BLOCK_SIZE == 0 {
+            return;
+        }
+        let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
+        let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
+        self.available_blocks[idx].push_back(round_down_4k(offset));
     }
 }
 

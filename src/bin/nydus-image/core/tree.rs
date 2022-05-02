@@ -357,6 +357,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             v6_datalayout: 0,
             v6_compact_inode: false,
             v6_force_extended_inode: false,
+            dirents_offset: 0,
         })
     }
 }
