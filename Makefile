@@ -4,6 +4,7 @@ TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
 ARCH ?= $(shell uname -p)
+OS ?= linux
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
@@ -56,14 +57,16 @@ endef
 	${CARGO} fmt -- --check
 
 .musl_target:
-	$(eval CARGO_BUILD_FLAGS += --target ${ARCH}-unknown-linux-musl)
+	$(eval CARGO_BUILD_FLAGS += --target ${ARCH}-unknown-${OS}-musl)
 
 # Targets that are exposed to developers and users.
 build: .format fusedev virtiofs
-release: .format .release_version fusedev virtiofs
-static-release: .musl_target .format .release_version fusedev virtiofs
+release: fusedev-release virtiofs-release
 fusedev-release: .format .release_version fusedev
 virtiofs-release: .format .release_version virtiofs
+static-release: static-fusedev static-virtiofs
+static-fusedev: .musl_target .format .release_version fusedev
+static-virtiofs: .musl_target .format .release_version virtiofs
 
 virtiofs:
 	# TODO: switch to --out-dir when it moves to stable
@@ -87,6 +90,10 @@ ut:
 # If virtiofs test must be performed, only run binary part since other package is not affected by feature - virtiofs
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
 	RUST_BACKTRACE=1 ${CARGO} test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
+
+macos-fusedev:
+	# nydus-cached/nydus-image does not support macos yet
+	${CARGO} build --target ${ARCH}-apple-darwin --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd
 
 macos-ut:
 	${CARGO} clippy --target-dir ${current_dir}/target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings
