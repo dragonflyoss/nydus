@@ -277,7 +277,10 @@ impl BlobCacheMgr {
                 cache_compressed: false,
                 cache_config: entry.blob_config.cache_config.clone(),
                 cache_validate: false,
-                prefetch_config: Default::default(),
+                prefetch_config: match serde_json::from_value(entry.fs_prefetch.clone()) {
+                    Ok(fs_prefetch) => fs_prefetch,
+                    Err(_e) => Default::default(),
+                },
             },
         });
 

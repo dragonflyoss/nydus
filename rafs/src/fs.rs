@@ -58,7 +58,7 @@ fn default_threads_count() -> usize {
     8
 }
 
-fn default_merging_size() -> usize {
+pub fn default_merging_size() -> usize {
     128 * 1024
 }
 
