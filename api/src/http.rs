@@ -95,6 +95,8 @@ pub struct BlobCacheEntry {
     /// Domain id for the blob, which is used to group cached blobs into management domains.
     #[serde(default)]
     pub domain_id: String,
+    #[serde(default)]
+    pub fs_prefetch: Value,
 }
 
 /// Configuration information for a list of cached blob objects.

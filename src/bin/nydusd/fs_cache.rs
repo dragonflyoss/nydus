@@ -4,6 +4,7 @@
 
 //! Handler to cooperate with Linux fscache subsystem for blob cache.
 
+use std::cmp;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{File, OpenOptions};
@@ -18,6 +19,7 @@ use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use storage::cache::BlobCache;
+use storage::device::BlobPrefetchRequest;
 use storage::factory::BLOB_FACTORY;
 
 use crate::blob_cache::{
@@ -416,14 +418,56 @@ impl FsCacheHandler {
             match self.create_data_blob_object(&config, msg.fd) {
                 Err(s) => format!("copen {},{}", hdr.msg_id, s),
                 Ok((blob, blob_size)) => {
-                    state
-                        .id_to_object_map
-                        .insert(hdr.object_id, (FsCacheObject::DataBlob(blob), msg.fd));
+                    state.id_to_object_map.insert(
+                        hdr.object_id,
+                        (FsCacheObject::DataBlob(blob.clone()), msg.fd),
+                    );
                     state.id_to_config_map.insert(hdr.object_id, config.clone());
+                    let _ = self.do_prefetch(&config, blob);
                     format!("copen {},{}", hdr.msg_id, blob_size)
                 }
             }
         }
+    }
+
+    pub fn do_prefetch(&self, config: &BlobCacheConfigDataBlob, blob: Arc<dyn BlobCache>) {
+        let blob_info = config.blob_info().deref();
+        let factory_config = config.factory_config().deref();
+        if !factory_config.cache.prefetch_config.enable {
+            return;
+        }
+        let size = match factory_config
+            .cache
+            .prefetch_config
+            .merging_size
+            .checked_next_power_of_two()
+        {
+            None => rafs::fs::default_merging_size() as u64,
+            Some(1) => rafs::fs::default_merging_size() as u64,
+            Some(s) => s as u64,
+        };
+        let blob_size = blob_info.compressed_size();
+        let count = (blob_size + size - 1) / size;
+        let mut blob_req = Vec::with_capacity(count as usize);
+        let mut pre_offset = 0u64;
+        for _i in 0..count {
+            blob_req.push(BlobPrefetchRequest {
+                blob_id: blob_info.blob_id().to_owned(),
+                offset: pre_offset,
+                len: cmp::min(size, blob_size - pre_offset),
+            });
+            pre_offset = pre_offset + size;
+            if pre_offset > blob_size {
+                break;
+            }
+        }
+        info!("blob prefetch start");
+        let _ = std::thread::spawn(move || {
+            let _ = blob
+                .prefetch(blob.clone(), &blob_req, &[])
+                .map_err(|_e| eio!("failed to prefetch blob data"));
+            let _ = blob.stop_prefetch();
+        });
     }
 
     /// The `fscache` factory essentially creates a namespace for blob objects cached by the

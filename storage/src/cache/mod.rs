@@ -117,7 +117,7 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
 }
 
 /// Configuration information for blob data prefetching.
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct BlobPrefetchConfig {
     /// Whether to enable blob data prefetching.
     pub enable: bool,
