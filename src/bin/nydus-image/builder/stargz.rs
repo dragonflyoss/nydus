@@ -577,7 +577,12 @@ impl StargzBuilder {
         let mut decompressed_blob_size = 0u64;
         let mut compressed_blob_size = 0u64;
         let blob_index = blob_mgr.alloc_index()?;
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_storage.clone(), 0)?;
+        let mut blob_ctx = BlobContext::new(
+            ctx.blob_id.clone(),
+            ctx.blob_storage.clone(),
+            0,
+            ctx.inline_bootstrap,
+        )?;
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
 
@@ -633,7 +638,7 @@ impl Builder for StargzBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         // Build tree from source
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut tree = self.build_tree_from_index(ctx, layer_idx)?;

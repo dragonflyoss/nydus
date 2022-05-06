@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::fs::DirEntry;
+use std::io::Write;
 
 use anyhow::{Context, Result};
 
@@ -16,6 +17,9 @@ use crate::core::context::{
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
+
+const TAR_BLOB_NAME: &str = "image.blob";
+const TAR_BOOTSTRAP_NAME: &str = "image.boot";
 
 struct FilesystemTreeBuilder {}
 
@@ -116,7 +120,7 @@ impl Builder for DirectoryBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         // Scan source directory to build upper layer tree.
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx, layer_idx)?;
@@ -138,6 +142,7 @@ impl Builder for DirectoryBuilder {
             ctx.blob_id.clone(),
             ctx.blob_storage.clone(),
             ctx.blob_offset,
+            ctx.inline_bootstrap,
         )?;
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
@@ -159,14 +164,31 @@ impl Builder for DirectoryBuilder {
             "dump_blob"
         )?;
 
-        // Add new blob to blob table
+        // Safe to unwrap because we ensured the writer exists.
+        let mut blob_writer = blob_ctx.writer.take().unwrap();
+        let blob_id = blob_ctx.blob_id();
         if blob_exists {
+            if ctx.inline_bootstrap {
+                if let Some(blob_writer) = &mut blob_ctx.writer {
+                    blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
+                }
+            } else {
+                blob_writer.finalize(blob_id.clone())?;
+            }
+            // Add new blob to blob table.
             blob_mgr.add(blob_ctx);
         }
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
+
+        if ctx.inline_bootstrap {
+            let bootstrap_data = bootstrap_ctx.writer.data();
+            blob_writer.write_all(bootstrap_data)?;
+            blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, bootstrap_data.len() as u64)?;
+            blob_writer.finalize(blob_id)?;
+        }
 
         bootstrap_mgr.add(bootstrap_ctx);
         BuildOutput::new(&blob_mgr, &bootstrap_mgr)

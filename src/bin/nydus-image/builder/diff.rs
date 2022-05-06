@@ -305,7 +305,8 @@ fn dump_blob(
     blob_nodes: &mut Vec<Node>,
     chunk_dict: Arc<dyn ChunkDict>,
 ) -> Result<(Option<BlobContext>, ChunkMap)> {
-    let mut blob_ctx = BlobContext::new(blob_id, blob_storage, ctx.blob_offset)?;
+    let mut blob_ctx =
+        BlobContext::new(blob_id, blob_storage, ctx.blob_offset, ctx.inline_bootstrap)?;
     blob_ctx.set_chunk_dict(chunk_dict);
     blob_ctx.set_chunk_size(ctx.chunk_size);
     blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
@@ -324,6 +325,10 @@ fn dump_blob(
         blob_nodes,
         &mut chunk_cache,
     )? {
+        let blob_id = blob_ctx.blob_id();
+        if let Some(writer) = &mut blob_ctx.writer {
+            writer.finalize(blob_id)?;
+        }
         Some(blob_ctx)
     } else {
         None
@@ -739,7 +744,7 @@ impl DiffBuilder {
                         .insert_blob(ChunkSource::Build, idx as u32, blob_ctx);
                 }
             }
-            let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+            let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
             bootstrap_ctx.name = format!("bootstrap-{}", idx);
             self.build_bootstrap(ctx, &mut bootstrap_ctx, idx as u32, paths[idx].clone())?;
             bootstrap_mgr.add(bootstrap_ctx);
@@ -792,7 +797,7 @@ impl DiffBuilder {
         for (snapshot_idx, worker) in workers.into_iter().enumerate() {
             // FIXME: the behavior of build with diff is not working.
             let (_, _) = worker.join().expect("panic on diff build")?;
-            let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+            let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
             let snapshot_path = paths[snapshot_idx + 1].clone().unwrap();
             self.build_bootstrap(ctx, &mut bootstrap_ctx, snapshot_idx as u32, snapshot_path)?;
             todo!();

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 
 use anyhow::{Context, Result};
@@ -74,7 +75,6 @@ impl Blob {
         }
 
         blob_ctx.set_blob_readahead_size(ctx);
-        blob_ctx.flush()?;
 
         let blob_exists = blob_ctx.compressed_blob_size > 0;
 
@@ -87,7 +87,7 @@ impl Blob {
         }
 
         if let Some(writer) = &mut blob_ctx.writer {
-            let pos = writer.get_pos()?;
+            let pos = writer.pos()?;
             let data = unsafe {
                 std::slice::from_raw_parts(
                     blob_ctx.blob_meta_info.as_ptr() as *const u8,

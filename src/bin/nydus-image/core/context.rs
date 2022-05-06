@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Cursor, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
@@ -109,25 +110,80 @@ impl ArtifactStorage {
     }
 }
 
-/// ArtifactBufferWriter provides a writer to allow writing bootstrap
+/// ArtifactMemoryWriter provides a writer to allow writing bootstrap
+/// data to a byte slice in memory.
+pub struct ArtifactMemoryWriter(Cursor<Vec<u8>>);
+
+impl RafsIoWrite for ArtifactMemoryWriter {
+    fn as_any(&self) -> &dyn Any {
+        &self.0
+    }
+
+    fn data(&self) -> &[u8] {
+        self.0.get_ref()
+    }
+}
+
+impl std::io::Seek for ArtifactMemoryWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl std::io::Write for ArtifactMemoryWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+pub struct ArtifactFileWriter(ArtifactWriter);
+
+impl RafsIoWrite for ArtifactFileWriter {
+    fn as_any(&self) -> &dyn Any {
+        &self.0
+    }
+
+    fn finalize(&mut self, name: Option<String>) -> Result<()> {
+        self.0.finalize(name)
+    }
+}
+
+impl std::io::Seek for ArtifactFileWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.file.seek(pos)
+    }
+}
+
+impl std::io::Write for ArtifactFileWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// ArtifactWriter provides a writer to allow writing bootstrap
 /// or blob data to a single file or in a directory.
-pub struct ArtifactBufferWriter {
-    pub file: BufWriter<File>,
+pub struct ArtifactWriter {
+    pos: usize,
+    file: BufWriter<File>,
     storage: ArtifactStorage,
     // Keep this because tmp file will be removed automatically when it is dropped.
     // But we will rename/link the tmp file before it is removed.
     tmp_file: Option<TempFile>,
 }
 
-impl RafsIoWrite for ArtifactBufferWriter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl std::io::Write for ArtifactBufferWriter {
+impl std::io::Write for ArtifactWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.file.write(bytes)
+        let n = self.file.write(bytes)?;
+        self.pos += n;
+        Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -135,26 +191,25 @@ impl std::io::Write for ArtifactBufferWriter {
     }
 }
 
-impl std::io::Seek for ArtifactBufferWriter {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(pos)
-    }
-}
-
-impl ArtifactBufferWriter {
-    pub fn new(storage: ArtifactStorage) -> Result<Self> {
+impl ArtifactWriter {
+    pub fn new(storage: ArtifactStorage, fifo: bool) -> Result<Self> {
         match storage {
             ArtifactStorage::SingleFile(ref p) => {
+                let mut opener = &mut OpenOptions::new();
+                opener = opener.write(true).create(true);
+                // Make it as the writer side of FIFO file, no truncate flag because it has
+                // been created by the reader side.
+                if !fifo {
+                    opener = opener.truncate(true);
+                }
                 let b = BufWriter::with_capacity(
                     BUF_WRITER_CAPACITY,
-                    OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
+                    opener
                         .open(p)
                         .with_context(|| format!("failed to open file {:?}", p))?,
                 );
                 Ok(Self {
+                    pos: 0,
                     file: b,
                     storage,
                     tmp_file: None,
@@ -167,6 +222,7 @@ impl ArtifactBufferWriter {
                     .with_context(|| format!("failed to create temp file in {:?}", p))?;
                 let tmp2 = tmp.as_file().try_clone()?;
                 Ok(Self {
+                    pos: 0,
                     file: BufWriter::with_capacity(BUF_WRITER_CAPACITY, tmp2),
                     storage,
                     tmp_file: Some(tmp),
@@ -175,19 +231,36 @@ impl ArtifactBufferWriter {
         }
     }
 
-    pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        self.file.write_all(buf).map_err(|e| anyhow!(e))
+    // The `inline-bootstrap` option merges the blob and bootstrap into one
+    // file. We need some header to index the location of the blob and bootstrap,
+    // write_tar_header uses tar header that arranges the data as follows:
+
+    // blob_data | blob_tar_header | bootstrap_data | boostrap_tar_header
+
+    // This is a tar-like structure, except that we put the tar header after the
+    // data. The advantage is that we do not need to determine the size of the data
+    // first, so that we can write the blob data by stream without seek to improve
+    // the performance of the blob dump by using fifo, if we need to read the bootstrap
+    // data quickly, first need to read the 512 bytes tar header from the end of blob
+    // file first, and then seek offset to read bootstrap data.
+    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<()> {
+        let mut header = Header::new_gnu();
+        header.set_path(Path::new(name))?;
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(size);
+        // The checksum must be set to ensure that the tar reader implementation
+        // in golang can correctly parse the header.
+        header.set_cksum();
+        self.write_all(header.as_bytes())?;
+        Ok(())
     }
 
-    pub fn get_pos(&mut self) -> Result<u64> {
-        let pos = self.file.seek(SeekFrom::Current(0))?;
-
-        Ok(pos)
+    pub fn pos(&self) -> Result<u64> {
+        Ok(self.pos as u64)
     }
 
-    pub fn release(self, name: Option<&str>) -> Result<()> {
-        let mut f = self.file.into_inner()?;
-        f.flush()?;
+    pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
+        self.file.flush()?;
 
         if let Some(n) = name {
             if let ArtifactStorage::FileDir(s) = &self.storage {
@@ -196,15 +269,15 @@ impl ArtifactBufferWriter {
                     return Ok(());
                 }
 
-                // Safe to unwrap as `FileDir` must have `tmp_file` created.
-                let tmp_file = self.tmp_file.unwrap();
-                rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
-                    format!(
-                        "failed to rename blob {:?} to {:?}",
-                        tmp_file.as_path(),
-                        might_exist_path
-                    )
-                })?;
+                if let Some(tmp_file) = &self.tmp_file {
+                    rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
+                        format!(
+                            "failed to rename blob {:?} to {:?}",
+                            tmp_file.as_path(),
+                            might_exist_path
+                        )
+                    })?;
+                }
             }
         } else if let ArtifactStorage::SingleFile(s) = &self.storage {
             // `new_name` is None means no blob is really built, perhaps due to dedup.
@@ -253,7 +326,7 @@ pub struct BlobContext {
     pub chunk_source: ChunkSource,
 
     // Blob writer for writing to disk file.
-    pub writer: Option<ArtifactBufferWriter>,
+    pub writer: Option<ArtifactWriter>,
 }
 
 impl Clone for BlobContext {
@@ -288,9 +361,10 @@ impl BlobContext {
         blob_id: String,
         blob_stor: Option<ArtifactStorage>,
         blob_offset: u64,
+        fifo: bool,
     ) -> Result<Self> {
         let writer = if let Some(blob_stor) = blob_stor {
-            Some(ArtifactBufferWriter::new(blob_stor)?)
+            Some(ArtifactWriter::new(blob_stor, fifo)?)
         } else {
             None
         };
@@ -326,7 +400,7 @@ impl BlobContext {
 
     pub fn new_with_writer(
         blob_id: String,
-        writer: Option<ArtifactBufferWriter>,
+        writer: Option<ArtifactWriter>,
         blob_offset: u64,
     ) -> Self {
         let size = if writer.is_some() {
@@ -417,18 +491,12 @@ impl BlobContext {
         }
     }
 
-    pub fn flush(&mut self) -> Result<()> {
-        let blob_id = if self.compressed_blob_size > 0 {
-            Some(self.blob_id.as_str())
+    pub fn blob_id(&mut self) -> Option<String> {
+        if self.compressed_blob_size > 0 {
+            Some(self.blob_id.to_string())
         } else {
             None
-        };
-
-        if let Some(writer) = self.writer.take() {
-            writer.release(blob_id)?;
         }
-
-        Ok(())
     }
 }
 
@@ -608,14 +676,19 @@ pub struct BootstrapContext {
     /// Bootstrap file name, only be used for diff build.
     pub name: String,
     pub blobs: Vec<BuildOutputBlob>,
-    /// Bootstrap file writer.
-    storage: ArtifactStorage,
     /// Not fully used blocks
     pub available_blocks: Vec<VecDeque<u64>>,
+    pub writer: Box<dyn RafsIoWrite>,
 }
 
 impl BootstrapContext {
-    pub fn new(storage: ArtifactStorage, layered: bool) -> Result<Self> {
+    pub fn new(storage: Option<ArtifactStorage>, layered: bool, fifo: bool) -> Result<Self> {
+        let writer = if let Some(storage) = storage {
+            Box::new(ArtifactFileWriter(ArtifactWriter::new(storage, fifo)?))
+                as Box<dyn RafsIoWrite>
+        } else {
+            Box::new(ArtifactMemoryWriter(Cursor::new(Vec::new()))) as Box<dyn RafsIoWrite>
+        };
         Ok(Self {
             layered,
             inode_map: HashMap::new(),
@@ -623,11 +696,11 @@ impl BootstrapContext {
             offset: EROFS_BLOCK_SIZE,
             name: String::new(),
             blobs: Vec::new(),
-            storage,
             available_blocks: vec![
                 VecDeque::new();
                 EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
             ],
+            writer,
         })
     }
 
@@ -661,10 +734,6 @@ impl BootstrapContext {
         0
     }
 
-    pub fn create_writer(&self) -> Result<ArtifactBufferWriter> {
-        ArtifactBufferWriter::new(self.storage.clone())
-    }
-
     // Append the block that `offset` belongs to corresponding deque.
     pub fn append_available_block(&mut self, offset: u64) {
         if offset % EROFS_BLOCK_SIZE == 0 {
@@ -681,7 +750,7 @@ impl BootstrapContext {
 pub struct BootstrapManager {
     /// Parent bootstrap file reader.
     pub f_parent_bootstrap: Option<RafsIoReader>,
-    bootstrap_storage: ArtifactStorage,
+    bootstrap_storage: Option<ArtifactStorage>,
     /// The vector index will be as the layer index.
     /// We can get the bootstrap of a layer by using:
     /// `self.bootstraps[layer_index];`
@@ -690,7 +759,7 @@ pub struct BootstrapManager {
 
 impl BootstrapManager {
     pub fn new(
-        bootstrap_storage: ArtifactStorage,
+        bootstrap_storage: Option<ArtifactStorage>,
         f_parent_bootstrap: Option<RafsIoReader>,
     ) -> Self {
         Self {
@@ -700,10 +769,11 @@ impl BootstrapManager {
         }
     }
 
-    pub fn create_ctx(&self) -> Result<BootstrapContext> {
+    pub fn create_ctx(&self, fifo: bool) -> Result<BootstrapContext> {
         BootstrapContext::new(
             self.bootstrap_storage.clone(),
             self.f_parent_bootstrap.is_some(),
+            fifo,
         )
     }
 
@@ -719,8 +789,8 @@ impl BootstrapManager {
         self.bootstraps.last().map(|b| b.name.to_owned())
     }
 
-    pub fn get_bootstrap_path(&self, name: &str) -> PathBuf {
-        self.bootstrap_storage.get_path(name)
+    pub fn get_bootstrap_path(&self, name: &str) -> Option<PathBuf> {
+        self.bootstrap_storage.as_ref().map(|s| s.get_path(name))
     }
 }
 
@@ -761,6 +831,7 @@ pub struct BuildContext {
 
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
+    pub inline_bootstrap: bool,
     pub has_xattr: bool,
 }
 
@@ -778,6 +849,7 @@ impl BuildContext {
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
+        inline_bootstrap: bool,
     ) -> Self {
         BuildContext {
             blob_id,
@@ -796,6 +868,7 @@ impl BuildContext {
 
             prefetch,
             blob_storage,
+            inline_bootstrap,
             has_xattr: false,
         }
     }
@@ -829,6 +902,7 @@ impl Default for BuildContext {
             prefetch: Prefetch::default(),
             blob_storage: None,
             has_xattr: true,
+            inline_bootstrap: false,
         }
     }
 }

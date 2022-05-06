@@ -198,6 +198,8 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .help("path to store the nydus image's metadata blob")
                         .required_unless("diff-bootstrap-dir")
                         .conflicts_with("diff-bootstrap-dir")
+                        .required_unless("inline-bootstrap")
+                        .conflicts_with("inline-bootstrap")
                         .takes_value(true),
                 ).arg(
                     Arg::with_name("blob")
@@ -208,6 +210,12 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .required_unless("source-type")
                         .required_unless("blob-dir")
                         .takes_value(true)
+                ).arg(
+                    Arg::with_name("inline-bootstrap")
+                        .long("inline-bootstrap")
+                        .help("append bootstrap data to blob")
+                        .takes_value(false)
+                        .required(false),
                 ).arg(
                     Arg::with_name("blob-id")
                         .long("blob-id")
@@ -609,6 +617,7 @@ impl Command {
         }
 
         let prefetch = Self::get_prefetch(matches)?;
+        let inline_bootstrap = matches.is_present("inline-bootstrap");
 
         let mut build_ctx = BuildContext::new(
             blob_id,
@@ -622,6 +631,7 @@ impl Command {
             source_path,
             prefetch,
             blob_stor,
+            inline_bootstrap,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -634,7 +644,9 @@ impl Command {
             )?);
         }
 
-        let mut bootstrap_mgr = if source_type == SourceType::Diff {
+        let mut bootstrap_mgr = if inline_bootstrap {
+            BootstrapManager::new(None, parent_bootstrap)
+        } else if source_type == SourceType::Diff {
             let bootstrap_dir = matches.value_of("diff-bootstrap-dir");
             let storage = if let Some(bootstrap_dir) = bootstrap_dir {
                 Self::ensure_directory(&bootstrap_dir)?;
@@ -643,11 +655,11 @@ impl Command {
                 let bootstrap_path = Self::get_bootstrap(&matches)?;
                 ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path))
             };
-            BootstrapManager::new(storage, parent_bootstrap)
+            BootstrapManager::new(Some(storage), parent_bootstrap)
         } else {
             let bootstrap_path = Self::get_bootstrap(&matches)?;
             BootstrapManager::new(
-                ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path)),
+                Some(ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path))),
                 parent_bootstrap,
             )
         };
@@ -677,9 +689,12 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
-        let bootstrap_path = bootstrap_mgr.get_bootstrap_path(&build_output.last_bootstrap_name);
-        Self::validate_image(&matches, &bootstrap_path)?;
-        info!("build successfully: {:?}", build_output,);
+        if let Some(bootstrap_path) =
+            bootstrap_mgr.get_bootstrap_path(&build_output.last_bootstrap_name)
+        {
+            Self::validate_image(&matches, &bootstrap_path)?;
+            info!("build successfully: {:?}", build_output,);
+        }
 
         OutputSerializer::dump(matches, build_output, &build_info)?;
 

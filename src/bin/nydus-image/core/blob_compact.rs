@@ -2,6 +2,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
+
+use nydus_utils::digest::RafsDigest;
+use nydus_utils::try_round_up_4k;
+use rafs::metadata::{RafsMode, RafsSuper};
+use storage::backend::BlobBackend;
+use storage::utils::alloc_buf;
+
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
@@ -11,17 +26,6 @@ use crate::core::context::{
 };
 use crate::core::node::{ChunkWrapper, Node, WhiteoutSpec};
 use crate::core::tree::Tree;
-use anyhow::Result;
-use nydus_utils::digest::RafsDigest;
-use nydus_utils::try_round_up_4k;
-use rafs::metadata::{RafsMode, RafsSuper};
-use serde::{Deserialize, Serialize};
-use sha2::Digest;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use storage::backend::BlobBackend;
-use storage::utils::alloc_buf;
 
 const DEFAULT_COMPACT_BLOB_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_COMPACT_SIZE: usize = 100 * 1024 * 1024;
@@ -172,7 +176,10 @@ impl ChunkSet {
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
         Blob::new().dump_meta_data(new_blob_ctx)?;
-        new_blob_ctx.flush()?;
+        let blob_id = new_blob_ctx.blob_id();
+        if let Some(writer) = &mut new_blob_ctx.writer {
+            writer.finalize(blob_id)?;
+        }
         Ok(chunks_change)
     }
 }
@@ -516,7 +523,8 @@ impl BlobCompactor {
                 }
                 State::Rebuild(cs) => {
                     let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
-                    let mut blob_ctx = BlobContext::new(String::from(""), Some(blob_storage), 0)?;
+                    let mut blob_ctx =
+                        BlobContext::new(String::from(""), Some(blob_storage), 0, false)?;
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
                     let new_chunks = cs.dump(
@@ -566,10 +574,11 @@ impl BlobCompactor {
             PathBuf::from(""),
             Default::default(),
             None,
+            false,
         );
         let mut bootstrap_mgr =
-            BootstrapManager::new(ArtifactStorage::SingleFile(d_bootstrap), None);
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+            BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
         let mut ori_blob_mgr = BlobManager::new();
         ori_blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
         if let Some(dict) = chunk_dict {

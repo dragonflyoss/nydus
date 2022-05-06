@@ -140,6 +140,21 @@ pub trait RafsIoWrite: Write + Seek + 'static {
             e
         })
     }
+
+    /// Seek the writer to current position plus the specified offset.
+    fn seek_current(&mut self, offset: i64) -> Result<u64> {
+        self.seek(SeekFrom::Current(offset))
+    }
+
+    /// Do some finalization works.
+    fn finalize(&mut self, _name: Option<String>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Get all data has been written.
+    fn data(&self) -> &[u8] {
+        unimplemented!();
+    }
 }
 
 impl RafsIoWrite for File {
