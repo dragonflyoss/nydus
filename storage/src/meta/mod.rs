@@ -505,7 +505,7 @@ impl BlobMetaInfo {
         } else {
             std::cmp::min(
                 start.checked_add(batch_size).unwrap_or(end),
-                self.state.uncompressed_size,
+                self.state.compressed_size,
             )
         };
 
