@@ -524,8 +524,8 @@ impl DiffBuilder {
                 .context("failed to load superblock from bootstrap")?;
             // Load blobs from the blob table of parent bootstrap.
             blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
-            rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
-                                                        path: &Path|
+            rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
+                                                     path: &Path|
              -> Result<()> {
                 let mut chunks = Vec::new();
                 if inode.is_reg() {

@@ -326,8 +326,8 @@ fn integration_test_diff_build_with_chunk_dict() {
     rs.load(&mut reader).unwrap();
     let mut actual = HashMap::new();
     let blobs = rs.superblock.get_blob_infos();
-    rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
-                                                path: &Path|
+    rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
+                                             path: &Path|
      -> Result<()> {
         let mut chunks = Vec::new();
         if inode.is_reg() {
@@ -465,8 +465,8 @@ fn integration_test_diff_build_with_chunk_dict() {
     rs.load(&mut reader).unwrap();
     let mut actual = HashMap::new();
     let blobs = rs.superblock.get_blob_infos();
-    rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
-                                                path: &Path|
+    rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
+                                             path: &Path|
      -> Result<()> {
         let mut chunks = Vec::new();
         if inode.is_reg() {
@@ -686,8 +686,8 @@ fn integration_test_diff_build_with_chunk_dict() {
     rs.load(&mut reader).unwrap();
     let mut actual = HashMap::new();
     let blobs = rs.superblock.get_blob_infos();
-    rs.walk_inodes(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
-                                                path: &Path|
+    rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
+                                             path: &Path|
      -> Result<()> {
         let mut chunks = Vec::new();
         if inode.is_reg() {
