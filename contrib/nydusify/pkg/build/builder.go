@@ -120,12 +120,13 @@ func (builder *Builder) Run(option BuilderOption) error {
 		option.OutputJSONPath,
 		"--blob",
 		option.BlobPath,
-		option.RootfsPath,
 	)
 
 	if len(option.PrefetchPatterns) > 0 {
 		args = append(args, "--prefetch-policy", "fs")
 	}
+
+	args = append(args, option.RootfsPath)
 
 	return builder.run(args, option.PrefetchPatterns)
 }
