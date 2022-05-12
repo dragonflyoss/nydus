@@ -488,7 +488,7 @@ impl Rafs {
         // Without too much layout concern, just prefetch a certain range from backend.
         let prefetches = sb
             .superblock
-            .get_blobs()
+            .get_blob_infos()
             .iter()
             .map(|b| BlobPrefetchRequest {
                 blob_id: b.blob_id().to_owned(),

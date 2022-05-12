@@ -32,8 +32,8 @@ use crate::metadata::layout::v5::{
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
     BlobIoVec, ChildInodeHandler, Inode, PostWalkAction, RafsError, RafsInode, RafsResult,
-    RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT,
-    DOTDOT, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
+    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT, DOTDOT,
+    RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
 
@@ -156,12 +156,6 @@ impl RafsSuperInodes for CachedSuperBlockV5 {
         digester: Algorithm,
     ) -> Result<bool> {
         rafsv5_validate_digest(inode, recursive, digester)
-    }
-}
-
-impl RafsSuperBlobs for CachedSuperBlockV5 {
-    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
-        self.s_blob.get_all()
     }
 }
 
