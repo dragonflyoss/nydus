@@ -348,7 +348,7 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 		return errors.Wrap(err, "Get remote existing manifest index")
 	}
 
-	_index, err := mm.makeManifestIndex(ctx, existManifests, nydusManifestDesc, ociManifestDesc)
+	ociIndex, err := mm.makeManifestIndex(ctx, existManifests, nydusManifestDesc, ociManifestDesc)
 	if err != nil {
 		return errors.Wrap(err, "Make manifest index for target")
 	}
@@ -363,7 +363,7 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 		ocispec.Index
 	}{
 		MediaType: indexMediaType,
-		Index:     *_index,
+		Index:     *ociIndex,
 	}
 
 	indexDesc, indexBytes, err := utils.MarshalToDesc(index, indexMediaType)
