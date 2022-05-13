@@ -23,7 +23,7 @@ sudo cp nydusify containerd-nydus-grpc /usr/local/bin
 Nydus provides a containerd remote snapshotter `containerd-nydus-grpc` to prepare container rootfs with nydus formatted images. To start it, first save a `nydusd` configuration to `/etc/nydusd-config.json`:
 
 ```bash
-$ sudo cat > /etc/nydusd-config.json << EOF
+$ sudo tee /etc/nydusd-config.json > /dev/null << EOF
 {
   "device": {
     "backend": {
