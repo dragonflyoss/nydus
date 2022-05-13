@@ -457,16 +457,23 @@ impl OndiskInodeWrapper {
                 let s = (de.e_nameoff - head_de.e_nameoff) as u64
                     + (size_of::<RafsV6Dirent>() * max_entries) as u64;
 
-                let e = slice::from_raw_parts(
-                    block_mapping.add(de.e_nameoff as usize),
-                    (self.size() % EROFS_BLOCK_SIZE - s) as usize,
-                );
+                // The possible maximum len of the last dirent's file name should be calculated
+                // differently depends on whether the dirent is at the last block of the dir file.
+                // Because the other blocks should be fully used, while the last may not.
+                let len = if div_round_up(self.size(), EROFS_BLOCK_SIZE) as usize == block_index + 1
+                {
+                    (self.size() % EROFS_BLOCK_SIZE - s) as usize
+                } else {
+                    (EROFS_BLOCK_SIZE - s) as usize
+                };
+
+                let e = slice::from_raw_parts(block_mapping.add(de.e_nameoff as usize), len);
                 // Use this trick to temporarily decide entry name's length. Improve this?
                 let mut l: usize = 0;
                 for i in e {
                     if *i != 0 {
                         l += 1;
-                        if self.size() % EROFS_BLOCK_SIZE - s == l as u64 {
+                        if len == l {
                             break;
                         }
                     } else {
