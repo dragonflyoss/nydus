@@ -192,8 +192,10 @@ jobs:
         path: nydus-tarball
     - name: prepare release env
       run: |
+        echo "tarballs<<EOF" >> $GITHUB_ENV
         cnt=0
-        for I in $(ls nydus-tarball);do cnt=$((cnt+1)); echo "tarball${cnt}=nydus-tarball/${I}" >> $GITHUB_ENV; done
+        for I in $(ls nydus-tarball);do cnt=$((cnt+1)); echo "nydus-tarball/${I}" >> $GITHUB_ENV; done
+        echo "EOF" >> $GITHUB_ENV
         tag=$(echo $GITHUB_REF | cut -d/ -f3-)
         echo "tag=${tag}" >> $GITHUB_ENV
         cat $GITHUB_ENV
@@ -204,6 +206,4 @@ jobs:
         name: "Nydus Image Service ${{ env.tag }}"
         generate_release_notes: true
         files: |
-          ${{ env.tarball1 }}
-          ${{ env.tarball2 }}
-          ${{ env.tarball3 }}
+          ${{ env.tarballs }}
