@@ -148,11 +148,17 @@ jobs:
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
         echo "tarball=${tarball}" >> $GITHUB_ENV
+
+        shasum="$tarball.sha256sum"
+        sha256sum $tarball > $shasum
+        echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
         name: nydus-release-tarball
-        path: ${{ env.tarball }}
+        path: |
+          ${{ env.tarball }}
+          ${{ env.tarball_shasum }}
 
   # use a seperate job for darwin because github action if: condition cannot handle && properly.
   prepare-tarball-darwin:
@@ -175,11 +181,17 @@ jobs:
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
         echo "tarball=${tarball}" >> $GITHUB_ENV
+
+        shasum="$tarball.sha256sum"
+        sha256sum $tarball > $shasum
+        echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
       uses: actions/upload-artifact@v2
       with:
         name: nydus-release-tarball
-        path: ${{ env.tarball }}
+        path: |
+          ${{ env.tarball }}
+          ${{ env.tarball_shasum }}
 
   create-release:
     runs-on: ubuntu-latest
