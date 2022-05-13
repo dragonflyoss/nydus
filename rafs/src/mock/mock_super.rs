@@ -10,7 +10,7 @@ use std::sync::Arc;
 use nydus_utils::digest;
 use storage::device::BlobInfo;
 
-use crate::metadata::{Inode, RafsInode, RafsSuperBlobs, RafsSuperBlock, RafsSuperInodes};
+use crate::metadata::{Inode, RafsInode, RafsSuperBlock, RafsSuperInodes};
 use crate::{RafsIoReader, RafsResult};
 
 pub struct MockSuperBlock {
@@ -50,12 +50,6 @@ impl RafsSuperInodes for MockSuperBlock {
         _recursive: bool,
         _digester: digest::Algorithm,
     ) -> Result<bool> {
-        unimplemented!()
-    }
-}
-
-impl RafsSuperBlobs for MockSuperBlock {
-    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
         unimplemented!()
     }
 }

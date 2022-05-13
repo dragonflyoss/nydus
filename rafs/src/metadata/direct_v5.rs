@@ -45,9 +45,9 @@ use crate::metadata::layout::{
     RAFS_ROOT_INODE,
 };
 use crate::metadata::{
-    Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
-    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, DOT, DOTDOT, RAFS_ATTR_BLOCK_SIZE,
-    RAFS_MAX_METADATA_SIZE, RAFS_MAX_NAME,
+    Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlock,
+    RafsSuperInodes, RafsSuperMeta, DOT, DOTDOT, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_METADATA_SIZE,
+    RAFS_MAX_NAME,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -379,12 +379,6 @@ impl RafsSuperInodes for DirectSuperBlockV5 {
         digester: Algorithm,
     ) -> Result<bool> {
         rafsv5_validate_digest(inode, recursive, digester)
-    }
-}
-
-impl RafsSuperBlobs for DirectSuperBlockV5 {
-    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
-        self.state.load().blob_table.get_all()
     }
 }
 

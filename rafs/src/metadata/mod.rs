@@ -75,14 +75,8 @@ pub trait RafsSuperInodes {
     ) -> Result<bool>;
 }
 
-/// Trait to get information about a Rafs filesystem instance.
-pub trait RafsSuperBlobs {
-    /// Get blob information for all blobs referenced by the filesystem instance.
-    fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
-}
-
 /// Trait to access Rafs filesystem superblock and inodes.
-pub trait RafsSuperBlock: RafsSuperBlobs + RafsSuperInodes + Send + Sync {
+pub trait RafsSuperBlock: RafsSuperInodes + Send + Sync {
     /// Load the super block from a reader.
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 

@@ -46,8 +46,8 @@ use crate::metadata::{
         XattrName, XattrValue,
     },
     {
-        Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlobs,
-        RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
+        Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlock,
+        RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
     },
 };
 use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
@@ -284,12 +284,6 @@ impl RafsSuperInodes for DirectSuperBlockV6 {
         _digester: Algorithm,
     ) -> Result<bool> {
         todo!()
-    }
-}
-
-impl RafsSuperBlobs for DirectSuperBlockV6 {
-    fn get_blobs(&self) -> Vec<Arc<BlobInfo>> {
-        self.state.load().blob_table.get_all()
     }
 }
 
