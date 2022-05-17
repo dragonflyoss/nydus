@@ -1,6 +1,6 @@
 # Cache and Prefetch
 
-Nydus stores blobs in OCI compatible registry, OSS (Aliyun Object Storage Service) and local file system. Regarding to local filesystem storage backend, it doesn't mean blob can only be stored on local disk. It can surely be stored in the NAS device, which can be accessed by Posix file system interfaces.
+Nydus stores blobs in OCI compatible registry, OSS (Aliyun Object Storage Service) and local file system. Regarding to local filesystem storage backend, it doesn't mean blob can only be stored on local disk. It can surely be stored in the NAS device, which can be accessed by POSIX file system interfaces.
 
 Nydus divides a single regular file into segments by 1MB size which will be compressed by a configurable compressor like lz4, etc. The compressed segments are called chunk. Chunks are contiguously arranged within a blob file.
 
@@ -35,7 +35,7 @@ Prefetch is configurable by Rafs configuration file.
 - bandwidth_rate
 
   In unit of bytes.
-  In order to mitigate possible backend bandwidth contention, we can give a bandwidth ratelimit to prefetch. Note that the `bandwidth_rate` sets the limit to the aggregated backend bandwidth consumed by all the threads configured by `threads_count`. So with a lower `bandwidth_rate` limit, more prefetch threads might be meaningless.
+  In order to mitigate possible backend bandwidth contention, we can give a bandwidth rate limit to prefetch. Note that the `bandwidth_rate` sets the limit to the aggregated backend bandwidth consumed by all the threads configured by `threads_count`. So with a lower `bandwidth_rate` limit, more prefetch threads might be meaningless.
 
 A rafs configuration file (only `$.fs_prefetch` shows, other properties are omitted) follows:
 

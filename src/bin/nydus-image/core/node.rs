@@ -167,7 +167,7 @@ impl Display for NodeChunk {
 /// ChunkSource flags chunk original source in bootstrap.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum ChunkSource {
-    /// Chunk from parent boostrap.
+    /// Chunk from parent bootstrap.
     Parent,
     /// Chunk from this build workflow.
     Build,

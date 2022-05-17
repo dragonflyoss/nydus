@@ -35,7 +35,7 @@ Generally, this is regular file which blob content will be dumped into. It can a
 ```shell
 # Build from lower layer
 nydus-image create \
-  --bootstrap /path/to/parent-bootstrap \
+  --bootstrap /path/to/bootstrap \
   --blob /path/to/blob \
   /path/to/lower/dir
 # Build from upper layer based on lower layer
@@ -54,7 +54,7 @@ nydus-image create \
 ```shell
 # Build with bootstrap type chunk-dict
 nydus-image create \
-  --bootstrap /path/to/parent-bootstrap \
+  --bootstrap /path/to/bootstrap \
   --chunk-dict bootstrap=/path/to/dict.boot \
   --blob /path/to/blob \
   /path/to/lower/dir

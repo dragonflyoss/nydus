@@ -46,7 +46,7 @@ The registry is now ready to use. Please refer to [docker document](https://docs
 
 ### Convert OCI Image to Nydus Image
 
-You can pull an image from Docker Hub and push it to your local registry. The following example pulls the `ubuntu:16.04` image from Docker Hub, convert to Nydus image, then pushes it to the local registry and re-tags it as `ubuntu:16.04-nydus`.
+You can pull an image from Docker Hub and push it to your local registry. The following example pulls the `ubuntu:16.04` image from Docker Hub, converts to Nydus image, then pushes it to the local registry and re-tags it as `ubuntu:16.04-nydus`.
 
 ```bash
 # workdir: image-service/contrib/nydusify

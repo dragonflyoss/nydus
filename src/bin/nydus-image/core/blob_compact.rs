@@ -553,14 +553,14 @@ impl BlobCompactor {
     }
 
     pub fn do_compact(
-        s_boostrap: PathBuf,
+        s_bootstrap: PathBuf,
         d_bootstrap: PathBuf,
         chunk_dict: Option<Arc<dyn ChunkDict>>,
         backend: Arc<dyn BlobBackend + Send + Sync>,
         cfg: &Config,
     ) -> Result<Option<BuildOutput>> {
-        let rs = RafsSuper::load_from_metadata(&s_boostrap, RafsMode::Direct, true)?;
-        info!("load bootstrap {:?} successfully", s_boostrap);
+        let rs = RafsSuper::load_from_metadata(&s_bootstrap, RafsMode::Direct, true)?;
+        info!("load bootstrap {:?} successfully", s_bootstrap);
         let mut build_ctx = BuildContext::new(
             "".to_string(),
             false,
@@ -599,7 +599,7 @@ impl BlobCompactor {
         compactor.compact(cfg)?;
         compactor.dump_new_blobs(&cfg.blobs_dir, build_ctx.aligned_chunk)?;
         if compactor.new_blob_mgr.len() == 0 {
-            info!("blobs of {:?} have already been optimized", s_boostrap);
+            info!("blobs of {:?} have already been optimized", s_bootstrap);
             return Ok(None);
         }
         info!("compact blob successfully");
