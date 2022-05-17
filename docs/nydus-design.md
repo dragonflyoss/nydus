@@ -98,13 +98,14 @@ Nydus can be configured to set up a cache for blob, called `blobcache`.  With `b
 ##    6. Compression
 Nydus can be configured to save either compressed chunk or noncompressed chunk, with compressed chunk is the default configuration.
 
-The compression algorithm is lz4 and gzip, `None` stands for noncompression.
+The compression algorithm is lz4, gzip and zstd, `None` stands for noncompression.
 
 ```rust
 pub enum Algorithm {
     None,
     LZ4Block,
     GZip,
+    Zstd,
 }
 ```
 
@@ -359,9 +360,9 @@ A typical image manifest of nydus consists of `config.json`, one nydus metadata 
 * nydus metadata layer
 
 This layer refers to the metadata part of files and directories in the image, including rafs filesystem metadata and digest for validation purpose.
-The special part is that an annotation `"containerd.io/snapshot/nydus-bootstrap": "true"` is set and lets containerd's snapshotter know it's nydus metadata layer and do its job accordingly.
 
 * nydus data layer
+
 This layer refers to the data part, please note that the data layers of an image can be owned solely by this image or shared by others, similarly, each data layer is annotated with `"containerd.io/snapshot/nydus-blob": "true"`, which can be used to tell containerd's snapshotter to skip downloading them.
 
 The manifest is designed to be compatible with the dependency architect and garbage collection algorithm widely used by containerd and registry.

@@ -235,7 +235,7 @@ impl ArtifactWriter {
     // file. We need some header to index the location of the blob and bootstrap,
     // write_tar_header uses tar header that arranges the data as follows:
 
-    // blob_data | blob_tar_header | bootstrap_data | boostrap_tar_header
+    // blob_data | blob_tar_header | bootstrap_data | bootstrap_tar_header
 
     // This is a tar-like structure, except that we put the tar header after the
     // data. The advantage is that we do not need to determine the size of the data

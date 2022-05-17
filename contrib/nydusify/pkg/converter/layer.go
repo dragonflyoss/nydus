@@ -135,14 +135,14 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 		layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
 	)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "Calculate compressed boostrap digest")
+		return nil, nil, errors.Wrap(err, "Calculate compressed bootstrap digest")
 	}
 
 	uncompressedDigest, _, err := utils.PackTargzInfo(
 		layer.bootstrapPath, utils.BootstrapFileNameInLayer, false,
 	)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "Calculate uncompressed boostrap digest")
+		return nil, nil, errors.Wrap(err, "Calculate uncompressed bootstrap digest")
 	}
 
 	bootstrapMediaType := ocispec.MediaTypeImageLayerGzip
@@ -171,7 +171,7 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 			layer.bootstrapPath, utils.BootstrapFileNameInLayer, true,
 		)
 		if err != nil {
-			return errors.Wrap(err, "Compress boostrap layer")
+			return errors.Wrap(err, "Compress bootstrap layer")
 		}
 		defer compressedReader.Close()
 

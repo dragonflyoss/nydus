@@ -1,7 +1,7 @@
 # Nydusify
 
 The Nydusify CLI tool supports:
-1. Convert an OCI container image from source registry into a Nydus image using `nydus-image` CLI layer by layer, then pushes Nydus image to target registry.
+1. Convert an OCI container image from source registry into a Nydus image using `nydus-image` CLI layer by layer, then push Nydus image to target registry.
 2. Convert local file system dictionary into Nydus image using `nydus-image`, then push Nydus-image to target remote storage(e.g. oss) optionally.
 
 ### Get binaries from release page
