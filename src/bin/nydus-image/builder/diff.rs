@@ -979,11 +979,11 @@ pub mod tests {
 
         println!(
             "lower dir:\n {}",
-            exec(&format!("tree -a {:?}", lower_dir), true).unwrap()
+            exec(&format!("ls -R {:?}", lower_dir), true).unwrap()
         );
         println!(
             "merge dir:\n{}",
-            exec(&format!("tree -a {:?}", merge_dir), true).unwrap()
+            exec(&format!("ls -R {:?}", merge_dir), true).unwrap()
         );
 
         // Diff build lower layer
