@@ -189,19 +189,26 @@ impl<'a> Builder<'a> {
         );
     }
 
-    pub fn build_lower(&mut self, compressor: &str) {
+    pub fn build_lower(&mut self, compressor: &str, rafs_version: &str) {
         let lower_dir = self.work_dir.join("lower");
+        let disable_check = if rafs_version == "6" {
+            "--disable-check"
+        } else {
+            ""
+        };
 
         self.create_dir(&self.work_dir.join("blobs"));
 
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} --fs-version {} {} {:?}",
                 self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("blobs"),
                 compressor,
                 self.whiteout_spec,
+                rafs_version,
+                disable_check,
                 lower_dir,
             )
             .as_str(),
@@ -209,18 +216,19 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_upper(&mut self, compressor: &str) {
+    pub fn build_upper(&mut self, compressor: &str, rafs_version: &str) {
         let upper_dir = self.work_dir.join("upper");
 
         exec(
             format!(
-                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
                 self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("bootstrap-overlay"),
                 self.work_dir.join("blobs"),
                 compressor,
                 self.whiteout_spec,
+                rafs_version,
                 upper_dir,
             )
             .as_str(),

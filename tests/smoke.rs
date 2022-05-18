@@ -46,12 +46,13 @@ fn test(
     cache_compressed: bool,
     rafs_mode: &str,
     whiteout_spec: &str,
+    rafs_version: &str,
 ) {
     // std::thread::sleep(std::time::Duration::from_secs(1000));
 
     info!(
-        "\n\n==================== testing run: compressor={} enable_cache={} cache_compressed={} rafs_mode={}",
-        compressor, enable_cache, cache_compressed, rafs_mode
+        "\n\n==================== testing run: compressor={} enable_cache={} cache_compressed={} rafs_mode={} whiteout_spec={} rafs_version={}",
+        compressor, enable_cache, cache_compressed, rafs_mode, whiteout_spec, rafs_version,
     );
 
     // If the smoke test run in container based on overlayfs storage driver,
@@ -73,11 +74,12 @@ fn test(
     let overlay_texture = "directory/overlay.result".to_string();
 
     let mut builder = builder::new(&work_dir, whiteout_spec);
+    let rafsv6 = rafs_version == "6";
 
     {
         // Create & build lower rootfs
         builder.make_lower();
-        builder.build_lower(compressor);
+        builder.build_lower(compressor, rafs_version);
 
         // Mount lower rootfs and check
         let nydusd = nydusd::new(
@@ -86,18 +88,25 @@ fn test(
             cache_compressed,
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
-            true,
+            // FIXME: Currently no digest validation is implemented for rafs v6.
+            !rafsv6,
         );
         nydusd.start(Some("bootstrap-lower"), "mnt");
         nydusd.check(&lower_texture, "mnt");
         nydusd.umount("mnt");
     }
 
+    // FIXME: Currently no load is implemented for rafs v6 parent bootstrap,
+    // so the layered build is temporarily unsupported and need to be fixed.
+    if rafsv6 {
+        return;
+    }
+
     // Mount upper rootfs and check
     {
         // Create & build upper rootfs based lower
         builder.make_upper();
-        builder.build_upper(compressor);
+        builder.build_upper(compressor, rafs_version);
 
         // Mount overlay rootfs and check
         let nydusd = nydusd::new(
@@ -136,47 +145,50 @@ fn integration_test_init() {
 
 #[test]
 fn integration_test_directory_1() {
-    test("lz4_block", true, false, "direct", "oci")
+    test("lz4_block", true, false, "direct", "oci", "5");
+    test("lz4_block", true, false, "direct", "oci", "6")
 }
 
 #[test]
 fn integration_test_directory_2() {
-    test("lz4_block", false, false, "direct", "oci")
+    test("lz4_block", false, false, "direct", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_3() {
-    test("gzip", false, false, "direct", "oci")
+    test("gzip", false, false, "direct", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_4() {
-    test("none", true, false, "direct", "oci")
+    test("none", true, false, "direct", "oci", "5");
+    test("none", true, false, "direct", "oci", "6")
 }
 
 #[test]
 fn integration_test_directory_5() {
-    test("gzip", true, true, "cached", "oci")
+    test("gzip", true, true, "cached", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_6() {
-    test("none", false, true, "cached", "oci")
+    test("none", false, true, "cached", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_7() {
-    test("lz4_block", false, true, "cached", "oci")
+    test("lz4_block", false, true, "cached", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_8() {
-    test("lz4_block", true, true, "cached", "oci")
+    test("lz4_block", true, true, "cached", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_9() {
-    test("lz4_block", true, false, "direct", "overlayfs")
+    test("lz4_block", true, false, "direct", "overlayfs", "5");
+    test("lz4_block", true, false, "direct", "overlayfs", "6")
 }
 
 #[test]
