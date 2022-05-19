@@ -558,26 +558,24 @@ impl Bootstrap {
             (0, 0)
         };
 
-        // Make the superblock's meta_blkaddr one block ahead of the inode table,
-        // to avoid using 0 as root nid.
-        // inode offset = meta_blkaddr * block_size + 32 * nid
-        // When using nid 0 as root nid,
-        // the root directory will not be shown by glibc's getdents/readdir.
-        // Because in some OS, ino == 0 represents corresponding file is deleted.
-        let orig_meta_addr = bootstrap_ctx.nodes[0].offset - EROFS_BLOCK_SIZE;
+        // Note that glibc's getdents/readdir wrapper takes ino == 0 as deleted
+        // file and doesn't show it any more, so avoid using 0 as root_nid.
+        let orig_meta_addr =
+            bootstrap_ctx.nodes[0].offset - RAFS_ROOT_INODE * EROFS_INODE_SLOT_SIZE as u64;
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
                 EROFS_BLOCK_SIZE as u64,
             )
         } else {
-            orig_meta_addr
+            align_offset(orig_meta_addr, EROFS_BLOCK_SIZE as u64)
         };
 
         let root_nid = calculate_nid(
             bootstrap_ctx.nodes[0].offset - orig_meta_addr + meta_addr,
             meta_addr,
         );
+        debug_assert!(root_nid == RAFS_ROOT_INODE);
 
         // Dump superblock
         let mut sb = RafsV6SuperBlock::new();
