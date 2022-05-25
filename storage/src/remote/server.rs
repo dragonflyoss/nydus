@@ -350,6 +350,7 @@ mod tests {
     use vmm_sys_util::tempdir::TempDir;
 
     #[test]
+    #[ignore]
     fn test_new_server() {
         let tmpdir = TempDir::new().unwrap();
         let sock = tmpdir.as_path().to_str().unwrap().to_owned() + "/test_sock1";
@@ -383,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_reconnect() {
         let tmpdir = TempDir::new().unwrap();
         let sock = tmpdir.as_path().to_str().unwrap().to_owned() + "/test_sock1";
