@@ -14,8 +14,6 @@ Currently, Nydus includes the following tools:
 
 To work with containerd, you also need [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter/releases) for containerd:
 
-- A `containerd-nydus-grpc` daemon provides a containerd remote snapshotter plugin, allows to run nydus image in containerd.
-
 ### What will this tutorial teach me?
 
 This tutorial aims to be the one-stop shop for getting your hands dirty with Nydus. Apart from demystifying the Nydus landscape, it'll give you hands-on experience with building and deploying your own images on host.
@@ -28,7 +26,7 @@ The getting started guide on Docker has detailed instructions for setting up Doc
 
 ### Get binaries from release page
 
-Get `nydus-image`, `nydusd`, `nydusify`, and `containerd-nydus-grpc` binaries from [image-service release](https://github.com/dragonflyoss/image-service/releases/latest) and [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter/releases).
+Get `nydus-image`, `nydusd`, and `nydusify` binaries from [image-service release](https://github.com/dragonflyoss/image-service/releases/latest) and `containerd-nydus-grpc` from[nydus-snapshotter release](https://github.com/containerd/nydus-snapshotter/releases).
 
 ## Build Nydus Image through nydusify
 
