@@ -366,9 +366,9 @@ dependencies = [
 
 [[package]]
 name = "dbs-uhttp"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b773f7f1b9088438e9746890c7c0836b133b07935812867a33e06e81c92c0cdc"
+checksum = "0b23c11eebec0e0814aa80b08fc43e2672d8e2c57bd006de66108ff1d2b4bfb6"
 dependencies = [
  "libc",
  "mio 0.8.2",
