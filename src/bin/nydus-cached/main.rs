@@ -18,7 +18,7 @@ use clap::{App, Arg};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
-use storage::remote::{RemoteBlobMgr, Server};
+use nydus_storage::remote::{RemoteBlobMgr, Server};
 use vmm_sys_util::eventfd::EventFd;
 
 const CLIENT_TOKEN: Token = Token(1);

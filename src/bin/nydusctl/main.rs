@@ -11,6 +11,7 @@ extern crate anyhow;
 extern crate lazy_static;
 #[macro_use]
 extern crate serde_json;
+extern crate nydus_rafs as rafs;
 
 use std::collections::HashMap;
 

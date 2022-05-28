@@ -20,7 +20,7 @@ use fuse_backend_rs::{
     passthrough::PassthroughFs,
 };
 use nydus_error::{einval, eother};
-use rafs::{
+use nydus_rafs::{
     fs::{Rafs, RafsConfig},
     RafsIoRead,
 };

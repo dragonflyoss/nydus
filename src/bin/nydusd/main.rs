@@ -16,6 +16,7 @@ extern crate lazy_static;
 extern crate nix;
 #[macro_use]
 extern crate nydus_error;
+extern crate nydus_rafs as rafs;
 extern crate nydus_storage as storage;
 
 #[cfg(feature = "fusedev")]
