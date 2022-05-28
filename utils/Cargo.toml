@@ -1,6 +1,6 @@
 [package]
 name = "nydus-utils"
-version = "0.1.0"
+version = "0.2.0"
 description = "Utilities for Nydus and Rafs"
 authors = ["The Nydus Developers"]
 repository = "https://github.com/dragonflyoss/image-service"
@@ -27,3 +27,7 @@ vmm-sys-util = ">=0.9.0"
 
 [features]
 fusedev = ["fuse-backend-rs/fusedev"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin"]

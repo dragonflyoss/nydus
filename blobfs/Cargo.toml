@@ -26,4 +26,4 @@ backend-oss = ["rafs/backend-oss"]
 backend-registry = ["rafs/backend-registry"]
 
 [dev-dependencies]
-nydus-app = { version = "0.2", path = "../app" }
+nydus-app = { version = "0.3", path = "../app" }
