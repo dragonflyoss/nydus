@@ -1,6 +1,6 @@
 [package]
 name = "nydus-utils"
-version = "0.1.0"
+version = "0.2.0"
 description = "Utilities for Nydus and Rafs"
 authors = ["The Nydus Developers"]
 repository = "https://github.com/dragonflyoss/image-service"
