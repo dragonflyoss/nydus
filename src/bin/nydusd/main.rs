@@ -14,6 +14,7 @@ extern crate rafs;
 extern crate serde_json;
 #[macro_use]
 extern crate nydus_error;
+extern crate nydus_storage as storage;
 
 #[cfg(feature = "fusedev")]
 use std::convert::TryInto;

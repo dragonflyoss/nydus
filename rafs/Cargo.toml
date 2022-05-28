@@ -32,7 +32,7 @@ fuse-backend-rs = { version = "0.9.0" }
 
 nydus-utils = { path = "../utils" }
 nydus-error = { path = "../error" }
-storage = { path = "../storage", features = ["backend-localfs"] }
+nydus-storage = { version = "0.5.0", path = "../storage", features = ["backend-localfs"] }
 
 [dev-dependencies]
 vmm-sys-util = "0.9.0"
@@ -42,5 +42,5 @@ assert_matches = "1.5.0"
 fusedev = ["fuse-backend-rs/fusedev"]
 virtio-fs = ["fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]
 vhost-user-fs = ["fuse-backend-rs/vhost-user-fs"]
-backend-oss = ["storage/backend-oss"]
-backend-registry = ["storage/backend-registry"]
+backend-oss = ["nydus-storage/backend-oss"]
+backend-registry = ["nydus-storage/backend-registry"]

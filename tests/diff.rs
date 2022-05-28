@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vmm_sys_util::tempdir::TempDir;
 
+use nydus_storage::device::BlobChunkInfo;
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper};
 use rafs::RafsIoReader;
-use storage::device::BlobChunkInfo;
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct BuildOutputBlob {

@@ -1,4 +1,4 @@
-FROM rust:1.52.1
+FROM rust:1.61.0
 ARG ARCH=x86_64
 
 RUN mkdir /root/.cargo/

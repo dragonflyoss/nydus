@@ -1,9 +1,12 @@
 [package]
-name = "storage"
+name = "nydus-storage"
 version = "0.5.0"
+description = "The core storage subsystem for Nydus Image Service"
 authors = ["The Nydus Developers"]
-edition = "2018"
 license = "Apache-2.0 OR BSD-3-Clause"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
+edition = "2018"
 
 [dependencies]
 anyhow = "1.0.35"
@@ -32,8 +35,8 @@ vm-memory = "0.7.0"
 vmm-sys-util = "0.9.0"
 fuse-backend-rs = { version = "0.9.0" }
 
-nydus-utils = { path = "../utils" }
-nydus-error = { path = "../error" }
+nydus-utils = { version = "0.2.0", path = "../utils" }
+nydus-error = { version = "0.2.0", path = "../error" }
 
 dbs-uhttp = { version = "0.3.0" }
 
@@ -43,3 +46,7 @@ dbs-uhttp = { version = "0.3.0" }
 backend-localfs = ["sha2"]
 backend-oss = ["base64", "httpdate", "reqwest", "sha-1", "sha2", "hmac", "url"]
 backend-registry = ["base64", "reqwest", "sha2", "url"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin"]

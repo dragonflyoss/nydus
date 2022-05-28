@@ -14,6 +14,7 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
+extern crate nydus_storage as storage;
 
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::path::{Path, PathBuf};
