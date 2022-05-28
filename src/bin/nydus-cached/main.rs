@@ -8,6 +8,7 @@ extern crate clap;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
+extern crate nydus_storage as storage;
 
 use std::io::Result;
 use std::os::unix::prelude::AsRawFd;

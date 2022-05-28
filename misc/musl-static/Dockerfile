@@ -1,4 +1,4 @@
-FROM clux/muslrust:1.52.1
+FROM clux/muslrust:1.61.0
 
 ARG ARCH=x86_64
 
