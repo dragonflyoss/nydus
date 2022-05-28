@@ -1,6 +1,6 @@
 [package]
 name = "nydus-app"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["The Nydus Developers"]
 description = "Application framework and utilities for Nydus"
 readme = "README.md"
