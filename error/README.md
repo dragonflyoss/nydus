@@ -54,4 +54,4 @@ fn record_error(size: usize) {
 
 ## License
 
-This code is licensed under [Apache-2.0](LICENSE).
+This code is licensed under [Apache-2.0](LICENSE-APACHE) or [BSD-3-Clause](LICENSE-BSD-3-Clause).
