@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::thread::*;
 use std::time;
 
+use nydus_rafs::metadata::RafsMode;
 use nydus_utils::exec;
-use rafs::metadata::RafsMode;
 
 pub struct Nydusd {
     nydusd: String,

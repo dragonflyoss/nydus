@@ -10,10 +10,10 @@ extern crate clap;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
-extern crate rafs;
 extern crate serde_json;
 #[macro_use]
 extern crate nydus_error;
+extern crate nydus_rafs as rafs;
 extern crate nydus_storage as storage;
 
 #[cfg(feature = "fusedev")]

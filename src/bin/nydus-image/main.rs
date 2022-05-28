@@ -14,6 +14,7 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
+extern crate nydus_rafs as rafs;
 extern crate nydus_storage as storage;
 
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
@@ -25,9 +26,10 @@ use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
 use nydus_app::{setup_logging, BuildTimeInfo};
+use nydus_rafs::RafsIoReader;
+use nydus_storage::factory::{BackendConfig, BlobFactory};
+use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
 use nydus_utils::{compress, digest};
-use rafs::RafsIoReader;
-use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
@@ -42,7 +44,6 @@ use crate::core::tree;
 use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::validator::Validator;
-use storage::factory::{BackendConfig, BlobFactory};
 
 #[macro_use]
 mod trace;

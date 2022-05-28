@@ -19,7 +19,7 @@ use std::sync::{
 use clap::{App, Arg};
 use event_manager::{EventManager, EventOps, EventSubscriber, Events, SubscriberOps};
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
-use storage::remote::{RemoteBlobMgr, Server};
+use nydus_storage::remote::{RemoteBlobMgr, Server};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
