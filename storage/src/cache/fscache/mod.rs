@@ -114,7 +114,7 @@ impl FsCacheMgr {
         }
 
         let entry = FileCacheEntry::new_fs_cache(
-            &self,
+            self,
             blob.clone(),
             self.prefetch_config.clone(),
             self.runtime.clone(),
