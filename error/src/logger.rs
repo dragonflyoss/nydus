@@ -87,12 +87,12 @@ mod tests {
         let mut left = 16;
         while left >= 0 {
             let r = holder.push(error_msg);
-            assert_eq!(r.is_ok(), true);
+            assert!(r.is_ok());
             left -= 1;
         }
 
-        assert_eq!(holder.total_errors <= 10, true);
-        assert_eq!(holder.total_size <= 80, true);
+        assert!(holder.total_errors <= 10);
+        assert!(holder.total_size <= 80);
 
         let mut multi = 10;
         let mut error_msg_long = "".to_string();

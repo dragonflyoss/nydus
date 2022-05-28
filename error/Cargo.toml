@@ -1,11 +1,11 @@
 [package]
 name = "nydus-error"
-version = "0.2.0"
-description = "Error handling utilities for Nydus"
-readme = "README.md"
-repository = "https://github.com/dragonflyoss/image-service"
+version = "0.2.1"
+description = "Error handling utilities for Nydus Image Service"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
 
 [dependencies]
@@ -15,3 +15,7 @@ libc = "0.2"
 log = "0.4"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin"]
