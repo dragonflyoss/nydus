@@ -78,6 +78,7 @@ pub(crate) struct MockChunkInfo {
     pub uncompress_offset: u64,
     pub file_offset: u64,
     pub index: u32,
+    #[allow(unused)]
     pub reserved: u32,
 }
 

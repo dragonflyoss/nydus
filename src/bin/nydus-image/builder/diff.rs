@@ -159,7 +159,7 @@ fn same_file(f1: &Node, f2: &Node) -> bool {
         return false;
     }
     let cap_name = OsStr::new("security.capability");
-    if f1.xattrs.get(&cap_name) != f2.xattrs.get(&cap_name) {
+    if f1.xattrs.get(cap_name) != f2.xattrs.get(cap_name) {
         return false;
     }
     if !f1.is_dir() {
@@ -751,7 +751,7 @@ impl DiffBuilder {
         }
 
         let blob_mgr = self.blob_map.to_blob_mgr();
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
+        BuildOutput::new(&blob_mgr, bootstrap_mgr)
     }
 
     fn build_with_diff(
@@ -804,7 +804,7 @@ impl DiffBuilder {
         }
 
         let blob_mgr = self.blob_map.to_blob_mgr();
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
+        BuildOutput::new(&blob_mgr, bootstrap_mgr)
     }
 }
 

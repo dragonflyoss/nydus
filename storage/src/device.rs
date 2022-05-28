@@ -1079,7 +1079,7 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         if let Some(index) = self.iovec.get_target_blob_index() {
             let blobs = &self.dev.blobs.load();
             if (index as usize) < blobs.len() {
-                return blobs[index as usize].read(&mut self.iovec, buffers);
+                return blobs[index as usize].read(self.iovec, buffers);
             }
         }
 
@@ -1153,8 +1153,8 @@ mod tests {
         assert_eq!(iochunk.compress_size(), 0x100);
         assert_eq!(iochunk.uncompress_offset(), 0x2000);
         assert_eq!(iochunk.uncompress_size(), 0x200);
-        assert_eq!(iochunk.is_compressed(), false);
-        assert_eq!(iochunk.is_hole(), false);
+        assert!(!iochunk.is_compressed());
+        assert!(!iochunk.is_hole());
     }
 
     #[test]

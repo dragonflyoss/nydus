@@ -847,13 +847,13 @@ impl RafsV5ExtBlobTable {
     pub fn load(&mut self, r: &mut RafsIoReader, count: usize) -> Result<()> {
         let mut entries = Vec::<RafsV5ExtBlobEntry>::with_capacity(count);
         // Safe because it is already reserved enough space
-        let (_, mut data, _) = unsafe {
+        let (_, data, _) = unsafe {
             entries.set_len(count);
             (&mut entries).align_to_mut::<u8>()
         };
 
-        r.read_exact(&mut data)?;
-        self.entries = entries.to_vec().into_iter().map(Arc::new).collect();
+        r.read_exact(data)?;
+        self.entries = entries.iter().cloned().map(Arc::new).collect();
 
         Ok(())
     }
@@ -1387,7 +1387,7 @@ pub(crate) fn rafsv5_validate_digest(
                 return Ok(false);
             }
             let child_digest = child.get_digest();
-            let child_digest = child_digest.as_ref().as_ref();
+            let child_digest = child_digest.as_ref();
 
             hasher.digest_update(child_digest);
         }
@@ -1579,6 +1579,7 @@ pub mod tests {
         pub uncompress_offset: u64,
         pub file_offset: u64,
         pub index: u32,
+        #[allow(unused)]
         pub reserved: u32,
     }
 
@@ -1815,11 +1816,11 @@ pub mod tests {
 
         assert_eq!(table.size(), 0);
         assert_eq!(table.len(), 0);
-        assert_eq!(table.is_empty(), true);
+        assert!(table.is_empty());
         table.add_entry(0x1);
         assert_eq!(table.size(), 8);
         assert_eq!(table.len(), 1);
-        assert_eq!(table.is_empty(), false);
+        assert!(!table.is_empty());
 
         let tmp_file = TempFile::new().unwrap();
         let file = OpenOptions::new()
@@ -1843,7 +1844,7 @@ pub mod tests {
         table.load_prefetch_table_from(&mut reader, 8, 2).unwrap();
         assert_eq!(table.size(), 8);
         assert_eq!(table.len(), 2);
-        assert_eq!(table.is_empty(), false);
+        assert!(!table.is_empty());
         assert_eq!(table.inodes[0], 0x1);
         assert_eq!(table.inodes[1], 0x0);
     }
@@ -1853,12 +1854,12 @@ pub mod tests {
         let mut inode = RafsV5Inode::new();
         inode.set_name_size(3);
         assert_eq!(inode.size(), 136);
-        assert_eq!(inode.is_symlink(), false);
-        assert_eq!(inode.is_hardlink(), false);
-        assert_eq!(inode.is_dir(), false);
-        assert_eq!(inode.is_reg(), false);
-        assert_eq!(inode.has_hole(), false);
-        assert_eq!(inode.has_xattr(), false);
+        assert!(!inode.is_symlink());
+        assert!(!inode.is_hardlink());
+        assert!(!inode.is_dir());
+        assert!(!inode.is_reg());
+        assert!(!inode.has_hole());
+        assert!(!inode.has_xattr());
 
         let mut inode = RafsV5Inode::new();
         inode.set_symlink_size(3);

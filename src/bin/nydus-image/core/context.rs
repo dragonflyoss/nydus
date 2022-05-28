@@ -218,7 +218,7 @@ impl ArtifactWriter {
             ArtifactStorage::FileDir(ref p) => {
                 // Better we can use open(2) O_TMPFILE, but for compatibility sake, we delay this job.
                 // TODO: Blob dir existence?
-                let tmp = TempFile::new_in(&p)
+                let tmp = TempFile::new_in(p)
                     .with_context(|| format!("failed to create temp file in {:?}", p))?;
                 let tmp2 = tmp.as_file().try_clone()?;
                 Ok(Self {
@@ -569,6 +569,7 @@ impl BlobManager {
         self.blobs.last()
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
             .iter()

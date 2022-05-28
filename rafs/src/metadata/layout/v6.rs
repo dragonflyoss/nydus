@@ -1198,6 +1198,7 @@ impl Default for RafsV6Blob {
 impl_bootstrap_converter!(RafsV6Blob);
 
 impl RafsV6Blob {
+    #[allow(clippy::wrong_self_convention)]
     fn to_blob_info(&self) -> Result<BlobInfo> {
         // debug_assert!(RAFS_DIGEST_LENGTH == 32);
         debug_assert!(size_of::<RafsV6Blob>() == 256);
@@ -2021,7 +2022,7 @@ mod tests {
 
         let mut entry1 = RafsV6XattrEntry::new();
         reader.read_exact(entry1.as_mut()).unwrap();
-        assert_eq!((entry1 == target1 || entry1 == target2), true);
+        assert!((entry1 == target1 || entry1 == target2));
 
         size += size_of::<RafsV6XattrEntry>()
             + entry1.name_len() as usize
@@ -2034,9 +2035,9 @@ mod tests {
         let mut entry2 = RafsV6XattrEntry::new();
         reader.read_exact(entry2.as_mut()).unwrap();
         if entry1 == target1 {
-            assert_eq!(entry2 == target2, true);
+            assert!(entry2 == target2);
         } else {
-            assert_eq!(entry2 == target1, true);
+            assert!(entry2 == target1);
         }
     }
 }

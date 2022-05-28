@@ -2,7 +2,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::array::IntoIter;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::prelude::*;
@@ -76,7 +75,7 @@ fn create_dir(path: &Path) -> PathBuf {
 fn create_file(path: &Path, chunks: &[Vec<u8>]) {
     let mut file = File::create(path).unwrap();
     for chunk in chunks {
-        file.write_all(&chunk).unwrap();
+        file.write_all(chunk).unwrap();
     }
 }
 
@@ -227,7 +226,7 @@ fn integration_test_diff_build_with_chunk_dict() {
         vec![&layer_dir_1, &layer_dir_2, &layer_dir_3, &layer_dir_4],
         &snapshot_dir_4,
     ));
-    let expected_chunk_dict_bootstrap = IntoIter::new([
+    let expected_chunk_dict_bootstrap = [
         (PathBuf::from("/"), vec![]),
         (
             PathBuf::from("/file-1"),
@@ -292,7 +291,9 @@ fn integration_test_diff_build_with_chunk_dict() {
             )],
         ),
         (PathBuf::from("/file-7"), vec![]),
-    ])
+    ]
+    .iter()
+    .cloned()
     .collect();
 
     // Diff build to a chunk-dict bootstrap
@@ -388,7 +389,7 @@ fn integration_test_diff_build_with_chunk_dict() {
         vec![&layer_dir_5, &layer_dir_6],
         &snapshot_dir_6,
     ));
-    let expected_bootstrap = IntoIter::new([
+    let expected_bootstrap = [
         (PathBuf::from("/"), vec![]),
         (
             PathBuf::from("/file-8"),
@@ -435,7 +436,9 @@ fn integration_test_diff_build_with_chunk_dict() {
                 ),
             ],
         ),
-    ])
+    ]
+    .iter()
+    .cloned()
     .collect();
 
     // Diff build based on a chunk dict bootstrap
@@ -544,7 +547,7 @@ fn integration_test_diff_build_with_chunk_dict() {
         &snapshot_dir_8,
     ));
 
-    let expected_bootstrap = IntoIter::new([
+    let expected_bootstrap = [
         (PathBuf::from("/"), vec![]),
         (
             PathBuf::from("/file-1"),
@@ -639,7 +642,9 @@ fn integration_test_diff_build_with_chunk_dict() {
                 ),
             ],
         ),
-    ])
+    ]
+    .iter()
+    .cloned()
     .collect();
 
     // Diff build based on a build-cache + chunk-dict bootstrap

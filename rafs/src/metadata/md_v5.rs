@@ -162,7 +162,7 @@ impl RafsSuper {
     pub(crate) fn amplify_io(
         &self,
         max_size: u32,
-        descs: &mut Vec<BlobIoVec>,
+        descs: &mut [BlobIoVec],
         inode: &Arc<dyn RafsInode>,
         window_base: u64,
         mut window_size: u64,

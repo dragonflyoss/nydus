@@ -479,7 +479,7 @@ fn handle_http_request(
     let mut response = match uri_parsed {
         Ok(uri) => match HTTP_ROUTES.routes.get(uri.path()) {
             Some(route) => route
-                .handle_request(&request, &|r| {
+                .handle_request(request, &|r| {
                     kick_api_server(api_notifier.clone(), to_api, from_api, r)
                 })
                 .unwrap_or_else(|err| error_response(err, StatusCode::BadRequest)),

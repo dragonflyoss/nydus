@@ -382,9 +382,9 @@ mod tests {
 
     #[test]
     fn test_is_success_status() {
-        assert_eq!(is_success_status(StatusCode::CONTINUE), false);
-        assert_eq!(is_success_status(StatusCode::OK), true);
-        assert_eq!(is_success_status(StatusCode::PERMANENT_REDIRECT), true);
-        assert_eq!(is_success_status(StatusCode::BAD_REQUEST), false);
+        assert!(!is_success_status(StatusCode::CONTINUE));
+        assert!(is_success_status(StatusCode::OK));
+        assert!(is_success_status(StatusCode::PERMANENT_REDIRECT));
+        assert!(!is_success_status(StatusCode::BAD_REQUEST));
     }
 }

@@ -98,6 +98,7 @@ struct TocEntry {
     pub offset: u64,
 
     // the Offset of the next entry with a non-zero Offset
+    #[allow(unused)]
     #[serde(skip)]
     pub next_offset: u64,
 
@@ -137,9 +138,11 @@ struct TocEntry {
     #[serde(default, rename = "chunkSize")]
     pub chunk_size: u64,
 
+    #[allow(unused)]
     #[serde(skip)]
     pub children: Vec<RcTocEntry>,
 
+    #[allow(unused)]
     #[serde(skip)]
     pub inode: u64,
 }
@@ -402,14 +405,14 @@ impl StargzIndexTreeBuilder {
                 }
             }
             if entry.is_reg() {
-                last_reg_entry = Some(&entry);
+                last_reg_entry = Some(entry);
             }
             if entry.is_chunk() {
                 continue;
             }
 
             let mut lost_dirs = Vec::new();
-            self.make_lost_dirs(&entry, &mut lost_dirs)?;
+            self.make_lost_dirs(entry, &mut lost_dirs)?;
             for dir in &lost_dirs {
                 let node = self.parse_node(dir, ctx.explicit_uidgid, ctx.fs_version, layer_idx)?;
                 nodes.push(node);
@@ -664,6 +667,6 @@ impl Builder for StargzBuilder {
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
 
         bootstrap_mgr.add(bootstrap_ctx);
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr)
+        BuildOutput::new(blob_mgr, bootstrap_mgr)
     }
 }

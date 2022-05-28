@@ -29,6 +29,7 @@ use crate::metadata::{
 use storage::device::v5::BlobV5ChunkInfo;
 
 #[derive(Default, Clone, Debug)]
+#[allow(unused)]
 pub struct MockInode {
     i_ino: Inode,
     i_name: OsString,

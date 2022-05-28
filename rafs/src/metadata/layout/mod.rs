@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn test_bootstrap_convert() {
         let mut value = 0x504030201u64;
-        let buf: &mut [u8] = &mut value.as_mut_slice();
+        let buf = value.as_mut_slice();
 
         let v: std::io::Result<&MockU32> = (&buf[1..5]).try_into();
         assert!(v.is_err());

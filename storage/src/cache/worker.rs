@@ -24,6 +24,7 @@ use fuse_backend_rs::transport::FileVolatileSlice;
 /// Configuration information for asynchronous workers.
 pub(crate) struct AsyncPrefetchConfig {
     /// Whether or not to eneable prefetch.
+    #[allow(unused)]
     pub enable: bool,
     /// Number of working threads.
     pub threads_count: usize,

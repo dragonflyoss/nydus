@@ -729,7 +729,7 @@ pub(crate) enum ExecuteError {
     IllegalCommand,
     ArgumentParse,
     Exit,
-    ExecuteError(anyhow::Error),
+    ExecError(anyhow::Error),
 }
 
 pub(crate) struct Executor {}
@@ -740,7 +740,7 @@ impl Executor {
         input: String,
     ) -> std::result::Result<Option<Value>, ExecuteError> {
         let mut raw = input
-            .strip_suffix("\n")
+            .strip_suffix('\n')
             .unwrap_or(&input)
             .split_ascii_whitespace();
         let cmd = match raw.next() {
@@ -789,7 +789,7 @@ impl Executor {
                 };
             }
         }
-        .map_err(ExecuteError::ExecuteError)?;
+        .map_err(ExecuteError::ExecError)?;
 
         Ok(output)
     }
@@ -826,7 +826,7 @@ impl Prompt {
                 Err(ExecuteError::Exit) => break,
                 Err(ExecuteError::IllegalCommand) => continue,
                 Err(ExecuteError::HelpCommand) => continue,
-                Err(ExecuteError::ExecuteError(e)) => {
+                Err(ExecuteError::ExecError(e)) => {
                     println!("Failed in executing command, {:?}", e);
                     continue;
                 }
