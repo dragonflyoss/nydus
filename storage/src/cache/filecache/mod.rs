@@ -116,7 +116,7 @@ impl FileCacheMgr {
         }
 
         let entry = FileCacheEntry::new_file_cache(
-            &self,
+            self,
             blob.clone(),
             self.prefetch_config.clone(),
             self.runtime.clone(),
@@ -329,7 +329,7 @@ pub mod blob_cache_tests {
         );
 
         let mut blob_config: FileCacheConfig = serde_json::from_str(&s).unwrap();
-        assert_eq!(blob_config.disable_indexed_map, false);
+        assert!(!blob_config.disable_indexed_map);
         assert_eq!(blob_config.work_dir, dir.to_str().unwrap());
         /*
         assert_eq!(blob_config.get_work_dir().unwrap(), dir.to_str().unwrap());

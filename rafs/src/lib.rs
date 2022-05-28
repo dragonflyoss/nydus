@@ -75,7 +75,7 @@ impl std::error::Error for RafsError {
 
 impl Display for RafsError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        write!(f, "{}", format!("{:?}", self))?;
+        write!(f, "{:?}", self)?;
         Ok(())
     }
 }

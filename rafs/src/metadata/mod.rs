@@ -263,7 +263,7 @@ impl Default for RafsSuperFlags {
 
 impl Display for RafsSuperFlags {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        write!(f, "{}", format!("{:?}", self))?;
+        write!(f, "{:?}", self)?;
         Ok(())
     }
 }
@@ -452,7 +452,7 @@ impl RafsSuper {
     /// Create a new `RafsSuper` instance from a `RafsConfig` object.
     pub fn new(conf: &RafsConfig) -> Result<Self> {
         Ok(Self {
-            mode: RafsMode::from_str(&conf.mode.as_str())?,
+            mode: RafsMode::from_str(conf.mode.as_str())?,
             validate_digest: conf.digest_validate,
             ..Default::default()
         })

@@ -846,7 +846,7 @@ mod cached_tests {
         assert_eq!(cached_chunk.uncompress_offset(), 0);
         let c_xattr = cached_inode.get_xattrs().unwrap();
         for k in c_xattr.iter() {
-            let k = OsStr::from_bytes(&k);
+            let k = OsStr::from_bytes(k);
             let v = cached_inode.get_xattr(k).unwrap();
             assert_eq!(xattr.get(k).cloned().unwrap(), v.unwrap());
         }
@@ -990,7 +990,7 @@ mod cached_tests {
 
         assert_eq!(sb.max_inode, RAFS_ROOT_INODE);
         assert_eq!(sb.s_inodes.len(), 0);
-        assert_eq!(sb.validate_digest, true);
+        assert!(sb.validate_digest);
 
         let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode.i_ino = 1;

@@ -13,13 +13,8 @@ use storage::device::BlobInfo;
 use crate::metadata::{Inode, RafsInode, RafsSuperBlock, RafsSuperInodes};
 use crate::{RafsIoReader, RafsResult};
 
+#[derive(Default)]
 pub struct NoopSuperBlock {}
-
-impl Default for NoopSuperBlock {
-    fn default() -> Self {
-        Self {}
-    }
-}
 
 impl NoopSuperBlock {
     pub fn new() -> Self {

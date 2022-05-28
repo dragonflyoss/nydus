@@ -352,7 +352,7 @@ fn is_mounted(mp: impl AsRef<Path>) -> Result<bool> {
     let match_mp = mpb.iter().find(|mp_stat| unsafe {
         let mp_name = CStr::from_ptr(&mp_stat.f_mntonname as *const i8);
         let mp = CStr::from_ptr(mp.as_ptr());
-        mp.eq(&mp_name)
+        mp.eq(mp_name)
     });
 
     Ok(match_mp.is_some())

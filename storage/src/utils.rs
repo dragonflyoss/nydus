@@ -223,7 +223,11 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
 /// A customized buf allocator that avoids zeroing
 pub fn alloc_buf(size: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(size);
-    unsafe { buf.set_len(size) };
+    // It's ok to provide uninitialized data buffer, the caller should take care of it.
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(size)
+    };
     buf
 }
 

@@ -571,19 +571,19 @@ struct Command {}
 
 impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
-        let blob_id = Self::get_blob_id(&matches)?;
-        let chunk_size = Self::get_chunk_size(&matches)?;
-        let blob_offset = Self::get_blob_offset(&matches)?;
-        let parent_bootstrap = Self::get_parent_bootstrap(&matches)?;
+        let blob_id = Self::get_blob_id(matches)?;
+        let chunk_size = Self::get_chunk_size(matches)?;
+        let blob_offset = Self::get_blob_offset(matches)?;
+        let parent_bootstrap = Self::get_parent_bootstrap(matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
         let extra_paths: Vec<PathBuf> = matches
             .values_of("SOURCE")
             .map(|paths| paths.map(PathBuf::from).skip(1).collect())
             .unwrap();
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
-        let blob_stor = Self::get_blob_storage(&matches, source_type)?;
+        let blob_stor = Self::get_blob_storage(matches, source_type)?;
         let repeatable = matches.is_present("repeatable");
-        let version = Self::get_fs_version(&matches)?;
+        let version = Self::get_fs_version(matches)?;
         let aligned_chunk = if version.is_v6() {
             info!("v6 enforces to use \"aligned-chunk\".");
             true
@@ -654,12 +654,12 @@ impl Command {
                 Self::ensure_directory(&bootstrap_dir)?;
                 ArtifactStorage::FileDir(PathBuf::from(bootstrap_dir))
             } else {
-                let bootstrap_path = Self::get_bootstrap(&matches)?;
+                let bootstrap_path = Self::get_bootstrap(matches)?;
                 ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path))
             };
             BootstrapManager::new(Some(storage), parent_bootstrap)
         } else {
-            let bootstrap_path = Self::get_bootstrap(&matches)?;
+            let bootstrap_path = Self::get_bootstrap(matches)?;
             BootstrapManager::new(
                 Some(ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path))),
                 parent_bootstrap,
@@ -694,11 +694,11 @@ impl Command {
         if let Some(bootstrap_path) =
             bootstrap_mgr.get_bootstrap_path(&build_output.last_bootstrap_name)
         {
-            Self::validate_image(&matches, &bootstrap_path)?;
+            Self::validate_image(matches, &bootstrap_path)?;
             info!("build successfully: {:?}", build_output,);
         }
 
-        OutputSerializer::dump(matches, build_output, &build_info)?;
+        OutputSerializer::dump(matches, build_output, build_info)?;
 
         Ok(())
     }
@@ -708,7 +708,7 @@ impl Command {
             .values_of("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
-        let target_bootstrap_path = Self::get_bootstrap(&matches)?;
+        let target_bootstrap_path = Self::get_bootstrap(matches)?;
         let chunk_dict_path = if let Some(arg) = matches.value_of("chunk-dict") {
             Some(parse_chunk_dict_arg(arg)?)
         } else {
@@ -752,7 +752,7 @@ impl Command {
         if let Some(build_output) =
             BlobCompactor::do_compact(bootstrap_path, dst_bootstrap, chunk_dict, backend, &config)?
         {
-            OutputSerializer::dump(matches, build_output, &build_info)?;
+            OutputSerializer::dump(matches, build_output, build_info)?;
         }
         Ok(())
     }
@@ -766,7 +766,7 @@ impl Command {
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
         info!("bootstrap is valid, blobs: {:?}", blob_ids);
-        OutputSerializer::dump_with_check(matches, &build_info, blob_ids)?;
+        OutputSerializer::dump_with_check(matches, build_info, blob_ids)?;
 
         Ok(())
     }
@@ -931,7 +931,7 @@ impl Command {
     #[allow(dead_code)]
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
-            let mut validator = Validator::new(&bootstrap_path)?;
+            let mut validator = Validator::new(bootstrap_path)?;
             timing_tracer!(
                 {
                     validator

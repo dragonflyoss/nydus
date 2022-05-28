@@ -355,8 +355,8 @@ impl Node {
                 chunk_size
             };
 
-            let mut chunk_data = &mut blob_ctx.chunk_data_buf[0..chunk_size as usize];
-            file.read_exact(&mut chunk_data)
+            let chunk_data = &mut blob_ctx.chunk_data_buf[0..chunk_size as usize];
+            file.read_exact(chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
             // TODO: check for hole chunks. One possible way is to always save
@@ -411,7 +411,7 @@ impl Node {
             }
 
             // Compress chunk data
-            let (compressed, is_compressed) = compress::compress(&chunk_data, ctx.compressor)
+            let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
                 .with_context(|| format!("failed to compress node file {:?}", self.path))?;
             let compressed_size = compressed.len();
 
@@ -637,7 +637,7 @@ impl Node {
                     0,
                     RafsV6Dirent::file_type(*file_type),
                 );
-                dirents.push((entry, &name));
+                dirents.push((entry, name));
 
                 nameoff += size_of::<RafsV6Dirent>() as u64;
                 used += len as u64;
@@ -1869,7 +1869,7 @@ mod tests {
         node.set_v6_offset(&mut bootstrap_ctx);
         assert_eq!(node.offset, 0);
         assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
-        assert_eq!(node.v6_compact_inode, true);
+        assert!(node.v6_compact_inode);
         assert_eq!(bootstrap_ctx.offset, 32);
 
         // symlink and dir are handled in the same way.
@@ -1980,7 +1980,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(reg_node.v6_compact_inode, true);
+        assert!(reg_node.v6_compact_inode);
 
         let pyc_node = Node::new(
             RafsVersion::V6,
@@ -1993,7 +1993,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(pyc_node.v6_compact_inode, false);
+        assert!(!pyc_node.v6_compact_inode);
 
         std::fs::remove_file(&pa_pyc).unwrap();
     }

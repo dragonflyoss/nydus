@@ -378,22 +378,22 @@ mod tests {
 
         assert_eq!(hdr.get_version(), 0x1);
 
-        assert_eq!(hdr.is_reply(), false);
+        assert!(!hdr.is_reply());
         hdr.set_reply(true);
-        assert_eq!(hdr.is_reply(), true);
+        assert!(hdr.is_reply());
         hdr.set_reply(false);
 
-        assert_eq!(hdr.is_need_reply(), false);
+        assert!(!hdr.is_need_reply());
         hdr.set_need_reply(true);
-        assert_eq!(hdr.is_need_reply(), true);
+        assert!(hdr.is_need_reply());
         hdr.set_need_reply(false);
 
         assert_eq!(hdr.get_size(), 0x100);
         hdr.set_size(0x200);
         assert_eq!(hdr.get_size(), 0x200);
 
-        assert_eq!(hdr.is_need_reply(), false);
-        assert_eq!(hdr.is_reply(), false);
+        assert!(!hdr.is_need_reply());
+        assert!(!hdr.is_reply());
         assert_eq!(hdr.get_version(), 0x1);
 
         // Check message length

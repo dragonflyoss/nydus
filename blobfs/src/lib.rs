@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 #[cfg(feature = "virtiofs")]
-use storage::device::BlobPrefetchRequest;
+use nydus_storage::device::BlobPrefetchRequest;
 use vm_memory::ByteValued;
 
 mod sync_io;
@@ -94,21 +94,12 @@ impl FromStr for BlobOndemandConfig {
 }
 
 /// Options that configure the behavior of the blobfs fuse file system.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct Config {
     /// Blobfs config is embedded with passthrough config
     pub ps_config: PassthroughConfig,
     /// This provides on demand config of blob management.
     pub blob_ondemand_cfg: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            ps_config: PassthroughConfig::default(),
-            blob_ondemand_cfg: Default::default(),
-        }
-    }
 }
 
 #[allow(dead_code)]

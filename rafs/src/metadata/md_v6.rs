@@ -135,7 +135,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(rs.try_load_v6(&mut reader).unwrap(), false);
+        assert!(!rs.try_load_v6(&mut reader).unwrap());
     }
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(rs.try_load_v6(&mut reader).unwrap(), false);
+        assert!(!rs.try_load_v6(&mut reader).unwrap());
     }
 
     #[test]

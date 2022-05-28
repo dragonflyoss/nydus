@@ -28,7 +28,7 @@ use clap::{App, Arg, ArgMatches};
 use fuse_backend_rs::api::{Vfs, VfsOptions};
 use mio::Waker;
 use nix::sys::signal;
-use rlimit::{rlim, Resource};
+use rlimit::Resource;
 
 use nydus::FsBackendType;
 use nydus_api::http::start_http_thread;
@@ -51,9 +51,9 @@ mod daemon;
 mod upgrade;
 
 /// Minimal number of file descriptors reserved for system.
-const RLIMIT_NOFILE_RESERVED: rlim = 16384;
+const RLIMIT_NOFILE_RESERVED: u64 = 16384;
 /// Default number of file descriptors.
-const RLIMIT_NOFILE_MAX: rlim = 1_000_000;
+const RLIMIT_NOFILE_MAX: u64 = 1_000_000;
 
 lazy_static! {
     static ref FUSE_DAEMON: Mutex::<Option<Arc<dyn NydusDaemon + Send + Sync>>> = Mutex::default();
@@ -260,10 +260,10 @@ fn parse_commandline_options(bti_string: String) -> ArgMatches<'static> {
 }
 
 #[cfg(target_os = "macos")]
-fn get_max_rlimit_nofile() -> Result<rlim> {
+fn get_max_rlimit_nofile() -> Result<u64> {
     let mut mib = [nix::libc::CTL_KERN, nix::libc::KERN_MAXFILES];
-    let mut file_max: rlim = 0;
-    let mut size = std::mem::size_of::<rlim>();
+    let mut file_max: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
     // Safe because the arguments are valid and we have checked the result.
     let res = unsafe {
         nix::libc::sysctl(
@@ -280,18 +280,18 @@ fn get_max_rlimit_nofile() -> Result<rlim> {
 }
 
 #[cfg(target_os = "linux")]
-fn get_max_rlimit_nofile() -> Result<rlim> {
+fn get_max_rlimit_nofile() -> Result<u64> {
     let file_max = std::fs::read_to_string("/proc/sys/fs/file-max")?;
     file_max
         .trim()
-        .parse::<rlim>()
+        .parse::<u64>()
         .map_err(|_| eother!("invalid content from fs.file-max"))
 }
 
 /// Handle command line option to tune rlimit for maximum file descriptor number.
 fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<()> {
     // `rlimit-nofile` has a default value, so safe to unwrap().
-    let rlimit_nofile: rlim = args.value_of(option_name).unwrap().parse().map_err(|_e| {
+    let rlimit_nofile: u64 = args.value_of(option_name).unwrap().parse().map_err(|_e| {
         Error::new(
             ErrorKind::InvalidInput,
             "invalid value for option `rlimit-nofile`",

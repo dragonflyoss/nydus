@@ -96,7 +96,7 @@ impl ClientConnection {
         }
 
         hdr.set_reply(true);
-        guard.send_header(&hdr, None).map_err(|_e| eio!())
+        guard.send_header(hdr, None).map_err(|_e| eio!())
     }
 
     fn handle_get_blob(&self, hdr: &mut MsgHeader, mut guard: MutexGuard<Endpoint>) -> Result<()> {
@@ -121,7 +121,7 @@ impl ClientConnection {
 
         let mut guard = self.lock_conn();
         hdr.set_reply(true);
-        guard.send_message(&hdr, &reply, None).map_err(|_e| eio!())
+        guard.send_message(hdr, &reply, None).map_err(|_e| eio!())
     }
 
     fn handle_fetch_range(
@@ -148,7 +148,7 @@ impl ClientConnection {
 
         let mut guard = self.lock_conn();
         hdr.set_reply(true);
-        guard.send_message(&hdr, &reply, None).map_err(|_e| eio!())
+        guard.send_message(hdr, &reply, None).map_err(|_e| eio!())
     }
 
     fn lock_conn(&self) -> MutexGuard<Endpoint> {

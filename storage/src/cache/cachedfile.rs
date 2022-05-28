@@ -338,7 +338,7 @@ impl BlobObject for FileCacheEntry {
             }
         }
 
-        self.do_fetch_chunks(&chunks)
+        self.do_fetch_chunks(chunks)
     }
 }
 

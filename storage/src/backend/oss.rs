@@ -229,6 +229,7 @@ pub struct Oss {
     connection: Arc<Connection>,
     state: Arc<OssState>,
     metrics: Option<Arc<BackendMetrics>>,
+    #[allow(unused)]
     id: Option<String>,
 }
 
@@ -332,7 +333,7 @@ mod tests {
     #[test]
     fn test_oss_new() {
         let json_str = "{\"access_key_id\":\"key\",\"access_key_secret\":\"secret\",\"bucket_name\":\"images\",\"endpoint\":\"/oss\",\"object_prefix\":\"nydus\",\"scheme\":\"\",\"proxy\":{\"url\":\"\",\"ping_url\":\"\",\"fallback\":true,\"check_interval\":5},\"timeout\":5,\"connect_timeout\":5,\"retry_limit\":5}";
-        let json: Value = serde_json::from_str(&json_str).unwrap();
+        let json: Value = serde_json::from_str(json_str).unwrap();
         let oss = Oss::new(json, Some("test-image")).unwrap();
 
         oss.metrics();
