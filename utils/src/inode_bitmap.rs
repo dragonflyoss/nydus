@@ -149,9 +149,9 @@ mod tests {
         m.set(5);
         assert_eq!(m.bitmap_to_array(), [vec![1, 2], vec![5]]);
 
-        assert_eq!(m.is_set(2), true);
+        assert!(m.is_set(2));
         m.clear(2);
-        assert_eq!(m.is_set(2), false);
+        assert!(!m.is_set(2));
         assert_eq!(m.bitmap_to_array(), [[1], [5]]);
 
         m.set(65);
@@ -186,7 +186,7 @@ mod tests {
             m.bitmap_to_array_and_clear(),
             [vec![0, 99999], vec![100002]]
         );
-        assert_eq!(m.is_set(9000), false);
+        assert!(!m.is_set(9000));
         assert_eq!(m.bitmap_to_array(), empty);
     }
 }

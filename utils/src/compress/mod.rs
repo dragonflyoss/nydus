@@ -149,7 +149,7 @@ mod tests {
     fn test_compress_algorithm_gzip() {
         let buf = vec![0x2u8; 4095];
         let compressed = compress(&buf, Algorithm::GZip).unwrap();
-        assert_eq!(compressed.1, true);
+        assert!(compressed.1);
         let (compressed, _) = compressed;
         assert_ne!(compressed.len(), 0);
 
