@@ -63,9 +63,6 @@ storage = { path = "storage" }
 blobfs = { path = "blobfs", features = ["virtiofs"], optional = true }
 mio = { version = "0.8", features = ["os-poll", "os-ext"]}
 
-[target.'cfg(target_os = "linux")'.dependencies]
-event-manager = "0.2.1"
-
 [dev-dependencies]
 sendfd = "0.3.3"
 vmm-sys-util = "0.9.0"
