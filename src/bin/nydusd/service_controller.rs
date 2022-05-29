@@ -120,7 +120,7 @@ impl ServiceContoller {
         info!(
             "Create fscache instance at {} with tag {}",
             p,
-            tag.clone().unwrap_or("<none>")
+            tag.unwrap_or("<none>")
         );
         let fscache = crate::fs_cache::FsCacheHandler::new(
             "/dev/cachefiles",
