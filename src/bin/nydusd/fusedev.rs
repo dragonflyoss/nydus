@@ -165,7 +165,7 @@ impl FusedevFsService {
         fp: FailoverPolicy,
         readonly: bool,
     ) -> Result<Self> {
-        let session = FuseSession::new(&mnt, "rafs", "", readonly)?;
+        let session = FuseSession::new(mnt, "rafs", "", readonly)?;
         let upgrade_mgr = supervisor
             .as_ref()
             .map(|s| Mutex::new(UpgradeManager::new(s.to_string().into())));
