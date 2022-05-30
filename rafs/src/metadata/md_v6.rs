@@ -47,7 +47,7 @@ impl RafsSuper {
         self.meta.meta_blkaddr = sb.s_meta_blkaddr;
         self.meta.root_nid = sb.s_root_nid;
 
-        self.meta.prefetch_table_entries = ext_sb.prefetch_table_size() / size_of::<u64>() as u32;
+        self.meta.prefetch_table_entries = ext_sb.prefetch_table_size() / size_of::<u32>() as u32;
         self.meta.prefetch_table_offset = ext_sb.prefetch_table_offset();
 
         trace!(
