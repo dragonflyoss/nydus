@@ -2,11 +2,9 @@
 
 This guide shows you how to use fscache-based EROFS nydus image service to launch docker containers with the fscache-enabled in-kernel erofs on-demand download feature.
 
-**Please be careful**, currently, the user-space daemon only implements _the basic functionality_ and it's aimed to test the fscache on-demand kernel code as a real end-to-end workload for container use cases, so it may take more extra steps compared with existing well-done solutions. This guide can be _frequently updated_ due to the overall implementation changes, so please make sure that you're now referring to the latest document version.
-
 ## Prepare the kernel
 
-Be aware of using the fscache-enabled erofs linux kernel, it can be built with the following steps:
+Be aware of using the fscache-enabled erofs kernel (Linux 5.19+), it can be built with the following steps:
 
 1.  ``git clone git://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs.git`` \
      or (mirror in china): ``git://kernel.source.codeaurora.cn/pub/scm/linux/kernel/git/xiang/erofs.git``
@@ -37,7 +35,7 @@ CONFIG_EROFS_FS_ONDEMAND=y
 1. Make sure you have installed _rust 1.52.1_ version and golang.
 
 2. Check out the latest nydus source code with \
-``git clone https://github.com/dragonflyoss/image-service.git -b fscache``
+``git clone https://github.com/dragonflyoss/image-service.git``
 
 3. Build nydusd with \
 ``cargo build --target x86_64-unknown-linux-gnu --features=fusedev --release --target-dir target-fusedev --bin nydusd``
@@ -56,7 +54,7 @@ make
 2. Get nydus snapshotter with erofs supported:
   ```shell
   # clone code
-  git clone https://github.com/imeoer/nydus-snapshotter.git -b erofs-with-fscache-support
+  git clone https://github.com/containerd/nydus-snapshotter.git
   # compile binary to ./bin/containerd-nydus-grpc
   cd nydus-snapshotter
   make
@@ -83,7 +81,7 @@ make
 ./bin/containerd-nydus-grpc \
  --config-path /path/nydus-erofs-config.json \
  --daemon-mode shared \
- --daemon-backend erofs \
+ --daemon-backend fscache \
  --log-level info \
  --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
  --cache-dir /var/lib/nydus/cache \
