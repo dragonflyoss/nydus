@@ -207,6 +207,14 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
             .conflicts_with("shared-dir"),
     )
     .arg(
+        Arg::with_name("shared-dir")
+            .long("shared-dir")
+            .short("s")
+            .help("Directory shared by host and guest for passthroughfs, which also enables pathroughfs mode")
+            .takes_value(true)
+            .conflicts_with("bootstrap"),
+    )
+    .arg(
         Arg::with_name("prefetch-files")
             .long("prefetch-files")
             .short("P")
@@ -293,14 +301,6 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
             .help("Enable support for both rafs and passthroughfs modes")
             .required(false)
             .takes_value(false),
-    )
-    .arg(
-        Arg::with_name("shared-dir")
-            .long("shared-dir")
-            .short("s")
-            .help("Directory shared by host and guest for passthroughfs, which also enables pathroughfs mode")
-            .takes_value(true)
-            .conflicts_with("bootstrap"),
     )
     .arg(
         Arg::with_name("sock")
