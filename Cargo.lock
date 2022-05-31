@@ -1251,7 +1251,6 @@ version = "0.2.1"
 dependencies = [
  "blake3",
  "flate2",
- "fuse-backend-rs",
  "lazy_static",
  "libc",
  "log",
