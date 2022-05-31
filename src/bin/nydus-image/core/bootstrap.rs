@@ -105,7 +105,7 @@ impl Bootstrap {
         timing_tracer!(
             {
                 for node in &bootstrap_ctx.nodes {
-                    tree.apply(&node, true, ctx.whiteout_spec)
+                    tree.apply(node, true, ctx.whiteout_spec)
                         .context("failed to apply tree")?;
                 }
                 Ok(true)
@@ -285,7 +285,7 @@ impl Bootstrap {
         }
         /* XXX: `.' and `..' should be sorted globally too */
         node.dirents
-            .sort_unstable_by(|a, b| a.1.as_os_str().cmp(&b.1.as_os_str()) as std::cmp::Ordering);
+            .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()) as std::cmp::Ordering);
 
         for dir in dirs {
             self.update_dirents(nodes, dir, tree.node.offset);
@@ -364,8 +364,8 @@ impl Bootstrap {
         blob_table: &RafsBlobTable,
     ) -> Result<()> {
         match blob_table {
-            RafsBlobTable::V5(table) => self.dump_rafsv5(ctx, bootstrap_ctx, &table),
-            RafsBlobTable::V6(table) => self.dump_rafsv6(ctx, bootstrap_ctx, &table),
+            RafsBlobTable::V5(table) => self.dump_rafsv5(ctx, bootstrap_ctx, table),
+            RafsBlobTable::V6(table) => self.dump_rafsv6(ctx, bootstrap_ctx, table),
         }
     }
 
@@ -484,7 +484,7 @@ impl Bootstrap {
         timing_tracer!(
             {
                 for node in &bootstrap_ctx.nodes {
-                    node.dump_bootstrap_v5(&ctx, bootstrap_ctx.writer.as_mut())
+                    node.dump_bootstrap_v5(ctx, bootstrap_ctx.writer.as_mut())
                         .context("failed to dump bootstrap")?;
                 }
 

@@ -13,14 +13,14 @@ use fuse_backend_rs::api::CreateIn;
 use fuse_backend_rs::transport::FsCacheReqHandler;
 use nydus_error::eacces;
 #[cfg(feature = "virtiofs")]
+use nydus_storage::device::BlobPrefetchRequest;
+#[cfg(feature = "virtiofs")]
 use std::cmp::min;
 use std::ffi::CStr;
 use std::io;
 #[cfg(feature = "virtiofs")]
 use std::path::Path;
 use std::time::Duration;
-#[cfg(feature = "virtiofs")]
-use storage::device::BlobPrefetchRequest;
 
 impl BlobFs {
     #[cfg(feature = "virtiofs")]
@@ -50,7 +50,7 @@ impl BlobFs {
 
         let blob_file = Self::open_file(
             libc::AT_FDCWD,
-            &blob_id_full_path.as_path(),
+            blob_id_full_path.as_path(),
             libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0,
         )

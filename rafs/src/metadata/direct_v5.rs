@@ -108,6 +108,11 @@ struct DirectMappingState {
     validate_digest: bool,
 }
 
+// Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for DirectMappingState {}
+
+unsafe impl Sync for DirectMappingState {}
+
 impl DirectMappingState {
     fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
         DirectMappingState {
@@ -179,11 +184,6 @@ impl Drop for DirectMappingState {
 pub struct DirectSuperBlockV5 {
     state: ArcSwap<DirectMappingState>,
 }
-
-// Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for DirectSuperBlockV5 {}
-
-unsafe impl Sync for DirectSuperBlockV5 {}
 
 impl DirectSuperBlockV5 {
     /// Create a new instance of `DirectSuperBlockV5`.

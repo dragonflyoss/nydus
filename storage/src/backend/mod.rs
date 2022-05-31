@@ -18,7 +18,7 @@ use std::sync::Arc;
 use fuse_backend_rs::transport::FileVolatileSlice;
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
 
-use crate::utils::copyv;
+use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
 
 #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
@@ -188,8 +188,7 @@ pub trait BlobReader: Send + Sync {
             // Use std::alloc to avoid zeroing the allocated buffer.
             let size = bufs.iter().fold(0usize, move |size, s| size + s.len());
             let size = std::cmp::min(size, max_size);
-            let mut data = Vec::with_capacity(size);
-            unsafe { data.set_len(size) };
+            let mut data = alloc_buf(size);
 
             let result = self.read(&mut data, offset)?;
             copyv(&[&data], bufs, 0, result, 0, 0)
@@ -253,7 +252,7 @@ mod tests {
         assert_eq!(config.connect_timeout, 5);
         assert_eq!(config.retry_limit, 0);
         assert_eq!(config.proxy.check_interval, 5);
-        assert_eq!(config.proxy.fallback, true);
+        assert!(config.proxy.fallback);
         assert_eq!(config.proxy.ping_url, "");
         assert_eq!(config.proxy.url, "");
     }

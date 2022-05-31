@@ -131,9 +131,9 @@ macro_rules! trim_backend_config {
     ($config:expr, $($i:expr),*) => {
         let mut _n :&mut serde_json::Value = &mut $config["device"]["backend"]["config"];
         if let serde_json::Value::Object(ref mut m) = _n {
-            $(if m.contains_key($i) { m[$i].take();} else {()};)*
+            $(if m.contains_key($i) { m[$i].take();} )*
         }
-    };
+    }
 }
 
 /// Rafs storage backend configuration information.
@@ -1029,7 +1029,7 @@ pub(crate) mod tests {
     #[test]
     fn it_should_enable_xattr() {
         let rafs = new_rafs_backend();
-        assert_eq!(rafs.xattr_supported(), true);
+        assert!(rafs.xattr_supported());
     }
 
     #[test]

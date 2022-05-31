@@ -23,11 +23,13 @@ use serde::Deserialize;
 use serde_json::value::Value;
 use tokio::runtime::{Builder, Runtime};
 
+#[cfg(feature = "backend-localfs")]
+use crate::backend::localfs;
 #[cfg(feature = "backend-oss")]
 use crate::backend::oss;
 #[cfg(feature = "backend-registry")]
 use crate::backend::registry;
-use crate::backend::{localfs, BlobBackend};
+use crate::backend::BlobBackend;
 use crate::cache::{
     BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr, FsCacheMgr,
 };
@@ -225,6 +227,7 @@ impl BlobFactory {
     }
 
     /// Create a storage backend for the blob with id `blob_id`.
+    #[allow(unused_variables)]
     pub fn new_backend(
         config: BackendConfig,
         blob_id: &str,

@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Utility helpers to supprt the storage subsystem.
-use std::alloc::{alloc, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, Result};
 use std::os::unix::io::RawFd;
@@ -223,12 +222,13 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
 
 /// A customized buf allocator that avoids zeroing
 pub fn alloc_buf(size: usize) -> Vec<u8> {
-    debug_assert!(size < isize::MAX as usize);
-    let layout = Layout::from_size_align(size, 0x1000)
-        .unwrap()
-        .pad_to_align();
-    let ptr = unsafe { alloc(layout) };
-    unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
+    let mut buf = Vec::with_capacity(size);
+    // It's ok to provide uninitialized data buffer, the caller should take care of it.
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buf.set_len(size)
+    };
+    buf
 }
 
 /// Check hash of data matches provided one

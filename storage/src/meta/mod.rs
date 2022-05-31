@@ -14,6 +14,7 @@
 //! `blobid.blob.meata`. Together with the chunk map file `blobid.chunkmap`, they may be used to
 //! optimize the communication between blob manager and blob manager clients such as virtiofsd.
 
+use std::any::Any;
 use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
@@ -26,7 +27,7 @@ use nydus_utils::digest::RafsDigest;
 
 use crate::backend::BlobReader;
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk};
-use std::any::Any;
+use crate::utils::alloc_buf;
 
 const BLOB_METADATA_MAX_CHUNKS: u32 = 0xf_ffff;
 const BLOB_METADATA_MAX_SIZE: u64 = 0x100_0000u64;
@@ -586,9 +587,7 @@ impl BlobMetaInfo {
             }
         } else {
             let compressed_size = blob_info.meta_ci_compressed_size();
-            let mut buf = Vec::with_capacity(compressed_size as usize);
-            unsafe { buf.set_len(compressed_size as usize) };
-
+            let mut buf = alloc_buf(compressed_size as usize);
             let size = reader
                 .read(&mut buf, blob_info.meta_ci_offset())
                 .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
@@ -820,11 +819,11 @@ mod tests {
         assert_eq!(chunk.uncompressed_size(), 0x100);
         assert_eq!(chunk.uncompressed_end(), 0x2100);
         assert_eq!(chunk.aligned_uncompressed_end(), 0x3000);
-        assert_eq!(chunk.is_compressed(), false);
+        assert!(!chunk.is_compressed());
 
         chunk.set_uncompressed_size(0x200);
         assert_eq!(chunk.uncompressed_size(), 0x200);
-        assert_eq!(chunk.is_compressed(), true);
+        assert!(chunk.is_compressed());
     }
 
     #[test]
@@ -871,8 +870,8 @@ mod tests {
         assert_eq!(vec[0].compress_size(), 0x1000);
         assert_eq!(vec[0].uncompress_offset(), 0);
         assert_eq!(vec[0].uncompress_size(), 0x1001);
-        assert_eq!(vec[0].is_compressed(), true);
-        assert_eq!(vec[0].is_hole(), false);
+        assert!(vec[0].is_compressed());
+        assert!(!vec[0].is_hole());
 
         let vec = info.get_chunks_uncompressed(0x0, 0x4000, 0).unwrap();
         assert_eq!(vec.len(), 2);
@@ -882,8 +881,8 @@ mod tests {
         assert_eq!(vec[1].compress_size(), 0x2000);
         assert_eq!(vec[1].uncompress_offset(), 0x2000);
         assert_eq!(vec[1].uncompress_size(), 0x2000);
-        assert_eq!(vec[1].is_compressed(), false);
-        assert_eq!(vec[1].is_hole(), false);
+        assert!(!vec[1].is_compressed());
+        assert!(!vec[1].is_hole());
 
         let vec = info.get_chunks_uncompressed(0x0, 0x4001, 0).unwrap();
         assert_eq!(vec.len(), 3);
@@ -980,7 +979,7 @@ mod tests {
         };
 
         let pos = 0;
-        w.write_all(&data).unwrap();
+        w.write_all(data).unwrap();
 
         let mut blob_info = BlobInfo::new(
             0,
@@ -999,8 +998,7 @@ mod tests {
             compress::Algorithm::None as u32,
         );
 
-        let mut buffer = Vec::with_capacity(data.len());
-        unsafe { buffer.set_len(data.len()) };
+        let mut buffer = alloc_buf(data.len());
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
@@ -1043,7 +1041,7 @@ mod tests {
         };
 
         let (buf, compressed) = compress::compress(data, compress::Algorithm::Lz4Block).unwrap();
-        assert_eq!(compressed, true);
+        assert!(compressed);
 
         let pos = 0;
         w.write_all(&buf).unwrap();
@@ -1067,8 +1065,7 @@ mod tests {
             compress::Algorithm::Lz4Block as u32,
         );
 
-        let mut buffer = Vec::with_capacity(uncompressed_size);
-        unsafe { buffer.set_len(uncompressed_size) };
+        let mut buffer = alloc_buf(uncompressed_size);
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,

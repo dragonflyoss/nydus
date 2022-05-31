@@ -59,7 +59,7 @@ impl CommandBlobcache {
         let m = metrics.as_object().unwrap();
 
         if raw {
-            println!("{}", metrics.to_string());
+            println!("{}", metrics);
         } else {
             print!(
                 r#"
@@ -191,7 +191,7 @@ Block Sizes/millis:
         }
 
         if raw {
-            println!("{}", metrics.to_string());
+            println!("{}", metrics);
         } else {
             let sizes = vec!["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
             let m = metrics.as_object().unwrap();
@@ -264,7 +264,7 @@ impl CommandFsStats {
         let m = metrics.as_object().unwrap();
         let fop_counter = m["fop_hits"].as_array().unwrap();
         if raw {
-            println!("{}", metrics.to_string());
+            println!("{}", metrics);
         } else {
             print!(
                 r#"
@@ -326,7 +326,7 @@ impl CommandDaemon {
             let backend_list = i["backend_collection"].as_object().unwrap();
 
             if raw {
-                println!("{}", info.to_string());
+                println!("{}", info);
             } else {
                 let version_info = &i["version"];
                 print!(
@@ -408,7 +408,7 @@ impl CommandUmount {
         let mountpoint = &p["mountpoint"];
 
         client
-            .delete("mount", None, Some(vec![("mountpoint", &mountpoint)]))
+            .delete("mount", None, Some(vec![("mountpoint", mountpoint)]))
             .await
     }
 }

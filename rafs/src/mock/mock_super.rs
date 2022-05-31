@@ -13,19 +13,12 @@ use storage::device::BlobInfo;
 use crate::metadata::{Inode, RafsInode, RafsSuperBlock, RafsSuperInodes};
 use crate::{RafsIoReader, RafsResult};
 
+#[derive(Default)]
 pub struct MockSuperBlock {
     pub inodes: HashMap<Inode, Arc<dyn RafsInode + Send + Sync>>,
 }
 
 pub const CHUNK_SIZE: u32 = 200;
-
-impl Default for MockSuperBlock {
-    fn default() -> Self {
-        Self {
-            inodes: HashMap::new(),
-        }
-    }
-}
 
 impl MockSuperBlock {
     pub fn new() -> Self {

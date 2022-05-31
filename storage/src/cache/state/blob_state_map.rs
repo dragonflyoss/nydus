@@ -530,12 +530,9 @@ pub(crate) mod tests {
                 .unwrap();
         }
         for idx in 0..chunk_count {
-            assert_eq!(
-                chunk_map
-                    .check_ready_and_mark_pending(chunks[idx as usize].as_ref())
-                    .unwrap(),
-                true
-            );
+            assert!(chunk_map
+                .check_ready_and_mark_pending(chunks[idx as usize].as_ref())
+                .unwrap(),);
         }
     }
 
@@ -606,34 +603,25 @@ pub(crate) mod tests {
         index_map
             .set_ready_and_clear_pending(chunk_1.as_ref())
             .unwrap();
-        assert_eq!(
-            index_map
-                .check_ready_and_mark_pending(chunk_1.as_ref())
-                .unwrap(),
-            true
-        );
+        assert!(index_map
+            .check_ready_and_mark_pending(chunk_1.as_ref())
+            .unwrap(),);
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
 
         index_map.clear_pending(chunk_2.as_ref());
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
-        assert_eq!(
-            index_map
-                .check_ready_and_mark_pending(chunk_2.as_ref())
-                .unwrap(),
-            false
-        );
+        assert!(!index_map
+            .check_ready_and_mark_pending(chunk_2.as_ref())
+            .unwrap(),);
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 1);
         index_map.clear_pending(chunk_2.as_ref());
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
         index_map
             .set_ready_and_clear_pending(chunk_2.as_ref())
             .unwrap();
-        assert_eq!(
-            index_map
-                .check_ready_and_mark_pending(chunk_2.as_ref())
-                .unwrap(),
-            true
-        );
+        assert!(index_map
+            .check_ready_and_mark_pending(chunk_2.as_ref())
+            .unwrap(),);
         assert_eq!(index_map.inflight_tracer.lock().unwrap().len(), 0);
 
         // digested ChunkMap
@@ -655,19 +643,13 @@ pub(crate) mod tests {
         digest_map
             .set_ready_and_clear_pending(chunk_1.as_ref())
             .unwrap();
-        assert_eq!(
-            digest_map
-                .check_ready_and_mark_pending(chunk_1.as_ref())
-                .unwrap(),
-            true
-        );
+        assert!(digest_map
+            .check_ready_and_mark_pending(chunk_1.as_ref())
+            .unwrap(),);
         digest_map.clear_pending(chunk_2.as_ref());
-        assert_eq!(
-            digest_map
-                .check_ready_and_mark_pending(chunk_2.as_ref())
-                .unwrap(),
-            false
-        );
+        assert!(!digest_map
+            .check_ready_and_mark_pending(chunk_2.as_ref())
+            .unwrap(),);
         digest_map.clear_pending(chunk_2.as_ref());
         assert_eq!(digest_map.inflight_tracer.lock().unwrap().len(), 0);
     }
@@ -685,12 +667,10 @@ pub(crate) mod tests {
             c
         });
 
-        assert_eq!(
-            map.as_ref()
-                .check_ready_and_mark_pending(chunk_4.as_ref())
-                .unwrap(),
-            false
-        );
+        assert!(!map
+            .as_ref()
+            .check_ready_and_mark_pending(chunk_4.as_ref())
+            .unwrap(),);
         let map_cloned = map.clone();
         assert_eq!(map.inflight_tracer.lock().unwrap().len(), 1);
 
@@ -701,7 +681,7 @@ pub(crate) mod tests {
                     let ready = map_cloned
                         .check_ready_and_mark_pending(chunk_4_cloned.as_ref())
                         .unwrap();
-                    assert_eq!(ready, true);
+                    assert!(ready);
                 }
             })
             .unwrap();
@@ -714,7 +694,7 @@ pub(crate) mod tests {
                     let ready = map_cloned_2
                         .check_ready_and_mark_pending(chunk_4_cloned_2.as_ref())
                         .unwrap();
-                    assert_eq!(ready, true);
+                    assert!(ready);
                 }
             })
             .unwrap();
@@ -791,9 +771,9 @@ pub(crate) mod tests {
             IndexedChunkMap::new(tmp_file.as_path().to_str().unwrap(), 10, true).unwrap(),
         ));
 
-        assert_eq!(map.is_range_all_ready(), false);
-        assert_eq!(map.is_range_ready(0, 1).unwrap(), false);
-        assert_eq!(map.is_range_ready(9, 1).unwrap(), false);
+        assert!(!map.is_range_all_ready());
+        assert!(!map.is_range_ready(0, 1).unwrap());
+        assert!(!map.is_range_ready(9, 1).unwrap());
         assert!(map.is_range_ready(10, 1).is_err());
         assert_eq!(
             map.check_range_ready_and_mark_pending(0, 2).unwrap(),
@@ -808,8 +788,8 @@ pub(crate) mod tests {
         );
         map.set_range_ready_and_clear_pending(2, 1).unwrap();
         map.set_range_ready_and_clear_pending(3, 7).unwrap();
-        assert_eq!(map.is_range_ready(0, 1).unwrap(), true);
-        assert_eq!(map.is_range_ready(9, 1).unwrap(), true);
-        assert_eq!(map.is_range_all_ready(), true);
+        assert!(map.is_range_ready(0, 1).unwrap());
+        assert!(map.is_range_ready(9, 1).unwrap());
+        assert!(map.is_range_all_ready());
     }
 }

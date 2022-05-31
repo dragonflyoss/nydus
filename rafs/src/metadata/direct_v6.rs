@@ -61,10 +61,6 @@ use storage::device::{
 };
 use storage::utils::readahead;
 
-// Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for DirectSuperBlockV6 {}
-unsafe impl Sync for DirectSuperBlockV6 {}
-
 fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, rafs_err)
 }
@@ -85,6 +81,10 @@ struct DirectMappingState {
     fd: RawFd,
     validate_digest: bool,
 }
+
+// Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for DirectMappingState {}
+unsafe impl Sync for DirectMappingState {}
 
 impl DirectMappingState {
     fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {

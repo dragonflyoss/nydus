@@ -8,7 +8,7 @@ use std::io::{Error, Result};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use nydus_utils::metrics::BackendMetrics;
 use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
@@ -129,7 +129,7 @@ impl OssState {
         }
         let data = data.join("\n");
         let mut mac =
-            HmacSha1::new_varkey(self.access_key_secret.as_bytes()).map_err(|e| einval!(e))?;
+            HmacSha1::new_from_slice(self.access_key_secret.as_bytes()).map_err(|e| einval!(e))?;
         mac.update(data.as_bytes());
         let signature = base64::encode(&mac.finalize().into_bytes());
 
@@ -233,6 +233,7 @@ pub struct Oss {
     connection: Arc<Connection>,
     state: Arc<OssState>,
     metrics: Option<Arc<BackendMetrics>>,
+    #[allow(unused)]
     id: Option<String>,
 }
 
@@ -336,7 +337,7 @@ mod tests {
     #[test]
     fn test_oss_new() {
         let json_str = "{\"access_key_id\":\"key\",\"access_key_secret\":\"secret\",\"bucket_name\":\"images\",\"endpoint\":\"/oss\",\"object_prefix\":\"nydus\",\"scheme\":\"\",\"proxy\":{\"url\":\"\",\"ping_url\":\"\",\"fallback\":true,\"check_interval\":5},\"timeout\":5,\"connect_timeout\":5,\"retry_limit\":5}";
-        let json: Value = serde_json::from_str(&json_str).unwrap();
+        let json: Value = serde_json::from_str(json_str).unwrap();
         let oss = Oss::new(json, Some("test-image")).unwrap();
 
         oss.metrics();

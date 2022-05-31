@@ -143,7 +143,7 @@ impl<'a> Builder<'a> {
             &dir.join("sub/sub-root-large-copy-hardlink-1"),
         );
         self.create_symlink(
-            &Path::new("../root-large").to_path_buf(),
+            Path::new("../root-large"),
             &dir.join("sub/sub-root-large-symlink"),
         );
 

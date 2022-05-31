@@ -75,7 +75,7 @@ impl Merger {
         // Get the blobs come from chunk dict bootstrap.
         let mut chunk_dict_blobs = HashSet::new();
         if let Some(chunk_dict_path) = &chunk_dict {
-            let rs = RafsSuper::load_from_metadata(&chunk_dict_path, RafsMode::Direct, true)
+            let rs = RafsSuper::load_from_metadata(chunk_dict_path, RafsMode::Direct, true)
                 .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
@@ -83,7 +83,7 @@ impl Merger {
         }
 
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)
+            let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
 
             let current_flags = Flags::from_meta(&rs.meta);
@@ -172,7 +172,7 @@ impl Merger {
         let storage = ArtifactStorage::SingleFile(target.clone());
         let mut bootstrap_ctx = BootstrapContext::new(Some(storage), false, false)?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
-        let blob_table = blob_mgr.to_blob_table(&ctx)?;
+        let blob_table = blob_mgr.to_blob_table(ctx)?;
         bootstrap
             .dump(ctx, &mut bootstrap_ctx, &blob_table)
             .context(format!("dump bootstrap to {:?}", target))?;

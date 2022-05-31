@@ -125,6 +125,7 @@ struct TokenResponse {
 
 #[derive(Debug)]
 struct BasicAuth {
+    #[allow(unused)]
     realm: String,
 }
 

@@ -48,10 +48,10 @@ impl Tree {
 
     /// Load a `Tree` from a bootstrap file, and optionally caches chunk information.
     pub fn from_bootstrap<T: ChunkDict>(rs: &RafsSuper, chunk_dict: &mut T) -> Result<Self> {
-        let tree_builder = MetadataTreeBuilder::new(&rs);
+        let tree_builder = MetadataTreeBuilder::new(rs);
         let root_inode = rs.get_inode(RAFS_ROOT_INODE, true)?;
         let root_node =
-            MetadataTreeBuilder::parse_node(&rs, root_inode.as_ref(), PathBuf::from("/"))?;
+            MetadataTreeBuilder::parse_node(rs, root_inode.as_ref(), PathBuf::from("/"))?;
         let mut tree = Tree::new(root_node);
 
         tree.children = timing_tracer!(
@@ -277,7 +277,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
             let child_path = parent_path.join(child.name());
-            let child = Self::parse_node(&self.rs, child.as_ref(), child_path)?;
+            let child = Self::parse_node(self.rs, child.as_ref(), child_path)?;
 
             if child.is_reg() {
                 for chunk in &child.chunks {
@@ -323,7 +323,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         for name in inode.get_xattrs()? {
             let name = bytes_to_os_str(&name);
             let value = inode.get_xattr(name)?;
-            xattrs.add(name.to_os_string(), value.unwrap_or_else(Vec::new));
+            xattrs.add(name.to_os_string(), value.unwrap_or_default());
         }
 
         // Nodes loaded from bootstrap will only be used as `Overlay::Lower`, so make `dev` invalid

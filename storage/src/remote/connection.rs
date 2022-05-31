@@ -501,7 +501,7 @@ impl Endpoint {
                     .take(n)
                     .map(|fd| {
                         // Safe because we have the ownership of `fd`.
-                        unsafe { File::from_raw_fd(*fd) }
+                        File::from_raw_fd(*fd)
                     })
                     .collect();
                 Some(files)

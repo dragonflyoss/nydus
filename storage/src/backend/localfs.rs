@@ -408,12 +408,14 @@ impl LocalFsTracer {
 /// Struct to prefetch blob data according to access trace.
 #[derive(Debug)]
 struct Prefetcher {
-    blob_file: File,     // blob file for readahead
-    blob_size: u64,      // blob file size
-    log_path: String,    // log file path
-    log_file: File,      // file for access logging
+    blob_file: File, // blob file for readahead
+    blob_size: u64,  // blob file size
+    #[allow(unused)]
+    log_path: String, // log file path
+    #[allow(unused)]
+    log_file: File, // file for access logging
     log_base: *const u8, // mmapped access log base
-    log_size: u64,       // size of mmapped area
+    log_size: u64,   // size of mmapped area
     records: ManuallyDrop<Vec<AccessLogEntry>>,
 }
 
@@ -734,8 +736,8 @@ mod tests {
         let mut trace: Vec<AccessLogEntry> = vec![Default::default(); 4];
         let log_path = path.to_str().unwrap().to_owned() + BLOB_ACCESSED_SUFFIX;
         let mut log_file = File::open(&log_path).unwrap();
-        let mut buf = unsafe { std::slice::from_raw_parts_mut(trace.as_mut_ptr() as *mut u8, 64) };
-        assert_eq!(log_file.read(&mut buf).unwrap(), 32);
+        let buf = unsafe { std::slice::from_raw_parts_mut(trace.as_mut_ptr() as *mut u8, 64) };
+        assert_eq!(log_file.read(buf).unwrap(), 32);
 
         assert_eq!(trace[0].0, 0x0);
         assert_eq!(trace[0].1, 0x1000);

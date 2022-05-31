@@ -82,7 +82,7 @@ pub trait DigestHasher {
 /// for each digest.
 #[derive(Clone, Debug)]
 pub enum RafsDigestHasher {
-    Blake3(blake3::Hasher),
+    Blake3(Box<blake3::Hasher>),
     Sha256(Sha256),
 }
 
@@ -153,7 +153,7 @@ impl RafsDigest {
 
     pub fn hasher(algorithm: Algorithm) -> RafsDigestHasher {
         match algorithm {
-            Algorithm::Blake3 => RafsDigestHasher::Blake3(blake3::Hasher::new()),
+            Algorithm::Blake3 => RafsDigestHasher::Blake3(Box::new(blake3::Hasher::new())),
             Algorithm::Sha256 => RafsDigestHasher::Sha256(Sha256::new()),
         }
     }

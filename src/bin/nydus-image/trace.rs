@@ -297,13 +297,7 @@ pub mod tests {
         t3.join().unwrap();
 
         let map = root_tracer!().dump_summary_map().unwrap();
-        assert_eq!(
-            map["registered_events"]["event_1"].as_u64(),
-            serde::export::Some(600)
-        );
-        assert_eq!(
-            map["registered_events"]["event_2"].as_u64(),
-            serde::export::Some(900)
-        );
+        assert_eq!(map["registered_events"]["event_1"].as_u64(), Some(600));
+        assert_eq!(map["registered_events"]["event_2"].as_u64(), Some(900));
     }
 }

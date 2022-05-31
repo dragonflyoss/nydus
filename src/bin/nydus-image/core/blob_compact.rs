@@ -85,6 +85,7 @@ impl ChunkKey {
 #[derive(Clone, Debug)]
 struct ChunkSet {
     chunks: HashMap<ChunkKey, ChunkWrapper>,
+    #[allow(unused)]
     version: RafsVersion,
     total_size: usize,
 }
