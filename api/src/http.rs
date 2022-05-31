@@ -25,7 +25,8 @@ use url::Url;
 use crate::http_endpoint_v1::{
     EventsHandler, ExitHandler, FsBackendInfo, InfoHandler, MetricsBackendHandler,
     MetricsBlobcacheHandler, MetricsFilesHandler, MetricsHandler, MetricsInflightHandler,
-    MetricsPatternHandler, MountHandler, SendFuseFdHandler, TakeoverHandler, HTTP_ROOT_V1,
+    MetricsPatternHandler, MountHandler, SendFuseFdHandler, StartHandler, TakeoverHandler,
+    HTTP_ROOT_V1,
 };
 use crate::http_endpoint_v2::{BlobObjectListHandlerV2, HTTP_ROOT_V2};
 
@@ -126,6 +127,7 @@ pub enum ApiRequest {
     ExportFilesMetrics(Option<String>, bool),
     Exit,
     Takeover,
+    Start,
 
     // Filesystem Related
     Mount(String, ApiMountCmd),
@@ -398,6 +400,8 @@ lazy_static! {
         r.routes.insert(endpoint_v2!("/daemon/events"), Box::new(EventsHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/exit"), Box::new(ExitHandler{}));
         r.routes.insert(endpoint_v2!("/daemon/exit"), Box::new(ExitHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/start"), Box::new(StartHandler{}));
+        r.routes.insert(endpoint_v2!("/daemon/start"), Box::new(StartHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint_v2!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));

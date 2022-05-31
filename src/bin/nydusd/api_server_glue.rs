@@ -63,6 +63,7 @@ impl ApiServer {
             ApiRequest::ConfigureDaemon(conf) => self.configure_daemon(conf),
             ApiRequest::DaemonInfo => self.daemon_info(true),
             ApiRequest::Exit => self.do_exit(),
+            ApiRequest::Start => self.do_start(),
             ApiRequest::Takeover => self.do_takeover(),
             ApiRequest::Events => Self::events(),
             ApiRequest::ExportGlobalMetrics(id) => Self::export_global_metrics(id),
@@ -324,6 +325,13 @@ impl ApiServer {
                 }
             }
         }
+    }
+
+    fn do_start(&self) -> ApiResponse {
+        let d = self.get_daemon_object()?;
+        d.trigger_start()
+            .map(|_| ApiResponsePayload::Empty)
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
     }
 }
 
