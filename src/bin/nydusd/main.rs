@@ -210,7 +210,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("shared-dir")
             .long("shared-dir")
             .short("s")
-            .help("Directory shared by host and guest for passthroughfs, which also enables pathroughfs mode")
+            .help("Directory shared by host and guest for passthroughfs or a passthroughfs source for FUSE(for test and demonstration purpose), which also enables passthroughfs mode")
             .takes_value(true)
             .conflicts_with("bootstrap"),
     )
