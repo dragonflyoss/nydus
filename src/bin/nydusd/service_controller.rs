@@ -20,7 +20,7 @@ use crate::daemon::{
 };
 use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
 
-pub struct ServiceContoller {
+pub struct ServiceController {
     bti: BuildTimeInfo,
     id: Option<String>,
     request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
@@ -35,7 +35,7 @@ pub struct ServiceContoller {
     fscache: Mutex<Option<Arc<crate::fs_cache::FsCacheHandler>>>,
 }
 
-impl ServiceContoller {
+impl ServiceController {
     /// Start all enabled services.
     fn start_services(&self) -> Result<()> {
         info!("Starting all Nydus services...");
@@ -92,7 +92,7 @@ impl ServiceContoller {
 }
 
 #[cfg(target_os = "linux")]
-impl ServiceContoller {
+impl ServiceController {
     fn initialize_fscache_service(&self, subargs: &SubCmdArgs, path: &str) -> Result<()> {
         // Validate --fscache option value is an existing directory.
         let p = match Path::new(&path).canonicalize() {
@@ -135,7 +135,7 @@ impl ServiceContoller {
     }
 }
 
-impl NydusDaemon for ServiceContoller {
+impl NydusDaemon for ServiceController {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -187,7 +187,7 @@ impl NydusDaemon for ServiceContoller {
     }
 }
 
-impl DaemonStateMachineSubscriber for ServiceContoller {
+impl DaemonStateMachineSubscriber for ServiceController {
     fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
         self.request_sender
             .lock()
@@ -217,7 +217,7 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
 
     let (to_sm, from_client) = channel::<DaemonStateMachineInput>();
     let (to_client, from_sm) = channel::<DaemonResult<()>>();
-    let service_controller = ServiceContoller {
+    let service_controller = ServiceController {
         bti,
         id,
         request_sender: Arc::new(Mutex::new(to_sm)),
