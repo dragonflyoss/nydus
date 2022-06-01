@@ -197,6 +197,14 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     DAEMON_CONTROLLER.shutdown();
 }
 
+#[cfg(feature = "virtiofs")]
+const SHARED_DIR_HELP_MESSAGE: &str = "Directory shared by host and guest for \
+passthroughfs, which also enables passthroughfs mode";
+
+#[cfg(feature = "fusedev")]
+const SHARED_DIR_HELP_MESSAGE: &str = "A passthroughfs source for FUSE (the \
+purpose of testing and demonstration), which also enables passthroughfs mode";
+
 #[cfg(any(feature = "fusedev", feature = "virtiofs"))]
 fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     app.arg(
@@ -212,7 +220,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("shared-dir")
             .long("shared-dir")
             .short("s")
-            .help("Directory shared by host and guest for passthroughfs, which also enables pathroughfs mode")
+            .help(SHARED_DIR_HELP_MESSAGE)
             .takes_value(true)
             .conflicts_with("bootstrap"),
     )
