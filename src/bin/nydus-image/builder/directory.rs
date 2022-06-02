@@ -124,6 +124,7 @@ impl Builder for DirectoryBuilder {
         // Scan source directory to build upper layer tree.
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx, layer_idx)?;
+        let origin_bootstarp_offset = bootstrap_ctx.offset;
         let mut bootstrap = Bootstrap::new()?;
         if bootstrap_ctx.layered {
             // Merge with lower layer if there's one, do not prepare `prefetch` list during merging.
@@ -131,6 +132,9 @@ impl Builder for DirectoryBuilder {
             bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
             tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         }
+        // If layered, the bootstrap_ctx.offset will be set in first build, so we need restore it here
+        bootstrap_ctx.offset = origin_bootstarp_offset;
+        bootstrap_ctx.layered = false;
         // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
         timing_tracer!(
             { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },

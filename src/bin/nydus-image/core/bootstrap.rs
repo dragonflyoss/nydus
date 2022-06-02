@@ -33,7 +33,7 @@ const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
 pub(crate) struct Bootstrap {}
 
 impl Bootstrap {
-    /// Create a new instance of `BootStrap`.
+    /// Create a new instance of `Bootstrap`.
     pub fn new() -> Result<Self> {
         Ok(Self {})
     }
@@ -77,7 +77,7 @@ impl Bootstrap {
         nodes.push(tree.node.clone());
         self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes)?;
 
-        if ctx.fs_version.is_v6() {
+        if ctx.fs_version.is_v6() && !bootstrap_ctx.layered {
             self.update_dirents(&mut nodes, tree, root_offset);
         }
         bootstrap_ctx.nodes = nodes;
@@ -116,6 +116,11 @@ impl Bootstrap {
 
         // Clear all cached states for next upper layer build.
         bootstrap_ctx.inode_map.clear();
+        bootstrap_ctx.nodes.clear();
+        bootstrap_ctx
+            .available_blocks
+            .iter_mut()
+            .for_each(|v| v.clear());
         ctx.prefetch.clear();
 
         Ok(tree)
