@@ -20,7 +20,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs, RAFS_ROOT_INODE};
+use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
 use rafs::metadata::{Inode, RafsInode, RafsSuper};
 
 use super::chunk_dict::ChunkDict;
@@ -49,13 +49,13 @@ impl Tree {
     /// Load a `Tree` from a bootstrap file, and optionally caches chunk information.
     pub fn from_bootstrap<T: ChunkDict>(rs: &RafsSuper, chunk_dict: &mut T) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(rs);
-        let root_inode = rs.get_inode(RAFS_ROOT_INODE, true)?;
+        let root_inode = rs.get_inode(rs.superblock.root_ino(), true)?;
         let root_node =
             MetadataTreeBuilder::parse_node(rs, root_inode.as_ref(), PathBuf::from("/"))?;
         let mut tree = Tree::new(root_node);
 
         tree.children = timing_tracer!(
-            { tree_builder.load_children(RAFS_ROOT_INODE, None, chunk_dict, true) },
+            { tree_builder.load_children(rs.superblock.root_ino(), None, chunk_dict, true) },
             "load_tree_from_bootstrap"
         )?;
 
