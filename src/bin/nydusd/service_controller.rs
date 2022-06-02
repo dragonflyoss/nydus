@@ -242,6 +242,9 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
     let machine = DaemonStateMachineContext::new(daemon.clone(), from_client, to_client);
     machine.kick_state_machine()?;
     daemon
+        .on_event(DaemonStateMachineInput::Mount)
+        .map_err(|e| eother!(e))?;
+    daemon
         .on_event(DaemonStateMachineInput::Start)
         .map_err(|e| eother!(e))?;
 

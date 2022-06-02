@@ -400,6 +400,9 @@ pub fn create_virtiofs_daemon(
         daemon.service.mount(cmd)?;
     }
     daemon
+        .on_event(DaemonStateMachineInput::Mount)
+        .map_err(|e| eother!(e))?;
+    daemon
         .on_event(DaemonStateMachineInput::Start)
         .map_err(|e| eother!(e))?;
 
