@@ -61,33 +61,32 @@ impl ApiServer {
         let resp = match request {
             // Common (v1/v2)
             ApiRequest::ConfigureDaemon(conf) => self.configure_daemon(conf),
-            ApiRequest::DaemonInfo => self.daemon_info(true),
+            ApiRequest::GetDaemonInfo => self.daemon_info(true),
+            ApiRequest::GetEvents => Self::events(),
             ApiRequest::Exit => self.do_exit(),
             ApiRequest::Start => self.do_start(),
-            ApiRequest::Takeover => self.do_takeover(),
-            ApiRequest::Events => Self::events(),
-            ApiRequest::ExportGlobalMetrics(id) => Self::export_global_metrics(id),
-            ApiRequest::ExportFilesMetrics(id, latest_read_files) => {
-                Self::export_files_metrics(id, latest_read_files)
-            }
-            ApiRequest::ExportAccessPatterns(id) => Self::export_access_patterns(id),
-            ApiRequest::ExportBackendMetrics(id) => Self::export_backend_metrics(id),
-            ApiRequest::ExportBlobcacheMetrics(id) => Self::export_blobcache_metrics(id),
-
-            // Filesystem (v1)
-            ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
-            ApiRequest::ExportInflightMetrics => self.export_inflight_metrics(),
+            ApiRequest::SendFuseFd => self.send_fuse_fd(),
+            ApiRequest::TakeoverFuseFd => self.do_takeover(),
             ApiRequest::Mount(mountpoint, info) => self.do_mount(mountpoint, info),
             ApiRequest::Remount(mountpoint, info) => self.do_remount(mountpoint, info),
             ApiRequest::Umount(mountpoint) => self.do_umount(mountpoint),
-            ApiRequest::SendFuseFd => self.send_fuse_fd(),
+            ApiRequest::ExportBackendMetrics(id) => Self::export_backend_metrics(id),
+            ApiRequest::ExportBlobcacheMetrics(id) => Self::export_blobcache_metrics(id),
+
+            // Nydus API v1
+            ApiRequest::ExportFsGlobalMetrics(id) => Self::export_global_metrics(id),
+            ApiRequest::ExportFsFilesMetrics(id, latest_read_files) => {
+                Self::export_files_metrics(id, latest_read_files)
+            }
+            ApiRequest::ExportFsAccessPatterns(id) => Self::export_access_patterns(id),
+            ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
+            ApiRequest::ExportFsInflightMetrics => self.export_inflight_metrics(),
 
             // Nydus API v2
-            ApiRequest::DaemonInfoV2 => self.daemon_info(false),
+            ApiRequest::GetDaemonInfoV2 => self.daemon_info(false),
             ApiRequest::GetBlobObject(_param) => todo!(),
             ApiRequest::CreateBlobObject(entry) => self.create_blob_cache_entry(&entry),
             ApiRequest::DeleteBlobObject(param) => self.remove_blob_cache_entry(&param),
-            ApiRequest::ListBlobObject => todo!(),
         };
 
         self.respond(resp);
@@ -237,7 +236,7 @@ impl ApiServer {
             .export_inflight_ops()
             .map_err(|e| ApiError::Metrics(MetricsErrorKind::Daemon(e.into())))?
         {
-            Ok(ApiResponsePayload::InflightMetrics(ops))
+            Ok(ApiResponsePayload::FsInflightMetrics(ops))
         } else {
             Ok(ApiResponsePayload::Empty)
         }

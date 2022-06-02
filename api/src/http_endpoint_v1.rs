@@ -3,10 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! We keep HTTP and endpoints handlers in the separated crate because not only
-//! nydusd is using api server. Other component like `rafs` crate also rely this
-//! to export running metrics. So it will be easier to wrap different crates' Error
-//! into.
+//! Nydus API v1.
 
 use dbs_uhttp::{Method, Request, Response};
 
@@ -15,6 +12,7 @@ use crate::http::{
     ApiError, ApiRequest, ApiResponse, ApiResponsePayload, EndpointHandler, HttpError, HttpResult,
 };
 
+/// HTTP URI prefix for API v1.
 pub const HTTP_ROOT_V1: &str = "/api/v1";
 
 // Convert an ApiResponse to a HTTP response.
@@ -28,18 +26,13 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
         Ok(r) => {
             use ApiResponsePayload::*;
             match r {
-                // Daemon Common
                 Empty => success_response(None),
                 DaemonInfo(d) => success_response(Some(d)),
-                Events(d) => success_response(Some(d)),
-                BackendMetrics(d) => success_response(Some(d)),
-                BlobcacheMetrics(d) => success_response(Some(d)),
+                FsGlobalMetrics(d) => success_response(Some(d)),
                 FsFilesMetrics(d) => success_response(Some(d)),
                 FsFilesPatterns(d) => success_response(Some(d)),
-                FsGlobalMetrics(d) => success_response(Some(d)),
-                // Filesystem Specific
                 FsBackendInfo(d) => success_response(Some(d)),
-                InflightMetrics(d) => success_response(Some(d)),
+                FsInflightMetrics(d) => success_response(Some(d)),
                 _ => panic!("Unexpected response message from API service"),
             }
         }
@@ -50,6 +43,7 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
     }
 }
 
+/// Get daemon information and set daemon configuration.
 pub struct InfoHandler {}
 impl EndpointHandler for InfoHandler {
     fn handle_request(
@@ -59,7 +53,7 @@ impl EndpointHandler for InfoHandler {
     ) -> HttpResult {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
-                let r = kicker(ApiRequest::DaemonInfo);
+                let r = kicker(ApiRequest::GetDaemonInfo);
                 Ok(convert_to_response(r, HttpError::DaemonInfo))
             }
             (Method::Put, Some(body)) => {
@@ -72,213 +66,7 @@ impl EndpointHandler for InfoHandler {
     }
 }
 
-pub struct EventsHandler {}
-impl EndpointHandler for EventsHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let r = kicker(ApiRequest::Events);
-                Ok(convert_to_response(r, HttpError::Events))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct ExitHandler {}
-impl EndpointHandler for ExitHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::Exit);
-                Ok(convert_to_response(r, HttpError::Upgrade))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsHandler {}
-impl EndpointHandler for MetricsHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportGlobalMetrics(id));
-                Ok(convert_to_response(r, HttpError::GlobalMetrics))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsBackendHandler {}
-impl EndpointHandler for MetricsBackendHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportBackendMetrics(id));
-                Ok(convert_to_response(r, HttpError::BackendMetrics))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsBlobcacheHandler {}
-impl EndpointHandler for MetricsBlobcacheHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportBlobcacheMetrics(id));
-                Ok(convert_to_response(r, HttpError::BlobcacheMetrics))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsFilesHandler {}
-impl EndpointHandler for MetricsFilesHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let latest_read_files = extract_query_part(req, "latest")
-                    .map_or(false, |b| b.parse::<bool>().unwrap_or(false));
-                let r = kicker(ApiRequest::ExportFilesMetrics(id, latest_read_files));
-                Ok(convert_to_response(r, HttpError::FsFilesMetrics))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsPatternHandler {}
-impl EndpointHandler for MetricsPatternHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let id = extract_query_part(req, "id");
-                let r = kicker(ApiRequest::ExportAccessPatterns(id));
-                Ok(convert_to_response(r, HttpError::Pattern))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct TakeoverHandler {}
-impl EndpointHandler for TakeoverHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::Takeover);
-                Ok(convert_to_response(r, HttpError::Upgrade))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MountHandler {}
-impl EndpointHandler for MountHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        let mountpoint = extract_query_part(req, "mountpoint").ok_or_else(|| {
-            HttpError::QueryString("'mountpoint' should be specified in query string".to_string())
-        })?;
-        match (req.method(), req.body.as_ref()) {
-            (Method::Post, Some(body)) => {
-                let cmd = parse_body(body)?;
-                let r = kicker(ApiRequest::Mount(mountpoint, cmd));
-                Ok(convert_to_response(r, HttpError::Mount))
-            }
-            (Method::Put, Some(body)) => {
-                let cmd = parse_body(body)?;
-                let r = kicker(ApiRequest::Remount(mountpoint, cmd));
-                Ok(convert_to_response(r, HttpError::Mount))
-            }
-            (Method::Delete, None) => {
-                let r = kicker(ApiRequest::Umount(mountpoint));
-                Ok(convert_to_response(r, HttpError::Mount))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct StartHandler {}
-impl EndpointHandler for StartHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::Start);
-                Ok(convert_to_response(r, HttpError::Upgrade))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
-pub struct MetricsInflightHandler {}
-impl EndpointHandler for MetricsInflightHandler {
-    fn handle_request(
-        &self,
-        req: &Request,
-        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
-    ) -> HttpResult {
-        match (req.method(), req.body.as_ref()) {
-            (Method::Get, None) => {
-                let r = kicker(ApiRequest::ExportInflightMetrics);
-                Ok(convert_to_response(r, HttpError::InflightMetrics))
-            }
-            _ => Err(HttpError::BadRequest),
-        }
-    }
-}
-
+/// Get filesystem backend information.
 pub struct FsBackendInfo {}
 impl EndpointHandler for FsBackendInfo {
     fn handle_request(
@@ -301,17 +89,77 @@ impl EndpointHandler for FsBackendInfo {
     }
 }
 
-pub struct SendFuseFdHandler {}
-impl EndpointHandler for SendFuseFdHandler {
+/// Get filesystem global metrics.
+pub struct MetricsFsGlobalHandler {}
+impl EndpointHandler for MetricsFsGlobalHandler {
     fn handle_request(
         &self,
         req: &Request,
         kicker: &dyn Fn(ApiRequest) -> ApiResponse,
     ) -> HttpResult {
         match (req.method(), req.body.as_ref()) {
-            (Method::Put, None) => {
-                let r = kicker(ApiRequest::SendFuseFd);
-                Ok(convert_to_response(r, HttpError::Upgrade))
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportFsGlobalMetrics(id));
+                Ok(convert_to_response(r, HttpError::GlobalMetrics))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+/// Get filesystem access pattern log.
+pub struct MetricsFsAccessPatternHandler {}
+impl EndpointHandler for MetricsFsAccessPatternHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::ExportFsAccessPatterns(id));
+                Ok(convert_to_response(r, HttpError::Pattern))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+/// Get filesystem file metrics.
+pub struct MetricsFsFilesHandler {}
+impl EndpointHandler for MetricsFsFilesHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let latest_read_files = extract_query_part(req, "latest")
+                    .map_or(false, |b| b.parse::<bool>().unwrap_or(false));
+                let r = kicker(ApiRequest::ExportFsFilesMetrics(id, latest_read_files));
+                Ok(convert_to_response(r, HttpError::FsFilesMetrics))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+/// Get information about filesystem inflight requests.
+pub struct MetricsFsInflightHandler {}
+impl EndpointHandler for MetricsFsInflightHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let r = kicker(ApiRequest::ExportFsInflightMetrics);
+                Ok(convert_to_response(r, HttpError::InflightMetrics))
             }
             _ => Err(HttpError::BadRequest),
         }

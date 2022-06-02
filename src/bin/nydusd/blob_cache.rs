@@ -320,9 +320,10 @@ impl BlobCacheMgr {
             ));
         }
 
-        let prefetch_config = match serde_json::from_value(entry.fs_prefetch.clone()) {
-            Ok(fs_prefetch) => fs_prefetch,
-            Err(_e) => Default::default(),
+        let prefetch_config = if entry.fs_prefetch.is_some() {
+            entry.fs_prefetch.clone().unwrap()
+        } else {
+            entry.blob_config.prefetch_config.clone()
         };
         let factory_config = Arc::new(FactoryConfig {
             id: entry.blob_config.id.clone(),
@@ -547,6 +548,7 @@ mod tests {
             backend_config: entry.blob_config.backend_config,
             cache_type: "fscache".to_string(),
             cache_config: entry.blob_config.cache_config,
+            prefetch_config: Default::default(),
             metadata_path: Some(path.to_string()),
         };
         let mut entry = BlobCacheEntry {
