@@ -14,6 +14,9 @@ use storage::cache::FsCacheConfig;
 use storage::device::BlobInfo;
 use storage::factory::{BackendConfig, CacheConfig, FactoryConfig};
 
+const ID_SPLITTER: &str = "-";
+
+/// Configuration information for cached bootstrap blob objects.
 #[derive(Clone)]
 pub struct BlobCacheConfigBootstrap {
     blob_id: String,
@@ -23,11 +26,13 @@ pub struct BlobCacheConfigBootstrap {
 }
 
 impl BlobCacheConfigBootstrap {
+    /// Get file path of the bootstrap blob file.
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
+/// Configuration information for cached data blob objects.
 #[derive(Clone)]
 pub struct BlobCacheConfigDataBlob {
     blob_info: Arc<BlobInfo>,
@@ -36,19 +41,24 @@ pub struct BlobCacheConfigDataBlob {
 }
 
 impl BlobCacheConfigDataBlob {
+    /// Get [`BlobInfo`] of the data blob.
     pub fn blob_info(&self) -> &Arc<BlobInfo> {
         &self.blob_info
     }
 
+    /// Get ['FactoryConfig'] of the data blob.
     pub fn factory_config(&self) -> &Arc<FactoryConfig> {
         &self.factory_config
     }
 }
 
+/// Configuration information for cached blob objects.
 #[derive(Clone)]
 pub enum BlobCacheObjectConfig {
-    DataBlob(Arc<BlobCacheConfigDataBlob>),
+    /// Configuration information for cached bootstrap blob objects.
     Bootstrap(Arc<BlobCacheConfigBootstrap>),
+    /// Configuration information for cached data blob objects.
+    DataBlob(Arc<BlobCacheConfigDataBlob>),
 }
 
 impl BlobCacheObjectConfig {
@@ -60,8 +70,9 @@ impl BlobCacheObjectConfig {
         let scoped_blob_id = if domain_id.is_empty() {
             blob_info.blob_id().to_string()
         } else {
-            domain_id + "-" + blob_info.blob_id()
+            domain_id + ID_SPLITTER + blob_info.blob_id()
         };
+
         BlobCacheObjectConfig::DataBlob(Arc::new(BlobCacheConfigDataBlob {
             blob_info,
             scoped_blob_id,
@@ -78,8 +89,9 @@ impl BlobCacheObjectConfig {
         let scoped_blob_id = if domain_id.is_empty() {
             blob_id.clone()
         } else {
-            domain_id + "-" + &blob_id
+            domain_id + ID_SPLITTER + &blob_id
         };
+
         BlobCacheObjectConfig::Bootstrap(Arc::new(BlobCacheConfigBootstrap {
             blob_id,
             scoped_blob_id,
@@ -108,18 +120,6 @@ impl BlobCacheState {
         }
     }
 
-    fn remove(&mut self, domain_id: &str) {
-        let scoped_blob_prefix = format!("{}-", domain_id);
-        self.id_to_config_map.retain(|_k, v| match v {
-            BlobCacheObjectConfig::Bootstrap(o) => {
-                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
-            }
-            BlobCacheObjectConfig::DataBlob(o) => {
-                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
-            }
-        })
-    }
-
     fn try_add(&mut self, config: BlobCacheObjectConfig) -> Result<()> {
         let key = config.get_key();
         if self.id_to_config_map.contains_key(key) {
@@ -132,12 +132,24 @@ impl BlobCacheState {
         Ok(())
     }
 
+    fn remove(&mut self, domain_id: &str) {
+        let scoped_blob_prefix = format!("{}{}", domain_id, ID_SPLITTER);
+        self.id_to_config_map.retain(|_k, v| match v {
+            BlobCacheObjectConfig::Bootstrap(o) => {
+                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
+            }
+            BlobCacheObjectConfig::DataBlob(o) => {
+                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
+            }
+        })
+    }
+
     fn get(&self, key: &str) -> Option<BlobCacheObjectConfig> {
         self.id_to_config_map.get(key).cloned()
     }
 }
 
-/// Struct to maintain cached file objects.
+/// Manager for cached file objects.
 #[derive(Default)]
 pub struct BlobCacheMgr {
     state: Mutex<BlobCacheState>,
@@ -151,14 +163,119 @@ impl BlobCacheMgr {
         }
     }
 
-    /// Add a metadata blob object to be managed by the `FsCacheHandler`.
+    /// Add a bootstrap/data blob to be managed by the cache manager.
     ///
-    /// When adding a rafs metadata blob to the manager, all data blobs referenced by it will
-    /// also be added to the manager. It's convenient to support rafs image filesystem.
+    /// When adding a rafs bootstrap blob to the cache manager, all data blobs referenced by the
+    /// bootstrap blob will also be added to the cache manager too. It may be used to add a rafs
+    /// container image to the cache manager.
     ///
-    /// The `domain_id` and `id` forms a unique identifier to identify cached bootstrap objects.
-    /// That means `domain_id` is used to divide cached objects into groups and blobs with the
-    /// same `id` may exist in different groups.
+    /// Domains are used to control the blob sharing scope. All bootstrap and data blobs associated
+    /// with the same domain will be shared/reused, but blobs associated with different domains are
+    /// isolated. The `domain_id` is used to identify the associated domain.
+    pub fn add_blob_entry(&self, entry: &BlobCacheEntry) -> Result<()> {
+        if entry.blob_type == BLOB_CACHE_TYPE_BOOTSTRAP {
+            let (path, factory_config) = self.get_bootstrap_info(entry)?;
+            self.add_bootstrap_object(&entry.domain_id, &entry.blob_id, path, factory_config)
+                .map_err(|e| {
+                    warn!(
+                        "blob_cache: failed to add cache entry for bootstrap blob: {:?}",
+                        entry
+                    );
+                    e
+                })
+        } else {
+            warn!("blob_cache: invalid blob cache entry: {:?}", entry);
+            Err(einval!("blob_cache: invalid blob cache entry"))
+        }
+    }
+
+    /// Add a list of bootstrap and/or data blobs.
+    pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
+        for entry in blobs.blobs.iter() {
+            self.add_blob_entry(entry)?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove a blob object from the cache manager.
+    pub fn remove_blob_entry(&self, param: &BlobObjectParam) -> Result<()> {
+        let mut state = self.get_state();
+        state.remove(&param.domain_id);
+        Ok(())
+    }
+
+    /// Get configuration information for the blob with `key`.
+    pub fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
+        self.get_state().get(key)
+    }
+
+    #[inline]
+    fn get_state(&self) -> MutexGuard<BlobCacheState> {
+        self.state.lock().unwrap()
+    }
+
+    fn get_bootstrap_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<FactoryConfig>)> {
+        // Validate type of backend and cache.
+        let config = &entry.blob_config;
+        if config.cache_type != "fscache" {
+            return Err(einval!(
+                "blob_cache: `config.cache_type` for bootstrap blob is invalid"
+            ));
+        }
+        let cache_config = serde_json::from_value::<FsCacheConfig>(config.cache_config.clone())
+            .map_err(|_e| {
+                einval!("blob_cache: `config.cache_config` for bootstrap blob is invalid")
+            })?;
+
+        let path = config.metadata_path.clone().unwrap_or_default();
+        if path.is_empty() {
+            return Err(einval!(
+                "blob_cache: `config.metadata_path` for bootstrap blob is empty"
+            ));
+        }
+        let path = Path::new(&path).canonicalize().map_err(|_e| {
+            einval!("blob_cache: `config.metadata_path` for bootstrap blob is invalid")
+        })?;
+        if !path.is_file() {
+            return Err(einval!(
+                "blob_cache: `config.metadata_path` for bootstrap blob is not a file"
+            ));
+        }
+
+        // Validate the working directory for fscache
+        let path2 = Path::new(&cache_config.work_dir);
+        let path2 = path2
+            .canonicalize()
+            .map_err(|_e| eio!("blob_cache: `config.cache_config.work_dir` is invalid"))?;
+        if !path2.is_dir() {
+            return Err(einval!(
+                "blob_cache: `config.cache_config.work_dir` is not a directory"
+            ));
+        }
+
+        let prefetch_config = match serde_json::from_value(entry.fs_prefetch.clone()) {
+            Ok(fs_prefetch) => fs_prefetch,
+            Err(_e) => Default::default(),
+        };
+        let factory_config = Arc::new(FactoryConfig {
+            id: entry.blob_config.id.clone(),
+            backend: BackendConfig {
+                backend_type: entry.blob_config.backend_type.clone(),
+                backend_config: entry.blob_config.backend_config.clone(),
+            },
+            cache: CacheConfig {
+                cache_type: entry.blob_config.cache_type.clone(),
+                cache_compressed: false,
+                cache_config: entry.blob_config.cache_config.clone(),
+                cache_validate: false,
+                prefetch_config,
+            },
+        });
+
+        Ok((path, factory_config))
+    }
+
     fn add_bootstrap_object(
         &self,
         domain_id: &str,
@@ -179,7 +296,11 @@ impl BlobCacheMgr {
 
         // Try to add the referenced data blob object if it doesn't exist yet.
         for bi in rs.superblock.get_blob_infos() {
-            debug!("Found blob {} on domain {}", &bi.blob_id(), domain_id);
+            debug!(
+                "blob_cache: found blob {} in domain {}",
+                &bi.blob_id(),
+                domain_id
+            );
             let blob_config = BlobCacheObjectConfig::new_data_blob(
                 domain_id.to_string(),
                 bi,
@@ -190,102 +311,6 @@ impl BlobCacheMgr {
 
         Ok(())
     }
-
-    /// Add an entry of bootstrap and/or data blobs.
-    pub fn add_blob_entry(&self, entry: &BlobCacheEntry) -> Result<()> {
-        if entry.blob_type == BLOB_CACHE_TYPE_BOOTSTRAP {
-            let (path, factory_config) = self.get_bootstrap_info(entry)?;
-            if let Err(e) =
-                self.add_bootstrap_object(&entry.domain_id, &entry.blob_id, path, factory_config)
-            {
-                warn!("Failed to add cache entry for bootstrap blob: {:?}", entry);
-                return Err(e);
-            }
-        } else {
-            warn!("Invalid blob cache entry: {:?}", entry);
-            return Err(einval!("Invalid blob cache entry"));
-        }
-
-        Ok(())
-    }
-
-    pub fn remove_blob_entry(&self, param: &BlobObjectParam) -> Result<()> {
-        let mut state = self.get_state();
-        state.remove(&param.domain_id);
-        Ok(())
-    }
-
-    /// Add a list of bootstrap and/or data blobs.
-    pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
-        for entry in blobs.blobs.iter() {
-            self.add_blob_entry(entry)?;
-        }
-
-        Ok(())
-    }
-
-    /// Get blob configuration for blob with `key`.
-    pub fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
-        self.get_state().get(key)
-    }
-
-    #[inline]
-    fn get_state(&self) -> MutexGuard<BlobCacheState> {
-        self.state.lock().unwrap()
-    }
-
-    fn get_bootstrap_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<FactoryConfig>)> {
-        // Validate type of backend and cache.
-        let config = &entry.blob_config;
-        if config.cache_type != "fscache" {
-            return Err(einval!("`config.cache_type` for metadata blob is invalid"));
-        }
-        let cache_config =
-            serde_json::from_value::<FsCacheConfig>(entry.blob_config.cache_config.clone())
-                .map_err(|_e| {
-                    eother!("Invalid configuration of `FsCacheConfig` in blob cache entry")
-                })?;
-
-        let path = config.metadata_path.clone().unwrap_or_default();
-        if path.is_empty() {
-            return Err(einval!("`config.metadata_path` for metadata blob is empty"));
-        }
-        let path = Path::new(&path)
-            .canonicalize()
-            .map_err(|_e| einval!("`config.backend_config.blob_file` is invalid"))?;
-        if !path.is_file() {
-            return Err(einval!("`config.backend_config.blob_file` is not a file"));
-        }
-
-        // Validate the working directory for fscache
-        let path2 = Path::new(&cache_config.work_dir);
-        let path2 = path2
-            .canonicalize()
-            .map_err(|_e| eio!("`config.cache_config.work_dir` is invalid"))?;
-        if !path2.is_dir() {
-            return Err(einval!("`config.cache_config.work_dir` is not a directory"));
-        }
-
-        let factory_config = Arc::new(FactoryConfig {
-            id: entry.blob_config.id.clone(),
-            backend: BackendConfig {
-                backend_type: entry.blob_config.backend_type.clone(),
-                backend_config: entry.blob_config.backend_config.clone(),
-            },
-            cache: CacheConfig {
-                cache_type: entry.blob_config.cache_type.clone(),
-                cache_compressed: false,
-                cache_config: entry.blob_config.cache_config.clone(),
-                cache_validate: false,
-                prefetch_config: match serde_json::from_value(entry.fs_prefetch.clone()) {
-                    Ok(fs_prefetch) => fs_prefetch,
-                    Err(_e) => Default::default(),
-                },
-            },
-        });
-
-        Ok((path, factory_config))
-    }
 }
 
 #[cfg(test)]
@@ -293,12 +318,7 @@ mod tests {
     use super::*;
     use vmm_sys_util::tempdir::TempDir;
 
-    #[test]
-    fn test_blob_cache_entry() {
-        let tmpdir = TempDir::new().unwrap();
-        let path = tmpdir.as_path().join("bootstrap1");
-        std::fs::write(&path, "metadata").unwrap();
-
+    fn create_factory_config() -> String {
         let config = r#"
         {
             "type": "bootstrap",
@@ -317,6 +337,16 @@ mod tests {
                 "metadata_path": "/tmp/nydus/bootstrap1"
             }
           }"#;
+
+        config.to_string()
+    }
+
+    #[test]
+    fn test_blob_cache_entry() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = tmpdir.as_path().join("bootstrap1");
+        std::fs::write(&path, "metadata").unwrap();
+        let config = create_factory_config();
         let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
         let entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
 
@@ -326,6 +356,7 @@ mod tests {
         assert_eq!(&entry.blob_config.id, "factory1");
         assert_eq!(&entry.blob_config.backend_type, "localfs");
         assert_eq!(&entry.blob_config.cache_type, "fscache");
+        assert!(entry.blob_config.metadata_path.is_some());
         assert!(entry.blob_config.backend_config.is_object());
         assert!(entry.blob_config.cache_config.is_object());
 
@@ -335,6 +366,14 @@ mod tests {
         assert_eq!(&factory_config.id, "factory1");
         assert_eq!(&factory_config.backend.backend_type, "localfs");
         assert_eq!(&factory_config.cache.cache_type, "fscache");
+
+        let blob = BlobCacheConfigBootstrap {
+            blob_id: "123456789-123".to_string(),
+            scoped_blob_id: "domain1".to_string(),
+            path: path.clone(),
+            factory_config,
+        };
+        assert_eq!(blob.path(), &path);
     }
 
     #[test]
