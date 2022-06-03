@@ -8,7 +8,9 @@ use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nydus_api::http::{BlobCacheEntry, BlobCacheList, BlobObjectParam, BLOB_CACHE_TYPE_BOOTSTRAP};
+use nydus_api::http::{
+    BlobCacheEntry, BlobCacheList, BlobCacheObjectId, BLOB_CACHE_TYPE_BOOTSTRAP,
+};
 use rafs::metadata::{RafsMode, RafsSuper};
 use storage::cache::FsCacheConfig;
 use storage::device::BlobInfo;
@@ -16,7 +18,8 @@ use storage::factory::{BackendConfig, CacheConfig, FactoryConfig};
 
 const ID_SPLITTER: &str = "/";
 
-fn generate_blob_key(domain_id: &str, blob_id: &str) -> String {
+/// Generate blob key from domain and blob ids.
+pub fn generate_blob_key(domain_id: &str, blob_id: &str) -> String {
     if domain_id.is_empty() {
         blob_id.to_string()
     } else {
@@ -132,16 +135,29 @@ impl BlobCacheState {
         Ok(())
     }
 
-    fn remove(&mut self, domain_id: &str) {
-        let scoped_blob_prefix = format!("{}{}", domain_id, ID_SPLITTER);
-        self.id_to_config_map.retain(|_k, v| match v {
-            BlobCacheObjectConfig::Bootstrap(o) => {
-                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
-            }
-            BlobCacheObjectConfig::DataBlob(o) => {
-                !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
-            }
-        })
+    fn remove(&mut self, param: &BlobCacheObjectId) {
+        if param.blob_id.is_empty() && !param.domain_id.is_empty() {
+            // Remove all blobs associated with the domain.
+            let scoped_blob_prefix = format!("{}{}", param.domain_id, ID_SPLITTER);
+            self.id_to_config_map.retain(|_k, v| match v {
+                BlobCacheObjectConfig::Bootstrap(o) => {
+                    !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
+                }
+                BlobCacheObjectConfig::DataBlob(o) => {
+                    !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
+                }
+            });
+        } else {
+            let scoped_blob_prefix = if param.domain_id.is_empty() {
+                format!("{}", param.blob_id)
+            } else {
+                format!("{}{}{}", param.domain_id, ID_SPLITTER, param.blob_id)
+            };
+            self.id_to_config_map.retain(|_k, v| match v {
+                BlobCacheObjectConfig::Bootstrap(o) => !o.scoped_blob_id.eq(&scoped_blob_prefix),
+                BlobCacheObjectConfig::DataBlob(o) => !o.scoped_blob_id.eq(&scoped_blob_prefix),
+            });
+        }
     }
 
     fn get(&self, key: &str) -> Option<BlobCacheObjectConfig> {
@@ -199,9 +215,9 @@ impl BlobCacheMgr {
     }
 
     /// Remove a blob object from the cache manager.
-    pub fn remove_blob_entry(&self, param: &BlobObjectParam) -> Result<()> {
+    pub fn remove_blob_entry(&self, param: &BlobCacheObjectId) -> Result<()> {
         let mut state = self.get_state();
-        state.remove(&param.domain_id);
+        state.remove(param);
         Ok(())
     }
 
