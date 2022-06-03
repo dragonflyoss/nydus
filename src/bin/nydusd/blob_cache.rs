@@ -14,7 +14,15 @@ use storage::cache::FsCacheConfig;
 use storage::device::BlobInfo;
 use storage::factory::{BackendConfig, CacheConfig, FactoryConfig};
 
-const ID_SPLITTER: &str = "-";
+const ID_SPLITTER: &str = "/";
+
+fn generate_blob_key(domain_id: &str, blob_id: &str) -> String {
+    if domain_id.is_empty() {
+        blob_id.to_string()
+    } else {
+        format!("{}{}{}", domain_id, ID_SPLITTER, blob_id)
+    }
+}
 
 /// Configuration information for cached bootstrap blob objects.
 #[derive(Clone)]
@@ -67,11 +75,7 @@ impl BlobCacheObjectConfig {
         blob_info: Arc<BlobInfo>,
         factory_config: Arc<FactoryConfig>,
     ) -> Self {
-        let scoped_blob_id = if domain_id.is_empty() {
-            blob_info.blob_id().to_string()
-        } else {
-            domain_id + ID_SPLITTER + blob_info.blob_id()
-        };
+        let scoped_blob_id = generate_blob_key(&domain_id, blob_info.blob_id());
 
         BlobCacheObjectConfig::DataBlob(Arc::new(BlobCacheConfigDataBlob {
             blob_info,
@@ -86,11 +90,7 @@ impl BlobCacheObjectConfig {
         path: PathBuf,
         factory_config: Arc<FactoryConfig>,
     ) -> Self {
-        let scoped_blob_id = if domain_id.is_empty() {
-            blob_id.clone()
-        } else {
-            domain_id + ID_SPLITTER + &blob_id
-        };
+        let scoped_blob_id = generate_blob_key(&domain_id, &blob_id);
 
         BlobCacheObjectConfig::Bootstrap(Arc::new(BlobCacheConfigBootstrap {
             blob_id,
@@ -227,6 +227,16 @@ impl BlobCacheMgr {
             .map_err(|_e| {
                 einval!("blob_cache: `config.cache_config` for bootstrap blob is invalid")
             })?;
+
+        if entry.blob_id.contains(ID_SPLITTER) {
+            return Err(einval!(
+                "blob_cache: `blob_id` for bootstrap blob is invalid"
+            ));
+        } else if entry.domain_id.contains(ID_SPLITTER) {
+            return Err(einval!(
+                "blob_cache: `domain_id` for bootstrap blob is invalid"
+            ));
+        }
 
         let path = config.metadata_path.clone().unwrap_or_default();
         if path.is_empty() {
@@ -374,6 +384,20 @@ mod tests {
             factory_config,
         };
         assert_eq!(blob.path(), &path);
+    }
+
+    #[test]
+    fn test_invalid_blob_id() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = tmpdir.as_path().join("bootstrap1");
+        std::fs::write(&path, "metadata").unwrap();
+        let config = create_factory_config();
+        let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        let mgr = BlobCacheMgr::new();
+
+        entry.blob_id = "domain2/blob1".to_string();
+        mgr.get_bootstrap_info(&entry).unwrap_err();
     }
 
     #[test]
