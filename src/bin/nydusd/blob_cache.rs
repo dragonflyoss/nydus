@@ -326,6 +326,7 @@ impl BlobCacheMgr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nydus_api::http::BlobCacheEntryConfig;
     use vmm_sys_util::tempdir::TempDir;
 
     fn create_factory_config() -> String {
@@ -451,5 +452,49 @@ mod tests {
         assert_eq!(&list.blobs[0].blob_config.cache_type, "fscache");
         assert_eq!(&list.blobs[1].blob_type, "bootstrap");
         assert_eq!(&list.blobs[1].blob_id, "bootstrap2");
+    }
+
+    #[test]
+    fn test_add_bootstrap() {
+        let tmpdir = TempDir::new().unwrap();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("tests/texture/bootstrap/image_v2.boot");
+        let path = source_path.to_str().unwrap();
+
+        let config = create_factory_config();
+        let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
+        let entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+
+        let blob_config = BlobCacheEntryConfig {
+            id: "factory1".to_string(),
+            backend_type: "localfs".to_string(),
+            backend_config: entry.blob_config.backend_config,
+            cache_type: "fscache".to_string(),
+            cache_config: entry.blob_config.cache_config,
+            metadata_path: Some(path.to_string()),
+        };
+        let entry = BlobCacheEntry {
+            blob_type: BLOB_CACHE_TYPE_BOOTSTRAP.to_string(),
+            blob_id: "image_v2".to_string(),
+            blob_config,
+            domain_id: "domain2".to_string(),
+            fs_prefetch: Default::default(),
+        };
+
+        let mgr = BlobCacheMgr::new();
+        mgr.add_blob_entry(&entry).unwrap();
+        let blob_id = generate_blob_key(&entry.domain_id, &entry.blob_id);
+        assert!(mgr.get_config(&blob_id).is_some());
+
+        // Check existence of data blob referenced by the bootstrap.
+        let key = generate_blob_key(
+            &entry.domain_id,
+            "7fe907a0c9c7f35538f23f40baae5f2e8d148a3a6186f0f443f62d04b5e2d731",
+        );
+        assert!(mgr.get_config(&key).is_some());
+
+        let state = mgr.get_state();
+        assert_eq!(state.id_to_config_map.len(), 19);
     }
 }
