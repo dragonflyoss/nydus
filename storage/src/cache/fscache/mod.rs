@@ -14,7 +14,7 @@ use tokio::runtime::Runtime;
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::FileCacheEntry;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap};
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchState, AsyncWorkerMgr};
+use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::factory::CacheConfig;
@@ -226,7 +226,7 @@ impl FileCacheEntry {
             file,
             meta,
             metrics: mgr.metrics.clone(),
-            prefetch_state: Arc::new(AtomicU32::new(AsyncPrefetchState::Init as u32)),
+            prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
             runtime,
             workers,

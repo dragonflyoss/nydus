@@ -435,6 +435,10 @@ impl FsCacheHandler {
         if !factory_config.cache.prefetch_config.enable {
             return;
         }
+        if blob.start_prefetch().is_err() {
+            warn!("fscache: failed to enable data prefetch");
+            return;
+        }
 
         let size = match factory_config
             .cache
@@ -461,13 +465,11 @@ impl FsCacheHandler {
                 break;
             }
         }
+
         info!("blob prefetch start");
-        let _ = std::thread::spawn(move || {
-            let _ = blob
-                .prefetch(blob.clone(), &blob_req, &[])
-                .map_err(|_e| eio!("failed to prefetch blob data"));
-            let _ = blob.stop_prefetch();
-        });
+        if let Err(e) = blob.prefetch(blob.clone(), &blob_req, &[]) {
+            warn!("fscache: failed to prefetch blob data, {}", e);
+        }
     }
 
     /// The `fscache` factory essentially creates a namespace for blob objects cached by the
@@ -553,7 +555,11 @@ impl FsCacheHandler {
             // Safe to unwrap() because `id_to_config_map` and `id_to_object_map` is kept
             // in consistence.
             let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
-            BLOB_FACTORY.gc(Some((config.factory_config(), blob.blob_id())));
+            let factory_config = config.factory_config();
+            if factory_config.cache.prefetch_config.enable {
+                let _ = blob.stop_prefetch();
+            }
+            BLOB_FACTORY.gc(Some((factory_config, blob.blob_id())));
         }
     }
 

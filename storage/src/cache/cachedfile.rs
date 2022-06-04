@@ -26,9 +26,7 @@ use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
-use crate::cache::worker::{
-    AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncPrefetchState, AsyncWorkerMgr,
-};
+use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
@@ -135,7 +133,7 @@ impl BlobCache for FileCacheEntry {
     ) -> StorageResult<usize> {
         let mut bios = bios.to_vec();
         bios.iter_mut().for_each(|b| {
-            if let Some(ref chunks_meta) = self.meta {
+            if let Some(chunks_meta) = &self.meta {
                 // TODO: the first blob backend io triggers chunks array download.
                 if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
                     let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
@@ -145,10 +143,6 @@ impl BlobCache for FileCacheEntry {
         });
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
-
-        // Enable data prefetching
-        self.prefetch_state
-            .store(AsyncPrefetchState::Active as u32, Ordering::Release);
 
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
@@ -175,11 +169,33 @@ impl BlobCache for FileCacheEntry {
         Ok(0)
     }
 
-    fn stop_prefetch(&self) -> StorageResult<()> {
-        self.prefetch_state
-            .store(AsyncPrefetchState::Cancelled as u32, Ordering::Release);
-        self.workers.stop();
+    fn start_prefetch(&self) -> StorageResult<()> {
+        self.prefetch_state.fetch_add(1, Ordering::Release);
         Ok(())
+    }
+
+    fn stop_prefetch(&self) -> StorageResult<()> {
+        loop {
+            let val = self.prefetch_state.load(Ordering::Acquire);
+            if val > 0
+                && self
+                    .prefetch_state
+                    .compare_exchange(val, val - 1, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_err()
+            {
+                continue;
+            }
+
+            if val == 0 {
+                warn!("storage: inaccurate prefetch status");
+            }
+            if val == 0 || val == 1 {
+                // Stop the localfs legacy prefetch worker thread to read data into page cache.
+                let _ = self.reader.stop_data_prefetch();
+                //self.workers.flush_pending_prefetch_requests(&self.blob_info);
+                return Ok(());
+            }
+        }
     }
 
     fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {

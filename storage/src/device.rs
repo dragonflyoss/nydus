@@ -851,6 +851,7 @@ impl BlobDevice {
         &self,
         config: &Arc<FactoryConfig>,
         blob_infos: &[Arc<BlobInfo>],
+        fs_prefetch: bool,
     ) -> io::Result<()> {
         if self.blobs.load().len() != blob_infos.len() {
             return Err(einval!("number of blobs doesn't match"));
@@ -861,24 +862,22 @@ impl BlobDevice {
             blobs.push(blob);
         }
 
-        // Stop prefetch if it is running before swapping backend since prefetch threads cloned
-        // Arc<BlobCache>, the swap operation can't drop inner object completely.
-        // Otherwise prefetch threads will be leaked.
-        for blob in self.blobs.load().iter() {
-            blob.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
+        if fs_prefetch {
+            // Stop prefetch if it is running before swapping backend since prefetch threads cloned
+            // Arc<BlobCache>, the swap operation can't drop inner object completely.
+            // Otherwise prefetch threads will be leaked.
+            self.stop_prefetch();
         }
-
         self.blobs.store(Arc::new(blobs));
+        if fs_prefetch {
+            self.start_prefetch();
+        }
 
         Ok(())
     }
 
     /// Close the blob device.
     pub fn close(&self) -> io::Result<()> {
-        for blob in self.blobs.load().iter() {
-            blob.stop_prefetch().unwrap_or_else(|e| error!("{:?}", e));
-        }
-
         Ok(())
     }
 
@@ -927,6 +926,13 @@ impl BlobDevice {
         }
 
         Ok(())
+    }
+
+    /// Stop the background blob data prefetch task.
+    pub fn start_prefetch(&self) {
+        for blob in self.blobs.load().iter() {
+            let _ = blob.start_prefetch();
+        }
     }
 
     /// Stop the background blob data prefetch task.

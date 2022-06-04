@@ -101,6 +101,10 @@ impl BlobCache for DummyCache {
         }
     }
 
+    fn start_prefetch(&self) -> StorageResult<()> {
+        Ok(())
+    }
+
     fn stop_prefetch(&self) -> StorageResult<()> {
         if self.prefetch {
             let _ = self.reader.stop_data_prefetch();

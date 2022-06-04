@@ -45,18 +45,6 @@ impl From<BlobPrefetchConfig> for AsyncPrefetchConfig {
     }
 }
 
-/// Status of an asynchronous prefetch requests.
-#[repr(u32)]
-pub(crate) enum AsyncPrefetchState {
-    /// Initializations state.
-    Init,
-    /// The asynchronous service request is pending for executing, worker should not touching state
-    /// after executing the request.
-    Active,
-    /// The asynchronous service request has been cancelled.
-    Cancelled,
-}
-
 /// Asynchronous service request message.
 pub(crate) enum AsyncPrefetchMessage {
     /// Asynchronous blob layer prefetch request with (offset, size) of blob on storage backend.
@@ -205,7 +193,7 @@ impl AsyncWorkerMgr {
     /// Create working threads and start the event loop.
     pub fn start(mgr: Arc<AsyncWorkerMgr>) -> Result<()> {
         if mgr.prefetch_config.enable {
-            Self::start_prefetch_workers(mgr.clone())?;
+            Self::start_prefetch_workers(mgr)?;
         }
 
         Ok(())
@@ -291,7 +279,7 @@ impl AsyncWorkerMgr {
 
             match msg {
                 AsyncPrefetchMessage::BlobPrefetch(state, blob_cache, offset, size) => {
-                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
+                    if state.load(Ordering::Acquire) > 0 {
                         let _ = rt.spawn(Self::handle_blob_prefetch_request(
                             mgr.clone(),
                             blob_cache,
@@ -301,7 +289,7 @@ impl AsyncWorkerMgr {
                     }
                 }
                 AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
-                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
+                    if state.load(Ordering::Acquire) > 0 {
                         let _ = rt.spawn(Self::handle_fs_prefetch_request(
                             mgr.clone(),
                             blob_cache,
@@ -324,14 +312,14 @@ impl AsyncWorkerMgr {
         if let Some(limiter) = &self.prefetch_limiter {
             let size = match msg {
                 AsyncPrefetchMessage::BlobPrefetch(state, _blob_cache, _offset, size) => {
-                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
+                    if state.load(Ordering::Acquire) > 0 {
                         *size
                     } else {
                         0
                     }
                 }
                 AsyncPrefetchMessage::FsPrefetch(state, _blob_cache, req) => {
-                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
+                    if state.load(Ordering::Acquire) > 0 {
                         req.blob_size
                     } else {
                         0
@@ -384,6 +372,8 @@ impl AsyncWorkerMgr {
                 );
             }
         } else {
+            // This is only supported by localfs backend to prefetch data into page cache,
+            // or to generate/apply file trace log.
             let _ = cache.reader().prefetch_blob_data_range(offset, size);
         }
 
