@@ -153,8 +153,8 @@ impl BlobCache for FileCacheEntry {
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
             let msg = AsyncRequestMessage::new_blob_prefetch(
-                blob_cache.clone(),
                 self.prefetch_state.clone(),
+                blob_cache.clone(),
                 req.offset as u64,
                 req.len as u64,
             );
@@ -165,8 +165,8 @@ impl BlobCache for FileCacheEntry {
         let merging_size = self.prefetch_config.merging_size;
         BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
             let msg = AsyncRequestMessage::new_fs_prefetch(
-                blob_cache.clone(),
                 self.prefetch_state.clone(),
+                blob_cache.clone(),
                 req,
             );
             let _ = self.workers.send(msg);

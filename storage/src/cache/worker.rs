@@ -1,30 +1,30 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2021 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2021-2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Result;
+use std::collections::VecDeque;
+use std::io::{Error, ErrorKind, Result};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use fuse_backend_rs::transport::FileVolatileSlice;
 use futures::executor::block_on;
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use spmc::{channel, Receiver, Sender};
+use tokio::sync::Notify;
 
 use crate::cache::{BlobCache, BlobIoRange, BlobPrefetchConfig};
 use crate::RAFS_MAX_CHUNK_SIZE;
-use fuse_backend_rs::transport::FileVolatileSlice;
 
 /// Configuration information for asynchronous workers.
 pub(crate) struct AsyncPrefetchConfig {
-    /// Whether or not to eneable prefetch.
-    #[allow(unused)]
+    /// Whether or not to enable prefetch.
     pub enable: bool,
     /// Number of working threads.
     pub threads_count: usize,
@@ -54,34 +54,25 @@ pub(crate) enum AsyncRequestState {
     /// after executing the request.
     Pending,
     /// The asynchronous service request has been cancelled.
-    #[allow(dead_code)]
     Cancelled,
-    /*
-    /// The caller is waiting for the worker to execute the request and set state to `Finished`.
-    WaitingForAck,
-    /// The asynchronous service request has been executed.
-    Finished,
-     */
 }
 
 /// Asynchronous service request message.
-#[allow(dead_code)]
 pub(crate) enum AsyncRequestMessage {
-    /// Notify the working threads to exit.
-    Exit,
-    /// Ping for test.
-    Ping,
-    /// Asynchronous file-system layer prefetch request.
-    FsPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, BlobIoRange),
     /// Asynchronous blob layer prefetch request with (offset, size) of blob on storage backend.
     BlobPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, u64, u64),
+    /// Asynchronous file-system layer prefetch request.
+    FsPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, BlobIoRange),
+    #[cfg_attr(not(test), allow(unused))]
+    /// Ping for test.
+    Ping,
 }
 
 impl AsyncRequestMessage {
     /// Create a new asynchronous filesystem prefetch request message.
     pub fn new_fs_prefetch(
-        blob_cache: Arc<dyn BlobCache>,
         req_state: Arc<AtomicU32>,
+        blob_cache: Arc<dyn BlobCache>,
         req: BlobIoRange,
     ) -> Self {
         AsyncRequestMessage::FsPrefetch(req_state, blob_cache, req)
@@ -89,8 +80,8 @@ impl AsyncRequestMessage {
 
     /// Create a new asynchronous blob prefetch request message.
     pub fn new_blob_prefetch(
-        blob_cache: Arc<dyn BlobCache>,
         req_state: Arc<AtomicU32>,
+        blob_cache: Arc<dyn BlobCache>,
         offset: u64,
         size: u64,
     ) -> Self {
@@ -98,15 +89,77 @@ impl AsyncRequestMessage {
     }
 }
 
-pub(crate) struct AsyncWorkerMgr {
-    metrics: Arc<BlobcacheMetrics>,
-    receiver: Receiver<AsyncRequestMessage>,
-    sender: Mutex<Sender<AsyncRequestMessage>>,
-    workers: AtomicU32,
-    busy_workers: AtomicU32,
-    pings: AtomicU32,
-    exiting: AtomicBool,
+// Async implementation of Multi-Producer-Multi-Consumer channel.
+struct Channel<T> {
+    closed: AtomicBool,
+    notifier: Notify,
+    requests: Mutex<VecDeque<T>>,
+}
 
+impl<T> Channel<T> {
+    fn new() -> Self {
+        Channel {
+            closed: AtomicBool::new(false),
+            notifier: Notify::new(),
+            requests: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.notifier.notify_waiters();
+    }
+
+    fn send(&self, msg: T) -> std::result::Result<(), T> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(msg)
+        } else {
+            self.requests.lock().unwrap().push_back(msg);
+            self.notifier.notify_one();
+            Ok(())
+        }
+    }
+
+    fn try_recv(&self) -> Option<T> {
+        self.requests.lock().unwrap().pop_front()
+    }
+
+    async fn recv(&self) -> Result<T> {
+        let future = self.notifier.notified();
+        tokio::pin!(future);
+
+        loop {
+            /*
+            // TODO: enable this after https://github.com/tokio-rs/tokio/issues/4745 has been fixed
+            // Make sure that no wakeup is lost if we get `None` from `try_recv`.
+            future.as_mut().enable();
+             */
+
+            if let Some(msg) = self.try_recv() {
+                return Ok(msg);
+            } else if self.closed.load(Ordering::Acquire) {
+                return Err(Error::new(ErrorKind::BrokenPipe, "channel has been closed"));
+            }
+
+            // Wait for a call to `notify_one`.
+            //
+            // This uses `.as_mut()` to avoid consuming the future,
+            // which lets us call `Pin::set` below.
+            future.as_mut().await;
+
+            // Reset the future in case another call to `try_recv` got the message before us.
+            future.set(self.notifier.notified());
+        }
+    }
+}
+
+pub(crate) struct AsyncWorkerMgr {
+    channel: Arc<Channel<AsyncRequestMessage>>,
+    inflight_requests: AtomicU32,
+    ping_requests: AtomicU32,
+    workers: AtomicU32,
+
+    metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
     prefetch_limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
 }
@@ -126,20 +179,20 @@ impl AsyncWorkerMgr {
             0
         };
         let prefetch_limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
-            info!("Prefetch bandwidth will be limited at {}Bytes/S", v);
+            info!(
+                "stroage: prefetch bandwidth will be limited at {}Bytes/S",
+                v
+            );
             Arc::new(RateLimiter::direct(Quota::per_second(v)))
         });
-        let (sender, receiver) = channel::<AsyncRequestMessage>();
 
         Ok(AsyncWorkerMgr {
-            metrics,
-            receiver,
-            sender: Mutex::new(sender),
+            channel: Arc::new(Channel::new()),
+            inflight_requests: AtomicU32::new(0),
+            ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
-            busy_workers: AtomicU32::new(0),
-            pings: AtomicU32::new(0),
-            exiting: AtomicBool::new(false),
 
+            metrics,
             prefetch_config,
             prefetch_limiter,
         })
@@ -147,30 +200,38 @@ impl AsyncWorkerMgr {
 
     /// Create working threads and start the event loop.
     pub fn start(mgr: Arc<AsyncWorkerMgr>) -> Result<()> {
-        // Hold the sender to barrier all working threads.
-        let guard = mgr.sender.lock().unwrap();
-        let threads = mgr.prefetch_config.threads_count;
+        if !mgr.prefetch_config.enable {
+            return Ok(());
+        }
 
-        for num in 0..threads {
+        // Hold the request queue to barrier all working threads.
+        let guard = mgr.channel.requests.lock().unwrap();
+        for num in 0..mgr.prefetch_config.threads_count {
             let mgr2 = mgr.clone();
-            let rx = mgr.receiver.clone();
             let res = thread::Builder::new()
-                .name(format!("blob_async_thread_{}", num))
+                .name(format!("nydus_storage_worker_{}", num))
                 .spawn(move || {
                     mgr2.grow_n(1);
                     mgr2.metrics
                         .prefetch_workers
                         .fetch_add(1, Ordering::Relaxed);
-                    mgr2.run(rx);
+
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("storage: failed to create tokio runtime for current thread");
+                    rt.block_on(mgr2.run());
+
                     mgr2.metrics
                         .prefetch_workers
                         .fetch_sub(1, Ordering::Relaxed);
                     mgr2.shrink_n(1);
-                    info!("Prefetch thread exits.")
+                    info!("storage: worker thread {} exits.", num)
                 });
 
             if let Err(e) = res {
-                error!("Create prefetch worker failed, {:?}", e);
+                error!("storage: failed to create worker thread, {:?}", e);
+                mgr.channel.close();
                 drop(guard);
                 mgr.stop();
                 return Err(e);
@@ -182,16 +243,15 @@ impl AsyncWorkerMgr {
 
     /// Stop all working threads.
     pub fn stop(&self) {
-        //self.exiting.store(true, Ordering::Release);
-        while self.send(AsyncRequestMessage::Exit).is_ok()
-            && self.workers.load(Ordering::Relaxed) > 0
-        {
-            thread::sleep(Duration::from_millis(1));
+        self.channel.close();
+        while self.workers.load(Ordering::Relaxed) > 0 {
+            self.channel.notifier.notify_waiters();
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
     /// Send an asynchronous service request message to the workers.
-    pub fn send(&self, msg: AsyncRequestMessage) -> Result<()> {
+    pub fn send(&self, msg: AsyncRequestMessage) -> std::result::Result<(), AsyncRequestMessage> {
         match &msg {
             AsyncRequestMessage::FsPrefetch(_, _, req) => {
                 if let Some(ref limiter) = self.prefetch_limiter {
@@ -230,16 +290,12 @@ impl AsyncWorkerMgr {
             _ => {}
         }
 
-        let mut sender = self.sender.lock().unwrap();
-        sender.send(msg).map_err(|e| {
-            warn!("no more receiver for channel, {}", e);
-            eio!()
-        })
+        self.channel.send(msg)
     }
 
     /// Consume network bandwidth budget for prefetching.
     pub fn consume_prefetch_budget(&self, buffers: &[FileVolatileSlice]) {
-        if self.busy_workers.load(Ordering::Relaxed) > 0 {
+        if self.inflight_requests.load(Ordering::Relaxed) > 0 {
             let size = buffers.iter().fold(0, |v, i| v + i.len());
             if let Some(v) = NonZeroU32::new(std::cmp::min(size, u32::MAX as usize) as u32) {
                 // Try to consume budget but ignore result.
@@ -250,31 +306,26 @@ impl AsyncWorkerMgr {
         }
     }
 
-    fn run(&self, rx: Receiver<AsyncRequestMessage>) {
-        while let Ok(msg) = rx.recv() {
+    async fn run(&self) {
+        while let Ok(msg) = self.channel.recv().await {
             match msg {
-                AsyncRequestMessage::FsPrefetch(state, blob_cache, req) => {
-                    self.busy_workers.fetch_add(1, Ordering::Relaxed);
-                    if state.load(Ordering::Acquire) == AsyncRequestState::Pending as u32 {
-                        let _ = self.handle_fs_prefetch_request(&blob_cache, &req);
-                    }
-                    self.busy_workers.fetch_sub(1, Ordering::Relaxed);
-                }
                 AsyncRequestMessage::BlobPrefetch(state, blob_cache, offset, size) => {
-                    self.busy_workers.fetch_add(1, Ordering::Relaxed);
+                    self.inflight_requests.fetch_add(1, Ordering::Relaxed);
                     if state.load(Ordering::Acquire) == AsyncRequestState::Pending as u32 {
                         let _ = self.handle_blob_prefetch_request(&blob_cache, offset, size);
                     }
-                    self.busy_workers.fetch_sub(1, Ordering::Relaxed);
+                    self.inflight_requests.fetch_sub(1, Ordering::Relaxed);
+                }
+                AsyncRequestMessage::FsPrefetch(state, blob_cache, req) => {
+                    self.inflight_requests.fetch_add(1, Ordering::Relaxed);
+                    if state.load(Ordering::Acquire) == AsyncRequestState::Pending as u32 {
+                        let _ = self.handle_fs_prefetch_request(&blob_cache, &req);
+                    }
+                    self.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                 }
                 AsyncRequestMessage::Ping => {
-                    let _ = self.pings.fetch_add(1, Ordering::Relaxed);
+                    let _ = self.ping_requests.fetch_add(1, Ordering::Relaxed);
                 }
-                AsyncRequestMessage::Exit => return,
-            }
-
-            if self.exiting.load(Ordering::Relaxed) {
-                return;
             }
         }
     }
@@ -371,15 +422,18 @@ mod tests {
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
         AsyncWorkerMgr::start(mgr.clone()).unwrap();
-        assert_eq!(mgr.pings.load(Ordering::Relaxed), 0);
-        mgr.send(AsyncRequestMessage::Ping).unwrap();
-        mgr.send(AsyncRequestMessage::Ping).unwrap();
-        mgr.send(AsyncRequestMessage::Ping).unwrap();
+        assert_eq!(mgr.ping_requests.load(Ordering::Acquire), 0);
+        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
+        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
+        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
+        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
+        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
         thread::sleep(Duration::from_secs(1));
-        assert_eq!(mgr.workers.load(Ordering::Relaxed), 2);
-        assert_eq!(mgr.pings.load(Ordering::Relaxed), 3);
+        assert_eq!(mgr.ping_requests.load(Ordering::Acquire), 5);
+        assert_eq!(mgr.workers.load(Ordering::Acquire), 2);
         mgr.stop();
-        assert_eq!(mgr.workers.load(Ordering::Relaxed), 0);
+        assert_eq!(mgr.workers.load(Ordering::Acquire), 0);
+        assert!(mgr.send(AsyncRequestMessage::Ping).is_err());
     }
 
     #[test]
