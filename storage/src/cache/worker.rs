@@ -45,14 +45,14 @@ impl From<BlobPrefetchConfig> for AsyncPrefetchConfig {
     }
 }
 
-/// Status of an asynchronous service request message.
+/// Status of an asynchronous prefetch requests.
 #[repr(u32)]
-pub(crate) enum AsyncRequestState {
+pub(crate) enum AsyncPrefetchState {
     /// Initializations state.
     Init,
     /// The asynchronous service request is pending for executing, worker should not touching state
     /// after executing the request.
-    Pending,
+    Active,
     /// The asynchronous service request has been cancelled.
     Cancelled,
 }
@@ -311,14 +311,14 @@ impl AsyncWorkerMgr {
             match msg {
                 AsyncRequestMessage::BlobPrefetch(state, blob_cache, offset, size) => {
                     self.inflight_requests.fetch_add(1, Ordering::Relaxed);
-                    if state.load(Ordering::Acquire) == AsyncRequestState::Pending as u32 {
+                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
                         let _ = self.handle_blob_prefetch_request(&blob_cache, offset, size);
                     }
                     self.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                 }
                 AsyncRequestMessage::FsPrefetch(state, blob_cache, req) => {
                     self.inflight_requests.fetch_add(1, Ordering::Relaxed);
-                    if state.load(Ordering::Acquire) == AsyncRequestState::Pending as u32 {
+                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
                         let _ = self.handle_fs_prefetch_request(&blob_cache, &req);
                     }
                     self.inflight_requests.fetch_sub(1, Ordering::Relaxed);

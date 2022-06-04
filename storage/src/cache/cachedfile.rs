@@ -27,7 +27,7 @@ use tokio::runtime::Runtime;
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{
-    AsyncPrefetchConfig, AsyncRequestMessage, AsyncRequestState, AsyncWorkerMgr,
+    AsyncPrefetchConfig, AsyncPrefetchState, AsyncRequestMessage, AsyncWorkerMgr,
 };
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
@@ -148,7 +148,7 @@ impl BlobCache for FileCacheEntry {
 
         // Enable data prefetching
         self.prefetch_state
-            .store(AsyncRequestState::Pending as u32, Ordering::Release);
+            .store(AsyncPrefetchState::Active as u32, Ordering::Release);
 
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
@@ -176,8 +176,8 @@ impl BlobCache for FileCacheEntry {
     }
 
     fn stop_prefetch(&self) -> StorageResult<()> {
-        // self.prefetch_state
-        //     .store(AsyncRequestState::Cancelled as u32, Ordering::Release);
+        self.prefetch_state
+            .store(AsyncPrefetchState::Cancelled as u32, Ordering::Release);
         self.workers.stop();
         Ok(())
     }
