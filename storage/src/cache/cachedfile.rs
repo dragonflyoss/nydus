@@ -27,7 +27,7 @@ use tokio::runtime::Runtime;
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{
-    AsyncPrefetchConfig, AsyncPrefetchState, AsyncRequestMessage, AsyncWorkerMgr,
+    AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncPrefetchState, AsyncWorkerMgr,
 };
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
@@ -152,24 +152,24 @@ impl BlobCache for FileCacheEntry {
 
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
-            let msg = AsyncRequestMessage::new_blob_prefetch(
+            let msg = AsyncPrefetchMessage::new_blob_prefetch(
                 self.prefetch_state.clone(),
                 blob_cache.clone(),
                 req.offset as u64,
                 req.len as u64,
             );
-            let _ = self.workers.send(msg);
+            let _ = self.workers.send_prefetch_message(msg);
         }
 
         // Then handle fs prefetch
         let merging_size = self.prefetch_config.merging_size;
         BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
-            let msg = AsyncRequestMessage::new_fs_prefetch(
+            let msg = AsyncPrefetchMessage::new_fs_prefetch(
                 self.prefetch_state.clone(),
                 blob_cache.clone(),
                 req,
             );
-            let _ = self.workers.send(msg);
+            let _ = self.workers.send_prefetch_message(msg);
         });
 
         Ok(0)

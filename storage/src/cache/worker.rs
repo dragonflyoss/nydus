@@ -58,7 +58,7 @@ pub(crate) enum AsyncPrefetchState {
 }
 
 /// Asynchronous service request message.
-pub(crate) enum AsyncRequestMessage {
+pub(crate) enum AsyncPrefetchMessage {
     /// Asynchronous blob layer prefetch request with (offset, size) of blob on storage backend.
     BlobPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, u64, u64),
     /// Asynchronous file-system layer prefetch request.
@@ -70,14 +70,14 @@ pub(crate) enum AsyncRequestMessage {
     RateLimiter(u64),
 }
 
-impl AsyncRequestMessage {
+impl AsyncPrefetchMessage {
     /// Create a new asynchronous filesystem prefetch request message.
     pub fn new_fs_prefetch(
         req_state: Arc<AtomicU32>,
         blob_cache: Arc<dyn BlobCache>,
         req: BlobIoRange,
     ) -> Self {
-        AsyncRequestMessage::FsPrefetch(req_state, blob_cache, req)
+        AsyncPrefetchMessage::FsPrefetch(req_state, blob_cache, req)
     }
 
     /// Create a new asynchronous blob prefetch request message.
@@ -87,7 +87,7 @@ impl AsyncRequestMessage {
         offset: u64,
         size: u64,
     ) -> Self {
-        AsyncRequestMessage::BlobPrefetch(req_state, blob_cache, offset, size)
+        AsyncPrefetchMessage::BlobPrefetch(req_state, blob_cache, offset, size)
     }
 }
 
@@ -156,14 +156,14 @@ impl<T> Channel<T> {
 }
 
 pub(crate) struct AsyncWorkerMgr {
-    channel: Arc<Channel<AsyncRequestMessage>>,
-    delayed_requests: AtomicU64,
-    inflight_requests: AtomicU32,
+    metrics: Arc<BlobcacheMetrics>,
     ping_requests: AtomicU32,
     workers: AtomicU32,
 
-    metrics: Arc<BlobcacheMetrics>,
+    prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
+    prefetch_delayed: AtomicU64,
+    prefetch_inflight: AtomicU32,
     prefetch_limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
 }
 
@@ -190,26 +190,66 @@ impl AsyncWorkerMgr {
         });
 
         Ok(AsyncWorkerMgr {
-            channel: Arc::new(Channel::new()),
-            delayed_requests: AtomicU64::new(0),
-            inflight_requests: AtomicU32::new(0),
+            metrics,
             ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
 
-            metrics,
+            prefetch_channel: Arc::new(Channel::new()),
             prefetch_config,
+            prefetch_delayed: AtomicU64::new(0),
+            prefetch_inflight: AtomicU32::new(0),
             prefetch_limiter,
         })
     }
 
     /// Create working threads and start the event loop.
     pub fn start(mgr: Arc<AsyncWorkerMgr>) -> Result<()> {
-        if !mgr.prefetch_config.enable {
-            return Ok(());
+        if mgr.prefetch_config.enable {
+            Self::start_prefetch_workers(mgr.clone())?;
         }
 
+        Ok(())
+    }
+
+    /// Stop all working threads.
+    pub fn stop(&self) {
+        self.prefetch_channel.close();
+
+        while self.workers.load(Ordering::Relaxed) > 0 {
+            self.prefetch_channel.notifier.notify_waiters();
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Send an asynchronous service request message to the workers.
+    pub fn send_prefetch_message(
+        &self,
+        msg: AsyncPrefetchMessage,
+    ) -> std::result::Result<(), AsyncPrefetchMessage> {
+        if !self.prefetch_config.enable {
+            Err(msg)
+        } else {
+            self.prefetch_inflight.fetch_add(1, Ordering::Relaxed);
+            self.prefetch_channel.send(msg)
+        }
+    }
+
+    /// Consume network bandwidth budget for prefetching.
+    pub fn consume_prefetch_budget(&self, buffers: &[FileVolatileSlice]) {
+        if self.prefetch_inflight.load(Ordering::Relaxed) > 0 {
+            let size = buffers.iter().fold(0, |v, i| v + i.len());
+            if let Some(v) = NonZeroU32::new(std::cmp::min(size, u32::MAX as usize) as u32) {
+                // Try to consume budget but ignore result.
+                if let Some(limiter) = self.prefetch_limiter.as_ref() {
+                    let _ = limiter.check_n(v);
+                }
+            }
+        }
+    }
+
+    fn start_prefetch_workers(mgr: Arc<AsyncWorkerMgr>) -> Result<()> {
         // Hold the request queue to barrier all working threads.
-        let guard = mgr.channel.requests.lock().unwrap();
+        let guard = mgr.prefetch_channel.requests.lock().unwrap();
         for num in 0..mgr.prefetch_config.threads_count {
             let mgr2 = mgr.clone();
             let res = thread::Builder::new()
@@ -224,7 +264,7 @@ impl AsyncWorkerMgr {
                         .enable_all()
                         .build()
                         .expect("storage: failed to create tokio runtime for current thread");
-                    rt.block_on(Self::run(mgr2.clone(), &rt));
+                    rt.block_on(Self::handle_prefetch_requests(mgr2.clone(), &rt));
 
                     mgr2.metrics
                         .prefetch_workers
@@ -235,7 +275,7 @@ impl AsyncWorkerMgr {
 
             if let Err(e) = res {
                 error!("storage: failed to create worker thread, {:?}", e);
-                mgr.channel.close();
+                mgr.prefetch_channel.close();
                 drop(guard);
                 mgr.stop();
                 return Err(e);
@@ -245,80 +285,80 @@ impl AsyncWorkerMgr {
         Ok(())
     }
 
-    /// Stop all working threads.
-    pub fn stop(&self) {
-        self.channel.close();
-        while self.workers.load(Ordering::Relaxed) > 0 {
-            self.channel.notifier.notify_waiters();
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
+    async fn handle_prefetch_requests(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
+        while let Ok(msg) = mgr.prefetch_channel.recv().await {
+            mgr.handle_prefetch_rate_limit(&msg).await;
 
-    /// Send an asynchronous service request message to the workers.
-    pub fn send(&self, msg: AsyncRequestMessage) -> std::result::Result<(), AsyncRequestMessage> {
-        if !self.prefetch_config.enable {
-            Err(msg)
-        } else {
-            self.channel.send(msg)
-        }
-    }
-
-    /// Consume network bandwidth budget for prefetching.
-    pub fn consume_prefetch_budget(&self, buffers: &[FileVolatileSlice]) {
-        if self.inflight_requests.load(Ordering::Relaxed) > 0 {
-            let size = buffers.iter().fold(0, |v, i| v + i.len());
-            if let Some(v) = NonZeroU32::new(std::cmp::min(size, u32::MAX as usize) as u32) {
-                // Try to consume budget but ignore result.
-                if let Some(limiter) = self.prefetch_limiter.as_ref() {
-                    let _ = limiter.check_n(v);
-                }
-            }
-        }
-    }
-
-    async fn run(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
-        while let Ok(msg) = mgr.channel.recv().await {
             match msg {
-                AsyncRequestMessage::BlobPrefetch(state, blob_cache, offset, size) => {
+                AsyncPrefetchMessage::BlobPrefetch(state, blob_cache, offset, size) => {
                     if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
-                        mgr.inflight_requests.fetch_add(1, Ordering::Relaxed);
                         let _ = rt.spawn(Self::handle_blob_prefetch_request(
                             mgr.clone(),
-                            state,
                             blob_cache,
                             offset,
                             size,
                         ));
-                        mgr.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
-                AsyncRequestMessage::FsPrefetch(state, blob_cache, req) => {
+                AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
                     if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
-                        mgr.inflight_requests.fetch_add(1, Ordering::Relaxed);
                         let _ = rt.spawn(Self::handle_fs_prefetch_request(
                             mgr.clone(),
-                            state,
                             blob_cache,
                             req,
                         ));
-                        mgr.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
-                AsyncRequestMessage::Ping => {
+                AsyncPrefetchMessage::Ping => {
                     let _ = mgr.ping_requests.fetch_add(1, Ordering::Relaxed);
                 }
-                AsyncRequestMessage::RateLimiter(size) => {
-                    mgr.inflight_requests.fetch_add(1, Ordering::Relaxed);
-                    let _ = rt.spawn(Self::handle_rate_limiter_request(mgr.clone(), size));
-                    mgr.inflight_requests.fetch_sub(1, Ordering::Relaxed);
+                AsyncPrefetchMessage::RateLimiter(_size) => {}
+            }
+
+            mgr.prefetch_inflight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    async fn handle_prefetch_rate_limit(&self, msg: &AsyncPrefetchMessage) {
+        // Allocate network bandwidth budget
+        if let Some(limiter) = &self.prefetch_limiter {
+            let size = match msg {
+                AsyncPrefetchMessage::BlobPrefetch(state, _blob_cache, _offset, size) => {
+                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
+                        *size
+                    } else {
+                        0
+                    }
+                }
+                AsyncPrefetchMessage::FsPrefetch(state, _blob_cache, req) => {
+                    if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
+                        req.blob_size
+                    } else {
+                        0
+                    }
+                }
+                AsyncPrefetchMessage::Ping => 0,
+                AsyncPrefetchMessage::RateLimiter(size) => *size,
+            };
+
+            if size > 0 {
+                let size = std::cmp::min(size, u32::MAX as u64) as u32;
+                // Safe to unwrap because we have checked that size is not zero.
+                let cells = NonZeroU32::new(size).unwrap();
+                if limiter.check_n(cells).is_err() {
+                    self.prefetch_delayed.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = limiter.until_n_ready(cells).await {
+                        // `InsufficientCapacity` is the only possible error
+                        // Have to give up to avoid dead-loop
+                        error!("{}: give up rate-limiting", e);
+                    }
                 }
             }
         }
     }
 
     async fn handle_blob_prefetch_request(
-        mgr: Arc<AsyncWorkerMgr>,
-        state: Arc<AtomicU32>,
+        _mgr: Arc<AsyncWorkerMgr>,
         cache: Arc<dyn BlobCache>,
         offset: u64,
         size: u64,
@@ -330,26 +370,6 @@ impl AsyncWorkerMgr {
             size
         );
         if size == 0 {
-            return Ok(());
-        }
-
-        // Wait for network bandwidth budget
-        if let Some(ref limiter) = mgr.prefetch_limiter {
-            let size = std::cmp::min(size, u32::MAX as u64) as u32;
-            // Safe to unwrap because we have checked that size is not zero.
-            let cells = NonZeroU32::new(size).unwrap();
-            if limiter.check_n(cells).is_err() {
-                mgr.delayed_requests.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = limiter.until_n_ready(cells).await {
-                    // `InsufficientCapacity` is the only possible error
-                    // Have to give up to avoid dead-loop
-                    error!("{}: give up rate-limiting", e);
-                }
-            }
-        }
-
-        // Check whether the request has been cancelled.
-        if state.load(Ordering::Acquire) != AsyncPrefetchState::Active as u32 {
             return Ok(());
         }
 
@@ -372,7 +392,6 @@ impl AsyncWorkerMgr {
 
     async fn handle_fs_prefetch_request(
         mgr: Arc<AsyncWorkerMgr>,
-        state: Arc<AtomicU32>,
         cache: Arc<dyn BlobCache>,
         req: BlobIoRange,
     ) -> Result<()> {
@@ -394,53 +413,10 @@ impl AsyncWorkerMgr {
         mgr.metrics.prefetch_mr_count.inc();
         mgr.metrics.prefetch_data_amount.add(blob_size);
 
-        // Wait for network bandwidth budget
-        if let Some(ref limiter) = mgr.prefetch_limiter {
-            let size = std::cmp::min(blob_size, u32::MAX as u64) as u32;
-            // Safe to unwrap because we have checked that size is not zero.
-            let cells = NonZeroU32::new(size).unwrap();
-            if limiter.check_n(cells).is_err() {
-                mgr.delayed_requests.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = limiter.until_n_ready(cells).await {
-                    // `InsufficientCapacity` is the only possible error
-                    // Have to give up to avoid dead-loop
-                    error!("{}: give up rate-limiting", e);
-                }
-            }
-        }
-
-        // Check whether the request has been cancelled.
-        if state.load(Ordering::Acquire) != AsyncPrefetchState::Active as u32 {
-            return Ok(());
-        }
-
         if let Some(obj) = cache.get_blob_object() {
             obj.fetch_chunks(&req)?;
         } else {
             cache.prefetch_range(&req)?;
-        }
-
-        Ok(())
-    }
-
-    async fn handle_rate_limiter_request(mgr: Arc<AsyncWorkerMgr>, size: u64) -> Result<()> {
-        if size == 0 {
-            return Ok(());
-        }
-
-        // Wait for network bandwidth budget
-        if let Some(ref limiter) = mgr.prefetch_limiter {
-            let size = std::cmp::min(size, u32::MAX as u64) as u32;
-            // Safe to unwrap because we have checked that size is not zero.
-            let cells = NonZeroU32::new(size).unwrap();
-            if limiter.check_n(cells).is_err() {
-                mgr.delayed_requests.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = limiter.until_n_ready(cells).await {
-                    // `InsufficientCapacity` is the only possible error
-                    // Have to give up to avoid dead-loop
-                    error!("{}: give up rate-limiting", e);
-                }
-            }
         }
 
         Ok(())
@@ -474,17 +450,29 @@ mod tests {
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
         AsyncWorkerMgr::start(mgr.clone()).unwrap();
         assert_eq!(mgr.ping_requests.load(Ordering::Acquire), 0);
-        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
-        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
-        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
-        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
-        assert!(mgr.send(AsyncRequestMessage::Ping).is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_ok());
         thread::sleep(Duration::from_secs(1));
         assert_eq!(mgr.ping_requests.load(Ordering::Acquire), 5);
         assert_eq!(mgr.workers.load(Ordering::Acquire), 2);
         mgr.stop();
         assert_eq!(mgr.workers.load(Ordering::Acquire), 0);
-        assert!(mgr.send(AsyncRequestMessage::Ping).is_err());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_err());
     }
 
     #[test]
@@ -501,20 +489,29 @@ mod tests {
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
         AsyncWorkerMgr::start(mgr.clone()).unwrap();
 
-        assert_eq!(mgr.delayed_requests.load(Ordering::Acquire), 0);
-        assert_eq!(mgr.inflight_requests.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.prefetch_delayed.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
 
-        assert!(mgr.send(AsyncRequestMessage::RateLimiter(1)).is_ok());
-        assert!(mgr.send(AsyncRequestMessage::RateLimiter(1)).is_ok());
         thread::sleep(Duration::from_secs(1));
-        assert_eq!(mgr.delayed_requests.load(Ordering::Acquire), 0);
-        assert_eq!(mgr.inflight_requests.load(Ordering::Acquire), 0);
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(1))
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(1))
+            .is_ok());
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(mgr.prefetch_delayed.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
 
-        assert!(mgr.send(AsyncRequestMessage::RateLimiter(0x100001)).is_ok());
-        assert!(mgr.send(AsyncRequestMessage::RateLimiter(u64::MAX)).is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(0x100001))
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(u64::MAX))
+            .is_ok());
         thread::sleep(Duration::from_secs(4));
-        assert_eq!(mgr.delayed_requests.load(Ordering::Acquire), 2);
-        assert_eq!(mgr.inflight_requests.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.prefetch_delayed.load(Ordering::Acquire), 2);
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
 
         mgr.stop();
         assert_eq!(mgr.workers.load(Ordering::Acquire), 0);
