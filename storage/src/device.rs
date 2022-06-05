@@ -928,7 +928,7 @@ impl BlobDevice {
         Ok(())
     }
 
-    /// Stop the background blob data prefetch task.
+    /// Start the background blob data prefetch task.
     pub fn start_prefetch(&self) {
         for blob in self.blobs.load().iter() {
             let _ = blob.start_prefetch();

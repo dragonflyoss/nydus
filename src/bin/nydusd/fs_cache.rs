@@ -559,7 +559,9 @@ impl FsCacheHandler {
             if factory_config.cache.prefetch_config.enable {
                 let _ = blob.stop_prefetch();
             }
-            BLOB_FACTORY.gc(Some((factory_config, blob.blob_id())));
+            let id = blob.blob_id().to_string();
+            drop(blob);
+            BLOB_FACTORY.gc(Some((factory_config, &id)));
         }
     }
 

@@ -141,6 +141,13 @@ impl<T> Channel<T> {
             future.set(self.notifier.notified());
         }
     }
+
+    fn flush_pending_prefetch_requests<F>(&self, f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.requests.lock().unwrap().retain(f);
+    }
 }
 
 pub(crate) struct AsyncWorkerMgr {
@@ -220,6 +227,20 @@ impl AsyncWorkerMgr {
             self.prefetch_inflight.fetch_add(1, Ordering::Relaxed);
             self.prefetch_channel.send(msg)
         }
+    }
+
+    /// Flush pending prefetch requests associated with `blob_id`.
+    pub fn flush_pending_prefetch_requests(&self, blob_id: &str) {
+        self.prefetch_channel
+            .flush_pending_prefetch_requests(|t| match t {
+                AsyncPrefetchMessage::BlobPrefetch(state, blob, _, _) => {
+                    blob_id != blob.blob_id() || state.load(Ordering::Acquire) > 0
+                }
+                AsyncPrefetchMessage::FsPrefetch(state, blob, _) => {
+                    blob_id != blob.blob_id() || state.load(Ordering::Acquire) > 0
+                }
+                _ => true,
+            });
     }
 
     /// Consume network bandwidth budget for prefetching.
