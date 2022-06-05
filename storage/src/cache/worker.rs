@@ -12,11 +12,11 @@ use std::thread;
 use std::time::Duration;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
-use futures::executor::block_on;
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
+use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
 use crate::cache::{BlobCache, BlobIoRange, BlobPrefetchConfig};
@@ -220,7 +220,7 @@ impl AsyncWorkerMgr {
                         .enable_all()
                         .build()
                         .expect("storage: failed to create tokio runtime for current thread");
-                    rt.block_on(mgr2.run());
+                    rt.block_on(Self::run(mgr2.clone(), &rt));
 
                     mgr2.metrics
                         .prefetch_workers
@@ -252,44 +252,6 @@ impl AsyncWorkerMgr {
 
     /// Send an asynchronous service request message to the workers.
     pub fn send(&self, msg: AsyncRequestMessage) -> std::result::Result<(), AsyncRequestMessage> {
-        match &msg {
-            AsyncRequestMessage::FsPrefetch(_, _, req) => {
-                if let Some(ref limiter) = self.prefetch_limiter {
-                    let size = std::cmp::min(req.blob_size, u32::MAX as u64) as u32;
-                    let cells = match NonZeroU32::new(size) {
-                        Some(v) => v,
-                        None => return Ok(()),
-                    };
-                    if let Err(e) = limiter
-                        .check_n(cells)
-                        .or_else(|_| block_on(limiter.until_n_ready(cells)))
-                    {
-                        // `InsufficientCapacity` is the only possible error
-                        // Have to give up to avoid dead-loop
-                        error!("{}: give up rate-limiting", e);
-                    }
-                }
-            }
-            AsyncRequestMessage::BlobPrefetch(_, _, _, size) => {
-                if let Some(ref limiter) = self.prefetch_limiter {
-                    let size = std::cmp::min(*size, u32::MAX as u64) as u32;
-                    let cells = match NonZeroU32::new(size) {
-                        Some(v) => v,
-                        None => return Ok(()),
-                    };
-                    if let Err(e) = limiter
-                        .check_n(cells)
-                        .or_else(|_| block_on(limiter.until_n_ready(cells)))
-                    {
-                        // `InsufficientCapacity` is the only possible error
-                        // Have to give up to avoid dead-loop
-                        error!("{}: give up rate-limiting", e);
-                    }
-                }
-            }
-            _ => {}
-        }
-
         self.channel.send(msg)
     }
 
@@ -306,38 +268,50 @@ impl AsyncWorkerMgr {
         }
     }
 
-    async fn run(&self) {
-        while let Ok(msg) = self.channel.recv().await {
+    async fn run(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
+        while let Ok(msg) = mgr.channel.recv().await {
             match msg {
                 AsyncRequestMessage::BlobPrefetch(state, blob_cache, offset, size) => {
-                    self.inflight_requests.fetch_add(1, Ordering::Relaxed);
                     if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
-                        let _ = self.handle_blob_prefetch_request(&blob_cache, offset, size);
+                        mgr.inflight_requests.fetch_add(1, Ordering::Relaxed);
+                        let _ = rt.spawn(Self::handle_blob_prefetch_request(
+                            mgr.clone(),
+                            state,
+                            blob_cache,
+                            offset,
+                            size,
+                        ));
+                        mgr.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                     }
-                    self.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                 }
                 AsyncRequestMessage::FsPrefetch(state, blob_cache, req) => {
-                    self.inflight_requests.fetch_add(1, Ordering::Relaxed);
                     if state.load(Ordering::Acquire) == AsyncPrefetchState::Active as u32 {
-                        let _ = self.handle_fs_prefetch_request(&blob_cache, &req);
+                        mgr.inflight_requests.fetch_add(1, Ordering::Relaxed);
+                        let _ = rt.spawn(Self::handle_fs_prefetch_request(
+                            mgr.clone(),
+                            state,
+                            blob_cache,
+                            req,
+                        ));
+                        mgr.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                     }
-                    self.inflight_requests.fetch_sub(1, Ordering::Relaxed);
                 }
                 AsyncRequestMessage::Ping => {
-                    let _ = self.ping_requests.fetch_add(1, Ordering::Relaxed);
+                    let _ = mgr.ping_requests.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
     }
 
-    fn handle_blob_prefetch_request(
-        &self,
-        cache: &Arc<dyn BlobCache>,
+    async fn handle_blob_prefetch_request(
+        mgr: Arc<AsyncWorkerMgr>,
+        state: Arc<AtomicU32>,
+        cache: Arc<dyn BlobCache>,
         offset: u64,
         size: u64,
     ) -> Result<()> {
         trace!(
-            "Prefetch blob {} offset {} size {}",
+            "storage: prefetch blob {} offset {} size {}",
             cache.blob_id(),
             offset,
             size
@@ -346,10 +320,29 @@ impl AsyncWorkerMgr {
             return Ok(());
         }
 
+        // Wait for network bandwidth budget
+        if let Some(ref limiter) = mgr.prefetch_limiter {
+            let size = std::cmp::min(size, u32::MAX as u64) as u32;
+            // Safe to unwrap because we have checked that size is not zero.
+            let cells = NonZeroU32::new(size).unwrap();
+            if limiter.check_n(cells).is_err() {
+                if let Err(e) = limiter.until_n_ready(cells).await {
+                    // `InsufficientCapacity` is the only possible error
+                    // Have to give up to avoid dead-loop
+                    error!("{}: give up rate-limiting", e);
+                }
+            }
+        }
+
+        // Check whether the request has been cancelled.
+        if state.load(Ordering::Acquire) != AsyncPrefetchState::Active as u32 {
+            return Ok(());
+        }
+
         if let Some(obj) = cache.get_blob_object() {
             if let Err(e) = obj.fetch_range_compressed(offset, size) {
                 warn!(
-                    "Failed to prefetch data from blob {}, offset {}, size {}, {}",
+                    "storage: failed to prefetch data from blob {}, offset {}, size {}, {}",
                     cache.blob_id(),
                     offset,
                     size,
@@ -363,15 +356,16 @@ impl AsyncWorkerMgr {
         Ok(())
     }
 
-    fn handle_fs_prefetch_request(
-        &self,
-        cache: &Arc<dyn BlobCache>,
-        req: &BlobIoRange,
+    async fn handle_fs_prefetch_request(
+        mgr: Arc<AsyncWorkerMgr>,
+        state: Arc<AtomicU32>,
+        cache: Arc<dyn BlobCache>,
+        req: BlobIoRange,
     ) -> Result<()> {
         let blob_offset = req.blob_offset;
         let blob_size = req.blob_size;
         trace!(
-            "prefetch fs data from blob {} offset {} size {}",
+            "storage: prefetch fs data from blob {} offset {} size {}",
             cache.blob_id(),
             blob_offset,
             blob_size
@@ -383,13 +377,32 @@ impl AsyncWorkerMgr {
         // Record how much prefetch data is requested from storage backend.
         // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
         // We can measure merging possibility by this.
-        self.metrics.prefetch_mr_count.inc();
-        self.metrics.prefetch_data_amount.add(blob_size);
+        mgr.metrics.prefetch_mr_count.inc();
+        mgr.metrics.prefetch_data_amount.add(blob_size);
+
+        // Wait for network bandwidth budget
+        if let Some(ref limiter) = mgr.prefetch_limiter {
+            let size = std::cmp::min(blob_size, u32::MAX as u64) as u32;
+            // Safe to unwrap because we have checked that size is not zero.
+            let cells = NonZeroU32::new(size).unwrap();
+            if limiter.check_n(cells).is_err() {
+                if let Err(e) = limiter.until_n_ready(cells).await {
+                    // `InsufficientCapacity` is the only possible error
+                    // Have to give up to avoid dead-loop
+                    error!("{}: give up rate-limiting", e);
+                }
+            }
+        }
+
+        // Check whether the request has been cancelled.
+        if state.load(Ordering::Acquire) != AsyncPrefetchState::Active as u32 {
+            return Ok(());
+        }
 
         if let Some(obj) = cache.get_blob_object() {
-            obj.fetch_chunks(req)?;
+            obj.fetch_chunks(&req)?;
         } else {
-            cache.prefetch_range(req)?;
+            cache.prefetch_range(&req)?;
         }
 
         Ok(())
