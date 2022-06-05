@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -66,6 +66,8 @@ pub(crate) enum AsyncRequestMessage {
     #[cfg_attr(not(test), allow(unused))]
     /// Ping for test.
     Ping,
+    #[cfg_attr(not(test), allow(unused))]
+    RateLimiter(u64),
 }
 
 impl AsyncRequestMessage {
@@ -155,6 +157,7 @@ impl<T> Channel<T> {
 
 pub(crate) struct AsyncWorkerMgr {
     channel: Arc<Channel<AsyncRequestMessage>>,
+    delayed_requests: AtomicU64,
     inflight_requests: AtomicU32,
     ping_requests: AtomicU32,
     workers: AtomicU32,
@@ -188,6 +191,7 @@ impl AsyncWorkerMgr {
 
         Ok(AsyncWorkerMgr {
             channel: Arc::new(Channel::new()),
+            delayed_requests: AtomicU64::new(0),
             inflight_requests: AtomicU32::new(0),
             ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
@@ -252,7 +256,11 @@ impl AsyncWorkerMgr {
 
     /// Send an asynchronous service request message to the workers.
     pub fn send(&self, msg: AsyncRequestMessage) -> std::result::Result<(), AsyncRequestMessage> {
-        self.channel.send(msg)
+        if !self.prefetch_config.enable {
+            Err(msg)
+        } else {
+            self.channel.send(msg)
+        }
     }
 
     /// Consume network bandwidth budget for prefetching.
@@ -299,6 +307,11 @@ impl AsyncWorkerMgr {
                 AsyncRequestMessage::Ping => {
                     let _ = mgr.ping_requests.fetch_add(1, Ordering::Relaxed);
                 }
+                AsyncRequestMessage::RateLimiter(size) => {
+                    mgr.inflight_requests.fetch_add(1, Ordering::Relaxed);
+                    let _ = rt.spawn(Self::handle_rate_limiter_request(mgr.clone(), size));
+                    mgr.inflight_requests.fetch_sub(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -326,6 +339,7 @@ impl AsyncWorkerMgr {
             // Safe to unwrap because we have checked that size is not zero.
             let cells = NonZeroU32::new(size).unwrap();
             if limiter.check_n(cells).is_err() {
+                mgr.delayed_requests.fetch_add(1, Ordering::Relaxed);
                 if let Err(e) = limiter.until_n_ready(cells).await {
                     // `InsufficientCapacity` is the only possible error
                     // Have to give up to avoid dead-loop
@@ -386,6 +400,7 @@ impl AsyncWorkerMgr {
             // Safe to unwrap because we have checked that size is not zero.
             let cells = NonZeroU32::new(size).unwrap();
             if limiter.check_n(cells).is_err() {
+                mgr.delayed_requests.fetch_add(1, Ordering::Relaxed);
                 if let Err(e) = limiter.until_n_ready(cells).await {
                     // `InsufficientCapacity` is the only possible error
                     // Have to give up to avoid dead-loop
@@ -403,6 +418,29 @@ impl AsyncWorkerMgr {
             obj.fetch_chunks(&req)?;
         } else {
             cache.prefetch_range(&req)?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_rate_limiter_request(mgr: Arc<AsyncWorkerMgr>, size: u64) -> Result<()> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        // Wait for network bandwidth budget
+        if let Some(ref limiter) = mgr.prefetch_limiter {
+            let size = std::cmp::min(size, u32::MAX as u64) as u32;
+            // Safe to unwrap because we have checked that size is not zero.
+            let cells = NonZeroU32::new(size).unwrap();
+            if limiter.check_n(cells).is_err() {
+                mgr.delayed_requests.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = limiter.until_n_ready(cells).await {
+                    // `InsufficientCapacity` is the only possible error
+                    // Have to give up to avoid dead-loop
+                    error!("{}: give up rate-limiting", e);
+                }
+            }
         }
 
         Ok(())
@@ -451,6 +489,34 @@ mod tests {
 
     #[test]
     fn test_worker_mgr_rate_limiter() {
-        // TODO
+        let tmpdir = TempDir::new().unwrap();
+        let metrics = BlobcacheMetrics::new("test1", tmpdir.as_path().to_str().unwrap());
+        let config = Arc::new(AsyncPrefetchConfig {
+            enable: true,
+            threads_count: 4,
+            merging_size: 0x100000,
+            bandwidth_rate: 0x100000,
+        });
+
+        let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
+        AsyncWorkerMgr::start(mgr.clone()).unwrap();
+
+        assert_eq!(mgr.delayed_requests.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.inflight_requests.load(Ordering::Acquire), 0);
+
+        assert!(mgr.send(AsyncRequestMessage::RateLimiter(1)).is_ok());
+        assert!(mgr.send(AsyncRequestMessage::RateLimiter(1)).is_ok());
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(mgr.delayed_requests.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.inflight_requests.load(Ordering::Acquire), 0);
+
+        assert!(mgr.send(AsyncRequestMessage::RateLimiter(0x100001)).is_ok());
+        assert!(mgr.send(AsyncRequestMessage::RateLimiter(u64::MAX)).is_ok());
+        thread::sleep(Duration::from_secs(4));
+        assert_eq!(mgr.delayed_requests.load(Ordering::Acquire), 2);
+        assert_eq!(mgr.inflight_requests.load(Ordering::Acquire), 0);
+
+        mgr.stop();
+        assert_eq!(mgr.workers.load(Ordering::Acquire), 0);
     }
 }
