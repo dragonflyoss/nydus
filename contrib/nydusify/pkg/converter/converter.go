@@ -89,7 +89,8 @@ type Opt struct {
 	NydusifyVersion string
 	Source          string
 
-	ChunkDict ChunkDictOpt
+	ChunkDict    ChunkDictOpt
+	ImageVersion string
 }
 
 type Converter struct {
@@ -117,7 +118,8 @@ type Converter struct {
 
 	storageBackend backend.Backend
 
-	chunkDict ChunkDictOpt
+	chunkDict    ChunkDictOpt
+	ImageVersion string
 }
 
 func imageRepository(ref string) (string, error) {
@@ -156,7 +158,8 @@ func New(opt Opt) (*Converter, error) {
 
 		storageBackend: backend,
 
-		chunkDict: opt.ChunkDict,
+		chunkDict:    opt.ChunkDict,
+		ImageVersion: opt.ImageVersion,
 	}, nil
 }
 
@@ -211,6 +214,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 		NydusImagePath:   cvt.NydusImagePath,
 		PrefetchPatterns: cvt.PrefetchPatterns,
 		TargetDir:        cvt.WorkDir,
+		ImageVersion:     cvt.ImageVersion,
 	})
 	if err != nil {
 		return errors.Wrap(err, "Create build flow")
