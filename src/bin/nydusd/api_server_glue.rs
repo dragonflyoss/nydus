@@ -17,7 +17,7 @@ use nix::unistd::Pid;
 use nydus::{FsBackendType, NydusError};
 use nydus_api::http::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
-    ApiResult, BlobCacheEntry, BlobObjectParam, DaemonConf, DaemonErrorKind, MetricsErrorKind,
+    ApiResult, BlobCacheEntry, BlobCacheObjectId, DaemonConf, DaemonErrorKind, MetricsErrorKind,
 };
 use nydus_utils::metrics;
 
@@ -311,7 +311,7 @@ impl ApiServer {
         }
     }
 
-    fn remove_blob_cache_entry(&self, param: &BlobObjectParam) -> ApiResponse {
+    fn remove_blob_cache_entry(&self, param: &BlobCacheObjectId) -> ApiResponse {
         match DAEMON_CONTROLLER.get_blob_cache_mgr() {
             None => Err(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported)),
             Some(mgr) => {

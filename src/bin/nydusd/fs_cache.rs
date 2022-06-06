@@ -23,7 +23,8 @@ use storage::device::BlobPrefetchRequest;
 use storage::factory::BLOB_FACTORY;
 
 use crate::blob_cache::{
-    BlobCacheConfigBootstrap, BlobCacheConfigDataBlob, BlobCacheMgr, BlobCacheObjectConfig,
+    generate_blob_key, BlobCacheConfigBootstrap, BlobCacheConfigDataBlob, BlobCacheMgr,
+    BlobCacheObjectConfig,
 };
 
 ioctl_write_int!(fscache_cread, 0x98, 1);
@@ -381,12 +382,10 @@ impl FsCacheHandler {
             None => msg.volume_key.clone(),
             Some(str) => str.to_string(),
         };
-        let key = domain_id + "-" + &msg.cookie_key;
+        let key = generate_blob_key(&domain_id, &msg.cookie_key);
         let msg = match self.get_config(&key) {
             None => {
-                unsafe {
-                    libc::close(msg.fd as i32);
-                }
+                unsafe { libc::close(msg.fd as i32) };
                 format!("copen {},{}", hdr.msg_id, -libc::ENOENT)
             }
             Some(cfg) => match cfg {

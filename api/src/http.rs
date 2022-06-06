@@ -107,9 +107,16 @@ pub struct BlobCacheList {
     pub blobs: Vec<BlobCacheEntry>,
 }
 
+/// Identifier for cached blob objects.
+///
+/// Domains are used to control the blob sharing scope. All blobs associated with the same domain
+/// will be shared/reused, but blobs associated with different domains are isolated.
 #[derive(Clone, Deserialize, Debug)]
-pub struct BlobObjectParam {
+pub struct BlobCacheObjectId {
+    /// Domain identifier for the object.
     pub domain_id: String,
+    /// Blob identifier for the object.
+    pub blob_id: String,
 }
 
 #[derive(Debug)]
@@ -140,8 +147,8 @@ pub enum ApiRequest {
     // Nydus API v2
     DaemonInfoV2,
     CreateBlobObject(BlobCacheEntry),
-    GetBlobObject(BlobObjectParam),
-    DeleteBlobObject(BlobObjectParam),
+    GetBlobObject(BlobCacheObjectId),
+    DeleteBlobObject(BlobCacheObjectId),
     ListBlobObject,
 }
 

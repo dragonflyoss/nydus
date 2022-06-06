@@ -8,7 +8,7 @@ use dbs_uhttp::{Method, Request, Response};
 
 use crate::http::{
     error_response, extract_query_part, parse_body, success_response, translate_status_code,
-    ApiError, ApiRequest, ApiResponse, ApiResponsePayload, BlobObjectParam, EndpointHandler,
+    ApiError, ApiRequest, ApiResponse, ApiResponsePayload, BlobCacheObjectId, EndpointHandler,
     HttpError, HttpResult,
 };
 
@@ -57,7 +57,8 @@ impl EndpointHandler for BlobObjectListHandlerV2 {
         match (req.method(), req.body.as_ref()) {
             (Method::Get, None) => {
                 if let Some(domain_id) = extract_query_part(req, "domain_id") {
-                    let param = BlobObjectParam { domain_id };
+                    let blob_id = extract_query_part(req, "blob_id").unwrap_or_default();
+                    let param = BlobCacheObjectId { domain_id, blob_id };
                     let r = kicker(ApiRequest::GetBlobObject(param));
                     return Ok(convert_to_response(r, HttpError::GetBlobObjects));
                 }
@@ -70,7 +71,8 @@ impl EndpointHandler for BlobObjectListHandlerV2 {
             }
             (Method::Delete, None) => {
                 if let Some(domain_id) = extract_query_part(req, "domain_id") {
-                    let param = BlobObjectParam { domain_id };
+                    let blob_id = extract_query_part(req, "blob_id").unwrap_or_default();
+                    let param = BlobCacheObjectId { domain_id, blob_id };
                     let r = kicker(ApiRequest::DeleteBlobObject(param));
                     return Ok(convert_to_response(r, HttpError::DeleteBlobObject));
                 }
