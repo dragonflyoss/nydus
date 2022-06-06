@@ -782,8 +782,6 @@ impl RafsInode for OndiskInodeWrapper {
     /// `idx` is the number of child files in line. So we can keep the term `idx`
     /// in super crate and keep it consistent with layout v5.
     fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>> {
-        // Skip DOT and DOTDOT
-        let idx = idx + 2;
         let inode = self.disk_inode();
         let child_count = self.get_child_count();
 
@@ -800,25 +798,27 @@ impl RafsInode for OndiskInodeWrapper {
                 .unwrap();
             let name_offset = head_entry.e_nameoff;
             let entries_count = name_offset as u32 / size_of::<RafsV6Dirent>() as u32;
-            if cur_idx + entries_count <= idx {
-                cur_idx += entries_count;
-                continue;
+
+            for j in 0..entries_count {
+                let de = self
+                    .get_entry(i as usize, j as usize)
+                    .map_err(err_invalidate_data)?;
+                let name = self
+                    .entry_name(i as usize, j as usize, entries_count as usize)
+                    .map_err(err_invalidate_data)?;
+                if name == "." || name == ".." {
+                    continue;
+                }
+                if cur_idx == idx {
+                    let nid = de.e_nid;
+                    return Ok(self.mapping.inode_wrapper_with_info(
+                        nid,
+                        self.ino(),
+                        OsString::from(name),
+                    )? as Arc<dyn RafsInode>);
+                }
+                cur_idx += 1;
             }
-
-            let de = self
-                .get_entry(i as usize, (idx - cur_idx) as usize)
-                .map_err(err_invalidate_data)?;
-
-            let d_name = self
-                .entry_name(i as usize, (idx - cur_idx) as usize, entries_count as usize)
-                .map_err(err_invalidate_data)?;
-
-            let nid = de.e_nid;
-            return Ok(self.mapping.inode_wrapper_with_info(
-                nid,
-                self.ino(),
-                OsString::from(d_name),
-            )? as Arc<dyn RafsInode>);
         }
 
         Err(enoent!("invalid child index"))
@@ -1067,10 +1067,9 @@ impl RafsInode for OndiskInodeWrapper {
             let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
             let mut curr_name = OsString::from("");
 
-            // EROFS packs dot and dotdot, so skip them two.
             parent_inode
                 .walk_children_inodes(
-                    2,
+                    0,
                     &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
                         if cur_ino == ino {
                             curr_name = name;
@@ -1161,8 +1160,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
 
-        // EROFS packs dot and dotdot, so skip them two.
-        self.walk_children_inodes(2, &mut |inode: Option<Arc<dyn RafsInode>>,
+        self.walk_children_inodes(0, &mut |inode: Option<Arc<dyn RafsInode>>,
                                            name: OsString,
                                            ino,
                                            offset| {
@@ -1179,8 +1177,11 @@ impl RafsInode for OndiskInodeWrapper {
             }
         })
         .unwrap();
-
         for d in child_dirs {
+            // EROFS packs dot and dotdot, so skip them two.
+            if d.name() == "." || d.name() == ".." {
+                continue;
+            }
             d.collect_descendants_inodes(descendants)?;
         }
 
