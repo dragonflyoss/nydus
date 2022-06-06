@@ -2,7 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Rafs fop stats accounting and exporting.
+//! Nydus error events and performance related metrics.
+//!
+//! There are several types of metrics supported:
+//! - Global error events of type [`ErrorHolder`]
+//! - Storage backend metrics of type ['BackendMetrics']
+//! - Blobcache metrics of type ['BlobcacheMetrics']
+//! - Filesystem metrics of type ['FsIoStats`], supported by Rafs in fuse/virtiofs only.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Drop};
@@ -10,13 +16,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-use nydus_error::logger::ErrorHolder;
 use serde_json::Error as SerdeError;
+
+use nydus_error::logger::ErrorHolder;
 
 use crate::InodeBitmap;
 
+/// Type of `inode`.
 pub type Inode = u64;
 
+/// Type of file operation statistics counter.
 #[derive(PartialEq, Copy, Clone)]
 pub enum StatsFop {
     Getattr,
@@ -37,9 +46,12 @@ pub enum StatsFop {
     Max,
 }
 
+/// Errors related to IoStats.
 #[derive(Debug)]
 pub enum IoStatsError {
+    /// Non-exist counter.
     NoCounter,
+    /// Failed to serialize message.
     Serialize(SerdeError),
 }
 
@@ -92,7 +104,7 @@ fn latency_micros_range_index(elapsed: u64) -> usize {
 // be found as per the rafs backend mountpoint/id. Remind that nydusd can have
 // multiple backends mounted.
 lazy_static! {
-    static ref IOS_SET: RwLock<HashMap<String, Arc<GlobalIoStats>>> = Default::default();
+    static ref FS_METRICS: RwLock<HashMap<String, Arc<FsIoStats>>> = Default::default();
 }
 
 lazy_static! {
@@ -109,46 +121,14 @@ lazy_static! {
         Arc::new(Mutex::new(ErrorHolder::new(500, 50 * 1024)));
 }
 
-#[derive(Default, Debug, Serialize)]
-pub struct GlobalIoStats {
-    // Whether to enable each file accounting switch.
-    // As fop accounting might consume much memory space, it is disabled by default.
-    // But global fop accounting is always working within each Rafs.
-    files_account_enabled: AtomicBool,
-    access_pattern_enabled: AtomicBool,
-    record_latest_read_files_enabled: AtomicBool,
-    // Given the fact that we don't have to measure latency all the time,
-    // use this to turn it off.
-    measure_latency: AtomicBool,
-    id: String,
-    // Total bytes read against the filesystem.
-    data_read: BasicMetric,
-    // Cumulative bytes for different block size.
-    block_count_read: [BasicMetric; BLOCK_READ_SIZES_MAX],
-    // Counters for successful various file operations.
-    fop_hits: [BasicMetric; StatsFop::Max as usize],
-    // Counters for failed file operations.
-    fop_errors: [BasicMetric; StatsFop::Max as usize],
-    // Cumulative latency's life cycle is equivalent to Rafs, unlike incremental
-    // latency which will be cleared each time dumped. Unit as micro-seconds.
-    //   * @total means io_stats simply adds every fop latency to the counter which is never cleared.
-    //     It is useful for other tools to calculate their metrics report.
-    fop_cumulative_latency_total: [BasicMetric; StatsFop::Max as usize],
-    // Record how many times read latency drops to the ranges.
-    // This helps us to understand the io service time stability.
-    read_latency_dist: [BasicMetric; READ_LATENCY_RANGE_MAX],
-    // Total number of files that are currently open.
-    nr_opens: BasicMetric,
-    // Rwlock closes the race that more than one threads are creating counters concurrently.
-    #[serde(skip_serializing, skip_deserializing)]
-    file_counters: RwLock<HashMap<Inode, Arc<InodeIoStats>>>,
-    #[serde(skip_serializing, skip_deserializing)]
-    access_patterns: RwLock<HashMap<Inode, Arc<AccessPattern>>>,
-    // record regular file read
-    #[serde(skip_serializing, skip_deserializing)]
-    recent_read_files: InodeBitmap,
+/// Trait to manipulate per inode statistics metrics.
+pub trait InodeStatsCounter {
+    fn stats_fop_inc(&self, fop: StatsFop);
+    fn stats_fop_err_inc(&self, fop: StatsFop);
+    fn stats_cumulative(&self, fop: StatsFop, value: usize);
 }
 
+/// Per inode io statistics metrics.
 #[derive(Default, Debug, Serialize)]
 pub struct InodeIoStats {
     total_fops: BasicMetric,
@@ -157,6 +137,27 @@ pub struct InodeIoStats {
     block_count_read: [BasicMetric; BLOCK_READ_SIZES_MAX],
     fop_hits: [BasicMetric; StatsFop::Max as usize],
     fop_errors: [BasicMetric; StatsFop::Max as usize],
+}
+
+impl InodeStatsCounter for InodeIoStats {
+    fn stats_fop_inc(&self, fop: StatsFop) {
+        self.fop_hits[fop as usize].inc();
+        self.total_fops.inc();
+    }
+
+    fn stats_fop_err_inc(&self, fop: StatsFop) {
+        self.fop_errors[fop as usize].inc();
+    }
+
+    fn stats_cumulative(&self, fop: StatsFop, value: usize) {
+        if fop == StatsFop::Read {
+            self.data_read.add(value as u64);
+            // Put counters into $BLOCK_READ_COUNT_MAX catagories
+            // 1K; 4K; 16K; 64K, 128K, 512K, 1M
+            let idx = request_size_index(value);
+            self.block_count_read[idx].inc();
+        }
+    }
 }
 
 /// Records how a file is accessed.
@@ -194,41 +195,49 @@ impl AccessPattern {
     }
 }
 
-pub trait InodeStatsCounter {
-    fn stats_fop_inc(&self, fop: StatsFop);
-    fn stats_fop_err_inc(&self, fop: StatsFop);
-    fn stats_cumulative(&self, fop: StatsFop, value: usize);
-}
+/// Filesystem level statistics and metrics.
+///
+/// Currently only Rafs in Fuse/Virtiofs mode supports filesystem level statistics and metrics.
+#[derive(Default, Debug, Serialize)]
+pub struct FsIoStats {
+    // Whether to enable each file accounting switch.
+    // As fop accounting might consume much memory space, it is disabled by default.
+    // But global fop accounting is always working within each Rafs.
+    files_account_enabled: AtomicBool,
+    access_pattern_enabled: AtomicBool,
+    record_latest_read_files_enabled: AtomicBool,
+    // Flag to enable record operation latency.
+    measure_latency: AtomicBool,
 
-impl InodeStatsCounter for InodeIoStats {
-    fn stats_fop_inc(&self, fop: StatsFop) {
-        self.fop_hits[fop as usize].inc();
-        self.total_fops.inc();
-    }
+    id: String,
+    // Total number of files that are currently open.
+    nr_opens: BasicMetric,
+    // Total bytes read against the filesystem.
+    data_read: BasicMetric,
+    // Cumulative bytes for different block size.
+    block_count_read: [BasicMetric; BLOCK_READ_SIZES_MAX],
+    // Counters for successful various file operations.
+    fop_hits: [BasicMetric; StatsFop::Max as usize],
+    // Counters for failed file operations.
+    fop_errors: [BasicMetric; StatsFop::Max as usize],
 
-    fn stats_fop_err_inc(&self, fop: StatsFop) {
-        self.fop_errors[fop as usize].inc();
-    }
+    // Cumulative latency's life cycle is equivalent to Rafs, unlike incremental
+    // latency which will be cleared each time dumped. Unit as micro-seconds.
+    //   * @total means io_stats simply adds every fop latency to the counter which is never cleared.
+    //     It is useful for other tools to calculate their metrics report.
+    fop_cumulative_latency_total: [BasicMetric; StatsFop::Max as usize],
+    // Record how many times read latency drops to the ranges.
+    // This helps us to understand the io service time stability.
+    read_latency_dist: [BasicMetric; READ_LATENCY_RANGE_MAX],
 
-    fn stats_cumulative(&self, fop: StatsFop, value: usize) {
-        if fop == StatsFop::Read {
-            self.data_read.add(value as u64);
-            // Put counters into $BLOCK_READ_COUNT_MAX catagories
-            // 1K; 4K; 16K; 64K, 128K, 512K, 1M
-            let idx = request_size_index(value);
-            self.block_count_read[idx].inc();
-        }
-    }
-}
-
-pub fn new(id: &str) -> Arc<GlobalIoStats> {
-    let c = Arc::new(GlobalIoStats {
-        id: id.to_string(),
-        ..Default::default()
-    });
-    IOS_SET.write().unwrap().insert(id.to_string(), c.clone());
-    c.init();
-    c
+    // Rwlock closes the race that more than one threads are creating counters concurrently.
+    #[serde(skip_serializing, skip_deserializing)]
+    file_counters: RwLock<HashMap<Inode, Arc<InodeIoStats>>>,
+    #[serde(skip_serializing, skip_deserializing)]
+    access_patterns: RwLock<HashMap<Inode, Arc<AccessPattern>>>,
+    // record regular file read
+    #[serde(skip_serializing, skip_deserializing)]
+    recent_read_files: InodeBitmap,
 }
 
 macro_rules! impl_iostat_option {
@@ -245,7 +254,22 @@ macro_rules! impl_iostat_option {
     };
 }
 
-impl GlobalIoStats {
+impl FsIoStats {
+    /// Create a new instance of [`FsIoStats`] for filesystem `id`.
+    pub fn new(id: &str) -> Arc<FsIoStats> {
+        let c = Arc::new(FsIoStats {
+            id: id.to_string(),
+            ..Default::default()
+        });
+        FS_METRICS
+            .write()
+            .unwrap()
+            .insert(id.to_string(), c.clone());
+        c.init();
+        c
+    }
+
+    /// Initialize the [`FsIoStats`] object.
     pub fn init(&self) {
         self.files_account_enabled.store(false, Ordering::Relaxed);
         self.measure_latency.store(true, Ordering::Relaxed);
@@ -263,8 +287,7 @@ impl GlobalIoStats {
         record_latest_read_files_enabled
     );
 
-    /// For now, each inode has its iostats counter regardless whether it is
-    /// enabled per rafs.
+    /// Prepare for recording statistics information about `ino`.
     pub fn new_file_counter(&self, ino: Inode) {
         if self.files_enabled() {
             let mut counters = self.file_counters.write().unwrap();
@@ -288,7 +311,7 @@ impl GlobalIoStats {
     }
 
     fn file_stats_update(&self, ino: Inode, fop: StatsFop, bsize: usize, success: bool) {
-        self.global_update(fop, bsize, success);
+        self.fop_update(fop, bsize, success);
 
         if self.files_enabled() {
             let counters = self.file_counters.read().unwrap();
@@ -317,7 +340,7 @@ impl GlobalIoStats {
         }
     }
 
-    fn global_update(&self, fop: StatsFop, value: usize, success: bool) {
+    fn fop_update(&self, fop: StatsFop, value: usize, success: bool) {
         // Linux kernel no longer splits IO into sizes smaller than 128K.
         // So 512K and 1M is added.
         // We put block count into 5 catagories e.g. 1K; 4K; 16K; 64K; 128K; 512K; 1M
@@ -339,7 +362,7 @@ impl GlobalIoStats {
         }
     }
 
-    /// Paired with `latency_end` to record elapsed time for a certain type of fop.
+    /// Mark starting of filesystem operation.
     pub fn latency_start(&self) -> Option<SystemTime> {
         if !self.measure_latency.load(Ordering::Relaxed) {
             return None;
@@ -348,6 +371,7 @@ impl GlobalIoStats {
         Some(SystemTime::now())
     }
 
+    /// Mark ending of filesystem operation and record statistics.
     pub fn latency_end(&self, start: &Option<SystemTime>, fop: StatsFop) {
         if let Some(start) = start {
             if let Ok(d) = SystemTime::elapsed(start) {
@@ -386,12 +410,13 @@ impl GlobalIoStats {
         .map_err(IoStatsError::Serialize)
     }
 
-    fn export_global_stats(&self) -> Result<String, IoStatsError> {
+    fn export_fs_stats(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
 
-/// If you need FOP recorder count file system operations.
+/// Guard object to record file operation metrics associated with an inode.
+///
 /// Call its `settle()` method to generate an on-stack recorder.
 /// If the operation succeeds, call `mark_success()` to change the recorder's internal state.
 /// If the operation fails, its internal state will not be changed.
@@ -402,7 +427,7 @@ pub struct FopRecorder<'a> {
     success: bool,
     // Now, the size only makes sense for `Read` FOP.
     size: usize,
-    ios: &'a GlobalIoStats,
+    ios: &'a FsIoStats,
 }
 
 impl<'a> Drop for FopRecorder<'a> {
@@ -413,10 +438,10 @@ impl<'a> Drop for FopRecorder<'a> {
 }
 
 impl<'a> FopRecorder<'a> {
-    pub fn settle<'b, T>(fop: StatsFop, inode: u64, ios: &'b T) -> Self
+    /// Create a guard object for filesystem operation `fop` associated with `inode`.
+    pub fn settle<T>(fop: StatsFop, inode: u64, ios: &'a T) -> Self
     where
-        T: AsRef<GlobalIoStats>,
-        'b: 'a,
+        T: AsRef<FsIoStats>,
     {
         FopRecorder {
             fop,
@@ -427,20 +452,22 @@ impl<'a> FopRecorder<'a> {
         }
     }
 
+    /// Mark operation as success.
     pub fn mark_success(&mut self, size: usize) {
         self.success = true;
         self.size = size;
     }
 }
 
+/// Export file metrics of a filesystem.
 pub fn export_files_stats(
     name: &Option<String>,
     latest_read_files: bool,
 ) -> Result<String, IoStatsError> {
-    let ios_set = IOS_SET.read().unwrap();
+    let fs_metrics = FS_METRICS.read().unwrap();
 
     match name {
-        Some(k) => ios_set.get(k).ok_or(IoStatsError::NoCounter).map(|v| {
+        Some(k) => fs_metrics.get(k).ok_or(IoStatsError::NoCounter).map(|v| {
             if !latest_read_files {
                 v.export_files_stats()
             } else {
@@ -448,8 +475,8 @@ pub fn export_files_stats(
             }
         })?,
         None => {
-            if ios_set.len() == 1 {
-                if let Some(ios) = ios_set.values().next() {
+            if fs_metrics.len() == 1 {
+                if let Some(ios) = fs_metrics.values().next() {
                     return if !latest_read_files {
                         ios.export_files_stats()
                     } else {
@@ -462,16 +489,17 @@ pub fn export_files_stats(
     }
 }
 
+/// Export file access pattern of a filesystem.
 pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoStatsError> {
-    let ios_set = IOS_SET.read().unwrap();
+    let fs_metrics = FS_METRICS.read().unwrap();
     match name {
-        Some(k) => ios_set
+        Some(k) => fs_metrics
             .get(k)
             .ok_or(IoStatsError::NoCounter)
             .map(|v| v.export_files_access_patterns())?,
         None => {
-            if ios_set.len() == 1 {
-                if let Some(ios) = ios_set.values().next() {
+            if fs_metrics.len() == 1 {
+                if let Some(ios) = fs_metrics.values().next() {
                     return ios.export_files_access_patterns();
                 }
             }
@@ -480,19 +508,20 @@ pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoSt
     }
 }
 
+/// Export filesystem metrics.
 pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError> {
     // With only one rafs instance, we allow caller to ask for an unknown ios name.
-    let ios_set = IOS_SET.read().unwrap();
+    let fs_metrics = FS_METRICS.read().unwrap();
 
     match name {
-        Some(k) => ios_set
+        Some(k) => fs_metrics
             .get(k)
             .ok_or(IoStatsError::NoCounter)
-            .map(|v| v.export_global_stats())?,
+            .map(|v| v.export_fs_stats())?,
         None => {
-            if ios_set.len() == 1 {
-                if let Some(ios) = ios_set.values().next() {
-                    return ios.export_global_stats();
+            if fs_metrics.len() == 1 {
+                if let Some(ios) = fs_metrics.values().next() {
+                    return ios.export_fs_stats();
                 }
             }
             Err(IoStatsError::NoCounter)
@@ -500,6 +529,7 @@ pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError
     }
 }
 
+/// Export storage backend metrics.
 pub fn export_backend_metrics(name: &Option<String>) -> IoStatsResult<String> {
     let metrics = BACKEND_METRICS.read().unwrap();
 
@@ -519,6 +549,7 @@ pub fn export_backend_metrics(name: &Option<String>) -> IoStatsResult<String> {
     }
 }
 
+/// Export blob cache metircs.
 pub fn export_blobcache_metrics(id: &Option<String>) -> IoStatsResult<String> {
     let metrics = BLOBCACHE_METRICS.read().unwrap();
 
@@ -538,10 +569,12 @@ pub fn export_blobcache_metrics(id: &Option<String>) -> IoStatsResult<String> {
     }
 }
 
+/// Export global error events.
 pub fn export_events() -> IoStatsResult<String> {
     serde_json::to_string(ERROR_HOLDER.lock().unwrap().deref()).map_err(IoStatsError::Serialize)
 }
 
+/// Trait to manipulate metric counters.
 pub trait Metric {
     /// Adds `value` to the current counter.
     fn add(&self, value: u64);
@@ -551,34 +584,38 @@ pub trait Metric {
     }
     /// Returns current value of the counter.
     fn count(&self) -> u64;
+    /// Subtract `value` from the current counter.
     fn sub(&self, value: u64);
+    /// Decrease the current counter.
     fn dec(&self) {
         self.sub(1);
     }
 }
 
+/// Basic 64-bit metric counter.
 #[derive(Default, Serialize, Debug)]
 pub struct BasicMetric(AtomicU64);
 
-/*
-Exported backend metrics look like:
-```json
-{'read_count': 901, 'read_errors': 0, 'read_amount_total': 28650387, 'read_cumulative_latency_total': 4776473,
-'read_latency_dist':   [[0, 0, 0, 72, 1, 0, 0, 0],
-                        [0, 0, 0, 203, 1, 1, 0, 0],
-                        [0, 0, 0, 545, 3, 1, 0, 0],
-                        [0, 0, 0, 10, 0, 0, 0, 0],
-                        [0, 0, 0, 45, 0, 0, 0, 0],
-                        [0, 0, 0, 0, 0, 0, 0, 0],
-                        [0, 0, 0, 0, 2, 0, 0, 0],
-                        [0, 0, 0, 0, 17, 0, 0, 0]]
+impl Metric for BasicMetric {
+    fn add(&self, value: u64) {
+        self.0.fetch_add(value, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn sub(&self, value: u64) {
+        self.0.fetch_sub(value, Ordering::Relaxed);
+    }
 }
-*/
+
+/// Metrics for storage backends.
 #[derive(Default, Serialize, Debug)]
 pub struct BackendMetrics {
     #[serde(skip_serializing, skip_deserializing)]
     id: String,
-    // TODO: Turn this into enum?
+    // type of storage backend.
     backend_type: String,
     // Cumulative count of read request to backend
     read_count: BasicMetric,
@@ -595,17 +632,60 @@ pub struct BackendMetrics {
     read_latency_sizes_dist: [[BasicMetric; READ_LATENCY_RANGE_MAX]; BLOCK_READ_SIZES_MAX],
 }
 
-impl Metric for BasicMetric {
-    fn add(&self, value: u64) {
-        self.0.fetch_add(value, Ordering::Relaxed);
+impl BackendMetrics {
+    /// Create a [`BackendMetrics`] object for a storage backend.
+    pub fn new(id: &str, backend_type: &str) -> Arc<Self> {
+        let backend_metrics = Arc::new(Self {
+            id: id.to_string(),
+            backend_type: backend_type.to_string(),
+            ..Default::default()
+        });
+
+        BACKEND_METRICS
+            .write()
+            .unwrap()
+            .insert(id.to_string(), backend_metrics.clone());
+
+        backend_metrics
     }
 
-    fn count(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+    /// Release a [`BackendMetrics`] object for a storage backend.
+    pub fn release(&self) -> IoStatsResult<()> {
+        BACKEND_METRICS
+            .write()
+            .unwrap()
+            .remove(&self.id)
+            .map(|_| ())
+            .ok_or(IoStatsError::NoCounter)
     }
 
-    fn sub(&self, value: u64) {
-        self.0.fetch_sub(value, Ordering::Relaxed);
+    /// Mark starting of an IO operations.
+    pub fn begin(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    /// Mark ending of an IO operations.
+    pub fn end(&self, begin: &SystemTime, size: usize, error: bool) {
+        if let Ok(d) = SystemTime::elapsed(begin) {
+            let elapsed = saturating_duration_millis(&d);
+
+            self.read_count.inc();
+            if error {
+                self.read_errors.inc();
+            }
+
+            self.read_cumulative_latency_millis_total.add(elapsed);
+            self.read_amount_total.add(size as u64);
+            let lat_idx = latency_millis_range_index(elapsed);
+            let size_idx = request_size_index(size);
+            self.read_cumulative_latency_millis_dist[size_idx].add(elapsed);
+            self.read_count_block_size_dist[size_idx].inc();
+            self.read_latency_sizes_dist[size_idx][lat_idx].inc();
+        }
+    }
+
+    fn export_metrics(&self) -> IoStatsResult<String> {
+        serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
 
@@ -629,59 +709,6 @@ fn saturating_duration_micros(d: &Duration) -> u64 {
         d_secs
             .saturating_mul(1_000_000)
             .saturating_add(d.subsec_micros() as u64)
-    }
-}
-
-impl BackendMetrics {
-    pub fn new(id: &str, backend_type: &str) -> Arc<Self> {
-        let backend_metrics = Arc::new(Self {
-            id: id.to_string(),
-            backend_type: backend_type.to_string(),
-            ..Default::default()
-        });
-
-        BACKEND_METRICS
-            .write()
-            .unwrap()
-            .insert(id.to_string(), backend_metrics.clone());
-
-        backend_metrics
-    }
-
-    pub fn release(&self) -> IoStatsResult<()> {
-        BACKEND_METRICS
-            .write()
-            .unwrap()
-            .remove(&self.id)
-            .map(|_| ())
-            .ok_or(IoStatsError::NoCounter)
-    }
-
-    pub fn begin(&self) -> SystemTime {
-        SystemTime::now()
-    }
-
-    pub fn end(&self, begin: &SystemTime, size: usize, error: bool) {
-        if let Ok(d) = SystemTime::elapsed(begin) {
-            let elapsed = saturating_duration_millis(&d);
-
-            self.read_count.inc();
-            if error {
-                self.read_errors.inc();
-            }
-
-            self.read_cumulative_latency_millis_total.add(elapsed);
-            self.read_amount_total.add(size as u64);
-            let lat_idx = latency_millis_range_index(elapsed);
-            let size_idx = request_size_index(size);
-            self.read_cumulative_latency_millis_dist[size_idx].add(elapsed);
-            self.read_count_block_size_dist[size_idx].inc();
-            self.read_latency_sizes_dist[size_idx][lat_idx].inc();
-        }
-    }
-
-    fn export_metrics(&self) -> IoStatsResult<String> {
-        serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
 }
 
@@ -713,6 +740,7 @@ pub struct BlobcacheMetrics {
 }
 
 impl BlobcacheMetrics {
+    /// Create a [`BlobcacheMetrics`] object for a blob cache manager.
     pub fn new(id: &str, store_path: &str) -> Arc<Self> {
         let metrics = Arc::new(Self {
             id: id.to_string(),
@@ -731,6 +759,7 @@ impl BlobcacheMetrics {
         metrics
     }
 
+    /// Release a [`BlobcacheMetrics`] object for a blob cache manager.
     pub fn release(&self) -> IoStatsResult<()> {
         BLOBCACHE_METRICS
             .write()
@@ -740,6 +769,7 @@ impl BlobcacheMetrics {
             .ok_or(IoStatsError::NoCounter)
     }
 
+    /// Export blobcache metric information.
     pub fn export_metrics(&self) -> IoStatsResult<String> {
         serde_json::to_string(self).map_err(IoStatsError::Serialize)
     }
@@ -771,24 +801,24 @@ mod tests {
 
     #[test]
     fn test_block_read_count() {
-        let g = GlobalIoStats::default();
+        let g = FsIoStats::default();
         g.init();
-        g.global_update(StatsFop::Read, 4000, true);
+        g.fop_update(StatsFop::Read, 4000, true);
         assert_eq!(g.block_count_read[1].count(), 1);
 
-        g.global_update(StatsFop::Read, 4096, true);
+        g.fop_update(StatsFop::Read, 4096, true);
         assert_eq!(g.block_count_read[2].count(), 1);
 
-        g.global_update(StatsFop::Read, 65535, true);
+        g.fop_update(StatsFop::Read, 65535, true);
         assert_eq!(g.block_count_read[3].count(), 1);
 
-        g.global_update(StatsFop::Read, 131072, true);
+        g.fop_update(StatsFop::Read, 131072, true);
         assert_eq!(g.block_count_read[5].count(), 1);
 
-        g.global_update(StatsFop::Read, 65520, true);
+        g.fop_update(StatsFop::Read, 65520, true);
         assert_eq!(g.block_count_read[3].count(), 2);
 
-        g.global_update(StatsFop::Read, 2015520, true);
+        g.fop_update(StatsFop::Read, 2015520, true);
         assert_eq!(g.block_count_read[3].count(), 2);
     }
 }
