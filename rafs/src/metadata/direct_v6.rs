@@ -18,6 +18,7 @@
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
 use std::any::Any;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Result, SeekFrom};
@@ -31,6 +32,7 @@ use std::slice;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
+use std::cell::RefCell;
 
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
@@ -61,6 +63,12 @@ use storage::device::{
     BlobIoVec,
 };
 use storage::utils::readahead;
+
+// Use to store chunk info pre inode, Oour build is actually single-threaded,
+// so there's no lazy_static + mutex approach here, thread_local plus Refcell is enough.
+thread_local! {
+        static CHUNK_DICT_MAP: RefCell<Option<HashMap<RafsV6InodeChunkAddr, Arc<dyn BlobChunkInfo>>>> = RefCell::new(None);
+}
 
 fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, rafs_err)
@@ -153,6 +161,7 @@ pub struct DirectSuperBlockV6 {
 impl DirectSuperBlockV6 {
     /// Create a new instance of `DirectSuperBlockV6`.
     pub fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
+        CHUNK_DICT_MAP.with(|dict| *dict.borrow_mut() = None);
         let state = DirectMappingState::new(meta, validate_digest);
 
         Self {
@@ -264,6 +273,35 @@ impl DirectSuperBlockV6 {
 
         Ok(())
     }
+
+    // For RafsV6, inode doesn't store detailed chunk info, only a simple RafsV6InodeChunkAddr
+    // so we need to use the chunk table at the end of the bootstrap to restore the chunk info of an inode
+    fn load_chunk_map(&self) -> Result<HashMap<RafsV6InodeChunkAddr, Arc<dyn BlobChunkInfo>>> {
+        let mut chunk_dict: HashMap<RafsV6InodeChunkAddr, Arc<dyn BlobChunkInfo>> =
+            HashMap::default();
+        let state = self.state.load();
+        let size = state.meta.chunk_table_size as usize;
+        if size == 0 {
+            return Ok(chunk_dict);
+        }
+
+        let unit_size = size_of::<RafsV5ChunkInfo>();
+        if size % unit_size != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        for idx in 0..(size / unit_size) {
+            let chunk = self.get_chunk_info(idx)?;
+
+            let mut v6_chunk = RafsV6InodeChunkAddr::new();
+            v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
+            v6_chunk.set_blob_comp_index(chunk.id());
+            v6_chunk.set_block_addr((chunk.uncompress_offset() / EROFS_BLOCK_SIZE) as u32);
+            chunk_dict.insert(v6_chunk, chunk);
+        }
+
+        Ok(chunk_dict)
+    }
 }
 
 impl RafsSuperInodes for DirectSuperBlockV6 {
@@ -339,8 +377,6 @@ pub struct OndiskInodeWrapper {
     pub blocks_count: u64,
     // OndiskInodeWrapper always through Tree::from_bootstarp to create
     // And from_bootstarp will only create Root Inode through RafsSuperInodes:::get_inode,
-    // this time parent_inode field is None, the other Inodes are created through OndiskInodeWrapper,
-    // this field will be filled with inode_wrapper_with_parent
     parent_inode: Cell<Option<Inode>>,
     name: Cell<Option<OsString>>,
 }
@@ -886,7 +922,37 @@ impl RafsInode for OndiskInodeWrapper {
     /// It depends on Self::validate() to ensure valid memory layout.
     #[allow(clippy::cast_ptr_alignment)]
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
-        self.mapping.get_chunk_info(idx as usize)
+        let state = self.mapping.state.load();
+        let inode = self.disk_inode();
+        if !self.is_reg() || idx >= self.get_chunk_count() {
+            return Err(enoent!("invalid chunk info"));
+        }
+        let offset = self.offset as usize
+            + round_up(
+                self.this_inode_size() as u64 + self.xattr_size() as u64,
+                size_of::<RafsV6InodeChunkAddr>() as u64,
+            ) as usize
+            + (idx as usize * size_of::<RafsV6InodeChunkAddr>());
+
+        let chunk_addr = state.cast_to_ref::<RafsV6InodeChunkAddr>(state.base, offset)?;
+
+        let mut find = None;
+        // Lazy initializes all chunk info
+        CHUNK_DICT_MAP.with(|dict| {
+            if dict.borrow().is_none() {
+                // # Safety
+                // There will always be chunk info in bootstrap, or zero chunk.
+                *dict.borrow_mut() = Some(self.mapping.load_chunk_map().unwrap());
+            }
+            find = dict
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .get(chunk_addr)
+                .map(Arc::clone);
+        });
+
+        find.ok_or_else(|| enoent!("can't find chunk info"))
     }
 
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
