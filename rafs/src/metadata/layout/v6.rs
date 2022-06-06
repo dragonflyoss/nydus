@@ -949,7 +949,7 @@ impl_bootstrap_converter!(RafsV6InodeChunkHeader);
 
 /// Rafs v6 chunk address on-disk format, 8 bytes.
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct RafsV6InodeChunkAddr {
     /// Lower part of encoded blob address.
     c_blob_addr_lo: u16,
