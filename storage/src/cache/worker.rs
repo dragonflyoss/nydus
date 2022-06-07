@@ -19,7 +19,9 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
-use crate::cache::{BlobCache, BlobIoRange, BlobPrefetchConfig};
+use nydus_api::http::BlobPrefetchConfig;
+
+use crate::cache::{BlobCache, BlobIoRange};
 use crate::RAFS_MAX_CHUNK_SIZE;
 
 /// Configuration information for asynchronous workers.

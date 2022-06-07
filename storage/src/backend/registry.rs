@@ -7,19 +7,19 @@ use std::collections::HashMap;
 use std::io::{Error, Read, Result};
 use std::sync::{Arc, RwLock};
 
-use nydus_utils::metrics::BackendMetrics;
 use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
+use nydus_api::http::RegistryOssConfig;
+use nydus_utils::metrics::BackendMetrics;
+
 use crate::backend::connection::{
     is_success_status, respond, Connection, ConnectionError, ReqBody,
 };
-use crate::backend::{
-    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, CommonConfig,
-};
+use crate::backend::{default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader};
 
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -571,7 +571,7 @@ impl Registry {
     #[allow(clippy::useless_let_if_seq)]
     pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
         let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
-        let common_config: CommonConfig =
+        let common_config: RegistryOssConfig =
             serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
         let retry_limit = common_config.retry_limit;
         let connection = Connection::new(&common_config)?;

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, Error, ErrorKind, Result};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -117,6 +118,147 @@ pub struct BlobCacheObjectId {
     pub domain_id: String,
     /// Blob identifier for the object.
     pub blob_id: String,
+}
+
+/// Configuration information for blob data prefetching.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
+pub struct BlobPrefetchConfig {
+    /// Whether to enable blob data prefetching.
+    pub enable: bool,
+    /// Number of data prefetching working threads.
+    pub threads_count: usize,
+    /// The maximum size of a merged IO request.
+    pub merging_size: usize,
+    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
+    pub bandwidth_rate: u32,
+}
+
+fn default_work_dir() -> String {
+    ".".to_string()
+}
+
+/// Configuration information for file cache.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FileCacheConfig {
+    /// Working directory to store state and cached files.
+    #[serde(default = "default_work_dir")]
+    pub work_dir: String,
+    /// Deprecated: disable index mapping, keep it as false when possible.
+    #[serde(default)]
+    pub disable_indexed_map: bool,
+}
+
+impl FileCacheConfig {
+    /// Get the working directory.
+    pub fn get_work_dir(&self) -> Result<&str> {
+        let path = fs::metadata(&self.work_dir)
+            .or_else(|_| {
+                fs::create_dir_all(&self.work_dir)?;
+                fs::metadata(&self.work_dir)
+            })
+            .map_err(|e| {
+                last_error!(format!(
+                    "fail to stat filecache work_dir {}: {}",
+                    self.work_dir, e
+                ))
+            })?;
+
+        if path.is_dir() {
+            Ok(&self.work_dir)
+        } else {
+            Err(enoent!(format!(
+                "filecache work_dir {} is not a directory",
+                self.work_dir
+            )))
+        }
+    }
+}
+
+/// Configuration information for fscache.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FsCacheConfig {
+    /// Working directory to store state and cached files.
+    #[serde(default = "default_work_dir")]
+    pub work_dir: String,
+}
+
+impl FsCacheConfig {
+    /// Get the working directory.
+    pub fn get_work_dir(&self) -> Result<&str> {
+        let path = fs::metadata(&self.work_dir)
+            .or_else(|_| {
+                fs::create_dir_all(&self.work_dir)?;
+                fs::metadata(&self.work_dir)
+            })
+            .map_err(|e| {
+                last_error!(format!(
+                    "fail to stat fscache work_dir {}: {}",
+                    self.work_dir, e
+                ))
+            })?;
+
+        if path.is_dir() {
+            Ok(&self.work_dir)
+        } else {
+            Err(enoent!(format!(
+                "fscache work_dir {} is not a directory",
+                self.work_dir
+            )))
+        }
+    }
+}
+
+/// Configuration information for network proxy.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL.
+    pub url: String,
+    /// Endpoint of P2P proxy health checking.
+    pub ping_url: String,
+    /// Fallback to remote storage backend if P2P proxy ping failed.
+    pub fallback: bool,
+    /// Interval of P2P proxy health checking, in seconds.
+    pub check_interval: u64,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            ping_url: String::new(),
+            fallback: true,
+            check_interval: 5,
+        }
+    }
+}
+
+/// Generic configuration for storage backends.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RegistryOssConfig {
+    /// Enable HTTP proxy for the read request.
+    pub proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    pub timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
+    pub connect_timeout: u64,
+    /// Retry count when read request failed.
+    pub retry_limit: u8,
+}
+
+impl Default for RegistryOssConfig {
+    fn default() -> Self {
+        Self {
+            proxy: ProxyConfig::default(),
+            skip_verify: false,
+            timeout: 5,
+            connect_timeout: 5,
+            retry_limit: 0,
+        }
+    }
 }
 
 #[derive(Debug)]

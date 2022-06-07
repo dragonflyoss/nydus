@@ -4,13 +4,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Result;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, RwLock};
 
-use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
+
+use nydus_api::http::FileCacheConfig;
+use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::FileCacheEntry;
@@ -20,49 +22,6 @@ use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::factory::CacheConfig;
 use crate::meta::BlobMetaInfo;
-
-fn default_work_dir() -> String {
-    ".".to_string()
-}
-
-/// Configuration information for file cache.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct FileCacheConfig {
-    /// Working directory to keep cached files.
-    #[serde(default = "default_work_dir")]
-    pub work_dir: String,
-    /// Legacy: disable index mapping, keep it as false when possible.
-    #[serde(default)]
-    pub disable_indexed_map: bool,
-}
-
-impl FileCacheConfig {
-    fn get_work_dir(&self) -> Result<&str> {
-        let path = fs::metadata(&self.work_dir)
-            .or_else(|_| {
-                fs::create_dir_all(&self.work_dir)?;
-                fs::metadata(&self.work_dir)
-            })
-            .map_err(|e| {
-                last_error!(format!(
-                    "fail to stat filecache work_dir {}: {}",
-                    self.work_dir, e
-                ))
-            })?;
-
-        if path.is_dir() {
-            Ok(&self.work_dir)
-        } else {
-            Err(enoent!(format!(
-                "filecache work_dir {} is not a directory",
-                self.work_dir
-            )))
-        }
-    }
-}
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with local storage.

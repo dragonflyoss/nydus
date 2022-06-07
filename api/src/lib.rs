@@ -8,6 +8,8 @@ extern crate log;
 extern crate serde_derive;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate nydus_error;
 
 pub mod http;
 pub mod http_endpoint_v1;

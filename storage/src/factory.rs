@@ -23,6 +23,8 @@ use serde::Deserialize;
 use serde_json::value::Value;
 use tokio::runtime::{Builder, Runtime};
 
+use nydus_api::http::BlobPrefetchConfig;
+
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
 #[cfg(feature = "backend-oss")]
@@ -30,9 +32,7 @@ use crate::backend::oss;
 #[cfg(feature = "backend-registry")]
 use crate::backend::registry;
 use crate::backend::BlobBackend;
-use crate::cache::{
-    BlobCache, BlobCacheMgr, BlobPrefetchConfig, DummyCacheMgr, FileCacheMgr, FsCacheMgr,
-};
+use crate::cache::{BlobCache, BlobCacheMgr, DummyCacheMgr, FileCacheMgr, FsCacheMgr};
 use crate::device::BlobInfo;
 
 lazy_static! {
@@ -96,13 +96,13 @@ impl BackendConfig {
 /// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CacheConfig {
-    /// Type of blob cache.
+    /// Type of blob cache: "blobcache", "fscache" or ""
     #[serde(default, rename = "type")]
     pub cache_type: String,
     /// Whether the data from the cache is compressed, not used anymore.
     #[serde(default, rename = "compressed")]
     pub cache_compressed: bool,
-    /// Blob cache manager specific configuration.
+    /// Blob cache manager specific configuration: FileCacheConfig, FsCacheConfig.
     #[serde(default, rename = "config")]
     pub cache_config: Value,
     /// Whether to validate data read from the cache.

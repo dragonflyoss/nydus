@@ -14,7 +14,6 @@
 //! data. There are also [FsPrefetchControl](struct.FsPrefetchControl.html) and
 //! [RafsConfig](struct.RafsConfig.html) to configure an [Rafs] instance.
 
-use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
 use std::any::Any;
 use std::cmp;
 use std::convert::TryFrom;
@@ -28,16 +27,17 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use fuse_backend_rs::abi::fuse_abi::Attr;
+use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
+use fuse_backend_rs::api::filesystem::*;
+use fuse_backend_rs::api::BackendFileSystem;
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
-use fuse_backend_rs::abi::fuse_abi::Attr;
-use fuse_backend_rs::api::filesystem::*;
-use fuse_backend_rs::api::BackendFileSystem;
+use nydus_api::http::BlobPrefetchConfig;
+use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
+use nydus_storage::factory::FactoryConfig;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
-use storage::cache::BlobPrefetchConfig;
-use storage::device::{BlobDevice, BlobPrefetchRequest};
-use storage::factory::FactoryConfig;
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
 use crate::metadata::{
