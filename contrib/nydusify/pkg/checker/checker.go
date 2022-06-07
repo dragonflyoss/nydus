@@ -32,6 +32,7 @@ type Opt struct {
 	BackendType    string
 	BackendConfig  string
 	ExpectedArch   string
+	ImageVersion   string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
@@ -105,6 +106,14 @@ func (checker *Checker) Check(ctx context.Context) error {
 		return errors.Wrap(err, "output image information")
 	}
 
+	mode := "cache"
+	digestValidate := true
+	if checker.ImageVersion == "6" {
+		mode = "direct"
+		digestValidate = false
+
+	}
+
 	rules := []rule.Rule{
 		&rule.ManifestRule{
 			SourceParsed:  sourceParsed,
@@ -124,14 +133,16 @@ func (checker *Checker) Check(ctx context.Context) error {
 			Source:          checker.Source,
 			SourceMountPath: filepath.Join(checker.WorkDir, "fs/source_mounted"),
 			NydusdConfig: tool.NydusdConfig{
-				NydusdPath:    checker.NydusdPath,
-				BackendType:   checker.BackendType,
-				BackendConfig: checker.BackendConfig,
-				BootstrapPath: filepath.Join(checker.WorkDir, "nydus_bootstrap"),
-				ConfigPath:    filepath.Join(checker.WorkDir, "fs/nydusd_config.json"),
-				BlobCacheDir:  filepath.Join(checker.WorkDir, "fs/nydus_blobs"),
-				MountPath:     filepath.Join(checker.WorkDir, "fs/nydus_mounted"),
-				APISockPath:   filepath.Join(checker.WorkDir, "fs/nydus_api.sock"),
+				NydusdPath:     checker.NydusdPath,
+				BackendType:    checker.BackendType,
+				BackendConfig:  checker.BackendConfig,
+				BootstrapPath:  filepath.Join(checker.WorkDir, "nydus_bootstrap"),
+				ConfigPath:     filepath.Join(checker.WorkDir, "fs/nydusd_config.json"),
+				BlobCacheDir:   filepath.Join(checker.WorkDir, "fs/nydus_blobs"),
+				MountPath:      filepath.Join(checker.WorkDir, "fs/nydus_mounted"),
+				APISockPath:    filepath.Join(checker.WorkDir, "fs/nydus_api.sock"),
+				Mode:           mode,
+				DigestValidate: digestValidate,
 			},
 		},
 	}

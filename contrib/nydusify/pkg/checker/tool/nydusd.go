@@ -30,6 +30,8 @@ type NydusdConfig struct {
 	BlobCacheDir   string
 	APISockPath    string
 	MountPath      string
+	Mode           string
+	DigestValidate bool
 }
 
 // Nydusd runs nydusd binary.
@@ -55,14 +57,14 @@ var configTpl = `
 			}
 		}
 	},
-	"mode": "cached",
+	"mode": "{{.Mode}}",
 	"iostats_files": false,
 	"fs_prefetch": {
 		"enable": {{.EnablePrefetch}},
 		"threads_count": 10,
 		"merging_size": 131072
 	},
-	"digest_validate": true,
+	"digest_validate": {{.DigestValidate}},
 	"enable_xattr": true
 }
 `
