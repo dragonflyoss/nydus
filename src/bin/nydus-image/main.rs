@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, ArgMatches, SubCommand};
+use decompress::Decompressor;
 use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,7 @@ use crate::core::context::{
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
+use crate::decompress::DefaultDecompressor;
 use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::validator::Validator;
@@ -50,6 +52,7 @@ use crate::validator::Validator;
 mod trace;
 mod builder;
 mod core;
+mod decompress;
 mod inspect;
 mod merge;
 mod stat;
@@ -509,6 +512,33 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .help("path to JSON output file")
                         .takes_value(true))
         )
+        .subcommand(
+            SubCommand::with_name("decompress")
+            .about("Decompress nydus bootstrap and blob files to tar")
+            .arg(
+                Arg::with_name("bootstrap")
+                .long("bootstrap")
+                .short("B")
+                .help("path to bootstrap file")
+                .required(true)
+                .takes_value(true))
+            .arg(
+                Arg::with_name("blob")
+                .long("blob")
+                .short("b")
+                .help("path to blob file")
+                .required(true)
+                .takes_value(true)
+                )
+            .arg(
+                Arg::with_name("output")
+                .long("output")
+                .short("o")
+                .help("path to output")
+                .required(true)
+                .takes_value(true)
+                )
+        )
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
@@ -567,6 +597,8 @@ fn main() -> Result<()> {
         Command::stat(matches)
     } else if let Some(matches) = cmd.subcommand_matches("compact") {
         Command::compact(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("decompress") {
+        Command::decompress(matches)
     } else {
         println!("{}", cmd.usage());
         Ok(())
@@ -763,6 +795,24 @@ impl Command {
             OutputSerializer::dump(matches, build_output, build_info)?;
         }
         Ok(())
+    }
+
+    fn decompress(args: &clap::ArgMatches) -> Result<()> {
+        let bootstrap = args.value_of("bootstrap").expect("pass in bootstrap");
+        let blob = args.value_of("blob").expect("pass in blob");
+        let output = args.value_of("output").expect("pass in output");
+
+        let decompressor = Box::new(DefaultDecompressor::new(bootstrap, blob, output).map_err(
+            |err| {
+                error!("fail to create decompressor, error: {}", err);
+                anyhow!("fail to create decompressor, error: {}", err)
+            },
+        )?) as Box<dyn Decompressor>;
+
+        decompressor.decompress().map_err(|err| {
+            error!("fail to decompress, error: {}", err);
+            anyhow!("fail to decompress, error: {}", err)
+        })
     }
 
     fn check(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
