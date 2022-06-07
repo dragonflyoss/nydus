@@ -42,9 +42,10 @@ type Nydusify struct {
 	backendType   string
 	backendConfig string
 	chunkDictArgs string
+	imageVersion  string
 }
 
-func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string) *Nydusify {
+func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, imageVersion string) *Nydusify {
 	host := registry.Host()
 
 	backendType := "registry"
@@ -60,6 +61,9 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 	if os.Getenv("BACKEND_CONFIG") != "" {
 		backendConfig = os.Getenv("BACKEND_CONFIG")
 	}
+	if len(imageVersion) == 0 {
+		imageVersion = "5"
+	}
 
 	return &Nydusify{
 		Registry:      registry,
@@ -69,6 +73,7 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 		backendType:   backendType,
 		backendConfig: backendConfig,
 		chunkDictArgs: chunkDictArgs,
+		imageVersion:  imageVersion,
 	}
 }
 
@@ -128,6 +133,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 			Insecure: false,
 			Platform: "linux/amd64",
 		},
+		ImageVersion: nydusify.imageVersion,
 	}
 
 	cvt, err := converter.New(opt)
