@@ -353,12 +353,7 @@ impl FileCacheEntry {
         // Get chunks not ready yet, also marking them as inflight.
         let pending = match bitmap.check_range_ready_and_mark_pending(chunk_index, count)? {
             None => return Ok(0),
-            Some(v) => {
-                if v.is_empty() {
-                    return Ok(0);
-                }
-                v
-            }
+            Some(v) => v,
         };
 
         let mut total_size = 0;
