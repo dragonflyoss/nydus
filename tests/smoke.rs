@@ -96,12 +96,6 @@ fn test(
         nydusd.umount("mnt");
     }
 
-    // FIXME: Currently no load is implemented for rafs v6 parent bootstrap,
-    // so the layered build is temporarily unsupported and need to be fixed.
-    if rafsv6 {
-        return;
-    }
-
     // Mount upper rootfs and check
     {
         // Create & build upper rootfs based lower
