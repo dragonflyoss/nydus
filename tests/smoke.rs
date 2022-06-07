@@ -109,7 +109,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
-            true,
+            !rafsv6,
         );
         nydusd.start(Some("bootstrap-overlay"), "mnt");
         nydusd.check(&overlay_texture, "mnt");
@@ -124,7 +124,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
-            true,
+            !rafsv6,
         );
         nydusd.start(Some("bootstrap-overlay"), "mnt");
         nydusd.check(&overlay_texture, "mnt");
