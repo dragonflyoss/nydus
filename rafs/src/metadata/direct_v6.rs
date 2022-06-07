@@ -975,38 +975,34 @@ impl RafsInode for OndiskInodeWrapper {
 
         find.ok_or_else(|| enoent!("can't find chunk info"))
     }
-
+    // TODO(tianqian.zyf): Use get_xattrs implement it
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
         let inode = self.disk_inode();
         let total = inode.xattr_inline_count();
         if total == 0 {
             return Ok(None);
         }
+        // xattr body size
+        let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>()
+            + size_of::<RafsV6XattrIbodyHeader>();
         let m = self.mapping.state.load();
         let mut cur = unsafe {
             m.base
                 .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
         };
 
-        let mut size = size_of::<RafsV6XattrIbodyHeader>() as u32;
+        remaining -= size_of::<RafsV6XattrIbodyHeader>();
 
-        while (size as usize)
-            < ((total as usize) * size_of::<RafsV6XattrEntry>()
-                + size_of::<RafsV6XattrIbodyHeader>())
-        {
+        while remaining > 0 {
             let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
-
             let mut xa_name = recover_namespace(e.name_index())?;
-
             let suffix = OsStr::from_bytes(unsafe {
                 slice::from_raw_parts(
                     cur.add(size_of::<RafsV6XattrEntry>()),
                     e.name_len() as usize,
                 )
             });
-
             xa_name.push(suffix);
-
             if xa_name == name {
                 let value = unsafe {
                     slice::from_raw_parts(
@@ -1017,13 +1013,11 @@ impl RafsInode for OndiskInodeWrapper {
                 .to_vec();
                 return Ok(Some(value));
             }
-
             let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
             s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
-            size += s;
+            remaining -= s as usize;
             cur = unsafe { cur.add(s as usize) };
         }
-
         Ok(None)
     }
 
@@ -1034,18 +1028,17 @@ impl RafsInode for OndiskInodeWrapper {
         if total == 0 {
             return Ok(xattrs);
         }
+        // xattr body size
+        let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>()
+            + size_of::<RafsV6XattrIbodyHeader>();
         let m = self.mapping.state.load();
         let mut cur = unsafe {
             m.base
                 .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
         };
+        remaining -= size_of::<RafsV6XattrIbodyHeader>();
 
-        let mut size = size_of::<RafsV6XattrIbodyHeader>() as u32;
-
-        while (size as usize)
-            < ((total as usize) * size_of::<RafsV6XattrEntry>()
-                + size_of::<RafsV6XattrIbodyHeader>())
-        {
+        while remaining > 0 {
             let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
 
             let ns = recover_namespace(e.name_index())?;
@@ -1059,7 +1052,7 @@ impl RafsInode for OndiskInodeWrapper {
             xattrs.push(xa);
             let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
             s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
-            size += s;
+            remaining -= s as usize;
             cur = unsafe { cur.add(s as usize) };
         }
 
