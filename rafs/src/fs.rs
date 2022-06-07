@@ -208,7 +208,7 @@ impl fmt::Display for RafsConfig {
 pub struct Rafs {
     id: String,
     device: BlobDevice,
-    ios: Arc<metrics::GlobalIoStats>,
+    ios: Arc<metrics::FsIoStats>,
     sb: Arc<RafsSuper>,
 
     initialized: bool,
@@ -238,7 +238,7 @@ impl Rafs {
         let rafs = Rafs {
             id: id.to_string(),
             device,
-            ios: metrics::new(id),
+            ios: metrics::FsIoStats::new(id),
             sb: Arc::new(sb),
 
             initialized: false,

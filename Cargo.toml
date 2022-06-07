@@ -69,7 +69,7 @@ env_logger = "0.8.2"
 rand = "0.8.5"
 
 [features]
-fusedev = ["nydus-utils/fusedev", "fuse-backend-rs/fusedev"]
+fusedev = ["fuse-backend-rs/fusedev"]
 virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings"]
 
 [workspace]
