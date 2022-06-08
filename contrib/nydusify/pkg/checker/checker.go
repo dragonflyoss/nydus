@@ -106,7 +106,7 @@ func (checker *Checker) Check(ctx context.Context) error {
 		return errors.Wrap(err, "output image information")
 	}
 
-	mode := "cache"
+	mode := "cached"
 	digestValidate := true
 	if checker.FsVersion == "6" {
 		mode = "direct"
