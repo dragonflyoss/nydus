@@ -210,7 +210,7 @@ func main() {
 				// chosen to make it compatible with the 127 max in graph driver of
 				// docker so that we can pull cache image using docker.
 				&cli.UintFlag{Name: "build-cache-max-records", Value: maxCacheMaxRecords, Usage: "Maximum cache records in cache image", EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"}},
-				&cli.StringFlag{Name: "fs-version", Required: false, Usage: "Image format version", EnvVars: []string{"FS_VERSION"}, Value: "5", DefaultText: "V5 format"},
+				&cli.StringFlag{Name: "fs-version", Required: false, Usage: "Version number of nydus image format, possible values: 5, 6", EnvVars: []string{"FS_VERSION"}, Value: "5", DefaultText: "V5 format"},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
