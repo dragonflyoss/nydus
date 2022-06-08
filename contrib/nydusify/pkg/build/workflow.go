@@ -21,7 +21,7 @@ type WorkflowOption struct {
 	TargetDir        string
 	NydusImagePath   string
 	PrefetchPatterns string
-	ImageVersion     string
+	FsVersion        string
 }
 
 type Workflow struct {
@@ -119,7 +119,7 @@ func (workflow *Workflow) Build(
 		BlobPath:            blobPath,
 		AlignedChunk:        alignedChunk,
 		ChunkDict:           workflow.ChunkDict,
-		ImageVersion:        workflow.ImageVersion,
+		FsVersion:           workflow.FsVersion,
 	}); err != nil {
 		return "", errors.Wrapf(err, "build layer %s", layerDir)
 	}

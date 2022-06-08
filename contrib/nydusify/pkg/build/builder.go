@@ -26,7 +26,7 @@ type BuilderOption struct {
 	// A regular file or fifo into which commands nydus-image to dump contents.
 	BlobPath     string
 	AlignedChunk bool
-	ImageVersion string
+	FsVersion    string
 }
 
 type CompactOption struct {
@@ -122,7 +122,7 @@ func (builder *Builder) Run(option BuilderOption) error {
 		"--blob",
 		option.BlobPath,
 		"--fs-version",
-		option.ImageVersion,
+		option.FsVersion,
 	)
 
 	if len(option.PrefetchPatterns) > 0 {

@@ -32,7 +32,7 @@ type Opt struct {
 	BackendType    string
 	BackendConfig  string
 	ExpectedArch   string
-	ImageVersion   string
+	FsVersion      string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
@@ -108,7 +108,7 @@ func (checker *Checker) Check(ctx context.Context) error {
 
 	mode := "cache"
 	digestValidate := true
-	if checker.ImageVersion == "6" {
+	if checker.FsVersion == "6" {
 		mode = "direct"
 		digestValidate = false
 
