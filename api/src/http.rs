@@ -794,10 +794,153 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
+    fn test_blob_prefetch_config() {
+        let config = BlobPrefetchConfig::default();
+        assert!(!config.enable);
+        assert_eq!(config.threads_count, 0);
+        assert_eq!(config.merging_size, 0);
+        assert_eq!(config.bandwidth_rate, 0);
+
+        let content = r#"{
+            "enable": true,
+            "threads_count": 2,
+            "merging_size": 4,
+            "bandwidth_rate": 5
+        }"#;
+        let config: BlobPrefetchConfig = serde_json::from_str(content).unwrap();
+        assert!(config.enable);
+        assert_eq!(config.threads_count, 2);
+        assert_eq!(config.merging_size, 4);
+        assert_eq!(config.bandwidth_rate, 5);
+    }
+
+    #[test]
+    fn test_file_cache_config() {
+        let config: FileCacheConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(&config.work_dir, ".");
+        assert!(!config.disable_indexed_map);
+
+        let config: FileCacheConfig =
+            serde_json::from_str("{\"work_dir\":\"/tmp\",\"disable_indexed_map\":true}").unwrap();
+        assert_eq!(&config.work_dir, "/tmp");
+        assert!(config.get_work_dir().is_ok());
+        assert!(config.disable_indexed_map);
+
+        let config: FileCacheConfig =
+            serde_json::from_str("{\"work_dir\":\"/proc/mounts\",\"disable_indexed_map\":true}")
+                .unwrap();
+        assert!(config.get_work_dir().is_err());
+    }
+
+    #[test]
+    fn test_fs_cache_config() {
+        let config: FsCacheConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(&config.work_dir, ".");
+
+        let config: FileCacheConfig = serde_json::from_str("{\"work_dir\":\"/tmp\"}").unwrap();
+        assert_eq!(&config.work_dir, "/tmp");
+        assert!(config.get_work_dir().is_ok());
+
+        let config: FileCacheConfig =
+            serde_json::from_str("{\"work_dir\":\"/proc/mounts\"}").unwrap();
+        assert!(config.get_work_dir().is_err());
+    }
+
+    #[test]
+    fn test_blob_cache_entry() {
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "prefetch_config": {
+                    "enable": true,
+                    "threads_count": 2,
+                    "merging_size": 4,
+                    "bandwidth_rate": 5
+                },
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1",
+            "fs_prefetch": {
+                "enable": true,
+                "threads_count": 2,
+                "merging_size": 4,
+                "bandwidth_rate": 5
+            }
+        }"#;
+        let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
+        assert_eq!(&config.blob_type, BLOB_CACHE_TYPE_BOOTSTRAP);
+        assert_eq!(&config.blob_id, "blob1");
+        assert_eq!(&config.domain_id, "domain1");
+        assert_eq!(&config.blob_config.id, "cache1");
+        assert_eq!(&config.blob_config.backend_type, "localfs");
+        assert_eq!(&config.blob_config.cache_type, "fscache");
+        assert!(config.blob_config.cache_config.is_object());
+        assert!(config.blob_config.prefetch_config.enable);
+        assert_eq!(config.blob_config.prefetch_config.threads_count, 2);
+        assert_eq!(config.blob_config.prefetch_config.merging_size, 4);
+        assert_eq!(
+            config.blob_config.metadata_path.as_ref().unwrap().as_str(),
+            "/tmp/metadata1"
+        );
+        assert!(config.fs_prefetch.is_some());
+
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
+        assert!(!config.blob_config.prefetch_config.enable);
+        assert_eq!(config.blob_config.prefetch_config.threads_count, 0);
+        assert_eq!(config.blob_config.prefetch_config.merging_size, 0);
+        assert!(config.fs_prefetch.is_none());
+    }
+
+    #[test]
+    fn test_registry_oss_config() {
+        let content = r#"{
+            "proxy": {
+                "url": "http://proxy.com",
+                "ping_url": "http://proxy.com/ping",
+                "fallback": true,
+                "check_interval": 10
+            },
+            "skip_verify": true,
+            "timeout": 60,
+            "connect_timeout": 10,
+            "retry_limit": 3
+        }"#;
+        let config: RegistryOssConfig = serde_json::from_str(content).unwrap();
+        assert!(config.skip_verify);
+        assert_eq!(config.timeout, 60);
+        assert_eq!(config.connect_timeout, 10);
+        assert_eq!(config.retry_limit, 3);
+        assert_eq!(&config.proxy.url, "http://proxy.com");
+        assert_eq!(&config.proxy.ping_url, "http://proxy.com/ping");
+        assert!(config.proxy.fallback);
+        assert_eq!(config.proxy.check_interval, 10);
+    }
+
+    #[test]
     fn test_http_api_routes_v1() {
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/events").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/backend").is_some());
+        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/start").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/exit").is_some());
         assert!(HTTP_ROUTES
             .routes
@@ -807,6 +950,7 @@ mod tests {
             .routes
             .get("/api/v1/daemon/fuse/takeover")
             .is_some());
+        assert!(HTTP_ROUTES.routes.get("/api/v1/mount").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/files").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/pattern").is_some());
@@ -821,6 +965,7 @@ mod tests {
     #[test]
     fn test_http_api_routes_v2() {
         assert!(HTTP_ROUTES.routes.get("/api/v2/daemon").is_some());
+        assert!(HTTP_ROUTES.routes.get("/api/v2/blobs").is_some());
     }
 
     #[test]
