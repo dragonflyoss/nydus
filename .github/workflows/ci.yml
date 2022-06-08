@@ -12,6 +12,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  ORGANIZATION: ${{ github.repository }}
+  IMAGE_LIST_PATH: misc/top_images/error_prone_images.txt
+  FSCK_PATCH_PATH: misc/top_images/fsck.patch
 
 jobs:
   contrib-ut:
@@ -78,3 +82,60 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - uses: EmbarkStudios/cargo-deny-action@v1
+
+  convert-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - uses: actions/setup-go@v2
+      - name: cache go mod
+        uses: actions/cache@v2
+        with:
+          path: /go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go
+      - name: Build nydus
+        run: |
+          rustup component add rustfmt && rustup component add clippy
+          make fusedev && make nydusify
+          sudo cp target-fusedev/debug/nydus-image contrib/nydusify/cmd/nydusify /usr/local/bin/
+      - name: Build fsck.erofs
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential git autotools-dev automake libtool pkg-config uuid-dev liblz4-dev
+          git clone https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git
+          cd erofs-utils && git apply ../${{ env.FSCK_PATCH_PATH }} && ./autogen.sh && ./configure && make && cd ..
+          sudo cp erofs-utils/fsck/fsck.erofs /usr/local/bin/
+      - name: Log in to the container registry
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Convert RAFS v5 images
+        run: |
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            echo "converting $I:nydus-latest-v5"
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --source $I:latest \
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-latest-v5 \
+                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I \
+                 --fs-version 5
+            sudo rm -rf ./tmp
+          done
+      - name: Convert and check RAFS v6 images
+        run: |
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            echo "converting $I:nydus-latest-v6"
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --source $I:latest \
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-latest-v6 \
+                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I \
+                 --fs-version 6
+            sudo rm -rf ./tmp
+            nydusify check \
+                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-latest-v6 2&>1 > /dev/null
+            fsck.erofs --extract -d9 output/nydus_bootstrap 
+            rm -rf ./output
+          done

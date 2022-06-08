@@ -1,0 +1,4 @@
+centos
+telegraf
+ghost
+java
