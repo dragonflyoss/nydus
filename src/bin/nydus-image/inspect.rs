@@ -17,6 +17,9 @@ use rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobTable, RafsV5Inode, RafsV5InodeTable,
     RafsV5PrefetchTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
+use rafs::metadata::layout::v6::{
+    RafsV6BlobTable, RafsV6SuperBlockExt, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
+};
 use rafs::metadata::RafsSuperFlags;
 use rafs::{RafsIoRead, RafsIoReader};
 use storage::RAFS_DEFAULT_CHUNK_SIZE;
@@ -38,6 +41,14 @@ impl RafsLayout {
         RafsLayout {
             super_block_offset: 0,
             super_block_size: 8192,
+            inode_size: 128,
+            chunk_info_size: 80,
+        }
+    }
+    fn rafsv6_layout() -> Self {
+        RafsLayout {
+            super_block_offset: (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u32,
+            super_block_size: 256,
             inode_size: 128,
             chunk_info_size: 80,
         }
@@ -80,6 +91,26 @@ impl From<&RafsV5SuperBlock> for RafsMeta {
     }
 }
 
+impl From<&RafsV6SuperBlockExt> for RafsMeta {
+    fn from(sb: &RafsV6SuperBlockExt) -> Self {
+        Self {
+            inodes_count: 0,
+            inode_table_offset: 0,
+            inode_table_entries: 0,
+            prefetch_table_offset: sb.prefetch_table_offset(),
+            blob_table_offset: sb.blob_table_offset(),
+            blob_table_size: sb.blob_table_size(),
+            prefetch_table_entries: sb.prefetch_table_size() / std::mem::size_of::<u32>() as u32,
+            extended_blob_table_offset: 0,
+            extended_blob_table_entries: 0,
+            chunk_size: sb.chunk_size(),
+            flags: RafsSuperFlags::default(),
+            fs_version: 0,
+            version: RafsVersion::V6,
+        }
+    }
+}
+
 pub enum Action {
     Break,
     Continue,
@@ -91,14 +122,23 @@ struct RafsV5State {
     extended_blobs_table: Option<RafsV5ExtBlobTable>,
 }
 
+struct RafsV6State {
+    blobs_table: RafsV6BlobTable,
+}
+
 enum RafsState {
     V5(RafsV5State),
+    V6(RafsV6State),
 }
 
 impl RafsState {
     fn get_blob_id(&self, blob_index: u32) -> Result<String> {
         match self {
             RafsState::V5(b) => {
+                let blob = b.blobs_table.get(blob_index)?;
+                Ok(blob.blob_id().to_owned())
+            }
+            RafsState::V6(b) => {
                 let blob = b.blobs_table.get(blob_index)?;
                 Ok(blob.blob_id().to_owned())
             }
@@ -124,7 +164,7 @@ impl RafsInspector {
         let (rafs_meta, layout_profile) = Self::load_meta(&mut f)?;
         let state = match rafs_meta.version {
             RafsVersion::V5 => Self::load_state_v5(&mut f, &rafs_meta)?,
-            RafsVersion::V6 => todo!(),
+            RafsVersion::V6 => Self::load_state_v6(&mut f, &rafs_meta)?,
         };
 
         Ok(RafsInspector {
@@ -141,20 +181,19 @@ impl RafsInspector {
 
     fn load_meta(f: &mut RafsIoReader) -> Result<(RafsMeta, RafsLayout)> {
         let layout_profile = RafsLayout::rafsv5_layout();
-        match Self::super_block_v5(f, &layout_profile) {
-            Ok(sb) => {
-                let rafs_meta: RafsMeta = (&sb).into();
-                Ok((rafs_meta, layout_profile))
-            }
-            Err(e) => Err(e),
-        }
+        let mut res = Self::super_block_v5(f, &layout_profile).map(|sb| {
+            let rafs_meta: RafsMeta = (&sb).into();
+            (rafs_meta, layout_profile)
+        });
 
-        /*
-        match Self::super_block_v6(f, &layout_profile) {
-            Ok(sb) => {}
-            Err(e) => Err(e),
+        if res.is_err() {
+            let layout_v6_profile = RafsLayout::rafsv6_layout();
+            res = Self::super_block_v6(f).map(|sb| {
+                let rafs_meta: RafsMeta = (&sb).into();
+                (rafs_meta, layout_v6_profile)
+            });
         }
-         */
+        res
     }
 
     /// Index is u32, by which the inode can be found.
@@ -257,6 +296,9 @@ Blocks:             {blocks}"#,
             trace!("inode: {:?}; name: {:?}", child_inode, name);
             let inode_offset = match &self.state {
                 RafsState::V5(s) => s.inodes_table.data[idx as usize] << 3,
+                _ => {
+                    unimplemented!()
+                }
             };
 
             match op(name.as_os_str(), &child_inode, idx, inode_offset) {
@@ -296,6 +338,9 @@ Blocks:             {blocks}"#,
             trace!("inode: {:?}; name: {:?}", child_inode, name);
             let inode_offset = match &self.state {
                 RafsState::V5(s) => s.inodes_table.data[idx as usize] << 3,
+                _ => {
+                    unimplemented!()
+                }
             };
             match op(name.as_os_str(), &child_inode, idx, inode_offset) {
                 Action::Break => break,
@@ -603,6 +648,18 @@ Blocks:             {blocks}"#,
         bootstrap.seek_to_offset(self.rafs_meta.blob_table_offset)?;
 
         match &self.state {
+            RafsState::V6(s) => {
+                if self.request_mode {
+                    let mut value = json!([]);
+                    for (_i, b) in s.blobs_table.entries.iter().enumerate() {
+                        let v = json!({"blob_id": b.blob_id(), "readahead_offset": b.readahead_offset(),
+                "readahead_size":b.readahead_size(), "decompressed_size": None::<u64>, "compressed_size": None::<u64>});
+                        value.as_array_mut().unwrap().push(v);
+                    }
+                    return Ok(Some(value));
+                }
+                unimplemented!();
+            }
             RafsState::V5(s) => {
                 let blobs = &s.blobs_table;
                 let extended = &s.extended_blobs_table;
@@ -658,6 +715,13 @@ Blocks:             {blocks}"#,
 }
 
 impl RafsInspector {
+    fn load_state_v6(f: &mut RafsIoReader, meta: &RafsMeta) -> Result<RafsState> {
+        let mut table = RafsV6BlobTable::new();
+        f.seek_to_offset(meta.blob_table_offset)?;
+        table.load(f, meta.blob_table_size, meta.chunk_size, meta.flags)?;
+        Ok(RafsState::V6(RafsV6State { blobs_table: table }))
+    }
+
     fn load_state_v5(f: &mut RafsIoReader, meta: &RafsMeta) -> Result<RafsState> {
         let mut inodes_table = RafsV5InodeTable::new(meta.inode_table_entries as usize);
         f.seek_to_offset(meta.inode_table_offset)?;
@@ -690,6 +754,12 @@ impl RafsInspector {
         }))
     }
 
+    fn super_block_v6(b: &mut RafsIoReader) -> Result<RafsV6SuperBlockExt> {
+        let mut sb = RafsV6SuperBlockExt::new();
+        sb.load(b)?;
+        _ = sb.validate()?;
+        Ok(sb)
+    }
     fn super_block_v5(
         b: &mut RafsIoReader,
         layout_profile: &RafsLayout,
@@ -700,12 +770,19 @@ impl RafsInspector {
         sb.load(b)
             .map_err(|e| anyhow!("Failed in loading super block, {:?}", e))?;
 
+        if !sb.detect() {
+            return Err(anyhow!("invalid rafs v5 version"));
+        }
+
         Ok(sb)
     }
 
     fn load_ondisk_inode_v5(&self, index: usize) -> Result<(InodeWrapper, OsString)> {
         let offset = match &self.state {
             RafsState::V5(s) => s.inodes_table.data[index] << 3,
+            _ => {
+                unimplemented!()
+            }
         };
 
         let mut ondisk_inode = RafsV5Inode::new();

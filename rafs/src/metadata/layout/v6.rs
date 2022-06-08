@@ -41,9 +41,9 @@ pub const EROFS_I_VERSION_BITS: u16 = 1;
 pub const EROFS_I_DATALAYOUT_BITS: u16 = 3;
 
 // Offset of EROFS super block.
-const EROFS_SUPER_OFFSET: u16 = 1024;
+pub const EROFS_SUPER_OFFSET: u16 = 1024;
 // Size of EROFS super block.
-const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
+pub const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
 // Size of extended super block, used for rafs v6 specific fields
 const EROFS_EXT_SUPER_BLOCK_SIZE: u16 = 256;
 // Magic number for EROFS super block.
