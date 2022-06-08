@@ -17,7 +17,7 @@
 /// before making use of any bootstrap, especially we are using them in memory-mapped mode. The
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -32,7 +32,6 @@ use std::slice;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
-use std::cell::RefCell;
 
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
@@ -64,7 +63,7 @@ use storage::device::{
 };
 use storage::utils::readahead;
 
-// Use to store chunk info pre inode, Oour build is actually single-threaded,
+// Use to store chunk info pre inode, Our build is actually single-threaded,
 // so there's no lazy_static + mutex approach here, thread_local plus Refcell is enough.
 thread_local! {
         static CHUNK_DICT_MAP: RefCell<Option<HashMap<RafsV6InodeChunkAddr, Arc<dyn BlobChunkInfo>>>> = RefCell::new(None);
@@ -180,18 +179,18 @@ impl DirectSuperBlockV6 {
         }
     }
 
-    fn inode_wrapper(&self, nid: u64) -> Result<Arc<OndiskInodeWrapper>> {
+    fn inode_wrapper(&self, nid: u64) -> Result<OndiskInodeWrapper> {
         // TODO(chge): ensure safety
         let offset = self.calculate_inode_offset(nid) as usize;
         let inode = self.disk_inode(offset);
         let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
-        Ok(Arc::new(OndiskInodeWrapper {
+        Ok(OndiskInodeWrapper {
             mapping: self.clone(),
             offset,
             blocks_count,
             parent_inode: Cell::new(None),
             name: Cell::new(None),
-        }))
+        })
     }
 
     // For RafsV6, we can't get the parent info of a non-dir file with its on-disk inode,
@@ -201,13 +200,13 @@ impl DirectSuperBlockV6 {
         nid: u64,
         parent_inode: Inode,
         name: OsString,
-    ) -> Result<Arc<OndiskInodeWrapper>> {
+    ) -> Result<OndiskInodeWrapper> {
         self.inode_wrapper(nid).map(|inode| {
             let mut inode = inode;
             // # Safety
             // inode always valid
-            Arc::get_mut(&mut inode).unwrap().parent_inode = Cell::new(Some(parent_inode));
-            Arc::get_mut(&mut inode).unwrap().name = Cell::new(Some(name));
+            inode.parent_inode = Cell::new(Some(parent_inode));
+            inode.name = Cell::new(Some(name));
             inode
         })
     }
@@ -332,8 +331,7 @@ impl RafsSuperInodes for DirectSuperBlockV6 {
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
     fn get_inode(&self, ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
-        let wrapper = self.inode_wrapper(ino)?;
-        Ok(wrapper as Arc<dyn RafsInode>)
+        Ok(Arc::new(self.inode_wrapper(ino)?) as Arc<dyn RafsInode>)
     }
 
     /// Always return Ok(true) for RAFS v6
@@ -787,10 +785,11 @@ impl RafsInode for OndiskInodeWrapper {
         };
 
         if let Some(nid) = target {
-            Ok(self
-                .mapping
-                .inode_wrapper_with_info(nid, self.ino(), OsString::from(name))?
-                as Arc<dyn RafsInode>)
+            Ok(Arc::new(self.mapping.inode_wrapper_with_info(
+                nid,
+                self.ino(),
+                OsString::from(name),
+            )?) as Arc<dyn RafsInode>)
         } else {
             Err(enoent!())
         }
@@ -832,11 +831,11 @@ impl RafsInode for OndiskInodeWrapper {
                 }
                 if cur_idx == idx {
                     let nid = de.e_nid;
-                    return Ok(self.mapping.inode_wrapper_with_info(
+                    return Ok(Arc::new(self.mapping.inode_wrapper_with_info(
                         nid,
                         self.ino(),
                         OsString::from(name),
-                    )? as Arc<dyn RafsInode>);
+                    )?) as Arc<dyn RafsInode>);
                 }
                 cur_idx += 1;
             }
@@ -915,10 +914,11 @@ impl RafsInode for OndiskInodeWrapper {
                 }
 
                 let nid = de.e_nid;
-                let inode =
-                    self.mapping
-                        .inode_wrapper_with_info(nid, self.ino(), OsString::from(name))?
-                        as Arc<dyn RafsInode>;
+                let inode = Arc::new(self.mapping.inode_wrapper_with_info(
+                    nid,
+                    self.ino(),
+                    OsString::from(name),
+                )?) as Arc<dyn RafsInode>;
                 trace!("found file {:?}, nid {}", name, nid);
                 cur_offset += 1;
                 match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
