@@ -16,7 +16,7 @@ use crate::node::Node;
 pub enum PrefetchPolicy {
     None,
     /// Readahead will be issued from Fs layer, which leverages inode/chunkinfo to prefetch data
-    /// from blob no mather where it resides(OSS/Localfs). Basically, it is willing to cache the
+    /// from blob no matter where it resides(OSS/Localfs). Basically, it is willing to cache the
     /// data into blobcache(if exists). It's more nimble. With this policy applied, image builder
     /// currently puts readahead files' data into a continuous region within blob which behaves very
     /// similar to `Blob` policy.
