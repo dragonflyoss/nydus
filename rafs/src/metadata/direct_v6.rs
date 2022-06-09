@@ -189,7 +189,7 @@ impl DirectSuperBlockV6 {
             offset,
             blocks_count,
             parent_inode: Cell::new(None),
-            name: Cell::new(None),
+            name: RefCell::new(None),
         })
     }
 
@@ -206,7 +206,7 @@ impl DirectSuperBlockV6 {
             // # Safety
             // inode always valid
             inode.parent_inode = Cell::new(Some(parent_inode));
-            inode.name = Cell::new(Some(name));
+            inode.name = RefCell::new(Some(name));
             inode
         })
     }
@@ -397,7 +397,7 @@ pub struct OndiskInodeWrapper {
     // this time parent_inode field is None, the other Inodes are created through OndiskInodeWrapper,
     // this field will be filled with inode_wrapper_with_parent
     parent_inode: Cell<Option<Inode>>,
-    name: Cell<Option<OsString>>,
+    name: RefCell<Option<OsString>>,
 }
 
 impl OndiskInodeWrapper {
@@ -1069,32 +1069,32 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn name(&self) -> OsString {
-        if let Some(name) = self.name.take() {
-            self.name.set(Some(name.clone()));
-            name
-        } else {
-            debug_assert!(self.is_dir());
-            let cur_ino = self.ino();
-            if cur_ino == self.mapping.root_ino() {
-                return OsString::from("");
-            }
-            let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
-            let mut curr_name = OsString::from("");
+        match self.name.borrow().as_ref() {
+            Some(name) => name.clone(),
+            None => {
+                debug_assert!(self.is_dir());
+                let cur_ino = self.ino();
+                if cur_ino == self.mapping.root_ino() {
+                    return OsString::from("");
+                }
+                let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
+                let mut curr_name = OsString::from("");
 
-            parent_inode
-                .walk_children_inodes(
-                    0,
-                    &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
-                        if cur_ino == ino {
-                            curr_name = name;
-                            return Ok(PostWalkAction::Break);
-                        }
-                        Ok(PostWalkAction::Continue)
-                    },
-                )
-                .unwrap();
-            self.name.set(Some(curr_name.clone()));
-            curr_name
+                parent_inode
+                    .walk_children_inodes(
+                        0,
+                        &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
+                            if cur_ino == ino {
+                                curr_name = name;
+                                return Ok(PostWalkAction::Break);
+                            }
+                            Ok(PostWalkAction::Continue)
+                        },
+                    )
+                    .unwrap();
+                *self.name.borrow_mut() = Some(curr_name.clone());
+                curr_name
+            }
         }
     }
     // RafsV5 flags, not used by v6, return 0
@@ -1128,13 +1128,14 @@ impl RafsInode for OndiskInodeWrapper {
 
     /// Get inode number of the parent directory.
     fn parent(&self) -> u64 {
-        if let Some(parent) = self.parent_inode.get() {
-            parent
-        } else {
-            debug_assert!(self.is_dir());
-            let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
-            self.parent_inode.set(Some(ino));
-            ino
+        match self.parent_inode.get() {
+            Some(parent) => parent,
+            None => {
+                debug_assert!(self.is_dir());
+                let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
+                self.parent_inode.set(Some(ino));
+                ino
+            }
         }
     }
 
