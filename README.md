@@ -6,7 +6,7 @@
 ![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)
 ![Release Test Daily](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml/badge.svg?event=schedule)
 
-The nydus project implements a user space filesystem on top of a container image format that improves over the current OCI image specification, in terms of container launching speed, image space, and network bandwidth efficiency, as well as data integrity.
+The nydus project implements a content-addressable filesystem on top of a RAFS format that improves the current OCI image specification, in terms of container launching speed, image space, and network bandwidth efficiency, as well as data integrity.
 
 The following benchmarking result shows the performance improvement compared with the OCI image for the container cold startup elapsed time on containerd. As the OCI image size increases, the container startup time of using Nydus image remains very short.
 
@@ -14,19 +14,18 @@ The following benchmarking result shows the performance improvement compared wit
 
 Nydus' key features include:
 
-- Container images may be downloaded on demand in chunks to boost container startup
-- Chunk level data de-duplication among layers in a single repository to reduce storage, transport and memory cost
-- Flatten image metadata and data to remove all intermediate layers
-- Deleted(whiteout) files in certain layer aren't packed into nydus image, therefore, image size may be reduced
+- Container images can be downloaded on demand in chunks for lazy pulling to boost container startup
+- Chunk-based content-addressable data de-duplication to minimize storage, transmission and memory footprints
+- Merged filesystem tree in order to remove all intermediate layers as a option
+- in-kernel EROFS or FUSE filesystem together with overlayfs to provide full POSIX compatibility
 - E2E image data integrity check. So security issues like "Supply Chain Attach" can be avoided and detected at runtime
 - Compatible with the OCI artifacts spec and distribution spec, so nydus image can be stored in a regular container registry
+- Various container image storage backends are supported. For example, Registry, NAS, Aliyun/OSS.
 - Integrated with CNCF incubating project Dragonfly to distribute container images in P2P fashion and mitigate the pressure on container registries
-- Different container image storage backends are supported. For example, Registry, NAS, Aliyun/OSS.
 - Capable to prefetch data block before user IO hits the block thus to reduce read latency
-- Readonly FUSE file system with Linux overlayfs to provide full POSIX compatibility
 - Record files access pattern during runtime gathering access trace/log, by which user abnormal behaviors are easily caught
 - Access trace based prefetch table
-- User IO amplification to reduce the amount of small requests to storage backend.
+- User I/O amplification to reduce the amount of small requests to storage backend.
 
 Currently Nydus includes following tools:
 
@@ -53,7 +52,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 | Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Run Nydus image in containerd with nydus-snapshotter                                                                                                         | ✅      |
 | Runtime       | [Docker](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver)            | Run Nydus image in Docker container with graphdriver plugin                                                                                                  | ✅      |
 | Runtime       | [KataContainers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/kata-nydus-design.md) | Run Nydus image in KataContainers as a native solution                                                                                                       | ✅      |
-| Runtime       | [EROFS](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)  | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | 🚧      |
+| Runtime       | [EROFS](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)  | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
 
 To try nydus image service:
 
