@@ -6,8 +6,8 @@ This guide shows you how to use fscache-based EROFS nydus image service to launc
 
 Be aware of using the fscache-enabled erofs kernel (Linux 5.19+), it can be built with the following steps:
 
-1.  ``git clone git://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs.git`` \
-     or (mirror in china): ``git://kernel.source.codeaurora.cn/pub/scm/linux/kernel/git/xiang/erofs.git``
+1.  ``git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git`` \
+     or (mirror in china): ``git://kernel.source.codeaurora.cn/pub/scm/linux/kernel/git/torvalds/linux.git``
 
 2. ``make olddefconfig``
 

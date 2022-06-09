@@ -16,7 +16,7 @@ Nydus' key features include:
 
 - Container images can be downloaded on demand in chunks for lazy pulling to boost container startup
 - Chunk-based content-addressable data de-duplication to minimize storage, transmission and memory footprints
-- Merged filesystem tree in order to remove all intermediate layers as a option
+- Merged filesystem tree in order to remove all intermediate layers as an option
 - in-kernel EROFS or FUSE filesystem together with overlayfs to provide full POSIX compatibility
 - E2E image data integrity check. So security issues like "Supply Chain Attach" can be avoided and detected at runtime
 - Compatible with the OCI artifacts spec and distribution spec, so nydus image can be stored in a regular container registry
@@ -31,7 +31,7 @@ Currently Nydus includes following tools:
 
 | Tool                                                                                                                   | Description                                                                                                                                                |
 | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [nydusd](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusd.md)                                     | Linux FUSE user-space daemon, it processes all fuse messages from host/guest kernel and parses nydus container image to fullfil those requests             |
+| [nydusd](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusd.md)                                     | Nydus user-space daemon, it processes all fscache/FUSE messages from the kernel and parses Nydus images to fullfil those requests             |
 | [nydus-image](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md)                           | Convert a single layer of OCI format container image into a nydus format container image generating meta part file and data part file respectively         |
 | [nydusify](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusify.md)                                 | It pulls OCI image down and unpack it, invokes `nydus-image create` to convert image and then pushes the converted image back to registry and data storage |
 | [nydusctl](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md)                              | Nydusd CLI client (`nydus-image inspect`), query daemon's working status/metrics and configure it                                                          |
@@ -93,6 +93,14 @@ It works as a `containerd` remote snapshotter to help setup container rootfs wit
 Normally, users do not need to start `nydusd` by hand. It is started by `nydus-snapshotter` or `nydus-docker-graphdriver` when a container rootfs is prepared.
 
 Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
+
+## Run Nydus with in-kernel EROFS filesystem
+
+In-kernel EROFS has been fully compatible with RAFS v6 image format since Linux 5.16. In other words, uncompressed RAFS v6 images can be mounted over block devices since then.
+
+Since [Linux 5.19](https://lwn.net/Articles/896140), EROFS has added a new file-based caching (fscache) backend. In this way, compressed RAFS v6 images can be mounted directly with fscache subsystem, even such images are partially available. In the future, `estargz` and `zstd::chunked` can be converted on the fly and mounted in this way too.
+
+Guide to running Nydus with fscache: [Nydus-fscache](./docs/nydus-fscache.md)
 
 ## Build Images via Harbor
 
