@@ -96,12 +96,6 @@ fn test(
         nydusd.umount("mnt");
     }
 
-    // FIXME: Currently no load is implemented for rafs v6 parent bootstrap,
-    // so the layered build is temporarily unsupported and need to be fixed.
-    if rafsv6 {
-        return;
-    }
-
     // Mount upper rootfs and check
     {
         // Create & build upper rootfs based lower
@@ -115,7 +109,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
-            true,
+            !rafsv6,
         );
         nydusd.start(Some("bootstrap-overlay"), "mnt");
         nydusd.check(&overlay_texture, "mnt");
@@ -130,7 +124,7 @@ fn test(
             cache_compressed,
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
-            true,
+            !rafsv6,
         );
         nydusd.start(Some("bootstrap-overlay"), "mnt");
         nydusd.check(&overlay_texture, "mnt");

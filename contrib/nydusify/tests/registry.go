@@ -49,7 +49,8 @@ func NewRegistry(t *testing.T) *Registry {
 }
 
 func (registry *Registry) Destroy(t *testing.T) {
-	run(t, fmt.Sprintf("docker rm -f %s", registry.id), true)
+	run(t, fmt.Sprintf("docker stop  %s", registry.id), true)
+	run(t, fmt.Sprintf("docker rm -f  %s", registry.id), true)
 }
 
 func (registry *Registry) Build(t *testing.T, source string) {

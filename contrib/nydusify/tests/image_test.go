@@ -34,17 +34,18 @@ func transfer(t *testing.T, ref string) {
 	run(t, fmt.Sprintf("docker push %s/%s", host, ref), true)
 }
 
-func convert(t *testing.T, ref string) {
+func convert(t *testing.T, ref string, fsVersion string) {
 	registry := NewRegistry(t)
 	defer registry.Destroy(t)
 	transfer(t, ref)
-	nydusify := NewNydusify(registry, ref, fmt.Sprintf("%s-nydus", ref), "", "")
+	nydusify := NewNydusify(registry, ref, fmt.Sprintf("%s-nydus", ref), "", "", fsVersion)
 	nydusify.Convert(t)
 	nydusify.Check(t)
 }
 
 func TestDockerHubImage(t *testing.T) {
 	for _, ref := range list {
-		convert(t, ref)
+		convert(t, ref, "5")
+		convert(t, ref, "6")
 	}
 }

@@ -42,9 +42,10 @@ type Nydusify struct {
 	backendType   string
 	backendConfig string
 	chunkDictArgs string
+	fsVersion     string
 }
 
-func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string) *Nydusify {
+func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string) *Nydusify {
 	host := registry.Host()
 
 	backendType := "registry"
@@ -60,6 +61,9 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 	if os.Getenv("BACKEND_CONFIG") != "" {
 		backendConfig = os.Getenv("BACKEND_CONFIG")
 	}
+	if len(fsVersion) == 0 {
+		fsVersion = "5"
+	}
 
 	return &Nydusify{
 		Registry:      registry,
@@ -69,6 +73,7 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 		backendType:   backendType,
 		backendConfig: backendConfig,
 		chunkDictArgs: chunkDictArgs,
+		fsVersion:     fsVersion,
 	}
 }
 
@@ -128,6 +133,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 			Insecure: false,
 			Platform: "linux/amd64",
 		},
+		FsVersion: nydusify.fsVersion,
 	}
 
 	cvt, err := converter.New(opt)
@@ -151,6 +157,7 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 		BackendType:    nydusify.backendType,
 		BackendConfig:  nydusify.backendConfig,
 		ExpectedArch:   "amd64",
+		FsVersion:      nydusify.fsVersion,
 	})
 	assert.Nil(t, err)
 

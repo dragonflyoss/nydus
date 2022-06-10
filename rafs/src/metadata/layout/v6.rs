@@ -41,9 +41,9 @@ pub const EROFS_I_VERSION_BITS: u16 = 1;
 pub const EROFS_I_DATALAYOUT_BITS: u16 = 3;
 
 // Offset of EROFS super block.
-const EROFS_SUPER_OFFSET: u16 = 1024;
+pub const EROFS_SUPER_OFFSET: u16 = 1024;
 // Size of EROFS super block.
-const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
+pub const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
 // Size of extended super block, used for rafs v6 specific fields
 const EROFS_EXT_SUPER_BLOCK_SIZE: u16 = 256;
 // Magic number for EROFS super block.
@@ -949,7 +949,7 @@ impl_bootstrap_converter!(RafsV6InodeChunkHeader);
 
 /// Rafs v6 chunk address on-disk format, 8 bytes.
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct RafsV6InodeChunkAddr {
     /// Lower part of encoded blob address.
     c_blob_addr_lo: u16,

@@ -25,8 +25,8 @@ use nydus_utils::{
     div_round_up, round_down_4k, round_up, try_round_up_4k, ByteSize,
 };
 use rafs::metadata::cached_v5::{CachedChunkInfoV5, CachedInodeV5};
-use rafs::metadata::direct_v5::{DirectChunkInfoV5, OndiskInodeWrapper};
-use rafs::metadata::direct_v6::DirectChunkInfoV6;
+use rafs::metadata::direct_v5::{DirectChunkInfoV5, OndiskInodeWrapper as OndiskInodeWrapperV5};
+use rafs::metadata::direct_v6::{DirectChunkInfoV6, OndiskInodeWrapper as OndiskInodeWrapperV6};
 use rafs::metadata::layout::v5::{
     RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
 };
@@ -562,13 +562,21 @@ impl Node {
 
         // update all the inodes's offset according to the new 'meta_addr'.
         self.offset = self.offset - orig_meta_addr + meta_addr;
-        self.dirents_offset = self.dirents_offset + meta_addr - orig_meta_addr;
+        // Only dir and symlink file can be of EROFS_INODE_FLAT_INLINE layout,
+        // so the `dirents_offset` is only used for these two types.
+        // For other types, the `dirents_offset` will always be 0,
+        // To avoid overflow, we add this check.
+        if self.is_dir() || self.is_symlink() {
+            self.dirents_offset = self.dirents_offset + meta_addr - orig_meta_addr;
+        }
+
         if self.is_dir() {
             // the 1st 4k block after dir inode.
             let mut dirent_off = self.dirents_offset;
 
             inode.set_u((dirent_off / EROFS_BLOCK_SIZE) as u32);
             // Dump inode
+            trace!("{:?} dir inode: offset {}", self.target, self.offset);
             f_bootstrap
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for dir inode")?;
@@ -589,14 +597,14 @@ impl Node {
             let mut used: u64 = 0;
             let mut dirents: Vec<(RafsV6Dirent, &OsString)> = Vec::new();
 
-            trace!("self.dirents.len {}", self.dirents.len());
+            trace!("{:?} self.dirents.len {}", self.target, self.dirents.len());
             // fill dir blocks one by one
             for (offset, name, file_type) in self.dirents.iter() {
                 let len = name.len() + size_of::<RafsV6Dirent>();
                 if used + len as u64 > EROFS_BLOCK_SIZE {
                     // write to bootstrap
                     for (entry, name) in dirents.iter_mut() {
-                        trace!("nameoff {}", nameoff);
+                        trace!("{:?} nameoff {}", name, nameoff);
                         entry.set_name_offset(nameoff as u16);
                         dir_data.extend(entry.as_ref());
                         entry_names.push(*name);
@@ -658,11 +666,16 @@ impl Node {
             //     entry_names.clear();
             // }
 
-            trace!("used {} dir size {}", used, self.inode.size());
+            trace!(
+                "{:?} used {} dir size {}",
+                self.target,
+                used,
+                self.inode.size()
+            );
             // dump tail part if any
             if used > 0 {
                 for (entry, name) in dirents.iter_mut() {
-                    trace!("tail nameoff {}", nameoff);
+                    trace!("{:?} tail nameoff {}", name, nameoff);
                     entry.set_name_offset(nameoff as u16);
                     dir_data.extend(entry.as_ref());
                     entry_names.push(*name);
@@ -1210,11 +1223,12 @@ impl Node {
         };
 
         trace!(
-            "{:?} dir offset {} ctx offset {} d_size {} datalayout {}",
+            "{:?} inode offset {} ctx offset {} d_size {} dirents_offset {} datalayout {}",
             self.name(),
             self.offset,
             bootstrap_ctx.offset,
             d_size,
+            self.dirents_offset,
             self.v6_datalayout
         );
     }
@@ -1239,8 +1253,10 @@ impl InodeWrapper {
     pub fn from_inode_info(inode: &dyn RafsInode) -> Self {
         if let Some(inode) = inode.as_any().downcast_ref::<CachedInodeV5>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
-        } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapper>() {
+        } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapperV5>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
+        } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapperV6>() {
+            InodeWrapper::V6(to_rafsv5_inode(inode))
         } else {
             panic!("unknown inode information struct");
         }
