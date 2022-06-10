@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::fs;
 use std::io::Result;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, RwLock};
 
-use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
+
+use nydus_api::http::FsCacheConfig;
+use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::FileCacheEntry;
@@ -19,46 +20,6 @@ use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::factory::CacheConfig;
 use crate::meta::BlobMetaInfo;
-
-fn default_work_dir() -> String {
-    ".".to_string()
-}
-
-/// Configuration information for fscache.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct FsCacheConfig {
-    /// Working directory to keep cached files.
-    #[serde(default = "default_work_dir")]
-    pub work_dir: String,
-}
-
-impl FsCacheConfig {
-    fn get_work_dir(&self) -> Result<&str> {
-        let path = fs::metadata(&self.work_dir)
-            .or_else(|_| {
-                fs::create_dir_all(&self.work_dir)?;
-                fs::metadata(&self.work_dir)
-            })
-            .map_err(|e| {
-                last_error!(format!(
-                    "fail to stat fscache work_dir {}: {}",
-                    self.work_dir, e
-                ))
-            })?;
-
-        if path.is_dir() {
-            Ok(&self.work_dir)
-        } else {
-            Err(enoent!(format!(
-                "fscache work_dir {} is not a directory",
-                self.work_dir
-            )))
-        }
-    }
-}
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with Linux fscache subsystem.

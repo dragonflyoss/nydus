@@ -35,6 +35,7 @@ vm-memory = "0.7.0"
 vmm-sys-util = "0.9.0"
 fuse-backend-rs = { version = "0.9.0" }
 
+nydus-api = { version = "0.1.0", path = "../api" }
 nydus-utils = { version = "0.2.0", path = "../utils" }
 nydus-error = { version = "0.2.0", path = "../error" }
 

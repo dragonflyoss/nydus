@@ -20,7 +20,7 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use crate::backend::CommonConfig;
+use nydus_api::http::RegistryOssConfig;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
@@ -132,7 +132,7 @@ pub(crate) struct Connection {
 
 impl Connection {
     /// Create a new connection according to the configuration.
-    pub fn new(config: &CommonConfig) -> Result<Arc<Connection>> {
+    pub fn new(config: &RegistryOssConfig) -> Result<Arc<Connection>> {
         info!("backend config: {:?}", config);
         let client = Self::build_connection("", config)?;
         let proxy = if !config.proxy.url.is_empty() {
@@ -260,7 +260,7 @@ impl Connection {
         )
     }
 
-    fn build_connection(proxy: &str, config: &CommonConfig) -> Result<Client> {
+    fn build_connection(proxy: &str, config: &RegistryOssConfig) -> Result<Client> {
         let connect_timeout = if config.connect_timeout != 0 {
             Some(Duration::from_secs(config.connect_timeout))
         } else {

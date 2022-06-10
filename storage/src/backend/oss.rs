@@ -9,15 +9,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use hmac::{Hmac, Mac};
-use nydus_utils::metrics::BackendMetrics;
 use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
 use sha1::Sha1;
 
+use nydus_api::http::RegistryOssConfig;
+use nydus_utils::metrics::BackendMetrics;
+
 use crate::backend::connection::{Connection, ConnectionError};
-use crate::backend::{
-    default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader, CommonConfig,
-};
+use crate::backend::{default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -240,7 +240,7 @@ pub struct Oss {
 impl Oss {
     /// Create a new OSS storage backend.
     pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Oss> {
-        let common_config: CommonConfig =
+        let common_config: RegistryOssConfig =
             serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
         let retry_limit = common_config.retry_limit;
         let connection = Connection::new(&common_config)?;

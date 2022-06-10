@@ -43,8 +43,8 @@ mod worker;
 pub mod state;
 
 pub use dummycache::DummyCacheMgr;
-pub use filecache::{FileCacheConfig, FileCacheMgr};
-pub use fscache::{FsCacheConfig, FsCacheMgr};
+pub use filecache::FileCacheMgr;
+pub use fscache::FsCacheMgr;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
@@ -114,19 +114,6 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
             state.issue();
         }
     }
-}
-
-/// Configuration information for blob data prefetching.
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct BlobPrefetchConfig {
-    /// Whether to enable blob data prefetching.
-    pub enable: bool,
-    /// Number of data prefetching working threads.
-    pub threads_count: usize,
-    /// The maximum size of a merged IO request.
-    pub merging_size: usize,
-    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
-    pub bandwidth_rate: u32,
 }
 
 /// Trait representing a cache object for a blob on backend storage.

@@ -10,46 +10,58 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::Arc;
-use std::thread;
 use std::time::SystemTime;
+use std::{fs, thread};
 
 use dbs_uhttp::{Body, HttpServer, MediaType, Request, Response, ServerError, StatusCode, Version};
 use http::uri::Uri;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use nydus_utils::metrics::IoStatsError;
 use serde::Deserialize;
 use serde_json::{Error as SerdeError, Value};
 use url::Url;
 
-use crate::http_endpoint_v1::{
-    EventsHandler, ExitHandler, FsBackendInfo, InfoHandler, MetricsBackendHandler,
-    MetricsBlobcacheHandler, MetricsFilesHandler, MetricsHandler, MetricsInflightHandler,
-    MetricsPatternHandler, MountHandler, SendFuseFdHandler, StartHandler, TakeoverHandler,
-    HTTP_ROOT_V1,
+use nydus_utils::metrics::IoStatsError;
+
+use crate::http_endpoint_common::{
+    EventsHandler, ExitHandler, MetricsBackendHandler, MetricsBlobcacheHandler, MountHandler,
+    SendFuseFdHandler, StartHandler, TakeoverFuseFdHandler,
 };
-use crate::http_endpoint_v2::{BlobObjectListHandlerV2, HTTP_ROOT_V2};
+use crate::http_endpoint_v1::{
+    FsBackendInfo, InfoHandler, MetricsFsAccessPatternHandler, MetricsFsFilesHandler,
+    MetricsFsGlobalHandler, MetricsFsInflightHandler, HTTP_ROOT_V1,
+};
+use crate::http_endpoint_v2::{BlobObjectListHandlerV2, InfoV2Handler, HTTP_ROOT_V2};
 
 const EXIT_TOKEN: Token = Token(usize::MAX);
 const REQUEST_TOKEN: Token = Token(1);
 
+/// Mount a filesystem.
 #[derive(Clone, Deserialize, Debug)]
 pub struct ApiMountCmd {
+    /// Path to source of the filesystem.
     pub source: String,
+    /// Type of filesystem.
     #[serde(default)]
     pub fs_type: String,
+    /// Configuration for the filesystem.
     pub config: String,
+    /// List of files to prefetch.
     #[serde(default)]
     pub prefetch_files: Option<Vec<String>>,
 }
 
+/// Umount a mounted filesystem.
 #[derive(Clone, Deserialize, Debug)]
 pub struct ApiUmountCmd {
+    /// Path of mountpoint.
     pub mountpoint: String,
 }
 
+/// Set/update daemon configuration.
 #[derive(Clone, Deserialize, Debug)]
 pub struct DaemonConf {
+    /// Logging level: Off, Error, Warn, Info, Debug, Trace.
     pub log_level: String,
 }
 
@@ -62,15 +74,20 @@ pub struct BlobCacheEntryConfig {
     /// Type of storage backend, corresponding to `FactoryConfig::BackendConfig::backend_type`.
     pub backend_type: String,
     /// Configuration for storage backend, corresponding to `FactoryConfig::BackendConfig::backend_config`.
-    /// One of `LocalFsConfig`, `CommonConfig`.
+    ///
+    /// Possible value: `LocalFsConfig`, `RegistryOssConfig`.
     pub backend_config: Value,
     /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
-    #[serde(default)]
+    ///
+    /// Possible value: "fscache", "filecache".
     pub cache_type: String,
     /// Configuration for blob cache, corresponding to `FactoryConfig::CacheConfig::cache_config`.
-    /// One of `FileCacheConfig`, `FsCacheConfig`, or empty.
-    #[serde(default)]
+    ///
+    /// Possible value: `FileCacheConfig`, `FsCacheConfig`.
     pub cache_config: Value,
+    /// Configuration for data prefetch.
+    #[serde(default)]
+    pub prefetch_config: BlobPrefetchConfig,
     /// Optional file path for metadata blobs.
     #[serde(default)]
     pub metadata_path: Option<String>,
@@ -96,8 +113,9 @@ pub struct BlobCacheEntry {
     /// Domain id for the blob, which is used to group cached blobs into management domains.
     #[serde(default)]
     pub domain_id: String,
+    /// Deprecated: data prefetch configuration: BlobPrefetchConfig.
     #[serde(default)]
-    pub fs_prefetch: Value,
+    pub fs_prefetch: Option<BlobPrefetchConfig>,
 }
 
 /// Configuration information for a list of cached blob objects.
@@ -111,66 +129,237 @@ pub struct BlobCacheList {
 ///
 /// Domains are used to control the blob sharing scope. All blobs associated with the same domain
 /// will be shared/reused, but blobs associated with different domains are isolated.
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlobCacheObjectId {
     /// Domain identifier for the object.
+    #[serde(default)]
     pub domain_id: String,
     /// Blob identifier for the object.
+    #[serde(default)]
     pub blob_id: String,
+}
+
+/// Configuration information for blob data prefetching.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
+pub struct BlobPrefetchConfig {
+    /// Whether to enable blob data prefetching.
+    pub enable: bool,
+    /// Number of data prefetching working threads.
+    pub threads_count: usize,
+    /// The maximum size of a merged IO request.
+    pub merging_size: usize,
+    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
+    pub bandwidth_rate: u32,
+}
+
+fn default_work_dir() -> String {
+    ".".to_string()
+}
+
+/// Configuration information for file cache.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FileCacheConfig {
+    /// Working directory to store state and cached files.
+    #[serde(default = "default_work_dir")]
+    pub work_dir: String,
+    /// Deprecated: disable index mapping, keep it as false when possible.
+    #[serde(default)]
+    pub disable_indexed_map: bool,
+}
+
+impl FileCacheConfig {
+    /// Get the working directory.
+    pub fn get_work_dir(&self) -> Result<&str> {
+        let path = fs::metadata(&self.work_dir)
+            .or_else(|_| {
+                fs::create_dir_all(&self.work_dir)?;
+                fs::metadata(&self.work_dir)
+            })
+            .map_err(|e| {
+                last_error!(format!(
+                    "fail to stat filecache work_dir {}: {}",
+                    self.work_dir, e
+                ))
+            })?;
+
+        if path.is_dir() {
+            Ok(&self.work_dir)
+        } else {
+            Err(enoent!(format!(
+                "filecache work_dir {} is not a directory",
+                self.work_dir
+            )))
+        }
+    }
+}
+
+/// Configuration information for fscache.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FsCacheConfig {
+    /// Working directory to store state and cached files.
+    #[serde(default = "default_work_dir")]
+    pub work_dir: String,
+}
+
+impl FsCacheConfig {
+    /// Get the working directory.
+    pub fn get_work_dir(&self) -> Result<&str> {
+        let path = fs::metadata(&self.work_dir)
+            .or_else(|_| {
+                fs::create_dir_all(&self.work_dir)?;
+                fs::metadata(&self.work_dir)
+            })
+            .map_err(|e| {
+                last_error!(format!(
+                    "fail to stat fscache work_dir {}: {}",
+                    self.work_dir, e
+                ))
+            })?;
+
+        if path.is_dir() {
+            Ok(&self.work_dir)
+        } else {
+            Err(enoent!(format!(
+                "fscache work_dir {} is not a directory",
+                self.work_dir
+            )))
+        }
+    }
+}
+
+/// Configuration information for network proxy.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL.
+    pub url: String,
+    /// Endpoint of P2P proxy health checking.
+    pub ping_url: String,
+    /// Fallback to remote storage backend if P2P proxy ping failed.
+    pub fallback: bool,
+    /// Interval of P2P proxy health checking, in seconds.
+    pub check_interval: u64,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            ping_url: String::new(),
+            fallback: true,
+            check_interval: 5,
+        }
+    }
+}
+
+/// Generic configuration for storage backends.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RegistryOssConfig {
+    /// Enable HTTP proxy for the read request.
+    pub proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    pub timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
+    pub connect_timeout: u64,
+    /// Retry count when read request failed.
+    pub retry_limit: u8,
+}
+
+impl Default for RegistryOssConfig {
+    fn default() -> Self {
+        Self {
+            proxy: ProxyConfig::default(),
+            skip_verify: false,
+            timeout: 5,
+            connect_timeout: 5,
+            retry_limit: 0,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum ApiRequest {
-    // Common requests
+    /// Set daemon configuration.
     ConfigureDaemon(DaemonConf),
-
-    // Nydus API v1 requests
-    DaemonInfo,
-    Events,
-    ExportGlobalMetrics(Option<String>),
-    ExportAccessPatterns(Option<String>),
-    ExportBackendMetrics(Option<String>),
-    ExportBlobcacheMetrics(Option<String>),
-    ExportFilesMetrics(Option<String>, bool),
+    /// Get daemon information.
+    GetDaemonInfo,
+    /// Get daemon global events.
+    GetEvents,
+    /// Stop the daemon.
     Exit,
-    Takeover,
+    /// Start the daemon.
     Start,
+    /// Send fuse fd to new daemon.
+    SendFuseFd,
+    /// Take over fuse fd from old daemon instance.
+    TakeoverFuseFd,
 
     // Filesystem Related
+    /// Mount a filesystem.
     Mount(String, ApiMountCmd),
+    /// Remount a filesystem.
     Remount(String, ApiMountCmd),
+    /// Unmount a filesystem.
     Umount(String),
+
+    /// Get storage backend metrics.
+    ExportBackendMetrics(Option<String>),
+    /// Get blob cache metrics.
+    ExportBlobcacheMetrics(Option<String>),
+
+    // Nydus API v1 requests
+    /// Get filesystem global metrics.
+    ExportFsGlobalMetrics(Option<String>),
+    /// Get filesystem access pattern log.
+    ExportFsAccessPatterns(Option<String>),
+    /// Get filesystem backend information.
     ExportFsBackendInfo(String),
-    ExportInflightMetrics,
-    SendFuseFd,
+    /// Get filesystem file metrics.
+    ExportFsFilesMetrics(Option<String>, bool),
+    /// Get information about filesystem inflight requests.
+    ExportFsInflightMetrics,
 
     // Nydus API v2
-    DaemonInfoV2,
+    /// Get daemon information excluding filesystem backends.
+    GetDaemonInfoV2,
+    /// Create a blob cache entry
     CreateBlobObject(BlobCacheEntry),
+    /// Get information about blob cache entries
     GetBlobObject(BlobCacheObjectId),
+    /// Delete a blob cache entry
     DeleteBlobObject(BlobCacheObjectId),
-    ListBlobObject,
 }
 
+/// Kinds for daemon related error messages.
 #[derive(Debug)]
 pub enum DaemonErrorKind {
+    /// Service not ready yet.
     NotReady,
+    /// Generic errors.
     Other(String),
+    /// Message serialization/deserialization related errors.
     Serde(SerdeError),
+    /// Unexpected event type.
     UnexpectedEvent(String),
+    /// Can't upgrade the daemon.
     UpgradeManager,
+    /// Unsupported requests.
     Unsupported,
 }
 
+/// Kinds for metrics related error messages.
 #[derive(Debug)]
 pub enum MetricsErrorKind {
-    // Errors about daemon working status
+    /// Generic daemon related errors.
     Daemon(DaemonErrorKind),
-    // Errors about metrics/stats recorders
+    /// Errors related to metrics implementation.
     Stats(IoStatsError),
 }
 
-/// Errors generated by/related to the API service, sent back through `ApiResponse`.
+/// Errors generated by/related to the API service, sent back through [`ApiResponse`].
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum ApiError {
@@ -197,32 +386,34 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 #[derive(Serialize)]
 pub enum ApiResponsePayload {
-    /// Daemon version, configuration and status information in json.
-    DaemonInfo(String),
-    /// No data is sent on the channel.
-    Empty,
-
     /// Filesystem backend metrics.
     BackendMetrics(String),
     /// Blobcache metrics.
     BlobcacheMetrics(String),
-    /// Global events.
+    /// Daemon version, configuration and status information in json.
+    DaemonInfo(String),
+    /// No data is sent on the channel.
+    Empty,
+    /// Global error events.
     Events(String),
-    /// Filesystem global metrics.
-    FsGlobalMetrics(String),
-    /// Filesystem per-file metrics.
-    FsFilesMetrics(String),
-    /// Filesystem access pattern trace log.
-    FsFilesPatterns(String),
 
-    // Filesystem Backend Information
+    /// Filesystem global metrics, v1.
+    FsGlobalMetrics(String),
+    /// Filesystem per-file metrics, v1.
+    FsFilesMetrics(String),
+    /// Filesystem access pattern trace log, v1.
+    FsFilesPatterns(String),
+    // Filesystem Backend Information, v1.
     FsBackendInfo(String),
-    // Filesystem Inflight Requests
-    InflightMetrics(String),
+    // Filesystem Inflight Requests, v1.
+    FsInflightMetrics(String),
 
     /// List of blob objects, v2
     BlobObjectList(String),
 }
+
+/// Specialized version of [`std::result::Result`] for value returned by backend services.
+pub type ApiResponse = std::result::Result<ApiResponsePayload, ApiError>;
 
 /// HTTP error messages sent back to the clients.
 ///
@@ -237,6 +428,8 @@ pub enum HttpError {
     Configure(ApiError),
     /// Failed to query information about daemon.
     DaemonInfo(ApiError),
+    /// Failed to query global events.
+    Events(ApiError),
     /// No handler registered for HTTP request URI
     NoRoute,
     /// Failed to parse HTTP request message body
@@ -244,29 +437,28 @@ pub enum HttpError {
     /// Query parameter is missed from the HTTP request.
     QueryString(String),
 
-    // Metrics related errors
-    /// Failed to query global events.
-    Events(ApiError),
-    /// Failed to get backend metrics.
-    BackendMetrics(ApiError),
-    /// Failed to get blobcache metrics.
-    BlobcacheMetrics(ApiError),
-    /// Failed to get global metrics.
-    GlobalMetrics(ApiError),
-    /// Failed to get filesystem per-file metrics.
-    FsFilesMetrics(ApiError),
-    /// Failed to get filesystem file access trace.
-    Pattern(ApiError),
-
-    // Filesystem related errors (v1)
-    /// Failed to get filesystem backend information
-    FsBackendInfo(ApiError),
-    /// Failed to get information about inflight request
-    InflightMetrics(ApiError),
     /// Failed to mount filesystem.
     Mount(ApiError),
     /// Failed to remount filesystem.
     Upgrade(ApiError),
+
+    // Metrics related errors
+    /// Failed to get backend metrics.
+    BackendMetrics(ApiError),
+    /// Failed to get blobcache metrics.
+    BlobcacheMetrics(ApiError),
+
+    // Filesystem related errors (v1)
+    /// Failed to get filesystem backend information
+    FsBackendInfo(ApiError),
+    /// Failed to get filesystem per-file metrics.
+    FsFilesMetrics(ApiError),
+    /// Failed to get global metrics.
+    GlobalMetrics(ApiError),
+    /// Failed to get information about inflight request
+    InflightMetrics(ApiError),
+    /// Failed to get filesystem file access trace.
+    Pattern(ApiError),
 
     // Blob cache management related errors (v2)
     /// Failed to create blob object
@@ -277,8 +469,7 @@ pub enum HttpError {
     GetBlobObjects(ApiError),
 }
 
-// This is the response sent by the API server through the mpsc channel.
-pub type ApiResponse = std::result::Result<ApiResponsePayload, ApiError>;
+/// Specialized version of [`std::result::Result`] for value returned by [`EndpointHandler`].
 pub type HttpResult = std::result::Result<Response, HttpError>;
 
 #[derive(Serialize, Debug)]
@@ -294,6 +485,7 @@ impl From<ErrorMessage> for Vec<u8> {
     }
 }
 
+/// Get query parameter with `key` from the HTTP request.
 pub fn extract_query_part(req: &Request, key: &str) -> Option<String> {
     // Splicing req.uri with "http:" prefix might look weird, but since it depends on
     // crate `Url` to generate query_pairs HashMap, which is working on top of Url not Uri.
@@ -302,14 +494,14 @@ pub fn extract_query_part(req: &Request, key: &str) -> Option<String> {
     let http_prefix = format!("http:{}", req.uri().get_abs_path());
     let url = Url::parse(&http_prefix)
         .map_err(|e| {
-            error!("Can't parse request {:?}", e);
+            error!("api: can't parse request {:?}", e);
             e
         })
         .ok()?;
 
     for (k, v) in url.query_pairs() {
         if k == key {
-            trace!("Got query part {:?}", (k, &v));
+            trace!("api: got query param {}={}", k, v);
             return Some(v.into_owned());
         }
     }
@@ -398,34 +590,26 @@ lazy_static! {
             routes: HashMap::new(),
         };
 
-        // Global
-        r.routes.insert(endpoint_v1!("/daemon"), Box::new(InfoHandler{}));
-        r.routes.insert(endpoint_v2!("/daemon"), Box::new(InfoHandler{}));
-        r.routes.insert(endpoint_v1!("/daemon/backend"), Box::new(FsBackendInfo{}));
-        r.routes.insert(endpoint_v2!("/daemon/backend"), Box::new(FsBackendInfo{}));
+        // Common
         r.routes.insert(endpoint_v1!("/daemon/events"), Box::new(EventsHandler{}));
-        r.routes.insert(endpoint_v2!("/daemon/events"), Box::new(EventsHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/exit"), Box::new(ExitHandler{}));
-        r.routes.insert(endpoint_v2!("/daemon/exit"), Box::new(ExitHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/start"), Box::new(StartHandler{}));
-        r.routes.insert(endpoint_v2!("/daemon/start"), Box::new(StartHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/fuse/takeover"), Box::new(TakeoverFuseFdHandler{}));
+        r.routes.insert(endpoint_v1!("/mount"), Box::new(MountHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
-        r.routes.insert(endpoint_v2!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
-        r.routes.insert(endpoint_v2!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/files"), Box::new(MetricsFilesHandler{}));
-        r.routes.insert(endpoint_v2!("/metrics/files"), Box::new(MetricsFilesHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/pattern"), Box::new(MetricsPatternHandler{}));
-        r.routes.insert(endpoint_v2!("/metrics/pattern"), Box::new(MetricsPatternHandler{}));
 
         // Nydus API, v1
-        r.routes.insert(endpoint_v1!("/mount"), Box::new(MountHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics"), Box::new(MetricsHandler{}));
-        r.routes.insert(endpoint_v1!("/metrics/inflight"), Box::new(MetricsInflightHandler{}));
-        r.routes.insert(endpoint_v1!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
-        r.routes.insert(endpoint_v1!("/daemon/fuse/takeover"), Box::new(TakeoverHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon"), Box::new(InfoHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/backend"), Box::new(FsBackendInfo{}));
+        r.routes.insert(endpoint_v1!("/metrics"), Box::new(MetricsFsGlobalHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/files"), Box::new(MetricsFsFilesHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/inflight"), Box::new(MetricsFsInflightHandler{}));
+        r.routes.insert(endpoint_v1!("/metrics/pattern"), Box::new(MetricsFsAccessPatternHandler{}));
 
         // Nydus API, v2
+        r.routes.insert(endpoint_v2!("/daemon"), Box::new(InfoV2Handler{}));
         r.routes.insert(endpoint_v2!("/blobs"), Box::new(BlobObjectListHandlerV2{}));
 
         r
@@ -509,6 +693,8 @@ fn handle_http_request(
     response
 }
 
+/// Start a HTTP server to serve API requests.
+///
 /// Start a HTTP server parsing http requests and send to nydus API server a concrete
 /// request to operate nydus or fetch working status.
 /// The HTTP server sends request by `to_api` channel and wait for response from `from_api` channel.
@@ -522,8 +708,8 @@ pub fn start_http_thread(
     std::fs::remove_file(path).unwrap_or_default();
     let socket_path = PathBuf::from(path);
 
-    let mut pool = Poll::new()?;
-    let waker = Arc::new(Waker::new(pool.registry(), EXIT_TOKEN)?);
+    let mut poll = Poll::new()?;
+    let waker = Arc::new(Waker::new(poll.registry(), EXIT_TOKEN)?);
     let waker2 = waker.clone();
     let mut server = HttpServer::new(socket_path).map_err(|e| {
         if let ServerError::IOError(e) = e {
@@ -532,24 +718,23 @@ pub fn start_http_thread(
             Error::new(ErrorKind::Other, format!("{:?}", e))
         }
     })?;
-    pool.registry().register(
+    poll.registry().register(
         &mut SourceFd(&server.epoll().as_raw_fd()),
         REQUEST_TOKEN,
         Interest::READABLE,
     )?;
 
     let thread = thread::Builder::new()
-        .name("http-server".to_string())
+        .name("nydus-http-server".to_string())
         .spawn(move || {
             // Must start the server successfully or just die by panic
             server.start_server().unwrap();
-            let mut events = Events::with_capacity(100);
-            let mut do_exit = false;
-
             info!("http server started");
 
+            let mut events = Events::with_capacity(100);
+            let mut do_exit = false;
             loop {
-                match pool.poll(&mut events, None) {
+                match poll.poll(&mut events, None) {
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => {
                         error!("http server poll events failed, {}", e);
@@ -592,6 +777,7 @@ pub fn start_http_thread(
                     break;
                 }
             }
+
             info!("http-server thread exits");
             // Keep the Waker alive to match the lifetime of the poll loop above
             drop(waker2);
@@ -608,10 +794,153 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
+    fn test_blob_prefetch_config() {
+        let config = BlobPrefetchConfig::default();
+        assert!(!config.enable);
+        assert_eq!(config.threads_count, 0);
+        assert_eq!(config.merging_size, 0);
+        assert_eq!(config.bandwidth_rate, 0);
+
+        let content = r#"{
+            "enable": true,
+            "threads_count": 2,
+            "merging_size": 4,
+            "bandwidth_rate": 5
+        }"#;
+        let config: BlobPrefetchConfig = serde_json::from_str(content).unwrap();
+        assert!(config.enable);
+        assert_eq!(config.threads_count, 2);
+        assert_eq!(config.merging_size, 4);
+        assert_eq!(config.bandwidth_rate, 5);
+    }
+
+    #[test]
+    fn test_file_cache_config() {
+        let config: FileCacheConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(&config.work_dir, ".");
+        assert!(!config.disable_indexed_map);
+
+        let config: FileCacheConfig =
+            serde_json::from_str("{\"work_dir\":\"/tmp\",\"disable_indexed_map\":true}").unwrap();
+        assert_eq!(&config.work_dir, "/tmp");
+        assert!(config.get_work_dir().is_ok());
+        assert!(config.disable_indexed_map);
+
+        let config: FileCacheConfig =
+            serde_json::from_str("{\"work_dir\":\"/proc/mounts\",\"disable_indexed_map\":true}")
+                .unwrap();
+        assert!(config.get_work_dir().is_err());
+    }
+
+    #[test]
+    fn test_fs_cache_config() {
+        let config: FsCacheConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(&config.work_dir, ".");
+
+        let config: FileCacheConfig = serde_json::from_str("{\"work_dir\":\"/tmp\"}").unwrap();
+        assert_eq!(&config.work_dir, "/tmp");
+        assert!(config.get_work_dir().is_ok());
+
+        let config: FileCacheConfig =
+            serde_json::from_str("{\"work_dir\":\"/proc/mounts\"}").unwrap();
+        assert!(config.get_work_dir().is_err());
+    }
+
+    #[test]
+    fn test_blob_cache_entry() {
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "prefetch_config": {
+                    "enable": true,
+                    "threads_count": 2,
+                    "merging_size": 4,
+                    "bandwidth_rate": 5
+                },
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1",
+            "fs_prefetch": {
+                "enable": true,
+                "threads_count": 2,
+                "merging_size": 4,
+                "bandwidth_rate": 5
+            }
+        }"#;
+        let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
+        assert_eq!(&config.blob_type, BLOB_CACHE_TYPE_BOOTSTRAP);
+        assert_eq!(&config.blob_id, "blob1");
+        assert_eq!(&config.domain_id, "domain1");
+        assert_eq!(&config.blob_config.id, "cache1");
+        assert_eq!(&config.blob_config.backend_type, "localfs");
+        assert_eq!(&config.blob_config.cache_type, "fscache");
+        assert!(config.blob_config.cache_config.is_object());
+        assert!(config.blob_config.prefetch_config.enable);
+        assert_eq!(config.blob_config.prefetch_config.threads_count, 2);
+        assert_eq!(config.blob_config.prefetch_config.merging_size, 4);
+        assert_eq!(
+            config.blob_config.metadata_path.as_ref().unwrap().as_str(),
+            "/tmp/metadata1"
+        );
+        assert!(config.fs_prefetch.is_some());
+
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
+        assert!(!config.blob_config.prefetch_config.enable);
+        assert_eq!(config.blob_config.prefetch_config.threads_count, 0);
+        assert_eq!(config.blob_config.prefetch_config.merging_size, 0);
+        assert!(config.fs_prefetch.is_none());
+    }
+
+    #[test]
+    fn test_registry_oss_config() {
+        let content = r#"{
+            "proxy": {
+                "url": "http://proxy.com",
+                "ping_url": "http://proxy.com/ping",
+                "fallback": true,
+                "check_interval": 10
+            },
+            "skip_verify": true,
+            "timeout": 60,
+            "connect_timeout": 10,
+            "retry_limit": 3
+        }"#;
+        let config: RegistryOssConfig = serde_json::from_str(content).unwrap();
+        assert!(config.skip_verify);
+        assert_eq!(config.timeout, 60);
+        assert_eq!(config.connect_timeout, 10);
+        assert_eq!(config.retry_limit, 3);
+        assert_eq!(&config.proxy.url, "http://proxy.com");
+        assert_eq!(&config.proxy.ping_url, "http://proxy.com/ping");
+        assert!(config.proxy.fallback);
+        assert_eq!(config.proxy.check_interval, 10);
+    }
+
+    #[test]
     fn test_http_api_routes_v1() {
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/events").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/backend").is_some());
+        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/start").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/exit").is_some());
         assert!(HTTP_ROUTES
             .routes
@@ -621,6 +950,7 @@ mod tests {
             .routes
             .get("/api/v1/daemon/fuse/takeover")
             .is_some());
+        assert!(HTTP_ROUTES.routes.get("/api/v1/mount").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/files").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/pattern").is_some());
@@ -635,13 +965,14 @@ mod tests {
     #[test]
     fn test_http_api_routes_v2() {
         assert!(HTTP_ROUTES.routes.get("/api/v2/daemon").is_some());
+        assert!(HTTP_ROUTES.routes.get("/api/v2/blobs").is_some());
     }
 
     #[test]
     fn test_kick_api_server() {
         let (to_api, from_route) = channel();
         let (to_route, from_api) = channel();
-        let request = ApiRequest::DaemonInfo;
+        let request = ApiRequest::GetDaemonInfo;
         let thread =
             thread::spawn(
                 move || match kick_api_server(None, &to_api, &from_api, request) {
@@ -650,7 +981,7 @@ mod tests {
                 },
             );
         let req2 = from_route.recv().unwrap();
-        matches!(req2.as_ref().unwrap(), ApiRequest::DaemonInfo);
+        matches!(req2.as_ref().unwrap(), ApiRequest::GetDaemonInfo);
         let reply: ApiResponse = Err(ApiError::ResponsePayloadType);
         to_route.send(reply).unwrap();
         thread.join().unwrap();
@@ -658,10 +989,10 @@ mod tests {
         let (to_api, from_route) = channel();
         let (to_route, from_api) = channel();
         drop(to_route);
-        let request = ApiRequest::DaemonInfo;
+        let request = ApiRequest::GetDaemonInfo;
         assert!(kick_api_server(None, &to_api, &from_api, request).is_err());
         drop(from_route);
-        let request = ApiRequest::DaemonInfo;
+        let request = ApiRequest::GetDaemonInfo;
         assert!(kick_api_server(None, &to_api, &from_api, request).is_err());
     }
 

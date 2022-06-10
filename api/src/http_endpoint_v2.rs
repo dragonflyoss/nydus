@@ -4,6 +4,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Nydus API v2.
+
 use dbs_uhttp::{Method, Request, Response};
 
 use crate::http::{
@@ -12,8 +14,11 @@ use crate::http::{
     HttpError, HttpResult,
 };
 
+/// HTTP URI prefix for API v2.
 pub const HTTP_ROOT_V2: &str = "/api/v2";
 
+// Convert an ApiResponse to a HTTP response.
+//
 // API server has successfully processed the request, but can't fulfill that. Therefore,
 // a `error_response` is generated whose status code is 4XX or 5XX. With error response,
 // it still returns Ok(error_response) to http request handling framework, which means
@@ -25,19 +30,8 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
             match r {
                 Empty => success_response(None),
                 DaemonInfo(d) => success_response(Some(d)),
-                Events(d) => success_response(Some(d)),
-                BackendMetrics(d) => success_response(Some(d)),
-                BlobcacheMetrics(d) => success_response(Some(d)),
-                FsFilesMetrics(d) => success_response(Some(d)),
-                FsFilesPatterns(d) => success_response(Some(d)),
-                FsGlobalMetrics(d) => success_response(Some(d)),
-
-                // Nydus API v1
-                FsBackendInfo(d) => success_response(Some(d)),
-                InflightMetrics(d) => success_response(Some(d)),
-
-                // Nydus API v2
                 BlobObjectList(d) => success_response(Some(d)),
+                _ => panic!("Unexpected response message from API service"),
             }
         }
         Err(e) => {
@@ -47,6 +41,30 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
     }
 }
 
+/// Get daemon information and set daemon configuration.
+pub struct InfoV2Handler {}
+impl EndpointHandler for InfoV2Handler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let r = kicker(ApiRequest::GetDaemonInfoV2);
+                Ok(convert_to_response(r, HttpError::DaemonInfo))
+            }
+            (Method::Put, Some(body)) => {
+                let conf = parse_body(body)?;
+                let r = kicker(ApiRequest::ConfigureDaemon(conf));
+                Ok(convert_to_response(r, HttpError::Configure))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+/// List blob objects managed by the blob cache manager.
 pub struct BlobObjectListHandlerV2 {}
 impl EndpointHandler for BlobObjectListHandlerV2 {
     fn handle_request(
