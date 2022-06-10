@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::Result;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
@@ -33,6 +33,7 @@ pub struct FsCacheMgr {
     worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
     validate: bool,
+    closed: Arc<AtomicBool>,
 }
 
 impl FsCacheMgr {
@@ -59,6 +60,7 @@ impl FsCacheMgr {
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             validate: config.cache_validate,
+            closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -103,12 +105,15 @@ impl BlobCacheMgr for FsCacheMgr {
     }
 
     fn destroy(&self) {
-        self.worker_mgr.stop();
-        self.backend().shutdown();
-        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
+        if !self.closed.load(Ordering::Acquire) {
+            self.closed.store(true, Ordering::Release);
+            self.worker_mgr.stop();
+            self.backend().shutdown();
+            self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
+        }
     }
 
-    fn gc(&self, id: Option<&str>) {
+    fn gc(&self, id: Option<&str>) -> bool {
         if let Some(blob_id) = id {
             self.blobs.write().unwrap().remove(blob_id);
         } else {
@@ -130,6 +135,8 @@ impl BlobCacheMgr for FsCacheMgr {
                 }
             }
         }
+
+        self.blobs.read().unwrap().len() == 0
     }
 
     fn backend(&self) -> &(dyn BlobBackend) {
@@ -139,6 +146,12 @@ impl BlobCacheMgr for FsCacheMgr {
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         self.get_or_create_cache_entry(blob_info)
             .map(|v| v as Arc<dyn BlobCache>)
+    }
+}
+
+impl Drop for FsCacheMgr {
+    fn drop(&mut self) {
+        self.destroy();
     }
 }
 

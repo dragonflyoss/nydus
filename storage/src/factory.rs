@@ -213,16 +213,36 @@ impl BlobFactory {
 
     /// Garbage-collect unused blob cache managers and blob caches.
     pub fn gc(&self, victim: Option<(&Arc<FactoryConfig>, &str)>) {
+        let mut mgrs = Vec::new();
+
         if let Some((config, id)) = victim {
             let key = BlobCacheMgrKey {
                 config: config.clone(),
             };
             let mgr = self.mgrs.lock().unwrap().get(&key).cloned();
             if let Some(mgr) = mgr {
-                mgr.gc(Some(id));
+                if mgr.gc(Some(id)) {
+                    mgrs.push((key, mgr.clone()));
+                }
             }
         } else {
-            unimplemented!("TODO")
+            for (key, mgr) in self.mgrs.lock().unwrap().iter() {
+                if mgr.gc(None) {
+                    mgrs.push((
+                        BlobCacheMgrKey {
+                            config: key.config.clone(),
+                        },
+                        mgr.clone(),
+                    ));
+                }
+            }
+        }
+
+        for (key, mgr) in mgrs {
+            let mut guard = self.mgrs.lock().unwrap();
+            if mgr.gc(None) {
+                guard.remove(&key);
+            }
         }
     }
 

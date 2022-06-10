@@ -330,7 +330,7 @@ pub trait BlobCache: Send + Sync {
 ///
 /// The main responsibility of the blob cache manager is to create blob cache objects for blobs,
 /// all IO requests should be issued to the blob cache object directly.
-pub trait BlobCacheMgr: Send + Sync {
+pub(crate) trait BlobCacheMgr: Send + Sync {
     /// Initialize the blob cache manager.
     fn init(&self) -> Result<()>;
 
@@ -338,9 +338,9 @@ pub trait BlobCacheMgr: Send + Sync {
     fn destroy(&self);
 
     /// Garbage-collect unused resources.
-    fn gc(&self, _id: Option<&str>) {
-        todo!()
-    }
+    ///
+    /// Return true if the blob cache manager itself should be garbage-collected.
+    fn gc(&self, _id: Option<&str>) -> bool;
 
     /// Get the underlying `BlobBackend` object of the blob cache object.
     fn backend(&self) -> &(dyn BlobBackend);
