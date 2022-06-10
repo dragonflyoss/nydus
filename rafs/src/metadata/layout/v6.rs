@@ -17,7 +17,6 @@ use lazy_static::lazy_static;
 use nydus_utils::{compress, digest, round_up, ByteSize};
 use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::{BlobMetaHeaderOndisk, BLOB_FEATURE_4K_ALIGNED};
-use storage::RAFS_MAX_CHUNK_SIZE;
 
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
@@ -353,10 +352,7 @@ impl RafsV6SuperBlockExt {
         }
 
         let chunk_size = u32::from_le(self.s_chunk_size) as u64;
-        if !chunk_size.is_power_of_two()
-            || chunk_size < EROFS_BLOCK_SIZE
-            || chunk_size > RAFS_MAX_CHUNK_SIZE
-        {
+        if !chunk_size.is_power_of_two() || chunk_size < EROFS_BLOCK_SIZE {
             return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
         }
 
@@ -1296,11 +1292,7 @@ impl RafsV6Blob {
         }
 
         let c_size = u32::from_le(self.chunk_size) as u64;
-        if c_size.count_ones() != 1
-            || c_size < EROFS_BLOCK_SIZE
-            || c_size > RAFS_MAX_CHUNK_SIZE
-            || c_size != chunk_size as u64
-        {
+        if c_size.count_ones() != 1 || c_size < EROFS_BLOCK_SIZE || c_size != chunk_size as u64 {
             error!(
                 "RafsV6Blob: idx {} invalid c_size {}, count_ones() {}",
                 blob_index,

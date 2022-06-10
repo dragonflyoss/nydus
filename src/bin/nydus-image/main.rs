@@ -952,10 +952,7 @@ impl Command {
                 let param = v.trim_start_matches("0x").trim_end_matches("0X");
                 let chunk_size =
                     u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
-                if chunk_size as u64 > RAFS_DEFAULT_CHUNK_SIZE
-                    || chunk_size < 0x1000
-                    || !chunk_size.is_power_of_two()
-                {
+                if chunk_size < 0x1000 || !chunk_size.is_power_of_two() {
                     bail!("invalid chunk size: {}", chunk_size);
                 }
                 Ok(chunk_size)
