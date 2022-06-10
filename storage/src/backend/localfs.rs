@@ -167,7 +167,7 @@ impl BlobReader for LocalFsEntry {
             readahead(self.file.as_raw_fd(), ra_offset, end);
         }
 
-        // start access logging
+        // start file access logging
         if let Ok(log_file) = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -197,6 +197,7 @@ impl BlobReader for LocalFsEntry {
     }
 
     fn stop_data_prefetch(&self) -> BackendResult<()> {
+        // Disable writing file trace log
         let &(ref lock, ref cvar) = &*self.trace_condvar;
         *lock.lock().unwrap() = true;
         cvar.notify_all();

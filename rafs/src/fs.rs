@@ -286,7 +286,7 @@ impl Rafs {
 
         // step 2: update device (only localfs is supported)
         self.device
-            .update(&storage_conf, &blob_infos)
+            .update(&storage_conf, &blob_infos, self.fs_prefetch)
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
@@ -304,7 +304,8 @@ impl Rafs {
         }
         if self.fs_prefetch {
             // Device should be ready before any prefetch.
-            self.prefetch(r, prefetch_files)
+            self.device.start_prefetch();
+            self.prefetch(r, prefetch_files);
         }
         self.initialized = true;
 
@@ -319,6 +320,9 @@ impl Rafs {
             Arc::get_mut(&mut self.sb)
                 .expect("Superblock is no longer used")
                 .destroy();
+            if self.fs_prefetch {
+                self.device.stop_prefetch();
+            }
             self.device.close()?;
             self.initialized = false;
         }
@@ -522,8 +526,6 @@ impl Rafs {
                 info!("No file to be prefetched {:?}", e);
             });
         }
-
-        device.stop_prefetch();
     }
 
     fn convert_file_list(files: &[PathBuf], sb: &Arc<RafsSuper>) -> Vec<Inode> {

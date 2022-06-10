@@ -26,9 +26,7 @@ use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
-use crate::cache::worker::{
-    AsyncPrefetchConfig, AsyncRequestMessage, AsyncRequestState, AsyncWorkerMgr,
-};
+use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
@@ -135,7 +133,7 @@ impl BlobCache for FileCacheEntry {
     ) -> StorageResult<usize> {
         let mut bios = bios.to_vec();
         bios.iter_mut().for_each(|b| {
-            if let Some(ref chunks_meta) = self.meta {
+            if let Some(chunks_meta) = &self.meta {
                 // TODO: the first blob backend io triggers chunks array download.
                 if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
                     let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
@@ -146,40 +144,59 @@ impl BlobCache for FileCacheEntry {
         bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
 
-        // Enable data prefetching
-        self.prefetch_state
-            .store(AsyncRequestState::Pending as u32, Ordering::Release);
-
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
-            let msg = AsyncRequestMessage::new_blob_prefetch(
-                blob_cache.clone(),
+            let msg = AsyncPrefetchMessage::new_blob_prefetch(
                 self.prefetch_state.clone(),
+                blob_cache.clone(),
                 req.offset as u64,
                 req.len as u64,
             );
-            let _ = self.workers.send(msg);
+            let _ = self.workers.send_prefetch_message(msg);
         }
 
         // Then handle fs prefetch
         let merging_size = self.prefetch_config.merging_size;
         BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
-            let msg = AsyncRequestMessage::new_fs_prefetch(
-                blob_cache.clone(),
+            let msg = AsyncPrefetchMessage::new_fs_prefetch(
                 self.prefetch_state.clone(),
+                blob_cache.clone(),
                 req,
             );
-            let _ = self.workers.send(msg);
+            let _ = self.workers.send_prefetch_message(msg);
         });
 
         Ok(0)
     }
 
-    fn stop_prefetch(&self) -> StorageResult<()> {
-        // self.prefetch_state
-        //     .store(AsyncRequestState::Cancelled as u32, Ordering::Release);
-        self.workers.stop();
+    fn start_prefetch(&self) -> StorageResult<()> {
+        self.prefetch_state.fetch_add(1, Ordering::Release);
         Ok(())
+    }
+
+    fn stop_prefetch(&self) -> StorageResult<()> {
+        loop {
+            let val = self.prefetch_state.load(Ordering::Acquire);
+            if val > 0
+                && self
+                    .prefetch_state
+                    .compare_exchange(val, val - 1, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_err()
+            {
+                continue;
+            }
+
+            if val == 0 {
+                warn!("storage: inaccurate prefetch status");
+            }
+            if val == 0 || val == 1 {
+                // Stop the localfs legacy prefetch worker thread to read data into page cache.
+                let _ = self.reader.stop_data_prefetch();
+                self.workers
+                    .flush_pending_prefetch_requests(self.blob_info.blob_id());
+                return Ok(());
+            }
+        }
     }
 
     fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {

@@ -171,7 +171,14 @@ pub trait BlobCache: Send + Sync {
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize>;
 
+    /// Enable prefetching blob data in background.
+    ///
+    /// It should be paired with stop_prefetch().
+    fn start_prefetch(&self) -> StorageResult<()>;
+
     /// Stop prefetching blob data in background.
+    ///
+    /// It should be paired with start_prefetch().
     fn stop_prefetch(&self) -> StorageResult<()>;
 
     /// Execute filesystem data prefetch.
