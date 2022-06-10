@@ -18,7 +18,7 @@ use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
-use nydus_utils::ByteSize;
+use nydus_utils::{try_round_up_4k, ByteSize};
 use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
 use rafs::metadata::layout::RafsXAttrs;
 use rafs::metadata::Inode;
@@ -352,6 +352,7 @@ impl StargzIndexTreeBuilder {
         let mut tree: Option<Tree> = None;
         let mut last_reg_entry: Option<&TocEntry> = None;
 
+        let mut uncompress_offset = 0;
         for entry in toc_index.entries.iter() {
             if !entry.is_supported() {
                 continue;
@@ -370,6 +371,15 @@ impl StargzIndexTreeBuilder {
             }
 
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
+                let aligned_chunk_size = if ctx.aligned_chunk {
+                    // Safe to unwrap because `chunk_size` is much less than u32::MAX.
+                    try_round_up_4k(decompress_size).unwrap()
+                } else {
+                    decompress_size
+                };
+                let pre_uncompress_offset = uncompress_offset;
+                uncompress_offset += aligned_chunk_size;
+
                 let block_id = entry.block_id(&ctx.blob_id)?;
                 let v5_chunk_info = ChunkWrapper::V5(RafsV5ChunkInfo {
                     block_id,
@@ -381,7 +391,7 @@ impl StargzIndexTreeBuilder {
                     uncompress_size: decompress_size as u32,
                     compress_offset: entry.offset as u64,
                     // No available data on entry
-                    uncompress_offset: 0,
+                    uncompress_offset: pre_uncompress_offset,
                     file_offset: entry.chunk_offset as u64,
                     index: 0,
                     reserved: 0,
@@ -594,6 +604,8 @@ impl StargzBuilder {
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
         blob_ctx.blob_meta_header = header;
 
+        let mut chunk_map = HashMap::new();
+
         // Set blob index and inode digest for upper nodes
         for node in &mut bootstrap_ctx.nodes {
             if node.overlay.is_lower_layer() {
@@ -603,8 +615,13 @@ impl StargzBuilder {
             let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
 
             for chunk in node.chunks.iter_mut() {
-                let chunk_index = blob_ctx.alloc_index()?;
-                chunk.inner.set_index(chunk_index);
+                if let Some(chunk_index) = chunk_map.get(chunk.inner.id()) {
+                    chunk.inner.set_index(*chunk_index);
+                } else {
+                    let chunk_index = blob_ctx.alloc_index()?;
+                    chunk.inner.set_index(chunk_index);
+                    chunk_map.insert(*chunk.inner.id(), chunk.inner.index());
+                }
                 chunk.inner.set_blob_index(blob_index);
                 decompressed_blob_size += chunk.inner.uncompressed_size() as u64;
                 compressed_blob_size += chunk.inner.compressed_size() as u64;
