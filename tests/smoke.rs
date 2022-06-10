@@ -231,8 +231,7 @@ fn integration_test_special_files() {
     }
 }
 
-#[test]
-fn integration_test_stargz() {
+fn test_stargz(rafs_version: &str) {
     info!("\n\n==================== testing run: stargz test");
 
     let tmp_dir = TempDir::new().unwrap();
@@ -246,8 +245,8 @@ fn integration_test_stargz() {
 
     let mut builder = builder::new(&work_dir, "oci");
 
-    builder.build_stargz_lower();
-    builder.build_stargz_upper();
+    builder.build_stargz_lower(rafs_version);
+    builder.build_stargz_upper(rafs_version);
 
     let nydusd = nydusd::new(
         &work_dir,
@@ -261,4 +260,10 @@ fn integration_test_stargz() {
     nydusd.start(Some("bootstrap-overlay"), "mnt");
     nydusd.check("directory/overlay.result", "mnt");
     nydusd.umount("mnt");
+}
+
+#[test]
+fn integration_test_stargz() {
+    test_stargz("5");
+    test_stargz("6");
 }

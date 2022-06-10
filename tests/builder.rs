@@ -229,13 +229,14 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_stargz_lower(&mut self) {
+    pub fn build_stargz_lower(&mut self, rafs_version: &str) {
         exec(
             format!(
-                "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --fs-version {} --log-level info {:?}",
                 self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 "lower.stargz",
+                rafs_version,
                 self.work_dir.join("stargz.index-lower.json"),
             )
             .as_str(),
@@ -243,14 +244,15 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_stargz_upper(&mut self) {
+    pub fn build_stargz_upper(&mut self, rafs_version: &str) {
         exec(
             format!(
-                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --fs-version {} --log-level info {:?}",
                 self.builder,
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("bootstrap-overlay"),
                 "upper.stargz",
+                rafs_version,
                 self.work_dir.join("stargz.index-upper.json"),
             )
             .as_str(),
