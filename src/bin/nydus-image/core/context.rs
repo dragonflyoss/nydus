@@ -384,30 +384,36 @@ impl BlobContext {
         Ok(Self::new_with_writer(blob_id, writer, blob_offset))
     }
 
-    pub fn from(blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut ctx = Self::new_with_writer(blob.blob_id().to_owned(), None, 0);
+    pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
+        let mut blob_ctx = Self::new_with_writer(blob.blob_id().to_owned(), None, 0);
 
-        ctx.blob_readahead_size = blob.readahead_size();
-        ctx.chunk_count = blob.chunk_count();
-        ctx.decompressed_blob_size = blob.uncompressed_size();
-        ctx.compressed_blob_size = blob.compressed_size();
-        ctx.chunk_source = chunk_source;
+        blob_ctx.blob_readahead_size = blob.readahead_size();
+        blob_ctx.chunk_count = blob.chunk_count();
+        blob_ctx.decompressed_blob_size = blob.uncompressed_size();
+        blob_ctx.compressed_blob_size = blob.compressed_size();
+        blob_ctx.chunk_size = blob.chunk_size();
+        blob_ctx.chunk_source = chunk_source;
+        blob_ctx.blob_meta_header.set_4k_aligned(ctx.aligned_chunk);
 
         if blob.meta_ci_is_valid() {
-            ctx.blob_meta_header
+            blob_ctx
+                .blob_meta_header
                 .set_ci_compressor(blob.meta_ci_compressor());
-            ctx.blob_meta_header.set_ci_entries(blob.chunk_count());
-            ctx.blob_meta_header
+            blob_ctx.blob_meta_header.set_ci_entries(blob.chunk_count());
+            blob_ctx
+                .blob_meta_header
                 .set_ci_compressed_offset(blob.meta_ci_offset());
-            ctx.blob_meta_header
+            blob_ctx
+                .blob_meta_header
                 .set_ci_compressed_size(blob.meta_ci_compressed_size());
-            ctx.blob_meta_header
+            blob_ctx
+                .blob_meta_header
                 .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
-            ctx.blob_meta_header.set_4k_aligned(true);
-            ctx.blob_meta_info_enabled = true;
+            blob_ctx.blob_meta_header.set_4k_aligned(true);
+            blob_ctx.blob_meta_info_enabled = true;
         }
 
-        ctx
+        blob_ctx
     }
 
     pub fn new_with_writer(
@@ -582,10 +588,10 @@ impl BlobManager {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_blob_table(&mut self, blob_table: Vec<Arc<BlobInfo>>) {
+    pub fn from_blob_table(&mut self, ctx: &BuildContext, blob_table: Vec<Arc<BlobInfo>>) {
         self.blobs = blob_table
             .iter()
-            .map(|entry| BlobContext::from(entry.as_ref(), ChunkSource::Parent))
+            .map(|entry| BlobContext::from(ctx, entry.as_ref(), ChunkSource::Parent))
             .collect();
     }
 
@@ -605,7 +611,7 @@ impl BlobManager {
     /// Extend blobs which belong to ChunkDict and setup real_blob_idx map
     /// should call this function after import parent bootstrap
     /// otherwise will break blobs order
-    pub fn extend_blob_table_from_chunk_dict(&mut self) -> Result<()> {
+    pub fn extend_blob_table_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
         let blobs = self.chunk_dict_ref.get_blobs();
 
         for blob in blobs.iter() {
@@ -614,7 +620,7 @@ impl BlobManager {
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
                 let idx = self.alloc_index()?;
-                self.add(BlobContext::from(blob.as_ref(), ChunkSource::Dict));
+                self.add(BlobContext::from(ctx, blob.as_ref(), ChunkSource::Dict));
                 self.chunk_dict_ref
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
@@ -844,6 +850,7 @@ pub struct BuildContext {
 
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
+    pub blob_meta_storage: Option<ArtifactStorage>,
     pub inline_bootstrap: bool,
     pub has_xattr: bool,
 }
@@ -862,6 +869,7 @@ impl BuildContext {
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
+        blob_meta_storage: Option<ArtifactStorage>,
         inline_bootstrap: bool,
     ) -> Self {
         BuildContext {
@@ -881,6 +889,7 @@ impl BuildContext {
 
             prefetch,
             blob_storage,
+            blob_meta_storage,
             inline_bootstrap,
             has_xattr: false,
         }
@@ -914,6 +923,7 @@ impl Default for BuildContext {
 
             prefetch: Prefetch::default(),
             blob_storage: None,
+            blob_meta_storage: None,
             has_xattr: true,
             inline_bootstrap: false,
         }

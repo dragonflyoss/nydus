@@ -118,7 +118,7 @@ impl Merger {
             let mut parent_blob_added = false;
 
             for blob in &parent_blobs {
-                let mut blob_ctx = BlobContext::from(blob, ChunkSource::Parent);
+                let mut blob_ctx = BlobContext::from(ctx, blob, ChunkSource::Parent);
                 if chunk_dict_blobs.get(blob.blob_id()).is_none() {
                     // It is assumed that the `nydus-image create` at each layer and `nydus-image merge` commands
                     // use the same chunk dict bootstrap. So the parent bootstrap includes multiple blobs, but

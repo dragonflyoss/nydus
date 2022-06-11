@@ -12,7 +12,7 @@ use sha2::Digest;
 use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::chunk_dict::ChunkDict;
-use super::context::{BlobContext, BuildContext, SourceType};
+use super::context::{ArtifactWriter, BlobContext, BuildContext, SourceType};
 use super::node::Node;
 
 pub struct Blob {}
@@ -45,8 +45,7 @@ impl Blob {
                         blob_ctx.blob_readahead_size += size;
                     }
                 }
-
-                self.dump_meta_data(blob_ctx)?;
+                Self::dump_meta_data(ctx, blob_ctx)?;
             }
             SourceType::StargzIndex => {
                 for node in nodes {
@@ -82,7 +81,35 @@ impl Blob {
         Ok(blob_exists)
     }
 
-    pub(crate) fn dump_meta_data(&mut self, blob_ctx: &mut BlobContext) -> Result<()> {
+    pub fn dump_meta_data_raw(
+        pos: u64,
+        blob_meta_info: &[BlobChunkInfoOndisk],
+    ) -> Result<(std::borrow::Cow<[u8]>, BlobMetaHeaderOndisk)> {
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                blob_meta_info.as_ptr() as *const u8,
+                blob_meta_info.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+            )
+        };
+        let (buf, compressed) = compress::compress(data, compress::Algorithm::Lz4Block)
+            .with_context(|| "failed to compress blob chunk info array".to_string())?;
+        let mut header = BlobMetaHeaderOndisk::default();
+
+        if compressed {
+            header.set_ci_compressor(compress::Algorithm::Lz4Block);
+        } else {
+            header.set_ci_compressor(compress::Algorithm::None);
+        }
+        header.set_ci_entries(blob_meta_info.len() as u32);
+        header.set_ci_compressed_offset(pos);
+        header.set_ci_compressed_size(buf.len() as u64);
+        header.set_ci_uncompressed_size(data.len() as u64);
+        header.set_4k_aligned(true);
+
+        Ok((buf, header))
+    }
+
+    pub(crate) fn dump_meta_data(ctx: &BuildContext, blob_ctx: &mut BlobContext) -> Result<()> {
         // Dump is only required if there is chunk in the blob or blob meta info enabled
         if !blob_ctx.blob_meta_info_enabled || blob_ctx.compressed_blob_size == 0 {
             return Ok(());
@@ -90,33 +117,19 @@ impl Blob {
 
         if let Some(writer) = &mut blob_ctx.writer {
             let pos = writer.pos()?;
-            let data = unsafe {
-                std::slice::from_raw_parts(
-                    blob_ctx.blob_meta_info.as_ptr() as *const u8,
-                    blob_ctx.blob_meta_info.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
-                )
-            };
-            let (buf, compressed) = compress::compress(data, compress::Algorithm::Lz4Block)
-                .with_context(|| "failed to compress blob chunk info array".to_string())?;
-            let mut header = BlobMetaHeaderOndisk::default();
+            let (data, header) = Self::dump_meta_data_raw(pos, &blob_ctx.blob_meta_info)?;
 
-            if compressed {
-                header.set_ci_compressor(compress::Algorithm::Lz4Block);
-            } else {
-                header.set_ci_compressor(compress::Algorithm::None);
-            }
-            header.set_ci_entries(blob_ctx.blob_meta_info.len() as u32);
-            header.set_ci_compressed_offset(pos);
-            header.set_ci_compressed_size(buf.len() as u64);
-            header.set_ci_uncompressed_size(data.len() as u64);
-            header.set_4k_aligned(true);
+            writer.write_all(&data)?;
+            writer.write_all(header.as_bytes())?;
 
             blob_ctx.blob_meta_header = header;
-
-            writer.write_all(&buf)?;
-            writer.write_all(header.as_bytes())?;
-            blob_ctx.blob_hash.update(&buf);
+            blob_ctx.blob_hash.update(&data);
             blob_ctx.blob_hash.update(header.as_bytes());
+        } else if let Some(stor) = ctx.blob_meta_storage.clone() {
+            let mut writer = ArtifactWriter::new(stor, false)?;
+            let (data, header) = Self::dump_meta_data_raw(0, &blob_ctx.blob_meta_info)?;
+            writer.write_all(&data)?;
+            writer.write_all(header.as_bytes())?;
         }
 
         Ok(())
