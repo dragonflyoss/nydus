@@ -390,7 +390,6 @@ impl StargzIndexTreeBuilder {
                     compress_size: 0,
                     uncompress_size: decompress_size as u32,
                     compress_offset: entry.offset as u64,
-                    // No available data on entry
                     uncompress_offset: pre_uncompress_offset,
                     file_offset: entry.chunk_offset as u64,
                     index: 0,

@@ -791,7 +791,11 @@ impl RafsInode for OndiskInodeWrapper {
                 OsString::from(name),
             )?) as Arc<dyn RafsInode>)
         } else {
-            Err(enoent!())
+            Err(enoent!(format!(
+                "invalid child name {:?}, parent {:?}",
+                OsString::from(name),
+                self.name(),
+            )))
         }
     }
 
@@ -841,7 +845,11 @@ impl RafsInode for OndiskInodeWrapper {
             }
         }
 
-        Err(enoent!("invalid child index"))
+        Err(enoent!(format!(
+            "invalid child index {}, parent {:?}",
+            idx,
+            self.name(),
+        )))
     }
 
     #[inline]

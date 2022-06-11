@@ -511,6 +511,7 @@ impl DiffBuilder {
 
     fn prepare_parent_chunk_map(
         &mut self,
+        ctx: &BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
     ) -> Result<BlobManager> {
         let mut blob_mgr = BlobManager::new();
@@ -523,7 +524,7 @@ impl DiffBuilder {
             rs.load(r)
                 .context("failed to load superblock from bootstrap")?;
             // Load blobs from the blob table of parent bootstrap.
-            blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
+            blob_mgr.from_blob_table(ctx, rs.superblock.get_blob_infos());
             rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
                                                      path: &Path|
              -> Result<()> {
@@ -817,7 +818,7 @@ impl Builder for DiffBuilder {
     ) -> Result<BuildOutput> {
         // Add blobs in parent bootstrap to blob map.
         let mut parent_blob_mgr = self
-            .prepare_parent_chunk_map(bootstrap_mgr)
+            .prepare_parent_chunk_map(ctx, bootstrap_mgr)
             .context("failed to load chunks from bootstrap")?;
         let len = parent_blob_mgr.len();
         if len > 0 {
@@ -829,7 +830,7 @@ impl Builder for DiffBuilder {
         }
 
         // Add blobs in chunk dict bootstrap to blob map.
-        dict_blob_mgr.extend_blob_table_from_chunk_dict()?;
+        dict_blob_mgr.extend_blob_table_from_chunk_dict(ctx)?;
         let len = dict_blob_mgr.len();
         if len > 0 {
             for blob_idx in (0..len).rev() {

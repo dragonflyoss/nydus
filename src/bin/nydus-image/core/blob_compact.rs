@@ -581,10 +581,10 @@ impl BlobCompactor {
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
         let mut ori_blob_mgr = BlobManager::new();
-        ori_blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
+        ori_blob_mgr.from_blob_table(&build_ctx, rs.superblock.get_blob_infos());
         if let Some(dict) = chunk_dict {
             ori_blob_mgr.set_chunk_dict(dict);
-            ori_blob_mgr.extend_blob_table_from_chunk_dict()?;
+            ori_blob_mgr.extend_blob_table_from_chunk_dict(&build_ctx)?;
         }
         if ori_blob_mgr.len() < cfg.layers_to_compact {
             return Ok(None);

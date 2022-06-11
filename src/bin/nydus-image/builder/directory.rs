@@ -151,7 +151,7 @@ impl Builder for DirectoryBuilder {
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
-        blob_mgr.extend_blob_table_from_chunk_dict()?;
+        blob_mgr.extend_blob_table_from_chunk_dict(ctx)?;
 
         let blob_index = blob_mgr.alloc_index()?;
         let mut blob = Blob::new();
