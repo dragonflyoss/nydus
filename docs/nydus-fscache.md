@@ -1,10 +1,10 @@
 # Nydus EROFS fscache user guide
 
-This guide shows you how to use fscache-based EROFS nydus image service to launch docker containers with the fscache-enabled in-kernel erofs on-demand download feature.
+This guide shows you how to use fscache-based EROFS nydus image service to launch containers with the fscache-enabled in-kernel EROFS on-demand download feature.
 
 ## Prepare the kernel
 
-Be aware of using the fscache-enabled erofs kernel (Linux 5.19+), it can be built with the following steps:
+Be aware of using the fscache-enabled EROFS kernel (Linux 5.19+), it can be built with the following steps:
 
 1.  ``git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git`` \
      or (mirror in china): ``git://kernel.source.codeaurora.cn/pub/scm/linux/kernel/git/torvalds/linux.git``
@@ -51,7 +51,7 @@ make
 
 1. Make sure your containerd version is 1.4 or above.
 
-2. Get nydus snapshotter with erofs supported:
+2. Get nydus snapshotter with EROFS supported:
   ```shell
   # clone code
   git clone https://github.com/containerd/nydus-snapshotter.git
@@ -123,13 +123,21 @@ For more information on how to configure containerd to use nydus snapshotter ple
 
 ``` shell
 # pull nydus image
-contrib/ctr-remote/bin/ctr-remote images rpull docker.io/hsiangkao/ubuntu:20.04-rafs-v6-docker
+contrib/ctr-remote/bin/ctr-remote images rpull docker.io/hsiangkao/ubuntu:20.04-rafs-v6
 
 # run nydus image
-ctr run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6-docker ubuntu /bin/bash
+ctr run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6 ubuntu /bin/bash
 
 # remove nydus image
-ctr images rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6-docker
+ctr images rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6
+```
+
+Some RAFS v6 referenced images (in Zstd algorithms):
+```
+docker.io/hsiangkao/ubuntu:20.04-rafs-v6
+docker.io/hsiangkao/ubuntu:22.04-rafs-v6
+docker.io/hsiangkao/wordpress:5.7-rafs-v6
+docker.io/hsiangkao/wordpress:6.0-rafs-v6
 ```
 
 ## Try to convert a new image to RAFS v6
