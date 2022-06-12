@@ -182,25 +182,9 @@ fn default_http_scheme() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use nydus_api::http::RegistryOssConfig;
-
     #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
     #[test]
     fn test_default_http_scheme() {
-        assert_eq!(default_http_scheme(), "https");
-    }
-
-    #[test]
-    fn test_common_config() {
-        let config = RegistryOssConfig::default();
-
-        assert_eq!(config.timeout, 5);
-        assert_eq!(config.connect_timeout, 5);
-        assert_eq!(config.retry_limit, 0);
-        assert_eq!(config.proxy.check_interval, 5);
-        assert!(config.proxy.fallback);
-        assert_eq!(config.proxy.ping_url, "");
-        assert_eq!(config.proxy.url, "");
+        assert_eq!(super::default_http_scheme(), "https");
     }
 }

@@ -1021,4 +1021,17 @@ mod tests {
         assert!(msg.is_none());
         let _ = thread.join().unwrap();
     }
+
+    #[test]
+    fn test_common_config() {
+        let config = RegistryOssConfig::default();
+
+        assert_eq!(config.timeout, 5);
+        assert_eq!(config.connect_timeout, 5);
+        assert_eq!(config.retry_limit, 0);
+        assert_eq!(config.proxy.check_interval, 5);
+        assert!(config.proxy.fallback);
+        assert_eq!(config.proxy.ping_url, "");
+        assert_eq!(config.proxy.url, "");
+    }
 }
