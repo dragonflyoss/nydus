@@ -37,10 +37,17 @@ CONFIG_EROFS_FS_ONDEMAND=y
 2. Check out the latest nydus source code with \
 ``git clone https://github.com/dragonflyoss/image-service.git``
 
-3. Build nydusd with \
-``cargo build --target x86_64-unknown-linux-gnu --features=fusedev --release --target-dir target-fusedev --bin nydusd``
+3. Build nydusd and nydus-image with 
 
-4. Build ctr-remote with
+``` bash
+cd image-service
+make release
+```
+
+4. Copy the "nydus-image" binary file compiled in Step 3 into _$PATH_ e.g. /usr/local/bin with \
+``cp target-fusedev/release/nydus-image /usr/local/bin``
+
+5. Build ctr-remote with
 
 ``` bash
 cd contrib/ctr-remote
