@@ -22,6 +22,7 @@ pub mod digest;
 pub mod exec;
 pub mod inode_bitmap;
 pub mod metrics;
+pub mod mpmc;
 pub mod types;
 
 /// Round up and divide the value `n` by `d`.

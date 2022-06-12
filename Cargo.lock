@@ -1262,6 +1262,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "vmm-sys-util",
  "zstd",
 ]

@@ -3,11 +3,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -17,9 +16,9 @@ use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
-use tokio::sync::Notify;
 
 use nydus_api::http::BlobPrefetchConfig;
+use nydus_utils::mpmc::Channel;
 
 use crate::cache::{BlobCache, BlobIoRange};
 use crate::RAFS_MAX_CHUNK_SIZE;
@@ -78,74 +77,6 @@ impl AsyncPrefetchMessage {
         size: u64,
     ) -> Self {
         AsyncPrefetchMessage::BlobPrefetch(req_state, blob_cache, offset, size)
-    }
-}
-
-// Async implementation of Multi-Producer-Multi-Consumer channel.
-struct Channel<T> {
-    closed: AtomicBool,
-    notifier: Notify,
-    requests: Mutex<VecDeque<T>>,
-}
-
-impl<T> Channel<T> {
-    fn new() -> Self {
-        Channel {
-            closed: AtomicBool::new(false),
-            notifier: Notify::new(),
-            requests: Mutex::new(VecDeque::new()),
-        }
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.notifier.notify_waiters();
-    }
-
-    fn send(&self, msg: T) -> std::result::Result<(), T> {
-        if self.closed.load(Ordering::Acquire) {
-            Err(msg)
-        } else {
-            self.requests.lock().unwrap().push_back(msg);
-            self.notifier.notify_one();
-            Ok(())
-        }
-    }
-
-    fn try_recv(&self) -> Option<T> {
-        self.requests.lock().unwrap().pop_front()
-    }
-
-    async fn recv(&self) -> Result<T> {
-        let future = self.notifier.notified();
-        tokio::pin!(future);
-
-        loop {
-            // Make sure that no wakeup is lost if we get `None` from `try_recv`.
-            future.as_mut().enable();
-
-            if let Some(msg) = self.try_recv() {
-                return Ok(msg);
-            } else if self.closed.load(Ordering::Acquire) {
-                return Err(Error::new(ErrorKind::BrokenPipe, "channel has been closed"));
-            }
-
-            // Wait for a call to `notify_one`.
-            //
-            // This uses `.as_mut()` to avoid consuming the future,
-            // which lets us call `Pin::set` below.
-            future.as_mut().await;
-
-            // Reset the future in case another call to `try_recv` got the message before us.
-            future.set(self.notifier.notified());
-        }
-    }
-
-    fn flush_pending_prefetch_requests<F>(&self, f: F)
-    where
-        F: FnMut(&T) -> bool,
-    {
-        self.requests.lock().unwrap().retain(f);
     }
 }
 
@@ -210,7 +141,7 @@ impl AsyncWorkerMgr {
         self.prefetch_channel.close();
 
         while self.workers.load(Ordering::Relaxed) > 0 {
-            self.prefetch_channel.notifier.notify_waiters();
+            self.prefetch_channel.notify_waiters();
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -233,12 +164,12 @@ impl AsyncWorkerMgr {
         self.prefetch_channel
             .flush_pending_prefetch_requests(|t| match t {
                 AsyncPrefetchMessage::BlobPrefetch(state, blob, _, _) => {
-                    blob_id != blob.blob_id() || state.load(Ordering::Acquire) > 0
+                    blob_id == blob.blob_id() && state.load(Ordering::Acquire) == 0
                 }
                 AsyncPrefetchMessage::FsPrefetch(state, blob, _) => {
-                    blob_id != blob.blob_id() || state.load(Ordering::Acquire) > 0
+                    blob_id == blob.blob_id() && state.load(Ordering::Acquire) == 0
                 }
-                _ => true,
+                _ => false,
             });
     }
 
@@ -257,7 +188,7 @@ impl AsyncWorkerMgr {
 
     fn start_prefetch_workers(mgr: Arc<AsyncWorkerMgr>) -> Result<()> {
         // Hold the request queue to barrier all working threads.
-        let guard = mgr.prefetch_channel.requests.lock().unwrap();
+        let guard = mgr.prefetch_channel.lock_channel();
         for num in 0..mgr.prefetch_config.threads_count {
             let mgr2 = mgr.clone();
             let res = thread::Builder::new()
