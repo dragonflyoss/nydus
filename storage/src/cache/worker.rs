@@ -121,11 +121,8 @@ impl<T> Channel<T> {
         tokio::pin!(future);
 
         loop {
-            /*
-            // TODO: enable this after https://github.com/tokio-rs/tokio/issues/4745 has been fixed
             // Make sure that no wakeup is lost if we get `None` from `try_recv`.
             future.as_mut().enable();
-             */
 
             if let Some(msg) = self.try_recv() {
                 return Ok(msg);
