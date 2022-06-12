@@ -188,10 +188,10 @@ impl FileCacheEntry {
         let is_stargz = blob_info.is_stargz();
         let is_compressed = mgr.is_compressed || is_stargz;
         let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_stargz;
-        let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap && !is_stargz;
+        let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap;
 
         trace!(
-            "comp {} direct {} startgz {}",
+            "comp {} direct {} stargz {}",
             mgr.is_compressed,
             is_direct_chunkmap,
             is_stargz
@@ -248,7 +248,6 @@ impl FileCacheEntry {
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
         let chunk_map: Arc<dyn ChunkMap> = if mgr.disable_indexed_map
-            || blob_info.is_stargz()
             || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
         {
             direct_chunkmap = false;

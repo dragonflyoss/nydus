@@ -130,6 +130,7 @@ impl Blob {
             let (data, header) = Self::dump_meta_data_raw(0, &blob_ctx.blob_meta_info)?;
             writer.write_all(&data)?;
             writer.write_all(header.as_bytes())?;
+            blob_ctx.blob_meta_header = header;
         }
 
         Ok(())

@@ -323,9 +323,7 @@ impl BlobInfo {
 
     /// Check whether compression metadata is available.
     pub fn meta_ci_is_valid(&self) -> bool {
-        self.meta_ci_offset != 0
-            && self.meta_ci_compressed_size != 0
-            && self.meta_ci_uncompressed_size != 0
+        self.meta_ci_compressed_size != 0 && self.meta_ci_uncompressed_size != 0
     }
 
     /// Set the associated `File` object provided by Linux fscache subsystem.
