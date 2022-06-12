@@ -20,6 +20,12 @@ pub struct Channel<T> {
     requests: Mutex<VecDeque<T>>,
 }
 
+impl<T> Default for Channel<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> Channel<T> {
     /// Create a new instance of [`Channel`].
     pub fn new() -> Self {

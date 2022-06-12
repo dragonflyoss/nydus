@@ -22,4 +22,4 @@ url = "2.1.1"
 vmm-sys-util = "0.9.0"
 
 nydus-error = { version = "0.2.0", path = "../error" }
-nydus-utils = { version = "0.2.0", path = "../utils" }
+nydus-utils = { version = "0.3.0", path = "../utils" }
