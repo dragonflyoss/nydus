@@ -14,7 +14,7 @@ use rafs::metadata::{RafsInode, RafsMode, RafsSuper, RafsSuperMeta};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
-use crate::core::context::ArtifactStorage;
+use crate::core::context::{ArtifactStorage, RafsVersion};
 use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext};
 use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
 use crate::core::tree::{MetadataTreeBuilder, Tree};
@@ -183,7 +183,7 @@ impl Merger {
         }
 
         // Safe to unwrap because a valid version must exist
-        ctx.fs_version = fs_version.unwrap().into();
+        ctx.fs_version = RafsVersion::try_from(fs_version.unwrap())?;
         // Safe to unwrap because there is at least one source bootstrap.
         let mut tree = tree.unwrap();
         let mut bootstrap = Bootstrap::new()?;
