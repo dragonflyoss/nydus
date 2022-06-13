@@ -23,7 +23,7 @@ use vmm_sys_util::tempfile::TempFile;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
-use rafs::metadata::layout::RafsBlobTable;
+use rafs::metadata::layout::{RafsBlobTable, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use rafs::metadata::RafsSuperFlags;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWrite};
@@ -48,6 +48,18 @@ pub enum RafsVersion {
 impl Default for RafsVersion {
     fn default() -> Self {
         RafsVersion::V5
+    }
+}
+
+impl TryFrom<u32> for RafsVersion {
+    type Error = Error;
+    fn try_from(version: u32) -> Result<Self, Self::Error> {
+        if version == RAFS_SUPER_VERSION_V5 {
+            return Ok(RafsVersion::V5);
+        } else if version == RAFS_SUPER_VERSION_V6 {
+            return Ok(RafsVersion::V6);
+        }
+        Err(anyhow!("invalid version {}", version))
     }
 }
 
