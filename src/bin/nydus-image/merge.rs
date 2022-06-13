@@ -80,11 +80,22 @@ impl Merger {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
             }
         }
-        let mut fs_versions = HashSet::new();
+        let mut fs_version = None;
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
             let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
-            fs_versions.insert(rs.meta.version);
+
+            match fs_version {
+                Some(version) => {
+                    if version != rs.meta.version {
+                        bail!(
+                            "inconsistent fs version between layers, expected version {}",
+                            version
+                        );
+                    }
+                }
+                None => fs_version = Some(rs.meta.version),
+            }
             let current_flags = Flags::from_meta(&rs.meta);
             if let Some(flags) = &flags {
                 if flags != &current_flags {
@@ -171,10 +182,8 @@ impl Merger {
             }
         }
 
-        assert!(fs_versions.len() == 1);
-        for v in fs_versions.drain() {
-            ctx.fs_version = v.into();
-        }
+        // Safe to unwrap because a valid version must exist
+        ctx.fs_version = fs_version.unwrap().into();
         // Safe to unwrap because there is at least one source bootstrap.
         let mut tree = tree.unwrap();
         let mut bootstrap = Bootstrap::new()?;
