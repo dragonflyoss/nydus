@@ -59,7 +59,7 @@ nydus-app = { path = "app" }
 nydus-error = { path = "error" }
 nydus-rafs = { version = "0.1.0", path = "rafs", features = ["backend-registry", "backend-oss"] }
 nydus-storage = { version = "0.5.0", path = "storage" }
-nydus-utils = { version = "0.2.0", path = "utils" }
+nydus-utils = { version = "0.3.0", path = "utils" }
 blobfs = { path = "blobfs", features = ["virtiofs"], optional = true }
 
 [dev-dependencies]
