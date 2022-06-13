@@ -11,6 +11,7 @@ env:
   REGISTRY: ghcr.io
   ORGANIZATION: ${{ github.repository }}
   IMAGE_LIST_PATH: misc/top_images/image_list.txt
+  FSCK_PATCH_PATH: misc/top_images/fsck.patch
 
 jobs:
   convert-images:
@@ -24,19 +25,44 @@ jobs:
           wget https://github.com/dragonflyoss/image-service/releases/download/$NYDUS_VERSION/nydus-static-$NYDUS_VERSION-linux-amd64.tgz
           tar xzf nydus-static-$NYDUS_VERSION-linux-amd64.tgz
           sudo cp nydus-static/nydusify nydus-static/nydus-image /usr/local/bin/
+          sudo cp nydus-static/nydusd-fusedev /usr/local/bin/nydusd
       - name: Log in to the container registry
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Convert images
+      - name: Build fsck.erofs
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential git autotools-dev automake libtool pkg-config uuid-dev liblz4-dev
+          git clone https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git
+          cd erofs-utils && git apply ../${{ env.FSCK_PATCH_PATH }} && ./autogen.sh && ./configure && make && cd ..
+          sudo cp erofs-utils/fsck/fsck.erofs /usr/local/bin/
+      - name: Convert RAFS v5 images
         run: |
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
-            echo "converting $I:latest"
+            echo "converting $I:latest to $I:nydus-nightly-v5"
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
-                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-latest \
-                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5 \
+                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v5 \
+                 --fs-version 5
             sudo rm -rf ./tmp
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
+                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5
+          done
+      - name: Convert and check RAFS v6 images
+        run: |
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            echo "converting $I:latest to $I:nydus-nightly-v6"
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --source $I:latest \
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
+                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v6 \
+                 --fs-version 6
+            sudo rm -rf ./tmp
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
+                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6
+            sudo fsck.erofs -d9 output/nydus_bootstrap 
+            sudo rm -rf ./output
           done
