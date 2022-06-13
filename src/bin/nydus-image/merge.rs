@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 
 use nydus_utils::compress;
 use nydus_utils::digest::{self};
-use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsInode, RafsMode, RafsSuper, RafsSuperMeta};
 
 use crate::core::bootstrap::Bootstrap;
@@ -81,11 +80,11 @@ impl Merger {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
             }
         }
-
+        let mut fs_versions = HashSet::new();
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
             let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
-
+            fs_versions.insert(rs.meta.version);
             let current_flags = Flags::from_meta(&rs.meta);
             if let Some(flags) = &flags {
                 if flags != &current_flags {
@@ -127,36 +126,42 @@ impl Merger {
 
             if let Some(tree) = &mut tree {
                 let mut nodes = Vec::new();
-                rs.walk_dir(RAFS_ROOT_INODE, None, &mut |inode: &dyn RafsInode,
-                                                         path: &Path|
-                 -> Result<()> {
-                    let mut node = MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
-                        .context(format!("parse node from bootstrap {:?}", bootstrap_path))?;
-                    for chunk in &mut node.chunks {
-                        let origin_blob_index = chunk.inner.blob_index() as usize;
-                        // Set the blob index of chunk to real index in blob table of final bootstrap.
-                        chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
-                    }
-                    // Set node's layer index to distinguish same inode number (from bootstrap)
-                    // between different layers.
-                    node.layer_idx = u16::try_from(layer_idx).context(format!(
-                        "too many layers {}, limited to {}",
-                        layer_idx,
-                        u16::MAX
-                    ))?;
-                    node.overlay = Overlay::UpperAddition;
-                    match node.whiteout_type(WhiteoutSpec::Oci) {
-                        Some(_) => {
-                            // Insert whiteouts at the head, so they will be handled first when
-                            // applying to lower layer.
-                            nodes.insert(0, node);
+                rs.walk_dir(
+                    rs.superblock.root_ino(),
+                    None,
+                    &mut |inode: &dyn RafsInode, path: &Path| -> Result<()> {
+                        let mut node =
+                            MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
+                                .context(format!(
+                                    "parse node from bootstrap {:?}",
+                                    bootstrap_path
+                                ))?;
+                        for chunk in &mut node.chunks {
+                            let origin_blob_index = chunk.inner.blob_index() as usize;
+                            // Set the blob index of chunk to real index in blob table of final bootstrap.
+                            chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
                         }
-                        _ => {
-                            nodes.push(node);
+                        // Set node's layer index to distinguish same inode number (from bootstrap)
+                        // between different layers.
+                        node.layer_idx = u16::try_from(layer_idx).context(format!(
+                            "too many layers {}, limited to {}",
+                            layer_idx,
+                            u16::MAX
+                        ))?;
+                        node.overlay = Overlay::UpperAddition;
+                        match node.whiteout_type(WhiteoutSpec::Oci) {
+                            Some(_) => {
+                                // Insert whiteouts at the head, so they will be handled first when
+                                // applying to lower layer.
+                                nodes.insert(0, node);
+                            }
+                            _ => {
+                                nodes.push(node);
+                            }
                         }
-                    }
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 for node in &nodes {
                     tree.apply(node, true, WhiteoutSpec::Oci)?;
                 }
@@ -166,6 +171,10 @@ impl Merger {
             }
         }
 
+        assert!(fs_versions.len() == 1);
+        for v in fs_versions.drain() {
+            ctx.fs_version = v.into();
+        }
         // Safe to unwrap because there is at least one source bootstrap.
         let mut tree = tree.unwrap();
         let mut bootstrap = Bootstrap::new()?;

@@ -24,6 +24,7 @@ use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use rafs::metadata::layout::RafsBlobTable;
+use rafs::metadata::layout::{RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use rafs::metadata::RafsSuperFlags;
 use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWrite};
@@ -47,6 +48,17 @@ pub enum RafsVersion {
 
 impl Default for RafsVersion {
     fn default() -> Self {
+        RafsVersion::V5
+    }
+}
+
+impl From<u32> for RafsVersion {
+    fn from(version: u32) -> Self {
+        if version == RAFS_SUPER_VERSION_V5 {
+            return RafsVersion::V5;
+        } else if version == RAFS_SUPER_VERSION_V6 {
+            return RafsVersion::V6;
+        }
         RafsVersion::V5
     }
 }
