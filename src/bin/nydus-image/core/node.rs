@@ -719,7 +719,7 @@ impl Node {
 
                 chunk_cache.add_chunk(chunk.inner.clone());
             }
-
+            // Dump inode
             f_bootstrap
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for dir inode")?;
@@ -732,6 +732,7 @@ impl Node {
                     .context("failed to dump xattr to bootstrap")?;
             }
 
+            // Dump chunk indexes
             let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
             let chunk_off = align_offset(self.offset + self.size_with_xattr() as u64, unit);
             f_bootstrap
@@ -746,6 +747,7 @@ impl Node {
             // TODO: check whether 'i_u' is used at all in case of
             // inline symlink.
             inode.set_u((data_off / EROFS_BLOCK_SIZE) as u32);
+            // Dump inode
             f_bootstrap
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for symlink inode")?;
@@ -777,6 +779,7 @@ impl Node {
                     .context("filed to store symlink")?;
             }
         } else {
+            // Dump inode
             f_bootstrap
                 .seek(SeekFrom::Start(self.offset))
                 .context("failed seek for dir inode")?;
