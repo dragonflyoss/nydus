@@ -157,7 +157,6 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 		BackendType:    nydusify.backendType,
 		BackendConfig:  nydusify.backendConfig,
 		ExpectedArch:   "amd64",
-		FsVersion:      nydusify.fsVersion,
 	})
 	assert.Nil(t, err)
 
