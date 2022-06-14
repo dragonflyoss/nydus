@@ -194,6 +194,7 @@ fn integration_test_compact() {
     let _ = exec(
         format!("cp -a tests/texture/repeatable/* {:?}", work_dir).as_str(),
         false,
+        b"",
     );
 
     for mode in vec!["direct", "cached"].iter() {
@@ -241,6 +242,7 @@ fn integration_test_stargz() {
     let _ = exec(
         format!("cp -a tests/texture/stargz/* {:?}", work_dir).as_str(),
         false,
+        b"",
     )
     .unwrap();
 
@@ -260,5 +262,29 @@ fn integration_test_stargz() {
 
     nydusd.start(Some("bootstrap-overlay"), "mnt");
     nydusd.check("directory/overlay.result", "mnt");
+    nydusd.umount("mnt");
+}
+
+#[test]
+fn integration_test_empty_file_with_prefetch() {
+    info!("\n\n==================== testing run: prefetch with empty file test");
+
+    let tmp_dir = TempDir::new().unwrap();
+    let work_dir = tmp_dir.as_path().to_path_buf();
+    let mut builder = builder::new(&work_dir, "oci");
+
+    builder.build_empty_file_with_prefetch();
+
+    let nydusd = nydusd::new(
+        &work_dir,
+        true,
+        true,
+        "direct".parse().unwrap(),
+        "api.sock".into(),
+        false,
+    );
+
+    nydusd.start(Some("bootstrap-empty_file"), "mnt");
+    nydusd.check("empty/result", "mnt");
     nydusd.umount("mnt");
 }

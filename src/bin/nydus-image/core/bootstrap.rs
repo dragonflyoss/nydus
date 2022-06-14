@@ -552,16 +552,18 @@ impl Bootstrap {
 
         let blob_table_entries = blob_table.entries.len();
 
-        let (prefetch_table_offset, prefetch_table_size) = if ctx.prefetch.len() > 0 {
-            // Prefetch table is very close to blob devices table
-            let offset = blob_table_offset + blob_table_size;
-            // Each prefetched file has is nid of `u32` filled into prefetch table.
-            let size = ctx.prefetch.len() * size_of::<u32>() as u32;
-            trace!("prefetch table locates at offset {} size {}", offset, size);
-            (offset, size)
-        } else {
-            (0, 0)
-        };
+        let (prefetch_table_offset, prefetch_table_size) =
+            // If blob_table_size equal to 0, there is no prefetch.
+            if ctx.prefetch.len() > 0 && blob_table_size > 0 {
+                // Prefetch table is very close to blob devices table
+                let offset = blob_table_offset + blob_table_size;
+                // Each prefetched file has is nid of `u32` filled into prefetch table.
+                let size = ctx.prefetch.len() * size_of::<u32>() as u32;
+                trace!("prefetch table locates at offset {} size {}", offset, size);
+                (offset, size)
+            } else {
+                (0, 0)
+            };
 
         // Make the superblock's meta_blkaddr one block ahead of the inode table,
         // to avoid using 0 as root nid.

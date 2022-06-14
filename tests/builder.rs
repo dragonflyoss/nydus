@@ -206,6 +206,7 @@ impl<'a> Builder<'a> {
             )
             .as_str(),
             false,
+            b""
         ).unwrap();
     }
 
@@ -226,6 +227,7 @@ impl<'a> Builder<'a> {
             )
             .as_str(),
             false,
+            b"",
         ).unwrap();
     }
 
@@ -240,6 +242,7 @@ impl<'a> Builder<'a> {
             )
             .as_str(),
             false,
+            b"",
         ).unwrap();
     }
 
@@ -255,6 +258,7 @@ impl<'a> Builder<'a> {
             )
             .as_str(),
             false,
+            b"",
         ).unwrap();
     }
 
@@ -281,6 +285,28 @@ impl<'a> Builder<'a> {
             )
             .as_str(),
             false,
+            b"",
+        ).unwrap();
+    }
+
+    pub fn build_empty_file_with_prefetch(&mut self) {
+        let dir = self.work_dir.join("empty_file");
+        self.create_dir(&dir);
+        self.create_dir(&self.work_dir.join("blobs"));
+        self.create_file(&dir.join("empty-file"), b"");
+        exec(
+            format!(
+                "{:?} create --bootstrap {:?} --prefetch-policy fs --backend-type localfs --backend-config '{{\"blob_file\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
+                self.builder,
+                self.work_dir.join("bootstrap-empty_file"),
+                self.work_dir.join("smoke-localfs-blob"),
+                "lz4_block",
+                self.whiteout_spec,
+                dir,
+            )
+            .as_str(),
+            false,
+            b"/",
         ).unwrap();
     }
 }
