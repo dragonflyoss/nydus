@@ -531,7 +531,12 @@ impl Bootstrap {
         for entry in blob_table.entries.iter() {
             let mut devslot = RafsV6Device::new();
             // blob id is String, which is processed by sha256.finalize().
-            debug_assert!(entry.blob_id().len() == 64);
+            if entry.blob_id().len() != 64 {
+                bail!(format!(
+                    "only blob id of length 64 is supported, blob id {:?}",
+                    entry.blob_id()
+                ));
+            }
             devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
             devslot.set_blocks(entry.uncompressed_size());
             devslot.set_mapped_blkaddr(0);

@@ -81,6 +81,7 @@ impl Merger {
             }
         }
         let mut fs_version = None;
+        let mut chunk_size = None;
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
             let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
@@ -129,6 +130,7 @@ impl Merger {
                     // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
                     // runtime, should change it to the hash of whole tar blob.
                     blob_ctx.blob_id = blob_hash.to_owned();
+                    chunk_size = Some(blob_ctx.chunk_size);
                     parent_blob_added = true;
                 }
                 blob_idx_map.push(blob_mgr.len() as u32);
@@ -186,6 +188,9 @@ impl Merger {
         ctx.fs_version = RafsVersion::try_from(fs_version.unwrap())?;
         // Safe to unwrap because there is at least one source bootstrap.
         let mut tree = tree.unwrap();
+        if let Some(chunk_size) = chunk_size {
+            ctx.chunk_size = chunk_size;
+        }
         let mut bootstrap = Bootstrap::new()?;
         let storage = ArtifactStorage::SingleFile(target.clone());
         let mut bootstrap_ctx = BootstrapContext::new(Some(storage), false, false)?;
