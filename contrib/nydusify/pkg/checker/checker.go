@@ -108,10 +108,9 @@ func (checker *Checker) Check(ctx context.Context) error {
 
 	mode := "cached"
 	digestValidate := true
-	if checker.FsVersion == "6" {
+	if checker.Opt.FsVersion == "6" {
 		mode = "direct"
 		digestValidate = false
-
 	}
 
 	rules := []rule.Rule{
