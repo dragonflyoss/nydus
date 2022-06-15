@@ -2,9 +2,11 @@
 
 A collection of utilities to support [Nydus Image Service](https://nydus.dev/).
 It provides:
-- LZ4 and zstd compression algorithms
+- Asynchronous Multi-Producer Multi-Consumer channel
 - Blake3 and SHA256 message digest algorithms
+- LZ4 and zstd compression algorithms
 - `InodeBitmap`: a bitmap implementation to manage inode numbers
+- Per-thread async runtime of type tokio current thread Runtime.
 - exec() helper
 - metric helpers
 

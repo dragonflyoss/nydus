@@ -2,7 +2,7 @@
 name = "nydus-app"
 version = "0.2.0"
 authors = ["The Nydus Developers"]
-description = "Application framework and utilities for Nydus"
+description = "Application framework for Nydus Image Service"
 readme = "README.md"
 repository = "https://github.com/dragonflyoss/image-service"
 license = "Apache-2.0 OR BSD-3-Clause"
