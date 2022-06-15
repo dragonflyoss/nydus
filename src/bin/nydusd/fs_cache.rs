@@ -4,18 +4,22 @@
 
 //! Handler to cooperate with Linux fscache subsystem for blob cache.
 
-use std::cmp;
 use std::collections::hash_map::Entry::Vacant;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::convert::TryFrom;
-use std::fs::{File, OpenOptions};
+use std::ffi::CString;
+use std::fs::{DirEntry, File, OpenOptions};
 use std::io::{Error, ErrorKind, Result, Write};
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+use std::time::SystemTime;
+use std::{cmp, fs};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -64,6 +68,68 @@ impl TryFrom<u32> for FsCacheOpCode {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum FsCacheObjType {
+    Index,
+    Data,
+    Special,
+    Intermediate,
+    Unknown,
+}
+
+impl FsCacheObjType {
+    pub fn get_fscache_objtype(filename: &str) -> FsCacheObjType {
+        match filename.chars().next().unwrap() {
+            'I' | 'J' => Self::Index,
+            'D' | 'E' => Self::Data,
+            'S' | 'T' => Self::Special,
+            '+' | '@' => Self::Intermediate,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+struct DirEntryWrapper {
+    atime: SystemTime,
+    filepath: PathBuf,
+    objtype: FsCacheObjType,
+    dentry: DirEntry,
+}
+
+impl DirEntryWrapper {
+    pub fn new(
+        filepath: PathBuf,
+        atime: SystemTime,
+        objtype: FsCacheObjType,
+        dentry: DirEntry,
+    ) -> Self {
+        Self {
+            atime,
+            filepath,
+            objtype,
+            dentry,
+        }
+    }
+}
+
+impl PartialEq for DirEntryWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.atime == other.atime
+    }
+}
+impl Eq for DirEntryWrapper {}
+
+// Reverse cmp logic to turn max-heap into min-heap
+impl PartialOrd for DirEntryWrapper {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(other.atime.cmp(&self.atime))
+    }
+}
+impl Ord for DirEntryWrapper {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        other.atime.cmp(&self.atime)
+    }
+}
 /// Common header for request messages.
 #[repr(C)]
 #[derive(Debug, Eq, PartialEq)]
@@ -228,6 +294,9 @@ pub struct FsCacheHandler {
     state: Arc<Mutex<FsCacheState>>,
     poller: Mutex<Poll>,
     waker: Arc<Waker>,
+    dir: PathBuf,
+    cache_dir: PathBuf,
+    graveyard_dir: PathBuf,
 }
 
 impl FsCacheHandler {
@@ -244,7 +313,6 @@ impl FsCacheHandler {
             dir,
             tag.unwrap_or("<None>")
         );
-
         let mut file = OpenOptions::new()
             .write(true)
             .read(true)
@@ -259,7 +327,7 @@ impl FsCacheHandler {
             .register(
                 &mut SourceFd(&file.as_raw_fd()),
                 Token(TOKEN_EVENT_FSCACHE),
-                Interest::READABLE,
+                Interest::READABLE | Interest::WRITABLE,
             )
             .map_err(|_e| eother!("fscache: failed to register fd for service"))?;
 
@@ -279,6 +347,9 @@ impl FsCacheHandler {
             blob_cache_mgr,
         };
 
+        let dir = PathBuf::new().join(dir);
+        let cache_dir = dir.join("cache");
+        let graveyard_dir = dir.join("graveyard");
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
             barrier: Barrier::new(threads + 1),
@@ -287,6 +358,9 @@ impl FsCacheHandler {
             state: Arc::new(Mutex::new(state)),
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
+            dir,
+            cache_dir,
+            graveyard_dir,
         })
     }
 
@@ -311,7 +385,11 @@ impl FsCacheHandler {
     pub fn run_loop(&self) -> Result<()> {
         let mut events = Events::with_capacity(64);
         let mut buf = vec![0u8; MIN_DATA_BUF_SIZE];
-
+        let mut counter = 0usize;
+        let mut scan = false;
+        let mut cull = false;
+        let mut scanned = 0usize;
+        let mut file_atime_pq = BinaryHeap::new();
         loop {
             match self.poller.lock().unwrap().poll(&mut events, None) {
                 Ok(_) => {}
@@ -321,7 +399,6 @@ impl FsCacheHandler {
                     return Err(e);
                 }
             }
-
             for event in events.iter() {
                 if event.is_error() {
                     error!("fscache: got error event from poller");
@@ -331,8 +408,30 @@ impl FsCacheHandler {
                     if event.is_readable() {
                         self.handle_requests(&mut buf)?;
                     }
-                } else if event.is_readable()
-                    && event.token() == Token(TOKEN_EVENT_WAKER)
+                    if event.is_writable() {
+                        scan = true;
+                        cull = true;
+                    }
+                    counter += 1;
+                    if scan || counter >= 1000 {
+                        if !cull {
+                            cull = self.should_cull();
+                        }
+                        if file_atime_pq.len() < scanned / 2 + 2 {
+                            file_atime_pq = self.scan_cache_dir(None, None)?;
+                            scanned = file_atime_pq.len();
+                        }
+                        scan = false;
+                        counter = 0;
+                    }
+
+                    if cull {
+                        self.handle_culls(&mut file_atime_pq, scanned / 10)?;
+                        self.reap_graveyard()?;
+                        cull = self.should_cull();
+                    }
+                } else if event.token() == Token(TOKEN_EVENT_WAKER)
+                    && event.is_readable()
                     && !self.active.load(Ordering::Acquire)
                 {
                     // Notify next worker to exit.
@@ -437,6 +536,188 @@ impl FsCacheHandler {
             unsafe { libc::close(msg.fd as i32) };
             format!("copen {},{}", hdr.msg_id, -libc::EALREADY)
         }
+    }
+
+    fn should_cull(&self) -> bool {
+        if let Ok(st) = self.get_culling_state() {
+            let (free_blocks, free_files, total_blocks, total_files) =
+                (st.f_bfree, st.f_ffree, st.f_blocks, st.f_files);
+            if free_blocks <= (0.05 * total_blocks as f64) as u64
+                || free_files <= (0.05 * total_files as f64) as u64
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn scan_cache_dir(
+        &self,
+        file_atime_pq: Option<BinaryHeap<DirEntryWrapper>>,
+        path: Option<PathBuf>,
+    ) -> Result<BinaryHeap<DirEntryWrapper>> {
+        let entries = fs::read_dir(self.dir.clone())?;
+        let mut file_atime_pq = file_atime_pq.unwrap_or_default();
+        let path = path.unwrap_or_else(|| self.cache_dir.clone());
+        for entry in entries {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            let filetype = metadata.file_type();
+            let filename = entry.file_name().to_str().unwrap().to_string();
+            let objtype = FsCacheObjType::get_fscache_objtype(&filename);
+            // If objtype is not valid, skip this file.
+            // If file is not dir but the objtype is Index or Intermediate, skip this file.
+            // if neither directory nor regular file, skip this file.
+            if objtype == FsCacheObjType::Unknown
+                || (!filetype.is_dir()
+                    && (!filetype.is_file()
+                        || objtype == FsCacheObjType::Index
+                        || objtype == FsCacheObjType::Intermediate))
+            {
+                self.destroy_unexpected_object(entry)?;
+                continue;
+            }
+
+            if entry.file_type()?.is_dir() {
+                file_atime_pq =
+                    self.scan_cache_dir(Some(file_atime_pq), Some(path.join(filename)))?;
+            }
+            file_atime_pq.push(DirEntryWrapper::new(
+                entry.path(),
+                entry.metadata()?.accessed()?,
+                objtype,
+                entry,
+            ));
+        }
+        Ok(file_atime_pq)
+    }
+
+    fn handle_culls(
+        &self,
+        file_atime_pq: &mut BinaryHeap<DirEntryWrapper>,
+        cull_count: usize,
+    ) -> Result<()> {
+        for _ in 0..cull_count {
+            if let Some(entry) = file_atime_pq.pop() {
+                let metadata = entry.dentry.metadata()?;
+                // If access time changed, skip it.
+                if metadata.accessed()? != entry.atime {
+                    continue;
+                }
+                let path = entry.dentry.path();
+                let mut inuse = true;
+                match entry.objtype {
+                    // For index and intermediate, check if it is in use,
+                    // by checking if it has child.
+                    FsCacheObjType::Index => {
+                        // For index directory, if no child, cull it.
+                        // However, the cachefiles cull dir by move it to the graveyard.
+                        // We daemon need to mannually clean it.
+                        if let Ok(mut entries) = fs::read_dir(path) {
+                            if entries.next().is_none() {
+                                inuse = false;
+                            }
+                        }
+                    }
+                    FsCacheObjType::Intermediate => {
+                        // For intermediate directory, if no child, unlink it.
+                        if let Ok(mut entries) = fs::read_dir(path.clone()) {
+                            if entries.next().is_none() {
+                                inuse = false;
+                            }
+                        }
+                        if !inuse {
+                            fs::remove_dir(path)?;
+                            continue;
+                        }
+                    }
+                    FsCacheObjType::Data | FsCacheObjType::Special => {
+                        inuse = self.check_if_in_use(&entry.filepath);
+                    }
+                    _ => {
+                        // TODO this should be an error
+                    }
+                }
+                if !inuse {
+                    self.cull_file(entry.filepath.as_path());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // fn cull_files(&self, relative_dir: Option<&str>) -> Result<()> {
+    //     if let Some(dir) = relative_dir {
+    //         match FsCacheObjType::get_fscache_objtype(dir) {
+    //             FsCacheObjType::ObjTypeIndex => {
+    //                 self.cull_files(Some(dir))?;
+    //             },
+    //             FsCacheObjType::ObjTypeIntermediate => {
+    //                 self.cull_files(Some(dir.trim_end_matches('/')))?;
+    //             },
+    //             _ => {
+    //                 return
+    //             }
+    //         }
+    //         let full_dir = self.cache_dir.join(dir);
+    //         if !dir.exists() {
+    //             return Ok(());
+    //         }
+    //     } else {
+    //         // A new round of cull, starts from the cache root directory
+    //         let dir = self.cache_dir.clone();
+    //         if !dir.exists() {
+    //             return Ok(());
+    //         }
+    //     }
+    // }
+
+    fn cull_file(&self, filename: &Path) {
+        let cull_msg = format!("cull {}", filename.as_os_str().to_str().unwrap());
+        let ret = unsafe {
+            libc::write(
+                self.file.as_raw_fd(),
+                cull_msg.as_bytes().as_ptr() as *const u8 as *const libc::c_void,
+                cull_msg.len(),
+            )
+        };
+        if ret as usize != cull_msg.len() {
+            warn!(
+                "fscache: failed to send cull message \"{}\", {}",
+                cull_msg,
+                Error::last_os_error()
+            );
+        }
+    }
+
+    fn check_if_in_use(&self, filepath: &Path) -> bool {
+        let inuse_msg = format!("inuse {}", filepath.as_os_str().to_str().unwrap());
+        let ret = unsafe {
+            libc::write(
+                self.file.as_raw_fd(),
+                inuse_msg.as_bytes().as_ptr() as *const u8 as *const libc::c_void,
+                inuse_msg.len(),
+            )
+        };
+        if ret < 0 {
+            if let Some(err) = Error::last_os_error().raw_os_error() {
+                if err == libc::EBUSY {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn destroy_unexpected_object(&self, entry: DirEntry) -> Result<()> {
+        if entry.metadata()?.is_dir() {
+            // If it is a directory, move it and its contents to graveyard.
+            fs::rename(entry.path(), self.graveyard_dir.join(entry.file_name()))?;
+        } else {
+            // Else just remove it.
+            fs::remove_file(entry.path())?;
+        }
+        Ok(())
     }
 
     fn do_prefetch(&self, config: &BlobCacheConfigDataBlob, blob: Arc<dyn BlobCache>) {
@@ -676,6 +957,50 @@ impl FsCacheHandler {
     fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
         self.get_state().blob_cache_mgr.get_config(key)
     }
+
+    fn get_culling_state(&self) -> Result<libc::statvfs64> {
+        // Safe because this is a constant value and a valid C string.
+        let pathname = CString::new(self.cache_dir.as_os_str().to_str().unwrap().as_bytes())
+            .map_err(|_| Error::from_raw_os_error(libc::EINVAL))?;
+        let mut st = MaybeUninit::<libc::statvfs64>::zeroed();
+
+        // Safe because the kernel will only write data in `st` and we check the return value.
+        let res = unsafe { libc::statvfs64(pathname.as_ptr(), st.as_mut_ptr()) };
+        if res >= 0 {
+            // Safe because the kernel guarantees that the struct is now fully initialized.
+            Ok(unsafe { st.assume_init() })
+        } else {
+            Err(Error::last_os_error())
+        }
+    }
+
+    fn reap_graveyard(&self) -> Result<()> {
+        for entry in fs::read_dir(&self.graveyard_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    // fn reap_graveyard_subdir(dir: &PathBuf) -> Result<()> {
+    //     // fs::remove_dir_all
+    //     for entry in fs::read_dir(dir)? {
+    //         let entry = entry?;
+    //         let path = entry.path();
+    //         if entry.file_type()?.is_dir() {
+    //             Self::reap_graveyard_subdir(&path)?;
+    //             fs::remove_dir(path)?;
+    //         } else {
+    //             fs::remove_file(path)?;
+    //         }
+    //     }
+    //     Ok(())
+    // }
 }
 
 impl AsRawFd for FsCacheHandler {
