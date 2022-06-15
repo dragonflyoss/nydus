@@ -21,8 +21,13 @@ impl MockBlobReader {
     }
 }
 
+#[async_trait::async_trait]
 impl BlobReader for MockBlobReader {
-    fn try_read(&self, buf: &mut [u8], offset: u64) -> storage::backend::BackendResult<usize> {
+    async fn async_try_read(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> storage::backend::BackendResult<usize> {
         let offset = offset as usize;
         if offset >= self.data.len() {
             return Ok(0_usize);

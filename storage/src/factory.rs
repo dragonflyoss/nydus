@@ -80,7 +80,7 @@ impl BlobFactory {
     }
 
     /// Create a blob cache object for a blob with specified configuration.
-    pub fn new_blob_cache(
+    pub async fn async_new_blob_cache(
         &self,
         config: &Arc<FactoryConfig>,
         blob_info: &Arc<BlobInfo>,
@@ -89,29 +89,33 @@ impl BlobFactory {
             config: config.clone(),
         };
         // Use the existing blob cache manager if there's one with the same configuration.
-        if let Some(mgr) = self.mgrs.lock().unwrap().get(&key) {
-            return mgr.get_blob_cache(blob_info);
+        let mgr = self.mgrs.lock().unwrap().get(&key).cloned();
+        if let Some(mgr) = mgr {
+            return mgr.async_get_blob_cache(blob_info).await;
         }
 
-        let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
+        let backend =
+            Self::async_new_backend(key.config.backend.clone(), blob_info.blob_id()).await?;
         let mgr = match key.config.cache.cache_type.as_str() {
             "blobcache" => {
-                let mgr = FileCacheMgr::new(
+                let mgr = FileCacheMgr::async_new(
                     config.cache.clone(),
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
-                )?;
+                )
+                .await?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
             "fscache" => {
-                let mgr = FsCacheMgr::new(
+                let mgr = FsCacheMgr::async_new(
                     config.cache.clone(),
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
-                )?;
+                )
+                .await?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
@@ -122,10 +126,12 @@ impl BlobFactory {
             }
         };
 
-        let mut guard = self.mgrs.lock().unwrap();
-        let mgr = guard.entry(key).or_insert_with(|| mgr);
+        let mgr = {
+            let mut guard = self.mgrs.lock().unwrap();
+            guard.entry(key).or_insert_with(|| mgr).clone()
+        };
 
-        mgr.get_blob_cache(blob_info)
+        mgr.async_get_blob_cache(blob_info).await
     }
 
     /// Garbage-collect unused blob cache managers and blob caches.
@@ -165,7 +171,7 @@ impl BlobFactory {
 
     /// Create a storage backend for the blob with id `blob_id`.
     #[allow(unused_variables)]
-    pub fn new_backend(
+    pub async fn async_new_backend(
         config: BackendConfig,
         blob_id: &str,
     ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {

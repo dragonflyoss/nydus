@@ -402,6 +402,7 @@ impl RegistryReader {
         let mut resp;
         let cached_redirect = self.state.cached_redirect.get(&self.blob_id);
 
+        // TODO: async io
         if let Some(cached_redirect) = cached_redirect {
             resp = self
                 .connection
@@ -490,6 +491,7 @@ impl RegistryReader {
     }
 }
 
+#[async_trait::async_trait]
 impl BlobReader for RegistryReader {
     fn blob_size(&self) -> BackendResult<u64> {
         let url = self
@@ -510,7 +512,7 @@ impl BlobReader for RegistryReader {
             .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?)
     }
 
-    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    async fn async_try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         self._try_read(buf, offset, true)
             .map_err(BackendError::Registry)
     }

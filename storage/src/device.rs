@@ -33,6 +33,7 @@ use fuse_backend_rs::transport::{FileReadWriteVolatile, FileVolatileSlice};
 use vm_memory::Bytes;
 
 use nydus_api::http::FactoryConfig;
+use nydus_utils::async_helper::with_runtime;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 
@@ -799,7 +800,8 @@ pub type BlobFetchRequest = BlobPrefetchRequest;
 /// - call `fetch()` to ensure blob range [offset, offset + size) has been cached.
 /// - call `as_raw_fd()` to get the underlying file descriptor for direct access.
 /// - call File::read(buf, offset + `base_offset()`, size) to read data from underlying cache file.
-pub trait BlobObject: AsRawFd {
+#[async_trait::async_trait]
+pub trait BlobObject: Send + Sync + AsRawFd {
     /// Get base offset to read blob from the fd returned by `as_raw_fd()`.
     fn base_offset(&self) -> u64;
 
@@ -807,14 +809,14 @@ pub trait BlobObject: AsRawFd {
     fn is_all_data_ready(&self) -> bool;
 
     /// Fetch data from storage backend covering compressed blob range [offset, offset + size).
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+    async fn async_fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<usize>;
 
     /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
     /// for use.
-    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+    async fn async_fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<usize>;
 
     /// Fetch data for specified chunks from storage backend.
-    fn fetch_chunks(&self, range: &BlobIoRange) -> io::Result<usize>;
+    async fn async_fetch_chunks(&self, range: &BlobIoRange) -> io::Result<usize>;
 }
 
 /// A wrapping object over an underlying [BlobCache] object.
@@ -830,13 +832,13 @@ pub struct BlobDevice {
 
 impl BlobDevice {
     /// Create new blob device instance.
-    pub fn new(
+    pub async fn async_new(
         config: &Arc<FactoryConfig>,
         blob_infos: &[Arc<BlobInfo>],
     ) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            let blob = BLOB_FACTORY.async_new_blob_cache(config, blob_info).await?;
             blobs.push(blob);
         }
 
@@ -850,7 +852,7 @@ impl BlobDevice {
     ///
     /// The `update()` method switch a new storage backend object according to the configuration
     /// information passed in.
-    pub fn update(
+    pub async fn async_update(
         &self,
         config: &Arc<FactoryConfig>,
         blob_infos: &[Arc<BlobInfo>],
@@ -861,7 +863,7 @@ impl BlobDevice {
         }
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            let blob = BLOB_FACTORY.async_new_blob_cache(config, blob_info).await?;
             blobs.push(blob);
         }
 
@@ -905,6 +907,7 @@ impl BlobDevice {
             let mut f = BlobDeviceIoVec::new(self, desc);
             // The `off` parameter to w.write_from() is actually ignored by
             // BlobV5IoVec::read_vectored_at_volatile()
+            // TODO: async io
             w.write_from(&mut f, size, 0)
         }
     }
@@ -984,7 +987,7 @@ impl BlobDevice {
     }
 
     /// fetch specified blob data in a synchronous way.
-    pub fn fetch_range(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
+    pub async fn async_fetch_range(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
         for req in prefetches {
             if req.len == 0 {
                 continue;
@@ -998,7 +1001,8 @@ impl BlobDevice {
                 );
                 if let Some(obj) = cache.clone().get_blob_object() {
                     let _ = obj
-                        .fetch_range_uncompressed(req.offset as u64, req.len as u64)
+                        .async_fetch_range_uncompressed(req.offset as u64, req.len as u64)
+                        .await
                         .map_err(|e| {
                             warn!(
                                 "Failed to prefetch data from blob {}, offset {}, size {}, {}",
@@ -1088,7 +1092,11 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         if let Some(index) = self.iovec.get_target_blob_index() {
             let blobs = &self.dev.blobs.load();
             if (index as usize) < blobs.len() {
-                return blobs[index as usize].read(self.iovec, buffers);
+                return with_runtime(|rt| {
+                    rt.block_on(async {
+                        blobs[index as usize].async_read(self.iovec, buffers).await
+                    })
+                });
             }
         }
 

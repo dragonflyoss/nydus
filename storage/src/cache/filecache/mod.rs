@@ -41,7 +41,7 @@ pub struct FileCacheMgr {
 
 impl FileCacheMgr {
     /// Create a new instance of `FileCacheMgr`.
-    pub fn new(
+    pub async fn async_new(
         config: CacheConfig,
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
@@ -76,18 +76,19 @@ impl FileCacheMgr {
 
     // Create a file cache entry for the specified blob object if not present, otherwise
     // return the existing one.
-    fn get_or_create_cache_entry(&self, blob: &Arc<BlobInfo>) -> Result<Arc<FileCacheEntry>> {
+    async fn get_or_create_cache_entry(&self, blob: &Arc<BlobInfo>) -> Result<Arc<FileCacheEntry>> {
         if let Some(entry) = self.get(blob) {
             return Ok(entry);
         }
 
-        let entry = FileCacheEntry::new_file_cache(
+        let entry = FileCacheEntry::async_new_file_cache(
             self,
             blob.clone(),
             self.prefetch_config.clone(),
             self.runtime.clone(),
             self.worker_mgr.clone(),
-        )?;
+        )
+        .await?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
         if let Some(entry) = guard.get(blob.blob_id()) {
@@ -104,6 +105,7 @@ impl FileCacheMgr {
     }
 }
 
+#[async_trait::async_trait]
 impl BlobCacheMgr for FileCacheMgr {
     fn init(&self) -> Result<()> {
         AsyncWorkerMgr::start(self.worker_mgr.clone())
@@ -149,8 +151,9 @@ impl BlobCacheMgr for FileCacheMgr {
         self.backend.as_ref()
     }
 
-    fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
+    async fn async_get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         self.get_or_create_cache_entry(blob_info)
+            .await
             .map(|v| v as Arc<dyn BlobCache>)
     }
 }
@@ -162,7 +165,7 @@ impl Drop for FileCacheMgr {
 }
 
 impl FileCacheEntry {
-    fn new_file_cache(
+    async fn async_new_file_cache(
         mgr: &FileCacheMgr,
         blob_info: Arc<BlobInfo>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -205,11 +208,9 @@ impl FileCacheEntry {
                 assert_eq!(file_size, blob_info.uncompressed_size());
             }
 
-            Some(Arc::new(BlobMetaInfo::new(
-                &blob_file_path,
-                &blob_info,
-                Some(&reader),
-            )?))
+            Some(Arc::new(
+                BlobMetaInfo::async_new(&blob_file_path, &blob_info, Some(&reader)).await?,
+            ))
         } else {
             None
         };

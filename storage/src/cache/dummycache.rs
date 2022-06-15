@@ -44,6 +44,7 @@ struct DummyCache {
     validate: bool,
 }
 
+#[async_trait::async_trait]
 impl BlobCache for DummyCache {
     fn blob_id(&self) -> &str {
         &self.blob_id
@@ -114,7 +115,11 @@ impl BlobCache for DummyCache {
         Ok(())
     }
 
-    fn read(&self, iovec: &mut BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
+    async fn async_read(
+        &self,
+        iovec: &mut BlobIoVec,
+        bufs: &[FileVolatileSlice<'_>],
+    ) -> Result<usize> {
         let bios = &iovec.bi_vec;
 
         if iovec.bi_size == 0 || bios.is_empty() {
@@ -131,7 +136,9 @@ impl BlobCache for DummyCache {
                 return Ok(0);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
-            return self.read_raw_chunk(&bios[0].chunkinfo, buf, false, None);
+            return self
+                .async_read_raw_chunk(&bios[0].chunkinfo, buf, false, false)
+                .await;
         }
 
         let mut user_size = 0;
@@ -139,7 +146,8 @@ impl BlobCache for DummyCache {
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompress_size() as usize);
-                self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), false, None)?;
+                self.async_read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), false, false)
+                    .await?;
                 buffer_holder.push(d);
                 user_size += bio.size;
             }
@@ -183,6 +191,7 @@ impl DummyCacheMgr {
     }
 }
 
+#[async_trait::async_trait]
 impl BlobCacheMgr for DummyCacheMgr {
     fn init(&self) -> Result<()> {
         Ok(())
@@ -203,7 +212,7 @@ impl BlobCacheMgr for DummyCacheMgr {
         self.backend.as_ref()
     }
 
-    fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
+    async fn async_get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         let blob_id = blob_info.blob_id().to_owned();
         let reader = self.backend.get_reader(&blob_id).map_err(|e| eother!(e))?;
 

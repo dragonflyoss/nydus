@@ -56,6 +56,7 @@ impl BlobRangeMap {
     }
 }
 
+#[async_trait::async_trait]
 impl RangeMap for BlobRangeMap {
     type I = u64;
 
@@ -77,7 +78,7 @@ impl RangeMap for BlobRangeMap {
         Ok(true)
     }
 
-    fn check_range_ready_and_mark_pending(
+    async fn async_check_range_ready_and_mark_pending(
         &self,
         start: u64,
         count: u64,
@@ -102,7 +103,7 @@ impl RangeMap for BlobRangeMap {
         }
     }
 
-    fn set_range_ready_and_clear_pending(&self, start: u64, count: u64) -> Result<()> {
+    async fn async_set_range_ready_and_clear_pending(&self, start: u64, count: u64) -> Result<()> {
         if !self.is_range_all_ready() {
             let (start_index, end_index) = self.get_range(start, count)?;
 
@@ -121,13 +122,14 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
+    use nydus_utils::async_helper::with_runtime;
     use vmm_sys_util::tempdir::TempDir;
 
     use super::super::BlobStateMap;
     use super::*;
 
-    #[test]
-    fn test_range_map() {
+    #[tokio::test]
+    async fn test_range_map() {
         let dir = TempDir::new().unwrap();
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
@@ -147,21 +149,33 @@ mod tests {
         let now = Instant::now();
 
         let h1 = thread::spawn(move || {
-            for idx in 0..range_count {
-                if idx % skip_index != 0 {
-                    let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-                    map1.set_range_ready_and_clear_pending(addr, 1).unwrap();
-                }
-            }
+            with_runtime(|rt| {
+                rt.block_on(async {
+                    for idx in 0..range_count {
+                        if idx % skip_index != 0 {
+                            let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+                            map1.async_set_range_ready_and_clear_pending(addr, 1)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                })
+            });
         });
 
         let h2 = thread::spawn(move || {
-            for idx in 0..range_count {
-                if idx % skip_index != 0 {
-                    let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-                    map2.set_range_ready_and_clear_pending(addr, 1).unwrap();
-                }
-            }
+            with_runtime(|rt| {
+                rt.block_on(async {
+                    for idx in 0..range_count {
+                        if idx % skip_index != 0 {
+                            let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+                            map2.async_set_range_ready_and_clear_pending(addr, 1)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                })
+            });
         });
 
         h1.join()

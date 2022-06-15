@@ -18,12 +18,13 @@ pub(crate) struct MockBackend {
     pub metrics: Arc<BackendMetrics>,
 }
 
+#[async_trait::async_trait]
 impl BlobReader for MockBackend {
     fn blob_size(&self) -> BackendResult<u64> {
         Ok(0)
     }
 
-    fn try_read(&self, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
+    async fn async_try_read(&self, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
         let mut i = 0;
         while i < buf.len() {
             buf[i] = i as u8;

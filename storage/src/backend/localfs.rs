@@ -65,6 +65,7 @@ struct LocalFsEntry {
     trace_condvar: Arc<(Mutex<bool>, Condvar)>,
 }
 
+#[async_trait::async_trait]
 impl BlobReader for LocalFsEntry {
     fn blob_size(&self) -> BackendResult<u64> {
         self.file
@@ -73,7 +74,7 @@ impl BlobReader for LocalFsEntry {
             .map_err(|e| LocalFsError::BlobFile(e).into())
     }
 
-    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    async fn async_try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         debug!(
             "local blob file reading: offset={}, size={} from={}",
             offset,
@@ -81,6 +82,7 @@ impl BlobReader for LocalFsEntry {
             self.id,
         );
 
+        // TODO: async io
         uio::pread(self.file.as_raw_fd(), buf, offset as i64)
             .map(|v| {
                 debug!("local blob file read {} bytes", v);
@@ -90,7 +92,7 @@ impl BlobReader for LocalFsEntry {
             .map_err(|e| LocalFsError::ReadBlob(e).into())
     }
 
-    fn readv(
+    async fn async_readv(
         &self,
         bufs: &[FileVolatileSlice],
         offset: u64,
@@ -99,6 +101,7 @@ impl BlobReader for LocalFsEntry {
         let mut c = MemSliceCursor::new(bufs);
         let iovec = c.consume(max_size);
 
+        // TODO: async io
         readv(self.file.as_raw_fd(), &iovec, offset)
             .map(|v| {
                 debug!("local blob file read {} bytes", v);
@@ -615,8 +618,8 @@ mod tests {
         assert_eq!(Arc::strong_count(&blob2), 3);
     }
 
-    #[test]
-    fn test_localfs_get_reader() {
+    #[tokio::test]
+    async fn test_localfs_get_reader() {
         let tempfile = TempFile::new().unwrap();
         let path = tempfile.as_path();
         let filename = path.file_name().unwrap().to_str().unwrap();
@@ -641,7 +644,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&blob1), 3);
 
         let mut buf1 = [0x0u8];
-        blob1.read(&mut buf1, 0x0).unwrap();
+        blob1.async_read(&mut buf1, 0x0).await.unwrap();
         assert_eq!(buf1[0], 0x1);
 
         let mut buf2 = [0x0u8];
@@ -651,11 +654,11 @@ mod tests {
             unsafe { FileVolatileSlice::new(buf3.as_mut_ptr(), 1) },
         ];
 
-        assert_eq!(blob2.readv(&bufs, 0x1, 2).unwrap(), 2);
+        assert_eq!(blob2.async_readv(&bufs, 0x1, 2).await.unwrap(), 2);
         assert_eq!(buf2[0], 0x2);
         assert_eq!(buf3[0], 0x3);
 
-        assert_eq!(blob2.readv(&bufs, 0x3, 3).unwrap(), 1);
+        assert_eq!(blob2.async_readv(&bufs, 0x3, 3).await.unwrap(), 1);
         assert_eq!(buf2[0], 0x4);
         assert_eq!(buf3[0], 0x3);
 
@@ -664,8 +667,8 @@ mod tests {
         assert_eq!(blob4.blob_size().unwrap(), 4);
     }
 
-    #[test]
-    fn test_localfs_trace_and_prefetch() {
+    #[tokio::test]
+    async fn test_localfs_trace_and_prefetch() {
         let tempfile = TempFile::new().unwrap();
         let path = tempfile.as_path();
         let filename = path.file_name().unwrap().to_str().unwrap();
@@ -697,7 +700,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&blob1), 3);
 
         let mut buf1 = [0x0u8];
-        blob1.read(&mut buf1, 0x0).unwrap();
+        blob1.async_read(&mut buf1, 0x0).await.unwrap();
         assert_eq!(buf1[0], 0x1);
 
         let mut buf2 = [0x0u8];
@@ -706,7 +709,7 @@ mod tests {
             unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), 1) },
             unsafe { FileVolatileSlice::new(buf3.as_mut_ptr(), 1) },
         ];
-        assert_eq!(blob2.readv(&bufs, 0x1001, 3).unwrap(), 2);
+        assert_eq!(blob2.async_readv(&bufs, 0x1001, 3).await.unwrap(), 2);
         assert_eq!(buf2[0], 0x2);
         assert_eq!(buf3[0], 0x3);
 

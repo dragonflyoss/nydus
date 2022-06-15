@@ -52,6 +52,7 @@ pub enum BackendError {
 pub type BackendResult<T> = std::result::Result<T, BackendError>;
 
 /// Trait to read data from a on storage backend.
+#[async_trait::async_trait]
 pub trait BlobReader: Send + Sync {
     /// Get size of the blob file.
     fn blob_size(&self) -> BackendResult<u64>;
@@ -61,7 +62,7 @@ pub trait BlobReader: Send + Sync {
     /// Try to read data of range [offset, offset + buf.len()) from the blob file, and returns:
     /// - bytes of data read, which may be smaller than buf.len()
     /// - error code if error happens
-    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize>;
+    async fn async_try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize>;
 
     /// Read a range of data from the blob file into the provided buffer.
     ///
@@ -71,12 +72,12 @@ pub trait BlobReader: Send + Sync {
     ///
     /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
     /// read data.
-    fn read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    async fn async_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let mut retry_count = self.retry_limit();
         let begin_time = self.metrics().begin();
 
         loop {
-            match self.try_read(buf, offset) {
+            match self.async_try_read(buf, offset).await {
                 Ok(size) => {
                     self.metrics().end(&begin_time, buf.len(), false);
                     return Ok(size);
@@ -110,7 +111,7 @@ pub trait BlobReader: Send + Sync {
     ///
     /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
     /// read data.
-    fn readv(
+    async fn async_readv(
         &self,
         bufs: &[FileVolatileSlice],
         offset: u64,
@@ -118,14 +119,14 @@ pub trait BlobReader: Send + Sync {
     ) -> BackendResult<usize> {
         if bufs.len() == 1 && max_size >= bufs[0].len() {
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), bufs[0].len()) };
-            self.read(buf, offset)
+            self.async_read(buf, offset).await
         } else {
             // Use std::alloc to avoid zeroing the allocated buffer.
             let size = bufs.iter().fold(0usize, move |size, s| size + s.len());
             let size = std::cmp::min(size, max_size);
             let mut data = alloc_buf(size);
 
-            let result = self.read(&mut data, offset)?;
+            let result = self.async_read(&mut data, offset).await?;
             copyv(&[&data], bufs, 0, result, 0, 0)
                 .map(|r| r.0)
                 .map_err(BackendError::CopyData)

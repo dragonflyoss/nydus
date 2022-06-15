@@ -201,6 +201,7 @@ impl AsRawFd for RemoteBlob {
     }
 }
 
+#[async_trait::async_trait]
 impl BlobObject for RemoteBlob {
     fn base_offset(&self) -> u64 {
         self.base
@@ -210,18 +211,18 @@ impl BlobObject for RemoteBlob {
         self.map.is_range_all_ready()
     }
 
-    fn fetch_range_compressed(&self, _offset: u64, _size: u64) -> Result<usize> {
+    async fn async_fetch_range_compressed(&self, _offset: u64, _size: u64) -> Result<usize> {
         Err(enosys!())
     }
 
-    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
+    async fn async_fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
         match self.map.is_range_ready(offset, size) {
             Ok(true) => Ok(0),
             _ => self.conn.call_fetch_range(self, offset, size),
         }
     }
 
-    fn fetch_chunks(&self, _range: &BlobIoRange) -> Result<usize> {
+    async fn async_fetch_chunks(&self, _range: &BlobIoRange) -> Result<usize> {
         Err(enosys!())
     }
 }

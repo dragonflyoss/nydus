@@ -64,10 +64,11 @@ nydus-utils = { version = "0.3.0", path = "utils" }
 nydus-blobfs = { version = "0.1.0", path = "blobfs", features = ["virtiofs"], optional = true }
 
 [dev-dependencies]
-sendfd = "0.3.3"
-vmm-sys-util = "0.9.0"
+async-trait = "0.1.56"
 env_logger = "0.8.2"
 rand = "0.8.5"
+sendfd = "0.3.3"
+vmm-sys-util = "0.9.0"
 
 [features]
 fusedev = ["fuse-backend-rs/fusedev"]

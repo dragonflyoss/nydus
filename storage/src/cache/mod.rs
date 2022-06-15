@@ -120,6 +120,7 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
 ///
 /// The caller may use the `BlobCache` trait to access blob data on backend storage, with an
 /// optional intermediate cache layer to improve performance.
+#[async_trait::async_trait]
 pub trait BlobCache: Send + Sync {
     /// Get id of the blob object.
     fn blob_id(&self) -> &str;
@@ -169,12 +170,16 @@ pub trait BlobCache: Send + Sync {
     fn stop_prefetch(&self) -> StorageResult<()>;
 
     /// Execute filesystem data prefetch.
-    fn prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {
+    async fn async_prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {
         Err(enosys!("doesn't support prefetch_range()"))
     }
 
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
-    fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize>;
+    async fn async_read(
+        &self,
+        iovec: &mut BlobIoVec,
+        buffers: &[FileVolatileSlice<'_>],
+    ) -> Result<usize>;
 
     /// Internal: read multiple chunks from the blob cache in batch mode.
     ///
@@ -185,7 +190,7 @@ pub trait BlobCache: Send + Sync {
     /// entry in the `chunks` array in corresponding order.
     ///
     /// This method returns success only if all requested data are successfully fetched.
-    fn read_chunks(
+    async fn async_read_chunks(
         &self,
         blob_offset: u64,
         blob_size: usize,
@@ -195,7 +200,8 @@ pub trait BlobCache: Send + Sync {
         let mut c_buf = alloc_buf(blob_size);
         let nr_read = self
             .reader()
-            .read(c_buf.as_mut_slice(), blob_offset)
+            .async_read(c_buf.as_mut_slice(), blob_offset)
+            .await
             .map_err(|e| eio!(e))?;
         if nr_read != blob_size {
             return Err(eio!(format!(
@@ -226,7 +232,15 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
 
-            self.process_raw_chunk(chunk, buf, None, &mut buffer, chunk.is_compressed(), false)?;
+            self.async_process_raw_chunk(
+                chunk,
+                buf,
+                None,
+                &mut buffer,
+                chunk.is_compressed(),
+                false,
+            )
+            .await?;
             buffers.push(buffer);
             last = offset + size as u64;
         }
@@ -240,12 +254,12 @@ pub trait BlobCache: Send + Sync {
     /// Moreover, chunk data from backend storage may be validated per user's configuration.
     /// Above is not redundant with blob cache's validation given IO path backend -> blobcache
     /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
-    fn read_raw_chunk(
+    async fn async_read_raw_chunk(
         &self,
         chunk: &BlobIoChunk,
         buffer: &mut [u8],
         force_validation: bool,
-        raw_hook: Option<&dyn Fn(&[u8])>,
+        post_hook: bool,
     ) -> Result<usize> {
         let mut d;
         let offset = chunk.compress_offset();
@@ -268,31 +282,40 @@ pub trait BlobCache: Send + Sync {
             unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) }
         };
 
-        let size = self.reader().read(raw_chunk, offset).map_err(|e| eio!(e))?;
+        let size = self
+            .reader()
+            .async_read(raw_chunk, offset)
+            .await
+            .map_err(|e| eio!(e))?;
         if size != raw_chunk.len() {
             return Err(eio!("storage backend returns less data than requested"));
         }
 
-        self.process_raw_chunk(
+        self.async_process_raw_chunk(
             chunk.as_base(),
             raw_chunk,
             None,
             buffer,
             chunk.is_compressed(),
             force_validation,
-        )?;
-        if let Some(hook) = raw_hook {
-            hook(raw_chunk)
+        )
+        .await?;
+
+        if post_hook {
+            self.post_read_raw_chunk(chunk, raw_chunk).await;
         }
 
         Ok(buffer.len())
     }
 
+    /// Internal: post-preocess for read_raw_chunk().
+    async fn post_read_raw_chunk(&self, _chunk: &BlobIoChunk, _buffer: &mut [u8]) {}
+
     /// Internal: hook point to post-process data received from storage backend.
     ///
     /// This hook method provides a chance to transform data received from storage backend into
     /// data cached on local disk.
-    fn process_raw_chunk(
+    async fn async_process_raw_chunk(
         &self,
         chunk: &dyn BlobChunkInfo,
         raw_buffer: &[u8],
@@ -302,6 +325,7 @@ pub trait BlobCache: Send + Sync {
         force_validation: bool,
     ) -> Result<usize> {
         if need_decompress {
+            // TODO: async io
             compress::decompress(raw_buffer, raw_stream, buffer, self.compressor()).map_err(
                 |e| {
                     error!("failed to decompress chunk: {}", e);
@@ -330,6 +354,7 @@ pub trait BlobCache: Send + Sync {
 ///
 /// The main responsibility of the blob cache manager is to create blob cache objects for blobs,
 /// all IO requests should be issued to the blob cache object directly.
+#[async_trait::async_trait]
 pub(crate) trait BlobCacheMgr: Send + Sync {
     /// Initialize the blob cache manager.
     fn init(&self) -> Result<()>;
@@ -346,7 +371,7 @@ pub(crate) trait BlobCacheMgr: Send + Sync {
     fn backend(&self) -> &(dyn BlobBackend);
 
     /// Get the blob cache to provide access to the `blob` object.
-    fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>>;
+    async fn async_get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>>;
 }
 
 #[cfg(test)]

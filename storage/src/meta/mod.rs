@@ -295,7 +295,7 @@ impl BlobMetaInfo {
     ///
     /// When `reader` contains a valid value and the metadata is not ready yet, a new metadata file
     /// will be created.
-    pub fn new(
+    pub async fn async_new(
         blob_path: &str,
         blob_info: &BlobInfo,
         reader: Option<&Arc<dyn BlobReader>>,
@@ -354,33 +354,40 @@ impl BlobMetaInfo {
                 fd,
                 0,
             )
-        };
-        if base == libc::MAP_FAILED {
+        } as usize;
+        if base == libc::MAP_FAILED as usize {
             return Err(last_error!("failed to mmap blob chunk_map"));
-        } else if base.is_null() {
+        } else if (base as *const u8).is_null() {
             return Err(ebadf!("failed to mmap blob chunk_map"));
         }
 
-        let header = unsafe { (base as *mut u8).add(aligned_info_size as usize) };
-        let header = unsafe { &mut *(header as *mut BlobMetaHeaderOndisk) };
-        if u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
-            || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
-            || u32::from_le(header.s_features) != blob_info.meta_flags()
-            || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
-            || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
-            || u64::from_le(header.s_ci_uncompressed_size) != blob_info.meta_ci_uncompressed_size()
-        {
+        let read_metadata = {
+            let header = unsafe { (base as *mut u8).add(aligned_info_size as usize) };
+            let header = unsafe { &mut *(header as *mut BlobMetaHeaderOndisk) };
+            u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
+                || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
+                || u32::from_le(header.s_features) != blob_info.meta_flags()
+                || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
+                || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
+                || u64::from_le(header.s_ci_uncompressed_size)
+                    != blob_info.meta_ci_uncompressed_size()
+        };
+        if read_metadata {
             if !enable_write {
                 return Err(enoent!("blob metadata file is not ready"));
             }
 
             let buffer = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
             buffer[info_size..].fill(0);
-            Self::read_metadata(
+            Self::async_read_metadata(
                 blob_info,
                 reader.as_ref().unwrap(),
                 &mut buffer[..info_size],
-            )?;
+            )
+            .await?;
+
+            let header = unsafe { (base as *mut u8).add(aligned_info_size as usize) };
+            let header = unsafe { &mut *(header as *mut BlobMetaHeaderOndisk) };
             header.s_features = u32::to_le(blob_info.meta_flags());
             header.s_ci_offset = u64::to_le(blob_info.meta_ci_offset());
             header.s_ci_compressed_size = u64::to_le(blob_info.meta_ci_compressed_size());
@@ -575,7 +582,7 @@ impl BlobMetaInfo {
         }
     }
 
-    fn read_metadata(
+    async fn async_read_metadata(
         blob_info: &BlobInfo,
         reader: &Arc<dyn BlobReader>,
         buffer: &mut [u8],
@@ -590,7 +597,8 @@ impl BlobMetaInfo {
 
         if blob_info.meta_ci_compressor() == compress::Algorithm::None {
             let size = reader
-                .read(buffer, blob_info.meta_ci_offset())
+                .async_read(buffer, blob_info.meta_ci_offset())
+                .await
                 .map_err(|e| {
                     eio!(format!(
                         "failed to read metadata from backend(compressor is none), {:?}",
@@ -606,7 +614,8 @@ impl BlobMetaInfo {
             let compressed_size = blob_info.meta_ci_compressed_size();
             let mut buf = alloc_buf(compressed_size as usize);
             let size = reader
-                .read(&mut buf, blob_info.meta_ci_offset())
+                .async_read(&mut buf, blob_info.meta_ci_offset())
+                .await
                 .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
             if size as u64 != compressed_size {
                 return Err(eio!("failed to read blob metadata from backend"));
@@ -972,12 +981,13 @@ mod tests {
         file: File,
     }
 
+    #[async_trait::async_trait]
     impl BlobReader for DummyBlobReader {
         fn blob_size(&self) -> BackendResult<u64> {
             Ok(0)
         }
 
-        fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        async fn async_try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
             let ret = uio::pread(self.file.as_raw_fd(), buf, offset as i64).unwrap();
             Ok(ret)
         }
@@ -999,8 +1009,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_read_metadata_compressor_none() {
+    #[tokio::test]
+    async fn test_read_metadata_compressor_none() {
         let temp = TempFile::new().unwrap();
         let mut w = OpenOptions::new()
             .read(true)
@@ -1056,13 +1066,15 @@ mod tests {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
-        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+        BlobMetaInfo::async_read_metadata(&blob_info, &reader, &mut buffer)
+            .await
+            .unwrap();
 
         assert_eq!(buffer, data);
     }
 
-    #[test]
-    fn test_read_metadata_compressor_lz4() {
+    #[tokio::test]
+    async fn test_read_metadata_compressor_lz4() {
         let temp = TempFile::new().unwrap();
         let mut w = OpenOptions::new()
             .read(true)
@@ -1123,7 +1135,9 @@ mod tests {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
-        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+        BlobMetaInfo::async_read_metadata(&blob_info, &reader, &mut buffer)
+            .await
+            .unwrap();
 
         assert_eq!(buffer, data);
     }

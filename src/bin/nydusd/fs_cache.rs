@@ -19,6 +19,7 @@ use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use nydus_utils::async_helper::with_runtime;
 use storage::cache::BlobCache;
 use storage::device::BlobPrefetchRequest;
 use storage::factory::BLOB_FACTORY;
@@ -500,7 +501,14 @@ impl FsCacheHandler {
         blob_info.set_fscache_file(Some(Arc::new(file)));
         let blob_ref = Arc::new(blob_info);
 
-        match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
+        let blob = with_runtime(|rt| {
+            rt.block_on(async {
+                BLOB_FACTORY
+                    .async_new_blob_cache(config.factory_config(), &blob_ref)
+                    .await
+            })
+        });
+        match blob {
             Err(_e) => Err(-libc::ENOENT),
             Ok(blob) => match blob.blob_size() {
                 Err(_e) => Err(-libc::EIO),
@@ -592,13 +600,18 @@ impl FsCacheHandler {
                     None => {
                         warn!("fscache: internal error: cached object is not BlobCache objects");
                     }
-                    Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
-                        Ok(_) => {}
-                        Err(e) => error!(
-                            "{}",
-                            format!("fscache: failed to read data from blob object: {}", e,)
-                        ),
-                    },
+                    Some(obj) => with_runtime(|rt| {
+                        rt.block_on(async {
+                            if let Err(e) =
+                                obj.async_fetch_range_uncompressed(msg.off, msg.len).await
+                            {
+                                error!(
+                                    "{}",
+                                    format!("fscache: failed to read data from blob object: {}", e,)
+                                );
+                            }
+                        })
+                    }),
                 }
             }
             Some((FsCacheObject::Bootstrap(bs), u)) => {

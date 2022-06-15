@@ -52,6 +52,7 @@ mod persist_map;
 mod range_map;
 
 /// Trait to track chunk readiness state.
+#[async_trait::async_trait]
 pub trait ChunkMap: Any + Send + Sync {
     /// Check whether the chunk is ready for use.
     fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool>;
@@ -63,17 +64,20 @@ pub trait ChunkMap: Any + Send + Sync {
     /// - `Ok(true)` if the the chunk is ready.
     /// - `Ok(false)` marks the chunk as pending, either set_ready_and_clear_pending() or
     ///   clear_pending() must be called to clear the pending state.
-    fn check_ready_and_mark_pending(&self, _chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
+    async fn async_check_ready_and_mark_pending(
+        &self,
+        _chunk: &dyn BlobChunkInfo,
+    ) -> StorageResult<bool> {
         panic!("no support of check_ready_and_mark_pending()");
     }
 
     /// Set the chunk to ready for use and clear the pending state.
-    fn set_ready_and_clear_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<()> {
+    async fn async_set_ready_and_clear_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<()> {
         panic!("no support of check_ready_and_mark_pending()");
     }
 
     /// Clear the pending state of the chunk.
-    fn clear_pending(&self, _chunk: &dyn BlobChunkInfo) {
+    async fn async_clear_pending(&self, _chunk: &dyn BlobChunkInfo) {
         panic!("no support of clear_pending()");
     }
 
@@ -93,6 +97,7 @@ pub trait ChunkMap: Any + Send + Sync {
 /// A `RangeMap` object tracks readiness state of a chunk or data range, indexed by chunk index or
 /// data address. The trait methods are designed to support batch operations for improving
 /// performance by avoid frequently acquire/release locks.
+#[async_trait::async_trait]
 pub trait RangeMap: Send + Sync {
     type I: Send + Sync;
 
@@ -116,7 +121,7 @@ pub trait RangeMap: Send + Sync {
     /// - clear_range_pending() to clear the pending state without marking data or chunks as ready.
     /// - wait_for_range_ready() to wait for all data or chunks to clear pending state, including
     ///   data or chunks marked as pending by other threads.
-    fn check_range_ready_and_mark_pending(
+    async fn async_check_range_ready_and_mark_pending(
         &self,
         _start: Self::I,
         _count: Self::I,
@@ -125,15 +130,19 @@ pub trait RangeMap: Send + Sync {
     }
 
     /// Mark all chunks or data in the range as ready for use.
-    fn set_range_ready_and_clear_pending(&self, _start: Self::I, _count: Self::I) -> Result<()> {
+    async fn async_set_range_ready_and_clear_pending(
+        &self,
+        _start: Self::I,
+        _count: Self::I,
+    ) -> Result<()> {
         Err(enosys!())
     }
 
     /// Clear the pending state for all chunks or data in the range.
-    fn clear_range_pending(&self, _start: Self::I, _count: Self::I) {}
+    async fn async_clear_range_pending(&self, _start: Self::I, _count: Self::I) {}
 
     /// Wait for all chunks or data in the range to be ready until timeout.
-    fn wait_for_range_ready(&self, _start: Self::I, _count: Self::I) -> Result<bool> {
+    async fn async_wait_for_range_ready(&self, _start: Self::I, _count: Self::I) -> Result<bool> {
         Err(enosys!())
     }
 }

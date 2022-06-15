@@ -30,6 +30,7 @@ use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
+use nydus_utils::async_helper::with_runtime;
 use nydus_utils::{compress, digest};
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
@@ -780,7 +781,9 @@ impl Command {
         let backend_type = matches.value_of("backend-type").unwrap();
         let backend_file = matches.value_of("backend-config-file").unwrap();
         let backend_config = BackendConfig::from_file(backend_type, backend_file)?;
-        let backend = BlobFactory::new_backend(backend_config, "compactor")?;
+        let backend = with_runtime(|rt| {
+            rt.block_on(async { BlobFactory::async_new_backend(backend_config, "compactor").await })
+        })?;
 
         let config_file_path = matches.value_of("config").unwrap();
         let file = File::open(config_file_path)

@@ -132,6 +132,7 @@ struct OssReader {
     metrics: Arc<BackendMetrics>,
 }
 
+#[async_trait::async_trait]
 impl BlobReader for OssReader {
     fn blob_size(&self) -> BackendResult<u64> {
         let (resource, url) = self.state.url(&self.blob_id, &[]);
@@ -157,7 +158,7 @@ impl BlobReader for OssReader {
             .map_err(|err| OssError::Response(format!("invalid content length: {:?}", err)))?)
     }
 
-    fn try_read(&self, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    async fn async_try_read(&self, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let query = &[];
         let (resource, url) = self.state.url(&self.blob_id, query);
         let mut headers = HeaderMap::new();
@@ -175,6 +176,7 @@ impl BlobReader for OssReader {
             .sign(Method::GET, &mut headers, resource.as_str())
             .map_err(OssError::Auth)?;
 
+        // TODO: async io
         // Safe because the the call() is a synchronous operation.
         let mut resp = self
             .connection

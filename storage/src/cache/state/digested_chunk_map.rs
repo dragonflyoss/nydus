@@ -40,12 +40,13 @@ impl DigestedChunkMap {
     }
 }
 
+#[async_trait::async_trait]
 impl ChunkMap for DigestedChunkMap {
     fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
         Ok(self.cache.read().unwrap().contains(chunk.chunk_id()))
     }
 
-    fn set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
+    async fn async_set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         // Do not expect poisoned lock.
         self.cache.write().unwrap().insert(*chunk.chunk_id());
         Ok(())

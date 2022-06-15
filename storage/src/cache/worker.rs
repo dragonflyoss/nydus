@@ -312,7 +312,7 @@ impl AsyncWorkerMgr {
         }
 
         if let Some(obj) = cache.clone().get_blob_object() {
-            if let Err(e) = obj.fetch_range_compressed(offset, size) {
+            if let Err(e) = obj.async_fetch_range_compressed(offset, size).await {
                 warn!(
                     "storage: failed to prefetch data from blob {}, offset {}, size {}, {}",
                     cache.blob_id(),
@@ -354,9 +354,9 @@ impl AsyncWorkerMgr {
         mgr.metrics.prefetch_data_amount.add(blob_size);
 
         if let Some(obj) = cache.clone().get_blob_object() {
-            obj.fetch_chunks(&req)?;
+            obj.async_fetch_chunks(&req).await?;
         } else {
-            cache.prefetch_range(&req)?;
+            cache.async_prefetch_range(&req).await?;
         }
 
         Ok(())

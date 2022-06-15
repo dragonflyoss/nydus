@@ -49,6 +49,7 @@ impl IndexedChunkMap {
     }
 }
 
+#[async_trait::async_trait]
 impl ChunkMap for IndexedChunkMap {
     fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
         if self.is_range_all_ready() {
@@ -59,7 +60,7 @@ impl ChunkMap for IndexedChunkMap {
         }
     }
 
-    fn set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
+    async fn async_set_ready_and_clear_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         self.map.set_chunk_ready(chunk.id())
     }
 
@@ -72,6 +73,7 @@ impl ChunkMap for IndexedChunkMap {
     }
 }
 
+#[async_trait::async_trait]
 impl RangeMap for IndexedChunkMap {
     type I = u32;
 
@@ -95,7 +97,7 @@ impl RangeMap for IndexedChunkMap {
         Ok(true)
     }
 
-    fn check_range_ready_and_mark_pending(
+    async fn async_check_range_ready_and_mark_pending(
         &self,
         start_index: u32,
         count: u32,
@@ -121,7 +123,11 @@ impl RangeMap for IndexedChunkMap {
         }
     }
 
-    fn set_range_ready_and_clear_pending(&self, start_index: u32, count: u32) -> Result<()> {
+    async fn async_set_range_ready_and_clear_pending(
+        &self,
+        start_index: u32,
+        count: u32,
+    ) -> Result<()> {
         let count = std::cmp::min(count, u32::MAX - start_index);
         let end = start_index + count;
 
@@ -182,8 +188,8 @@ mod tests {
         assert!(IndexedChunkMap::new(&blob_path, 1, true).is_err());
     }
 
-    #[test]
-    fn test_indexed_new_zero_file_size() {
+    #[tokio::test]
+    async fn test_indexed_new_zero_file_size() {
         let dir = TempDir::new().unwrap();
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
@@ -213,12 +219,14 @@ mod tests {
         assert_eq!(map.map.size, 0x1001);
         assert!(!map.is_range_all_ready());
         assert!(!map.is_ready(chunk.as_base()).unwrap());
-        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        map.async_set_ready_and_clear_pending(chunk.as_base())
+            .await
+            .unwrap();
         assert!(map.is_ready(chunk.as_base()).unwrap());
     }
 
-    #[test]
-    fn test_indexed_new_header_not_ready() {
+    #[tokio::test]
+    async fn test_indexed_new_header_not_ready() {
         let dir = TempDir::new().unwrap();
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
@@ -249,12 +257,14 @@ mod tests {
         assert_eq!(map.map.size, 0x1001);
         assert!(!map.is_range_all_ready());
         assert!(!map.is_ready(chunk.as_base()).unwrap());
-        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        map.async_set_ready_and_clear_pending(chunk.as_base())
+            .await
+            .unwrap();
         assert!(map.is_ready(chunk.as_base()).unwrap());
     }
 
-    #[test]
-    fn test_indexed_new_all_ready() {
+    #[tokio::test]
+    async fn test_indexed_new_all_ready() {
         let dir = TempDir::new().unwrap();
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
@@ -294,12 +304,14 @@ mod tests {
         assert_eq!(map.map.count, 1);
         assert_eq!(map.map.size, 0x1001);
         assert!(map.is_ready(chunk.as_base()).unwrap());
-        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        map.async_set_ready_and_clear_pending(chunk.as_base())
+            .await
+            .unwrap();
         assert!(map.is_ready(chunk.as_base()).unwrap());
     }
 
-    #[test]
-    fn test_indexed_new_load_v0() {
+    #[tokio::test]
+    async fn test_indexed_new_load_v0() {
         let dir = TempDir::new().unwrap();
         let blob_path = dir.as_path().join("blob-1");
         let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
@@ -340,7 +352,9 @@ mod tests {
         assert_eq!(map.map.size, 0x1001);
         assert!(!map.is_range_all_ready());
         assert!(!map.is_ready(chunk.as_base()).unwrap());
-        map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
+        map.async_set_ready_and_clear_pending(chunk.as_base())
+            .await
+            .unwrap();
         assert!(map.is_ready(chunk.as_base()).unwrap());
     }
 }
