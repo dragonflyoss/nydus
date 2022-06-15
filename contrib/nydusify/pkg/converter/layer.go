@@ -56,8 +56,8 @@ type buildLayer struct {
 	backend         backend.Backend
 	forcePush       bool
 	alignedChunk    bool
-
-	referenceBlobs []ocispec.Descriptor
+	fsVersion       string
+	referenceBlobs  []ocispec.Descriptor
 }
 
 // parseSourceMount parses mounts object returned by the Mount method in
@@ -159,6 +159,7 @@ func (layer *buildLayer) pushBootstrap(ctx context.Context) (*ocispec.Descriptor
 			// DiffID of layer defined in OCI spec
 			utils.LayerAnnotationUncompressed:   uncompressedDigest.String(),
 			utils.LayerAnnotationNydusBootstrap: "true",
+			utils.LayerAnnotationNydusFsVersion: layer.fsVersion,
 		},
 	}
 	if len(layer.referenceBlobs) > 0 {
