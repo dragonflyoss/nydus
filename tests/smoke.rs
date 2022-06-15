@@ -72,9 +72,27 @@ fn test(
     let work_dir = tmp_dir.as_path().to_path_buf();
     let lower_texture = "directory/lower.result".to_string();
     let overlay_texture = "directory/overlay.result".to_string();
+    let empty_texture = "directory/empty.result".to_string();
 
     let mut builder = builder::new(&work_dir, whiteout_spec);
     let rafsv6 = rafs_version == "6";
+    {
+        // Create & build empty rootfs
+        builder.build_empty_file_with_prefetch(compressor, rafs_version);
+        // Mount empty rootfs and check
+        let nydusd = nydusd::new(
+            &work_dir,
+            enable_cache,
+            cache_compressed,
+            rafs_mode.parse().unwrap(),
+            "api.sock".into(),
+            // FIXME: Currently no digest validation is implemented for rafs v6.
+            !rafsv6,
+        );
+        nydusd.start(Some("bootstrap-empty"), "mnt");
+        nydusd.check(&empty_texture, "mnt");
+        nydusd.umount("mnt");
+    }
 
     {
         // Create & build lower rootfs
@@ -88,7 +106,6 @@ fn test(
             cache_compressed,
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
-            // FIXME: Currently no digest validation is implemented for rafs v6.
             !rafsv6,
         );
         nydusd.start(Some("bootstrap-lower"), "mnt");
@@ -248,6 +265,7 @@ fn integration_test_stargz() {
 
     let mut builder = builder::new(&work_dir, "oci");
 
+    builder.build_stargz_empty();
     builder.build_stargz_lower();
     builder.build_stargz_upper();
 
@@ -262,29 +280,5 @@ fn integration_test_stargz() {
 
     nydusd.start(Some("bootstrap-overlay"), "mnt");
     nydusd.check("directory/overlay.result", "mnt");
-    nydusd.umount("mnt");
-}
-
-#[test]
-fn integration_test_empty_file_with_prefetch() {
-    info!("\n\n==================== testing run: prefetch with empty file test");
-
-    let tmp_dir = TempDir::new().unwrap();
-    let work_dir = tmp_dir.as_path().to_path_buf();
-    let mut builder = builder::new(&work_dir, "oci");
-
-    builder.build_empty_file_with_prefetch();
-
-    let nydusd = nydusd::new(
-        &work_dir,
-        true,
-        true,
-        "direct".parse().unwrap(),
-        "api.sock".into(),
-        false,
-    );
-
-    nydusd.start(Some("bootstrap-empty_file"), "mnt");
-    nydusd.check("empty/result", "mnt");
     nydusd.umount("mnt");
 }

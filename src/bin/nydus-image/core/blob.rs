@@ -36,21 +36,17 @@ impl Blob {
                 let (inodes, prefetch_entries) = blob_ctx
                     .blob_layout
                     .layout_blob_simple(&ctx.prefetch, nodes)?;
-                let mut has_chunk = false;
                 for (idx, inode) in inodes.iter().enumerate() {
                     let node = &mut nodes[*inode];
                     let size = node
                         .dump_blob(ctx, blob_ctx, blob_index, chunk_dict)
                         .context("failed to dump blob chunks")?;
-                    if size > 0 {
-                        has_chunk = true
-                    }
                     if idx < prefetch_entries {
                         blob_ctx.blob_readahead_size += size;
                     }
                 }
                 // Dump is only required if there is chunk in the blob
-                if has_chunk {
+                if blob_ctx.compressed_blob_size > 0 {
                     self.dump_meta_data(blob_ctx)?;
                 }
             }

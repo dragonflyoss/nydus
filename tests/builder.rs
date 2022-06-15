@@ -117,7 +117,6 @@ impl<'a> Builder<'a> {
     fn set_xattr(&mut self, path: &Path, key: &str, value: &[u8]) {
         xattr::set(path, key, value).unwrap();
     }
-
     pub fn make_lower(&mut self) {
         let dir = self.work_dir.join("lower");
         self.create_dir(&dir);
@@ -195,8 +194,9 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
+                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
                 self.builder,
+                self.work_dir.join("bootstrap-empty"),
                 self.work_dir.join("bootstrap-lower"),
                 self.work_dir.join("blobs"),
                 compressor,
@@ -231,11 +231,27 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_stargz_lower(&mut self) {
+    pub fn build_stargz_empty(&mut self) {
         exec(
             format!(
                 "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level info {:?}",
                 self.builder,
+                self.work_dir.join("bootstrap-empty"),
+                "empty.stargz",
+                self.work_dir.join("stargz.index-empty.json"),
+            )
+            .as_str(),
+            false,
+            b"",
+        ).unwrap();
+    }
+
+    pub fn build_stargz_lower(&mut self) {
+        exec(
+            format!(
+                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
+                self.builder,
+                self.work_dir.join("bootstrap-empty"),
                 self.work_dir.join("bootstrap-lower"),
                 "lower.stargz",
                 self.work_dir.join("stargz.index-lower.json"),
@@ -289,20 +305,21 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_empty_file_with_prefetch(&mut self) {
-        let dir = self.work_dir.join("empty_file");
-        self.create_dir(&dir);
+    pub fn build_empty_file_with_prefetch(&mut self, compressor: &str, rafs_version: &str) {
+        let empty_file_dir = self.work_dir.join("empty");
+        self.create_dir(&empty_file_dir);
         self.create_dir(&self.work_dir.join("blobs"));
-        self.create_file(&dir.join("empty-file"), b"");
+        self.create_file(&empty_file_dir.join("empty-file"), b"");
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --prefetch-policy fs --backend-type localfs --backend-config '{{\"blob_file\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --bootstrap {:?} --prefetch-policy fs --blob-dir {:?}  --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
                 self.builder,
-                self.work_dir.join("bootstrap-empty_file"),
-                self.work_dir.join("smoke-localfs-blob"),
-                "lz4_block",
+                self.work_dir.join("bootstrap-empty"),
+                self.work_dir.join("blobs"),
+                compressor,
                 self.whiteout_spec,
-                dir,
+                rafs_version,
+                empty_file_dir,
             )
             .as_str(),
             false,
