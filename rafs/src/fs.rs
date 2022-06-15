@@ -35,7 +35,7 @@ use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
 use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
-use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
+use nydus_storage::device::{BlobDevice, BlobFetchRequest, BlobPrefetchRequest};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
@@ -472,8 +472,8 @@ impl Rafs {
     }
 
     /// for blobfs
-    pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> Result<()> {
-        self.device.fetch_range_synchronous(prefetches)
+    pub fn fetch_range(&self, prefetches: &[BlobFetchRequest]) -> Result<()> {
+        self.device.fetch_range(prefetches)
     }
 
     fn root_ino(&self) -> u64 {

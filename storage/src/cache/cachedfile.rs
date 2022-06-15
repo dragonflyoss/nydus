@@ -117,7 +117,7 @@ impl BlobCache for FileCacheEntry {
         &self.chunk_map
     }
 
-    fn get_blob_object(&self) -> Option<&dyn BlobObject> {
+    fn get_blob_object(self: Arc<Self>) -> Option<Arc<dyn BlobObject>> {
         if self.is_get_blob_object_supported {
             Some(self)
         } else {

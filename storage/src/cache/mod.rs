@@ -146,7 +146,7 @@ pub trait BlobCache: Send + Sync {
     fn get_chunk_map(&self) -> &Arc<dyn ChunkMap>;
 
     /// Get a `BlobObject` instance to directly access uncompressed blob file.
-    fn get_blob_object(&self) -> Option<&dyn BlobObject> {
+    fn get_blob_object(self: Arc<Self>) -> Option<Arc<dyn BlobObject>> {
         None
     }
 
@@ -176,7 +176,7 @@ pub trait BlobCache: Send + Sync {
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize>;
 
-    /// Read multiple chunks from the blob cache in batch mode.
+    /// Internal: read multiple chunks from the blob cache in batch mode.
     ///
     /// This is an interface to optimize chunk data fetch performance by merging multiple continuous
     /// chunks into one backend request. Callers must ensure that chunks in `chunks` covers a
@@ -234,7 +234,7 @@ pub trait BlobCache: Send + Sync {
         Ok(buffers)
     }
 
-    /// Read a whole chunk directly from the storage backend.
+    /// Internal: read a whole chunk directly from the storage backend.
     ///
     /// The fetched chunk data may be compressed or not, which depends chunk information from `chunk`.
     /// Moreover, chunk data from backend storage may be validated per user's configuration.
@@ -288,7 +288,7 @@ pub trait BlobCache: Send + Sync {
         Ok(buffer.len())
     }
 
-    /// Hook point to post-process data received from storage backend.
+    /// Internal: hook point to post-process data received from storage backend.
     ///
     /// This hook method provides a chance to transform data received from storage backend into
     /// data cached on local disk.

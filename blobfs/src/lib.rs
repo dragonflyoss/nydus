@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 #[cfg(feature = "virtiofs")]
-use nydus_storage::device::BlobPrefetchRequest;
+use nydus_storage::device::BlobFetchRequest;
 use vm_memory::ByteValued;
 
 mod sync_io;
@@ -137,10 +137,10 @@ impl BootstrapArgs {
         }
     }
 
-    fn fetch_range_sync(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
+    fn fetch_range_sync(&self, prefetches: &[BlobFetchRequest]) -> io::Result<()> {
         let c = self.rafs_handle.rafs.lock().unwrap();
         match &*c {
-            Some(rafs) => rafs.fetch_range_synchronous(prefetches),
+            Some(rafs) => rafs.fetch_range(prefetches),
             None => Err(einval!("create rafs failed in thread.")),
         }
     }

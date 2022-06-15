@@ -788,6 +788,9 @@ pub struct BlobPrefetchRequest {
     pub len: u64,
 }
 
+/// Reuse [BlobPrefetchRequest] for blob fetch request.
+pub type BlobFetchRequest = BlobPrefetchRequest;
+
 /// Trait to provide direct access to underlying uncompressed blob file.
 ///
 /// The suggested flow to make use of an `BlobObject` is as below:
@@ -910,7 +913,7 @@ impl BlobDevice {
     pub fn prefetch(
         &self,
         io_vecs: &[&BlobIoVec],
-        prefetches: &[BlobPrefetchRequest],
+        prefetches: &[BlobFetchRequest],
     ) -> io::Result<()> {
         for idx in 0..prefetches.len() {
             if let Some(blob) = self.get_blob_by_id(&prefetches[idx].blob_id) {
@@ -981,7 +984,7 @@ impl BlobDevice {
     }
 
     /// fetch specified blob data in a synchronous way.
-    pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
+    pub fn fetch_range(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
         for req in prefetches {
             if req.len == 0 {
                 continue;
@@ -993,7 +996,7 @@ impl BlobDevice {
                     req.offset,
                     req.len
                 );
-                if let Some(obj) = cache.get_blob_object() {
+                if let Some(obj) = cache.clone().get_blob_object() {
                     let _ = obj
                         .fetch_range_uncompressed(req.offset as u64, req.len as u64)
                         .map_err(|e| {
