@@ -113,7 +113,8 @@ impl Nydusd {
                     work_dir.join("supervisor.sock"),
                 )
                 .as_str(),
-                false
+                false,
+                b"",
             ).unwrap();
         });
 
@@ -132,10 +133,16 @@ impl Nydusd {
         let mount_path = self.work_dir.join(mount_path);
 
         // TODO: Lower `tree` does not support option `-J`, we should check return code from here.
-        let tree_ret = exec(format!("tree -a -J -v {:?}", mount_path).as_str(), true).unwrap();
+        let tree_ret = exec(
+            format!("tree -a -J -v {:?}", mount_path).as_str(),
+            true,
+            b"",
+        )
+        .unwrap();
         let md5_ret = exec(
             format!("find {:?} -type f -exec md5sum {{}} + | sort", mount_path).as_str(),
             true,
+            b"",
         )
         .unwrap();
 
@@ -154,7 +161,7 @@ impl Nydusd {
     }
 
     pub fn is_mounted(&self, mount_path: &str) -> bool {
-        let ret = exec("cat /proc/mounts", true).unwrap();
+        let ret = exec("cat /proc/mounts", true, b"").unwrap();
         for line in ret.split('\n') {
             if line.contains(self.work_dir.join(mount_path).to_str().unwrap()) {
                 return true;
@@ -167,6 +174,7 @@ impl Nydusd {
         exec(
             format!("umount {:?}", self.work_dir.join(mount_path)).as_str(),
             false,
+            b"",
         )
         .unwrap();
     }

@@ -910,6 +910,7 @@ pub mod tests {
                     upper_dir, lower_dir, merge_dir,
                 ),
                 true,
+                b"",
             )
             .unwrap();
             Mounter {
@@ -920,7 +921,7 @@ pub mod tests {
 
     impl Drop for Mounter {
         fn drop(&mut self) {
-            exec(&format!("umount {:?}", self.mountpoint), true).unwrap();
+            exec(&format!("umount {:?}", self.mountpoint), true, b"").unwrap();
         }
     }
 
@@ -979,11 +980,11 @@ pub mod tests {
 
         println!(
             "lower dir:\n {}",
-            exec(&format!("ls -R {:?}", lower_dir), true).unwrap()
+            exec(&format!("ls -R {:?}", lower_dir), true, b"").unwrap()
         );
         println!(
             "merge dir:\n{}",
-            exec(&format!("ls -R {:?}", merge_dir), true).unwrap()
+            exec(&format!("ls -R {:?}", merge_dir), true, b"").unwrap()
         );
 
         // Diff build lower layer

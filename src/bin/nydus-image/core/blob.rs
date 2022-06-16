@@ -45,6 +45,7 @@ impl Blob {
                         blob_ctx.blob_readahead_size += size;
                     }
                 }
+
                 self.dump_meta_data(blob_ctx)?;
             }
             SourceType::StargzIndex => {
@@ -82,7 +83,8 @@ impl Blob {
     }
 
     pub(crate) fn dump_meta_data(&mut self, blob_ctx: &mut BlobContext) -> Result<()> {
-        if !blob_ctx.blob_meta_info_enabled {
+        // Dump is only required if there is chunk in the blob or blob meta info enabled
+        if !blob_ctx.blob_meta_info_enabled || blob_ctx.compressed_blob_size == 0 {
             return Ok(());
         }
 

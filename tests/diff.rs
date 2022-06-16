@@ -53,6 +53,7 @@ impl Mounter {
                 target_dir.to_str().unwrap(),
             ),
             false,
+            b"",
         )
         .unwrap();
         Self {
@@ -63,7 +64,7 @@ impl Mounter {
 
 impl Drop for Mounter {
     fn drop(&mut self) {
-        exec(&format!("umount {:?}", self.mountpoint), true).unwrap();
+        exec(&format!("umount {:?}", self.mountpoint), true, b"").unwrap();
     }
 }
 
@@ -145,7 +146,7 @@ fn diff_build(
             String::new()
         },
     );
-    exec(&cmd, false).unwrap();
+    exec(&cmd, false, b"").unwrap();
 }
 
 fn generate_chunks(num: usize) -> (Vec<Vec<u8>>, Vec<String>) {
