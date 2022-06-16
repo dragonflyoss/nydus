@@ -2,15 +2,6 @@
 	"version": 1,
 	"entries": [
 		{
-			"name": "",
-			"type": "dir",
-			"modtime": "2020-09-10T06:43:07Z",
-			"mode": 493,
-			"userName": "root",
-			"groupName": "root",
-			"NumLink": 0
-		},
-		{
 			"name": "sub/",
 			"type": "dir",
 			"modtime": "2020-09-10T06:43:07Z",
