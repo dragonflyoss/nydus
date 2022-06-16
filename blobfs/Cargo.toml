@@ -1,29 +1,34 @@
 [package]
-name = "blobfs"
+name = "nydus-blobfs"
 version = "0.1.0"
+description = "Blob object file system for Nydus Image Service"
 authors = ["The Nydus Developers"]
-edition = "2018"
 license = "Apache-2.0 OR BSD-3-Clause"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
+edition = "2018"
 
 [dependencies]
+fuse-backend-rs = { version = "0.9.0" }
+libc = "0.2"
 log = "0.4.8"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 serde_with = { version = "1.6.0", features = ["macros"] }
-libc = "0.2"
 vm-memory = { version = "0.7.0" }
-fuse-backend-rs = { version = "0.9.0" }
 
-nydus-error = { path = "../error" }
+nydus-error = { version = "0.2.0", path = "../error" }
 nydus-rafs = { version = "0.1.0", path = "../rafs" }
 nydus-storage = { version = "0.5.0", path = "../storage", features = ["backend-localfs"] }
+
+[dev-dependencies]
+nydus-app = { version = "0.2", path = "../app" }
 
 [features]
 virtiofs = [ "fuse-backend-rs/virtiofs", "nydus-rafs/virtio-fs" ]
 backend-oss = ["nydus-rafs/backend-oss"]
 backend-registry = ["nydus-rafs/backend-registry"]
 
-[dev-dependencies]
-nydus-app = { version = "0.2", path = "../app" }
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin"]

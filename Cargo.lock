@@ -130,23 +130,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blobfs"
-version = "0.1.0"
-dependencies = [
- "fuse-backend-rs",
- "libc",
- "log",
- "nydus-app",
- "nydus-error",
- "nydus-rafs",
- "nydus-storage",
- "serde",
- "serde_json",
- "serde_with",
- "vm-memory 0.7.0",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1123,6 +1106,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nydus-blobfs"
+version = "0.1.0"
+dependencies = [
+ "fuse-backend-rs",
+ "libc",
+ "log",
+ "nydus-app",
+ "nydus-error",
+ "nydus-rafs",
+ "nydus-storage",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "vm-memory 0.7.0",
+]
+
+[[package]]
 name = "nydus-error"
 version = "0.2.1"
 dependencies = [
@@ -1174,7 +1174,6 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64",
- "blobfs",
  "chrono",
  "clap",
  "env_logger",
@@ -1189,6 +1188,7 @@ dependencies = [
  "nix",
  "nydus-api",
  "nydus-app",
+ "nydus-blobfs",
  "nydus-error",
  "nydus-rafs",
  "nydus-storage",
