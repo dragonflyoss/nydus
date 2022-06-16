@@ -13,13 +13,10 @@
         {
             "name": "empty-file",
             "type": "reg",
-            "size": 0,
             "modtime": "2020-09-10T07:40:29Z",
             "mode": 420,
-            "offset": 0,
             "NumLink": 0,
-            "digest": "",
-            "chunkSize": 4194304
+            "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         }
     ]
 }
