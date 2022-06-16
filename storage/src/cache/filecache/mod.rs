@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Result;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
@@ -37,6 +37,7 @@ pub struct FileCacheMgr {
     validate: bool,
     disable_indexed_map: bool,
     is_compressed: bool,
+    closed: Arc<AtomicBool>,
 }
 
 impl FileCacheMgr {
@@ -65,6 +66,7 @@ impl FileCacheMgr {
             disable_indexed_map: blob_config.disable_indexed_map,
             validate: config.cache_validate,
             is_compressed: config.cache_compressed,
+            closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -109,12 +111,15 @@ impl BlobCacheMgr for FileCacheMgr {
     }
 
     fn destroy(&self) {
-        self.worker_mgr.stop();
-        self.backend().shutdown();
-        self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
+        if !self.closed.load(Ordering::Acquire) {
+            self.closed.store(true, Ordering::Release);
+            self.worker_mgr.stop();
+            self.backend().shutdown();
+            self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
+        }
     }
 
-    fn gc(&self, id: Option<&str>) {
+    fn gc(&self, id: Option<&str>) -> bool {
         let mut reclaim = Vec::new();
 
         if let Some(blob_id) = id {
@@ -137,6 +142,8 @@ impl BlobCacheMgr for FileCacheMgr {
             }
             guard.remove(key);
         }
+
+        self.blobs.read().unwrap().len() == 0
     }
 
     fn backend(&self) -> &(dyn BlobBackend) {
@@ -146,6 +153,12 @@ impl BlobCacheMgr for FileCacheMgr {
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         self.get_or_create_cache_entry(blob_info)
             .map(|v| v as Arc<dyn BlobCache>)
+    }
+}
+
+impl Drop for FileCacheMgr {
+    fn drop(&mut self) {
+        self.destroy();
     }
 }
 

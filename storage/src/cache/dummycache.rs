@@ -19,6 +19,7 @@
 //!   The [is_chunk_cached()](../trait.BlobCache.html#tymethod.is_chunk_cached) method always
 //!   return true to enable data prefetching.
 use std::io::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
@@ -161,6 +162,7 @@ pub struct DummyCacheMgr {
     cached: bool,
     prefetch: bool,
     validate: bool,
+    closed: AtomicBool,
 }
 
 impl DummyCacheMgr {
@@ -176,6 +178,7 @@ impl DummyCacheMgr {
             cached,
             validate: config.cache_validate,
             prefetch: enable_prefetch,
+            closed: AtomicBool::new(false),
         })
     }
 }
@@ -186,7 +189,14 @@ impl BlobCacheMgr for DummyCacheMgr {
     }
 
     fn destroy(&self) {
-        self.backend().shutdown()
+        if !self.closed.load(Ordering::Acquire) {
+            self.closed.store(true, Ordering::Release);
+            self.backend().shutdown();
+        }
+    }
+
+    fn gc(&self, _id: Option<&str>) -> bool {
+        false
     }
 
     fn backend(&self) -> &(dyn BlobBackend) {
@@ -207,5 +217,11 @@ impl BlobCacheMgr for DummyCacheMgr {
             prefetch: self.prefetch,
             validate: self.validate,
         }))
+    }
+}
+
+impl Drop for DummyCacheMgr {
+    fn drop(&mut self) {
+        self.destroy();
     }
 }
