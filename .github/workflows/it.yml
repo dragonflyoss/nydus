@@ -1,0 +1,117 @@
+name: Nydus Ingegration Test
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64]
+        
+    steps:          
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.17
+
+    - name: Setup pytest
+      run: |
+        sudo apt install --no-install-recommends -y attr libattr1-dev fio pkg-config libssl-dev python3
+        sudo python3 -m pip install --upgrade pip
+        sudo pip3 install pytest xattr requests psutil requests_unixsocket libconf py-splice fallocate pytest-repeat PyYAML six docker toml
+      
+    - name: containerd runc and crictl
+      run: |
+        sudo wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.17.0/crictl-v1.17.0-linux-amd64.tar.gz
+        sudo tar zxvf ./crictl-v1.17.0-linux-amd64.tar.gz -C /usr/local/bin
+        sudo wget https://github.com/containerd/containerd/releases/download/v1.4.3/containerd-1.4.3-linux-amd64.tar.gz
+        mkdir containerd
+        sudo tar -zxf ./containerd-1.4.3-linux-amd64.tar.gz -C ./containerd
+        sudo mv ./containerd/bin/* /usr/bin/
+        sudo wget https://github.com/opencontainers/runc/releases/download/v1.1.2/runc.amd64 -O /usr/bin/runc
+        sudo chmod +x /usr/bin/runc
+      
+    - name: Set up ossutils
+      run: |
+        sudo wget https://gosspublic.alicdn.com/ossutil/1.7.13/ossutil64 -O /usr/bin/ossutil64
+        sudo chmod +x /usr/bin/ossutil64
+        
+    - uses: actions/checkout@v3
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v1
+      with:
+        target-dir: |
+          ./target-fusedev
+          ./target-virtiofs
+        cache-on-failure: true
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+
+    - name: Build nydus-rs
+      run: |
+        declare -A rust_arch_map=( ["amd64"]="x86_64" ["arm64"]="aarch64")
+        arch=${rust_arch_map[${{ matrix.arch }}]}
+        cargo install cross
+        rustup component add rustfmt clippy
+        make -e ARCH=$arch -e CARGO=cross static-release
+        #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
+        #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-cached .
+        #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
+        #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusctl .
+        #sudo mv target-virtiofs/$arch-unknown-linux-musl/release/nydusd nydusd-virtiofs
+        sudo cp -r misc/configs .
+        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
+        
+        pwd
+        ls -lh target-virtiofs/$arch-unknown-linux-musl/release
+      
+    - name: Set up anchor file
+      env:
+        OSS_AK_ID: ${{ secrets.OSS_TEST_AK_ID }}
+        OSS_AK_SEC: ${{ secrets.OSS_TEST_AK_SECRET }}
+      run: |
+        sudo mkdir -p /home/runner/nydus-test-workspace
+        sudo cat > /home/runner/work/image-service/image-service/contrib/nydus-test/anchor_conf.json << EOF
+        {
+            "workspace": "/home/runner/nydus-test-workspace",
+            "nydus_project": "/home/runner/work/image-service/image-service",
+            "nydus_runtime_conf": {
+                "profile": "release",
+                "log_level": "info"
+            },
+            "registry": {
+                "registry_url": "localhost:5000",
+                "registry_namespace": "",
+                "registry_auth": "Y2h1YW5sYW5nLmdjdzoxcWF6MndzeA=="
+            },
+            "oss": {
+                "endpoint": "oss-cn-beijing.aliyuncs.com",
+                "ak_id": "$OSS_AK_ID",
+                "ak_secret": "$OSS_AK_SEC",
+                "bucket": "nydus-ci"
+            },
+            "images": {
+                "images_array": [
+                    "busybox:latest"
+                ]
+            },
+            "artifacts": {
+                "containerd": "/usr/bin/containerd",
+                "ossutil_bin": "/usr/bin/ossutil64"
+            },
+            "logging_file": "stderr",
+            "target": "musl"
+        }
+        EOF
+
+    - name: run IT
+      run: |
+        cd /home/runner/work/image-service/image-service/contrib/nydus-test
+        sudo mkdir -p /blobdir
+        cp misc/containerize/entrypoint.sh ./
+        sudo sh ./entrypoint.sh
