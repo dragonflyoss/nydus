@@ -226,6 +226,12 @@ func main() {
 					return fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
 				}
 
+				fsVersion := c.String("fs-version")
+				possibleFsVersions := []string{"5", "6"}
+				if !isPossibleValue(possibleFsVersions, fsVersion) {
+					return fmt.Errorf("--fs-version should be one of %v", possibleFsVersions)
+				}
+
 				// This only works for OSS backend rightnow
 				backendConfig, err := parseBackendConfig(c.String("backend-config"), c.String("backend-config-file"))
 				if err != nil {
@@ -312,7 +318,7 @@ func main() {
 
 					NydusifyVersion: version,
 					Source:          c.String("source"),
-					FsVersion:       c.String("fs-version"),
+					FsVersion:       fsVersion,
 
 					ChunkDict: converter.ChunkDictOpt{
 						Args:     c.String("chunk-dict"),
