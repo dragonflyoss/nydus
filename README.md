@@ -52,7 +52,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 | Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Run Nydus image in containerd with nydus-snapshotter                                                                                                         | ✅      |
 | Runtime       | [Docker](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver)            | Run Nydus image in Docker container with graphdriver plugin                                                                                                  | ✅      |
 | Runtime       | [KataContainers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/kata-nydus-design.md) | Run Nydus image in KataContainers as a native solution                                                                                                       | ✅      |
-| Runtime       | [EROFS](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)  | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
+| Runtime       | [EROFS](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)                                          | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
 
 To try nydus image service:
 
@@ -117,8 +117,10 @@ Docker graph driver is also accompanied, it helps to start container from nydus 
 Browse the documentation to learn more. Here are some topics you may be interested in:
 
 - [A Nydus Tutorial for Beginners](./docs/tutorial.md)
-- Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
 - [Nydus Design Doc](./docs/nydus-design.md)
+- Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
+- [EROFS, What Are We Doing Now For Containers?](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)
+- [The Evolution of the Nydus Image Acceleration](https://d7y.io/blog/2022/06/06/evolution-of-nydus/)
 
 ## Run with macos
 
