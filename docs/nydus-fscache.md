@@ -160,3 +160,5 @@ Duplicate `./misc/config/config.yaml.nydus.tmpl` configuration file as `path/to/
 # convert to nydus image
 ./accelctl convert --config path/to/config.yaml <your-registry-address>/ubuntu:latest
 ```
+
+3. CI test
