@@ -60,11 +60,14 @@ class NydusAnchor:
 
         artifacts = kwargs.pop("artifacts")
         self.containerd_bin = artifacts["containerd"]
-        self.ossutil_bin = (
-            "framework/bin/ossutil64.x86"
-            if self.machine != "aarch64"
-            else "framework/bin/ossutil64.aarch64"
-        )
+        if artifacts["ossutil_bin"]:
+            self.ossutil_bin = artifacts["ossutil_bin"]
+        else:
+            self.ossutil_bin = (
+                "framework/bin/ossutil64.x86"
+                if self.machine != "aarch64"
+                else "framework/bin/ossutil64.aarch64"
+            )
 
         nydus_runtime_conf = kwargs.pop("nydus_runtime_conf")
         self.log_level = nydus_runtime_conf["log_level"]
