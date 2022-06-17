@@ -183,7 +183,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 
 	// Try to pull Nydus cache image from remote registry
 	cg, err := newCacheGlue(
-		ctx, cvt.CacheMaxRecords, cvt.CacheVersion, cvt.DockerV2Format, cvt.TargetRemote, cvt.CacheRemote, cvt.storageBackend,
+		ctx, cvt.CacheMaxRecords, cvt.CacheVersion, cvt.FsVersion, cvt.DockerV2Format, cvt.TargetRemote, cvt.CacheRemote, cvt.storageBackend,
 	)
 	if err != nil {
 		return errors.Wrap(err, "Pull cache image")
@@ -254,6 +254,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 			forcePush:      cvt.BackendForcePush,
 			alignedChunk:   cvt.BackendAlignedChunk,
 			referenceBlobs: blobLayers,
+			fsVersion:      cvt.FsVersion,
 		}
 		parentBuildLayer = buildLayer
 		buildLayers = append(buildLayers, buildLayer)

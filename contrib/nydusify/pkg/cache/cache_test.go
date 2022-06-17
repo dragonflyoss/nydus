@@ -47,6 +47,7 @@ func makeBootstrapLayer(id int64, hasBlob bool) ocispec.Descriptor {
 		Size:      id,
 		Annotations: map[string]string{
 			utils.LayerAnnotationNydusBootstrap:     "true",
+			utils.LayerAnnotationNydusFsVersion:     "6",
 			utils.LayerAnnotationNydusSourceChainID: digest.FromString("chain-" + idStr).String(),
 			utils.LayerAnnotationUncompressed:       digest.FromString("bootstrap-uncompressed-" + idStr).String(),
 		},
@@ -76,6 +77,7 @@ func testWithBackend(t *testing.T, _backend backend.Backend) {
 		MaxRecords:     3,
 		DockerV2Format: false,
 		Backend:        _backend,
+		FsVersion:      "6",
 	})
 	assert.Nil(t, err)
 

@@ -253,6 +253,7 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 		utils.LayerAnnotationNydusBlobIDs:          true,
 		utils.LayerAnnotationNydusReferenceBlobIDs: true,
 		utils.LayerAnnotationNydusBootstrap:        true,
+		utils.LayerAnnotationNydusFsVersion:        true,
 	}
 	for idx, desc := range layers {
 		layerDiffID := digest.Digest(desc.Annotations[utils.LayerAnnotationUncompressed])

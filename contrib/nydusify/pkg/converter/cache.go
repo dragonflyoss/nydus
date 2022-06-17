@@ -29,7 +29,7 @@ type cacheGlue struct {
 }
 
 func newCacheGlue(
-	ctx context.Context, maxRecords uint, version string, dockerV2Format bool, remote *remote.Remote, cacheRemote *remote.Remote, backend backend.Backend,
+	ctx context.Context, maxRecords uint, version string, fsVersion string, dockerV2Format bool, remote *remote.Remote, cacheRemote *remote.Remote, backend backend.Backend,
 ) (*cacheGlue, error) {
 	if cacheRemote == nil {
 		return &cacheGlue{}, nil
@@ -41,6 +41,7 @@ func newCacheGlue(
 	cache, err := cache.New(cacheRemote, cache.Opt{
 		MaxRecords:     maxRecords,
 		Version:        version,
+		FsVersion:      fsVersion,
 		DockerV2Format: dockerV2Format,
 		Backend:        backend,
 	})

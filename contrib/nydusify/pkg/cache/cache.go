@@ -29,7 +29,16 @@ import (
 type Opt struct {
 	// Maximum records(bootstrap layer + blob layer) in cache image.
 	MaxRecords uint
-	Version    string
+	// Version of cache image, we need to discard cache layers when
+	// the required version (specified by `--build-cache-version`)
+	// is unmatched with the cache image version, for example nydus
+	// bootstrap format has a minor upgrade.
+	Version string
+	// Bootstrap's RAFS version of cache image, we need to discard cache
+	// layers when the required version (specified by `--fs-version`) is
+	// unmatched with the fs version recorded in cache image, for example
+	// we can't use rafs v5 cache layers for rafs v6 image.
+	FsVersion string
 	// Make cache image manifest compatible with the docker v2 media
 	// type defined in github.com/containerd/containerd/images.
 	DockerV2Format bool
@@ -129,6 +138,7 @@ func (cache *Cache) recordToLayer(record *Record) (*ocispec.Descriptor, *ocispec
 		Size:      record.NydusBootstrapDesc.Size,
 		Annotations: map[string]string{
 			utils.LayerAnnotationNydusBootstrap:     "true",
+			utils.LayerAnnotationNydusFsVersion:     cache.opt.FsVersion,
 			utils.LayerAnnotationNydusSourceChainID: record.SourceChainID.String(),
 			// Use the annotation to record bootstrap layer DiffID.
 			utils.LayerAnnotationUncompressed: record.NydusBootstrapDiffID.String(),
@@ -230,6 +240,7 @@ func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *Record {
 			Size:      layer.Size,
 			Annotations: map[string]string{
 				utils.LayerAnnotationNydusBootstrap: "true",
+				utils.LayerAnnotationNydusFsVersion: cache.opt.FsVersion,
 				utils.LayerAnnotationUncompressed:   uncompressedDigestStr,
 			},
 		}
@@ -402,7 +413,8 @@ func (cache *Cache) Export(ctx context.Context) error {
 			Config: *configDesc,
 			Layers: layers,
 			Annotations: map[string]string{
-				utils.ManifestNydusCache: cache.opt.Version,
+				utils.ManifestNydusCache:            cache.opt.Version,
+				utils.LayerAnnotationNydusFsVersion: cache.opt.FsVersion,
 			},
 		},
 	}
@@ -443,11 +455,22 @@ func (cache *Cache) Import(ctx context.Context) error {
 		return errors.Wrap(err, "Unmarshal cache manifest")
 	}
 
-	// Discard the cache mismatched version
+	// Discard the cache if mismatched version
 	if manifest.Annotations[utils.ManifestNydusCache] != cache.opt.Version {
 		return fmt.Errorf(
 			"unmatched cache image version %s, required to be %s",
 			manifest.Annotations[utils.ManifestNydusCache], cache.opt.Version,
+		)
+	}
+
+	// Discard the cache if mismatched RAFS FsVersion
+	// If utils.LayerAnnotationNydusFsVersion == "" and cache.opt.FsVersion == "5",
+	// it should be old cache image.
+	if manifest.Annotations[utils.LayerAnnotationNydusFsVersion] != cache.opt.FsVersion &&
+		!(manifest.Annotations[utils.LayerAnnotationNydusFsVersion] == "" && cache.opt.FsVersion == "5") {
+		return fmt.Errorf(
+			"unmatched fs version %s, required to be %s",
+			manifest.Annotations[utils.LayerAnnotationNydusFsVersion], cache.opt.FsVersion,
 		)
 	}
 
