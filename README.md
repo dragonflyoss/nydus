@@ -31,14 +31,14 @@ Currently Nydus includes following tools:
 
 | Tool                                                                                                                   | Description                                                                                                                                                |
 | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [nydusd](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusd.md)                                     | Nydus user-space daemon, it processes all fscache/FUSE messages from the kernel and parses Nydus images to fullfil those requests             |
+| [nydusd](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusd.md)                                     | Nydus user-space daemon, it processes all fscache/FUSE messages from the kernel and parses Nydus images to fullfil those requests                          |
 | [nydus-image](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md)                           | Convert a single layer of OCI format container image into a nydus format container image generating meta part file and data part file respectively         |
 | [nydusify](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusify.md)                                 | It pulls OCI image down and unpack it, invokes `nydus-image create` to convert image and then pushes the converted image back to registry and data storage |
 | [nydusctl](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md)                              | Nydusd CLI client (`nydus-image inspect`), query daemon's working status/metrics and configure it                                                          |
 | [ctr-remote](https://github.com/dragonflyoss/image-service/tree/master/contrib/ctr-remote)                             | An enhanced `containerd` CLI tool enable nydus support with `containerd` ctr                                                                               |
 | [nydus-docker-graphdriver](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver) | Works as a `docker` remote graph driver to control how images and containers are stored and managed                                                        |
 | [nydus-overlayfs](https://github.com/dragonflyoss/image-service/tree/master/contrib/nydus-overlayfs)                   | `Containerd` mount helper to invoke overlayfs mount with tweaking mount options a bit. So nydus prerequisites can be passed to vm-based runtime            |
-| [nydus-backend-proxy](./contrib/nydus-backend-proxy/README.md)                                                         | A simple HTTP server to serve local directory as a blob backend for nydusd            |
+| [nydus-backend-proxy](./contrib/nydus-backend-proxy/README.md)                                                         | A simple HTTP server to serve local directory as a blob backend for nydusd                                                                                 |
 
 Currently Nydus is supporting the following platforms in container ecosystem:
 
@@ -52,7 +52,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 | Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Run Nydus image in containerd with nydus-snapshotter                                                                                                         | ✅      |
 | Runtime       | [Docker](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver)            | Run Nydus image in Docker container with graphdriver plugin                                                                                                  | ✅      |
 | Runtime       | [KataContainers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/kata-nydus-design.md) | Run Nydus image in KataContainers as a native solution                                                                                                       | ✅      |
-| Runtime       | [EROFS](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)  | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
+| Runtime       | [EROFS](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)                                          | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
 
 To try nydus image service:
 
@@ -117,8 +117,10 @@ Docker graph driver is also accompanied, it helps to start container from nydus 
 Browse the documentation to learn more. Here are some topics you may be interested in:
 
 - [A Nydus Tutorial for Beginners](./docs/tutorial.md)
-- Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
 - [Nydus Design Doc](./docs/nydus-design.md)
+- Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
+- [EROFS, What Are We Doing Now For Containers?](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)
+- [The Evolution of the Nydus Image Acceleration](https://d7y.io/blog/2022/06/06/evolution-of-nydus/)
 
 ## Run with macos
 
@@ -138,7 +140,7 @@ Feel free to reach/join us via Slack and Dingtalk
 
 - Dingtalk
 
-  Join nydus-devel group by clicking [URL](https://qr.dingtalk.com/action/joingroup?code=v1,k1,YfGzhaTOnpm10Bf+/ohz4WcuDEIe9nTIjo+MPuIgRGQ=&_dt_no_comment=1&origin=11) on your phone.
+  Join nydus-devel group by clicking [URL](https://h5.dingtalk.com/circle/healthCheckin.html?dtaction=os&corpId=dingbbd4fb77fb7c4f7f85db999db6125bc4&1fd25e0=3e15bd0&cbdbhh=qwertyuiop) on your phone.
 
   You can also search our talking group by number _34971767_ and QR code
 
