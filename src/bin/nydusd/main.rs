@@ -26,12 +26,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches, SubCommand, Values};
-use fuse_backend_rs::api::{Vfs, VfsOptions};
 use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::Resource;
 
-use nydus::FsBackendType;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
@@ -198,12 +196,11 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
 }
 
 #[cfg(feature = "virtiofs")]
-const SHARED_DIR_HELP_MESSAGE: &str = "Directory shared by host and guest for \
-passthroughfs, which also enables passthroughfs mode";
+const SHARED_DIR_HELP_MESSAGE: &str = "Directory to share between host and guest by virtiofs, which also enables `passthroughfs` mode";
 
 #[cfg(feature = "fusedev")]
-const SHARED_DIR_HELP_MESSAGE: &str = "A passthroughfs source for FUSE (the \
-purpose of testing and demonstration), which also enables passthroughfs mode";
+const SHARED_DIR_HELP_MESSAGE: &str =
+    "Directory to share by FUSE for testing, which also enables `passthroughfs` mode";
 
 #[cfg(any(feature = "fusedev", feature = "virtiofs"))]
 fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
@@ -211,7 +208,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("bootstrap")
             .long("bootstrap")
             .short("B")
-            .help("Bootstrap/metadata file for rafs filesystem, which also enables rafs mode")
+            .help("Bootstrap file of a rafs filesystem, which also enables `rafs` mode")
             .takes_value(true)
             .requires("config")
             .conflicts_with("shared-dir"),
@@ -238,7 +235,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("virtual-mountpoint")
             .long("virtual-mountpoint")
             .short("m")
-            .help("Path inside FUSE/virtiofs virtual filesystem to mount the rafs/passthroughfs instance")
+            .help("Path within the FUSE/virtiofs device to mount the filesystem")
             .takes_value(true)
             .default_value("/")
             .required(false),
@@ -270,7 +267,7 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
             .long("thread-num")
             .short("T")
             .default_value("1")
-            .help("Number of working threads to serve FUSE IO requests")
+            .help("Number of worker threads to serve IO requests")
             .takes_value(true)
             .required(false)
             .validator(|v| {
@@ -289,7 +286,7 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("writable")
             .long("writable")
             .short("W")
-            .help("Mount FUSE filesystem in rw mode")
+            .help("Mounts FUSE filesystem in rw mode")
             .takes_value(false),
     )
 }
@@ -308,7 +305,7 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
         Arg::with_name("hybrid-mode")
             .long("hybrid-mode")
             .short("H")
-            .help("Enable support for both rafs and passthroughfs modes")
+            .help("Enables both `rafs` and `passthroughfs` modes")
             .required(false)
             .takes_value(false),
     )
@@ -337,13 +334,13 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
             Arg::with_name("fscache")
                 .long("fscache")
                 .short("F")
-                .help("Working directory fscache driver to cache files")
+                .help("Working directory for Linux fscache driver to store cached files")
                 .takes_value(true),
         )
         .arg(
             Arg::with_name("fscache-tag")
                 .long("fscache-tag")
-                .help("Fscache tag to identify the fs daemon instance")
+                .help("Tag to identify the fscache daemon instance")
                 .takes_value(true)
                 .requires("fscache"),
         );
@@ -426,7 +423,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
             Arg::with_name("upgrade")
                 .long("upgrade")
                 .short("U")
-                .help("Start in upgrade mode")
+                .help("Starts daemon in upgrade mode")
                 .takes_value(false)
                 .required(false)
                 .global(true),
@@ -549,6 +546,7 @@ impl<'a> SubCmdArgs<'a> {
     }
 }
 
+#[cfg(any(feature = "fusedev", feature = "virtiofs"))]
 fn process_default_fs_service(
     args: SubCmdArgs,
     bti: BuildTimeInfo,
@@ -562,10 +560,10 @@ fn process_default_fs_service(
     // safe as virtual_mountpoint default to "/"
     let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
 
-    let mut opts = VfsOptions::default();
+    let mut opts = fuse_backend_rs::api::VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
         let cmd = FsBackendMountCmd {
-            fs_type: FsBackendType::PassthroughFs,
+            fs_type: nydus::FsBackendType::PassthroughFs,
             source: shared_dir.to_string(),
             config: "".to_string(),
             mountpoint: virtual_mnt.to_string(),
@@ -587,7 +585,7 @@ fn process_default_fs_service(
             .map(|files| files.map(|s| s.to_string()).collect());
 
         let cmd = FsBackendMountCmd {
-            fs_type: FsBackendType::Rafs,
+            fs_type: nydus::FsBackendType::Rafs,
             source: b.to_string(),
             config: std::fs::read_to_string(config)?,
             mountpoint: virtual_mnt.to_string(),
@@ -608,7 +606,7 @@ fn process_default_fs_service(
         opts.killpriv_v2 = true;
     }
 
-    let vfs = Vfs::new(opts);
+    let vfs = fuse_backend_rs::api::Vfs::new(opts);
     let vfs = Arc::new(vfs);
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = args.value_of("id").map(|id| id.to_string());
@@ -678,6 +676,18 @@ fn process_default_fs_service(
     Ok(())
 }
 
+#[cfg(not(any(feature = "fusedev", feature = "virtiofs")))]
+fn process_default_fs_service(
+    _args: SubCmdArgs,
+    _bti: BuildTimeInfo,
+    _apisock: Option<&str>,
+    _is_fuse: bool,
+) -> Result<()> {
+    return Err(einval!(
+        "Neither fusedev nor virtiofs is enabled, please recompile nydusd with required features!"
+    ));
+}
+
 fn process_daemon_arguments(
     subargs: &SubCmdArgs,
     _apisock: Option<&str>,
@@ -726,6 +736,8 @@ fn main() -> Result<()> {
             #[cfg(feature = "fusedev")]
             process_default_fs_service(subargs, bti, apisock, true)?;
             #[cfg(feature = "virtiofs")]
+            process_default_fs_service(subargs, bti, apisock, false)?;
+            #[cfg(not(any(feature = "fusedev", feature = "virtiofs")))]
             process_default_fs_service(subargs, bti, apisock, false)?;
         }
     }
