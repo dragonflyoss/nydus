@@ -1,6 +1,9 @@
 # Changelog
 ## [Unreleased]
 
+## [v0.3.1]
+- Add async io helpers
+
 ## [v0.3]
 
 ### Added

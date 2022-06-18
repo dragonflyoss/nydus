@@ -18,6 +18,7 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
 
 use nydus_api::http::BlobPrefetchConfig;
+use nydus_utils::async_helper::with_runtime;
 use nydus_utils::mpmc::Channel;
 
 use crate::cache::{BlobCache, BlobIoRange};
@@ -199,11 +200,9 @@ impl AsyncWorkerMgr {
                         .prefetch_workers
                         .fetch_add(1, Ordering::Relaxed);
 
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("storage: failed to create tokio runtime for current thread");
-                    rt.block_on(Self::handle_prefetch_requests(mgr2.clone(), &rt));
+                    with_runtime(|rt| {
+                        rt.block_on(Self::handle_prefetch_requests(mgr2.clone(), rt));
+                    });
 
                     mgr2.metrics
                         .prefetch_workers
