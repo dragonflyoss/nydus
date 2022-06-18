@@ -113,5 +113,6 @@ jobs:
       run: |
         cd /home/runner/work/image-service/image-service/contrib/nydus-test
         sudo mkdir -p /blobdir
-        cp misc/containerize/entrypoint.sh ./
-        sudo sh ./entrypoint.sh
+        sudo python3 nydus_test_config.py --dist fs_structure.yaml
+        #sudo pytest -vs --durations=0 --pdb functional-test/test_nydus.py functional-test/test_layered_image.py functional-test/test_api.py
+        sudo pytest -vs --durations=0 --pdb functional-test/test_api.py
