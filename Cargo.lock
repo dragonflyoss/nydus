@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dbs-uhttp",
  "http",
