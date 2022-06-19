@@ -17,12 +17,12 @@ serde_json = "1.0.53"
 serde_with = { version = "1.6.0", features = ["macros"] }
 vm-memory = { version = "0.7.0" }
 
-nydus-error = { version = "0.2.0", path = "../error" }
-nydus-rafs = { version = "0.1.0", path = "../rafs" }
-nydus-storage = { version = "0.5.0", path = "../storage", features = ["backend-localfs"] }
+nydus-error = { version = "0.2", path = "../error" }
+nydus-rafs = { version = "0.1", path = "../rafs" }
+nydus-storage = { version = "0.5", path = "../storage", features = ["backend-localfs"] }
 
 [dev-dependencies]
-nydus-app = { version = "0.2", path = "../app" }
+nydus-app = { version = "0.3", path = "../app" }
 
 [features]
 virtiofs = [ "fuse-backend-rs/virtiofs", "nydus-rafs/virtio-fs" ]
