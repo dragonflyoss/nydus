@@ -165,9 +165,6 @@ impl FileCacheEntry {
         if blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE) {
             return Err(einval!("fscache does not support Rafs v5 blobs"));
         }
-        if blob_info.is_stargz() {
-            return Err(einval!("fscache does not support stargz blob file"));
-        }
         let file = blob_info
             .get_fscache_file()
             .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
@@ -210,7 +207,7 @@ impl FileCacheEntry {
             is_get_blob_object_supported: true,
             is_compressed: false,
             is_direct_chunkmap: true,
-            is_stargz: false,
+            is_stargz: blob_info.is_stargz(),
             dio_enabled: true,
             need_validate: mgr.validate,
             prefetch_config,

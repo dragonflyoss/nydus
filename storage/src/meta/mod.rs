@@ -407,6 +407,7 @@ impl BlobMetaInfo {
             chunks: chunk_infos,
             base: base as *const u8,
             unmap_len: expected_size,
+            is_stargz: blob_info.is_stargz(),
         });
 
         Ok(BlobMetaInfo { state })
@@ -465,7 +466,9 @@ impl BlobMetaInfo {
                 index += 1;
                 let entry = &infos[index];
                 self.validate_chunk(entry)?;
-                if entry.uncompressed_offset() != last_end {
+
+                // For stargz chunks, disable this check.
+                if !self.state.is_stargz && entry.uncompressed_offset() != last_end {
                     return Err(einval!(format!(
                         "mismatch uncompressed {} size {} last_end {}",
                         entry.uncompressed_offset(),
@@ -562,7 +565,8 @@ impl BlobMetaInfo {
 
     #[inline]
     fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
-        if entry.compressed_end() > self.state.compressed_size
+        // For stargz blob, self.state.compressed_size == 0, so don't validate it.
+        if (!self.state.is_stargz && entry.compressed_end() > self.state.compressed_size)
             || entry.uncompressed_end() > self.state.uncompressed_size
         {
             Err(einval!())
@@ -646,6 +650,8 @@ pub struct BlobMetaState {
     chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
     base: *const u8,
     unmap_len: usize,
+    /// The blob meta is for an stargz image.
+    is_stargz: bool,
 }
 
 // // Safe to Send/Sync because the underlying data structures are readonly
@@ -670,6 +676,25 @@ impl BlobMetaState {
         let mut right = size;
         let mut start = 0;
         let mut end = 0;
+
+        if self.is_stargz {
+            // FIXME: since stargz chunks are not currently allocated chunk index in the order of uncompressed_offset,
+            // a binary search is not available for now, here is a heavy overhead workaround, need to be fixed.
+            for i in 0..self.chunk_count {
+                let off = if compressed {
+                    chunks[i as usize].compressed_offset()
+                } else {
+                    chunks[i as usize].uncompressed_offset()
+                };
+                if addr == off {
+                    return Ok(i as usize);
+                }
+            }
+            return Err(einval!(format!(
+                "can't find stargz chunk by offset {}",
+                addr,
+            )));
+        }
 
         while left < right {
             let mid = left + size / 2;
@@ -799,6 +824,7 @@ mod tests {
             ]),
             base: std::ptr::null(),
             unmap_len: 0,
+            is_stargz: false,
         };
 
         assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
@@ -883,6 +909,7 @@ mod tests {
             ]),
             base: std::ptr::null(),
             unmap_len: 0,
+            is_stargz: false,
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),

@@ -29,7 +29,7 @@ use nydus_api::http::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
-use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
+use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
@@ -967,7 +967,10 @@ impl Command {
                 let param = v.trim_start_matches("0x").trim_end_matches("0X");
                 let chunk_size =
                     u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
-                if chunk_size < 0x1000 || !chunk_size.is_power_of_two() {
+                if chunk_size as u64 > RAFS_MAX_CHUNK_SIZE
+                    || chunk_size < 0x1000
+                    || !chunk_size.is_power_of_two()
+                {
                     bail!("invalid chunk size: {}", chunk_size);
                 }
                 Ok(chunk_size)
