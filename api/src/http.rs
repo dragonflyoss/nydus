@@ -113,6 +113,99 @@ impl BackendConfig {
     }
 }
 
+/// Configuration information for localfs storage backend.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct LocalFsConfig {
+    #[serde(default)]
+    pub readahead: bool,
+    #[serde(default = "default_readahead_sec")]
+    pub readahead_sec: u32,
+    #[serde(default)]
+    pub blob_file: String,
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub alt_dirs: Vec<String>,
+}
+
+/// OSS configuration information to access blobs.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OssConfig {
+    /// Enable HTTP proxy for the read request.
+    pub proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    pub timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
+    pub connect_timeout: u64,
+    /// Retry count when read request failed.
+    pub retry_limit: u8,
+    /// Oss endpoint
+    pub endpoint: String,
+    /// Oss access key
+    pub access_key_id: String,
+    /// Oss secret
+    pub access_key_secret: String,
+    /// Oss bucket name
+    pub bucket_name: String,
+    /// Oss http scheme, either 'http' or 'https'
+    #[serde(default = "default_http_scheme")]
+    pub scheme: String,
+    /// Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
+    /// - object_key: sha256:xxx
+    /// - object_prefix: nydus/
+    /// - object_key with object_prefix: nydus/sha256:xxx
+    #[serde(default)]
+    pub object_prefix: String,
+}
+
+/// Container registry configuration information to access blobs.
+///
+/// This structure is externally visible through configuration file and HTTP API, please keep them
+/// stable.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct RegistryConfig {
+    /// Enable HTTP proxy for the read request.
+    pub proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    pub timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
+    pub connect_timeout: u64,
+    /// Retry count when read request failed.
+    pub retry_limit: u8,
+    /// Registry http scheme, either 'http' or 'https'
+    #[serde(default = "default_http_scheme")]
+    pub scheme: String,
+    /// Registry url host
+    pub host: String,
+    /// Registry image name, like 'library/ubuntu'
+    pub repo: String,
+    /// Base64_encoded(username:password), the field should be
+    /// sent to registry auth server to get a bearer token.
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// The field is a bearer token to be sent to registry
+    /// to authorize registry requests.
+    #[serde(default)]
+    pub registry_token: Option<String>,
+    /// The http scheme to access blobs. It is used to workaround some P2P subsystem
+    /// that requires a different scheme than the registry.
+    #[serde(default)]
+    pub blob_url_scheme: String,
+    /// Redirect blob access to a different host regardless of the one specified in 'host'.
+    #[serde(default)]
+    pub blob_redirected_host: String,
+}
+
 /// Configuration information for blob cache manager.
 ///
 /// This structure is externally visible through configuration file and HTTP API, please keep them
@@ -843,6 +936,15 @@ pub fn start_http_thread(
         })?;
 
     Ok((thread, waker))
+}
+
+/// Get default http scheme for network connection.
+fn default_http_scheme() -> String {
+    "https".to_string()
+}
+
+fn default_readahead_sec() -> u32 {
+    10
 }
 
 #[cfg(test)]

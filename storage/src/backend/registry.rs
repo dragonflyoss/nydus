@@ -13,13 +13,13 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
-use nydus_api::http::ProxyConfig;
+use nydus_api::http::RegistryConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{
     is_success_status, respond, Connection, ConnectionConfig, ConnectionError, ReqBody,
 };
-use crate::backend::{default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader};
+use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -92,46 +92,6 @@ impl HashCache {
         let mut cached_guard = self.0.write().unwrap();
         cached_guard.remove(key);
     }
-}
-
-/// Container registry configuration information to access blobs.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct RegistryConfig {
-    /// Enable HTTP proxy for the read request.
-    pub proxy: ProxyConfig,
-    /// Skip SSL certificate validation for HTTPS scheme.
-    pub skip_verify: bool,
-    /// Drop the read request once http request timeout, in seconds.
-    pub timeout: u64,
-    /// Drop the read request once http connection timeout, in seconds.
-    pub connect_timeout: u64,
-    /// Retry count when read request failed.
-    pub retry_limit: u8,
-    /// Registry http scheme, either 'http' or 'https'
-    #[serde(default = "default_http_scheme")]
-    pub scheme: String,
-    /// Registry url host
-    pub host: String,
-    /// Registry image name, like 'library/ubuntu'
-    pub repo: String,
-    /// Base64_encoded(username:password), the field should be
-    /// sent to registry auth server to get a bearer token.
-    #[serde(default)]
-    pub auth: Option<String>,
-    /// The field is a bearer token to be sent to registry
-    /// to authorize registry requests.
-    #[serde(default)]
-    pub registry_token: Option<String>,
-    /// The http scheme to access blobs. It is used to workaround some P2P subsystem
-    /// that requires a different scheme than the registry.
-    #[serde(default)]
-    pub blob_url_scheme: String,
-    /// Redirect blob access to a different host regardless of the one specified in 'host'.
-    #[serde(default)]
-    pub blob_redirected_host: String,
 }
 
 #[derive(Clone, Deserialize)]

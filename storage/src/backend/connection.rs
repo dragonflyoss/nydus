@@ -20,10 +20,7 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use nydus_api::http::ProxyConfig;
-
-use crate::backend::oss::OssConfig;
-use crate::backend::registry::RegistryConfig;
+use nydus_api::http::{OssConfig, ProxyConfig, RegistryConfig};
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
 

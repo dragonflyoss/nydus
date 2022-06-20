@@ -13,11 +13,11 @@ use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
 use sha1::Sha1;
 
-use nydus_api::http::ProxyConfig;
+use nydus_api::http::OssConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError};
-use crate::backend::{default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader};
+use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -39,41 +39,6 @@ impl From<OssError> for BackendError {
     fn from(error: OssError) -> Self {
         BackendError::Oss(error)
     }
-}
-
-/// OSS configuration information to access blobs.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct OssConfig {
-    /// Enable HTTP proxy for the read request.
-    pub proxy: ProxyConfig,
-    /// Skip SSL certificate validation for HTTPS scheme.
-    pub skip_verify: bool,
-    /// Drop the read request once http request timeout, in seconds.
-    pub timeout: u64,
-    /// Drop the read request once http connection timeout, in seconds.
-    pub connect_timeout: u64,
-    /// Retry count when read request failed.
-    pub retry_limit: u8,
-    /// Oss endpoint
-    pub endpoint: String,
-    /// Oss access key
-    pub access_key_id: String,
-    /// Oss secret
-    pub access_key_secret: String,
-    /// Oss bucket name
-    pub bucket_name: String,
-    /// Oss http scheme, either 'http' or 'https'
-    #[serde(default = "default_http_scheme")]
-    pub scheme: String,
-    /// Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
-    /// - object_key: sha256:xxx
-    /// - object_prefix: nydus/
-    /// - object_key with object_prefix: nydus/sha256:xxx
-    #[serde(default)]
-    pub object_prefix: String,
 }
 
 // `OssState` is almost identical to `OssConfig`, but let's keep them separated.
