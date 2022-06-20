@@ -13,11 +13,11 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
-use nydus_api::http::RegistryOssConfig;
+use nydus_api::http::ProxyConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{
-    is_success_status, respond, Connection, ConnectionError, ReqBody,
+    is_success_status, respond, Connection, ConnectionConfig, ConnectionError, ReqBody,
 };
 use crate::backend::{default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader};
 
@@ -100,20 +100,36 @@ impl HashCache {
 /// stable.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct RegistryConfig {
+    /// Enable HTTP proxy for the read request.
+    pub proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    pub timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
+    pub connect_timeout: u64,
+    /// Retry count when read request failed.
+    pub retry_limit: u8,
+    /// Registry http scheme, either 'http' or 'https'
     #[serde(default = "default_http_scheme")]
     pub scheme: String,
+    /// Registry url host
     pub host: String,
+    /// Registry image name, like 'library/ubuntu'
     pub repo: String,
-    // Base64_encoded(username:password), the field should be
-    // sent to registry auth server to get a bearer token.
+    /// Base64_encoded(username:password), the field should be
+    /// sent to registry auth server to get a bearer token.
     #[serde(default)]
     pub auth: Option<String>,
-    // The field is a bearer token to be sent to registry
-    // to authorize registry requests.
+    /// The field is a bearer token to be sent to registry
+    /// to authorize registry requests.
     #[serde(default)]
     pub registry_token: Option<String>,
+    /// The http scheme to access blobs. It is used to workaround some P2P subsystem
+    /// that requires a different scheme than the registry.
     #[serde(default)]
     pub blob_url_scheme: String,
+    /// Redirect blob access to a different host regardless of the one specified in 'host'.
     #[serde(default)]
     pub blob_redirected_host: String,
 }
@@ -571,11 +587,10 @@ impl Registry {
     #[allow(clippy::useless_let_if_seq)]
     pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
         let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
-        let common_config: RegistryOssConfig =
-            serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
-        let retry_limit = common_config.retry_limit;
-        let connection = Connection::new(&common_config)?;
         let config: RegistryConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
+        let con_config: ConnectionConfig = config.clone().into();
+        let retry_limit = con_config.retry_limit;
+        let connection = Connection::new(&con_config)?;
         let auth = trim(config.auth);
         let registry_token = trim(config.registry_token);
         let (username, password) = Self::get_authorization_info(&auth)?;

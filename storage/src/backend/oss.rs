@@ -13,10 +13,10 @@ use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
 use sha1::Sha1;
 
-use nydus_api::http::RegistryOssConfig;
+use nydus_api::http::ProxyConfig;
 use nydus_utils::metrics::BackendMetrics;
 
-use crate::backend::connection::{Connection, ConnectionError};
+use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError};
 use crate::backend::{default_http_scheme, BackendError, BackendResult, BlobBackend, BlobReader};
 
 const HEADER_DATE: &str = "Date";
@@ -47,10 +47,25 @@ impl From<OssError> for BackendError {
 /// stable.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct OssConfig {
+    /// Enable HTTP proxy for the read request.
+    pub proxy: ProxyConfig,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    pub timeout: u64,
+    /// Drop the read request once http connection timeout, in seconds.
+    pub connect_timeout: u64,
+    /// Retry count when read request failed.
+    pub retry_limit: u8,
+    /// Oss endpoint
     pub endpoint: String,
+    /// Oss access key
     pub access_key_id: String,
+    /// Oss secret
     pub access_key_secret: String,
+    /// Oss bucket name
     pub bucket_name: String,
+    /// Oss http scheme, either 'http' or 'https'
     #[serde(default = "default_http_scheme")]
     pub scheme: String,
     /// Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
@@ -240,11 +255,10 @@ pub struct Oss {
 impl Oss {
     /// Create a new OSS storage backend.
     pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Oss> {
-        let common_config: RegistryOssConfig =
-            serde_json::from_value(config.clone()).map_err(|e| einval!(e))?;
-        let retry_limit = common_config.retry_limit;
-        let connection = Connection::new(&common_config)?;
         let oss_config: OssConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
+        let con_config: ConnectionConfig = oss_config.clone().into();
+        let retry_limit = con_config.retry_limit;
+        let connection = Connection::new(&con_config)?;
         let state = Arc::new(OssState {
             scheme: oss_config.scheme,
             object_prefix: oss_config.object_prefix,

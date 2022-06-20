@@ -75,7 +75,7 @@ pub struct BlobCacheEntryConfig {
     pub backend_type: String,
     /// Configuration for storage backend, corresponding to `FactoryConfig::BackendConfig::backend_config`.
     ///
-    /// Possible value: `LocalFsConfig`, `RegistryOssConfig`.
+    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
     pub backend_config: Value,
     /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
     ///
@@ -248,34 +248,6 @@ impl Default for ProxyConfig {
             ping_url: String::new(),
             fallback: true,
             check_interval: 5,
-        }
-    }
-}
-
-/// Generic configuration for storage backends.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
-pub struct RegistryOssConfig {
-    /// Enable HTTP proxy for the read request.
-    pub proxy: ProxyConfig,
-    /// Skip SSL certificate validation for HTTPS scheme.
-    pub skip_verify: bool,
-    /// Drop the read request once http request timeout, in seconds.
-    pub timeout: u64,
-    /// Drop the read request once http connection timeout, in seconds.
-    pub connect_timeout: u64,
-    /// Retry count when read request failed.
-    pub retry_limit: u8,
-}
-
-impl Default for RegistryOssConfig {
-    fn default() -> Self {
-        Self {
-            proxy: ProxyConfig::default(),
-            skip_verify: false,
-            timeout: 5,
-            connect_timeout: 5,
-            retry_limit: 0,
         }
     }
 }
@@ -911,31 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_oss_config() {
-        let content = r#"{
-            "proxy": {
-                "url": "http://proxy.com",
-                "ping_url": "http://proxy.com/ping",
-                "fallback": true,
-                "check_interval": 10
-            },
-            "skip_verify": true,
-            "timeout": 60,
-            "connect_timeout": 10,
-            "retry_limit": 3
-        }"#;
-        let config: RegistryOssConfig = serde_json::from_str(content).unwrap();
-        assert!(config.skip_verify);
-        assert_eq!(config.timeout, 60);
-        assert_eq!(config.connect_timeout, 10);
-        assert_eq!(config.retry_limit, 3);
-        assert_eq!(&config.proxy.url, "http://proxy.com");
-        assert_eq!(&config.proxy.ping_url, "http://proxy.com/ping");
-        assert!(config.proxy.fallback);
-        assert_eq!(config.proxy.check_interval, 10);
-    }
-
-    #[test]
     fn test_http_api_routes_v1() {
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon").is_some());
         assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/events").is_some());
@@ -1020,18 +967,5 @@ mod tests {
         let msg = from_route.recv().unwrap();
         assert!(msg.is_none());
         let _ = thread.join().unwrap();
-    }
-
-    #[test]
-    fn test_common_config() {
-        let config = RegistryOssConfig::default();
-
-        assert_eq!(config.timeout, 5);
-        assert_eq!(config.connect_timeout, 5);
-        assert_eq!(config.retry_limit, 0);
-        assert_eq!(config.proxy.check_interval, 5);
-        assert!(config.proxy.fallback);
-        assert_eq!(config.proxy.ping_url, "");
-        assert_eq!(config.proxy.url, "");
     }
 }

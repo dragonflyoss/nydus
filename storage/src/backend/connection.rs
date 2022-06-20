@@ -20,7 +20,10 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use nydus_api::http::RegistryOssConfig;
+use nydus_api::http::ProxyConfig;
+
+use crate::backend::oss::OssConfig;
+use crate::backend::registry::RegistryConfig;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
@@ -35,6 +38,52 @@ pub enum ConnectionError {
 
 /// Specialized `Result` for network communication.
 type ConnectionResult<T> = std::result::Result<T, ConnectionError>;
+
+/// Generic configuration for storage backends.
+#[derive(Debug, Clone)]
+pub(crate) struct ConnectionConfig {
+    pub proxy: ProxyConfig,
+    pub skip_verify: bool,
+    pub timeout: u64,
+    pub connect_timeout: u64,
+    pub retry_limit: u8,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            proxy: ProxyConfig::default(),
+            skip_verify: false,
+            timeout: 5,
+            connect_timeout: 5,
+            retry_limit: 0,
+        }
+    }
+}
+
+impl From<OssConfig> for ConnectionConfig {
+    fn from(c: OssConfig) -> ConnectionConfig {
+        ConnectionConfig {
+            proxy: c.proxy,
+            skip_verify: c.skip_verify,
+            timeout: c.timeout,
+            connect_timeout: c.connect_timeout,
+            retry_limit: c.retry_limit,
+        }
+    }
+}
+
+impl From<RegistryConfig> for ConnectionConfig {
+    fn from(c: RegistryConfig) -> ConnectionConfig {
+        ConnectionConfig {
+            proxy: c.proxy,
+            skip_verify: c.skip_verify,
+            timeout: c.timeout,
+            connect_timeout: c.connect_timeout,
+            retry_limit: c.retry_limit,
+        }
+    }
+}
 
 /// HTTP request data with progress callback.
 #[derive(Clone)]
@@ -132,7 +181,7 @@ pub(crate) struct Connection {
 
 impl Connection {
     /// Create a new connection according to the configuration.
-    pub fn new(config: &RegistryOssConfig) -> Result<Arc<Connection>> {
+    pub fn new(config: &ConnectionConfig) -> Result<Arc<Connection>> {
         info!("backend config: {:?}", config);
         let client = Self::build_connection("", config)?;
         let proxy = if !config.proxy.url.is_empty() {
@@ -260,7 +309,7 @@ impl Connection {
         )
     }
 
-    fn build_connection(proxy: &str, config: &RegistryOssConfig) -> Result<Client> {
+    fn build_connection(proxy: &str, config: &ConnectionConfig) -> Result<Client> {
         let connect_timeout = if config.connect_timeout != 0 {
             Some(Duration::from_secs(config.connect_timeout))
         } else {
@@ -386,5 +435,18 @@ mod tests {
         assert!(is_success_status(StatusCode::OK));
         assert!(is_success_status(StatusCode::PERMANENT_REDIRECT));
         assert!(!is_success_status(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn test_connection_config_default() {
+        let config = ConnectionConfig::default();
+
+        assert_eq!(config.timeout, 5);
+        assert_eq!(config.connect_timeout, 5);
+        assert_eq!(config.retry_limit, 0);
+        assert_eq!(config.proxy.check_interval, 5);
+        assert!(config.proxy.fallback);
+        assert_eq!(config.proxy.ping_url, "");
+        assert_eq!(config.proxy.url, "");
     }
 }
