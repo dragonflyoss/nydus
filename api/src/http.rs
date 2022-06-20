@@ -66,9 +66,6 @@ pub struct DaemonConf {
 }
 
 /// Configuration information for storage backend.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BackendConfig {
     /// Type of storage backend.
@@ -114,27 +111,26 @@ impl BackendConfig {
 }
 
 /// Configuration information for localfs storage backend.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct LocalFsConfig {
+    /// Enable fadvise based readahead.
     #[serde(default)]
     pub readahead: bool,
+    /// Trace based readahead record duration.
     #[serde(default = "default_readahead_sec")]
     pub readahead_sec: u32,
+    /// Blob file to access.
     #[serde(default)]
     pub blob_file: String,
+    /// Dir to hold blob files. Used when 'blob_file' is not specified.
     #[serde(default)]
     pub dir: String,
+    /// Alternative dirs to search for blobs.
     #[serde(default)]
     pub alt_dirs: Vec<String>,
 }
 
 /// OSS configuration information to access blobs.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct OssConfig {
     /// Enable HTTP proxy for the read request.
@@ -167,9 +163,6 @@ pub struct OssConfig {
 }
 
 /// Container registry configuration information to access blobs.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct RegistryConfig {
     /// Enable HTTP proxy for the read request.
@@ -207,9 +200,6 @@ pub struct RegistryConfig {
 }
 
 /// Configuration information for blob cache manager.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CacheConfig {
     /// Type of blob cache: "blobcache", "fscache" or ""
@@ -230,9 +220,6 @@ pub struct CacheConfig {
 }
 
 /// Configuration information to create blob cache manager.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FactoryConfig {
     /// Id of the factory.
@@ -330,10 +317,6 @@ pub struct BlobPrefetchConfig {
     pub merging_size: usize,
     /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
     pub bandwidth_rate: u32,
-}
-
-fn default_work_dir() -> String {
-    ".".to_string()
 }
 
 /// Configuration information for file cache.
@@ -945,6 +928,10 @@ fn default_http_scheme() -> String {
 
 fn default_readahead_sec() -> u32 {
     10
+}
+
+fn default_work_dir() -> String {
+    ".".to_string()
 }
 
 #[cfg(test)]
