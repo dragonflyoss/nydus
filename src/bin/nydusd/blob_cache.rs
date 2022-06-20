@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use nydus_api::http::{BackendConfig, CacheConfig, FactoryConfig};
 use nydus_api::http::{
     BlobCacheEntry, BlobCacheList, BlobCacheObjectId, FsCacheConfig, BLOB_CACHE_TYPE_BOOTSTRAP,
 };
 use rafs::metadata::{RafsMode, RafsSuper};
 use storage::device::BlobInfo;
-use storage::factory::{BackendConfig, CacheConfig, FactoryConfig};
 
 const ID_SPLITTER: &str = "/";
 

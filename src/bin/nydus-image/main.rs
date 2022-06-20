@@ -25,9 +25,10 @@ use clap::{App, Arg, ArgMatches, SubCommand};
 use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
+use nydus_api::http::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::RafsIoReader;
-use nydus_storage::factory::{BackendConfig, BlobFactory};
+use nydus_storage::factory::BlobFactory;
 use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
 use nydus_utils::{compress, digest};
 

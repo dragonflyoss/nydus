@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
 
-use nydus_api::http::FsCacheConfig;
+use nydus_api::http::{CacheConfig, FsCacheConfig};
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
@@ -18,7 +18,6 @@ use crate::cache::state::{BlobStateMap, IndexedChunkMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
-use crate::factory::CacheConfig;
 use crate::meta::BlobMetaInfo;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
