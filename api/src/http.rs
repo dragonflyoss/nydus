@@ -111,7 +111,8 @@ impl BackendConfig {
 }
 
 /// Configuration information for localfs storage backend.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct LocalFsConfig {
     /// Enable fadvise based readahead.
     #[serde(default)]
@@ -131,15 +132,18 @@ pub struct LocalFsConfig {
 }
 
 /// OSS configuration information to access blobs.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct OssConfig {
     /// Enable HTTP proxy for the read request.
     pub proxy: ProxyConfig,
     /// Skip SSL certificate validation for HTTPS scheme.
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
     pub timeout: u64,
     /// Drop the read request once http connection timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
     pub connect_timeout: u64,
     /// Retry count when read request failed.
     pub retry_limit: u8,
@@ -163,15 +167,18 @@ pub struct OssConfig {
 }
 
 /// Container registry configuration information to access blobs.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct RegistryConfig {
     /// Enable HTTP proxy for the read request.
     pub proxy: ProxyConfig,
     /// Skip SSL certificate validation for HTTPS scheme.
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
     pub timeout: u64,
     /// Drop the read request once http connection timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
     pub connect_timeout: u64,
     /// Retry count when read request failed.
     pub retry_limit: u8,
@@ -921,9 +928,12 @@ pub fn start_http_thread(
     Ok((thread, waker))
 }
 
-/// Get default http scheme for network connection.
 fn default_http_scheme() -> String {
     "https".to_string()
+}
+
+fn default_http_timeout() -> u64 {
+    5
 }
 
 fn default_readahead_sec() -> u32 {
@@ -1142,5 +1152,68 @@ mod tests {
         let msg = from_route.recv().unwrap();
         assert!(msg.is_none());
         let _ = thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_proxy_config() {
+        let content = r#"{
+            "url": "foo.com",
+            "ping_url": "ping.foo.com",
+            "fallback": true
+        }"#;
+        let config: ProxyConfig = serde_json::from_str(content).unwrap();
+        assert_eq!(config.url, "foo.com");
+        assert_eq!(config.ping_url, "ping.foo.com");
+        assert!(config.fallback);
+        assert_eq!(config.check_interval, 5);
+    }
+
+    #[test]
+    fn test_oss_config() {
+        let content = r#"{
+            "endpoint": "test",
+            "access_key_id": "test",
+            "access_key_secret": "test",
+            "bucket_name": "antsys-nydus",
+            "object_prefix":"nydus_v2/"
+        }"#;
+        let config: OssConfig = serde_json::from_str(content).unwrap();
+        assert_eq!(config.scheme, "https");
+        assert!(!config.skip_verify);
+        assert_eq!(config.timeout, 5);
+        assert_eq!(config.connect_timeout, 5);
+    }
+
+    #[test]
+    fn test_registry_config() {
+        let content = r#"{
+	    "scheme": "http",
+            "skip_verify": true,
+	    "host": "my-registry:5000",
+	    "repo": "test/repo",
+	    "auth": "base64_encoded_auth",
+	    "registry_token": "bearer_token",
+	    "blob_redirected_host": "blob_redirected_host"
+        }"#;
+        let config: RegistryConfig = serde_json::from_str(content).unwrap();
+        assert_eq!(config.scheme, "http");
+        assert!(config.skip_verify);
+    }
+
+    #[test]
+    fn test_localfs_config() {
+        let content = r#"{
+            "readahead": true,
+            "readahead_sec": 100,
+            "blob_file": "blob_file",
+            "dir": "blob_dir",
+            "alt_dirs": ["dir1", "dir2"]
+        }"#;
+        let config: LocalFsConfig = serde_json::from_str(content).unwrap();
+        assert!(config.readahead);
+        assert_eq!(config.readahead_sec, 100);
+        assert_eq!(config.blob_file, "blob_file");
+        assert_eq!(config.dir, "blob_dir");
+        assert_eq!(config.alt_dirs, vec!["dir1", "dir2"]);
     }
 }
