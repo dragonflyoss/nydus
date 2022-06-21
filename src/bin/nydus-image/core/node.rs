@@ -10,13 +10,15 @@ use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
 use std::io::{Read, SeekFrom, Write};
 use std::mem::size_of;
+#[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
+#[cfg(target_os = "macos")]
+use std::os::macos::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
-use nix::sys::stat;
 use sha2::digest::Digest;
 
 use nydus_utils::{
@@ -999,7 +1001,15 @@ impl Node {
             return false;
         }
 
-        self.inode.is_chrdev() && stat::major(self.rdev) == 0 && stat::minor(self.rdev) == 0
+        #[cfg(target_os = "linux")]
+        {
+            use nix::sys::stat;
+            self.inode.is_chrdev() && stat::major(self.rdev) == 0 && stat::minor(self.rdev) == 0
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.inode.is_chrdev() && ((self.rdev >> 24) & 0xff) == 0 && (self.rdev & 0xffffff) == 0
+        }
     }
 
     /// Check whether the inode (directory) is a overlayfs whiteout opaque.
@@ -1309,29 +1319,29 @@ impl InodeWrapper {
 
     pub fn is_chrdev(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFCHR,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFCHR,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32,
         }
     }
 
     pub fn is_blkdev(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFBLK,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFBLK,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32,
         }
     }
 
     pub fn is_fifo(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFIFO,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFIFO,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32,
         }
     }
 
     pub fn is_sock(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT == libc::S_IFSOCK,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT == libc::S_IFSOCK,
+            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32,
+            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32,
         }
     }
 

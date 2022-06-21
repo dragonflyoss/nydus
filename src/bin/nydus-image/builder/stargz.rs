@@ -191,7 +191,7 @@ impl TocEntry {
     }
 
     pub fn mode(&self) -> u32 {
-        let mut mode = self.mode;
+        let mut mode = 0;
 
         if self.is_dir() {
             mode |= libc::S_IFDIR;
@@ -207,7 +207,9 @@ impl TocEntry {
             mode |= libc::S_IFIFO;
         }
 
-        mode
+        #[cfg(target_os = "macos")]
+        let mode = mode as u32;
+        self.mode | mode
     }
 
     pub fn rdev(&self) -> u32 {

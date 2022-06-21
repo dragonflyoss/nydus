@@ -264,10 +264,13 @@ impl Bootstrap {
         }
 
         // dot & dotdot
-        node.dirents
-            .push((node.offset, OsString::from("."), libc::S_IFDIR));
-        node.dirents
-            .push((parent_offset, OsString::from(".."), libc::S_IFDIR));
+        #[allow(clippy::useless_conversion)]
+        {
+            node.dirents
+                .push((node.offset, OsString::from("."), libc::S_IFDIR.into()));
+            node.dirents
+                .push((parent_offset, OsString::from(".."), libc::S_IFDIR.into()));
+        }
 
         let mut dirs: Vec<&mut Tree> = Vec::new();
         for child in tree.children.iter_mut() {
