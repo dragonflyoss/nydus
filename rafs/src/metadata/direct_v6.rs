@@ -922,9 +922,11 @@ impl RafsInode for OndiskInodeWrapper {
                 trace!("found file {:?}, nid {}", name, nid);
                 cur_offset += 1;
                 match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
-                    Ok(PostWalkAction::Break) => break,
+                    // The PostWalkAction::Break indicates that the entire process needs to end,
+                    // so return is required here, because this is a nested loop, so you cannot use break to jump out of the loop.
+                    Ok(PostWalkAction::Break) => return Ok(()),
                     Ok(PostWalkAction::Continue) => continue,
-                    Err(_) => break,
+                    Err(e) => return Err(e),
                 };
             }
         }
