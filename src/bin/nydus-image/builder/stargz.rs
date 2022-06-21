@@ -14,9 +14,9 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 
+use nydus_utils::compact::makedev;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::{try_round_up_4k, ByteSize};
 use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
