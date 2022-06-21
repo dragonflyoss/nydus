@@ -11,7 +11,7 @@ Be aware of using the fscache-enabled EROFS kernel (Linux 5.19+), it can be buil
 
 2. ``make olddefconfig``
 
-3. Update _.config_ to enable the follow kernel configurations:
+3. `make menuconfig` to update _.config_ to enable the follow kernel configurations:
 ```
 CONFIG_FSCACHE=m
 CONFIG_CACHEFILES=m
