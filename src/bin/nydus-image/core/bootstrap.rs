@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
@@ -22,7 +23,6 @@ use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::layout::RAFS_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
-use super::chunk_dict::HashChunkDict;
 use super::context::{BlobManager, BootstrapContext, BootstrapManager, BuildContext, SourceType};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::tree::Tree;
@@ -628,9 +628,12 @@ impl Bootstrap {
         blob_table
             .store(bootstrap_ctx.writer.as_mut())
             .context("failed to store extended blob table")?;
-
         // collect all chunks in this bootstrap.
-        let mut chunk_cache = HashChunkDict::default();
+        // HashChunkDict cannot be used here, because there will be duplicate chunks between layers,
+        // but there is no deduplication during the actual construction.
+        // Each layer uses the corresponding chunk in the blob of its own layer.
+        // If HashChunkDict is used here, it will cause duplication. The chunks are removed, resulting in incomplete chunk info.
+        let mut chunk_cache = HashMap::new();
 
         // Dump bootstrap
         timing_tracer!(
@@ -690,8 +693,7 @@ impl Bootstrap {
         let chunk_table_offset = pos + padding;
 
         let mut chunk_table_size: u64 = 0;
-        for (_, chunk) in chunk_cache.m.iter() {
-            let chunk = &chunk.0;
+        for (_, chunk) in chunk_cache.iter() {
             let chunk_size = chunk
                 .store(bootstrap_ctx.writer.as_mut())
                 .context("failed to dump chunk table")?;
