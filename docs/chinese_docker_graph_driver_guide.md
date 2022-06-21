@@ -45,7 +45,7 @@ $ sudo docker plugin enable gechangwei/docker-nydus-graphdriver:0.2.0
 
 ---
 
-修改 docker 配置文件`/etc/docker/daemon.conf`。替换 graph driver。
+修改 docker 配置文件 `/etc/docker/daemon.json`，替换 graph driver。
 
 ```
 {
