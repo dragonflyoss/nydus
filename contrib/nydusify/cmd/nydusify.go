@@ -356,6 +356,7 @@ func main() {
 				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will check file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
 				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
 				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+				&cli.StringFlag{Name: "fs-version", Required: false, Usage: "Version number of nydus image format, possible values: 5, 6", EnvVars: []string{"FS_VERSION"}, Value: "5", DefaultText: "V5 format"},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -389,6 +390,7 @@ func main() {
 					BackendType:    backendType,
 					BackendConfig:  backendConfig,
 					ExpectedArch:   arch,
+					FsVersion:      c.String("fs-version"),
 				})
 				if err != nil {
 					return err

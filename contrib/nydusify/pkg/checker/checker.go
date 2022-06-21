@@ -32,6 +32,7 @@ type Opt struct {
 	BackendType    string
 	BackendConfig  string
 	ExpectedArch   string
+	FsVersion      string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
