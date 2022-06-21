@@ -199,7 +199,7 @@ pub struct OndiskInode {
     pub i_digest: RafsDigest, // 32
     /// parent inode number
     pub i_parent: u64,
-    /// from fs stat()
+    /// Artifact inode number set by the nydus image builder. Start from RAFS_ROOT_INODE = 1.
     pub i_ino: u64,
     pub i_uid: u32,
     pub i_gid: u32,
