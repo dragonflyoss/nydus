@@ -6,6 +6,8 @@ This document will walk through how to setup a nydus image service to work with 
 
 Get `nydus-image`, `nydusd`, `nydusify`, `ctr-remote` and `nydus-overlayfs` binaries from [image-service release](https://github.com/dragonflyoss/image-service/releases/latest) page.
 
+`nydusd` currently has two binaries, `nydusd-fusedev` (for fuse daemon mode) and `nydusd-virtiofs` (for virtiofs daemon mode), choose the one that fits your mode and rename it as `nydusd`.
+
 ```bash
 sudo cp nydusd nydus-image /usr/local/bin
 sudo cp nydusify containerd-nydus-grpc /usr/local/bin
