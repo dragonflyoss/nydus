@@ -38,6 +38,8 @@ class Backend(enum.Enum):
 class Compressor(enum.Enum):
     NONE = "none"
     LZ4_BLOCK = "lz4_block"
+    GZIP = "gzip"
+    ZSTD = "zstd"
 
     def __str__(self):
         return self.value

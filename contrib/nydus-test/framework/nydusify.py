@@ -29,6 +29,8 @@ class NydusifyParam(LinuxCommand):
     def work_dir(self, work_dir):
         return self.set_param("work-dir", work_dir)
 
+    def fs_version(self, fs_version):
+        return self.set_param("fs-version", fs_version)
 
 class Nydusify(LinuxCommand):
     def __init__(self, anchor: NydusAnchor):
@@ -43,7 +45,7 @@ class Nydusify(LinuxCommand):
         self.cmd = NydusifyParam(self.nydusify_bin)
         self.cmd.nydus_image(self.image_builder).work_dir(self.work_dir)
 
-    def convert(self, source, suffix="_converted", target_ref=None):
+    def convert(self, source, suffix="_converted", target_ref=None, fs_version="5"):
         """
         A reference to image looks like registry/namespace/repo:tag
         Before conversion begins, split the reference into those parts.
@@ -63,7 +65,7 @@ class Nydusify(LinuxCommand):
                 self.__converted_image,
             )
 
-        self.cmd.source(source).target(target_ref)
+        self.cmd.source(source).target(target_ref).fs_version(fs_version)
         self.target_ref = target_ref
 
         cmd = str(self.cmd)
@@ -78,7 +80,7 @@ class Nydusify(LinuxCommand):
             p.wait()
             assert p.returncode == 0
 
-    def check(self, source, suffix="_converted", target_ref=None):
+    def check(self, source, suffix="_converted", target_ref=None, fs_version="5"):
         """
         A reference to image looks like registry/namespace/repo:tag
         Before conversion begins, split the reference into those parts.
@@ -100,7 +102,7 @@ class Nydusify(LinuxCommand):
                 self.__converted_image,
             )
 
-        self.cmd.source(source).target(target_ref)
+        self.cmd.source(source).target(target_ref).fs_version(fs_version)
         self.target_ref = target_ref
 
         cmd = str(self.cmd)

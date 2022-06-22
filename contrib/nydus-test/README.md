@@ -22,11 +22,16 @@ Test framework includes several key components which are likely to be used by ea
 
 Cases are categorized into several files.
 
-* test_nydus.py
-* test_api.py:
+* test_api.py
+* test_fault.py
+* test_image_compatibility.py
 * test_layered_image.py
-* test_stress.py
+* test_nydus.py
+* test_nydusify.py
 * test_private.py
+* test_snapshotter.py
+* test_stargz.py
+* test_stress.py
 
 ## Getting Started
 
@@ -37,7 +42,7 @@ Cases are categorized into several files.
 python3 nydus_test_config.py -D fs_structure.yaml
 ```
 
-### Configure frame work
+### Configure framework
 
 ```json
 {

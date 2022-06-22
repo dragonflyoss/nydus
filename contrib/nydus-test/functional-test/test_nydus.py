@@ -727,6 +727,7 @@ def test_digest_validate(
     wg.finish_torture_read()
 
 
+@pytest.mark.skip(reason="This test cases runs forever")
 @pytest.mark.parametrize("backend", [Backend.OSS])
 def test_specified_prefetch(
     nydus_anchor: NydusAnchor,
