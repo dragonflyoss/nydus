@@ -16,6 +16,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 // Opt defines Checker options.
@@ -32,7 +33,6 @@ type Opt struct {
 	BackendType    string
 	BackendConfig  string
 	ExpectedArch   string
-	FsVersion      string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
@@ -108,6 +108,13 @@ func (checker *Checker) Check(ctx context.Context) error {
 
 	mode := "direct"
 	digestValidate := false
+
+	if sourceParsed.OCIImage.Manifest.Annotations[utils.LayerAnnotationNydusFsVersion] == "5" {
+		// Digest validate is not currently supported for v6,
+		// but v5 supports it. In order to make the check more sufficient,
+		// this validate needs to be turned on for v5.
+		digestValidate = true
+	}
 
 	rules := []rule.Rule{
 		&rule.ManifestRule{
