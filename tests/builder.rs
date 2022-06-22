@@ -450,4 +450,15 @@ impl<'a> Builder<'a> {
         assert_eq!(&header.path_bytes().as_ref(), b"image.blob");
         assert_eq!(cur, header.size().unwrap());
     }
+
+    pub fn decompress(&self, bootstrap: &str, blob: &str, output: &str) {
+        let cmd = format!(
+            "{:?} decompress --bootstrap {:?} --blob {:?} --output {:?}",
+            self.builder,
+            self.work_dir.join(bootstrap),
+            self.work_dir.join(blob),
+            self.work_dir.join(output)
+        );
+        exec(&cmd, false).unwrap();
+    }
 }

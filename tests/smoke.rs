@@ -4,7 +4,10 @@
 #[macro_use]
 extern crate log;
 
-use std::path::Path;
+use std::env::var;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use nydus_app::setup_logging;
 use nydus_utils::exec;
@@ -336,4 +339,48 @@ fn test_inline(rafs_version: &str) {
     builder.make_lower();
     builder.build_inline_lower(rafs_version);
     builder.check_inline_layout();
+}
+
+fn integration_test_decompress1() {
+    let mut prefix =
+        PathBuf::from(var("TEST_WORKDIR_PREFIX").expect("Please specify TEST_WORKDIR_PREFIX env"));
+    prefix.push("");
+
+    let wk_dir = TempDir::new_with_prefix(prefix).unwrap();
+
+    let mut builder = builder::new(wk_dir.as_path(), "oci");
+    builder.make_lower();
+    builder.build_lower("lz4_block", "5");
+
+    let tar_name = wk_dir.as_path().join("oci.tar");
+    builder.decompress("bootstrap-lower", "blobs", tar_name.to_str().unwrap());
+
+    let unpack_dir = wk_dir.as_path().join("output");
+    exec(&format!("mkdir {:?}", unpack_dir), false, b"").unwrap();
+    exec(
+        &format!("tar --xattrs -xf {:?} -C {:?}", tar_name, unpack_dir),
+        false,
+        b"",
+    )
+    .unwrap();
+
+    let tree_ret = exec(&format!("tree -a -J -v {:?}", unpack_dir), true, b"").unwrap();
+    let md5_ret = exec(
+        &format!("find {:?} -type f -exec md5sum {{}} + | sort", unpack_dir),
+        true,
+        b"",
+    )
+    .unwrap();
+
+    let ret = format!(
+        "{}{}",
+        tree_ret.replace(unpack_dir.to_str().unwrap(), ""),
+        md5_ret.replace(unpack_dir.to_str().unwrap(), "")
+    );
+
+    let mut texture = File::open("./tests/texture/directory/lower.result").unwrap();
+    let mut expected = String::new();
+    texture.read_to_string(&mut expected).unwrap();
+
+    assert_eq!(ret.trim(), expected.trim());
 }
