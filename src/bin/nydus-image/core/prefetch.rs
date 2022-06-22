@@ -149,11 +149,7 @@ impl Prefetch {
     }
 
     pub fn get_file_indexes(&self) -> Vec<u64> {
-        let mut indexes: Vec<u64> = self.readahead_files.values().copied().collect();
-
-        // Later, we might write chunks of data one by one according to inode number order.
-        indexes.sort_unstable();
-        indexes
+        self.readahead_files.values().copied().collect()
     }
 
     pub fn get_rafsv5_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
