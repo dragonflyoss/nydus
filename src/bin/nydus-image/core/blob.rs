@@ -42,6 +42,7 @@ impl Blob {
                         .dump_blob(ctx, blob_ctx, blob_index, chunk_dict)
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
+                        // Current node needs prefetch
                         blob_ctx.blob_readahead_size += size;
                     }
                 }

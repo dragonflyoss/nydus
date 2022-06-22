@@ -121,7 +121,6 @@ impl Prefetch {
         let path = node.target();
         let inode = node.inode.ino();
         let index = node.index;
-        let mut remove_node = false;
 
         if self.policy == PrefetchPolicy::None || self.disabled || node.inode.size() == 0 {
             return;
@@ -129,22 +128,19 @@ impl Prefetch {
 
         for (f, v) in self.readahead_patterns.iter_mut() {
             // As path is canonicalized, it should be reliable.
-            if path == f {
-                if self.policy == PrefetchPolicy::Fs {
-                    *v = Some(inode);
-                }
-                self.readahead_files.insert(path.clone(), index);
-            } else if path.starts_with(f) {
-                remove_node = true;
-                self.readahead_files.insert(path.clone(), index);
+            if !path.starts_with(f) {
+                continue;
             }
-        }
-
-        if remove_node {
-            // Users can specify hinted parent directory with its child files hinted as well.
-            // Only put the parent directory into prefetch table since a hinted directory's
-            // all child files will be prefetched after mount.
-            self.readahead_patterns.remove(path);
+            self.readahead_files.insert(path.clone(), index);
+            if path == f && self.policy == PrefetchPolicy::Fs {
+                *v = Some(inode);
+            } else {
+                // Users can specify hinted parent directory with its child files hinted as well.
+                // Only put the parent directory into prefetch table since a hinted directory's
+                // all child files will be prefetched after mount.
+                self.readahead_patterns.remove(path);
+            }
+            break;
         }
     }
 
