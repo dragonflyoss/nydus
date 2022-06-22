@@ -109,7 +109,7 @@ func (checker *Checker) Check(ctx context.Context) error {
 	mode := "direct"
 	digestValidate := false
 	if targetParsed.NydusImage != nil {
-		v := utils.GetNydusFsVersionOrDefault(targetParsed.NydusImage.Manifest.Annotations, utils.V6)
+		v := utils.GetNydusFsVersionOrDefault(targetParsed.NydusImage.Manifest.Annotations, utils.V5)
 		if v == utils.V5 {
 			// Digest validate is not currently supported for v6,
 			// but v5 supports it. In order to make the check more sufficient,
