@@ -923,7 +923,8 @@ impl RafsInode for OndiskInodeWrapper {
                 cur_offset += 1;
                 match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
                     // The PostWalkAction::Break indicates that the entire process needs to end,
-                    // so return is required here, because this is a nested loop, so you cannot use break to jump out of the loop.
+                    // so return is required here, because this is a nested loop,
+                    // using break can only jump out of the internal loop, there is no way to jump out of the whole loop.
                     Ok(PostWalkAction::Break) => return Ok(()),
                     Ok(PostWalkAction::Continue) => continue,
                     Err(e) => return Err(e),
