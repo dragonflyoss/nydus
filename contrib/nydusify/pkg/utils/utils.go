@@ -31,6 +31,29 @@ const (
 	PlatformArchARM64 string = "arm64"
 )
 
+type FsVersion int
+
+const (
+	V5 FsVersion = iota
+	V6
+)
+
+func GetNydusFsVersionOrDefault(annotations map[string]string, defaultVersion FsVersion) FsVersion {
+	if annotations == nil {
+		return defaultVersion
+	}
+	if v, ok := annotations[LayerAnnotationNydusFsVersion]; ok {
+		if v == "5" {
+			return V5
+		}
+		if v == "6" {
+			return V6
+		}
+	}
+
+	return defaultVersion
+}
+
 func WithRetry(op func() error) error {
 	var err error
 	attempts := defaultRetryAttempts
