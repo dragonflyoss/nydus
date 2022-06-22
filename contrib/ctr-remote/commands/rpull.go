@@ -19,13 +19,11 @@ package commands
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cmd/ctr/commands"
 	"github.com/containerd/containerd/cmd/ctr/commands/content"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/nydus-snapshotter/pkg/label"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -33,8 +31,7 @@ import (
 )
 
 const (
-	remoteSnapshotterName     = "nydus"
-	targetManifestDigestLabel = "containerd.io/snapshot/cri.manifest-digest"
+	remoteSnapshotterName = "nydus"
 )
 
 var RpullCommand = cli.Command{
@@ -97,49 +94,10 @@ func pull(ctx context.Context, client *containerd.Client, ref string, config *rP
 		containerd.WithSchema1Conversion,
 		containerd.WithPullUnpack,
 		containerd.WithPullSnapshotter(remoteSnapshotterName),
-		containerd.WithImageHandlerWrapper(appendDefaultLabelsHandlerWrapper(ref)),
+		containerd.WithImageHandlerWrapper(label.AppendLabelsHandlerWrapper(ref)),
 	}...); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func appendDefaultLabelsHandlerWrapper(ref string) func(f images.Handler) images.Handler {
-	return func(f images.Handler) images.Handler {
-		return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-			children, err := f.Handle(ctx, desc)
-			if err != nil {
-				return nil, err
-			}
-			switch desc.MediaType {
-			case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
-				for i := range children {
-					c := &children[i]
-					if images.IsLayerType(c.MediaType) {
-						if c.Annotations == nil {
-							c.Annotations = make(map[string]string)
-						}
-						c.Annotations[label.ImageRef] = ref
-						c.Annotations[label.CRIDigest] = c.Digest.String()
-						var layers string
-						for _, l := range children[i:] {
-							if images.IsLayerType(l.MediaType) {
-								ls := fmt.Sprintf("%s,", l.Digest.String())
-								// This avoids the label hits the size limitation.
-								// Skipping layers is allowed here and only affects performance.
-								if err := labels.Validate(label.NydusDataLayer, layers+ls); err != nil {
-									break
-								}
-								layers += ls
-							}
-						}
-						c.Annotations[label.CRIImageLayer] = strings.TrimSuffix(layers, ",")
-						c.Annotations[targetManifestDigestLabel] = desc.Digest.String()
-					}
-				}
-			}
-			return children, nil
-		})
-	}
 }

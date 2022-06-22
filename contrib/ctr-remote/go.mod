@@ -4,7 +4,7 @@ go 1.17
 
 require (
 	github.com/containerd/containerd v1.6.1
-	github.com/containerd/nydus-snapshotter v0.1.0
+	github.com/containerd/nydus-snapshotter v0.3.0-alpha.1
 	github.com/opencontainers/image-spec v1.0.2-0.20211117181255-693428a734f5
 	github.com/urfave/cli v1.22.5
 )
@@ -33,7 +33,7 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/uuid v1.2.0 // indirect
-	github.com/klauspost/compress v1.11.13 // indirect
+	github.com/klauspost/compress v1.15.1 // indirect
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/sys/mountinfo v0.5.0 // indirect
 	github.com/moby/sys/signal v0.6.0 // indirect
