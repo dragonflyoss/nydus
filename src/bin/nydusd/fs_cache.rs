@@ -584,7 +584,16 @@ impl FsCacheHandler {
                     }
                     Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
                         Ok(v) if v == msg.len as usize => {}
-                        _ => debug!("fscache: failed to read data from blob object"),
+                        Ok(v) => {
+                            warn!(
+                                "fscache: read data from blob object not matched: {} != {}",
+                                v, msg.len
+                            );
+                        }
+                        Err(e) => error!(
+                            "{}",
+                            format!("fscache: failed to read data from blob object: {}", e,)
+                        ),
                     },
                 }
             }

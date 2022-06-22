@@ -231,13 +231,27 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_stargz_empty(&mut self) {
+    pub fn build_stargz_empty(&mut self, rafs_version: &str, blob_id: &str) {
+        self.create_dir(&self.work_dir.join("cache"));
+
+        let mut blob_meta = String::new();
+        if rafs_version == "6" {
+            blob_meta = format!(
+                "--blob-meta {:?}",
+                self.work_dir
+                    .join("cache")
+                    .join(format!("{}.blob.meta", blob_id))
+            );
+        }
+
         exec(
             format!(
-                "{:?} create --source-type stargz_index --bootstrap {:?} --blob-id {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --fs-version {} --log-level info {:?}",
                 self.builder,
-                self.work_dir.join("bootstrap-empty"),
-                "empty.stargz",
+                self.work_dir.join(blob_id),
+                blob_meta,
+                blob_id,
+                rafs_version,
                 self.work_dir.join("stargz.index-empty.json"),
             )
             .as_str(),
@@ -246,14 +260,27 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_stargz_lower(&mut self) {
+    pub fn build_stargz_lower(&mut self, rafs_version: &str, blob_id: &str) {
+        self.create_dir(&self.work_dir.join("cache"));
+
+        let mut blob_meta = String::new();
+        if rafs_version == "6" {
+            blob_meta = format!(
+                "--blob-meta {:?}",
+                self.work_dir
+                    .join("cache")
+                    .join(format!("{}.blob.meta", blob_id))
+            );
+        }
+
         exec(
             format!(
-                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --fs-version {} --log-level info {:?}",
                 self.builder,
-                self.work_dir.join("bootstrap-empty"),
-                self.work_dir.join("bootstrap-lower"),
-                "lower.stargz",
+                self.work_dir.join(blob_id),
+                blob_meta,
+                blob_id,
+                rafs_version,
                 self.work_dir.join("stargz.index-lower.json"),
             )
             .as_str(),
@@ -262,20 +289,46 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn build_stargz_upper(&mut self) {
+    pub fn build_stargz_upper(&mut self, rafs_version: &str, blob_id: &str) {
+        let mut blob_meta = String::new();
+        if rafs_version == "6" {
+            blob_meta = format!(
+                "--blob-meta {:?}",
+                self.work_dir
+                    .join("cache")
+                    .join(format!("{}.blob.meta", blob_id))
+            );
+        }
+
         exec(
             format!(
-                "{:?} create --source-type stargz_index --parent-bootstrap {:?} --bootstrap {:?} --blob-id {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --fs-version {} --log-level info {:?}",
                 self.builder,
-                self.work_dir.join("bootstrap-lower"),
-                self.work_dir.join("bootstrap-overlay"),
-                "upper.stargz",
+                self.work_dir.join(blob_id),
+                blob_meta,
+                blob_id,
+                rafs_version,
                 self.work_dir.join("stargz.index-upper.json"),
             )
             .as_str(),
             false,
             b"",
         ).unwrap();
+    }
+
+    pub fn merge(&mut self, target: &Path, bootstraps: Vec<&str>) {
+        exec(
+            format!(
+                "{:?} merge --bootstrap {:?} --log-level info {}",
+                self.builder,
+                target,
+                bootstraps.join(" "),
+            )
+            .as_str(),
+            false,
+            b"",
+        )
+        .unwrap();
     }
 
     pub fn build_special_files(&mut self) {

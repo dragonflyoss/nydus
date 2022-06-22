@@ -249,8 +249,7 @@ fn integration_test_special_files() {
     }
 }
 
-#[test]
-fn integration_test_stargz() {
+fn test_stargz(rafs_version: &str) {
     info!("\n\n==================== testing run: stargz test");
 
     let tmp_dir = TempDir::new().unwrap();
@@ -263,11 +262,25 @@ fn integration_test_stargz() {
     )
     .unwrap();
 
+    let empty_blob_id = "db30bb2870067ed3e0e73c7448d9f0b529169da8295b5b5155b417624d861d81";
+    let lower_blob_id = "e81a6dbddf425e3082f158ff1d80f2adab1dde8dad0b8c4ca43c1bad339f4ec5";
+    let upper_blob_id = "5aabe268d8139e952bfff14b2dd0f43fcfef4f2c38b63ea782486ce7268d4954";
+
     let mut builder = builder::new(&work_dir, "oci");
 
-    builder.build_stargz_empty();
-    builder.build_stargz_lower();
-    builder.build_stargz_upper();
+    builder.build_stargz_empty(rafs_version, empty_blob_id);
+    builder.build_stargz_lower(rafs_version, lower_blob_id);
+    builder.build_stargz_upper(rafs_version, upper_blob_id);
+
+    // Merge assumes the bootstrap name as the hash of nydus blob.
+    builder.merge(
+        &work_dir.join("bootstrap-overlay"),
+        vec![
+            work_dir.join(empty_blob_id).to_str().unwrap(),
+            work_dir.join(lower_blob_id).to_str().unwrap(),
+            work_dir.join(upper_blob_id).to_str().unwrap(),
+        ],
+    );
 
     let nydusd = nydusd::new(
         &work_dir,
@@ -281,4 +294,10 @@ fn integration_test_stargz() {
     nydusd.start(Some("bootstrap-overlay"), "mnt");
     nydusd.check("directory/overlay.result", "mnt");
     nydusd.umount("mnt");
+}
+
+#[test]
+fn integration_test_stargz() {
+    test_stargz("5");
+    test_stargz("6");
 }

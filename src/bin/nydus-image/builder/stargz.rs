@@ -18,13 +18,15 @@ use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
-use nydus_utils::ByteSize;
+use nydus_utils::{try_round_up_4k, ByteSize};
 use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
-use rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
+use rafs::metadata::layout::RafsXAttrs;
 use rafs::metadata::Inode;
 use storage::device::BlobChunkFlags;
+use storage::meta::BlobMetaHeaderOndisk;
 
 use crate::builder::Builder;
+use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
     BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
@@ -296,7 +298,7 @@ impl TocIndex {
     fn load(path: &Path) -> Result<TocIndex> {
         let index_file = File::open(path)
             .with_context(|| format!("failed to open stargz index file {:?}", path))?;
-        let toc_index: TocIndex = serde_json::from_reader(index_file)
+        let mut toc_index: TocIndex = serde_json::from_reader(index_file)
             .with_context(|| format!("invalid stargz index file {:?}", path))?;
 
         if toc_index.version != 1 {
@@ -304,6 +306,15 @@ impl TocIndex {
                 "unsupported index version {}",
                 toc_index.version
             )));
+        }
+
+        // Append root directory entry if not exists.
+        if !toc_index.entries.is_empty() && toc_index.entries[0].name()? != PathBuf::from("/") {
+            let root_entry = TocEntry {
+                toc_type: String::from("dir"),
+                ..Default::default()
+            };
+            toc_index.entries.insert(0, root_entry);
         }
 
         Ok(toc_index)
@@ -351,6 +362,7 @@ impl StargzIndexTreeBuilder {
         let mut tree: Option<Tree> = None;
         let mut last_reg_entry: Option<&TocEntry> = None;
 
+        let mut uncompress_offset = 0;
         for entry in toc_index.entries.iter() {
             if !entry.is_supported() {
                 continue;
@@ -369,28 +381,35 @@ impl StargzIndexTreeBuilder {
             }
 
             if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
+                let aligned_chunk_size = if ctx.aligned_chunk {
+                    // Safe to unwrap because `chunk_size` is much less than u32::MAX.
+                    try_round_up_4k(decompress_size).unwrap()
+                } else {
+                    decompress_size
+                };
+                let pre_uncompress_offset = uncompress_offset;
+                uncompress_offset += aligned_chunk_size;
+
                 let block_id = entry.block_id(&ctx.blob_id)?;
+                let v5_chunk_info = ChunkWrapper::V5(RafsV5ChunkInfo {
+                    block_id,
+                    // Will be set later
+                    blob_index: 0,
+                    flags: BlobChunkFlags::COMPRESSED,
+                    // No available data on entry
+                    compress_size: 0,
+                    uncompress_size: decompress_size as u32,
+                    compress_offset: entry.offset as u64,
+                    uncompress_offset: pre_uncompress_offset,
+                    file_offset: entry.chunk_offset as u64,
+                    index: 0,
+                    reserved: 0,
+                });
                 let chunk = NodeChunk {
                     source: ChunkSource::Build,
                     inner: match ctx.fs_version {
-                        RafsVersion::V5 => {
-                            ChunkWrapper::V5(RafsV5ChunkInfo {
-                                block_id,
-                                // Will be set later
-                                blob_index: 0,
-                                flags: BlobChunkFlags::COMPRESSED,
-                                // No available data on entry
-                                compress_size: 0,
-                                uncompress_size: decompress_size as u32,
-                                compress_offset: entry.offset as u64,
-                                // No available data on entry
-                                uncompress_offset: 0,
-                                file_offset: entry.chunk_offset as u64,
-                                index: 0,
-                                reserved: 0,
-                            })
-                        }
-                        RafsVersion::V6 => todo!(),
+                        RafsVersion::V5 => v5_chunk_info,
+                        RafsVersion::V6 => v5_chunk_info,
                     },
                 };
 
@@ -504,32 +523,31 @@ impl StargzIndexTreeBuilder {
         let gid = if explicit_uidgid { entry.gid } else { 0 };
 
         // Parse inode info
+        let v5_inode = RafsV5Inode {
+            i_digest: RafsDigest::default(),
+            i_parent: 0,
+            i_ino: ino,
+            i_projid: 0,
+            i_uid: uid,
+            i_gid: gid,
+            i_mode: entry.mode(),
+            i_size: file_size,
+            i_nlink: entry.num_link,
+            i_blocks: 0,
+            i_flags: flags,
+            i_child_index: 0,
+            i_child_count: 0,
+            i_name_size: name_size,
+            i_symlink_size: symlink_size,
+            i_rdev: entry.rdev(),
+            // TODO: add mtime from entry.ModTime()
+            i_mtime: 0,
+            i_mtime_nsec: 0,
+            i_reserved: [0; 8],
+        };
         let inode = match version {
-            RafsVersion::V5 => {
-                InodeWrapper::V5(RafsV5Inode {
-                    i_digest: RafsDigest::default(),
-                    i_parent: 0,
-                    i_ino: ino,
-                    i_projid: 0,
-                    i_uid: uid,
-                    i_gid: gid,
-                    i_mode: entry.mode(),
-                    i_size: file_size,
-                    i_nlink: entry.num_link,
-                    i_blocks: 0,
-                    i_flags: flags,
-                    i_child_index: 0,
-                    i_child_count: 0,
-                    i_name_size: name_size,
-                    i_symlink_size: symlink_size,
-                    i_rdev: entry.rdev(),
-                    // TODO: add mtime from entry.ModTime()
-                    i_mtime: 0,
-                    i_mtime_nsec: 0,
-                    i_reserved: [0; 8],
-                })
-            }
-            RafsVersion::V6 => todo!(),
+            RafsVersion::V5 => InodeWrapper::V5(v5_inode),
+            RafsVersion::V6 => InodeWrapper::V6(v5_inode),
         };
 
         let path = entry.path()?;
@@ -575,19 +593,22 @@ impl StargzBuilder {
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
+        blob_ctx: &mut BlobContext,
         blob_mgr: &mut BlobManager,
     ) -> Result<()> {
         let mut decompressed_blob_size = 0u64;
         let mut compressed_blob_size = 0u64;
         let blob_index = blob_mgr.alloc_index()?;
-        let mut blob_ctx = BlobContext::new(
-            ctx.blob_id.clone(),
-            ctx.blob_storage.clone(),
-            0,
-            ctx.inline_bootstrap,
-        )?;
+
+        let mut header = BlobMetaHeaderOndisk::default();
+        header.set_4k_aligned(true);
+
         blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
+        blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
+        blob_ctx.blob_meta_header = header;
+
+        let mut chunk_map = HashMap::new();
 
         // Set blob index and inode digest for upper nodes
         for node in &mut bootstrap_ctx.nodes {
@@ -598,9 +619,15 @@ impl StargzBuilder {
             let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
 
             for chunk in node.chunks.iter_mut() {
-                let chunk_index = blob_ctx.alloc_index()?;
-                chunk.inner.set_index(chunk_index);
                 chunk.inner.set_blob_index(blob_index);
+                if let Some(chunk_index) = chunk_map.get(chunk.inner.id()) {
+                    chunk.inner.set_index(*chunk_index);
+                } else {
+                    let chunk_index = blob_ctx.alloc_index()?;
+                    chunk.inner.set_index(chunk_index);
+                    chunk_map.insert(*chunk.inner.id(), chunk.inner.index());
+                    blob_ctx.add_chunk_meta_info(&chunk.inner)?;
+                }
                 decompressed_blob_size += chunk.inner.uncompressed_size() as u64;
                 compressed_blob_size += chunk.inner.compressed_size() as u64;
                 inode_hasher.digest_update(chunk.inner.id().as_ref());
@@ -619,9 +646,6 @@ impl StargzBuilder {
 
         blob_ctx.decompressed_blob_size = decompressed_blob_size;
         blob_ctx.compressed_blob_size = compressed_blob_size;
-        if blob_ctx.decompressed_blob_size > 0 {
-            blob_mgr.add(blob_ctx);
-        }
 
         Ok(())
     }
@@ -645,28 +669,43 @@ impl Builder for StargzBuilder {
         // Build tree from source
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut tree = self.build_tree_from_index(ctx, layer_idx)?;
+        let origin_bootstarp_offset = bootstrap_ctx.offset;
         let mut bootstrap = Bootstrap::new()?;
-        if bootstrap_mgr.f_parent_bootstrap.is_some() {
+        if bootstrap_ctx.layered {
             // Merge with lower layer if there's one.
+            ctx.prefetch.disable();
             bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
             tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         }
+        // If layered, the bootstrap_ctx.offset will be set in first build, so we need restore it here
+        bootstrap_ctx.offset = origin_bootstarp_offset;
+        bootstrap_ctx.layered = false;
+
         timing_tracer!(
             { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },
             "build_bootstrap"
         )?;
 
         // Generate node chunks and digest
-        self.generate_nodes(ctx, &mut bootstrap_ctx, blob_mgr)?;
+        let mut blob_ctx = BlobContext::new(
+            ctx.blob_id.clone(),
+            ctx.blob_storage.clone(),
+            0,
+            ctx.inline_bootstrap,
+        )?;
+        self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
+
+        // Dump blob meta
+        Blob::dump_meta_data(ctx, &mut blob_ctx)?;
+        if blob_ctx.decompressed_blob_size > 0 {
+            blob_mgr.add(blob_ctx);
+        }
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
-        if let RafsBlobTable::V6(_) = blob_table {
-            todo!();
-        }
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
-
         bootstrap_mgr.add(bootstrap_ctx);
+
         BuildOutput::new(blob_mgr, bootstrap_mgr)
     }
 }

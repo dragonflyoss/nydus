@@ -40,8 +40,7 @@ use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
 use crate::metadata::{
-    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
-    RAFS_DEFAULT_CHUNK_SIZE,
+    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT, RAFS_MAX_CHUNK_SIZE,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -104,9 +103,9 @@ impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
     type Error = RafsError;
 
     fn try_from(c: &RafsConfig) -> RafsResult<Self> {
-        if c.fs_prefetch.merging_size as u64 > RAFS_DEFAULT_CHUNK_SIZE {
+        if c.fs_prefetch.merging_size as u64 > RAFS_MAX_CHUNK_SIZE {
             return Err(RafsError::Configure(
-                "Merging size can't exceed chunk size".to_string(),
+                "merging size can't exceed max chunk size".to_string(),
             ));
         } else if c.fs_prefetch.enable && c.fs_prefetch.threads_count == 0 {
             return Err(RafsError::Configure(
@@ -923,8 +922,8 @@ impl FileSystem for Rafs {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     use crate::RafsIoRead;
-    use storage::RAFS_MAX_CHUNK_SIZE;
 
     pub fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
@@ -1074,7 +1073,7 @@ pub(crate) mod tests {
         config.fs_prefetch.merging_size = RAFS_MAX_CHUNK_SIZE as usize + 1;
         assert!(BlobPrefetchConfig::try_from(&config).is_err());
 
-        config.fs_prefetch.merging_size = RAFS_MAX_CHUNK_SIZE as usize;
+        config.fs_prefetch.merging_size = RAFS_DEFAULT_CHUNK_SIZE as usize;
         config.fs_prefetch.bandwidth_rate = 1;
         config.fs_prefetch.prefetch_all = true;
         assert!(BlobPrefetchConfig::try_from(&config).is_ok());

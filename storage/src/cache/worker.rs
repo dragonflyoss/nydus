@@ -422,8 +422,8 @@ mod tests {
         let config = Arc::new(AsyncPrefetchConfig {
             enable: true,
             threads_count: 4,
-            merging_size: 0x100000,
-            bandwidth_rate: 0x100000,
+            merging_size: 0x1000000,
+            bandwidth_rate: 0x1000000,
         });
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
 
         assert!(mgr
-            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(0x100001))
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(0x1000001))
             .is_ok());
         assert!(mgr
             .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(u64::MAX))

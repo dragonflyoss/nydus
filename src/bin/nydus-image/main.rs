@@ -29,7 +29,7 @@ use nydus_api::http::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
-use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
+use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
 
 use crate::builder::{Builder, DiffBuilder, DirectoryBuilder, StargzBuilder};
@@ -212,6 +212,11 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .required_unless("backend-type")
                         .required_unless("source-type")
                         .required_unless("blob-dir")
+                        .takes_value(true)
+                ).arg(
+                    Arg::with_name("blob-meta")
+                        .long("blob-meta")
+                        .help("path to store nydus blob metadata")
                         .takes_value(true)
                 ).arg(
                     Arg::with_name("inline-bootstrap")
@@ -583,6 +588,7 @@ impl Command {
             .unwrap();
         let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
         let blob_stor = Self::get_blob_storage(matches, source_type)?;
+        let blob_meta_stor = Self::get_blob_meta_storage(matches)?;
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(matches)?;
         let aligned_chunk = if version.is_v6() {
@@ -634,6 +640,7 @@ impl Command {
             source_path,
             prefetch,
             blob_stor,
+            blob_meta_stor,
             inline_bootstrap,
         );
         build_ctx.set_fs_version(version);
@@ -892,6 +899,13 @@ impl Command {
         Ok(blob_stor)
     }
 
+    fn get_blob_meta_storage(matches: &clap::ArgMatches) -> Result<Option<ArtifactStorage>> {
+        let blob_meta_stor = matches
+            .value_of("blob-meta")
+            .map(|b| ArtifactStorage::SingleFile(b.into()));
+        Ok(blob_meta_stor)
+    }
+
     fn get_parent_bootstrap(matches: &clap::ArgMatches) -> Result<Option<RafsIoReader>> {
         let mut parent_bootstrap_path = Path::new("");
         if let Some(_parent_bootstrap_path) = matches.value_of("parent-bootstrap") {
@@ -953,7 +967,7 @@ impl Command {
                 let param = v.trim_start_matches("0x").trim_end_matches("0X");
                 let chunk_size =
                     u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
-                if chunk_size as u64 > RAFS_DEFAULT_CHUNK_SIZE
+                if chunk_size as u64 > RAFS_MAX_CHUNK_SIZE
                     || chunk_size < 0x1000
                     || !chunk_size.is_power_of_two()
                 {

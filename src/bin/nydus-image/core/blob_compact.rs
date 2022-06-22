@@ -120,6 +120,7 @@ impl ChunkSet {
 
     fn dump(
         &self,
+        build_ctx: &BuildContext,
         ori_blob_ids: &[String],
         new_blob_ctx: &mut BlobContext,
         new_blob_idx: u32,
@@ -176,7 +177,7 @@ impl ChunkSet {
         }
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
-        Blob::new().dump_meta_data(new_blob_ctx)?;
+        Blob::dump_meta_data(build_ctx, new_blob_ctx)?;
         let blob_id = new_blob_ctx.blob_id();
         if let Some(writer) = &mut new_blob_ctx.writer {
             writer.finalize(blob_id)?;
@@ -504,7 +505,12 @@ impl BlobCompactor {
             .collect()
     }
 
-    pub fn dump_new_blobs(&mut self, dir: &str, aligned_chunk: bool) -> Result<()> {
+    pub fn dump_new_blobs(
+        &mut self,
+        build_ctx: &BuildContext,
+        dir: &str,
+        aligned_chunk: bool,
+    ) -> Result<()> {
         let ori_blob_ids = self.original_blob_ids();
         ensure!(self.states.len() == self.ori_blob_mgr.len());
         for idx in 0..self.states.len() {
@@ -529,6 +535,7 @@ impl BlobCompactor {
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
                     let new_chunks = cs.dump(
+                        build_ctx,
                         &ori_blob_ids,
                         &mut blob_ctx,
                         blob_idx,
@@ -575,16 +582,17 @@ impl BlobCompactor {
             PathBuf::from(""),
             Default::default(),
             None,
+            None,
             false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
         let mut ori_blob_mgr = BlobManager::new();
-        ori_blob_mgr.from_blob_table(rs.superblock.get_blob_infos());
+        ori_blob_mgr.from_blob_table(&build_ctx, rs.superblock.get_blob_infos());
         if let Some(dict) = chunk_dict {
             ori_blob_mgr.set_chunk_dict(dict);
-            ori_blob_mgr.extend_blob_table_from_chunk_dict()?;
+            ori_blob_mgr.extend_blob_table_from_chunk_dict(&build_ctx)?;
         }
         if ori_blob_mgr.len() < cfg.layers_to_compact {
             return Ok(None);
@@ -598,7 +606,7 @@ impl BlobCompactor {
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
         let mut compactor = Self::new(build_ctx.fs_version, ori_blob_mgr, nodes, backend.clone())?;
         compactor.compact(cfg)?;
-        compactor.dump_new_blobs(&cfg.blobs_dir, build_ctx.aligned_chunk)?;
+        compactor.dump_new_blobs(&build_ctx, &cfg.blobs_dir, build_ctx.aligned_chunk)?;
         if compactor.new_blob_mgr.len() == 0 {
             info!("blobs of {:?} have already been optimized", s_bootstrap);
             return Ok(None);

@@ -34,10 +34,11 @@ const BLOB_METADATA_MAX_SIZE: u64 = 0x100_0000u64;
 const BLOB_METADTAT_HEADER_SIZE: u64 = 0x1000u64;
 const BLOB_METADATA_RESERVED_SIZE: u64 = BLOB_METADTAT_HEADER_SIZE - 44;
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
-const BLOB_CHUNK_COMP_OFFSET_MASK: u64 = 0xfff_ffff_ffff;
+const BLOB_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const BLOB_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
-const BLOB_CHUNK_SIZE_MASK: u64 = 0xf_ffff;
-const BLOB_CHUNK_SIZE_SHIFT: u64 = 44;
+const BLOB_CHUNK_SIZE_LOW_MASK: u64 = 0xf_ffff;
+const BLOB_CHUNK_SIZE_LOW_SHIFT: u64 = 44;
+const BLOB_CHUNK_SIZE_LOW_SHIFT_LEFT: u64 = 12;
 const FILE_SUFFIX: &str = "blob.meta";
 pub const BLOB_FEATURE_4K_ALIGNED: u32 = 0x1;
 
@@ -171,9 +172,9 @@ impl BlobMetaHeaderOndisk {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct BlobChunkInfoOndisk {
-    // size: 20bits, offset: 32bits, reserved(available for use): 12bits
+    // 20bits: size (low), 32bits: offset, 4bits: size (high), 8bits reserved
     uncomp_info: u64,
-    // size: 20bits, reserved: 4bits, offset: 40bits
+    // 20bits: size (low), 4bits: size (high), offset: 40bits
     comp_info: u64,
 }
 
@@ -195,16 +196,22 @@ impl BlobChunkInfoOndisk {
     /// Get compressed size of the chunk.
     #[inline]
     pub fn compressed_size(&self) -> u32 {
-        (self.comp_info >> BLOB_CHUNK_SIZE_SHIFT) as u32 + 1
+        let bit20 = self.comp_info >> BLOB_CHUNK_SIZE_LOW_SHIFT;
+        let bit4 = (self.comp_info & 0xf0000000000) >> 20;
+        (bit4 | bit20) as u32 + 1
     }
 
     /// Set compressed size of the chunk.
     #[inline]
     pub fn set_compressed_size(&mut self, size: u32) {
         let size = size as u64;
-        debug_assert!(size > 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
-        self.comp_info &= !(BLOB_CHUNK_SIZE_MASK << BLOB_CHUNK_SIZE_SHIFT);
-        self.comp_info |= ((size - 1) & BLOB_CHUNK_SIZE_MASK) << BLOB_CHUNK_SIZE_SHIFT;
+        debug_assert!(size > 0 && size <= BLOB_CHUNK_SIZE_LOW_MASK + 1);
+
+        let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
+        let size_high = ((size - 1) & 0xf0_0000) << 20;
+        let offset = self.comp_info & BLOB_CHUNK_COMP_OFFSET_MASK;
+
+        self.comp_info = size_low | size_high | offset;
     }
 
     /// Get compressed end of the chunk.
@@ -230,16 +237,22 @@ impl BlobChunkInfoOndisk {
     /// Get uncompressed end of the chunk.
     #[inline]
     pub fn uncompressed_size(&self) -> u32 {
-        (self.uncomp_info >> BLOB_CHUNK_SIZE_SHIFT) as u32 + 1
+        let size_high = (self.uncomp_info & 0xf00) << BLOB_CHUNK_SIZE_LOW_SHIFT_LEFT;
+        let size_low = self.uncomp_info >> BLOB_CHUNK_SIZE_LOW_SHIFT;
+        (size_high | size_low) as u32 + 1
     }
 
     /// Set uncompressed end of the chunk.
     #[inline]
     pub fn set_uncompressed_size(&mut self, size: u32) {
         let size = size as u64;
-        debug_assert!(size != 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
-        self.uncomp_info &= !(BLOB_CHUNK_SIZE_MASK << BLOB_CHUNK_SIZE_SHIFT);
-        self.uncomp_info |= ((size - 1) & BLOB_CHUNK_SIZE_MASK) << BLOB_CHUNK_SIZE_SHIFT;
+        debug_assert!(size != 0 && size <= BLOB_CHUNK_SIZE_LOW_MASK + 1);
+
+        let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
+        let offset = self.uncomp_info & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
+        let bit12 = ((size - 1) & 0xf0_0000) >> BLOB_CHUNK_SIZE_LOW_SHIFT_LEFT;
+
+        self.uncomp_info = size_low | offset | bit12;
     }
 
     /// Get uncompressed size of the chunk.
@@ -394,6 +407,7 @@ impl BlobMetaInfo {
             chunks: chunk_infos,
             base: base as *const u8,
             unmap_len: expected_size,
+            is_stargz: blob_info.is_stargz(),
         });
 
         Ok(BlobMetaInfo { state })
@@ -452,7 +466,9 @@ impl BlobMetaInfo {
                 index += 1;
                 let entry = &infos[index];
                 self.validate_chunk(entry)?;
-                if entry.uncompressed_offset() != last_end {
+
+                // For stargz chunks, disable this check.
+                if !self.state.is_stargz && entry.uncompressed_offset() != last_end {
                     return Err(einval!(format!(
                         "mismatch uncompressed {} size {} last_end {}",
                         entry.uncompressed_offset(),
@@ -549,7 +565,8 @@ impl BlobMetaInfo {
 
     #[inline]
     fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
-        if entry.compressed_end() > self.state.compressed_size
+        // For stargz blob, self.state.compressed_size == 0, so don't validate it.
+        if (!self.state.is_stargz && entry.compressed_end() > self.state.compressed_size)
             || entry.uncompressed_end() > self.state.uncompressed_size
         {
             Err(einval!())
@@ -633,6 +650,8 @@ pub struct BlobMetaState {
     chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
     base: *const u8,
     unmap_len: usize,
+    /// The blob meta is for an stargz image.
+    is_stargz: bool,
 }
 
 // // Safe to Send/Sync because the underlying data structures are readonly
@@ -657,6 +676,25 @@ impl BlobMetaState {
         let mut right = size;
         let mut start = 0;
         let mut end = 0;
+
+        if self.is_stargz {
+            // FIXME: since stargz chunks are not currently allocated chunk index in the order of uncompressed_offset,
+            // a binary search is not available for now, here is a heavy overhead workaround, need to be fixed.
+            for i in 0..self.chunk_count {
+                let off = if compressed {
+                    chunks[i as usize].compressed_offset()
+                } else {
+                    chunks[i as usize].uncompressed_offset()
+                };
+                if addr == off {
+                    return Ok(i as usize);
+                }
+            }
+            return Err(einval!(format!(
+                "can't find stargz chunk by offset {}",
+                addr,
+            )));
+        }
 
         while left < right {
             let mid = left + size / 2;
@@ -786,6 +824,7 @@ mod tests {
             ]),
             base: std::ptr::null(),
             unmap_len: 0,
+            is_stargz: false,
         };
 
         assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
@@ -812,18 +851,31 @@ mod tests {
         chunk.set_compressed_size(0x100);
         assert_eq!(chunk.compressed_offset(), 0x1000);
         assert_eq!(chunk.compressed_size(), 0x100);
-        assert_eq!(chunk.compressed_end(), 0x1100);
-        chunk.set_uncompressed_offset(0x2000);
-        chunk.set_uncompressed_size(0x100);
-        assert_eq!(chunk.uncompressed_offset(), 0x2000);
-        assert_eq!(chunk.uncompressed_size(), 0x100);
-        assert_eq!(chunk.uncompressed_end(), 0x2100);
-        assert_eq!(chunk.aligned_uncompressed_end(), 0x3000);
-        assert!(!chunk.is_compressed());
 
-        chunk.set_uncompressed_size(0x200);
-        assert_eq!(chunk.uncompressed_size(), 0x200);
-        assert!(chunk.is_compressed());
+        chunk.set_uncompressed_offset(0x1000);
+        chunk.set_uncompressed_size(0x100);
+        assert_eq!(chunk.uncompressed_offset(), 0x1000);
+        assert_eq!(chunk.uncompressed_size(), 0x100);
+
+        chunk.set_compressed_offset(0x1000000);
+        chunk.set_compressed_size(0x1000000);
+        assert_eq!(chunk.compressed_offset(), 0x1000000);
+        assert_eq!(chunk.compressed_size(), 0x1000000);
+
+        chunk.set_uncompressed_offset(0x1000000);
+        chunk.set_uncompressed_size(0x1000000);
+        assert_eq!(chunk.uncompressed_offset(), 0x1000000);
+        assert_eq!(chunk.uncompressed_size(), 0x1000000);
+
+        // For testing old format compatibility.
+        let chunk = BlobChunkInfoOndisk {
+            uncomp_info: 0xffff_ffff_f100_0000,
+            comp_info: 0xffff_f0ff_ffff_ffff,
+        };
+        assert_eq!(chunk.uncompressed_size(), 0x000f_ffff + 1);
+        assert_eq!(chunk.uncompressed_offset(), 0xffff_1000 * 0x1000);
+        assert_eq!(chunk.compressed_size(), 0x000f_ffff + 1);
+        assert_eq!(chunk.compressed_offset(), 0x00ff_ffff_ffff);
     }
 
     #[test]
@@ -857,6 +909,7 @@ mod tests {
             ]),
             base: std::ptr::null(),
             unmap_len: 0,
+            is_stargz: false,
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),
