@@ -43,7 +43,7 @@ use crate::core::context::{
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
-use crate::decompress::DefaultDecompressor;
+use crate::decompress::OCIDecompressor;
 use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::validator::Validator;
@@ -523,11 +523,11 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .required(true)
                 .takes_value(true))
             .arg(
-                Arg::with_name("blob")
-                .long("blob")
+                Arg::with_name("blob_dir")
+                .long("blob_dir")
                 .short("b")
-                .help("path to blob file")
-                .required(true)
+                .help("path to folder that holds blob file")
+                .required(false)
                 .takes_value(true)
                 )
             .arg(
@@ -799,10 +799,10 @@ impl Command {
 
     fn decompress(args: &clap::ArgMatches) -> Result<()> {
         let bootstrap = args.value_of("bootstrap").expect("pass in bootstrap");
-        let blob = args.value_of("blob").expect("pass in blob");
+        let blob_dir = args.value_of("blob_dir");
         let output = args.value_of("output").expect("pass in output");
 
-        let decompressor = Box::new(DefaultDecompressor::new(bootstrap, blob, output).map_err(
+        let decompressor = Box::new(OCIDecompressor::new(bootstrap, blob_dir, output).map_err(
             |err| {
                 error!("fail to create decompressor, error: {}", err);
                 anyhow!("fail to create decompressor, error: {}", err)

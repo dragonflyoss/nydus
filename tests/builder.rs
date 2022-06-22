@@ -453,7 +453,7 @@ impl<'a> Builder<'a> {
 
     pub fn decompress(&self, bootstrap: &str, blob: &str, output: &str) {
         let cmd = format!(
-            "{:?} decompress --bootstrap {:?} --blob {:?} --output {:?}",
+            "{:?} decompress --bootstrap {:?} --blob_dir {:?} --output {:?}",
             self.builder,
             self.work_dir.join(bootstrap),
             self.work_dir.join(blob),
