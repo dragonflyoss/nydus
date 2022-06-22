@@ -161,7 +161,3 @@ func (checker *Checker) Check(ctx context.Context) error {
 
 	return nil
 }
-
-func GetNydusFsVersionOrDefault() {
-	panic("unimplemented")
-}
