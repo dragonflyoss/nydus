@@ -25,16 +25,10 @@ use crate::StorageError;
 pub mod connection;
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
-#[cfg(feature = "backend-localfs")]
-pub use localfs::LocalFsConfig;
 #[cfg(feature = "backend-oss")]
 pub mod oss;
-#[cfg(feature = "backend-oss")]
-pub use oss::OssConfig;
 #[cfg(feature = "backend-registry")]
 pub mod registry;
-#[cfg(feature = "backend-registry")]
-pub use registry::RegistryConfig;
 
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
@@ -172,19 +166,4 @@ pub trait BlobBackend: Send + Sync {
 
     /// Get a blob reader object to access blod `blob_id`.
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>>;
-}
-
-#[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
-/// Get default http scheme for network connection.
-fn default_http_scheme() -> String {
-    "https".to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
-    #[test]
-    fn test_default_http_scheme() {
-        assert_eq!(super::default_http_scheme(), "https");
-    }
 }

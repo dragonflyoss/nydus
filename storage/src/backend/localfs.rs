@@ -19,13 +19,14 @@ use std::time::Duration;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
 use nix::sys::uio;
+
+use nydus_api::http::LocalFsConfig;
 use nydus_utils::{metrics::BackendMetrics, round_down_4k, try_round_up_4k};
 
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 use crate::utils::{readahead, readv, MemSliceCursor};
 
 const BLOB_ACCESSED_SUFFIX: &str = ".access";
-const BLOB_ACCESS_RECORD_SECOND: u32 = 10;
 
 // Each access record takes 16 bytes: u64 + u32 + u32
 // So we allow 2048 entries at most to avoid hurting backend upon flush
@@ -51,28 +52,6 @@ impl From<LocalFsError> for BackendError {
     fn from(error: LocalFsError) -> Self {
         BackendError::LocalFs(error)
     }
-}
-
-fn default_readahead_sec() -> u32 {
-    BLOB_ACCESS_RECORD_SECOND
-}
-
-/// Configuration information for localfs storage backend.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Deserialize, Serialize)]
-pub struct LocalFsConfig {
-    #[serde(default)]
-    pub readahead: bool,
-    #[serde(default = "default_readahead_sec")]
-    pub readahead_sec: u32,
-    #[serde(default)]
-    pub blob_file: String,
-    #[serde(default)]
-    pub dir: String,
-    #[serde(default)]
-    pub alt_dirs: Vec<String>,
 }
 
 struct LocalFsEntry {

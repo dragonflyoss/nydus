@@ -7,23 +7,19 @@
 //! The factory module provides methods to create
 //! [blob cache objects](../cache/trait.BlobCache.html) for blobs. Internally it caches a group
 //! of [BlobCacheMgr](../cache/trait.BlobCacheMgr.html) objects according to their
-//! [FactoryConfig](struct.FactoryConfig.html). Those cached blob managers may be garbage-collected
+//! [FactoryConfig](../../api/http/struct.FactoryConfig.html). Those cached blob managers may be garbage-collected
 //! by [BlobFactory::gc()](struct.BlobFactory.html#method.gc).
 //! if not used anymore.
 use std::collections::HashMap;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Result as IOResult;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use lazy_static::lazy_static;
-use serde::Deserialize;
-use serde_json::value::Value;
 use tokio::runtime::{Builder, Runtime};
 
-use nydus_api::http::BlobPrefetchConfig;
+use nydus_api::http::{BackendConfig, FactoryConfig};
 
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
@@ -48,85 +44,6 @@ lazy_static! {
             Err(e) => panic!("failed to create tokio async runtime, {}", e),
         }
     };
-}
-
-/// Configuration information for storage backend.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BackendConfig {
-    /// Type of storage backend.
-    #[serde(rename = "type")]
-    pub backend_type: String,
-    /// Configuration for storage backend.
-    #[serde(rename = "config")]
-    pub backend_config: Value,
-}
-
-impl BackendConfig {
-    /// Create a new instance of `BackendConfig`.
-    pub fn from_str(backend_type: &str, json_str: &str) -> Result<BackendConfig> {
-        let backend_config = serde_json::from_str(json_str)
-            .context("failed to parse backend config in JSON string")?;
-
-        Ok(Self {
-            backend_type: backend_type.to_string(),
-            backend_config,
-        })
-    }
-
-    /// Load storage backend configuration from a configuration file.
-    pub fn from_file(backend_type: &str, file_path: &str) -> Result<BackendConfig> {
-        let file = File::open(file_path)
-            .with_context(|| format!("failed to open backend config file {}", file_path))?;
-        let backend_config = serde_json::from_reader(file)
-            .with_context(|| format!("failed to parse backend config file {}", file_path))?;
-
-        Ok(Self {
-            backend_type: backend_type.to_string(),
-            backend_config,
-        })
-    }
-}
-
-/// Configuration information for blob cache manager.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CacheConfig {
-    /// Type of blob cache: "blobcache", "fscache" or ""
-    #[serde(default, rename = "type")]
-    pub cache_type: String,
-    /// Whether the data from the cache is compressed, not used anymore.
-    #[serde(default, rename = "compressed")]
-    pub cache_compressed: bool,
-    /// Blob cache manager specific configuration: FileCacheConfig, FsCacheConfig.
-    #[serde(default, rename = "config")]
-    pub cache_config: Value,
-    /// Whether to validate data read from the cache.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub cache_validate: bool,
-    /// Configuration for blob data prefetching.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub prefetch_config: BlobPrefetchConfig,
-}
-
-/// Configuration information to create blob cache manager.
-///
-/// This structure is externally visible through configuration file and HTTP API, please keep them
-/// stable.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FactoryConfig {
-    /// Id of the factory.
-    #[serde(default)]
-    pub id: String,
-    /// Configuration for storage backend.
-    pub backend: BackendConfig,
-    /// Configuration for blob cache manager.
-    #[serde(default)]
-    pub cache: CacheConfig,
 }
 
 #[derive(Eq, PartialEq)]

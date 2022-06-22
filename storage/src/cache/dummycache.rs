@@ -23,13 +23,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
+use nydus_api::http::CacheConfig;
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
-use crate::factory::CacheConfig;
 use crate::utils::{alloc_buf, copyv};
 use crate::{StorageError, StorageResult};
 

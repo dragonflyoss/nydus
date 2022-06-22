@@ -30,12 +30,14 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::transport::{FileReadWriteVolatile, FileVolatileSlice};
-use nydus_utils::compress;
-use nydus_utils::digest::{self, RafsDigest};
 use vm_memory::Bytes;
 
+use nydus_api::http::FactoryConfig;
+use nydus_utils::compress;
+use nydus_utils::digest::{self, RafsDigest};
+
 use crate::cache::BlobCache;
-use crate::factory::{FactoryConfig, BLOB_FACTORY};
+use crate::factory::BLOB_FACTORY;
 
 static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
