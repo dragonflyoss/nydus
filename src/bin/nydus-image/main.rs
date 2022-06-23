@@ -523,10 +523,10 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .required(true)
                 .takes_value(true))
             .arg(
-                Arg::with_name("blob_dir")
-                .long("blob_dir")
+                Arg::with_name("blob")
+                .long("blob")
                 .short("b")
-                .help("path to folder that holds blob file")
+                .help("path to blob file")
                 .required(false)
                 .takes_value(true)
                 )
@@ -799,10 +799,10 @@ impl Command {
 
     fn decompress(args: &clap::ArgMatches) -> Result<()> {
         let bootstrap = args.value_of("bootstrap").expect("pass in bootstrap");
-        let blob_dir = args.value_of("blob_dir");
+        let blob = args.value_of("blob");
         let output = args.value_of("output").expect("pass in output");
 
-        let decompressor = Box::new(OCIDecompressor::new(bootstrap, blob_dir, output).map_err(
+        let decompressor = Box::new(OCIDecompressor::new(bootstrap, blob, output).map_err(
             |err| {
                 error!("fail to create decompressor, error: {}", err);
                 anyhow!("fail to create decompressor, error: {}", err)

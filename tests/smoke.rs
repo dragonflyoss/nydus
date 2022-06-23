@@ -5,7 +5,7 @@
 extern crate log;
 
 use std::env::var;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -341,6 +341,7 @@ fn test_inline(rafs_version: &str) {
     builder.check_inline_layout();
 }
 
+#[test]
 fn integration_test_decompress1() {
     let mut prefix =
         PathBuf::from(var("TEST_WORKDIR_PREFIX").expect("Please specify TEST_WORKDIR_PREFIX env"));
@@ -350,10 +351,17 @@ fn integration_test_decompress1() {
 
     let mut builder = builder::new(wk_dir.as_path(), "oci");
     builder.make_lower();
-    builder.build_lower("lz4_block", "5");
+    builder.compress("lz4_block", "5");
+
+    let mut blob_dir = fs::read_dir(wk_dir.as_path().join("blobs")).unwrap();
+    let blob_path = blob_dir.next().unwrap().unwrap().path();
 
     let tar_name = wk_dir.as_path().join("oci.tar");
-    builder.decompress("bootstrap-lower", "blobs", tar_name.to_str().unwrap());
+    builder.decompress(
+        "bootstrap-lower",
+        blob_path.to_str().unwrap(),
+        tar_name.to_str().unwrap(),
+    );
 
     let unpack_dir = wk_dir.as_path().join("output");
     exec(&format!("mkdir {:?}", unpack_dir), false, b"").unwrap();
@@ -378,7 +386,7 @@ fn integration_test_decompress1() {
         md5_ret.replace(unpack_dir.to_str().unwrap(), "")
     );
 
-    let mut texture = File::open("./tests/texture/directory/lower.result").unwrap();
+    let mut texture = File::open("./tests/texture/directory/decompress.result").unwrap();
     let mut expected = String::new();
     texture.read_to_string(&mut expected).unwrap();
 

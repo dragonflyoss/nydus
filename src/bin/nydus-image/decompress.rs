@@ -15,14 +15,15 @@ use std::{
 };
 
 use anyhow::Result;
+use nydus_api::http::LocalFsConfig;
 use nydus_rafs::{
     metadata::{layout::RAFS_ROOT_INODE, RafsInode, RafsMode, RafsSuper},
     RafsIoReader,
 };
 use nydus_utils::compress::{self, Algorithm};
 use storage::{
-    backend::{localfs::LocalFs, BlobBackend, BlobReader, LocalFsConfig},
-    device::BlobChunkInfo,
+    backend::{localfs::LocalFs, BlobBackend, BlobReader},
+    device::{BlobChunkInfo, BlobInfo},
     utils::alloc_buf,
 };
 use tar::{Builder, EntryType, Header};
@@ -41,23 +42,24 @@ pub trait Decompressor {
 ///  A decompressor with the ability to convert bootstrap file and blob file to tar
 pub struct OCIDecompressor {
     bootstrap: Box<Path>,
-    blob_dir: Option<Box<Path>>,
+    blob: Option<Box<Path>>,
     output: Box<Path>,
+
+    builder_factory: OCITarBuilderFactory,
 }
 
 impl OCIDecompressor {
-    pub fn new(bootstrap: &str, blob_dir: Option<&str>, output: &str) -> Result<Self> {
+    pub fn new(bootstrap: &str, blob: Option<&str>, output: &str) -> Result<Self> {
         let bootstrap = PathBuf::from(bootstrap).into_boxed_path();
         let output = PathBuf::from(output).into_boxed_path();
+        let blob = blob.map(|v| PathBuf::from(v).into_boxed_path());
 
-        let blob_dir = match blob_dir {
-            Some(dir) => Some(PathBuf::from(dir).canonicalize()?.into_boxed_path()),
-            None => None,
-        };
+        let builder_factory = OCITarBuilderFactory::new();
 
         Ok(OCIDecompressor {
+            builder_factory,
             bootstrap,
-            blob_dir,
+            blob,
             output,
         })
     }
@@ -183,16 +185,14 @@ impl Decompressor for OCIDecompressor {
     fn decompress(&self) -> Result<()> {
         info!(
             "default decompressor, bootstrap file: {:?}, blob file: {:?}, output file: {:?}",
-            self.bootstrap, self.blob_dir, self.output
+            self.bootstrap, self.blob, self.output
         );
 
         let rafs = self.load_rafs()?;
 
-        let mut builder = Box::new(OCITarBuilder::new(
-            &rafs,
-            self.blob_dir.as_ref().map(|dir| dir.as_ref()),
-            &*self.output,
-        )?) as Box<dyn TarBuilder>;
+        let mut builder =
+            self.builder_factory
+                .create(&rafs, self.blob.as_deref(), &*self.output)?;
 
         for (node, path) in self.iterator(&rafs) {
             if node.name() == OsStr::from_bytes(ROOT_PATH_NAME) {
@@ -303,7 +303,7 @@ impl SectionBuilder for OCIWhiteoutBuilder {
         header.set_mtime(node.mtime());
         header.set_uid(node.uid() as u64);
         header.set_gid(node.gid() as u64);
-        header.set_mode(node.mode());
+        header.set_mode(Util::mask_mode(node.mode()));
 
         // Rafs loses the access time and change time.
         // It's required by certain tools, such 7-zip.
@@ -354,7 +354,7 @@ impl SectionBuilder for OCIDirBuilder {
         header.set_mtime(node.mtime());
         header.set_uid(node.uid() as u64);
         header.set_gid(node.gid() as u64);
-        header.set_mode(node.mode());
+        header.set_mode(Util::mask_mode(node.mode()));
 
         let mut extensions = Vec::with_capacity(2);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
@@ -434,7 +434,7 @@ impl SectionBuilder for OCIRegBuilder {
         header.set_mtime(node.mtime());
         header.set_uid(node.uid() as u64);
         header.set_gid(node.gid() as u64);
-        header.set_mode(node.mode());
+        header.set_mode(Util::mask_mode(node.mode()));
         header.set_size(node.size());
 
         let mut extensions = Vec::with_capacity(2);
@@ -576,7 +576,7 @@ impl PAXSpecialSectionBuilder {
         header.set_mtime(node.mtime());
         header.set_uid(node.uid() as u64);
         header.set_gid(node.gid() as u64);
-        header.set_mode(node.mode());
+        header.set_mode(Util::mask_mode(node.mode()));
         header.set_size(node.size());
 
         let dev_id = self.cal_dev(inode.rdev() as u64);
@@ -735,7 +735,7 @@ impl PAXLinkBuilder {
         header.set_mtime(node.mtime());
         header.set_uid(node.uid() as u64);
         header.set_gid(node.gid() as u64);
-        header.set_mode(node.mode());
+        header.set_mode(Util::mask_mode(node.mode()));
 
         let mut extensions = Vec::with_capacity(3);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
@@ -769,7 +769,7 @@ struct GNUUtil {}
 
 impl GNUUtil {
     fn set_path(header: &mut Header, path: &Path) -> Result<Option<TarSection>> {
-        let path = Util::normalize_path(&path, header.entry_type().is_dir())
+        let path = Util::normalize_path(&path)
             .map_err(|err| anyhow!("fail to normalize path, error {}", err))?;
 
         let rs = match header.set_path(&path) {
@@ -850,7 +850,7 @@ impl PAXUtil {
     }
 
     fn set_link(header: &mut Header, path: &Path) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>> {
-        let path = Util::normalize_path(path, header.entry_type().is_dir())
+        let path = Util::normalize_path(path)
             .map_err(|err| anyhow!("fail to normalize path, error {}", err))?;
 
         let max_len = header.as_old().linkname.len();
@@ -881,7 +881,7 @@ impl PAXUtil {
     }
 
     fn set_path(header: &mut Header, path: &Path) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>> {
-        let path = Util::normalize_path(&path, header.entry_type().is_dir())
+        let path = Util::normalize_path(&path)
             .map_err(|err| anyhow!("fail to normalize path, error {}", err))?;
 
         let max_len = header.as_old().name.len();
@@ -915,12 +915,11 @@ impl PAXUtil {
 struct Util {}
 
 impl Util {
-    fn normalize_path(path: &Path, is_dir: bool) -> Result<PathBuf> {
-        fn has_trailing_slash(p: &Path) -> bool {
+    fn normalize_path(path: &Path) -> Result<PathBuf> {
+        fn end_with_slash(p: &Path) -> bool {
             p.as_os_str().as_bytes().last() == Some(&b'/')
         }
 
-        // remove root
         let mut normalized = if path.has_root() {
             path.strip_prefix("/")
                 .map_err(|err| anyhow!("fail to strip prefix /, error {}", err))?
@@ -929,10 +928,7 @@ impl Util {
             path.to_path_buf()
         };
 
-        // handle trailing slash
-        if is_dir {
-            normalized.push("");
-        } else if has_trailing_slash(path) {
+        if end_with_slash(path) {
             normalized.set_file_name(normalized.file_name().unwrap().to_owned())
         }
 
@@ -954,16 +950,53 @@ impl Util {
 
         Ok(PathBuf::from(path))
     }
+
+    // Common Unix mode constants; these are not defined in any common tar standard.
+    //
+    //    c_ISDIR  = 040000  // Directory
+    //    c_ISFIFO = 010000  // FIFO
+    //    c_ISREG  = 0100000 // Regular file
+    //    c_ISLNK  = 0120000 // Symbolic link
+    //    c_ISBLK  = 060000  // Block special file
+    //    c_ISCHR  = 020000  // Character special file
+    //    c_ISSOCK = 0140000 // Socket
+    //
+    // Although many readers bear it, such as Go standard library and tar tool in ubuntu,  truncate to last four bytes. The four consists of below:
+    //
+    //    c_ISUID = 04000 // Set uid
+    //    c_ISGID = 02000 // Set gid
+    //    c_ISVTX = 01000 // Sticky bit
+    //    MODE_PERM = 0777 // Owner:Group:Other R/W
+    fn mask_mode(st_mode: u32) -> u32 {
+        st_mode & 0o7777
+    }
 }
 
-struct OCITarBuilder {
-    writer: Builder<File>,
-    builders: Vec<Box<dyn SectionBuilder>>,
-}
+struct OCITarBuilderFactory {}
 
-impl OCITarBuilder {
-    fn new(meta: &RafsSuper, blob_dir: Option<&Path>, output_path: &Path) -> Result<Self> {
-        let writer = Builder::new(
+impl OCITarBuilderFactory {
+    fn new() -> Self {
+        OCITarBuilderFactory {}
+    }
+
+    fn create(
+        &self,
+        meta: &RafsSuper,
+        blob_path: Option<&Path>,
+        output_path: &Path,
+    ) -> Result<Box<dyn TarBuilder>> {
+        let writer = self.create_writer(output_path)?;
+
+        let blob = meta.superblock.get_blob_infos().pop();
+        let builders = self.create_builders(blob, blob_path)?;
+
+        let builder = OCITarBuilder::new(builders, writer);
+
+        Ok(Box::new(builder) as Box<dyn TarBuilder>)
+    }
+
+    fn create_writer(&self, output_path: &Path) -> Result<Builder<File>> {
+        let builder = Builder::new(
             OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -979,29 +1012,34 @@ impl OCITarBuilder {
                 })?,
         );
 
-        let builders = Self::builders(meta, blob_dir)?;
-
-        Ok(Self { builders, writer })
+        Ok(builder)
     }
 
-    fn builders(meta: &RafsSuper, blob_dir: Option<&Path>) -> Result<Vec<Box<dyn SectionBuilder>>> {
-        let pax_ext_builder = Rc::new(PAXExtensionSectionBuilder::new());
-        let pax_link_builder = Rc::new(PAXLinkBuilder::new(pax_ext_builder.clone()));
-        let pax_special_builder = Rc::new(PAXSpecialSectionBuilder::new(pax_ext_builder.clone()));
+    fn create_builders(
+        &self,
+        blob: Option<Arc<BlobInfo>>,
+        blob_path: Option<&Path>,
+    ) -> Result<Vec<Box<dyn SectionBuilder>>> {
+        // PAX basic builders
+        let ext_builder = Rc::new(PAXExtensionSectionBuilder::new());
+        let link_builder = Rc::new(PAXLinkBuilder::new(ext_builder.clone()));
+        let special_builder = Rc::new(PAXSpecialSectionBuilder::new(ext_builder.clone()));
 
+        // OCI builders
         let sock_builder = OCISocketBuilder::new();
-        let link_builder = OCILinkBuilder::new(pax_link_builder.clone());
-        let symlink_builder = OCISymlinkBuilder::new(pax_link_builder.clone());
+        let hard_link_builder = OCILinkBuilder::new(link_builder.clone());
+        let symlink_builder = OCISymlinkBuilder::new(link_builder.clone());
         let whiteout_builder = OCIWhiteoutBuilder::new();
-        let dir_builder = OCIDirBuilder::new(pax_ext_builder);
-        let fifo_builder = OCIFifoBuilder::new(pax_special_builder.clone());
-        let char_builder = OCICharBuilder::new(pax_special_builder.clone());
-        let block_builder = OCIBlockBuilder::new(pax_special_builder);
-        let reg_builder = Self::reg_builder(meta, blob_dir)?;
+        let dir_builder = OCIDirBuilder::new(ext_builder);
+        let fifo_builder = OCIFifoBuilder::new(special_builder.clone());
+        let char_builder = OCICharBuilder::new(special_builder.clone());
+        let block_builder = OCIBlockBuilder::new(special_builder);
+        let reg_builder = self.create_reg_builder(blob, blob_path)?;
 
+        // The order counts.
         let builders = vec![
             Box::new(sock_builder) as Box<dyn SectionBuilder>,
-            Box::new(link_builder),
+            Box::new(hard_link_builder),
             Box::new(whiteout_builder),
             Box::new(dir_builder),
             Box::new(reg_builder),
@@ -1014,32 +1052,33 @@ impl OCITarBuilder {
         Ok(builders)
     }
 
-    fn reg_builder(meta: &RafsSuper, blob_dir: Option<&Path>) -> Result<OCIRegBuilder> {
-        let blob = meta.superblock.get_blob_infos().pop();
+    fn create_reg_builder(
+        &self,
+        blob: Option<Arc<BlobInfo>>,
+        blob_path: Option<&Path>,
+    ) -> Result<OCIRegBuilder> {
         let (reader, compressor) = match blob {
             None => (None, None),
             Some(ref blob) => {
-                if blob_dir.is_none() {
-                    bail!("miss blob dir")
+                if blob_path.is_none() {
+                    bail!("miss blob path")
                 }
 
-                let reader = Self::blob_reader(&blob_dir.unwrap().join(blob.blob_id()))?;
+                let reader = self.create_blob_reader(blob_path.unwrap())?;
                 let compressor = blob.compressor();
 
                 (Some(reader), Some(compressor))
             }
         };
 
-        let pax_ext_builder = Rc::new(PAXExtensionSectionBuilder::new());
-
         Ok(OCIRegBuilder::new(
-            pax_ext_builder.clone(),
+            Rc::new(PAXExtensionSectionBuilder::new()),
             reader,
             compressor,
         ))
     }
 
-    fn blob_reader(blob_path: &Path) -> Result<Arc<dyn BlobReader>> {
+    fn create_blob_reader(&self, blob_path: &Path) -> Result<Arc<dyn BlobReader>> {
         let config = LocalFsConfig {
             blob_file: blob_path.to_str().unwrap().to_owned(),
             readahead: false,
@@ -1071,18 +1110,34 @@ impl OCITarBuilder {
     }
 }
 
+struct OCITarBuilder {
+    writer: Builder<File>,
+    builders: Vec<Box<dyn SectionBuilder>>,
+}
+
+impl OCITarBuilder {
+    fn new(builders: Vec<Box<dyn SectionBuilder>>, writer: Builder<File>) -> Self {
+        Self { builders, writer }
+    }
+}
+
 impl TarBuilder for OCITarBuilder {
     fn append(&mut self, inode: &dyn RafsInode, path: &Path) -> Result<()> {
         let mut is_known_type = true;
 
         for builder in &mut self.builders {
-            if builder.can_handle(inode, path) {
-                is_known_type = false;
-
-                for sect in builder.build(inode, path)? {
-                    self.writer.append(&sect.header, sect.data)?;
-                }
+            // Useless one, just go !!!!!
+            if !builder.can_handle(inode, path) {
+                continue;
             }
+
+            for sect in builder.build(inode, path)? {
+                self.writer.append(&sect.header, sect.data)?;
+            }
+
+            is_known_type = false;
+
+            break;
         }
 
         if is_known_type {

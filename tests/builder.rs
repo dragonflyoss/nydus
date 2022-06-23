@@ -453,12 +453,34 @@ impl<'a> Builder<'a> {
 
     pub fn decompress(&self, bootstrap: &str, blob: &str, output: &str) {
         let cmd = format!(
-            "{:?} decompress --bootstrap {:?} --blob_dir {:?} --output {:?}",
+            "{:?} decompress --bootstrap {:?} --blob {:?} --output {:?}",
             self.builder,
             self.work_dir.join(bootstrap),
             self.work_dir.join(blob),
             self.work_dir.join(output)
         );
-        exec(&cmd, false).unwrap();
+
+        exec(&cmd, false, b"").unwrap();
+    }
+
+    pub fn compress(&mut self, compressor: &str, rafs_version: &str) {
+        let lower_dir = self.work_dir.join("lower");
+        self.create_dir(&self.work_dir.join("blobs"));
+
+        exec(
+            format!(
+                "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
+                self.builder,
+                self.work_dir.join("bootstrap-lower"),
+                self.work_dir.join("blobs"),
+                compressor,
+                self.whiteout_spec,
+                rafs_version,
+                lower_dir,
+            )
+            .as_str(),
+            false,
+            b""
+        ).unwrap();
     }
 }
