@@ -78,6 +78,8 @@ jobs:
         rustup target install $arch-apple-darwin
         make -e ARCH=$arch macos-fusedev
         sudo mv target-fusedev/$arch-apple-darwin/release/nydusd nydusd-fusedev
+        sudo mv target-fusedev/$arch-apple-darwin/release/nydus-cached .
+        sudo mv target-fusedev/$arch-apple-darwin/release/nydus-image .
         sudo mv target-fusedev/$arch-apple-darwin/release/nydusctl .
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
