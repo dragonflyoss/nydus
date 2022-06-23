@@ -1000,16 +1000,9 @@ impl Node {
         if spec != WhiteoutSpec::Overlayfs {
             return false;
         }
-
-        #[cfg(target_os = "linux")]
-        {
-            use nix::sys::stat;
-            self.inode.is_chrdev() && stat::major(self.rdev) == 0 && stat::minor(self.rdev) == 0
-        }
-        #[cfg(target_os = "macos")]
-        {
-            self.inode.is_chrdev() && ((self.rdev >> 24) & 0xff) == 0 && (self.rdev & 0xffffff) == 0
-        }
+        self.inode.is_chrdev()
+            && nydus_utils::compact::major_dev(self.rdev) == 0
+            && nydus_utils::compact::minor_dev(self.rdev) == 0
     }
 
     /// Check whether the inode (directory) is a overlayfs whiteout opaque.
