@@ -264,6 +264,9 @@ impl Bootstrap {
         }
 
         // dot & dotdot
+        // Type of libc::S_IFDIR is u16 on macos, so it need a conversion
+        // but compiler will report useless conversion on linux platform,
+        // so we add an allow annotation here.
         #[allow(clippy::useless_conversion)]
         {
             node.dirents
