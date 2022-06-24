@@ -358,6 +358,27 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
+    pub fn build_empty_dir_with_prefetch(&mut self, compressor: &str, rafs_version: &str) {
+        let empty_dir = self.work_dir.join("empty-dir");
+        self.create_dir(&empty_dir);
+        self.create_dir(&self.work_dir.join("blobs"));
+        exec(
+            format!(
+                "{:?} create --bootstrap {:?} --prefetch-policy fs --blob-dir {:?}  --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
+                self.builder,
+                self.work_dir.join("bootstrap-empty-dir"),
+                self.work_dir.join("blobs"),
+                compressor,
+                self.whiteout_spec,
+                rafs_version,
+                empty_dir,
+            )
+            .as_str(),
+            false,
+            b"/",
+        ).unwrap();
+    }
+
     pub fn build_empty_file_with_prefetch(&mut self, compressor: &str, rafs_version: &str) {
         let empty_file_dir = self.work_dir.join("empty");
         self.create_dir(&empty_file_dir);
@@ -365,8 +386,9 @@ impl<'a> Builder<'a> {
         self.create_file(&empty_file_dir.join("empty-file"), b"");
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --prefetch-policy fs --blob-dir {:?}  --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
+                "{:?} create --parent-bootstrap {:?} --bootstrap {:?} --prefetch-policy fs --blob-dir {:?}  --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
                 self.builder,
+                self.work_dir.join("bootstrap-empty-dir"),
                 self.work_dir.join("bootstrap-empty"),
                 self.work_dir.join("blobs"),
                 compressor,

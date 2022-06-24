@@ -188,17 +188,22 @@ impl Prefetch {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV6PrefetchTable::new();
             for i in self.readahead_patterns.values().filter_map(|v| *v) {
+                debug_assert!(i > 0);
+                // i holds the Node.index, which starts at 1, so it needs to be converted to the
+                // index of the Node array to index the corresponding Node
+                let array_index = i as usize - 1;
                 trace!(
                     "v6 prefetch table: map node index {} to offset {} nid {} path {:?} name {:?}",
                     i,
-                    nodes[i as usize].offset,
-                    calculate_nid(nodes[i as usize].offset, meta_addr),
-                    nodes[i as usize].path(),
-                    nodes[i as usize].name()
+                    nodes[array_index].offset,
+                    calculate_nid(nodes[array_index].offset, meta_addr),
+                    nodes[array_index].path(),
+                    nodes[array_index].name()
                 );
                 // 32bit nid can represent 128GB bootstrap, it is large enough, no need
                 // to worry about casting here
-                prefetch_table.add_entry(calculate_nid(nodes[i as usize].offset, meta_addr) as u32);
+                prefetch_table
+                    .add_entry(calculate_nid(nodes[array_index].offset, meta_addr) as u32);
             }
             Some(prefetch_table)
         } else {
