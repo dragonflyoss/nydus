@@ -73,12 +73,13 @@ fn test(
     let lower_texture = "directory/lower.result".to_string();
     let overlay_texture = "directory/overlay.result".to_string();
     let empty_texture = "directory/empty.result".to_string();
+    let emptydir_texture = "directory/emptydir.result".to_string();
 
     let mut builder = builder::new(&work_dir, whiteout_spec);
     let rafsv6 = rafs_version == "6";
     {
-        // Create & build empty rootfs
-        builder.build_empty_file_with_prefetch(compressor, rafs_version);
+        // Create & build empty dir rootfs
+        builder.build_empty_dir_with_prefetch(compressor, rafs_version);
         // Mount empty rootfs and check
         let nydusd = nydusd::new(
             &work_dir,
@@ -87,6 +88,23 @@ fn test(
             rafs_mode.parse().unwrap(),
             "api.sock".into(),
             // FIXME: Currently no digest validation is implemented for rafs v6.
+            !rafsv6,
+        );
+        nydusd.start(Some("bootstrap-empty-dir"), "mnt");
+        nydusd.check(&emptydir_texture, "mnt");
+        nydusd.umount("mnt");
+    }
+
+    {
+        // Create & build empty file rootfs
+        builder.build_empty_file_with_prefetch(compressor, rafs_version);
+        // Mount empty rootfs and check
+        let nydusd = nydusd::new(
+            &work_dir,
+            enable_cache,
+            cache_compressed,
+            rafs_mode.parse().unwrap(),
+            "api.sock".into(),
             !rafsv6,
         );
         nydusd.start(Some("bootstrap-empty"), "mnt");
