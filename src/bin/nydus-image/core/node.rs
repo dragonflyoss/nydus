@@ -198,7 +198,7 @@ pub struct Node {
     /// A source directory may contain multiple partitions from different hard disk, so
     /// a pair of (real_ino, dev) is needed to uniquely identify an inode from source directory.
     pub src_dev: u64,
-    /// Inode number of the source inode.
+    /// Inode number of the source inode, from fs stat().
     pub src_ino: Inode,
     /// Device ID for special files, describing the device that this inode represents.
     pub rdev: u64,
