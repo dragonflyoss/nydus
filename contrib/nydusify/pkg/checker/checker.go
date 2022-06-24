@@ -16,6 +16,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
 // Opt defines Checker options.
@@ -107,6 +108,18 @@ func (checker *Checker) Check(ctx context.Context) error {
 
 	mode := "direct"
 	digestValidate := false
+	if targetParsed.NydusImage != nil {
+		nydusManifest := parser.FindNydusBootstrapDesc(&targetParsed.NydusImage.Manifest)
+		if nydusManifest != nil {
+			v := utils.GetNydusFsVersionOrDefault(nydusManifest.Annotations, utils.V5)
+			if v == utils.V5 {
+				// Digest validate is not currently supported for v6,
+				// but v5 supports it. In order to make the check more sufficient,
+				// this validate needs to be turned on for v5.
+				digestValidate = true
+			}
+		}
+	}
 
 	rules := []rule.Rule{
 		&rule.ManifestRule{

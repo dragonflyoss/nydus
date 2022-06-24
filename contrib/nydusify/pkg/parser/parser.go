@@ -61,7 +61,7 @@ func New(remote *remote.Remote, interestedArch string) (*Parser, error) {
 
 // Try to find the topmost layer in Nydus manifest, it should
 // be a Nydus bootstrap layer, see examples/manifest/manifest.json
-func findNydusBootstrapDesc(manifest *ocispec.Manifest) *ocispec.Descriptor {
+func FindNydusBootstrapDesc(manifest *ocispec.Manifest) *ocispec.Descriptor {
 	layers := manifest.Layers
 	if len(layers) != 0 {
 		desc := &layers[len(layers)-1]
@@ -163,7 +163,7 @@ func (parser *Parser) parseImage(
 
 // PullNydusBootstrap pulls Nydus bootstrap layer from Nydus image.
 func (parser *Parser) PullNydusBootstrap(ctx context.Context, image *Image) (io.ReadCloser, error) {
-	bootstrapDesc := findNydusBootstrapDesc(&image.Manifest)
+	bootstrapDesc := FindNydusBootstrapDesc(&image.Manifest)
 	if bootstrapDesc == nil {
 		return nil, fmt.Errorf("not found Nydus bootstrap layer in manifest")
 	}
@@ -207,7 +207,7 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 			return nil, err
 		}
 
-		bootstrapDesc := findNydusBootstrapDesc(onlyManifest)
+		bootstrapDesc := FindNydusBootstrapDesc(onlyManifest)
 		if bootstrapDesc != nil {
 			nydusDesc = imageDesc
 		} else {

@@ -196,7 +196,7 @@ func (nydusd *Nydusd) Mount() error {
 		}
 	case <-ready:
 		return nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		return errors.New("timeout to wait Nydusd ready")
 	}
 

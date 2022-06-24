@@ -98,7 +98,9 @@ pub trait RafsSuperBlock: RafsSuperInodes + Send + Sync {
 }
 
 pub enum PostWalkAction {
+    // Indicates the need to continue iterating
     Continue,
+    // Indicates that it is necessary to stop continuing to iterate
     Break,
 }
 

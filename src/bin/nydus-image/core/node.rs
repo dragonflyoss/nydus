@@ -5,6 +5,7 @@
 
 //! An in-memory RAFS inode for image building and inspection.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
@@ -41,7 +42,7 @@ use rafs::RafsIoWrite;
 use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkFlags, BlobChunkInfo};
 
-use super::chunk_dict::ChunkDict;
+use super::chunk_dict::{ChunkDict, DigestWithBlobIndex};
 use super::context::{BlobContext, BootstrapContext, BuildContext, RafsVersion};
 use super::tree::Tree;
 
@@ -546,7 +547,7 @@ impl Node {
         orig_meta_addr: u64,
         meta_addr: u64,
         ctx: &mut BuildContext,
-        chunk_cache: &mut dyn ChunkDict,
+        chunk_cache: &mut HashMap<DigestWithBlobIndex, ChunkWrapper>,
     ) -> Result<usize> {
         let mut inode = self.new_rafsv6_inode();
 
@@ -717,7 +718,10 @@ impl Node {
 
                 chunks.extend(v6_chunk.as_ref());
 
-                chunk_cache.add_chunk(chunk.inner.clone());
+                chunk_cache.insert(
+                    DigestWithBlobIndex(*chunk.inner.id(), chunk.inner.blob_index() + 1),
+                    chunk.inner.clone(),
+                );
             }
             // Dump inode
             f_bootstrap
