@@ -583,13 +583,7 @@ impl FsCacheHandler {
                         warn!("fscache: internal error: cached object is not BlobCache objects");
                     }
                     Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
-                        Ok(v) if v == msg.len as usize => {}
-                        Ok(v) => {
-                            warn!(
-                                "fscache: read data from blob object not matched: {} != {}",
-                                v, msg.len
-                            );
-                        }
+                        Ok(_) => {}
                         Err(e) => error!(
                             "{}",
                             format!("fscache: failed to read data from blob object: {}", e,)
