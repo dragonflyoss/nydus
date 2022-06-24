@@ -620,6 +620,9 @@ impl Bootstrap {
         ext_sb.set_blob_table_offset(blob_table_offset);
         ext_sb.set_blob_table_size(blob_table_size as u32);
         // we need to write extended_sb until chunk table is dumped.
+        if ctx.explicit_uidgid {
+            ext_sb.set_explicit_uidgid();
+        }
 
         // dump devtslot
         bootstrap_ctx

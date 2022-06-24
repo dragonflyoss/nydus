@@ -384,6 +384,11 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
     }
 
+    /// Enable explicit Uid/Gid feature.
+    pub fn set_explicit_uidgid(&mut self) {
+        self.s_flags |= RafsSuperFlags::EXPLICIT_UID_GID.bits();
+    }
+
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();
