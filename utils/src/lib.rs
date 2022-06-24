@@ -18,6 +18,7 @@ pub use self::inode_bitmap::InodeBitmap;
 pub use self::types::*;
 
 pub mod async_helper;
+pub mod compact;
 pub mod compress;
 pub mod digest;
 pub mod exec;

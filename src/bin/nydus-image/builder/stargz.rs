@@ -14,9 +14,9 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use nix::sys::stat::makedev;
 use serde::{Deserialize, Serialize};
 
+use nydus_utils::compact::makedev;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::{try_round_up_4k, ByteSize};
 use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
@@ -191,7 +191,7 @@ impl TocEntry {
     }
 
     pub fn mode(&self) -> u32 {
-        let mut mode = self.mode;
+        let mut mode = 0;
 
         if self.is_dir() {
             mode |= libc::S_IFDIR;
@@ -207,7 +207,9 @@ impl TocEntry {
             mode |= libc::S_IFIFO;
         }
 
-        mode
+        #[cfg(target_os = "macos")]
+        let mode = mode as u32;
+        self.mode | mode
     }
 
     pub fn rdev(&self) -> u32 {

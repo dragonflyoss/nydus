@@ -12,20 +12,18 @@ extern crate nydus_storage as storage;
 
 use std::io::Result;
 use std::os::unix::prelude::AsRawFd;
-use std::sync::{atomic::AtomicBool, Mutex};
+use std::sync::atomic::AtomicBool;
 
 use clap::{App, Arg};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 use nydus_storage::remote::{RemoteBlobMgr, Server};
-use vmm_sys_util::eventfd::EventFd;
 
 const CLIENT_TOKEN: Token = Token(1);
 
 lazy_static! {
     static ref EVENT_MANAGER_RUN: AtomicBool = AtomicBool::new(true);
-    static ref EXIT_EVTFD: Mutex::<Option<EventFd>> = Mutex::<Option<EventFd>>::default();
 }
 
 fn main() -> Result<()> {

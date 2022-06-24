@@ -3,7 +3,7 @@ all: build
 TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
-ARCH ?= $(shell uname -p)
+ARCH ?= $(shell uname -m)
 OS ?= linux
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
@@ -92,8 +92,7 @@ ut:
 	RUST_BACKTRACE=1 ${CARGO} test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 macos-fusedev:
-	# nydus-cached/nydus-image does not support macos yet
-	${CARGO} build --target ${ARCH}-apple-darwin --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd
+	${CARGO} build --target ${ARCH}-apple-darwin --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image --bin nydus-cached
 
 macos-ut:
 	${CARGO} clippy --target-dir ${current_dir}/target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings

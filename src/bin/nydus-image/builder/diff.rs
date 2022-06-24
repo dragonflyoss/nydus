@@ -856,11 +856,12 @@ pub mod tests {
     use std::os::unix::fs as unix_fs;
     use std::path::Path;
 
-    use nix::sys::stat::{dev_t, makedev, mknod, Mode, SFlag};
+    use nix::sys::stat::{dev_t, mknod, Mode, SFlag};
     use nix::unistd::geteuid;
     use vmm_sys_util::tempdir::TempDir;
 
     use super::*;
+    use nydus_utils::compact::makedev;
     use nydus_utils::exec;
 
     fn create_dir(path: &Path) {
