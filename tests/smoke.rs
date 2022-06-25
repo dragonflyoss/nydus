@@ -301,3 +301,21 @@ fn integration_test_stargz() {
     test_stargz("5");
     test_stargz("6");
 }
+
+#[test]
+fn integration_test_inline_directory() {
+    test_inline("5");
+    test_inline("6");
+}
+
+fn test_inline(rafs_version: &str) {
+    info!("\n\n==================== testing run: stargz test");
+
+    let tmp_dir = TempDir::new().unwrap();
+    let work_dir = tmp_dir.as_path().to_path_buf();
+
+    let mut builder = builder::new(&work_dir, "oci");
+    builder.make_lower();
+    builder.build_inline_lower(rafs_version);
+    builder.check_inline_layout();
+}

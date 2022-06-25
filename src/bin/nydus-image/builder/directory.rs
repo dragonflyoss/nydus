@@ -173,9 +173,7 @@ impl Builder for DirectoryBuilder {
         let blob_id = blob_ctx.blob_id();
         if blob_exists {
             if ctx.inline_bootstrap {
-                if let Some(blob_writer) = &mut blob_ctx.writer {
-                    blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
-                }
+                blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
             } else {
                 blob_writer.finalize(blob_id.clone())?;
             }
