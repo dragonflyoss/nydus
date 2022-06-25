@@ -5,9 +5,10 @@
 use nix::sys::stat::{dev_t, mknod, Mode, SFlag};
 use nydus_utils::compact::makedev;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
+use tar::Header;
 
 use nydus_utils::exec;
 
@@ -187,6 +188,23 @@ impl<'a> Builder<'a> {
             &dir.join("sub/more/more-sub/more-sub-2"),
             b"upper:more-sub-2",
         );
+    }
+
+    pub fn build_inline_lower(&mut self, rafs_version: &str) {
+        let lower_dir = self.work_dir.join("lower");
+
+        exec(
+            format!(
+                "{:?} create --source-type directory --blob {:?} --log-level info  --fs-version {} --inline-bootstrap {:?}",
+                self.builder,
+                self.work_dir.join("inline.nydus"),
+                rafs_version,
+                lower_dir,
+            )
+            .as_str(),
+            false,
+            b""
+        ).unwrap();
     }
 
     pub fn build_lower(&mut self, compressor: &str, rafs_version: &str) {
@@ -401,5 +419,35 @@ impl<'a> Builder<'a> {
             false,
             b"/",
         ).unwrap();
+    }
+
+    pub fn check_inline_layout(&self) {
+        let header_size = 512;
+
+        let mut f = File::open(self.work_dir.join("inline.nydus")).unwrap();
+
+        assert!(f.metadata().unwrap().len() > header_size);
+        let mut cur = f.seek(SeekFrom::End(0 - header_size as i64)).unwrap();
+
+        let mut header = Header::new_old();
+        let bs = header.as_mut_bytes();
+
+        f.read_exact(bs).unwrap();
+        assert_eq!(&header.path_bytes().as_ref(), b"image.boot");
+
+        assert!(cur > header.size().unwrap());
+        cur = f
+            .seek(SeekFrom::Start(cur - header.size().unwrap()))
+            .unwrap();
+
+        assert!(cur > header_size);
+        cur = f.seek(SeekFrom::Start(cur - header_size)).unwrap();
+
+        let mut header = Header::new_old();
+        let bs = header.as_mut_bytes();
+
+        f.read_exact(bs).unwrap();
+        assert_eq!(&header.path_bytes().as_ref(), b"image.blob");
+        assert_eq!(cur, header.size().unwrap());
     }
 }
