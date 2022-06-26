@@ -54,7 +54,7 @@ jobs:
       run: |
         declare -A rust_arch_map=( ["amd64"]="x86_64" ["arm64"]="aarch64")
         arch=${rust_arch_map[${{ matrix.arch }}]}
-        cargo install cross
+        cargo install --version 0.2.1 cross
         rustup component add rustfmt clippy
         make -e ARCH=$arch -e CARGO=cross static-release
         #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
@@ -109,7 +109,7 @@ jobs:
         cd /home/runner/work/image-service/image-service/contrib/nydus-test
         sudo mkdir -p /blobdir
         sudo python3 nydus_test_config.py --dist fs_structure.yaml
-        sudo pytest -vs --durations=0 --pdb functional-test/test_api.py::test_detect_io_hang \\
-                                  functional-test/test_api.py::test_access_pattern \\
-                                  functional-test/test_api.py::test_api_mount_with_prefetch \\
+        sudo pytest -vs --durations=0 --pdb functional-test/test_api.py::test_detect_io_hang \
+                                  functional-test/test_api.py::test_access_pattern \
+                                  functional-test/test_api.py::test_api_mount_with_prefetch \
                                   functional-test/test_api.py::test_daemon_info
