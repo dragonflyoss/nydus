@@ -343,6 +343,26 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
                 .help("Tag to identify the fscache daemon instance")
                 .takes_value(true)
                 .requires("fscache"),
+        )
+        .arg(
+            Arg::with_name("fscache-threads")
+                .long("fscache-threads")
+                .default_value("1")
+                .help("Number of working threads to serve fscache requests")
+                .takes_value(true)
+                .required(false)
+                .validator(|v| {
+                    if let Ok(t) = v.parse::<i32>() {
+                        if t > 0 && t <= 1024 {
+                            Ok(())
+                        } else {
+                            Err("Invalid working thread number {}, valid values: [1-1024]"
+                                .to_string())
+                        }
+                    } else {
+                        Err("Input thread number is invalid".to_string())
+                    }
+                }),
         );
 
     app.subcommand(subcmd)

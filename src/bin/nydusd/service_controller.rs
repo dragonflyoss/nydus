@@ -43,15 +43,18 @@ impl ServiceController {
         #[cfg(target_os = "linux")]
         if self.fscache_enabled.load(Ordering::Acquire) {
             if let Some(fscache) = self.fscache.lock().unwrap().clone() {
-                std::thread::spawn(move || {
-                    if let Err(e) = fscache.run_loop() {
-                        error!("Failed to run fscache service loop, {}", e);
-                    }
-                    // Notify the global service controller that one working thread is exiting.
-                    if let Err(e) = crate::DAEMON_CONTROLLER.waker.wake() {
-                        error!("Failed to notify the global service controller, {}", e);
-                    }
-                });
+                for _ in 0..fscache.working_threads() {
+                    let fscache2 = fscache.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = fscache2.run_loop() {
+                            error!("Failed to run fscache service loop, {}", e);
+                        }
+                        // Notify the global service controller that one working thread is exiting.
+                        if let Err(e) = crate::DAEMON_CONTROLLER.waker.wake() {
+                            error!("Failed to notify the global service controller, {}", e);
+                        }
+                    });
+                }
             }
         }
 
@@ -117,16 +120,33 @@ impl ServiceController {
         };
         let tag = subargs.value_of("fscache-tag");
 
+        let mut threads = 1usize;
+        if let Some(threads_value) = subargs.value_of("fscache-threads") {
+            if let Ok(t) = threads_value.parse::<i32>() {
+                if t > 0 && t <= 1024 {
+                    threads = t as usize;
+                } else {
+                    return Err(einval!(
+                        "Invalid working thread number {}, valid values: [1-1024]"
+                    ));
+                }
+            } else {
+                return Err(einval!("Input thread number is invalid".to_string()));
+            }
+        }
+
         info!(
-            "Create fscache instance at {} with tag {}",
+            "Create fscache instance at {} with tag {}, {} working threads",
             p,
-            tag.unwrap_or("<none>")
+            tag.unwrap_or("<none>"),
+            threads
         );
         let fscache = crate::fs_cache::FsCacheHandler::new(
             "/dev/cachefiles",
             p,
             tag,
             self.blob_cache_mgr.clone(),
+            threads,
         )?;
         *self.fscache.lock().unwrap() = Some(Arc::new(fscache));
         self.fscache_enabled.store(true, Ordering::Release);

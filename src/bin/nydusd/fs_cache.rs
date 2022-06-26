@@ -223,6 +223,7 @@ struct FsCacheState {
 pub struct FsCacheHandler {
     active: AtomicBool,
     barrier: Barrier,
+    threads: usize,
     file: File,
     state: Arc<Mutex<FsCacheState>>,
     poller: Mutex<Poll>,
@@ -236,6 +237,7 @@ impl FsCacheHandler {
         dir: &str,
         tag: Option<&str>,
         blob_cache_mgr: Arc<BlobCacheMgr>,
+        threads: usize,
     ) -> Result<Self> {
         info!(
             "fscache: create FsCacheHandler with dir {}, tag {}",
@@ -279,12 +281,18 @@ impl FsCacheHandler {
 
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
-            barrier: Barrier::new(2),
+            barrier: Barrier::new(threads + 1),
+            threads,
             file,
             state: Arc::new(Mutex::new(state)),
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
         })
+    }
+
+    /// Get number of working threads to service fscache requests.
+    pub fn working_threads(&self) -> usize {
+        self.threads
     }
 
     /// Stop worker threads for the fscache service.
@@ -327,6 +335,8 @@ impl FsCacheHandler {
                     && event.token() == Token(TOKEN_EVENT_WAKER)
                     && !self.active.load(Ordering::Acquire)
                 {
+                    // Notify next worker to exit.
+                    let _ = self.waker.wake();
                     self.barrier.wait();
                     return Ok(());
                 }
