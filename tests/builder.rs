@@ -451,9 +451,9 @@ impl<'a> Builder<'a> {
         assert_eq!(cur, header.size().unwrap());
     }
 
-    pub fn decompress(&self, blob: &str, output: &str) {
+    pub fn unpack(&self, blob: &str, output: &str) {
         let cmd = format!(
-            "{:?} decompress --bootstrap {:?} --blob {:?} --output {:?}",
+            "{:?} unpack --bootstrap {:?} --blob {:?} --output {:?}",
             self.builder,
             self.work_dir.join("bootstrap"),
             self.work_dir.join(blob),
@@ -463,7 +463,7 @@ impl<'a> Builder<'a> {
         exec(&cmd, false, b"").unwrap();
     }
 
-    pub fn compress(&mut self, compressor: &str, rafs_version: &str) {
+    pub fn pack(&mut self, compressor: &str, rafs_version: &str) {
         self.create_dir(&self.work_dir.join("blobs"));
 
         exec(
@@ -483,7 +483,7 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn make_compress(&mut self) {
+    pub fn make_pack(&mut self) {
         let dir = self.work_dir.join("compress");
         self.create_dir(&dir);
 

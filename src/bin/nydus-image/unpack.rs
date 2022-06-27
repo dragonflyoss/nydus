@@ -1,5 +1,3 @@
-extern crate tar;
-
 use std::{
     collections::HashMap,
     ffi::OsStr,
@@ -14,7 +12,7 @@ use std::{
     vec::IntoIter,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use nydus_api::http::LocalFsConfig;
 use nydus_rafs::{
     metadata::{RafsInode, RafsMode, RafsSuper},
@@ -30,33 +28,33 @@ use tar::{Builder, EntryType, Header};
 
 use crate::core::node::InodeWrapper;
 
-static PAX_SEP1: &'static [u8; 1] = b" ";
-static PAX_SEP2: &'static [u8; 1] = b"=";
-static PAX_PREFIX: &'static [u8; 13] = b"SCHILY.xattr.";
-static PAX_DELIMITER: &'static [u8; 1] = b"\n";
+static PAX_SEP1: &[u8; 1] = b" ";
+static PAX_SEP2: &[u8; 1] = b"=";
+static PAX_PREFIX: &[u8; 13] = b"SCHILY.xattr.";
+static PAX_DELIMITER: &[u8; 1] = b"\n";
 
-pub trait Decompressor {
-    fn decompress(&self) -> Result<()>;
+pub trait Unpacker {
+    fn unpack(&self) -> Result<()>;
 }
 
-///  A decompressor with the ability to convert bootstrap file and blob file to tar
-pub struct OCIDecompressor {
-    bootstrap: Box<Path>,
-    blob: Option<Box<Path>>,
-    output: Box<Path>,
+///  A unpacker with the ability to convert bootstrap file and blob file to tar
+pub struct OCIUnpacker {
+    bootstrap: PathBuf,
+    blob: Option<PathBuf>,
+    output: PathBuf,
 
     builder_factory: OCITarBuilderFactory,
 }
 
-impl OCIDecompressor {
+impl OCIUnpacker {
     pub fn new(bootstrap: &str, blob: Option<&str>, output: &str) -> Result<Self> {
-        let bootstrap = PathBuf::from(bootstrap).into_boxed_path();
-        let output = PathBuf::from(output).into_boxed_path();
-        let blob = blob.map(|v| PathBuf::from(v).into_boxed_path());
+        let bootstrap = PathBuf::from(bootstrap);
+        let output = PathBuf::from(output);
+        let blob = blob.map(PathBuf::from);
 
         let builder_factory = OCITarBuilderFactory::new();
 
-        Ok(OCIDecompressor {
+        Ok(OCIUnpacker {
             builder_factory,
             bootstrap,
             blob,
@@ -69,35 +67,16 @@ impl OCIDecompressor {
             .read(true)
             .write(false)
             .open(&*self.bootstrap)
-            .map_err(|err| {
-                error!(
-                    "fail to load bootstrap {:?}, error: {}",
-                    self.bootstrap, err
-                );
-                anyhow!(
-                    "fail to load bootstrap {:?}, error: {}",
-                    self.bootstrap,
-                    err
-                )
-            })?;
+            .with_context(|| format!("fail to open bootstrap {:?}", self.bootstrap))?;
 
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
-            validate_digest: true,
+            validate_digest: false,
             ..Default::default()
         };
+
         rs.load(&mut (Box::new(bootstrap) as RafsIoReader))
-            .map_err(|err| {
-                error!(
-                    "fail to load bootstrap {:?}, error: {}",
-                    self.bootstrap, err
-                );
-                anyhow!(
-                    "fail to load bootstrap {:?}, error: {}",
-                    self.bootstrap,
-                    err
-                )
-            })?;
+            .with_context(|| format!("fail to load bootstrap {:?}", self.bootstrap))?;
 
         Ok(rs)
     }
@@ -106,8 +85,9 @@ impl OCIDecompressor {
     fn iterator<'a>(
         &'a self,
         rs: &'a RafsSuper,
-    ) -> Box<impl Iterator<Item = (Arc<dyn RafsInode>, Box<Path>)> + 'a> {
-        // A cursor means the next node to visit of certain height in the tree. It always starts with the first one of level.
+    ) -> Box<impl Iterator<Item = (Arc<dyn RafsInode>, PathBuf)> + 'a> {
+        // A cursor means the next node to be visited at same height in the tree.
+        // It always starts with the first one of level.
         // A cursor stack is of cursors from root to leaf.
         let mut cursor_stack = Vec::with_capacity(32);
 
@@ -142,7 +122,7 @@ impl OCIDecompressor {
         &self,
         node: Arc<dyn RafsInode>,
         path: &Path,
-    ) -> Box<dyn Iterator<Item = (Arc<dyn RafsInode>, Box<Path>)>> {
+    ) -> Box<dyn Iterator<Item = (Arc<dyn RafsInode>, PathBuf)>> {
         let base = path.to_path_buf();
         let mut next_idx = 0..node.get_child_count();
 
@@ -152,7 +132,7 @@ impl OCIDecompressor {
             }
 
             let child = node.get_child_by_index(next_idx.next().unwrap()).unwrap();
-            let child_path = base.join(child.name()).into_boxed_path();
+            let child_path = base.join(child.name());
 
             Some((child, child_path))
         };
@@ -163,7 +143,7 @@ impl OCIDecompressor {
     fn cursor_of_root<'a>(
         &self,
         rs: &'a RafsSuper,
-    ) -> Box<dyn Iterator<Item = (Arc<dyn RafsInode>, Box<Path>)> + 'a> {
+    ) -> Box<dyn Iterator<Item = (Arc<dyn RafsInode>, PathBuf)> + 'a> {
         let mut has_more = true;
         let visitor = from_fn(move || {
             if !has_more {
@@ -172,7 +152,7 @@ impl OCIDecompressor {
             has_more = false;
 
             let node = rs.get_inode(rs.superblock.root_ino(), false).unwrap();
-            let path = PathBuf::from("/").join(node.name()).into_boxed_path();
+            let path = PathBuf::from("/").join(node.name());
 
             Some((node, path))
         });
@@ -181,24 +161,24 @@ impl OCIDecompressor {
     }
 }
 
-impl Decompressor for OCIDecompressor {
-    fn decompress(&self) -> Result<()> {
+impl Unpacker for OCIUnpacker {
+    fn unpack(&self) -> Result<()> {
         info!(
-            "default decompressor, bootstrap file: {:?}, blob file: {:?}, output file: {:?}",
+            "oci unpacker, bootstrap file: {:?}, blob file: {:?}, output file: {:?}",
             self.bootstrap, self.blob, self.output
         );
 
         let rafs = self.load_rafs()?;
 
-        let mut builder =
-            self.builder_factory
-                .create(&rafs, self.blob.as_deref(), &*self.output)?;
+        let mut builder = self
+            .builder_factory
+            .create(&rafs, self.blob.as_deref(), &self.output)?;
 
         for (node, path) in self.iterator(&rafs) {
-            if Util::is_root(&*path) {
+            if Util::is_root(&path) {
                 continue;
             }
-            builder.append(&*node, &*path)?;
+            builder.append(&*node, &path)?;
         }
 
         Ok(())
@@ -263,7 +243,7 @@ impl SectionBuilder for OCILinkBuilder {
                 .insert(node.ino(), path.to_path_buf().into_boxed_path());
         }
 
-        return is_appeared;
+        is_appeared
     }
 
     fn build(&self, node: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
@@ -304,7 +284,7 @@ impl SectionBuilder for OCIDirBuilder {
 
         let mut extensions = Vec::with_capacity(2);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
-            extensions.extend(extension);
+            extensions.push(extension);
         }
         if let Some(extension) = PAXUtil::get_xattr_as_extensions(inode) {
             extensions.extend(extension);
@@ -356,7 +336,7 @@ impl OCIRegBuilder {
             .collect();
 
         let reader = ChunkReader::new(
-            self.compressor.as_ref().unwrap().clone(),
+            *self.compressor.as_ref().unwrap(),
             self.reader.as_ref().unwrap().clone(),
             chunks,
         );
@@ -385,7 +365,7 @@ impl SectionBuilder for OCIRegBuilder {
 
         let mut extensions = Vec::with_capacity(2);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
-            extensions.extend(extension);
+            extensions.push(extension);
         }
         if let Some(extension) = PAXUtil::get_xattr_as_extensions(inode) {
             extensions.extend(extension);
@@ -531,7 +511,7 @@ impl PAXSpecialSectionBuilder {
 
         let mut extensions = Vec::with_capacity(2);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
-            extensions.extend(extension);
+            extensions.push(extension);
         }
         if let Some(extension) = PAXUtil::get_xattr_as_extensions(inode) {
             extensions.extend(extension);
@@ -561,6 +541,11 @@ impl PAXSpecialSectionBuilder {
     }
 }
 
+struct PAXRecord {
+    k: Vec<u8>,
+    v: Vec<u8>,
+}
+
 struct PAXExtensionSectionBuilder {}
 
 impl PAXExtensionSectionBuilder {
@@ -568,12 +553,8 @@ impl PAXExtensionSectionBuilder {
         PAXExtensionSectionBuilder {}
     }
 
-    fn build(
-        &self,
-        header: &Header,
-        extensions: Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<Option<TarSection>> {
-        if extensions.len() == 0 {
+    fn build(&self, header: &Header, extensions: Vec<PAXRecord>) -> Result<Option<TarSection>> {
+        if extensions.is_empty() {
             return Ok(None);
         }
 
@@ -591,7 +572,7 @@ impl PAXExtensionSectionBuilder {
 
         header
             .set_path(&self.build_pax_name(&path, header.as_old().name.len())?)
-            .map_err(|err| anyhow!("fail to set path for pax section, error {}", err))?;
+            .with_context(|| "fail to set path for pax section")?;
 
         Util::set_cksum(&mut header);
 
@@ -601,17 +582,16 @@ impl PAXExtensionSectionBuilder {
         }))
     }
 
-    fn build_data(&self, mut extensions: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
-        extensions.sort_by(|(k1, _), (k2, _)| {
-            let k1 = str::from_utf8(k1).unwrap();
-            let k2 = str::from_utf8(k2).unwrap();
+    fn build_data(&self, mut extensions: Vec<PAXRecord>) -> Vec<u8> {
+        extensions.sort_by(|r1, r2| {
+            let k1 = str::from_utf8(&r1.k).unwrap();
+            let k2 = str::from_utf8(&r2.k).unwrap();
             k1.cmp(k2)
         });
 
         extensions
             .into_iter()
-            .map(|(k, v)| self.build_pax_record(&k, &v))
-            .flatten()
+            .flat_map(|r| self.build_pax_record(&r.k, &r.v))
             .collect()
     }
 
@@ -685,10 +665,10 @@ impl PAXLinkBuilder {
 
         let mut extensions = Vec::with_capacity(3);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
-            extensions.extend(extension);
+            extensions.push(extension);
         }
         if let Some(extension) = PAXUtil::set_link(&mut header, link)? {
-            extensions.extend(extension);
+            extensions.push(extension);
         }
         if let Some(extension) = PAXUtil::get_xattr_as_extensions(inode) {
             extensions.extend(extension);
@@ -714,7 +694,7 @@ impl PAXLinkBuilder {
 struct PAXUtil {}
 
 impl PAXUtil {
-    fn get_xattr_as_extensions(inode: &dyn RafsInode) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    fn get_xattr_as_extensions(inode: &dyn RafsInode) -> Option<Vec<PAXRecord>> {
         if !inode.has_xattr() {
             return None;
         }
@@ -732,70 +712,60 @@ impl PAXUtil {
                 .into_iter()
                 .chain(key.into_iter())
                 .collect();
-            extensions.push((key, value));
+            extensions.push(PAXRecord { k: key, v: value });
         }
 
         Some(extensions)
     }
 
-    fn set_link(header: &mut Header, path: &Path) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>> {
-        let path = Util::normalize_path(path)
-            .map_err(|err| anyhow!("fail to normalize path, error {}", err))?;
+    fn set_link(header: &mut Header, path: &Path) -> Result<Option<PAXRecord>> {
+        let path = Util::normalize_path(path).with_context(|| "fail to normalize path")?;
 
         let max_len = header.as_old().linkname.len();
         if path.as_os_str().len() <= max_len {
             return header
                 .set_link_name(&path)
-                .map_err(|err| anyhow!("fail to set short path for pax header, error {}", err))
+                .with_context(|| "fail to set short link for pax header")
                 .map(|_| None);
         }
 
-        let extension = vec![(
-            "linkpath".to_owned().into_bytes(),
-            path.to_owned().into_os_string().into_vec(),
-        )];
+        let extension = PAXRecord {
+            k: "linkpath".to_owned().into_bytes(),
+            v: path.to_owned().into_os_string().into_vec(),
+        };
 
         let path = Util::truncate_path(&path, max_len)
-            .map_err(|err| anyhow!("fail to truncate path for pax header, error {}", err))?;
+            .with_context(|| "fail to truncate link for pax header")?;
 
-        header.set_link_name(&path).map_err(|err| {
-            anyhow!(
-                "fail to set header path again for {:?}, error {}",
-                path,
-                err
-            )
-        })?;
+        header
+            .set_link_name(&path)
+            .with_context(|| format!("fail to set header link again for {:?}", path))?;
 
         Ok(Some(extension))
     }
 
-    fn set_path(header: &mut Header, path: &Path) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>> {
-        let path = Util::normalize_path(&path)
-            .map_err(|err| anyhow!("fail to normalize path, error {}", err))?;
+    fn set_path(header: &mut Header, path: &Path) -> Result<Option<PAXRecord>> {
+        let path = Util::normalize_path(path).with_context(|| "fail to normalize path")?;
 
         let max_len = header.as_old().name.len();
         if path.as_os_str().len() <= max_len {
             return header
                 .set_path(path)
-                .map_err(|err| anyhow!("fail to set short path for pax header, error {}", err))
+                .with_context(|| "fail to set short path for pax header")
                 .map(|_| None);
         }
 
-        let extension = vec![(
-            "path".to_owned().into_bytes(),
-            path.to_owned().into_os_string().into_vec(),
-        )];
+        let extension = PAXRecord {
+            k: "path".to_owned().into_bytes(),
+            v: path.to_owned().into_os_string().into_vec(),
+        };
 
         let path = Util::truncate_path(&path, max_len)
-            .map_err(|err| anyhow!("fail to truncate path for pax header, error {}", err))?;
+            .with_context(|| "fail to truncate path for pax header")?;
 
-        header.set_path(&path).map_err(|err| {
-            anyhow!(
-                "fail to set header path again for {:?}, error {}",
-                path,
-                err
-            )
-        })?;
+        header
+            .set_path(&path)
+            .with_context(|| format!("fail to set header path again for {:?}", path))?;
 
         Ok(Some(extension))
     }
@@ -815,14 +785,15 @@ impl Util {
 
         let mut normalized = if path.has_root() {
             path.strip_prefix("/")
-                .map_err(|err| anyhow!("fail to strip prefix /, error {}", err))?
+                .with_context(|| "fail to strip prefix /")?
                 .to_path_buf()
         } else {
             path.to_path_buf()
         };
 
         if end_with_slash(&normalized) {
-            normalized.set_file_name(normalized.file_name().unwrap().to_owned())
+            let name = normalized.file_name().unwrap().to_owned();
+            normalized.set_file_name(name);
         }
 
         Ok(normalized)
@@ -838,7 +809,7 @@ impl Util {
         let path = match str::from_utf8(&path[..max_len]) {
             Ok(s) => Ok(s),
             Err(err) => str::from_utf8(&path[..err.valid_up_to()])
-                .map_err(|err| anyhow!("fail to convert bytes to utf8 str, error: {}", err)),
+                .with_context(|| "fail to convert bytes to utf8 str"),
         }?;
 
         Ok(PathBuf::from(path))
@@ -854,7 +825,8 @@ impl Util {
     //    c_ISCHR  = 020000  // Character special file
     //    c_ISSOCK = 0140000 // Socket
     //
-    // Although many readers bear it, such as Go standard library and tar tool in ubuntu,  truncate to last four bytes. The four consists of below:
+    // Although many readers bear it, such as Go standard library and tar tool in ubuntu
+    // Truncate to last four bytes. The four consists of below:
     //
     //    c_ISUID = 04000 // Set uid
     //    c_ISGID = 02000 // Set gid
@@ -864,7 +836,9 @@ impl Util {
         st_mode & 0o7777
     }
 
-    // The checksum is calculated by taking the sum of the unsigned byte values of the header record with the eight checksum bytes taken to be ASCII spaces (decimal value 32). It is stored as a six digit octal number with leading zeroes followed by a NUL and then a space.
+    // The checksum is calculated by taking the sum of the unsigned byte values of
+    // the header record with the eight checksum bytes taken to be ASCII spaces (decimal value 32).
+    // It is stored as a six digit octal number with leading zeroes followed by a NUL and then a space.
     // The wiki and Go standard library adhere to this format. Stay with them~~~.
     fn set_cksum(header: &mut Header) {
         let old = header.as_old();
@@ -923,13 +897,7 @@ impl OCITarBuilderFactory {
                 .truncate(true)
                 .read(false)
                 .open(output_path)
-                .map_err(|err| {
-                    anyhow!(
-                        "fail to open output file {:?}, error: {:?}",
-                        output_path,
-                        err
-                    )
-                })?,
+                .with_context(|| format!("fail to open output file {:?}", output_path))?,
         );
 
         Ok(builder)
@@ -948,7 +916,7 @@ impl OCITarBuilderFactory {
         // OCI builders
         let sock_builder = OCISocketBuilder::new();
         let hard_link_builder = OCILinkBuilder::new(link_builder.clone());
-        let symlink_builder = OCISymlinkBuilder::new(link_builder.clone());
+        let symlink_builder = OCISymlinkBuilder::new(link_builder);
         let dir_builder = OCIDirBuilder::new(ext_builder);
         let fifo_builder = OCIFifoBuilder::new(special_builder.clone());
         let char_builder = OCICharBuilder::new(special_builder.clone());
@@ -1004,21 +972,11 @@ impl OCITarBuilderFactory {
             dir: Default::default(),
             alt_dirs: Default::default(),
         };
-        let config = serde_json::to_value(config).map_err(|err| {
-            anyhow!(
-                "fail to create local backend config for {:?}, error: {:?}",
-                blob_path,
-                err
-            )
-        })?;
+        let config = serde_json::to_value(config)
+            .with_context(|| format!("fail to create local backend config for {:?}", blob_path))?;
 
-        let backend = LocalFs::new(config, Some("decompressor")).map_err(|err| {
-            anyhow!(
-                "fail to create local backend for {:?}, error: {:?}",
-                blob_path,
-                err
-            )
-        })?;
+        let backend = LocalFs::new(config, Some("unpacker"))
+            .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
 
         let reader = backend
             .get_reader("")
@@ -1059,7 +1017,7 @@ impl TarBuilder for OCITarBuilder {
         }
 
         if is_known_type {
-            bail!("node {:?} can not be decompressed", path)
+            bail!("node {:?} can not be unpacked", path)
         }
 
         Ok(())
@@ -1109,10 +1067,7 @@ impl ChunkReader {
             data.as_mut_slice(),
             self.compressor,
         )
-        .map_err(|err| {
-            error!("fail to decompress, error: {:?}", err);
-            anyhow!("fail to decompress, error: {:?}", err)
-        })?;
+        .with_context(|| "fail to decompress")?;
 
         self.chunk = Cursor::new(data);
 

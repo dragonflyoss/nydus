@@ -342,28 +342,30 @@ fn test_inline(rafs_version: &str) {
 }
 
 #[test]
-fn integration_test_decompress() {
+fn integration_test_unpack() {
     let mut prefix =
         PathBuf::from(var("TEST_WORKDIR_PREFIX").expect("Please specify TEST_WORKDIR_PREFIX env"));
+
+    // A trailing slash is required.
     prefix.push("");
 
     let wk_dir = TempDir::new_with_prefix(&prefix).unwrap();
-    test_decompress(wk_dir.as_path(), "5");
+    test_unpack(wk_dir.as_path(), "5");
 
     let wk_dir = TempDir::new_with_prefix(&prefix).unwrap();
-    test_decompress(wk_dir.as_path(), "6");
+    test_unpack(wk_dir.as_path(), "6");
 }
 
-fn test_decompress(work_dir: &Path, version: &str) {
+fn test_unpack(work_dir: &Path, version: &str) {
     let mut builder = builder::new(work_dir, "oci");
-    builder.make_compress();
-    builder.compress("lz4_block", version);
+    builder.make_pack();
+    builder.pack("lz4_block", version);
 
     let mut blob_dir = fs::read_dir(work_dir.join("blobs")).unwrap();
     let blob_path = blob_dir.next().unwrap().unwrap().path();
 
     let tar_name = work_dir.join("oci.tar");
-    builder.decompress(blob_path.to_str().unwrap(), tar_name.to_str().unwrap());
+    builder.unpack(blob_path.to_str().unwrap(), tar_name.to_str().unwrap());
 
     let unpack_dir = work_dir.join("output");
     exec(&format!("mkdir {:?}", unpack_dir), false, b"").unwrap();
@@ -388,7 +390,7 @@ fn test_decompress(work_dir: &Path, version: &str) {
         md5_ret.replace(unpack_dir.to_str().unwrap(), "")
     );
 
-    let mut texture = File::open("./tests/texture/directory/decompress.result").unwrap();
+    let mut texture = File::open("./tests/texture/directory/unpack.result").unwrap();
     let mut expected = String::new();
     texture.read_to_string(&mut expected).unwrap();
 

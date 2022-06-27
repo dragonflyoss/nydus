@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, ArgMatches, SubCommand};
-use decompress::Decompressor;
 use nix::unistd::{getegid, geteuid};
 use serde::{Deserialize, Serialize};
 
@@ -43,19 +42,19 @@ use crate::core::context::{
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
 use crate::core::tree;
-use crate::decompress::OCIDecompressor;
 use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
+use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
 #[macro_use]
 mod trace;
 mod builder;
 mod core;
-mod decompress;
 mod inspect;
 mod merge;
 mod stat;
+mod unpack;
 mod validator;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
@@ -513,7 +512,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true))
         )
         .subcommand(
-            SubCommand::with_name("decompress")
+            SubCommand::with_name("unpack")
             .about("Decompress nydus bootstrap and blob files to tar")
             .arg(
                 Arg::with_name("bootstrap")
@@ -597,8 +596,8 @@ fn main() -> Result<()> {
         Command::stat(matches)
     } else if let Some(matches) = cmd.subcommand_matches("compact") {
         Command::compact(matches, &build_info)
-    } else if let Some(matches) = cmd.subcommand_matches("decompress") {
-        Command::decompress(matches)
+    } else if let Some(matches) = cmd.subcommand_matches("unpack") {
+        Command::unpack(matches)
     } else {
         println!("{}", cmd.usage());
         Ok(())
@@ -797,22 +796,16 @@ impl Command {
         Ok(())
     }
 
-    fn decompress(args: &clap::ArgMatches) -> Result<()> {
+    fn unpack(args: &clap::ArgMatches) -> Result<()> {
         let bootstrap = args.value_of("bootstrap").expect("pass in bootstrap");
         let blob = args.value_of("blob");
         let output = args.value_of("output").expect("pass in output");
 
-        let decompressor = Box::new(OCIDecompressor::new(bootstrap, blob, output).map_err(
-            |err| {
-                error!("fail to create decompressor, error: {}", err);
-                anyhow!("fail to create decompressor, error: {}", err)
-            },
-        )?) as Box<dyn Decompressor>;
+        let unpacker = Box::new(
+            OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?,
+        ) as Box<dyn Unpacker>;
 
-        decompressor.decompress().map_err(|err| {
-            error!("fail to decompress, error: {}", err);
-            anyhow!("fail to decompress, error: {}", err)
-        })
+        unpacker.unpack().with_context(|| "fail to unpack")
     }
 
     fn check(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {

@@ -25,7 +25,7 @@ impl BlobReader for MockBlobReader {
     fn try_read(&self, buf: &mut [u8], offset: u64) -> storage::backend::BackendResult<usize> {
         let offset = offset as usize;
         if offset >= self.data.len() {
-            return Ok(0 as usize);
+            return Ok(0_usize);
         }
 
         let end = self.data.len().min(offset as usize + buf.len());
@@ -179,7 +179,7 @@ fn test_read_chunk_zero_buffer() {
 
 #[test]
 fn test_read_chunk_compress() {
-    let mut reader = creater_compress_chunk_reader();
+    let mut reader = create_compress_chunk_reader();
     let mut buf = [0u8; 256];
 
     assert_eq!(256, reader.read(&mut buf).unwrap());
@@ -198,7 +198,7 @@ fn test_read_chunk_compress() {
     assert_eq!(buf, [4u8; 256]);
 }
 
-fn creater_compress_chunk_reader() -> ChunkReader {
+fn create_compress_chunk_reader() -> ChunkReader {
     let chunk = [[1u8; 256], [2u8; 256], [3u8; 256], [4u8; 256]].concat();
 
     let (compressed_chunk, is_compressed) = compress::compress(&chunk, Algorithm::GZip).unwrap();
