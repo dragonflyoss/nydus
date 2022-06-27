@@ -1,13 +1,9 @@
 name: Nydus Ingegration Test
 
 on:
-  push:
-    branches: ["*"]
-  pull_request:
-    branches: ["*"]
   schedule:
-    # Run daily sanity check at 23:08 clock UTC
-    - cron: "8 23 * * *"
+    # Do conversion every day at 00:03 clock UTC
+    - cron: "3 0 * * *"
   workflow_dispatch:
 
 jobs:
