@@ -1,11 +1,16 @@
 [
   {"type":"directory","name":"","contents":[
+    {"type":"block","name":"block-file"},
+    {"type":"char","name":"char-file"},
+    {"type":"fifo","name":"fifo-file"},
     {"type":"file","name":"root-1"},
     {"type":"file","name":"root-2"},
     {"type":"file","name":"root-large"},
     {"type":"file","name":"root-large-copy"},
     {"type":"directory","name":"sub","contents":[
+      {"type":"file","name":".wh.some"},
       {"type":"directory","name":"more","contents":[
+        {"type":"file","name":".wh..wh..opq"},
         {"type":"file","name":"more-1"},
         {"type":"directory","name":"more-sub","contents":[
           {"type":"file","name":"more-sub-1"}
@@ -23,7 +28,7 @@
     ]},
     {"type":"file","name":"test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name.test-😉-name."}
   ]},
-  {"type":"report","directories":4,"files":14}
+  {"type":"report","directories":4,"files":19}
 ]
 1db49cdc205866ae03c1bf1c0c569964  /sub/some/some-1
 1fc133b570f60d1a13f2c97e179a7e8b  /root-1
@@ -37,4 +42,6 @@ a832eab60623f115363cc100a8862c23  /sub/sub-root-large-copy-hardlink
 a832eab60623f115363cc100a8862c23  /sub/sub-root-large-copy-hardlink-1
 a832eab60623f115363cc100a8862c23  /sub/sub-root-large-hardlink
 cca7b08b6c36f4adce54108e0ec23fe7  /sub/more/more-sub/more-sub-1
+d41d8cd98f00b204e9800998ecf8427e  /sub/more/.wh..wh..opq
+d41d8cd98f00b204e9800998ecf8427e  /sub/.wh.some
 fb99fe44d7d0c4486fdb707dc260b2c8  /sub/sub-1

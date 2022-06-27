@@ -5,7 +5,7 @@ use std::{
     ffi::OsStr,
     fs::{File, OpenOptions},
     io::{self, Cursor, Error, ErrorKind, Read},
-    iter::from_fn,
+    iter::{self, from_fn, repeat},
     os::unix::prelude::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     rc::Rc,
@@ -17,7 +17,7 @@ use std::{
 use anyhow::Result;
 use nydus_api::http::LocalFsConfig;
 use nydus_rafs::{
-    metadata::{layout::RAFS_ROOT_INODE, RafsInode, RafsMode, RafsSuper},
+    metadata::{RafsInode, RafsMode, RafsSuper},
     RafsIoReader,
 };
 use nydus_utils::compress::{self, Algorithm};
@@ -28,7 +28,7 @@ use storage::{
 };
 use tar::{Builder, EntryType, Header};
 
-use crate::core::node::{InodeWrapper, OCISPEC_WHITEOUT_PREFIX, ROOT_PATH_NAME};
+use crate::core::node::InodeWrapper;
 
 static PAX_SEP1: &'static [u8; 1] = b" ";
 static PAX_SEP2: &'static [u8; 1] = b"=";
@@ -171,7 +171,7 @@ impl OCIDecompressor {
             }
             has_more = false;
 
-            let node = rs.get_inode(RAFS_ROOT_INODE, false).unwrap();
+            let node = rs.get_inode(rs.superblock.root_ino(), false).unwrap();
             let path = PathBuf::from("/").join(node.name()).into_boxed_path();
 
             Some((node, path))
@@ -195,7 +195,7 @@ impl Decompressor for OCIDecompressor {
                 .create(&rafs, self.blob.as_deref(), &*self.output)?;
 
         for (node, path) in self.iterator(&rafs) {
-            if node.name() == OsStr::from_bytes(ROOT_PATH_NAME) {
+            if Util::is_root(&*path) {
                 continue;
             }
             builder.append(&*node, &*path)?;
@@ -274,60 +274,6 @@ impl SectionBuilder for OCILinkBuilder {
     }
 }
 
-struct OCIWhiteoutBuilder {}
-
-impl OCIWhiteoutBuilder {
-    fn new() -> Self {
-        OCIWhiteoutBuilder {}
-    }
-}
-
-impl SectionBuilder for OCIWhiteoutBuilder {
-    fn can_handle(&mut self, _: &dyn RafsInode, path: &Path) -> bool {
-        path.file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with(OCISPEC_WHITEOUT_PREFIX)
-    }
-
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
-        // In order to save access time and change time, gnu layout is required.
-        let mut header = Header::new_gnu();
-        header.set_entry_type(EntryType::file());
-        header.set_device_major(0).unwrap();
-        header.set_device_minor(0).unwrap();
-        header.set_size(0);
-
-        let node = InodeWrapper::from_inode_info(inode);
-        header.set_mtime(node.mtime());
-        header.set_uid(node.uid() as u64);
-        header.set_gid(node.gid() as u64);
-        header.set_mode(Util::mask_mode(node.mode()));
-
-        // Rafs loses the access time and change time.
-        // It's required by certain tools, such 7-zip.
-        // Fill modify time as access time and change time.
-        header.as_gnu_mut().unwrap().set_atime(node.mtime());
-        header.as_gnu_mut().unwrap().set_ctime(node.mtime());
-
-        let mut sections = Vec::with_capacity(2);
-        if let Some(sect) = GNUUtil::set_path(&mut header, path)? {
-            sections.push(sect);
-        }
-
-        header.set_cksum();
-
-        let main_header = TarSection {
-            header,
-            data: Box::new(io::empty()),
-        };
-        sections.push(main_header);
-
-        Ok(sections)
-    }
-}
-
 struct OCIDirBuilder {
     ext_builder: Rc<PAXExtensionSectionBuilder>,
 }
@@ -364,7 +310,7 @@ impl SectionBuilder for OCIDirBuilder {
             extensions.extend(extension);
         }
 
-        header.set_cksum();
+        Util::set_cksum(&mut header);
 
         let mut sections = Vec::with_capacity(2);
         if let Some(ext_sect) = self.ext_builder.build(&header, extensions)? {
@@ -445,7 +391,7 @@ impl SectionBuilder for OCIRegBuilder {
             extensions.extend(extension);
         }
 
-        header.set_cksum();
+        Util::set_cksum(&mut header);
 
         let mut sections = Vec::with_capacity(2);
         if let Some(ext_sect) = self.ext_builder.build(&header, extensions)? {
@@ -591,7 +537,7 @@ impl PAXSpecialSectionBuilder {
             extensions.extend(extension);
         }
 
-        header.set_cksum();
+        Util::set_cksum(&mut header);
 
         let mut sections = Vec::with_capacity(2);
         if let Some(ext_sect) = self.ext_builder.build(&header, extensions)? {
@@ -647,7 +593,7 @@ impl PAXExtensionSectionBuilder {
             .set_path(&self.build_pax_name(&path, header.as_old().name.len())?)
             .map_err(|err| anyhow!("fail to set path for pax section, error {}", err))?;
 
-        header.set_cksum();
+        Util::set_cksum(&mut header);
 
         Ok(Some(TarSection {
             header,
@@ -748,7 +694,7 @@ impl PAXLinkBuilder {
             extensions.extend(extension);
         }
 
-        header.set_cksum();
+        Util::set_cksum(&mut header);
 
         let mut sections = Vec::with_capacity(2);
         if let Some(ext_sect) = self.ext_builder.build(&header, extensions)? {
@@ -762,63 +708,6 @@ impl PAXLinkBuilder {
         sections.push(main_header);
 
         Ok(sections)
-    }
-}
-
-struct GNUUtil {}
-
-impl GNUUtil {
-    fn set_path(header: &mut Header, path: &Path) -> Result<Option<TarSection>> {
-        let path = Util::normalize_path(&path)
-            .map_err(|err| anyhow!("fail to normalize path, error {}", err))?;
-
-        let rs = match header.set_path(&path) {
-            Ok(_) => return Ok(None),
-            Err(err) => Err(anyhow!("fail to set path for header, error {}", err)),
-        };
-
-        let path = match Util::truncate_path(&path, header.as_old().name.len()) {
-            Ok(path) => path,
-            Err(_) => return rs,
-        };
-
-        header.set_path(&path).map_err(|err| {
-            anyhow!(
-                "fail to set header path again for {:?}, error {}",
-                path,
-                err
-            )
-        })?;
-
-        Ok(Some(Self::build_long_section(
-            EntryType::GNULongName,
-            path.into_os_string().into_vec(),
-        )))
-    }
-
-    fn build_long_section(entry_type: EntryType, mut data: Vec<u8>) -> TarSection {
-        // gnu requires, especially for long-link section and long-name section
-        let mut header = Header::new_gnu();
-
-        data.push(0x00);
-        header.set_size(data.len() as u64);
-        let data = Cursor::new(data);
-
-        let title = b"././@LongLink";
-        header.as_gnu_mut().unwrap().name[..title.len()].clone_from_slice(&title[..]);
-
-        header.set_entry_type(entry_type);
-        header.set_mode(0o644);
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-
-        header.set_cksum();
-
-        TarSection {
-            header,
-            data: Box::new(data),
-        }
     }
 }
 
@@ -915,6 +804,10 @@ impl PAXUtil {
 struct Util {}
 
 impl Util {
+    fn is_root(path: &Path) -> bool {
+        path.is_absolute() && path.file_name().is_none()
+    }
+
     fn normalize_path(path: &Path) -> Result<PathBuf> {
         fn end_with_slash(p: &Path) -> bool {
             p.as_os_str().as_bytes().last() == Some(&b'/')
@@ -928,7 +821,7 @@ impl Util {
             path.to_path_buf()
         };
 
-        if end_with_slash(path) {
+        if end_with_slash(&normalized) {
             normalized.set_file_name(normalized.file_name().unwrap().to_owned())
         }
 
@@ -969,6 +862,33 @@ impl Util {
     //    MODE_PERM = 0777 // Owner:Group:Other R/W
     fn mask_mode(st_mode: u32) -> u32 {
         st_mode & 0o7777
+    }
+
+    // The checksum is calculated by taking the sum of the unsigned byte values of the header record with the eight checksum bytes taken to be ASCII spaces (decimal value 32). It is stored as a six digit octal number with leading zeroes followed by a NUL and then a space.
+    // The wiki and Go standard library adhere to this format. Stay with them~~~.
+    fn set_cksum(header: &mut Header) {
+        let old = header.as_old();
+        let start = old as *const _ as usize;
+        let cksum_start = old.cksum.as_ptr() as *const _ as usize;
+        let offset = cksum_start - start;
+        let len = old.cksum.len();
+
+        let bs = header.as_bytes();
+        let sum = bs[0..offset]
+            .iter()
+            .chain(iter::repeat(&b' ').take(len))
+            .chain(&bs[offset + len..])
+            .fold(0, |a, b| a + (*b as u32));
+
+        let bs = &mut header.as_old_mut().cksum;
+        bs[bs.len() - 1] = b' ';
+        bs[bs.len() - 2] = 0o0;
+
+        let o = format!("{:o}", sum);
+        let value = o.bytes().rev().chain(repeat(b'0'));
+        for (slot, value) in bs.iter_mut().rev().skip(2).zip(value) {
+            *slot = value;
+        }
     }
 }
 
@@ -1029,7 +949,6 @@ impl OCITarBuilderFactory {
         let sock_builder = OCISocketBuilder::new();
         let hard_link_builder = OCILinkBuilder::new(link_builder.clone());
         let symlink_builder = OCISymlinkBuilder::new(link_builder.clone());
-        let whiteout_builder = OCIWhiteoutBuilder::new();
         let dir_builder = OCIDirBuilder::new(ext_builder);
         let fifo_builder = OCIFifoBuilder::new(special_builder.clone());
         let char_builder = OCICharBuilder::new(special_builder.clone());
@@ -1040,7 +959,6 @@ impl OCITarBuilderFactory {
         let builders = vec![
             Box::new(sock_builder) as Box<dyn SectionBuilder>,
             Box::new(hard_link_builder),
-            Box::new(whiteout_builder),
             Box::new(dir_builder),
             Box::new(reg_builder),
             Box::new(symlink_builder),
