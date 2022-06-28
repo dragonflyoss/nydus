@@ -38,6 +38,8 @@ use crate::daemon::{DaemonError, NydusDaemon};
 use crate::fs_service::{FsBackendMountCmd, FsService};
 use crate::service_controller::create_daemon;
 
+use nydus::ensure_threads;
+
 #[cfg(feature = "fusedev")]
 mod fusedev;
 #[cfg(feature = "virtiofs")]
@@ -202,6 +204,10 @@ const SHARED_DIR_HELP_MESSAGE: &str = "Directory to share between host and guest
 const SHARED_DIR_HELP_MESSAGE: &str =
     "Directory to share by FUSE for testing, which also enables `passthroughfs` mode";
 
+pub fn thread_validator(v: String) -> std::result::Result<(), String> {
+    ensure_threads(v).map(|_| ())
+}
+
 #[cfg(any(feature = "fusedev", feature = "virtiofs"))]
 fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     app.arg(
@@ -270,17 +276,7 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
             .help("Number of worker threads to serve IO requests")
             .takes_value(true)
             .required(false)
-            .validator(|v| {
-                if let Ok(t) = v.parse::<i32>() {
-                    if t > 0 && t <= 1024 {
-                        Ok(())
-                    } else {
-                        Err("Invalid working thread number {}, valid values: [1-1024]".to_string())
-                    }
-                } else {
-                    Err("Input thread number is invalid".to_string())
-                }
-            }),
+            .validator(thread_validator),
     )
     .arg(
         Arg::with_name("writable")
@@ -351,18 +347,7 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
                 .help("Number of working threads to serve fscache requests")
                 .takes_value(true)
                 .required(false)
-                .validator(|v| {
-                    if let Ok(t) = v.parse::<i32>() {
-                        if t > 0 && t <= 1024 {
-                            Ok(())
-                        } else {
-                            Err("Invalid working thread number {}, valid values: [1-1024]"
-                                .to_string())
-                        }
-                    } else {
-                        Err("Input thread number is invalid".to_string())
-                    }
-                }),
+                .validator(thread_validator),
         );
 
     app.subcommand(subcmd)

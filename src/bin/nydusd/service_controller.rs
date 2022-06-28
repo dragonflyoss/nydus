@@ -19,6 +19,8 @@ use crate::daemon::{
     DaemonStateMachineSubscriber,
 };
 use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
+#[cfg(target_os = "linux")]
+use nydus::ensure_threads;
 
 pub struct ServiceController {
     bti: BuildTimeInfo,
@@ -120,20 +122,11 @@ impl ServiceController {
         };
         let tag = subargs.value_of("fscache-tag");
 
-        let mut threads = 1usize;
-        if let Some(threads_value) = subargs.value_of("fscache-threads") {
-            if let Ok(t) = threads_value.parse::<i32>() {
-                if t > 0 && t <= 1024 {
-                    threads = t as usize;
-                } else {
-                    return Err(einval!(
-                        "Invalid working thread number {}, valid values: [1-1024]"
-                    ));
-                }
-            } else {
-                return Err(einval!("Input thread number is invalid".to_string()));
-            }
-        }
+        let threads = if let Some(threads_value) = subargs.value_of("fscache-threads") {
+            ensure_threads(threads_value).map_err(|err| einval!(err))?
+        } else {
+            1usize
+        };
 
         info!(
             "Create fscache instance at {} with tag {}, {} working threads",
