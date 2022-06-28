@@ -62,3 +62,15 @@ pub struct FsBackendDesc {
     pub mounted_time: DateTime<Local>,
     pub config: Option<serde_json::Value>,
 }
+
+pub fn ensure_threads<V: AsRef<str>>(v: V) -> std::result::Result<usize, String> {
+    if let Ok(t) = v.as_ref().parse::<usize>() {
+        if t > 0 && t <= 1024 {
+            Ok(t)
+        } else {
+            Err("Invalid working thread number {}, valid values: [1-1024]".to_string())
+        }
+    } else {
+        Err("Input thread number is invalid".to_string())
+    }
+}
