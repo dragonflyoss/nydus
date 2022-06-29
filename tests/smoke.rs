@@ -4,7 +4,10 @@
 #[macro_use]
 extern crate log;
 
-use std::path::Path;
+use std::env::var;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use nydus_app::setup_logging;
 use nydus_utils::exec;
@@ -336,4 +339,60 @@ fn test_inline(rafs_version: &str) {
     builder.make_lower();
     builder.build_inline_lower(rafs_version);
     builder.check_inline_layout();
+}
+
+#[test]
+fn integration_test_unpack() {
+    let mut prefix =
+        PathBuf::from(var("TEST_WORKDIR_PREFIX").expect("Please specify TEST_WORKDIR_PREFIX env"));
+
+    // A trailing slash is required.
+    prefix.push("");
+
+    let wk_dir = TempDir::new_with_prefix(&prefix).unwrap();
+    test_unpack(wk_dir.as_path(), "5");
+
+    let wk_dir = TempDir::new_with_prefix(&prefix).unwrap();
+    test_unpack(wk_dir.as_path(), "6");
+}
+
+fn test_unpack(work_dir: &Path, version: &str) {
+    let mut builder = builder::new(work_dir, "oci");
+    builder.make_pack();
+    builder.pack("lz4_block", version);
+
+    let mut blob_dir = fs::read_dir(work_dir.join("blobs")).unwrap();
+    let blob_path = blob_dir.next().unwrap().unwrap().path();
+
+    let tar_name = work_dir.join("oci.tar");
+    builder.unpack(blob_path.to_str().unwrap(), tar_name.to_str().unwrap());
+
+    let unpack_dir = work_dir.join("output");
+    exec(&format!("mkdir {:?}", unpack_dir), false, b"").unwrap();
+    exec(
+        &format!("tar --xattrs -xf {:?} -C {:?}", tar_name, unpack_dir),
+        false,
+        b"",
+    )
+    .unwrap();
+
+    let tree_ret = exec(&format!("tree -a -J -v {:?}", unpack_dir), true, b"").unwrap();
+    let md5_ret = exec(
+        &format!("find {:?} -type f -exec md5sum {{}} + | sort", unpack_dir),
+        true,
+        b"",
+    )
+    .unwrap();
+
+    let ret = format!(
+        "{}{}",
+        tree_ret.replace(unpack_dir.to_str().unwrap(), ""),
+        md5_ret.replace(unpack_dir.to_str().unwrap(), "")
+    );
+
+    let mut texture = File::open("./tests/texture/directory/unpack.result").unwrap();
+    let mut expected = String::new();
+    texture.read_to_string(&mut expected).unwrap();
+
+    assert_eq!(ret.trim(), expected.trim());
 }

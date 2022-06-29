@@ -44,6 +44,7 @@ use crate::core::prefetch::Prefetch;
 use crate::core::tree;
 use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
+use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
 #[macro_use]
@@ -53,6 +54,7 @@ mod core;
 mod inspect;
 mod merge;
 mod stat;
+mod unpack;
 mod validator;
 
 const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
@@ -509,6 +511,33 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .help("path to JSON output file")
                         .takes_value(true))
         )
+        .subcommand(
+            SubCommand::with_name("unpack")
+            .about("Unpack nydus image layer to a tar file")
+            .arg(
+                Arg::with_name("bootstrap")
+                .long("bootstrap")
+                .short("B")
+                .help("path to bootstrap file")
+                .required(true)
+                .takes_value(true))
+            .arg(
+                Arg::with_name("blob")
+                .long("blob")
+                .short("b")
+                .help("path to blob file")
+                .required(false)
+                .takes_value(true)
+                )
+            .arg(
+                Arg::with_name("output")
+                .long("output")
+                .short("o")
+                .help("path to output tar file")
+                .required(true)
+                .takes_value(true)
+                )
+        )
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
@@ -567,6 +596,8 @@ fn main() -> Result<()> {
         Command::stat(matches)
     } else if let Some(matches) = cmd.subcommand_matches("compact") {
         Command::compact(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("unpack") {
+        Command::unpack(matches)
     } else {
         println!("{}", cmd.usage());
         Ok(())
@@ -763,6 +794,17 @@ impl Command {
             OutputSerializer::dump(matches, build_output, build_info)?;
         }
         Ok(())
+    }
+
+    fn unpack(args: &clap::ArgMatches) -> Result<()> {
+        let bootstrap = args.value_of("bootstrap").expect("pass in bootstrap");
+        let blob = args.value_of("blob");
+        let output = args.value_of("output").expect("pass in output");
+
+        let unpacker =
+            OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?;
+
+        unpacker.unpack().with_context(|| "fail to unpack")
     }
 
     fn check(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {

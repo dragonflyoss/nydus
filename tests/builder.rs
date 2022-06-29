@@ -450,4 +450,90 @@ impl<'a> Builder<'a> {
         assert_eq!(&header.path_bytes().as_ref(), b"image.blob");
         assert_eq!(cur, header.size().unwrap());
     }
+
+    pub fn unpack(&self, blob: &str, output: &str) {
+        let cmd = format!(
+            "{:?} unpack --bootstrap {:?} --blob {:?} --output {:?}",
+            self.builder,
+            self.work_dir.join("bootstrap"),
+            self.work_dir.join(blob),
+            self.work_dir.join(output)
+        );
+
+        exec(&cmd, false, b"").unwrap();
+    }
+
+    pub fn pack(&mut self, compressor: &str, rafs_version: &str) {
+        self.create_dir(&self.work_dir.join("blobs"));
+
+        exec(
+            format!(
+                "{:?} create --bootstrap {:?} --blob-dir {:?} --log-level info --compressor {} --whiteout-spec {} --fs-version {} {:?}",
+                self.builder,
+                self.work_dir.join("bootstrap"),
+                self.work_dir.join("blobs"),
+                compressor,
+                "none", // Use "none" instead of "oci". Otherwise whiteout and opaque files are no longer exist in result.
+                rafs_version,
+                self.work_dir.join("compress"),
+            )
+            .as_str(),
+            false,
+            b""
+        ).unwrap();
+    }
+
+    pub fn make_pack(&mut self) {
+        let dir = self.work_dir.join("compress");
+        self.create_dir(&dir);
+
+        self.create_file(&dir.join("root-1"), b"lower:root-1");
+        self.create_file(&dir.join("root-2"), b"lower:root-2");
+        self.create_large_file(&dir.join("root-large"), 13);
+        self.copy_file(&dir.join("root-large"), &dir.join("root-large-copy"));
+
+        self.create_dir(&dir.join("sub"));
+        self.create_file(&dir.join("sub/sub-1"), b"lower:sub-1");
+        self.create_file(&dir.join("sub/sub-2"), b"lower:sub-2");
+        self.create_hardlink(
+            &dir.join("root-large"),
+            &dir.join("sub/sub-root-large-hardlink"),
+        );
+        self.create_hardlink(
+            &dir.join("root-large-copy"),
+            &dir.join("sub/sub-root-large-copy-hardlink"),
+        );
+        self.create_hardlink(
+            &dir.join("root-large-copy"),
+            &dir.join("sub/sub-root-large-copy-hardlink-1"),
+        );
+        self.create_symlink(
+            Path::new("../root-large"),
+            &dir.join("sub/sub-root-large-symlink"),
+        );
+
+        self.create_dir(&dir.join("sub/some"));
+        self.create_file(&dir.join("sub/some/some-1"), b"lower:some-1");
+
+        self.create_dir(&dir.join("sub/more"));
+        self.create_file(&dir.join("sub/more/more-1"), b"lower:more-1");
+        self.create_dir(&dir.join("sub/more/more-sub"));
+        self.create_file(
+            &dir.join("sub/more/more-sub/more-sub-1"),
+            b"lower:more-sub-1",
+        );
+
+        let long_name = &"test-😉-name.".repeat(100)[..255];
+        self.create_file(&dir.join(long_name), b"lower:long-name");
+
+        self.set_xattr(&dir.join("sub/sub-1"), "user.key-foo", b"value-foo");
+        self.set_xattr(&dir.join("sub/sub-1"), "user.key-bar", b"value-bar");
+
+        self.create_whiteout_file(&dir.join("sub/some"));
+        self.create_opaque_entry(&dir.join("sub/more"));
+
+        self.create_special_file(&dir.join("block-file"), "block");
+        self.create_special_file(&dir.join("char-file"), "char");
+        self.create_special_file(&dir.join("fifo-file"), "fifo");
+    }
 }
