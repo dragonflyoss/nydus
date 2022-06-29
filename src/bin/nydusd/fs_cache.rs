@@ -565,6 +565,7 @@ impl FsCacheHandler {
             let filetype = metadata.file_type();
             let filename = entry.file_name().to_str().unwrap().to_string();
             let objtype = FsCacheObjType::get_fscache_objtype(&filename);
+            // TODO skip chunk map and blob meta file
             // If objtype is not valid, skip this file.
             // If file is not dir but the objtype is Index or Intermediate, skip this file.
             // if neither directory nor regular file, skip this file.
@@ -589,6 +590,7 @@ impl FsCacheHandler {
                 entry,
             ));
         }
+
         Ok(file_atime_pq)
     }
 
@@ -633,12 +635,17 @@ impl FsCacheHandler {
                     }
                     FsCacheObjType::Data | FsCacheObjType::Special => {
                         inuse = self.check_if_in_use(&entry.filepath);
+                        if !inuse {
+                            // TODO extract the blobid from the blob file path.
+                            // TODO mark corresponding chunk map file as deleted and delete it.
+                        }
                     }
                     _ => {
                         // TODO this should be an error
                     }
                 }
                 if !inuse {
+                    // self.remove_blob_entry();
                     self.cull_file(entry.filepath.as_path());
                 }
             }
