@@ -122,7 +122,7 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    use nydus_utils::async_helper::with_runtime;
+    use nydus_utils::async_helper::block_on;
     use vmm_sys_util::tempdir::TempDir;
 
     use super::super::BlobStateMap;
@@ -149,32 +149,28 @@ mod tests {
         let now = Instant::now();
 
         let h1 = thread::spawn(move || {
-            with_runtime(|rt| {
-                rt.block_on(async {
-                    for idx in 0..range_count {
-                        if idx % skip_index != 0 {
-                            let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-                            map1.async_set_range_ready_and_clear_pending(addr, 1)
-                                .await
-                                .unwrap();
-                        }
+            block_on(async {
+                for idx in 0..range_count {
+                    if idx % skip_index != 0 {
+                        let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+                        map1.async_set_range_ready_and_clear_pending(addr, 1)
+                            .await
+                            .unwrap();
                     }
-                })
+                }
             });
         });
 
         let h2 = thread::spawn(move || {
-            with_runtime(|rt| {
-                rt.block_on(async {
-                    for idx in 0..range_count {
-                        if idx % skip_index != 0 {
-                            let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
-                            map2.async_set_range_ready_and_clear_pending(addr, 1)
-                                .await
-                                .unwrap();
-                        }
+            block_on(async {
+                for idx in 0..range_count {
+                    if idx % skip_index != 0 {
+                        let addr = ((idx as u64) << 12) + (idx as u64 % 0x1000);
+                        map2.async_set_range_ready_and_clear_pending(addr, 1)
+                            .await
+                            .unwrap();
                     }
-                })
+                }
             });
         });
 

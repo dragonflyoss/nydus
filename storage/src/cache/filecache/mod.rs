@@ -76,7 +76,10 @@ impl FileCacheMgr {
 
     // Create a file cache entry for the specified blob object if not present, otherwise
     // return the existing one.
-    async fn get_or_create_cache_entry(&self, blob: &Arc<BlobInfo>) -> Result<Arc<FileCacheEntry>> {
+    async fn async_get_or_create_cache_entry(
+        &self,
+        blob: &Arc<BlobInfo>,
+    ) -> Result<Arc<FileCacheEntry>> {
         if let Some(entry) = self.get(blob) {
             return Ok(entry);
         }
@@ -152,7 +155,7 @@ impl BlobCacheMgr for FileCacheMgr {
     }
 
     async fn async_get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
-        self.get_or_create_cache_entry(blob_info)
+        self.async_get_or_create_cache_entry(blob_info)
             .await
             .map(|v| v as Arc<dyn BlobCache>)
     }

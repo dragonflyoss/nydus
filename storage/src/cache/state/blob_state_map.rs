@@ -427,7 +427,7 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::Instant;
 
-    use nydus_utils::async_helper::with_runtime;
+    use nydus_utils::async_helper::block_on;
     use nydus_utils::digest::Algorithm::Blake3;
     use nydus_utils::digest::{Algorithm, RafsDigest};
     use vmm_sys_util::tempdir::TempDir;
@@ -518,34 +518,30 @@ pub(crate) mod tests {
         let now = Instant::now();
 
         let h1 = thread::spawn(move || {
-            with_runtime(|rt| {
-                rt.block_on(async {
-                    for idx in 0..chunk_count {
-                        let chunk = Chunk::new(idx);
-                        if idx % skip_index != 0 {
-                            indexed_chunk_map1
-                                .async_set_ready_and_clear_pending(chunk.as_ref())
-                                .await
-                                .unwrap();
-                        }
+            block_on(async {
+                for idx in 0..chunk_count {
+                    let chunk = Chunk::new(idx);
+                    if idx % skip_index != 0 {
+                        indexed_chunk_map1
+                            .async_set_ready_and_clear_pending(chunk.as_ref())
+                            .await
+                            .unwrap();
                     }
-                })
+                }
             });
         });
 
         let h2 = thread::spawn(move || {
-            with_runtime(|rt| {
-                rt.block_on(async {
-                    for idx in 0..chunk_count {
-                        let chunk = Chunk::new(idx);
-                        if idx % skip_index != 0 {
-                            indexed_chunk_map2
-                                .async_set_ready_and_clear_pending(chunk.as_ref())
-                                .await
-                                .unwrap();
-                        }
+            block_on(async {
+                for idx in 0..chunk_count {
+                    let chunk = Chunk::new(idx);
+                    if idx % skip_index != 0 {
+                        indexed_chunk_map2
+                            .async_set_ready_and_clear_pending(chunk.as_ref())
+                            .await
+                            .unwrap();
                     }
-                })
+                }
             });
         });
 
@@ -757,16 +753,14 @@ pub(crate) mod tests {
         let chunk_4_cloned = chunk_4.clone();
         let t1 = thread::Builder::new()
             .spawn(move || {
-                with_runtime(|rt| {
-                    rt.block_on(async {
-                        for _ in 0..4 {
-                            let ready = map_cloned
-                                .async_check_ready_and_mark_pending(chunk_4_cloned.as_ref())
-                                .await
-                                .unwrap();
-                            assert!(ready);
-                        }
-                    })
+                block_on(async {
+                    for _ in 0..4 {
+                        let ready = map_cloned
+                            .async_check_ready_and_mark_pending(chunk_4_cloned.as_ref())
+                            .await
+                            .unwrap();
+                        assert!(ready);
+                    }
                 });
             })
             .unwrap();
@@ -775,16 +769,14 @@ pub(crate) mod tests {
         let chunk_4_cloned_2 = chunk_4.clone();
         let t2 = thread::Builder::new()
             .spawn(move || {
-                with_runtime(|rt| {
-                    rt.block_on(async {
-                        for _ in 0..2 {
-                            let ready = map_cloned_2
-                                .async_check_ready_and_mark_pending(chunk_4_cloned_2.as_ref())
-                                .await
-                                .unwrap();
-                            assert!(ready);
-                        }
-                    })
+                block_on(async {
+                    for _ in 0..2 {
+                        let ready = map_cloned_2
+                            .async_check_ready_and_mark_pending(chunk_4_cloned_2.as_ref())
+                            .await
+                            .unwrap();
+                        assert!(ready);
+                    }
                 });
             })
             .unwrap();
@@ -840,15 +832,13 @@ pub(crate) mod tests {
         let chunk_4_cloned = chunk_4.clone();
         let t1 = thread::Builder::new()
             .spawn(move || {
-                with_runtime(|rt| {
-                    rt.block_on(async {
-                        for _ in 0..4 {
-                            map_cloned
-                                .async_check_ready_and_mark_pending(chunk_4_cloned.as_ref())
-                                .await
-                                .unwrap_err();
-                        }
-                    })
+                block_on(async {
+                    for _ in 0..4 {
+                        map_cloned
+                            .async_check_ready_and_mark_pending(chunk_4_cloned.as_ref())
+                            .await
+                            .unwrap_err();
+                    }
                 });
             })
             .unwrap();

@@ -36,7 +36,7 @@ use serde::Deserialize;
 
 use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
 use nydus_storage::device::{BlobDevice, BlobFetchRequest, BlobPrefetchRequest};
-use nydus_utils::async_helper::with_runtime;
+use nydus_utils::async_helper::block_on;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 
 use crate::metadata::layout::RAFS_ROOT_INODE;
@@ -231,13 +231,8 @@ impl Rafs {
         sb.load(r).map_err(RafsError::FillSuperblock)?;
 
         let blob_infos = sb.superblock.get_blob_infos();
-        let device = with_runtime(|rt| {
-            rt.block_on(async {
-                BlobDevice::async_new(&storage_conf, &blob_infos)
-                    .await
-                    .map_err(RafsError::CreateDevice)
-            })
-        })?;
+        let device = block_on(async { BlobDevice::async_new(&storage_conf, &blob_infos).await })
+            .map_err(RafsError::CreateDevice)?;
 
         let rafs = Rafs {
             id: id.to_string(),
@@ -289,14 +284,12 @@ impl Rafs {
         let blob_infos = self.sb.superblock.get_blob_infos();
 
         // step 2: update device (only localfs is supported)
-        with_runtime(|rt| {
-            rt.block_on(async {
-                self.device
-                    .async_update(&storage_conf, &blob_infos, self.fs_prefetch)
-                    .await
-                    .map_err(RafsError::SwapBackend)
-            })
-        })?;
+        block_on(async {
+            self.device
+                .async_update(&storage_conf, &blob_infos, self.fs_prefetch)
+                .await
+        })
+        .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
         Ok(())
@@ -484,7 +477,7 @@ impl Rafs {
 
     /// for blobfs
     pub fn fetch_range(&self, prefetches: &[BlobFetchRequest]) -> Result<()> {
-        with_runtime(|rt| rt.block_on(async { self.device.async_fetch_range(prefetches).await }))
+        block_on(async { self.device.async_fetch_range(prefetches).await })
     }
 
     fn root_ino(&self) -> u64 {

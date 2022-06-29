@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RafsInode;
-use nydus_utils::async_helper::with_runtime;
+use nydus_utils::async_helper::block_on;
 use nydus_utils::compress::{self, Algorithm};
 use storage::{backend::BlobReader, device::BlobChunkInfo, utils::alloc_buf};
 use tar::{EntryType, Header};
@@ -721,16 +721,14 @@ impl ChunkReader {
 
     fn load_chunk(&mut self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         let mut buf = alloc_buf(chunk.compress_size() as usize);
-        with_runtime(|rt| {
-            rt.block_on(async {
-                self.reader
-                    .async_read(buf.as_mut_slice(), chunk.compress_offset())
-                    .await
-                    .map_err(|err| {
-                        error!("fail to read chunk, error: {:?}", err);
-                        anyhow!("fail to read chunk, error: {:?}", err)
-                    })
-            })
+        block_on(async {
+            self.reader
+                .async_read(buf.as_mut_slice(), chunk.compress_offset())
+                .await
+        })
+        .map_err(|err| {
+            error!("fail to read chunk, error: {:?}", err);
+            anyhow!("fail to read chunk, error: {:?}", err)
         })?;
 
         if !chunk.is_compressed() {

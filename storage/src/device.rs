@@ -33,7 +33,7 @@ use fuse_backend_rs::transport::{FileReadWriteVolatile, FileVolatileSlice};
 use vm_memory::Bytes;
 
 use nydus_api::http::FactoryConfig;
-use nydus_utils::async_helper::with_runtime;
+use nydus_utils::async_helper::block_on;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 
@@ -1092,10 +1092,8 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         if let Some(index) = self.iovec.get_target_blob_index() {
             let blobs = &self.dev.blobs.load();
             if (index as usize) < blobs.len() {
-                return with_runtime(|rt| {
-                    rt.block_on(async {
-                        blobs[index as usize].async_read(self.iovec, buffers).await
-                    })
+                return block_on(async {
+                    blobs[index as usize].async_read(self.iovec, buffers).await
                 });
             }
         }

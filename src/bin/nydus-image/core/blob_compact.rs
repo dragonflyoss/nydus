@@ -11,7 +11,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use nydus_utils::async_helper::with_runtime;
+use nydus_utils::async_helper::block_on;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::try_round_up_4k;
 use rafs::metadata::{RafsMode, RafsSuper};
@@ -146,14 +146,8 @@ impl ChunkSet {
                 .get_reader(&ori_blob_ids[blob_idx as usize])
                 .expect("get blob err");
             let mut buf = alloc_buf(chunk.compressed_size() as usize);
-            with_runtime(|rt| {
-                rt.block_on(async {
-                    reader
-                        .async_read(&mut buf, chunk.compressed_offset())
-                        .await
-                        .expect("read blob data err");
-                })
-            });
+            block_on(async { reader.async_read(&mut buf, chunk.compressed_offset()).await })
+                .expect("read blob data err");
             if let Some(w) = new_blob_ctx.writer.as_mut() {
                 w.write_all(&buf)?;
             }

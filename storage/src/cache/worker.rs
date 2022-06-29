@@ -15,10 +15,9 @@ use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use tokio::runtime::Runtime;
 
 use nydus_api::http::BlobPrefetchConfig;
-use nydus_utils::async_helper::with_runtime;
+use nydus_utils::async_helper::block_on;
 use nydus_utils::mpmc::Channel;
 
 use crate::cache::{BlobCache, BlobIoRange};
@@ -200,9 +199,7 @@ impl AsyncWorkerMgr {
                         .prefetch_workers
                         .fetch_add(1, Ordering::Relaxed);
 
-                    with_runtime(|rt| {
-                        rt.block_on(Self::handle_prefetch_requests(mgr2.clone(), rt));
-                    });
+                    block_on(Self::handle_prefetch_requests(mgr2.clone()));
 
                     mgr2.metrics
                         .prefetch_workers
@@ -223,14 +220,14 @@ impl AsyncWorkerMgr {
         Ok(())
     }
 
-    async fn handle_prefetch_requests(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
+    async fn handle_prefetch_requests(mgr: Arc<AsyncWorkerMgr>) {
         while let Ok(msg) = mgr.prefetch_channel.recv().await {
             mgr.handle_prefetch_rate_limit(&msg).await;
 
             match msg {
                 AsyncPrefetchMessage::BlobPrefetch(state, blob_cache, offset, size) => {
                     if state.load(Ordering::Acquire) > 0 {
-                        let _ = rt.spawn(Self::handle_blob_prefetch_request(
+                        let _ = tokio::spawn(Self::handle_blob_prefetch_request(
                             mgr.clone(),
                             blob_cache,
                             offset,
@@ -240,7 +237,7 @@ impl AsyncWorkerMgr {
                 }
                 AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
                     if state.load(Ordering::Acquire) > 0 {
-                        let _ = rt.spawn(Self::handle_fs_prefetch_request(
+                        let _ = tokio::spawn(Self::handle_fs_prefetch_request(
                             mgr.clone(),
                             blob_cache,
                             req,
