@@ -513,7 +513,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         )
         .subcommand(
             SubCommand::with_name("unpack")
-            .about("Decompress nydus bootstrap and blob files to tar")
+            .about("Unpack nydus image layer to a tar file")
             .arg(
                 Arg::with_name("bootstrap")
                 .long("bootstrap")
@@ -533,7 +533,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 Arg::with_name("output")
                 .long("output")
                 .short("o")
-                .help("path to output")
+                .help("path to output tar file")
                 .required(true)
                 .takes_value(true)
                 )
@@ -801,9 +801,8 @@ impl Command {
         let blob = args.value_of("blob");
         let output = args.value_of("output").expect("pass in output");
 
-        let unpacker = Box::new(
-            OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?,
-        ) as Box<dyn Unpacker>;
+        let unpacker =
+            OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?;
 
         unpacker.unpack().with_context(|| "fail to unpack")
     }
