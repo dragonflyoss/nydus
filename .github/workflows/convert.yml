@@ -1,6 +1,10 @@
 name: Convert Top Docker Hub Images
 
 on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: ["*"]
   schedule:
     # Do conversion every day at 00:03 clock UTC
     - cron: "3 0 * * *"
@@ -53,6 +57,7 @@ jobs:
           done
       - name: Convert and check RAFS v6 images
         run: |
+          auth=`echo ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }} > /tmp/data;base64 /tmp/data`
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v6"
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
@@ -61,8 +66,12 @@ jobs:
                  --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v6 \
                  --fs-version 6
             sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
-                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6
+            cat << EOF > backend.json
+            {"host": "${{ env.REGISTRY }}/${{ env.ORGANIZATION }}", "repo": "${I}", "scheme": "https", "auth": "${auth}"}
+            EOF
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
+                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
+                --backend-config-file ./backend.json --backend-type registry
             sudo fsck.erofs -d9 output/nydus_bootstrap 
             sudo rm -rf ./output
           done
