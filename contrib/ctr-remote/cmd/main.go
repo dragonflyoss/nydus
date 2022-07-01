@@ -33,6 +33,7 @@ func init() {
 func main() {
 	customCommands := []cli.Command{commands.RpullCommand}
 	app := app.New()
+	app.Description = "NOTE: Enhanced for nydus-snapshotter\n" + app.Description
 	for i := range app.Commands {
 		if app.Commands[i].Name == "images" {
 			sc := map[string]cli.Command{}

@@ -36,9 +36,9 @@ const (
 
 var RpullCommand = cli.Command{
 	Name:      "rpull",
-	Usage:     "pull an image from a registry levaraging nydus snapshotter",
+	Usage:     "pull an image from a registry leveraging nydus-snapshotter",
 	ArgsUsage: "[flags] <ref>",
-	Description: `Fetch and prepare an image for use in containerd levaraging nydus snapshotter.
+	Description: `Fetch and prepare an image for use in containerd leveraging nydus-snapshotter.
 After pulling an image, it should be ready to use the same reference in a run command.`,
 	Flags: append(commands.RegistryFlags, commands.LabelFlag),
 	Action: func(context *cli.Context) error {
