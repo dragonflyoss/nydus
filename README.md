@@ -20,6 +20,7 @@ Nydus' key features include:
 - in-kernel EROFS or FUSE filesystem together with overlayfs to provide full POSIX compatibility
 - E2E image data integrity check. So security issues like "Supply Chain Attach" can be avoided and detected at runtime
 - Compatible with the OCI artifacts spec and distribution spec, so nydus image can be stored in a regular container registry
+- Native [eStargz](https://github.com/containerd/stargz-snapshotter) image support with remote snapshotter plugin `nydus-snapshotter` for containerd runtime.
 - Various container image storage backends are supported. For example, Registry, NAS, Aliyun/OSS.
 - Integrated with CNCF incubating project Dragonfly to distribute container images in P2P fashion and mitigate the pressure on container registries
 - Capable to prefetch data block before user IO hits the block thus to reduce read latency
@@ -51,6 +52,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 | Runtime       | Kubernetes                                                                                                      | Run Nydus image using CRI interface                                                                                                                          | ✅      |
 | Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Run Nydus image in containerd with nydus-snapshotter                                                                                                         | ✅      |
 | Runtime       | [Docker](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver)            | Run Nydus image in Docker container with graphdriver plugin                                                                                                  | ✅      |
+| Runtime       | [Nerdctl](https://github.com/containerd/nerdctl)                                                                | Run Nydus image with `nerdctl --snapshotter nydus run ...`                                                                                                   | ✅      |
 | Runtime       | [KataContainers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/kata-nydus-design.md) | Run Nydus image in KataContainers as a native solution                                                                                                       | ✅      |
 | Runtime       | [EROFS](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)                                          | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
 
@@ -125,6 +127,10 @@ Browse the documentation to learn more. Here are some topics you may be interest
 ## Run with macos
 
 - Nydus can also run with macfuse(a.k.a osxfuse).For more details please read [nydus with macos](./docs/nydus_with_macos.md).
+
+## Run eStargz image (with lazy pulling)
+
+The containerd remote snapshotter plugin [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter) can be used to run nydus images, or to run [eStargz](https://github.com/containerd/stargz-snapshotter) images directly by appending `--enable-stargz` command line option.
 
 ## Community
 
