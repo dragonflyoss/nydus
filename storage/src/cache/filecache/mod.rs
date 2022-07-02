@@ -182,7 +182,8 @@ impl FileCacheEntry {
             .get_reader(blob_info.blob_id())
             .map_err(|_e| eio!("failed to get blob reader"))?;
 
-        let blob_size = Self::get_blob_size(&reader, &blob_info)?;
+        let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
+        let blob_uncompressed_size = blob_info.uncompressed_size();
         let compressor = blob_info.compressor();
         let digester = blob_info.digester();
         let is_stargz = blob_info.is_stargz();
@@ -225,7 +226,8 @@ impl FileCacheEntry {
             runtime,
             workers,
 
-            blob_size,
+            blob_compressed_size,
+            blob_uncompressed_size,
             compressor,
             digester,
             is_get_blob_object_supported,

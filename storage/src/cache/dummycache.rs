@@ -49,8 +49,12 @@ impl BlobCache for DummyCache {
         &self.blob_id
     }
 
-    fn blob_size(&self) -> Result<u64> {
+    fn blob_compressed_size(&self) -> Result<u64> {
         self.reader.blob_size().map_err(|e| eother!(e))
+    }
+
+    fn blob_uncompressed_size(&self) -> Result<u64> {
+        unimplemented!();
     }
 
     fn compressor(&self) -> compress::Algorithm {

@@ -47,7 +47,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) workers: Arc<AsyncWorkerMgr>,
 
-    pub(crate) blob_size: u64,
+    pub(crate) blob_compressed_size: u64,
+    pub(crate) blob_uncompressed_size: u64,
     pub(crate) compressor: compress::Algorithm,
     pub(crate) digester: digest::Algorithm,
     // Whether `get_blob_object()` is supported.
@@ -89,8 +90,12 @@ impl BlobCache for FileCacheEntry {
         self.blob_info.blob_id()
     }
 
-    fn blob_size(&self) -> Result<u64> {
-        Ok(self.blob_size)
+    fn blob_compressed_size(&self) -> Result<u64> {
+        Ok(self.blob_compressed_size)
+    }
+
+    fn blob_uncompressed_size(&self) -> Result<u64> {
+        Ok(self.blob_uncompressed_size)
     }
 
     fn compressor(&self) -> compress::Algorithm {

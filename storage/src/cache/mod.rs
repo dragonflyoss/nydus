@@ -124,8 +124,11 @@ pub trait BlobCache: Send + Sync {
     /// Get id of the blob object.
     fn blob_id(&self) -> &str;
 
-    /// Get size of the blob object.
-    fn blob_size(&self) -> Result<u64>;
+    /// Get size of the decompressed blob object.
+    fn blob_uncompressed_size(&self) -> Result<u64>;
+
+    /// Get size of the compressed blob object.
+    fn blob_compressed_size(&self) -> Result<u64>;
 
     /// Get data compression algorithm to handle chunks in the blob.
     fn compressor(&self) -> compress::Algorithm;
@@ -252,7 +255,7 @@ pub trait BlobCache: Send + Sync {
         let raw_chunk = if chunk.is_compressed() {
             // Need a scratch buffer to decompress compressed data.
             let c_size = if self.is_stargz() {
-                let blob_size = self.blob_size()?;
+                let blob_size = self.blob_compressed_size()?;
                 let max_size = blob_size.checked_sub(offset).ok_or_else(|| {
                     einval!("chunk compressed offset is bigger than blob file size")
                 })?;
