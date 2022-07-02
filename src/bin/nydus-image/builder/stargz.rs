@@ -612,6 +612,30 @@ impl StargzBuilder {
 
         let mut chunk_map = HashMap::new();
 
+        // Ensure that the chunks in the blob meta are sorted by uncompressed_offset
+        // and ordered by chunk index so that they can be found quickly at runtime
+        // with a binary search.
+        let mut blob_chunks = Vec::new();
+        for node in &bootstrap_ctx.nodes {
+            if node.overlay.is_lower_layer() {
+                continue;
+            }
+            for chunk in node.chunks.iter() {
+                blob_chunks.push(chunk.clone());
+            }
+        }
+        blob_chunks.sort_by(|a, b| {
+            a.inner
+                .uncompressed_offset()
+                .cmp(&b.inner.uncompressed_offset())
+        });
+        for chunk in &mut blob_chunks {
+            let chunk_index = blob_ctx.alloc_index()?;
+            chunk.inner.set_index(chunk_index);
+            chunk_map.insert(chunk.inner.id(), chunk_index);
+            blob_ctx.add_chunk_meta_info(&chunk.inner)?;
+        }
+
         // Set blob index and inode digest for upper nodes
         for node in &mut bootstrap_ctx.nodes {
             if node.overlay.is_lower_layer() {
@@ -624,13 +648,14 @@ impl StargzBuilder {
                 chunk.inner.set_blob_index(blob_index);
                 if let Some(chunk_index) = chunk_map.get(chunk.inner.id()) {
                     chunk.inner.set_index(*chunk_index);
-                } else {
-                    let chunk_index = blob_ctx.alloc_index()?;
-                    chunk.inner.set_index(chunk_index);
-                    chunk_map.insert(*chunk.inner.id(), chunk.inner.index());
-                    blob_ctx.add_chunk_meta_info(&chunk.inner)?;
                 }
-                decompressed_blob_size += chunk.inner.uncompressed_size() as u64;
+                // This method is used here to calculate decompressed_blob_size to
+                // be compatible with the possible 4k alignment requirement of
+                // uncompressed_offset (RAFS v6).
+                decompressed_blob_size = std::cmp::max(
+                    chunk.inner.uncompressed_offset() + chunk.inner.uncompressed_size() as u64,
+                    decompressed_blob_size,
+                );
                 compressed_blob_size += chunk.inner.compressed_size() as u64;
                 inode_hasher.digest_update(chunk.inner.id().as_ref());
             }
