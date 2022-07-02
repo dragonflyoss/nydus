@@ -502,7 +502,7 @@ impl FsCacheHandler {
 
         match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
             Err(_e) => Err(-libc::ENOENT),
-            Ok(blob) => match blob.blob_size() {
+            Ok(blob) => match blob.blob_uncompressed_size() {
                 Err(_e) => Err(-libc::EIO),
                 Ok(v) => Ok((blob, v)),
             },

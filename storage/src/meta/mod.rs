@@ -492,7 +492,7 @@ impl BlobMetaInfo {
             Err(einval!(format!(
                 "entry not found index {} infos.len {}",
                 index,
-                infos.len()
+                infos.len(),
             )))
         }
     }
@@ -569,7 +569,14 @@ impl BlobMetaInfo {
         if (!self.state.is_stargz && entry.compressed_end() > self.state.compressed_size)
             || entry.uncompressed_end() > self.state.uncompressed_size
         {
-            Err(einval!())
+            Err(einval!(format!(
+                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {}",
+                self.state.blob_index,
+                entry.compressed_end(),
+                self.state.compressed_size,
+                entry.uncompressed_end(),
+                self.state.uncompressed_size,
+            )))
         } else {
             Ok(())
         }
@@ -676,25 +683,6 @@ impl BlobMetaState {
         let mut right = size;
         let mut start = 0;
         let mut end = 0;
-
-        if self.is_stargz {
-            // FIXME: since stargz chunks are not currently allocated chunk index in the order of uncompressed_offset,
-            // a binary search is not available for now, here is a heavy overhead workaround, need to be fixed.
-            for i in 0..self.chunk_count {
-                let off = if compressed {
-                    chunks[i as usize].compressed_offset()
-                } else {
-                    chunks[i as usize].uncompressed_offset()
-                };
-                if addr == off {
-                    return Ok(i as usize);
-                }
-            }
-            return Err(einval!(format!(
-                "can't find stargz chunk by offset {}",
-                addr,
-            )));
-        }
 
         while left < right {
             let mid = left + size / 2;

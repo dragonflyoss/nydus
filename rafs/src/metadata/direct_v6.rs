@@ -976,7 +976,7 @@ impl RafsInode for OndiskInodeWrapper {
                 .map(Arc::clone);
         });
 
-        find.ok_or_else(|| enoent!("can't find chunk info"))
+        find.ok_or_else(|| enoent!(format!("can't find chunk info {}", chunk_addr.block_addr())))
     }
     // TODO(tianqian.zyf): Use get_xattrs implement it
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
