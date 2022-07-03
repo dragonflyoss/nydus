@@ -100,7 +100,7 @@ Run Nydusd Daemon to serve Nydus image: [Nydusd](./docs/nydusd.md).
 
 In-kernel EROFS has been fully compatible with RAFS v6 image format since Linux 5.16. In other words, uncompressed RAFS v6 images can be mounted over block devices since then.
 
-Since [Linux 5.19](https://lwn.net/Articles/896140), EROFS has added a new file-based caching (fscache) backend. In this way, compressed RAFS v6 images can be mounted directly with fscache subsystem, even such images are partially available. In the future, `estargz` and `zstd::chunked` can be converted on the fly and mounted in this way too.
+Since [Linux 5.19](https://lwn.net/Articles/896140), EROFS has added a new file-based caching (fscache) backend. In this way, compressed RAFS v6 images can be mounted directly with fscache subsystem, even such images are partially available. `estargz` can be converted on the fly and mounted in this way too.
 
 Guide to running Nydus with fscache: [Nydus-fscache](./docs/nydus-fscache.md)
 
@@ -131,6 +131,8 @@ Browse the documentation to learn more. Here are some topics you may be interest
 ## Run eStargz image (with lazy pulling)
 
 The containerd remote snapshotter plugin [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter) can be used to run nydus images, or to run [eStargz](https://github.com/containerd/stargz-snapshotter) images directly by appending `--enable-stargz` command line option.
+
+In the future, `zstd::chunked` can work in this way as well.
 
 ## Community
 
