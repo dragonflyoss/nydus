@@ -1,5 +1,7 @@
-/target*
+**/target*
 **/*.rs.bk
 /.vscode
 .idea
 .cargo
+**/.pyc
+__pycache__
