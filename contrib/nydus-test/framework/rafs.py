@@ -28,7 +28,7 @@ from oss import OssHelper
 
 class Backend(enum.Enum):
     OSS = "oss"
-    REGTISTRY = "registry"
+    REGISTRY = "registry"
     LOCALFS = "localfs"
 
     def __str__(self):
@@ -46,7 +46,7 @@ class Compressor(enum.Enum):
 
 
 class RafsConf:
-    """Generate nydusd workding configuration file.
+    """Generate nydusd working configuration file.
 
     A `registry` backend example:
     {
@@ -97,7 +97,7 @@ class RafsConf:
         b = str(backend_type)
         self._configure_rafs("device.backend.type", b)
 
-        if backend_type == Backend.REGTISTRY:
+        if backend_type == Backend.REGISTRY:
             # Manager like nydus-snapshotter can fill the repo field, so we do nothing here.
             if "repo" in kwargs:
                 self._configure_rafs(
@@ -234,7 +234,7 @@ class RafsImage(LinuxCommand):
         clear_from_oss=True,
     ):
         """
-        :rootfs: A plain direcotry from which to build rafs images(bootstrap and blob).
+        :rootfs: A plain directory from which to build rafs images(bootstrap and blob).
         :bootstrap_name: Name the generated test purpose bootstrap file.
         :blob_prefix: Generally, a sha256 string follows this prefix.
         :opts: Specify extra build options.
@@ -327,7 +327,7 @@ class RafsImage(LinuxCommand):
 
             pass
 
-        elif type == Backend.REGTISTRY:
+        elif type == Backend.REGISTRY:
 
             # Let nydusify upload blob from the path, which is an intermediate file
             self.set_param("blob", self.blob_abs_path)

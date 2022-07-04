@@ -28,7 +28,7 @@ logging_setup()
 
 # TODO: Test if nydusd is compatible with early version of image
 # We want to test every kind of images
-def test_build_image(nydus_anchor, nydus_scratch_image, rafs_conf: RafsConf):
+def test_build_image(nydus_anchor, nydus_scratch_image: RafsImage, rafs_conf: RafsConf):
     """
     title: Build nydus image
     description: Build nydus image from rootfs generating proper bootstrap and

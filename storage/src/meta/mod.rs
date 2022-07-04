@@ -31,8 +31,8 @@ use crate::utils::alloc_buf;
 
 const BLOB_METADATA_MAX_CHUNKS: u32 = 0xf_ffff;
 const BLOB_METADATA_MAX_SIZE: u64 = 0x100_0000u64;
-const BLOB_METADTAT_HEADER_SIZE: u64 = 0x1000u64;
-const BLOB_METADATA_RESERVED_SIZE: u64 = BLOB_METADTAT_HEADER_SIZE - 44;
+const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
+const BLOB_METADATA_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const BLOB_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
@@ -302,7 +302,7 @@ impl BlobMetaInfo {
     ) -> Result<Self> {
         assert_eq!(
             size_of::<BlobMetaHeaderOndisk>() as u64,
-            BLOB_METADTAT_HEADER_SIZE
+            BLOB_METADATA_HEADER_SIZE
         );
         assert_eq!(size_of::<BlobChunkInfoOndisk>(), 16);
         let chunk_count = blob_info.chunk_count();
@@ -332,7 +332,7 @@ impl BlobMetaInfo {
 
         let info_size = blob_info.meta_ci_uncompressed_size() as usize;
         let aligned_info_size = round_up_4k(info_size);
-        let expected_size = BLOB_METADTAT_HEADER_SIZE as usize + aligned_info_size;
+        let expected_size = BLOB_METADATA_HEADER_SIZE as usize + aligned_info_size;
         if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoOndisk>())
             || (aligned_info_size as u64) > BLOB_METADATA_MAX_SIZE
         {

@@ -48,7 +48,7 @@ class Distributor:
     def _generate_one_level(self, level, cur_dir):
         dirs = []
         with pushd(cur_dir):
-            # At least, each level has a child direcotry
+            # At least, each level has a child directory
             for index in range(0, randint(1, self.max_sub_directories)):
                 d_name = f"DIR.{level}.{index}"
                 try:
