@@ -72,7 +72,7 @@ def test_build_cache(
         assert l in cached_layers
 
     rafs_conf.set_rafs_backend(
-        Backend.REGTISTRY, repo=posixpath.basename(source).split(":")[0]
+        Backend.REGISTRY, repo=posixpath.basename(source).split(":")[0]
     )
     rafs_conf.enable_fs_prefetch()
     rafs_conf.enable_rafs_blobcache()
@@ -320,7 +320,7 @@ def test_cross_platform_multiplatform(
 
     # TODO: configure registry backend from `local_registry` rather than anchor
     rafs_conf.set_rafs_backend(
-        Backend.REGTISTRY, repo=posixpath.basename(source).split(":")[0]
+        Backend.REGISTRY, repo=posixpath.basename(source).split(":")[0]
     )
     rafs_conf.enable_fs_prefetch()
     rafs_conf.enable_rafs_blobcache()
@@ -404,7 +404,7 @@ def test_arm64_single_manifest(
 
     # TODO: configure registry backend from `local_registry` rather than anchor
     rafs_conf.set_rafs_backend(
-        Backend.REGTISTRY, repo=posixpath.basename(source).split(":")[0]
+        Backend.REGISTRY, repo=posixpath.basename(source).split(":")[0]
     )
     rafs_conf.enable_fs_prefetch()
     rafs_conf.enable_rafs_blobcache()

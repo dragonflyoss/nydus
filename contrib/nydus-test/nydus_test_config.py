@@ -46,7 +46,7 @@ def put_files(dist: Distributor, f_type, count, size):
 
     """
 
-    logging.info("puting %s, count %d", f_type, count)
+    logging.info("putting %s, count %d", f_type, count)
     if f_type == "regular":
         size_in_bytes = utils.parse_size(size)
         dist.put_multiple_files(count, Size(size_in_bytes))

@@ -34,7 +34,7 @@ def test_snapshotter(
     converter = Nydusify(nydus_anchor)
     converter.docker_v2().convert(image_url)
 
-    rafs_conf.set_rafs_backend(Backend.REGTISTRY, repo=converter.original_repo)
+    rafs_conf.set_rafs_backend(Backend.REGISTRY, repo=converter.original_repo)
     rafs_conf.enable_xattr()
     rafs_conf.dump_rafs_conf()
 
@@ -77,7 +77,7 @@ def test_snapshotter_converted_images(
     nydus_anchor.put_dustbin(containerd)
 
     # We can safely pass the step provide repo configured into the rafs configuration file.
-    rafs_conf.set_rafs_backend(Backend.REGTISTRY, scheme="https")
+    rafs_conf.set_rafs_backend(Backend.REGISTRY, scheme="https")
     rafs_conf.enable_xattr()
     rafs_conf.dump_rafs_conf()
 
@@ -131,7 +131,7 @@ def test_snapshotter_restart(
     nydus_anchor.put_dustbin(containerd)
 
     # We can safely pass the step provide repo configured into the rafs configuration file.
-    rafs_conf.set_rafs_backend(Backend.REGTISTRY, scheme="https")
+    rafs_conf.set_rafs_backend(Backend.REGISTRY, scheme="https")
     rafs_conf.enable_xattr().enable_fs_prefetch().enable_rafs_blobcache(
         work_dir=snapshotter.cache_dir()
     )
@@ -189,7 +189,7 @@ def test_snapshotter_converted_images_with_cache(
 
     # We can safely pass the step provide repo configured into the rafs configuration file.
     rafs_conf.set_rafs_backend(
-        Backend.REGTISTRY, scheme="https"
+        Backend.REGISTRY, scheme="https"
     ).enable_fs_prefetch().enable_rafs_blobcache(work_dir=snapshotter.cache_dir())
     rafs_conf.enable_xattr().dump_rafs_conf()
 
@@ -234,7 +234,7 @@ def test_snapshotter_public_converted_images(
 
     # We can safely pass the step provide repo configured into the rafs configuration file.
     rafs_conf.set_rafs_backend(
-        Backend.REGTISTRY, scheme="https"
+        Backend.REGISTRY, scheme="https"
     ).enable_fs_prefetch().enable_rafs_blobcache(work_dir=snapshotter.cache_dir())
     rafs_conf.enable_xattr().dump_rafs_conf()
 
