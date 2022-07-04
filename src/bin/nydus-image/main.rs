@@ -532,7 +532,6 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
             .arg(
                 Arg::with_name("output")
                 .long("output")
-                .short("o")
                 .help("path to output tar file")
                 .required(true)
                 .takes_value(true)
