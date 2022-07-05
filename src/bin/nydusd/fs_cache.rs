@@ -394,11 +394,12 @@ impl FsCacheHandler {
 
     fn handle_open_request(&self, hdr: &FsCacheMsgHeader, msg: &FsCacheMsgOpen) {
         // Drop the 'erofs,' prefix if any
-        let domain_id = match msg.volume_key.clone().strip_prefix("erofs,") {
-            None => msg.volume_key.clone(),
-            Some(str) => str.to_string(),
-        };
-        let key = generate_blob_key(&domain_id, &msg.cookie_key);
+        let domain_id = msg
+            .volume_key
+            .strip_prefix("erofs,")
+            .unwrap_or(msg.volume_key.as_str());
+
+        let key = generate_blob_key(domain_id, &msg.cookie_key);
         let msg = match self.get_config(&key) {
             None => {
                 unsafe { libc::close(msg.fd as i32) };
