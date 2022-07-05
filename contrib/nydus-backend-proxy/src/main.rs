@@ -14,7 +14,7 @@ use std::env;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::RawFd;
 use std::path::{Path, PathBuf};
-use std::{ffi, fs, io};
+use std::{fs, io};
 
 use clap::{App, Arg};
 use nix::sys::uio;
@@ -26,8 +26,7 @@ use rocket::futures::lock::{Mutex, MutexGuard};
 use rocket::http::Status;
 use rocket::request::{self, FromRequest, Outcome};
 use rocket::response::{self, stream::ReaderStream, Responder};
-use rocket::Request;
-use rocket::Response;
+use rocket::{Request, Response};
 
 lazy_static! {
     static ref BLOB_BACKEND: Mutex<BlobBackend> = Mutex::new(BlobBackend {
@@ -53,7 +52,7 @@ async fn init_blob_backend(root: &Path) {
 #[derive(Debug)]
 struct BlobBackend {
     root: PathBuf,
-    blobs: HashMap<ffi::OsString, fs::File>,
+    blobs: HashMap<String, fs::File>,
 }
 impl BlobBackend {
     fn populate_blobs_map(&mut self) {
@@ -65,14 +64,15 @@ impl BlobBackend {
         {
             let filepath = entry.path();
             if filepath.is_file() {
-                let digest = filepath.file_name().unwrap();
-
-                if self.blobs.contains_key(digest) {
+                // Collaborating system should put files with valid name which
+                // can also be converted to UTF-8
+                let digest = filepath.file_name().unwrap().to_string_lossy();
+                if self.blobs.contains_key(digest.as_ref()) {
                     continue;
                 }
 
                 let std_file = fs::File::open(&filepath).unwrap();
-                self.blobs.insert(digest.to_os_string(), std_file);
+                self.blobs.insert(digest.into_owned(), std_file);
             } else {
                 warn!("%s: Not regular file");
             }
@@ -112,9 +112,10 @@ pub async fn check(
     _repo: PathBuf,
     digest: String,
 ) -> Result<Option<FileStream>, Status> {
+    // Trim "sha256:" prefix
     let dis = &digest[7..];
-    let blobbackend = blob_backend_mut();
-    let path = blobbackend.await.root.join(&dis);
+    let backend = blob_backend_mut();
+    let path = backend.await.root.join(&dis);
     Ok(NamedFile::open(path)
         .await
         .ok()
@@ -207,13 +208,14 @@ pub async fn fetch(
     _namespace: PathBuf,
     _repo: PathBuf,
     digest: String,
-    headerdata: HeaderData,
+    header_data: HeaderData,
 ) -> Result<StoredData, Status> {
+    // Trim "sha256:" prefix
     let dis = &digest[7..];
-    let blobbackend = blob_backend_mut();
+    let blob_backend = blob_backend_mut();
     //if no range in Request header,return fetch blob response
-    if headerdata.range.is_empty() {
-        let filepath = blobbackend.await.root.join(&dis);
+    if header_data.range.is_empty() {
+        let filepath = blob_backend.await.root.join(&dis);
         return Ok(StoredData::AllFile(
             NamedFile::open(filepath)
                 .await
@@ -221,37 +223,52 @@ pub async fn fetch(
                 .map(|nf| FileStream(nf, dis.to_string())),
         ));
     } else {
-        let blobs = &mut blobbackend.await.blobs;
-        let blobfd = match blobs.get(&ffi::OsString::from(&dis)) {
-            Some(fd) => fd,
-            None => {
-                return Err(Status::NotFound);
+        let mut guard = blob_backend.await;
+        let mut blobs = &guard.blobs;
+
+        let blob_file = if let Some(f) = blobs.get(dis) {
+            f
+        } else {
+            trace!("Blob object not found: {}", dis);
+            // Re-populate blobs map by `readdir()` again to scan if files
+            // are newly added.
+            guard.populate_blobs_map();
+            trace!("re-populating to search blob {}", dis);
+            blobs = &guard.blobs;
+
+            match blobs.get(dis) {
+                Some(f) => {
+                    error!("Blob {} not found finally!", dis);
+                    f
+                }
+                None => return Err(Status::NotFound),
             }
         };
-        let metadata = match blobfd.metadata() {
+
+        let metadata = match blob_file.metadata() {
             Ok(meta) => meta,
-            Err(_err) => {
-                eprintln!("Get file metadata failed! Error: {}", _err);
+            Err(e) => {
+                eprintln!("Get file metadata failed! Error: {}", e);
                 return Err(Status::InternalServerError);
             }
         };
-        let ranges = match HttpRange::parse(&headerdata.range, metadata.len()) {
+
+        let ranges = match HttpRange::parse(&header_data.range, metadata.len()) {
             Ok(r) => r,
-            Err(_err) => {
-                eprintln!("HttpRange parse failed! Error: {:#?}", _err);
+            Err(e) => {
+                eprintln!("HttpRange parse failed! Error: {:#?}", e);
                 return Err(Status::RangeNotSatisfiable);
             }
         };
-        let startpos = ranges[0].start as u64;
+        let start_pos = ranges[0].start as u64;
         let size = ranges[0].length;
-
-        let file = blobs.get(&ffi::OsString::from(&dis)).unwrap().as_raw_fd();
+        let fd = blobs.get(dis).unwrap().as_raw_fd();
 
         Ok(StoredData::Range(RangeStream {
             dis: dis.to_string(),
             len: size,
-            start: startpos,
-            fd: file,
+            start: start_pos,
+            fd,
         }))
     }
 }
