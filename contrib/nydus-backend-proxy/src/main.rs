@@ -1,3 +1,7 @@
+// Copyright (C) 2022 Alibaba Cloud. All rights reserved.
+//
+// SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
+
 #[macro_use]
 extern crate rocket;
 #[macro_use]
