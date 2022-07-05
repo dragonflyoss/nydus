@@ -168,3 +168,9 @@ Duplicate `./misc/config/config.yaml.nydus.tmpl` configuration file as `path/to/
 # convert to nydus image
 ./accelctl convert --config path/to/config.yaml <your-registry-address>/ubuntu:latest
 ```
+
+## Recordings
+
+1. Pull Nydus / OCI wordpress images
+
+[![asciicast](https://asciinema.org/a/1a6aQA6rOFsoAgivDh9mBV0lE.svg)](https://asciinema.org/a/1a6aQA6rOFsoAgivDh9mBV0lE?speed=2)
