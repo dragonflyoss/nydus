@@ -297,6 +297,7 @@ async fn main() {
         .launch()
         .await
     {
-        panic!("Rocket didn't launch! Err:{:#?}", e);
+        error!("Rocket didn't launch! Err:{:#?}", e);
+        std::process::exit(-1);
     }
 }
