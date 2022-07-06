@@ -28,7 +28,7 @@ def setup_module(module):
     SCRATCH_IMAGE = RafsImage(
         ANCHOR,
         ANCHOR.scratch_dir,
-        "boostrap_scratched",
+        "bootstrap_scratched",
         "blob_scratched",
         clear_from_oss=True,
     )

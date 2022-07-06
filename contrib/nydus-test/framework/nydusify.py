@@ -32,6 +32,7 @@ class NydusifyParam(LinuxCommand):
     def fs_version(self, fs_version):
         return self.set_param("fs-version", fs_version)
 
+
 class Nydusify(LinuxCommand):
     def __init__(self, anchor: NydusAnchor):
         self.image_builder = anchor.image_bin
@@ -65,11 +66,11 @@ class Nydusify(LinuxCommand):
                 self.__converted_image,
             )
 
-        self.cmd.source(source).target(target_ref).fs_version(fs_version)
+        self.cmd.source(source).target(target_ref).fs_version("6")
         self.target_ref = target_ref
 
         cmd = str(self.cmd)
-        with utils.timer("### Image convertion time including Pull and Push ###"):
+        with utils.timer("### Image conversion time including Pull and Push ###"):
             _, p = utils.run(
                 cmd,
                 False,
@@ -261,12 +262,12 @@ class Nydusify(LinuxCommand):
 
         import requests
 
-        # Currently, we can handle auth
+        # Currently, we can not handle auth
         # OCI distribution spec: /v2/<name>/blobs/<digest>
         os.makedirs(downloaded_dir, exist_ok=True)
 
         reader = requests.get(
-            f"http://{self.registry_url}/v2/{self.original_repo}/blobs/{bootstrap_digest}",
+            f"http://{self.registry_url}/v2/{self.anchor.registry_namespace}/{self.original_repo}/blobs/{bootstrap_digest}",
             stream=True,
         )
         with utils.pushd(downloaded_dir):

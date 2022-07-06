@@ -15,8 +15,8 @@ import utils
 @pytest.mark.parametrize(
     "source",
     [
+        "python:3.7",
         "docker.io/busybox:latest",
-        "reg.docker.alibaba-inc.com/chge-mirrors/python:3.7",
     ],
 )
 @pytest.mark.parametrize("enable_multiplatform", [False])
@@ -29,7 +29,7 @@ def test_build_cache(
     nydusify_converter,
 ):
     """
-    No need to locate where boostrap is as we can directly pull it from registry
+    No need to locate where bootstrap is as we can directly pull it from registry
     """
     converter = Nydusify(nydus_anchor)
 
@@ -39,7 +39,7 @@ def test_build_cache(
         "localhost:5000/build_cache:000"
     ).enable_multiplatfrom(enable_multiplatform).convert(source)
 
-    # No need to locate where boostrap is as we can directly pull it from registry
+    # No need to locate where bootstrap is as we can directly pull it from registry
     bootstrap = converter.locate_bootstrap()
 
     converter.docker_v2().build_cache_ref("localhost:5000/build_cache:000").convert(
@@ -83,7 +83,7 @@ def test_build_cache(
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
 
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
-    # No need to locate where boostrap is as we can directly pull it from registry
+    # No need to locate where bootstrap is as we can directly pull it from registry
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
 
     assert workload_gen.verify_entire_fs()
@@ -92,16 +92,11 @@ def test_build_cache(
     workload_gen.finish_torture_read()
 
 
+@pytest.mark.skip(reason="Get rid of OSS dependency!")
 @pytest.mark.parametrize(
     "source",
     [
-        # "reg.docker.alibaba-inc.com/antmesh/odp:1.5.6",
-        # "reg.docker.alibaba-inc.com/antfin/antcoderpc:20210702-2",
-        # "reg.docker.alibaba-inc.com/antfin/dpprecompilestream:20210702-1",
         "docker.io/busybox:latest",
-        "reg.docker.alibaba-inc.com/chge-mirrors/python:3.7",
-        "reg.docker.alibaba-inc.com/chge-mirrors/node:13.13.0",
-        "reg.docker.alibaba-inc.com/chge-mirrors/redis:5.0.5",
     ],
 )
 def test_upload_oss(
@@ -142,10 +137,8 @@ def test_upload_oss(
 
     # `check` deletes all files
     checker = Nydusify(nydus_anchor)
-    checker.backend_type(
-        "oss", oss_object_prefix=oss_prefix
-    ).with_new_work_dir(
-        nydus_anchor.nydusify_work_dir+'-check'
+    checker.backend_type("oss", oss_object_prefix=oss_prefix).with_new_work_dir(
+        nydus_anchor.nydusify_work_dir + "-check"
     ).check(source)
 
     converted_layers = converter.extract_converted_layers_names()
@@ -191,92 +184,9 @@ def test_upload_oss(
 
 
 @pytest.mark.parametrize(
-    "source,chunk_dict_arg",
-    [
-        (
-            "reg.docker.alibaba-inc.com/antsys/nydus-image:supportd-1026-1",
-            "bootstrap:registry:reg.docker.alibaba-inc.com/antsys/chunkdict_test:antfin_supportprod"
-        ),
-        (
-            "reg.docker.alibaba-inc.com/antsys/nydus-image:mirrorprod-1027-3",
-            "bootstrap:registry:reg.docker.alibaba-inc.com/antsys/chunkdict_test:antfin_mirrorprod"
-        )
-    ]
-)
-def test_chunk_dict(
-    nydus_anchor: NydusAnchor,
-    rafs_conf: RafsConf,
-    source,
-    chunk_dict_arg,
-    local_registry,
-    nydusify_converter,
-):
-    '''
-    only support oss backend now
-    - convert image with chunk-dict
-    - check new image
-    '''
-    converter = Nydusify(nydus_anchor)
-
-    time.sleep(1)
-
-    oss_prefix = "nydus_v2/"
-
-    converter.docker_v2().backend_type(
-        "oss", oss_object_prefix=oss_prefix
-    ).build_cache_ref(
-        "localhost:5000/build_cache:000"
-    ).force_push().chunk_dict(chunk_dict_arg).convert(source)
-
-    rafs_conf.set_rafs_backend(Backend.OSS, prefix=oss_prefix)
-    rafs_conf.enable_fs_prefetch()
-    rafs_conf.enable_rafs_blobcache()
-    rafs_conf.dump_rafs_conf()
-
-    bootstrap = converter.locate_bootstrap()
-
-    checker = Nydusify(nydus_anchor)
-    checker.backend_type(
-        "oss", oss_object_prefix=oss_prefix
-    ).with_new_work_dir(
-        nydus_anchor.nydusify_work_dir+'-check'
-    ).check(source)
-
-    converted_layers = converter.extract_converted_layers_names()
-
-    # With oss backend, ant useage, `layers` only has one member
-    records = converter.get_build_cache_records("localhost:5000/build_cache:000")
-    assert len(records) != 0
-    cached_layers = [c["digest"] for c in records]
-    assert cached_layers.sort() == converted_layers.sort()
-
-    pulled_bootstrap = converter.pull_bootstrap(
-        tempfile.TemporaryDirectory(
-            dir=nydus_anchor.workspace, suffix="bootstrap"
-        ).name,
-        "pulled_bootstrap",
-    )
-
-    # Mount source rootfs (ociv1)
-    layers, base = converter.extract_source_layers_names_and_download()
-    nydus_anchor.mount_overlayfs(layers, base)
-    # Mount rafs rootfs
-    rafs = RafsMount(nydus_anchor, None, rafs_conf)
-
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
-    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
-
-    assert workload_gen.verify_entire_fs()
-    workload_gen.setup_workload_generator()
-    workload_gen.torture_read(8, 12, verify=True)
-    workload_gen.finish_torture_read()
-
-
-@pytest.mark.parametrize(
     "source",
     [
-        "busybox:latest",  # From dockerhub, manifest list image foramt, image config includes os/arch
-        # "reg.docker.alibaba-inc.com/swiftimage/basementtask-assets:12b2b720210429235656909_aarch64",  # Single manifest from internal registry
+        "busybox:latest",  # From DockerHub, manifest list image format, image config includes os/arch
     ],
 )
 @pytest.mark.parametrize("arch", ["arm64", "amd64"])
@@ -370,79 +280,11 @@ def test_cross_platform_multiplatform(
 
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
-    # No need to locate where boostrap is as we can directly pull it from registry
+    # No need to locate where bootstrap is as we can directly pull it from registry
     rafs = RafsMount(nydus_anchor, None, rafs_conf)
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
 
     assert workload_gen.verify_entire_fs()
     workload_gen.setup_workload_generator()
     workload_gen.torture_read(8, 12, verify=True)
-    workload_gen.finish_torture_read()
-
-
-@pytest.mark.skipif(platform.machine() == "x86_64", reason="Only supported x86")
-@pytest.mark.parametrize(
-    "source",
-    [
-        "reg.docker.alibaba-inc.com/swiftimage/basementtask-assets:12b2b720210429235656909_aarch64",  # Single manifest from internal registry
-    ],
-)
-def test_arm64_single_manifest(
-    nydus_anchor: NydusAnchor,
-    rafs_conf: RafsConf,
-    source,
-    local_registry,
-    nydusify_converter,
-):
-
-    converter = Nydusify(nydus_anchor)
-    arch = "arm64"
-
-    converter.docker_v2().build_cache_ref("localhost:5000/build_cache:000").convert(
-        source
-    )
-
-    # TODO: configure registry backend from `local_registry` rather than anchor
-    rafs_conf.set_rafs_backend(
-        Backend.REGISTRY, repo=posixpath.basename(source).split(":")[0]
-    )
-    rafs_conf.enable_fs_prefetch()
-    rafs_conf.enable_rafs_blobcache()
-
-    pulled_bootstrap = converter.pull_bootstrap(
-        tempfile.TemporaryDirectory(
-            dir=nydus_anchor.workspace, suffix="bootstrap"
-        ).name,
-        "pulled_bootstrap",
-        arch,
-    )
-
-    # Skopeo does not support media type: "application/vnd.oci.image.layer.nydus.blob.v1",
-    # So can't download build cache like a oci image.
-    layers, base = converter.extract_source_layers_names_and_download(arch=arch)
-    nydus_anchor.mount_overlayfs(layers, base)
-
-    converted_layers = converter.extract_converted_layers_names(arch=arch)
-    converted_layers.sort()
-
-    records = converter.get_build_cache_records("localhost:5000/build_cache:000")
-    assert len(records) != 0
-    cached_layers = [c["digest"] for c in records]
-    cached_layers.sort()
-    # >       assert cached_layers == converted_layers
-    # E       AssertionError: assert None == ['sha256:3f18...af3234b4c257']
-    # E         +None
-    # E         -['sha256:3f18b27a912188108c8590684206bd9da7d81bbfd0e8325f3ef0af3234b4c257']
-    for l in converted_layers:
-        assert l in cached_layers
-
-    # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
-    # No need to locate where boostrap is as we can directly pull it from registry
-    rafs = RafsMount(nydus_anchor, None, rafs_conf)
-    rafs.thread_num(2).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
-
-    assert workload_gen.verify_entire_fs()
-    workload_gen.setup_workload_generator()
-    workload_gen.torture_read(4, 4, verify=True)
     workload_gen.finish_torture_read()
