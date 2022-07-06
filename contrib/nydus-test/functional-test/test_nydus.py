@@ -315,7 +315,7 @@ def test_file_tail(nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, ba
     description: Read data from file tail
         - Create several files of different sizes
         - Punch hole to each file of which some should have hole tail
-        - Create rafs image from test scratch direcotry.
+        - Create rafs image from test scratch directory.
         - Mount rafs
         - Do some test.
     """
@@ -366,7 +366,7 @@ def test_file_tail(nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, ba
     assert wg.io_error == False
 
 
-def test_deep_direcotry(
+def test_deep_directory(
     nydus_anchor, rafs_conf: RafsConf, nydus_scratch_image: RafsImage
 ):
 

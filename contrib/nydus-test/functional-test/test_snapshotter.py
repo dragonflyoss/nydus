@@ -102,7 +102,7 @@ def test_snapshotter_converted_images(
         containerd.remove_image_sync(ref)
 
     # TODO: Rafs won't be unmounted and and nydusd still be alive even image is removed locally
-    # So kill all nydusd here to make fowllowing test verification pass. Is this a bug?
+    # So kill all nydusd here to make following test verification pass. Is this a bug?
 
     # Ensure nydusd must have been stopped here
     time.sleep(3)
