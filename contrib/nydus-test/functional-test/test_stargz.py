@@ -51,7 +51,7 @@ def test_stargz(
     image = RafsImage(
         nydus_anchor,
         toc,
-        "boostrap_scratched",
+        "bootstrap_scratched",
         "blob_scratched",
         clear_from_oss=True,
     )

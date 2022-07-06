@@ -30,7 +30,8 @@ class NydusifyParam(LinuxCommand):
         return self.set_param("work-dir", work_dir)
 
     def fs_version(self, fs_version):
-        return self.set_param("fs-version", fs_version)
+        return self.set_param("fs-version", str(fs_version))
+
 
 class Nydusify(LinuxCommand):
     def __init__(self, anchor: NydusAnchor):
@@ -45,7 +46,7 @@ class Nydusify(LinuxCommand):
         self.cmd = NydusifyParam(self.nydusify_bin)
         self.cmd.nydus_image(self.image_builder).work_dir(self.work_dir)
 
-    def convert(self, source, suffix="_converted", target_ref=None, fs_version="5"):
+    def convert(self, source, suffix="_converted", target_ref=None, fs_version=5):
         """
         A reference to image looks like registry/namespace/repo:tag
         Before conversion begins, split the reference into those parts.
@@ -69,7 +70,9 @@ class Nydusify(LinuxCommand):
         self.target_ref = target_ref
 
         cmd = str(self.cmd)
-        with utils.timer("### Image convertion time including Pull and Push ###"):
+        with utils.timer(
+            f"### Rafs V{fs_version} Image conversion time including Pull and Push ###"
+        ):
             _, p = utils.run(
                 cmd,
                 False,
@@ -80,7 +83,7 @@ class Nydusify(LinuxCommand):
             p.wait()
             assert p.returncode == 0
 
-    def check(self, source, suffix="_converted", target_ref=None, fs_version="5"):
+    def check(self, source, suffix="_converted", target_ref=None, fs_version=5):
         """
         A reference to image looks like registry/namespace/repo:tag
         Before conversion begins, split the reference into those parts.
@@ -261,12 +264,12 @@ class Nydusify(LinuxCommand):
 
         import requests
 
-        # Currently, we can handle auth
+        # Currently, we can not handle auth
         # OCI distribution spec: /v2/<name>/blobs/<digest>
         os.makedirs(downloaded_dir, exist_ok=True)
 
         reader = requests.get(
-            f"http://{self.registry_url}/v2/{self.original_repo}/blobs/{bootstrap_digest}",
+            f"http://{self.registry_url}/v2/{self.anchor.registry_namespace}/{self.original_repo}/blobs/{bootstrap_digest}",
             stream=True,
         )
         with utils.pushd(downloaded_dir):
