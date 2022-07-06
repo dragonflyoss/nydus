@@ -30,7 +30,7 @@ class NydusifyParam(LinuxCommand):
         return self.set_param("work-dir", work_dir)
 
     def fs_version(self, fs_version):
-        return self.set_param("fs-version", fs_version)
+        return self.set_param("fs-version", str(fs_version))
 
 
 class Nydusify(LinuxCommand):
@@ -46,7 +46,7 @@ class Nydusify(LinuxCommand):
         self.cmd = NydusifyParam(self.nydusify_bin)
         self.cmd.nydus_image(self.image_builder).work_dir(self.work_dir)
 
-    def convert(self, source, suffix="_converted", target_ref=None, fs_version="5"):
+    def convert(self, source, suffix="_converted", target_ref=None, fs_version=5):
         """
         A reference to image looks like registry/namespace/repo:tag
         Before conversion begins, split the reference into those parts.
@@ -66,11 +66,13 @@ class Nydusify(LinuxCommand):
                 self.__converted_image,
             )
 
-        self.cmd.source(source).target(target_ref).fs_version("6")
+        self.cmd.source(source).target(target_ref).fs_version(fs_version)
         self.target_ref = target_ref
 
         cmd = str(self.cmd)
-        with utils.timer("### Image conversion time including Pull and Push ###"):
+        with utils.timer(
+            f"### Rafs V{fs_version} Image conversion time including Pull and Push ###"
+        ):
             _, p = utils.run(
                 cmd,
                 False,
@@ -81,7 +83,7 @@ class Nydusify(LinuxCommand):
             p.wait()
             assert p.returncode == 0
 
-    def check(self, source, suffix="_converted", target_ref=None, fs_version="5"):
+    def check(self, source, suffix="_converted", target_ref=None, fs_version=5):
         """
         A reference to image looks like registry/namespace/repo:tag
         Before conversion begins, split the reference into those parts.

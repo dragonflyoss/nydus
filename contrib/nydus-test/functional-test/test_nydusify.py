@@ -19,6 +19,70 @@ import utils
         "docker.io/busybox:latest",
     ],
 )
+@pytest.mark.parametrize("fs_version", [5, 6])
+def test_basic_conversion(
+    nydus_anchor: NydusAnchor,
+    rafs_conf: RafsConf,
+    source,
+    fs_version,
+    local_registry,
+    nydusify_converter,
+):
+    """
+    No need to locate where bootstrap is as we can directly pull it from registry
+    """
+    converter = Nydusify(nydus_anchor)
+
+    time.sleep(1)
+
+    converter.docker_v2().enable_multiplatfrom(False).convert(
+        source, fs_version=fs_version
+    )
+    assert converter.locate_bootstrap() is not None
+    pulled_bootstrap = converter.pull_bootstrap(
+        tempfile.TemporaryDirectory(
+            dir=nydus_anchor.workspace, suffix="bootstrap"
+        ).name,
+        "pulled_bootstrap",
+    )
+
+    # Skopeo does not support media type: "application/vnd.oci.image.layer.nydus.blob.v1",
+    # So can't download build cache like a oci image.
+
+    layers, base = converter.extract_source_layers_names_and_download()
+    nydus_anchor.mount_overlayfs(layers, base)
+
+    converted_layers = converter.extract_converted_layers_names()
+    converted_layers.sort()
+
+    rafs_conf.set_rafs_backend(
+        Backend.REGISTRY, repo=posixpath.basename(source).split(":")[0]
+    )
+    rafs_conf.enable_fs_prefetch()
+    rafs_conf.enable_rafs_blobcache()
+    rafs_conf.dump_rafs_conf()
+
+    rafs = RafsMount(nydus_anchor, None, rafs_conf)
+
+    # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
+
+    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
+    # No need to locate where bootstrap is as we can directly pull it from registry
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+
+    assert workload_gen.verify_entire_fs()
+    workload_gen.setup_workload_generator()
+    workload_gen.torture_read(4, 6, verify=True)
+    workload_gen.finish_torture_read()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "python:3.7",
+        "docker.io/busybox:latest",
+    ],
+)
 @pytest.mark.parametrize("enable_multiplatform", [False])
 def test_build_cache(
     nydus_anchor: NydusAnchor,

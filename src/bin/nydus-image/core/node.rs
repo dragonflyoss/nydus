@@ -569,6 +569,7 @@ impl Node {
 
         // update all the inodes's offset according to the new 'meta_addr'.
         self.offset = self.offset - orig_meta_addr + meta_addr;
+
         // Only dir and symlink file can be of EROFS_INODE_FLAT_INLINE layout,
         // so the `dirents_offset` is only used for these two types.
         // For other types, the `dirents_offset` will always be 0,
