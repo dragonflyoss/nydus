@@ -40,11 +40,13 @@ base64 = "0.13.0"
 rust-fsm = "0.6.0"
 vm-memory = { version = "0.7.0", features = ["backend-mmap"], optional = true }
 chrono = "0.4.19"
-openssl = { version = "0.10.38", features = ["vendored"] }
+openssl = { version = "0.10.40", features = ["vendored"] }
+# pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
+openssl-src = { version = "111.22" }
 hyperlocal = "0.8.0"
 tokio = { version = "1.18.2", features = ["macros"] }
 hyper = "0.14.11"
-# pin rand_core to bring in fix for RUSTSEC-2021-0023
+# pin rand_core to bring in fix for https://rustsec.org/advisories/RUSTSEC-2021-0023
 rand_core = "0.6.2"
 tar = "0.4.38"
 mio = { version = "0.8", features = ["os-poll", "os-ext"]}

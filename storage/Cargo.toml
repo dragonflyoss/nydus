@@ -24,7 +24,7 @@ lazy_static = "1.4.0"
 libc = "0.2"
 log = "0.4.8"
 nix = "0.23.1"
-reqwest = { version = "0.11.0", features = ["blocking", "json"], optional = true }
+reqwest = { version = "0.11.11", features = ["blocking", "json"], optional = true }
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 serde_with = { version = "1.6.0", features = ["macros"] }
