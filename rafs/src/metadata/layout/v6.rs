@@ -517,6 +517,8 @@ pub trait RafsV6OndiskInode: RafsStore {
         self.set_data_layout(EROFS_INODE_CHUNK_BASED);
     }
 
+    fn set_rdev(&mut self, rdev: u32);
+
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 
     fn format(&self) -> u16;
@@ -527,6 +529,7 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn ugid(&self) -> (u32, u32);
     fn mtime_s_ns(&self) -> (u64, u32);
     fn nlink(&self) -> u32;
+    fn rdev(&self) -> u32;
     fn xattr_inline_count(&self) -> u16;
 }
 
@@ -623,6 +626,8 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     /// Set last modification time for the inode.
     fn set_mtime(&mut self, _sec: u64, _nsec: u32) {}
 
+    fn set_rdev(&mut self, _rdev: u32) {}
+
     /// Set inode data layout format.
     fn set_data_layout(&mut self, data_layout: u16) {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (data_layout << 1));
@@ -663,6 +668,10 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
 
     fn nlink(&self) -> u32 {
         self.i_nlink as u32
+    }
+
+    fn rdev(&self) -> u32 {
+        0
     }
 
     fn xattr_inline_count(&self) -> u16 {
@@ -778,6 +787,10 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
         self.i_mtime_nsec = u32::to_le(nsec);
     }
 
+    fn set_rdev(&mut self, rdev: u32) {
+        self.i_u = rdev
+    }
+
     /// Set inode data layout format.
     fn set_data_layout(&mut self, data_layout: u16) {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (data_layout << 1));
@@ -818,6 +831,10 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
 
     fn nlink(&self) -> u32 {
         self.i_nlink
+    }
+
+    fn rdev(&self) -> u32 {
+        self.i_u
     }
 
     fn xattr_inline_count(&self) -> u16 {

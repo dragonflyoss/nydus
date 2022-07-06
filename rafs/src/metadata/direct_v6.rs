@@ -715,6 +715,7 @@ impl RafsInode for OndiskInodeWrapper {
             mtime: inode.mtime_s_ns().0,
             mtimensec: inode.mtime_s_ns().1,
             blksize: RAFS_ATTR_BLOCK_SIZE,
+            rdev: inode.rdev(),
             ..Default::default()
         }
     }
