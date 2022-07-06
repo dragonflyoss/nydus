@@ -9,6 +9,7 @@ import docker
 sys.path.append(os.path.realpath("framework"))
 from nydus_anchor import NydusAnchor
 from rafs import RafsImage, RafsConf
+from backend_proxy import BackendProxy
 import utils
 
 ANCHOR = NydusAnchor()
@@ -93,7 +94,7 @@ def nydus_image(nydus_anchor: NydusAnchor, request):
 
 @pytest.fixture()
 def nydus_scratch_image(nydus_anchor: NydusAnchor):
-    """No longger use source_dir but use scratch_dir,
+    """No longer use source_dir but use scratch_dir,
     Scratch image's creation is delayed until runtime of each case.
     """
     nydus_anchor.prepare_scratch_dir()
@@ -103,7 +104,7 @@ def nydus_scratch_image(nydus_anchor: NydusAnchor):
     image = RafsImage(
         nydus_anchor,
         nydus_anchor.scratch_dir,
-        "boostrap_scratched",
+        "bootstrap_scratched",
         "blob_scratched",
         clear_from_oss=True,
     )
@@ -122,7 +123,7 @@ def nydus_scratch_image(nydus_anchor: NydusAnchor):
 @pytest.fixture()
 def nydus_parent_image(nydus_anchor: NydusAnchor):
     parent_image = RafsImage(
-        nydus_anchor, nydus_anchor.parent_rootfs, "boostrap_parent", "blob_parent"
+        nydus_anchor, nydus_anchor.parent_rootfs, "bootstrap_parent", "blob_parent"
     )
     yield parent_image
     try:
@@ -200,3 +201,26 @@ def local_registry():
         registry_container.stop()
     except docker.errors.APIError:
         assert False, "fail in stopping container"
+
+
+
+@pytest.fixture(scope="module", autouse=True)
+def nydus_backend_proxy():
+    backend_proxy = BackendProxy(
+        ANCHOR,
+        ANCHOR.backend_proxy_blobs_dir,
+        bin=os.path.join(
+            ANCHOR.nydus_project,
+            "contrib",
+            "nydus-backend-proxy",
+            "target",
+            "release",
+            "nydus-backend-proxy",
+        ),
+    )
+
+    backend_proxy.start()
+
+    yield
+
+    backend_proxy.stop()

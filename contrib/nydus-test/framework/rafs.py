@@ -1,3 +1,4 @@
+import shutil
 import utils
 import os
 import time
@@ -24,12 +25,14 @@ from linux_command import LinuxCommand
 from utils import Size, Unit
 from whiteout import WhiteoutSpec
 from oss import OssHelper
+from backend_proxy import BackendProxy
 
 
 class Backend(enum.Enum):
     OSS = "oss"
     REGISTRY = "registry"
     LOCALFS = "localfs"
+    BACKEND_PROXY = "backend_proxy"
 
     def __str__(self):
         return self.value
@@ -133,6 +136,17 @@ class RafsConf:
                 "device.backend.config.bucket_name", self.anchor.oss_bucket
             )
 
+        if backend_type == Backend.BACKEND_PROXY:
+            self._configure_rafs("device.backend.type", "registry")
+            self._configure_rafs(
+                "device.backend.config.scheme",
+                "http",
+            )
+            self._configure_rafs("device.backend.config.repo", "nydus")
+            self._configure_rafs(
+                "device.backend.config.host", self.anchor.backend_proxy_url
+            )
+
         if backend_type == Backend.LOCALFS:
             if "image" in kwargs:
                 self._configure_rafs(
@@ -215,6 +229,11 @@ class RafsConf:
 
     def dump_rafs_conf(self):
         # In case the conf is dumped more than once
+
+        if int(self.anchor.fs_version) == 6:
+            logging.warning("Rafs v6 must enable blobcache")
+            self.enable_rafs_blobcache()
+
         self.__conf_file_wrapper.truncate(0)
         self.__conf_file_wrapper.seek(0)
         logging.info("Current rafs metadata mode *%s*", self._rafs_conf_default["mode"])
@@ -314,7 +333,6 @@ class RafsImage(LinuxCommand):
 
         elif type == Backend.OSS:
             self.set_param("blob", self.blob_abs_path)
-
             prefix = kwargs.pop("prefix", None)
             self.oss_helper = OssHelper(
                 self.anchor.ossutil_bin,
@@ -324,11 +342,9 @@ class RafsImage(LinuxCommand):
                 self.anchor.oss_ak_secret,
                 prefix,
             )
-
-            pass
-
+        elif self.backend_type == Backend.BACKEND_PROXY:
+            self.set_param("blob", self.blob_abs_path)
         elif type == Backend.REGISTRY:
-
             # Let nydusify upload blob from the path, which is an intermediate file
             self.set_param("blob", self.blob_abs_path)
             pass
@@ -368,9 +384,8 @@ class RafsImage(LinuxCommand):
 
         if fs_version is not None:
             self.set_param("fs-version", fs_version)
-        elif int(self.anchor.fs_version) == 6:
-            self.set_param("fs-version", "6")
-            self.set_flags("disable-check")
+        else:
+            self.set_param("fs-version", str(self.anchor.fs_version))
 
         if self.compressor is not None:
             self.set_param("compressor", str(self.compressor))
@@ -424,6 +439,11 @@ class RafsImage(LinuxCommand):
             # nydus-rs image builder can also upload image itself.
             if self.oss_uploader == "util":
                 self.oss_helper.upload(self.blob_abs_path, self.blob_id)
+        elif self.backend_type == Backend.BACKEND_PROXY:
+            shutil.copy(
+                self.blob_abs_path,
+                os.path.join(self.anchor.backend_proxy_blobs_dir, self.blob_id),
+            )
 
         self.anchor.put_dustbin(self.bootstrap_name)
         # Only oss has a temporary place to hold blob

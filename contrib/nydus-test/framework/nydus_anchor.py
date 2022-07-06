@@ -55,8 +55,12 @@ class NydusAnchor:
 
         registry_conf = kwargs.pop("registry")
         self.registry_url = registry_conf["registry_url"]
+        self.backend_proxy_url = registry_conf["backend_proxy_url"]
         self.registry_auth = registry_conf["registry_auth"]
         self.registry_namespace = registry_conf["registry_namespace"]
+        self.backend_proxy_blobs_dir = registry_conf["backend_proxy_blobs_dir"]
+
+        os.makedirs(self.backend_proxy_blobs_dir, exist_ok=True)
 
         artifacts = kwargs.pop("artifacts")
         self.containerd_bin = artifacts["containerd"]
@@ -73,7 +77,7 @@ class NydusAnchor:
         self.log_level = nydus_runtime_conf["log_level"]
         profile = nydus_runtime_conf["profile"]
 
-        self.fs_version = kwargs.pop("fs_version", 5)
+        self.fs_version = kwargs.pop("fs_version", 6)
 
         oss_conf = kwargs.pop("oss")
         self.oss_ak_id = oss_conf["ak_id"]
@@ -160,9 +164,11 @@ class NydusAnchor:
                 os.unlink(p)
 
     def check_prerequisites(self):
-        assert os.path.exists(self.source_dir), "Verification direcotry not existed!"
-        assert os.path.exists(self.blobcache_dir), "Blobcache diretory not existed!"
-        assert len(os.listdir(self.blobcache_dir)) == 0, "Blobcache diretory not empty!"
+        assert os.path.exists(self.source_dir), "Verification directory not existed!"
+        assert os.path.exists(self.blobcache_dir), "Blobcache directory not existed!"
+        assert (
+            len(os.listdir(self.blobcache_dir)) == 0
+        ), "Blobcache directory not empty!"
         assert not os.path.ismount(self.mount_point), "Mount point was already mounted"
 
     def clear_blobcache(self):
@@ -199,7 +205,7 @@ class NydusAnchor:
             os.path.basename(os.path.normpath(self.parent_rootfs)) + "_scratch",
         )
 
-        # We don't delete the scratch dir because it helps to analyze prolems.
+        # We don't delete the scratch dir because it helps to analyze problems.
         # But if another round of test trip begins, no need to keep it anymore.
         if os.path.exists(self.scratch_parent_dir):
             shutil.rmtree(self.scratch_parent_dir)
@@ -232,8 +238,8 @@ class NydusAnchor:
     def mount_overlayfs(self, layers, base=os.getcwd()):
         """
         We usually use overlayfs to act as a verifying dir. Some cases may scratch
-        the oringal source dir.
-        :source_dir: A directroy acts on a layer of overlayfs, from which to build the image
+        the original source dir.
+        :source_dir: A directory acts on a layer of overlayfs, from which to build the image
         :layers: tail item from layers is the bottom layer.
         Cited:
 
