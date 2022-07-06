@@ -563,6 +563,10 @@ impl Node {
         inode.set_data_layout(self.v6_datalayout);
         inode.set_xattr_inline_count(self.xattrs.count_v6() as u16);
 
+        if self.is_special() {
+            inode.set_rdev(self.rdev as u32);
+        }
+
         // update all the inodes's offset according to the new 'meta_addr'.
         self.offset = self.offset - orig_meta_addr + meta_addr;
         // Only dir and symlink file can be of EROFS_INODE_FLAT_INLINE layout,
