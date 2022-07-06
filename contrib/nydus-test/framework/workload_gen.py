@@ -178,26 +178,35 @@ class WorkloadGen:
                 target_files.append(relpath)
                 source_path = os.path.join(self.verify_dir, relpath)
 
-                if os.path.islink(cur_path):
-                    if os.readlink(cur_path) != os.readlink(source_path):
-                        err_cnt += 1
-                        logging.error("Symlink mismatch, %s", cur_path)
-                elif os.path.isfile(cur_path):
-                    # TODO: How to verify special files?
-                    cur_md5 = WorkloadGen.calc_file_md5(cur_path)
-                    source_md5 = WorkloadGen.calc_file_md5(source_path)
-                    if cur_md5 != source_md5:
-                        err_cnt += 1
-                        logging.error("Verification error. File %s", cur_path)
-                        assert False
-                elif stat.S_ISBLK(os.stat(cur_path).st_mode):
-                    assert os.stat(cur_path).st_rdev == os.stat(source_path).st_rdev
-                elif stat.S_ISCHR(os.stat(cur_path).st_mode):
-                    assert os.stat(cur_path).st_rdev == os.stat(source_path).st_rdev
-                elif stat.S_ISFIFO(os.stat(cur_path).st_mode):
-                    pass
-                elif stat.S_ISSOCK(os.stat(cur_path).st_mode):
-                    pass
+                try:
+                    if os.path.islink(cur_path):
+                        if os.readlink(cur_path) != os.readlink(source_path):
+                            err_cnt += 1
+                            logging.error("Symlink mismatch, %s", cur_path)
+                    elif os.path.isfile(cur_path):
+                        # TODO: How to verify special files?
+                        cur_md5 = WorkloadGen.calc_file_md5(cur_path)
+                        source_md5 = WorkloadGen.calc_file_md5(source_path)
+                        if cur_md5 != source_md5:
+                            err_cnt += 1
+                            logging.error("Verification error. File %s", cur_path)
+                            assert False
+                    elif stat.S_ISBLK(os.stat(cur_path).st_mode):
+                        assert (
+                            os.stat(cur_path).st_rdev == os.stat(source_path).st_rdev
+                        ), f"left {os.stat(cur_path).st_rdev} while right {os.stat(source_path).st_rdev} "
+                    elif stat.S_ISCHR(os.stat(cur_path).st_mode):
+                        assert (
+                            os.stat(cur_path).st_rdev == os.stat(source_path).st_rdev
+                        ), f"left {os.stat(cur_path).st_rdev} while right {os.stat(source_path).st_rdev} "
+                    elif stat.S_ISFIFO(os.stat(cur_path).st_mode):
+                        pass
+                    elif stat.S_ISSOCK(os.stat(cur_path).st_mode):
+                        pass
+                except AssertionError as exp:
+                    logging.warning("current %s, source %s", cur_path, source_path
+                    )
+                    raise exp
 
                 cnt += 1
 
@@ -341,7 +350,7 @@ class WorkloadGen:
 
     def read_collected_files(self, duration):
         """
-        Randomly select a file from a random direcotry which was collected
+        Randomly select a file from a random directory which was collected
         when set up this workload generator. No dir recursive read happens.
         """
         dirs_cnt = len(self._collected_dirs)
