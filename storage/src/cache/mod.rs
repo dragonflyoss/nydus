@@ -350,6 +350,9 @@ pub(crate) trait BlobCacheMgr: Send + Sync {
 
     /// Get the blob cache to provide access to the `blob` object.
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>>;
+
+    /// Check the blob cache data status, if data all ready stop prefetch workers.
+    fn check_stat(&self);
 }
 
 #[cfg(test)]

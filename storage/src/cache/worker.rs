@@ -5,7 +5,7 @@
 
 use std::io::Result;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -87,6 +87,7 @@ pub(crate) struct AsyncWorkerMgr {
     metrics: Arc<BlobcacheMetrics>,
     ping_requests: AtomicU32,
     workers: AtomicU32,
+    active: AtomicBool,
 
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -121,6 +122,7 @@ impl AsyncWorkerMgr {
             metrics,
             ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
+            active: AtomicBool::new(false),
 
             prefetch_channel: Arc::new(Channel::new()),
             prefetch_config,
@@ -141,6 +143,13 @@ impl AsyncWorkerMgr {
 
     /// Stop all working threads.
     pub fn stop(&self) {
+        if self
+            .active
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
         self.prefetch_channel.close();
 
         while self.workers.load(Ordering::Relaxed) > 0 {
@@ -221,7 +230,7 @@ impl AsyncWorkerMgr {
                 return Err(e);
             }
         }
-
+        mgr.active.store(true, Ordering::Release);
         Ok(())
     }
 

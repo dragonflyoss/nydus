@@ -737,6 +737,7 @@ pub struct BlobcacheMetrics {
     pub prefetch_workers: AtomicUsize,
     pub prefetch_unmerged_chunks: BasicMetric,
     pub buffered_backend_size: BasicMetric,
+    pub data_all_ready: AtomicBool,
 }
 
 impl BlobcacheMetrics {

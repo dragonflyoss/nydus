@@ -157,6 +157,8 @@ impl BlobCacheMgr for FileCacheMgr {
         self.get_or_create_cache_entry(blob_info)
             .map(|v| v as Arc<dyn BlobCache>)
     }
+
+    fn check_stat(&self) {}
 }
 
 impl Drop for FileCacheMgr {

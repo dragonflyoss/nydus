@@ -222,6 +222,8 @@ impl BlobCacheMgr for DummyCacheMgr {
             validate: self.validate,
         }))
     }
+
+    fn check_stat(&self) {}
 }
 
 impl Drop for DummyCacheMgr {

@@ -17,7 +17,7 @@ use crate::cache::cachedfile::FileCacheEntry;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::{BlobFeatures, BlobInfo};
+use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::meta::BlobMetaInfo;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -148,6 +148,31 @@ impl BlobCacheMgr for FsCacheMgr {
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         self.get_or_create_cache_entry(blob_info)
             .map(|v| v as Arc<dyn BlobCache>)
+    }
+
+    fn check_stat(&self) {
+        let guard = self.blobs.read().unwrap();
+        if guard.len() != self.blobs_need {
+            info!(
+                "blob mgr not ready to check stat, need blobs {} have blobs {}",
+                self.blobs_need,
+                guard.len()
+            );
+            return;
+        }
+
+        let mut all_ready = true;
+        for (_id, entry) in guard.iter() {
+            if !entry.is_all_data_ready() {
+                all_ready = false;
+                break;
+            }
+        }
+
+        if all_ready {
+            self.worker_mgr.stop();
+            self.metrics.data_all_ready.store(true, Ordering::Release);
+        }
     }
 }
 
