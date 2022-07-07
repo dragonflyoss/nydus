@@ -16,6 +16,8 @@ env:
 jobs:
   convert-images:
     runs-on: ubuntu-latest
+    # don't run this action on forks
+    if: github.repository_owner == 'dragonflyoss'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
