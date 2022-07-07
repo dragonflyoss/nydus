@@ -32,7 +32,7 @@ use crate::cache::{BlobCache, BlobCacheMgr, DummyCacheMgr, FileCacheMgr, FsCache
 use crate::device::BlobInfo;
 
 lazy_static! {
-    static ref ASYNC_RUNTIME: Arc<Runtime> = {
+    pub static ref ASYNC_RUNTIME: Arc<Runtime> = {
         let runtime = Builder::new_multi_thread()
                 .worker_threads(1) // Limit the number of worker thread to 1 since this runtime is generally used to do blocking IO.
                 .thread_keep_alive(Duration::from_secs(10))
