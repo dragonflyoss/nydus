@@ -1239,7 +1239,7 @@ impl RafsInode for OndiskInodeWrapper {
                 content_len = std::cmp::min(chunk_size, left);
                 let desc = self.make_chunk_io(c, 0, content_len, user_io);
 
-                if c.blob_index() as u32 != descs.bi_vec[0].blob.blob_index() {
+                if desc.blob.blob_index() as u32 != descs.bi_vec[0].blob.blob_index() {
                     vec.push(descs);
                     descs = BlobIoVec::new();
                 }
