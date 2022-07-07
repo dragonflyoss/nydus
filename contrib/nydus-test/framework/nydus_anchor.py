@@ -60,10 +60,9 @@ class NydusAnchor:
         try:
             self.backend_proxy_url = registry_conf["backend_proxy_url"]
             self.backend_proxy_blobs_dir = registry_conf["backend_proxy_blobs_dir"]
+            os.makedirs(self.backend_proxy_blobs_dir, exist_ok=True)
         except KeyError:
             pass
-
-        os.makedirs(self.backend_proxy_blobs_dir, exist_ok=True)
 
         artifacts = kwargs.pop("artifacts")
         self.containerd_bin = artifacts["containerd"]
