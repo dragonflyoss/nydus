@@ -55,10 +55,13 @@ class NydusAnchor:
 
         registry_conf = kwargs.pop("registry")
         self.registry_url = registry_conf["registry_url"]
-        self.backend_proxy_url = registry_conf["backend_proxy_url"]
         self.registry_auth = registry_conf["registry_auth"]
         self.registry_namespace = registry_conf["registry_namespace"]
-        self.backend_proxy_blobs_dir = registry_conf["backend_proxy_blobs_dir"]
+        try:
+            self.backend_proxy_url = registry_conf["backend_proxy_url"]
+            self.backend_proxy_blobs_dir = registry_conf["backend_proxy_blobs_dir"]
+        except KeyError:
+            pass
 
         os.makedirs(self.backend_proxy_blobs_dir, exist_ok=True)
 
