@@ -53,16 +53,20 @@ jobs:
           done
       - name: Convert and check RAFS v6 images
         run: |
+          sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v6"
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
-                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
-                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v6 \
+                 --target localhost:5000/$I:nydus-nightly-v6 \
+                 --build-cache localhost:5000/nydus-build-cache:$I-v6 \
                  --fs-version 6
             sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
-                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6
+            echo "{\"host\": \"localhost:5000\", \"repo\": \"${I}\", \"scheme\": \"http\"}" > backend.json
+            cat backend.json
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
+                --target localhost:5000/$I:nydus-nightly-v6 \
+                --backend-config-file ./backend.json --backend-type registry
             sudo fsck.erofs -d9 output/nydus_bootstrap 
             sudo rm -rf ./output
           done
