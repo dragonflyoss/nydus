@@ -84,6 +84,7 @@ impl BlobFactory {
         &self,
         config: &Arc<FactoryConfig>,
         blob_info: &Arc<BlobInfo>,
+        blobs_need: usize,
     ) -> IOResult<Arc<dyn BlobCache>> {
         let key = BlobCacheMgrKey {
             config: config.clone(),
@@ -92,7 +93,6 @@ impl BlobFactory {
         if let Some(mgr) = self.mgrs.lock().unwrap().get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
-
         let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
         let mgr = match key.config.cache.cache_type.as_str() {
             "blobcache" => {
@@ -101,6 +101,7 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
+                    blobs_need,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
@@ -111,6 +112,7 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
+                    blobs_need,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>

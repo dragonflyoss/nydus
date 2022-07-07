@@ -25,6 +25,7 @@ use crate::meta::BlobMetaInfo;
 #[derive(Clone)]
 pub struct FsCacheMgr {
     blobs: Arc<RwLock<HashMap<String, Arc<FileCacheEntry>>>>,
+    blobs_need: usize,
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -42,6 +43,7 @@ impl FsCacheMgr {
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
+        blobs_need: usize,
     ) -> Result<FsCacheMgr> {
         let blob_config: FsCacheConfig =
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
@@ -52,6 +54,7 @@ impl FsCacheMgr {
 
         Ok(FsCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
+            blobs_need,
             backend,
             metrics,
             prefetch_config,

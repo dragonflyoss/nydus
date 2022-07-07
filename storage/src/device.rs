@@ -833,7 +833,7 @@ impl BlobDevice {
     ) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info, blob_infos.len())?;
             blobs.push(blob);
         }
 
@@ -858,7 +858,7 @@ impl BlobDevice {
         }
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info, blob_infos.len())?;
             blobs.push(blob);
         }
 

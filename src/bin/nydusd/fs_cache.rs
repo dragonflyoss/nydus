@@ -407,7 +407,7 @@ impl FsCacheHandler {
             }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
-                    self.handle_open_data_blob(hdr, msg, config)
+                    self.handle_open_data_blob(hdr, msg, config, domain_id)
                 }
                 BlobCacheObjectConfig::Bootstrap(config) => {
                     self.handle_open_bootstrap(hdr, msg, config)
@@ -422,10 +422,12 @@ impl FsCacheHandler {
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
         config: Arc<BlobCacheConfigDataBlob>,
+        domain_id: &str,
     ) -> String {
         let mut state = self.state.lock().unwrap();
+        let blobs_need = state.blob_cache_mgr.get_blobs_num(domain_id);
         if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
-            match self.create_data_blob_object(&config, msg.fd) {
+            match self.create_data_blob_object(&config, msg.fd, blobs_need) {
                 Err(s) => format!("copen {},{}", hdr.msg_id, s),
                 Ok((blob, blob_size)) => {
                     e.insert((FsCacheObject::DataBlob(blob.clone()), msg.fd));
@@ -491,6 +493,7 @@ impl FsCacheHandler {
         &self,
         config: &BlobCacheConfigDataBlob,
         fd: u32,
+        blobs_need: usize,
     ) -> std::result::Result<(Arc<dyn BlobCache>, u64), i32> {
         let mut blob_info = config.blob_info().deref().clone();
         // `BlobInfo` from the configuration cache should not have fscache file associated with it.
@@ -500,8 +503,7 @@ impl FsCacheHandler {
         let file = unsafe { File::from_raw_fd(fd as RawFd) };
         blob_info.set_fscache_file(Some(Arc::new(file)));
         let blob_ref = Arc::new(blob_info);
-
-        match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref) {
+        match BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref, blobs_need) {
             Err(_e) => Err(-libc::ENOENT),
             Ok(blob) => match blob.blob_uncompressed_size() {
                 Err(_e) => Err(-libc::EIO),
