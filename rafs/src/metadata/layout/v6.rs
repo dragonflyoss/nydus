@@ -992,6 +992,9 @@ impl RafsV6InodeChunkAddr {
         }
     }
 
+    /// Note: for erofs, bump id by 1 since device id 0 is bootstrap.
+    /// The index in BlobInfo grows from 0, so when using this method to index the corresponding blob,
+    /// the index always needs to be minus 1
     /// Get the blob index of the chunk.
     pub fn blob_index(&self) -> u8 {
         (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u8
