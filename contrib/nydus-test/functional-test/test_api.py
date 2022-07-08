@@ -17,8 +17,8 @@ logging_setup()
 
 
 def test_daemon_info(nydus_anchor, nydus_image, rafs_conf: RafsConf):
-    nydus_image.set_backend(Backend.OSS).create_image()
-    rafs_conf.set_rafs_backend(Backend.OSS)
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
     nc = NydusAPIClient(rafs.get_apisock())
@@ -30,9 +30,9 @@ def test_iostats(
 ):
     rafs_id = "/"
     rafs_conf.enable_files_iostats().enable_latest_read_files().set_rafs_backend(
-        Backend.OSS
+        Backend.BACKEND_PROXY
     )
-    nydus_image.set_backend(Backend.OSS).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
 
     rafs.mount()
@@ -77,8 +77,8 @@ def test_iostats(
 def test_global_metrics(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsConf):
     rafs_id = "/"
 
-    rafs_conf.enable_files_iostats().set_rafs_backend(Backend.OSS)
-    nydus_image.set_backend(Backend.OSS).create_image()
+    rafs_conf.enable_files_iostats().set_rafs_backend(Backend.BACKEND_PROXY)
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
@@ -132,10 +132,12 @@ def test_backend_swap(
     dist.generate_tree()
     dist.put_multiple_files(100, Size(2, Unit.MB))
 
-    nydus_scratch_image.set_backend(Backend.OSS).create_image(
+    nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image(
         readahead_policy="fs", readahead_files="/".encode()
     )
-    rafs_conf.set_rafs_backend(Backend.OSS).enable_rafs_blobcache().enable_fs_prefetch(
+    rafs_conf.set_rafs_backend(
+        Backend.BACKEND_PROXY
+    ).enable_rafs_blobcache().enable_fs_prefetch(
         threads_count=7, bandwidth_rate=Size(2, Unit.MB).B
     )
     rafs_conf.dump_rafs_conf()
@@ -192,12 +194,14 @@ def test_backend_swap(
     utils.clean_pagecache()
 
 
-def test_access_pattern(nydus_anchor, nydus_image, rafs_conf: RafsConf):
+def test_access_pattern(
+    nydus_anchor: NydusAnchor, nydus_image: RafsImage, rafs_conf: RafsConf
+):
     rafs_id = "/"
-    rafs_conf.enable_access_pattern().set_rafs_backend(Backend.OSS)
+    rafs_conf.enable_access_pattern().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
-    nydus_image.set_backend(Backend.OSS).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
@@ -226,14 +230,14 @@ def test_access_pattern(nydus_anchor, nydus_image, rafs_conf: RafsConf):
 def test_api_mount_with_prefetch(
     nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsConf
 ):
-    nydus_image.set_backend(Backend.OSS).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     hint_files = ["/"]
     rafs = RafsMount(nydus_anchor, None, None, with_defaults=False)
 
     # Prefetch must enable blobcache
     rafs_conf.enable_rafs_blobcache()
-    rafs_conf.set_rafs_backend(Backend.OSS)
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.enable_fs_prefetch(threads_count=4)
     rafs_conf.dump_rafs_conf()
     rafs.set_mountpoint(nydus_anchor.mount_point).apisock("api_sock").mount(
@@ -265,10 +269,10 @@ def test_api_mount_with_prefetch(
 
 def test_detect_io_hang(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsConf):
 
-    rafs_conf.enable_files_iostats().set_rafs_backend(Backend.OSS)
+    rafs_conf.enable_files_iostats().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
-    nydus_image.set_backend(Backend.OSS).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
     rafs.thread_num(5).mount()

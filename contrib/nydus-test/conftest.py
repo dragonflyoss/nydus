@@ -203,24 +203,26 @@ def local_registry():
         assert False, "fail in stopping container"
 
 
+try:
+    ANCHOR.backend_proxy_blobs_dir
 
-@pytest.fixture(scope="module", autouse=True)
-def nydus_backend_proxy():
-    backend_proxy = BackendProxy(
-        ANCHOR,
-        ANCHOR.backend_proxy_blobs_dir,
-        bin=os.path.join(
-            ANCHOR.nydus_project,
-            "contrib",
-            "nydus-backend-proxy",
-            "target",
-            "release",
-            "nydus-backend-proxy",
-        ),
-    )
+    @pytest.fixture(scope="module", autouse=True)
+    def nydus_backend_proxy():
+        backend_proxy = BackendProxy(
+            ANCHOR,
+            ANCHOR.backend_proxy_blobs_dir,
+            bin=os.path.join(
+                ANCHOR.nydus_project,
+                "contrib",
+                "nydus-backend-proxy",
+                "target",
+                "release",
+                "nydus-backend-proxy",
+            ),
+        )
+        backend_proxy.start()
+        yield
+        backend_proxy.stop()
 
-    backend_proxy.start()
-
-    yield
-
-    backend_proxy.stop()
+except AttributeError:
+    pass

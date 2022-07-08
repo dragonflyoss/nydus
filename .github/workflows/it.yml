@@ -53,6 +53,7 @@ jobs:
         cargo install --version 0.2.1 cross
         rustup component add rustfmt clippy
         make -e ARCH=$arch -e CARGO=cross static-release
+        make release  -C contrib/nydus-backend-proxy/
         #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
         #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-cached .
         #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
@@ -68,6 +69,7 @@ jobs:
         OSS_AK_SEC: ${{ secrets.OSS_TEST_AK_SECRET }}
       run: |
         sudo mkdir -p /home/runner/nydus-test-workspace
+        sudo mkdir -p /home/runner/nydus-test-workspace/proxy_blobs
         sudo cat > /home/runner/work/image-service/image-service/contrib/nydus-test/anchor_conf.json << EOF
         {
             "workspace": "/home/runner/nydus-test-workspace",
@@ -79,7 +81,9 @@ jobs:
             "registry": {
                 "registry_url": "localhost:5000",
                 "registry_namespace": "",
-                "registry_auth": "Y2h1YW5sYW5nLmdjdzoxcWF6MndzeA=="
+                "registry_auth": "YOURAUTH==",
+                "backend_proxy_url": "127.0.0.1:8000",
+                "backend_proxy_blobs_dir": "/home/runner/nydus-test-workspace/proxy_blobs"
             },
             "oss": {
                 "endpoint": "oss-cn-beijing.aliyuncs.com",
