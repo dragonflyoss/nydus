@@ -719,6 +719,10 @@ impl BlobMetaState {
 }
 
 /// A fake `BlobChunkInfo` object created from blob metadata.
+///
+/// It represents a chunk within memory mapped chunk maps, which
+/// means it is only used with blobs with chunk meta accommodated.
+/// So for rafs v5, we should avoid using it on IO path.
 pub struct BlobMetaChunk {
     chunk_index: usize,
     meta: Arc<BlobMetaState>,
