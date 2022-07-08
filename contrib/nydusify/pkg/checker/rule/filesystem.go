@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
@@ -30,17 +31,23 @@ type FilesystemRule struct {
 
 // Node records file metadata and file data hash.
 type Node struct {
-	Path   string
-	Size   int64
-	Mode   os.FileMode
-	Xattrs map[string][]byte
-	Hash   []byte
+	Path    string
+	Size    int64
+	Mode    os.FileMode
+	Rdev    uint64
+	Symlink string
+	UID     uint32
+	GID     uint32
+	Mtime   syscall.Timespec
+	Xattrs  map[string][]byte
+	Hash    []byte
 }
 
 func (node *Node) String() string {
 	return fmt.Sprintf(
-		"Path: %s, Size: %d, Mode: %d, Xattrs: %v, Hash: %s",
-		node.Path, node.Size, node.Mode, node.Xattrs, hex.EncodeToString(node.Hash),
+		"Path: %s, Size: %d, Mode: %d, Rdev: %d, Symink: %s, UID: %d, GID: %d, Mtime.Sec: %d, "+
+			"Mtime.Nsec: %d, Xattrs: %v, Hash: %s", node.Path, node.Size, node.Mode, node.Rdev, node.Symlink,
+		node.UID, node.GID, node.Mtime.Sec, node.Mtime.Nsec, node.Xattrs, hex.EncodeToString(node.Hash),
 	)
 }
 
@@ -87,7 +94,22 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 			// Ignore directory size check
 			size = info.Size()
 		}
+
 		mode := info.Mode()
+		var symlink string
+		if mode&os.ModeSymlink == os.ModeSymlink {
+			if symlink, err = os.Readlink(path); err != nil {
+				return errors.Wrapf(err, "read link %s", path)
+			}
+		} else {
+			symlink = rootfsPath
+		}
+
+		var stat syscall.Stat_t
+		if err := syscall.Lstat(path, &stat); err != nil {
+			return errors.Wrapf(err, "lstat %s", path)
+		}
+
 		xattrs, err := getXattrs(path)
 		if err != nil {
 			logrus.Warnf("Failed to get xattr: %s", err)
@@ -104,11 +126,16 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 		}
 
 		node := Node{
-			Path:   rootfsPath,
-			Size:   size,
-			Mode:   mode,
-			Xattrs: xattrs,
-			Hash:   hash,
+			Path:    rootfsPath,
+			Size:    size,
+			Mode:    mode,
+			Rdev:    stat.Rdev,
+			Symlink: symlink,
+			UID:     stat.Uid,
+			GID:     stat.Gid,
+			Mtime:   stat.Mtim,
+			Xattrs:  xattrs,
+			Hash:    hash,
 		}
 		nodes[rootfsPath] = node
 
