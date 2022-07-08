@@ -85,6 +85,11 @@ make
 4. Start nydus snapshotter with the command below:
 
 ```
+# make sure the _--root_ directory exists,
+mkdir /var/lib/containerd/io.containerd.snapshotter.v1.nydus
+```
+
+```
 ./bin/containerd-nydus-grpc \
  --config-path /path/nydus-erofs-config.json \
  --daemon-mode shared \
