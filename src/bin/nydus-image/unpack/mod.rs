@@ -158,7 +158,7 @@ impl OCIUnpacker {
 
 impl Unpacker for OCIUnpacker {
     fn unpack(&self) -> Result<()> {
-        info!(
+        debug!(
             "oci unpacker, bootstrap file: {:?}, blob file: {:?}, output file: {:?}",
             self.bootstrap, self.blob, self.output
         );
