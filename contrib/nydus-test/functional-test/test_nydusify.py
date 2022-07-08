@@ -15,11 +15,12 @@ import utils
 @pytest.mark.parametrize(
     "source",
     [
+        "openjdk:latest",
         "python:3.7",
         "docker.io/busybox:latest",
     ],
 )
-@pytest.mark.parametrize("fs_version", [5, 6])
+@pytest.mark.parametrize("fs_version", [6])
 def test_basic_conversion(
     nydus_anchor: NydusAnchor,
     rafs_conf: RafsConf,
