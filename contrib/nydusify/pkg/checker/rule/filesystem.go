@@ -7,17 +7,16 @@ package rule
 import (
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 
 	"github.com/pkg/errors"
 	"github.com/pkg/xattr"
 	"github.com/sirupsen/logrus"
-	"lukechampine.com/blake3"
 )
 
 // FilesystemRule compares file metadata and data in the two mountpoints:
@@ -47,32 +46,6 @@ func (node *Node) String() string {
 
 func (rule *FilesystemRule) Name() string {
 	return "Filesystem"
-}
-
-func hashFile(path string) ([]byte, error) {
-	hasher := blake3.New(32, nil)
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, errors.Wrap(err, "open file before hashing file")
-	}
-	defer file.Close()
-
-	buf := make([]byte, 2<<15) // 64KB
-	for {
-		n, err := file.Read(buf)
-		if err == io.EOF || n == 0 {
-			break
-		}
-		if err != nil {
-			return nil, errors.Wrap(err, "read file during hashing file")
-		}
-		if _, err := hasher.Write(buf); err != nil {
-			return nil, errors.Wrap(err, "calculate hash of file")
-		}
-	}
-
-	return hasher.Sum(nil), nil
 }
 
 func getXattrs(path string) (map[string][]byte, error) {
@@ -124,7 +97,7 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 		// this will cause that nydusd read data from backend, it's network load
 		var hash []byte
 		if rule.NydusdConfig.BackendType != "" && info.Mode().IsRegular() {
-			hash, err = hashFile(path)
+			hash, err = utils.HashFile(path)
 			if err != nil {
 				return err
 			}

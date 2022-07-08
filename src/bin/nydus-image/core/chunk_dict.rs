@@ -16,7 +16,7 @@ use storage::device::BlobInfo;
 
 use crate::core::node::ChunkWrapper;
 use crate::core::tree::Tree;
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
 
 pub trait ChunkDict: Sync + Send + 'static {
