@@ -132,7 +132,7 @@ impl DigestHasher for Sha256 {
     }
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, Default, Ord, PartialOrd)]
 pub struct RafsDigest {
     pub data: DigestData,
 }

@@ -17,7 +17,9 @@ import (
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"lukechampine.com/blake3"
 )
 
 const SupportedOS = "linux"
@@ -172,4 +174,30 @@ func IsPathExists(path string) bool {
 		return true
 	}
 	return false
+}
+
+func HashFile(path string) ([]byte, error) {
+	hasher := blake3.New(32, nil)
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.Wrap(err, "open file before hashing file")
+	}
+	defer file.Close()
+
+	buf := make([]byte, 2<<15) // 64KB
+	for {
+		n, err := file.Read(buf)
+		if err == io.EOF || n == 0 {
+			break
+		}
+		if err != nil {
+			return nil, errors.Wrap(err, "read file during hashing file")
+		}
+		if _, err := hasher.Write(buf); err != nil {
+			return nil, errors.Wrap(err, "calculate hash of file")
+		}
+	}
+
+	return hasher.Sum(nil), nil
 }

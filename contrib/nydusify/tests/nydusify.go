@@ -43,6 +43,7 @@ type Nydusify struct {
 	backendConfig string
 	chunkDictArgs string
 	fsVersion     string
+	workDir       string
 }
 
 func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string) *Nydusify {
@@ -65,6 +66,11 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 		fsVersion = "5"
 	}
 
+	workDir := "./tmp"
+	if os.Getenv("WORKDIR") != "" {
+		workDir = os.Getenv("WORKDIR")
+	}
+
 	return &Nydusify{
 		Registry:      registry,
 		Source:        source,
@@ -74,7 +80,12 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 		backendConfig: backendConfig,
 		chunkDictArgs: chunkDictArgs,
 		fsVersion:     fsVersion,
+		workDir:       workDir,
 	}
+}
+
+func (nydusify *Nydusify) GetBootstarpFilePath() string {
+	return filepath.Join(filepath.Join(nydusify.workDir, nydusify.Target), "nydus_bootstrap")
 }
 
 func (nydusify *Nydusify) Convert(t *testing.T) {
@@ -88,8 +99,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	logger, err := provider.DefaultLogger()
 	assert.Nil(t, err)
 
-	workDir := "./tmp"
-	sourceDir := filepath.Join(workDir, "source")
+	sourceDir := filepath.Join(nydusify.workDir, "source")
 	err = os.MkdirAll(sourceDir, 0755)
 	assert.Nil(t, err)
 
@@ -119,7 +129,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		CacheMaxRecords: 10,
 		CacheVersion:    "v1",
 
-		WorkDir:          "./tmp",
+		WorkDir:          nydusify.workDir,
 		PrefetchPatterns: "/",
 		NydusImagePath:   nydusImagePath,
 		MultiPlatform:    false,
@@ -147,7 +157,7 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 	host := nydusify.Registry.Host()
 
 	checker, err := checker.New(checker.Opt{
-		WorkDir:        filepath.Join("./tmp", nydusify.Target),
+		WorkDir:        filepath.Join(nydusify.workDir, nydusify.Target),
 		Source:         host + "/" + nydusify.Source,
 		Target:         host + "/" + nydusify.Target,
 		SourceInsecure: true,

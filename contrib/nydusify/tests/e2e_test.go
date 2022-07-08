@@ -6,7 +6,11 @@ package tests
 
 import (
 	"fmt"
+	"os"
 	"testing"
+
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/stretchr/testify/assert"
 )
 
 func testBasicConvert(t *testing.T, fsVersion string) {
@@ -16,6 +20,30 @@ func testBasicConvert(t *testing.T, fsVersion string) {
 	nydusify := NewNydusify(registry, "image-basic", "image-basic-nydus", "", "", fsVersion)
 	nydusify.Convert(t)
 	nydusify.Check(t)
+}
+
+func testReproducableBuild(t *testing.T, fsVersion string) {
+	registry := NewRegistry(t)
+	registry.Build(t, "image-basic")
+	defer registry.Destroy(t)
+	var initBootstraHash []byte
+	// Build the same image repeatedly to verify that the bootstarp files are the same
+	for i := 0; i < 5; i++ {
+		workDir := fmt.Sprintf("./tmp-%d", i)
+		os.Setenv("WORKDIR", workDir)
+		nydusify := NewNydusify(registry, "image-basic", "image-basic-nydus", "", "", fsVersion)
+		nydusify.Convert(t)
+		nydusify.Check(t)
+		hash, err := utils.HashFile(nydusify.GetBootstarpFilePath())
+		if err != nil {
+			t.Fatalf("expect bootstrap file must exist, but actual is not, error: %s", err)
+		}
+		if len(initBootstraHash) == 0 {
+			initBootstraHash = hash
+		} else {
+			assert.Equal(t, initBootstraHash, hash)
+		}
+	}
 }
 
 func testConvertWithCache(t *testing.T, fsVersion string) {
@@ -77,6 +105,7 @@ func TestSmoke(t *testing.T) {
 	fsVersions := [2]string{"5", "6"}
 	for _, v := range fsVersions {
 		testBasicConvert(t, v)
+		testReproducableBuild(t, v)
 		testConvertWithCache(t, v)
 		testConvertWithChunkDict(t, v)
 	}

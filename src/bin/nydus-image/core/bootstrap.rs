@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::convert::TryInto;
 use std::ffi::OsString;
@@ -647,7 +647,7 @@ impl Bootstrap {
         // but there is no deduplication during the actual construction.
         // Each layer uses the corresponding chunk in the blob of its own layer.
         // If HashChunkDict is used here, it will cause duplication. The chunks are removed, resulting in incomplete chunk info.
-        let mut chunk_cache = HashMap::new();
+        let mut chunk_cache = BTreeMap::new();
 
         // Dump bootstrap
         timing_tracer!(

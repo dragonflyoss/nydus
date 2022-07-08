@@ -5,7 +5,7 @@
 
 //! An in-memory RAFS inode for image building and inspection.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
@@ -549,7 +549,7 @@ impl Node {
         orig_meta_addr: u64,
         meta_addr: u64,
         ctx: &mut BuildContext,
-        chunk_cache: &mut HashMap<DigestWithBlobIndex, ChunkWrapper>,
+        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, ChunkWrapper>,
     ) -> Result<usize> {
         let mut inode = self.new_rafsv6_inode();
 
