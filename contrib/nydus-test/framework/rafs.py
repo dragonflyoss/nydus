@@ -363,6 +363,7 @@ class RafsImage(LinuxCommand):
         from_stargz=False,
         fs_version=None,
         disable_check=False,
+        chunk_size=None,
     ) -> "RafsImage":
         """
         :layers: Create an image on top of an existed one
@@ -389,6 +390,9 @@ class RafsImage(LinuxCommand):
 
         if self.compressor is not None:
             self.set_param("compressor", str(self.compressor))
+
+        if chunk_size is not None:
+            self.set_param("chunk-size", str(hex(chunk_size)))
 
         builder_output_json = tempfile.NamedTemporaryFile("w+", suffix="output.json")
         self.set_param("output-json", builder_output_json.name)
