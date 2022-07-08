@@ -96,6 +96,7 @@ type PackRequest struct {
 
 	TryCompact        bool
 	CompactConfigPath string
+	FsVersion         string
 }
 
 type PackResult struct {
@@ -282,6 +283,7 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 		WhiteoutSpec:        "oci",
 		OutputJSONPath:      p.outputJSONPath(),
 		BlobPath:            blobPath,
+		FsVersion:           req.FsVersion,
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to Pack targetDir %s", req.TargetDir)
 	}

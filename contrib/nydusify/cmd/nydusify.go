@@ -470,6 +470,14 @@ func main() {
 						"\"layers_to_compact\": 32}",
 					EnvVars: []string{"COMPACT_CONFIG_FILE"},
 				},
+				&cli.StringFlag{
+					Name:        "fs-version",
+					Required:    false,
+					Usage:       "Version number of nydus image format, possible values: 5, 6",
+					EnvVars:     []string{"FS_VERSION"},
+					Value:       "5",
+					DefaultText: "V5 format",
+				},
 			},
 			Before: func(ctx *cli.Context) error {
 				targetPath := ctx.String("target-dir")
@@ -526,6 +534,7 @@ func main() {
 
 					TryCompact:        c.Bool("compact"),
 					CompactConfigPath: c.String("compact-config-file"),
+					FsVersion:         c.String("fs-version"),
 				}); err != nil {
 					return err
 				}
