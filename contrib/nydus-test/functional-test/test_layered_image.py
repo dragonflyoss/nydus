@@ -34,12 +34,14 @@ def test_basic_read(
     description: Mount rafs to check if can act read correctly.
     """
 
-    nydus_parent_image.set_backend(Backend.OSS).create_image()
-    nydus_image.set_backend(Backend.OSS).create_image(parent_image=nydus_parent_image)
+    nydus_parent_image.set_backend(Backend.BACKEND_PROXY).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image(
+        parent_image=nydus_parent_image
+    )
 
     nydus_anchor.mount_overlayfs([nydus_image.rootfs(), nydus_parent_image.rootfs()])
 
-    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.OSS)
+    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
@@ -61,12 +63,14 @@ def test_read_stress(
     nydus_parent_image: RafsImage,
 ):
 
-    nydus_parent_image.set_backend(Backend.OSS).create_image()
-    nydus_image.set_backend(Backend.OSS).create_image(parent_image=nydus_parent_image)
+    nydus_parent_image.set_backend(Backend.BACKEND_PROXY).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image(
+        parent_image=nydus_parent_image
+    )
 
     nydus_anchor.mount_overlayfs([nydus_image.rootfs(), nydus_parent_image.rootfs()])
 
-    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.OSS)
+    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
@@ -88,12 +92,14 @@ def test_read_cache(
     nydus_parent_image: RafsImage,
 ):
 
-    nydus_parent_image.set_backend(Backend.OSS).create_image()
-    nydus_image.set_backend(Backend.OSS).create_image(parent_image=nydus_parent_image)
+    nydus_parent_image.set_backend(Backend.BACKEND_PROXY).create_image()
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image(
+        parent_image=nydus_parent_image
+    )
 
     nydus_anchor.mount_overlayfs([nydus_image.rootfs(), nydus_parent_image.rootfs()])
 
-    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.OSS)
+    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
@@ -125,19 +131,22 @@ def test_blobcache(
     hint_files_parent = [os.path.join("/", p) for p in dist_parent.files[-20:]]
     hint_files_parent = "\n".join(hint_files_parent[-1:])
 
-    nydus_scratch_parent_image.set_backend(Backend.OSS).create_image()
+    nydus_scratch_parent_image.set_backend(Backend.BACKEND_PROXY).create_image(
+        chunk_size=Size(64, Unit.KB).B
+    )
     # shutil.rmtree(nydus_scratch_parent_image.rootfs())
-    nydus_image.set_backend(Backend.OSS).create_image(
+    nydus_image.set_backend(Backend.BACKEND_PROXY).create_image(
         readahead_policy="fs",
         parent_image=nydus_scratch_parent_image,
         readahead_files=hint_files_parent.encode(),
+        chunk_size=Size(64, Unit.KB).B,
     )
 
     nydus_anchor.mount_overlayfs(
         [nydus_image.rootfs(), nydus_scratch_parent_image.rootfs()]
     )
 
-    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.OSS)
+    rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.enable_fs_prefetch()
     rafs_conf.dump_rafs_conf()
 
@@ -157,7 +166,7 @@ def test_blobcache(
     wg.finish_torture_read()
 
 
-@pytest.mark.parametrize("backend", [Backend.OSS])
+@pytest.mark.parametrize("backend", [Backend.BACKEND_PROXY])
 def test_layered_rebuild(
     nydus_anchor,
     nydus_scratch_image: RafsImage,
@@ -179,6 +188,7 @@ def test_layered_rebuild(
     rafs_conf.set_rafs_backend(backend)
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.dump_rafs_conf()
+    rafs_conf.enable_fs_prefetch()
 
     parent_rootfs = nydus_scratch_parent_image.rootfs()
     upper_rootfs = nydus_scratch_image.rootfs()
@@ -192,6 +202,7 @@ def test_layered_rebuild(
     dist_parent = Distributor(parent_rootfs, 6, 4)
     dist_parent.generate_tree()
     shared_files.extend(dist_parent.put_multiple_files(100, Size(64, Unit.KB)))
+    shared_files.extend(dist_parent.put_multiple_files(20, Size(3, Unit.MB)))
     shared_files.extend(dist_parent.put_symlinks(30))
     shared_files.extend(dist_parent.put_hardlinks(30))
     xattr_verifier = XattrVerifier(parent_rootfs, dist_parent)
@@ -199,9 +210,14 @@ def test_layered_rebuild(
 
     xattr_verifier.scratch(parent_rootfs)
 
-    nydus_scratch_parent_image.set_backend(backend).create_image()
+    nydus_scratch_parent_image.set_backend(backend).create_image(
+        chunk_size=Size(64, Unit.KB).B
+    )
     nydus_scratch_image.set_backend(backend).create_image(
-        parent_image=nydus_scratch_parent_image
+        parent_image=nydus_scratch_parent_image,
+        chunk_size=Size(64, Unit.KB).B,
+        readahead_policy="fs",
+        readahead_files="/".encode(),
     )
 
     rafs = RafsMount(nydus_anchor, nydus_scratch_image, rafs_conf)
@@ -284,12 +300,12 @@ def test_whiteout(nydus_anchor, rafs_conf, whiteout_spec):
     dir_to_be_removed = dist_parent.dirs[-1]
     whiteout.whiteout_one_dir(upper_rootfs, dir_to_be_removed)
 
-    parent_image.set_backend(Backend.OSS).create_image()
-    layered_image.set_backend(Backend.OSS).whiteout_spec(whiteout_spec).create_image(
-        parent_image=parent_image
-    )
+    parent_image.set_backend(Backend.BACKEND_PROXY).create_image()
+    layered_image.set_backend(Backend.BACKEND_PROXY).whiteout_spec(
+        whiteout_spec
+    ).create_image(parent_image=parent_image)
 
-    rafs_conf.set_rafs_backend(Backend.OSS)
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
 
     nydus_anchor.mount_overlayfs([layered_image.rootfs(), parent_image.rootfs()])
     rafs = RafsMount(nydus_anchor, layered_image, rafs_conf)
@@ -322,8 +338,7 @@ def test_prefetch_with_cache(
     parent_rootfs = nydus_scratch_parent_image.rootfs()
     upper_rootfs = nydus_scratch_image.rootfs()
 
-    rafs_conf.enable_validation()
-    rafs_conf.set_rafs_backend(Backend.OSS)
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.enable_fs_prefetch(threads_count=4, merging_size=512 * 1024)
     rafs_conf.dump_rafs_conf()
@@ -344,7 +359,7 @@ def test_prefetch_with_cache(
     # hint_files_parent = [os.path.join(parent_rootfs, p) for p in hint_files_parent]
     # hint_files_parent = "\n".join(hint_files_parent)
 
-    nydus_scratch_parent_image.set_backend(Backend.OSS).create_image(
+    nydus_scratch_parent_image.set_backend(Backend.BACKEND_PROXY).create_image(
         readahead_policy="fs", readahead_files="/".encode()
     )
 
@@ -354,7 +369,7 @@ def test_prefetch_with_cache(
     hint_files = [os.path.join("/", p) for p in hint_files]
     hint_files = "\n".join(hint_files)
 
-    nydus_scratch_image.set_backend(Backend.OSS).create_image(
+    nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image(
         parent_image=nydus_scratch_parent_image,
         readahead_policy="fs",
         readahead_files=hint_files.encode(),
@@ -402,13 +417,15 @@ def test_different_partitions(nydus_anchor: NydusAnchor, rafs_conf):
     Whiteout.mirror_files(dist2.files[:20], loop_mnt_2.name, loop_mnt_1.name)
 
     parent_image = (
-        RafsImage(nydus_anchor, loop_mnt_1.name).set_backend(Backend.OSS).create_image()
+        RafsImage(nydus_anchor, loop_mnt_1.name)
+        .set_backend(Backend.BACKEND_PROXY)
+        .create_image()
     )
 
     image = RafsImage(nydus_anchor, loop_mnt_2.name)
-    image.set_backend(Backend.OSS).create_image(parent_image=parent_image)
+    image.set_backend(Backend.BACKEND_PROXY).create_image(parent_image=parent_image)
 
-    rafs_conf.set_rafs_backend(Backend.OSS)
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs = RafsMount(nydus_anchor, image, rafs_conf)
     rafs.mount()
 
