@@ -699,7 +699,10 @@ fn process_daemon_arguments(
     bti: BuildTimeInfo,
 ) -> Result<()> {
     info!("Start Nydus in daemon mode!");
-    let daemon = create_daemon(subargs, bti)?;
+    let daemon = create_daemon(subargs, bti).map_err(|e| {
+        error!("Failed to start daemon: {}", e);
+        e
+    })?;
     DAEMON_CONTROLLER.set_daemon(daemon);
     Ok(())
 }
