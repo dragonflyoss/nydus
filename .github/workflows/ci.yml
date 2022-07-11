@@ -63,7 +63,10 @@ jobs:
           sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
 
   macos-ut:
-    runs-on: macos-latest
+    runs-on: macos-11
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v2
       - name: build and check

@@ -55,7 +55,7 @@ jobs:
           configs
 
   nydus-macos:
-    runs-on: macos-latest
+    runs-on: macos-11
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -69,8 +69,6 @@ jobs:
         cache-on-failure: true
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: build
-      # nydusd link failure on arm64 Darwin
-      if: matrix.arch != 'arm64'
       run: |
         # MacOS bash is too old to support declare -A
         arch=$(test ${{ matrix.arch }} == "amd64" && echo "x86_64" || echo "aarch64")
@@ -84,7 +82,6 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      if: matrix.arch != 'arm64'
       uses: actions/upload-artifact@v2
       with:
         name: nydus-artifacts-darwin-${{ matrix.arch }}
