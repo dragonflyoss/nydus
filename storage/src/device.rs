@@ -402,10 +402,19 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 }
 
 /// An enumeration to encapsulate different [BlobChunkInfo] implementations for [BlobIoDesc].
+
+/// This helps to feed unified IO description to storage subsystem from both rafs v6 and v5 since
+/// rafs v6 have a different ChunkInfo definition on bootstrap.
 #[derive(Clone)]
 pub enum BlobIoChunk {
+    // For rafs v6 to pass chunk info to storage module.
+    // (blob_index, chunk_index)
     Address(u32, u32),
+    // TODO: `Address` is is always converted to `Base` for v6, it is a little confusing.
+    // Try to avoid the value conversion? Maybe, we can just use trait object `BlobChunkInfo`
+    // in the storage module rather than `BlobIoChunk`, it makes data conversion complicated.
     Base(Arc<dyn BlobChunkInfo>),
+    // For rafs v5 to pass chunk info to storage module.
     V5(Arc<dyn self::v5::BlobV5ChunkInfo>),
 }
 
@@ -448,7 +457,13 @@ impl BlobChunkInfo for BlobIoChunk {
     }
 
     fn id(&self) -> u32 {
-        self.as_base().id()
+        // BlobIoChunk::Address is a medium type to pass chunk IO description
+        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
+        // causes panic. So this is a workaround to avoid panic.
+        match self {
+            Self::Address(_, index) => *index,
+            _ => self.as_base().id(),
+        }
     }
 
     fn blob_index(&self) -> u32 {
@@ -456,7 +471,13 @@ impl BlobChunkInfo for BlobIoChunk {
     }
 
     fn compress_offset(&self) -> u64 {
-        self.as_base().compress_offset()
+        // BlobIoChunk::Address is a medium type to pass chunk IO description
+        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
+        // causes panic. So this is a workaround to avoid panic.
+        match self {
+            Self::Address(_, _) => 0,
+            _ => self.as_base().compress_offset(),
+        }
     }
 
     fn compress_size(&self) -> u32 {
@@ -552,7 +573,7 @@ impl BlobIoDesc {
 pub struct BlobIoVec {
     /// Blob IO flags.
     pub bi_flags: u32,
-    /// Total size of blb IOs to be performed.
+    /// Total size of blob IOs to be performed.
     pub bi_size: usize,
     /// Array of blob IOs, these IOs should executed sequentially.
     pub bi_vec: Vec<BlobIoDesc>,

@@ -255,10 +255,18 @@ impl Rafs {
         };
 
         // Rafs v6 does must store chunk info into local file cache. So blob cache is required
-        if rafs.metadata().is_v6() && conf.device.cache.cache_type != "blobcache" {
-            return Err(RafsError::Configure(
-                "Rafs v6 must have local blobcache configured".to_string(),
-            ));
+        if rafs.metadata().is_v6() {
+            if conf.device.cache.cache_type != "blobcache" {
+                return Err(RafsError::Configure(
+                    "Rafs v6 must have local blobcache configured".to_string(),
+                ));
+            }
+
+            if conf.digest_validate {
+                return Err(RafsError::Configure(
+                    "Rafs v6 doesn't support integrity validation yet".to_string(),
+                ));
+            }
         }
 
         rafs.ios.toggle_files_recording(conf.iostats_files);

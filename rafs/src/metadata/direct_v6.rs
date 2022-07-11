@@ -566,6 +566,8 @@ impl OndiskInodeWrapper {
         let state = self.mapping.state.load();
         let blob_table = &state.blob_table.entries;
 
+        // As ondisk blobs table contains bootstrap as the first blob device
+        // while `blob_table` doesn't, it is subtracted 1.
         let blob_index = chunk_addr.blob_index() - 1;
         let chunk_index = chunk_addr.blob_comp_index();
         let io_chunk = BlobIoChunk::Address(blob_index as u32, chunk_index);
@@ -1239,7 +1241,14 @@ impl RafsInode for OndiskInodeWrapper {
                 content_len = std::cmp::min(chunk_size, left);
                 let desc = self.make_chunk_io(c, 0, content_len, user_io);
 
-                if desc.blob.blob_index() as u32 != descs.bi_vec[0].blob.blob_index() {
+                if desc.blob.blob_index() != descs.bi_vec[0].blob.blob_index() {
+                    trace!(
+                        "Continues storge IO has {} bios offset {} io size {} {:?}",
+                        descs.bi_vec.len(),
+                        offset,
+                        size,
+                        descs.bi_vec
+                    );
                     vec.push(descs);
                     descs = BlobIoVec::new();
                 }
@@ -1248,7 +1257,6 @@ impl RafsInode for OndiskInodeWrapper {
                 descs.bi_vec.push(desc);
                 descs.bi_size += content_len as usize;
                 left -= content_len;
-
                 if left == 0 {
                     break;
                 }
@@ -1256,6 +1264,13 @@ impl RafsInode for OndiskInodeWrapper {
         }
 
         if !descs.bi_vec.is_empty() {
+            trace!(
+                "Continues storge IO has {} bios offset {} io size {} {:?}",
+                descs.bi_vec.len(),
+                offset,
+                size,
+                descs.bi_vec
+            );
             vec.push(descs)
         }
 

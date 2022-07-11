@@ -323,7 +323,7 @@ pub struct RafsSuperMeta {
 }
 
 impl RafsSuperMeta {
-    /// Check whether the superblock is for Rafs v4/v5 filesystems.
+    /// Check whether the superblock is for Rafs v5 filesystems.
     pub fn is_v5(&self) -> bool {
         self.version == RAFS_SUPER_VERSION_V5
     }
