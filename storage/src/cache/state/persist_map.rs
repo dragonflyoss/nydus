@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Result, Write};
@@ -16,8 +17,9 @@ use crate::utils::readahead;
 pub(crate) const MAGIC1: u32 = 0x424D_4150;
 pub(crate) const MAGIC2: u32 = 0x434D_4150;
 pub(crate) const MAGIC_ALL_READY: u32 = 0x4D4D_4150;
+pub(crate) const MAGIC_DELETED: u32 = 0x4E4D_4150;
 pub(crate) const HEADER_SIZE: usize = 4096;
-pub(crate) const HEADER_RESERVED_SIZE: usize = HEADER_SIZE - 16;
+pub(crate) const HEADER_RESERVED_SIZE: usize = HEADER_SIZE - 20;
 
 /// The blob chunk map file header, 4096 bytes.
 #[repr(C)]
@@ -27,6 +29,7 @@ pub(crate) struct Header {
     pub version: u32,
     pub magic2: u32,
     pub all_ready: u32,
+    pub deleted: u32,
     pub reserved: [u8; HEADER_RESERVED_SIZE],
 }
 
@@ -46,6 +49,7 @@ pub(crate) struct PersistMap {
     pub size: usize,
     pub base: *const u8,
     pub not_ready_count: AtomicU32,
+    pub is_deleted: Cell<bool>,
 }
 
 impl PersistMap {
@@ -167,6 +171,7 @@ impl PersistMap {
             size: expected_size as usize,
             base: base as *const u8,
             not_ready_count: AtomicU32::new(not_ready_count),
+            is_deleted: Cell::new(false),
         })
     }
 
@@ -176,6 +181,7 @@ impl PersistMap {
             version: 1,
             magic2: MAGIC2,
             all_ready: 0,
+            deleted: 0,
             reserved: [0x0u8; HEADER_RESERVED_SIZE],
         };
 
@@ -263,6 +269,38 @@ impl PersistMap {
             if libc::msync(base, self.size, libc::MS_SYNC) == 0 {
                 let header = &mut *(self.base as *mut Header);
                 header.all_ready = MAGIC_ALL_READY;
+                let _ = libc::msync(base, HEADER_SIZE, libc::MS_SYNC);
+            }
+        }
+    }
+
+    pub fn is_file_deleted(&self) -> bool {
+        if self.is_deleted.get() {
+            return true;
+        }
+        let base = self.base as *const c_void as *mut c_void;
+        unsafe {
+            if libc::msync(base, self.size, libc::MS_SYNC) == 0 {
+                let header = &mut *(self.base as *mut Header);
+                if header.deleted == MAGIC_DELETED {
+                    self.is_deleted.set(true);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn mark_deleted(&self) {
+        if self.is_file_deleted() {
+            return;
+        }
+        let base = self.base as *const c_void as *mut c_void;
+        unsafe {
+            if libc::msync(base, self.size, libc::MS_SYNC) == 0 {
+                let header = &mut *(self.base as *mut Header);
+                header.deleted = MAGIC_DELETED;
+                self.is_deleted.set(true);
                 let _ = libc::msync(base, HEADER_SIZE, libc::MS_SYNC);
             }
         }

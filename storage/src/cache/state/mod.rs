@@ -86,6 +86,11 @@ pub trait ChunkMap: Any + Send + Sync {
     fn as_range_map(&self) -> Option<&dyn RangeMap<I = u32>> {
         None
     }
+
+    /// Check whether the on-disk file is deleted.
+    fn is_deleted(&self) -> bool {
+        false
+    }
 }
 
 /// Trait to track chunk or data readiness state.

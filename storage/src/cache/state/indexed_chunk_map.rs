@@ -30,6 +30,7 @@ const FILE_SUFFIX: &str = "chunk_map";
 /// set_ready(3), the layout should be changed to [0b00010000, 0b00000000].
 pub struct IndexedChunkMap {
     map: PersistMap,
+    filename: String,
 }
 
 impl IndexedChunkMap {
@@ -37,7 +38,8 @@ impl IndexedChunkMap {
     pub fn new(blob_path: &str, chunk_count: u32, persist: bool) -> Result<Self> {
         let filename = format!("{}.{}", blob_path, FILE_SUFFIX);
 
-        PersistMap::open(&filename, chunk_count, true, persist).map(|map| IndexedChunkMap { map })
+        PersistMap::open(&filename, chunk_count, true, persist)
+            .map(|map| IndexedChunkMap { map, filename })
     }
 
     /// Create a new instance of `IndexedChunkMap` from an existing chunk map file.
@@ -45,7 +47,13 @@ impl IndexedChunkMap {
         let filename = format!("{}/{}.{}", workdir, blob_info.blob_id(), FILE_SUFFIX);
 
         PersistMap::open(&filename, blob_info.chunk_count(), false, true)
-            .map(|map| IndexedChunkMap { map })
+            .map(|map| IndexedChunkMap { map, filename })
+    }
+
+    pub fn remove(self) -> Result<()> {
+        self.map.mark_deleted();
+        std::fs::remove_file(self.filename)?;
+        Ok(())
     }
 }
 
@@ -69,6 +77,10 @@ impl ChunkMap for IndexedChunkMap {
 
     fn as_range_map(&self) -> Option<&dyn RangeMap<I = u32>> {
         Some(self)
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.map.is_file_deleted()
     }
 }
 
@@ -279,6 +291,7 @@ mod tests {
             version: 1,
             magic2: MAGIC2,
             all_ready: MAGIC_ALL_READY,
+            deleted: 0,
             reserved: [0x0u8; HEADER_RESERVED_SIZE],
         };
 
@@ -324,6 +337,7 @@ mod tests {
             version: 0,
             magic2: 0,
             all_ready: 0,
+            deleted: 0,
             reserved: [0x0u8; HEADER_RESERVED_SIZE],
         };
 

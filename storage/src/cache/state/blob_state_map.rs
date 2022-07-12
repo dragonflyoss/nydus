@@ -164,6 +164,10 @@ where
         any.downcast_ref::<BlobStateMap<IndexedChunkMap, u32>>()
             .map(|v| v as &dyn RangeMap<I = u32>)
     }
+
+    fn is_deleted(&self) -> bool {
+        self.c.is_deleted()
+    }
 }
 
 impl RangeMap for BlobStateMap<IndexedChunkMap, u32> {
