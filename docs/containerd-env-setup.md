@@ -4,7 +4,7 @@ This document will walk through how to setup a nydus image service to work with 
 
 ## Install All Nydus Binaries
 
-Get `nydus-image`, `nydusd`, `nydusify`, `ctr-remote` and `nydus-overlayfs` binaries from [image-service release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+Get `nydus-image`, `nydusd`, `nydusify`, `ctr-remote` and `nydus-overlayfs` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
 
 `nydusd` currently has two binaries, `nydusd-fusedev` (for fuse daemon mode) and `nydusd-virtiofs` (for virtiofs daemon mode), choose the one that fits your mode and rename it as `nydusd`.
 
@@ -14,7 +14,7 @@ sudo cp nydusify containerd-nydus-grpc /usr/local/bin
 sudo cp ctr-remote nydus-overlayfs /usr/local/bin
 ```
 
-Get `containerd-nydus-grpc` binary from [nydus-snapshotter release](https://github.com/containerd/nydus-snapshotter/releases) page.
+Get `containerd-nydus-grpc` binary from nydus-snapshotter [release](https://github.com/containerd/nydus-snapshotter/releases) page.
 
 ```bash
 sudo cp nydusify containerd-nydus-grpc /usr/local/bin
@@ -36,7 +36,7 @@ $ sudo tee /etc/nydusd-config.json > /dev/null << EOF
         "timeout": 5,
         "connect_timeout": 5,
         "retry_limit": 2,
-        "auth": YOUR+LOGIN+AUTH=
+        "auth": "YOUR_LOGIN_AUTH="
       }
     },
     "cache": {
@@ -60,9 +60,9 @@ EOF
 
 Note:
 
-- The `auth` is Base64 encoded `username:password`. It is required by `nydusd` to enforce HTTP basic authentication method.
 - You might have to change the scheme from `http` to `https` according to you registry configuration.
-- Please copy your docker login auth from `$HOME/.docker/config.json` to replace `YOUR+LOGIN+AUTH=`.
+- The `auth` is base64 encoded `username:password`. It is required by `nydusd` to lazily pull image data from registry which is authentication enabled.
+- `containerd-nydus-grpc` will automatically read docker login auth from the configuration `$HOME/.docker/config.json`, otherwise please copy it to replace `YOUR_LOGIN_AUTH=`.
 
 Then start `containerd-nydus-grpc` remote snapshotter:
 
@@ -79,7 +79,7 @@ sudo /usr/local/bin/containerd-nydus-grpc \
     --log-to-stdout
 ```
 
-`cache-dir` argument represents the blob cache root dir, if unset, it will be set to `root` + "/cache". It overrides the `work_dir` option in `nydusd-config.json`.
+`cache-dir` argument represents the local blob cache root dir, if unset, it will be set to `root` + "/cache". It overrides the `device.cache.config.work_dir` option in `nydusd-config.json`.
 
 ## Configure and Start Containerd
 
@@ -124,6 +124,8 @@ sudo systemctl restart containerd
 
 ## Start a Local Registry Container
 
+To make it easier to convert and run nydus images next, we can run a local registry service with docker:
+
 ```bash
 sudo docker run -d --restart=always -p 5000:5000 registry
 ```
@@ -131,13 +133,47 @@ sudo docker run -d --restart=always -p 5000:5000 registry
 ## Convert an Image to Nydus Format
 
 Currently, nydus image must be created by converting from an existed OCI or docker v2 image.
-Please make sure you are authorized to pull and push the target registry. The basic method is to use `docker pull` and `docker push` to validate your access to the target registry.
+
+Note: For private registry repo, please make sure you are authorized to pull and push the target registry. The basic method is to use `docker pull` and `docker push` to validate your access to the target registry.
 
 ```bash
 sudo nydusify convert --nydus-image /usr/local/bin/nydus-image --source ubuntu --target localhost:5000/ubuntu-nydus
 ```
 
-## Create New Pods with Nydus Image in Kubernetes
+For more details about how to build nydus image, please refer to [nydusify](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusify.md) conversion tool and [acceld](https://github.com/goharbor/acceleration-service).
+
+## Try Nydus with `nerdctl`
+
+Nydus snapshotter has been supported by [nerdctl](https://github.com/containerd/nerdctl)(requires >= v0.22), we can lazily start container with it.
+
+```bash
+$ sudo nerdctl --snapshotter nydus run --rm -it localhost:5000/ubuntu-nydus:latest bash
+```
+
+## Try Nydus with `ctr-remote`
+
+Also nydus provides an enhanced `ctr` tool named as `ctr-remote` (Get binary from [release](https://github.com/dragonflyoss/image-service/releases) page) which is capable of pulling nydus image and start container based on nydus image, e.g.:
+
+Use extra `ctr-remote image rpull` command to lazily pull nydus image:
+
+```bash
+$ sudo ctr-remote image rpull --plain-http localhost:5000/ubuntu-nydus:latest
+fetching sha256:9523a2de... application/vnd.oci.image.manifest.v1+json
+fetching sha256:a2cdb40d... application/vnd.oci.image.config.v1+json
+fetching sha256:18059446... application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+Next run container with nydus snapshotter:
+
+```bash
+$ sudo ctr-remote run --rm -t --snapshotter=nydus localhost:5000/ubuntu-nydus:latest test /bin/bash
+$ ps -ef
+UID          PID    PPID  C STIME TTY          TIME CMD
+root           1       0  0 13:45 pts/0    00:00:00 /bin/bash
+root          10       1  0 13:46 pts/0    00:00:00 ps -ef
+```
+
+## Create Pod with Nydus Image in Kubernetes
 
 For example, use the following `nydus-sandbox.yaml` and `nydus-container.yaml`
 
@@ -171,7 +207,7 @@ args:
 log_path: container.1.log
 ```
 
-To create a new pod with the just converted nydus image:
+To create a pod with the just converted nydus image:
 
 ```bash
 $ sudo crictl pull localhost:5000/ubuntu-nydus:latest
@@ -181,40 +217,4 @@ $ sudo crictl start $container
 $ sudo crictl ps
 CONTAINER ID        IMAGE                                CREATED             STATE               NAME                      ATTEMPT             POD ID
 f4a6c6dc47e34       localhost:5000/ubuntu-nydus:latest   9 seconds ago       Running             nydus-container           0                   21b91779d551e
-```
-
-## Try Nydus with `ctr-remote`
-
-Nydus provides an enhanced `ctr` tool named as `ctr-remote` which is capable of pulling nydus image and start container based on nydus image leveraging `nydus-snapshotter` if it is properly configured and appends more critical labels to the nydus image which should consumed when `nydus-snapshotter` is setting up snapshot.
-
-You can also use `ctr-remote` to run containers with converted nydus image and pull it:
-
-```bash
-$ sudo ctr-remote image rpull --plain-http localhost:5000/ubuntu-nydus:latest
-fetching sha256:9523a2de... application/vnd.oci.image.manifest.v1+json
-fetching sha256:a2cdb40d... application/vnd.oci.image.config.v1+json
-fetching sha256:18059446... application/vnd.oci.image.layer.v1.tar+gzip
-```
-
-Next run container:
-
-```bash
-$ sudo ctr-remote run --rm -t --snapshotter=nydus localhost:5000/ubuntu-nydus:latest test /bin/bash
-$ ps -ef
-UID          PID    PPID  C STIME TTY          TIME CMD
-root           1       0  0 13:45 pts/0    00:00:00 /bin/bash
-root          10       1  0 13:46 pts/0    00:00:00 ps -ef
-```
-
-## Try Nydus with `nerdctl`
-
-To lazily start container with `nerdctl`, you CAN'T directly pull image using `nerdctl pull` or run container using `nerdctl run` since `nydus-snapshotter` relies on extra information to identify the image reference.
-`nydus-snapshotter` searches labels when preparing snapshot. Normal `pull` and `run` operations can't append such information to image when downloading and unpacking.
-Here, we MUST previously use `ctr-remote` to complete the image pulling.
-
-Then to lazily start container:
-
-```bash
-sudo ctr-remote image rpull --plain-http localhost:5000/ubuntu-nydus:latest
-sudo nerdctl --snapshotter nydus run --rm -it localhost:5000/ubuntu-nydus bash
 ```
