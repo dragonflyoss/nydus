@@ -91,7 +91,7 @@ mkdir -p /var/lib/containerd/io.containerd.snapshotter.v1.nydus
 ./bin/containerd-nydus-grpc \
  --config-path /path/nydus-erofs-config.json \
  --daemon-mode shared \
- --daemon-backend fscache \
+ --fs-driver fscache \
  --log-level info \
  --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
  --cache-dir /var/lib/nydus/cache \
