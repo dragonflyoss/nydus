@@ -17,7 +17,6 @@ jobs:
   convert-images:
     runs-on: ubuntu-latest
     # don't run this action on forks
-    if: github.repository_owner == 'dragonflyoss'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -42,20 +41,24 @@ jobs:
           sudo cp erofs-utils/fsck/fsck.erofs /usr/local/bin/
       - name: Convert RAFS v5 images
         run: |
+          sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v5"
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
-                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5 \
-                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v5 \
+                 --target localhost:5000/$I:nydus-nightly-v5 \
+                 --build-cache localhost:5000/nydus-build-cache:$I-v5 \
                  --fs-version 5
             sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
-                --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5
+            echo "{\"host\": \"localhost:5000\", \"repo\": \"${I}\", \"scheme\": \"http\"}" > backend.json
+            cat backend.json
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
+                --target localhost:5000/$I:nydus-nightly-v5 \
+                --backend-config-file ./backend.json --backend-type registry
           done
       - name: Convert and check RAFS v6 images
         run: |
-          sudo docker run -d --restart=always -p 5000:5000 registry
+          #sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v6"
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
