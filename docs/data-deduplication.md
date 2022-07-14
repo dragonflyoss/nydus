@@ -96,21 +96,72 @@ It uses file-level deduplication do reduce data transferred to/from the HTTP ser
 Data deduplication technologies may be used to reduce data generated, stored, transferred and loaded for container images and/or software packages.
 When talking about data deduplication for container images, it may mean different things from different point of view.
 For example, it may mean:
-- O1: reduce data uploaded to container registies
+- O1: reduce data uploaded to container registries
 - O2: reduce data stored in container registry storage backend
 - O3: reduce data downloaded from container registries
 - O4: reduce data stored on node local storage
 - O5: reduce data loaded from node local storage into memory
 
-![container_data_dedup](images/container-data-deduplication.drawio)
+![container_data_dedup](images/container-data-deduplication.png)
 
 # Nydus Data Deduplication
-The Rafs (Registry Accelerated File System), developed by the Nydus Image Service project, tries to reduce duplicated data by using `Fixed-Size Chunking Data Deduplication`.
+The Nydus Image Service project aims to achieve O1, O2, O3, O4 and O5 altogether with two technologies.
+
+First, it develops a new image format, named Rafs (Registry Accelerated File System), which reduces duplicated data by `Fixed-Size Chunking Dedup` at container build time.
+Rafs supports configurable chunking size, between 4K to 1M (`2^n, n >= 12 && n <= 20)`.
+By default, it reduces duplicated chunks within the same image layer and between layers of the same image. 
+It may also reduce duplicated chunks among images if a reference image is given.
+
+Second, it develops a CAS(content addressable storage) system to reduce node-level duplicated data at container runtime.
+We are still working on developing a CAS system for Nydus.
+
+![rafs_format](images/nydus-rafs-cas.svg)
 
 ## Data Deduplication within an Image Layer
 
+It follows the process to create an image layer from a source filesystem/directory:
+- create an image layer bootstrap file
+- create an empty image layer data file
+- create an empty `ChunkDigestHashTable`
+- scan the fs tree and for each filesystem object found:
+  - get metadata about the filesystem object, such as type, name, size, permission, owner, atime/ctime etc, and append a metadata entry to the bootstrap file.
+  - if the object is a normal file with data,
+    - split the file data into fixed-size chunks
+    - compute cryptographically secure hash signature for each chunk
+    - append the chunk to the data file and add the chunk digest to the `ChunkDigestHashTable` if it doesn't exist in the hash table yet
+
+Finally, we will get one bootstrap file containing all fs metadata and one data file containing de-duplicated data chunks.
+So all duplicated data chunks within the same layer will get de-duplicated.
+
+Data dedup within an image layer helps to achieve O1, O2, O3, O4 and O5.
+
 ## Data Deduplication within a Multiple Layer Image
+When creating the first layer of a multi-layer image, it follows the same process as above.
+When creating the following-on layers of a multi-layer image, there's one difference: it reuses the `ChunkDigestHashTable` of parent layer instead creating an empty one.
+By this way, all data chunks existing in ancestor layers will get de-duplicated.
+
+Data dedup among multiple image layers helps to achieve O1, O2, O3, O4 and O5.
 
 ## Data Deduplication among Multiple Images
+A referenced image may be used when creating an image by `nydus-image create --parent-bootstrap referenced-image-bootstrap ...`.
+When creating the first layer of an image, and a referenced parent image is present, it reconstructs the `ChunkDigestHashTable` from the reference bootstrap file instead of creating an empty one.
+By this way, all data chunks existing in the referenced image will get de-duplicated.
+This is most valuable for software upgrading scenario because there may be many duplicated chunks between the existing version and the new version.
+
+Data dedup among multiple images may help to achieve O1, O2, O3, O4 and O5.
 
 ## Data Deduplication on Node
+The above three methods achieve data dedup during image building stage.
+But multi container images may still contain duplicated data chunks, for example:
+- images containing the same nodejs library.
+- images containing the same java runtime.
+ 
+Even more, a container image may contain duplicated data with the host, say running a Ubuntu 16.04 based image on a Ubuntu 16.04 host.
+
+A node level CAS (content addressable storage) may help to de-duplicate data downloaded from the registry if it already exists in the node CAS system.
+When downloading a container image, all data chunks already existing in local CAS will be skipped, and chunks downloaded from the registry will be added to the local CAS system.
+So Nydus provides a node level CAS system to reduce data downloaded from the registry and data loaded into memory.
+
+The node level CAS system helps to achieve O4 and O5.
+
+# Node Level CAS System (WIP)
