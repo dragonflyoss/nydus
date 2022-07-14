@@ -16,12 +16,13 @@ use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+use std::{thread, time};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use storage::cache::BlobCache;
 use storage::device::BlobPrefetchRequest;
-use storage::factory::BLOB_FACTORY;
+use storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
 
 use crate::blob_cache::{
     generate_blob_key, BlobCacheConfigBootstrap, BlobCacheConfigDataBlob, BlobCacheMgr,
@@ -512,6 +513,38 @@ impl FsCacheHandler {
         }
     }
 
+    fn fill_bootstrap_cache(bootstrap_fd: RawFd, cachefile_fd: RawFd, size: usize) -> Result<()> {
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                bootstrap_fd,
+                0_i64,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            warn!(
+                "fscache: failed to mmap bootstrap file, {}",
+                std::io::Error::last_os_error()
+            );
+            return Err(eio!("fscache: fill bootstrap cachefile error"));
+        }
+
+        let ret = unsafe { libc::pwrite(cachefile_fd, base, size, 0) };
+        let _ = unsafe { libc::munmap(base, size) };
+
+        if ret != size as isize {
+            warn!(
+                "fscache: failed to write bootstrap blob data to cached file, {}",
+                std::io::Error::last_os_error()
+            );
+            return Err(eio!("fscache: fill bootstrap cachefile error"));
+        }
+        Ok(())
+    }
+
     fn handle_open_bootstrap(
         &self,
         hdr: &FsCacheMsgHeader,
@@ -540,11 +573,26 @@ impl FsCacheHandler {
                     }
                     Ok(md) => {
                         let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
+                        let bootstrap_fd = f.as_raw_fd();
+                        let cachefile_fd = cache_file.as_raw_fd();
                         let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
                             bootstrap_file: f,
                             cache_file,
                         }));
                         e.insert((object, msg.fd));
+                        let len = md.len() as usize;
+                        ASYNC_RUNTIME.spawn_blocking(move || {
+                            //add slight delay to let copen reply first
+                            thread::sleep(time::Duration::from_millis(10));
+                            for _i in 0..3 {
+                                if Self::fill_bootstrap_cache(bootstrap_fd, cachefile_fd, len)
+                                    .is_ok()
+                                {
+                                    break;
+                                }
+                                thread::sleep(time::Duration::from_secs(2));
+                            }
+                        });
                         md.len() as i64
                     }
                 },
