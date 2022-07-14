@@ -18,6 +18,7 @@ use crate::cache::state::{BlobStateMap, IndexedChunkMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
+use crate::factory::BLOB_FACTORY;
 use crate::meta::BlobMetaInfo;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -52,6 +53,7 @@ impl FsCacheMgr {
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
+        BLOB_FACTORY.start_mgr_checker();
         Ok(FsCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
             blobs_need,
