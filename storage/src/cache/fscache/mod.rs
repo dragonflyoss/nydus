@@ -17,7 +17,8 @@ use crate::cache::cachedfile::FileCacheEntry;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::{BlobFeatures, BlobInfo};
+use crate::device::{BlobFeatures, BlobInfo, BlobObject};
+use crate::factory::BLOB_FACTORY;
 use crate::meta::BlobMetaInfo;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -25,6 +26,7 @@ use crate::meta::BlobMetaInfo;
 #[derive(Clone)]
 pub struct FsCacheMgr {
     blobs: Arc<RwLock<HashMap<String, Arc<FileCacheEntry>>>>,
+    blobs_need: usize,
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -42,6 +44,7 @@ impl FsCacheMgr {
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
+        blobs_need: usize,
     ) -> Result<FsCacheMgr> {
         let blob_config: FsCacheConfig =
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
@@ -50,8 +53,10 @@ impl FsCacheMgr {
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
+        BLOB_FACTORY.start_mgr_checker();
         Ok(FsCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
+            blobs_need,
             backend,
             metrics,
             prefetch_config,
@@ -145,6 +150,31 @@ impl BlobCacheMgr for FsCacheMgr {
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
         self.get_or_create_cache_entry(blob_info)
             .map(|v| v as Arc<dyn BlobCache>)
+    }
+
+    fn check_stat(&self) {
+        let guard = self.blobs.read().unwrap();
+        if guard.len() != self.blobs_need {
+            info!(
+                "blob mgr not ready to check stat, need blobs {} have blobs {}",
+                self.blobs_need,
+                guard.len()
+            );
+            return;
+        }
+
+        let mut all_ready = true;
+        for (_id, entry) in guard.iter() {
+            if !entry.is_all_data_ready() {
+                all_ready = false;
+                break;
+            }
+        }
+
+        if all_ready {
+            self.worker_mgr.stop();
+            self.metrics.data_all_ready.store(true, Ordering::Release);
+        }
     }
 }
 

@@ -13,13 +13,16 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Result as IOResult;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use tokio::runtime::{Builder, Runtime};
-
 use nydus_api::http::{BackendConfig, FactoryConfig};
+use tokio::{
+    runtime::{Builder, Runtime},
+    time,
+};
 
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
@@ -32,12 +35,13 @@ use crate::cache::{BlobCache, BlobCacheMgr, DummyCacheMgr, FileCacheMgr, FsCache
 use crate::device::BlobInfo;
 
 lazy_static! {
-    static ref ASYNC_RUNTIME: Arc<Runtime> = {
+    pub static ref ASYNC_RUNTIME: Arc<Runtime> = {
         let runtime = Builder::new_multi_thread()
                 .worker_threads(1) // Limit the number of worker thread to 1 since this runtime is generally used to do blocking IO.
                 .thread_keep_alive(Duration::from_secs(10))
                 .max_blocking_threads(8)
                 .thread_name("cache-flusher")
+                .enable_all()
                 .build();
         match runtime {
             Ok(v) => Arc::new(v),
@@ -69,6 +73,7 @@ lazy_static::lazy_static! {
 /// Factory to create blob cache for blob objects.
 pub struct BlobFactory {
     mgrs: Mutex<HashMap<BlobCacheMgrKey, Arc<dyn BlobCacheMgr>>>,
+    mgr_checker_active: AtomicBool,
 }
 
 impl BlobFactory {
@@ -76,7 +81,25 @@ impl BlobFactory {
     pub fn new() -> Self {
         BlobFactory {
             mgrs: Mutex::new(HashMap::new()),
+            mgr_checker_active: AtomicBool::new(false),
         }
+    }
+
+    pub fn start_mgr_checker(&self) {
+        if self
+            .mgr_checker_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        ASYNC_RUNTIME.spawn(async {
+            let mut interval = time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                BLOB_FACTORY.check_cache_stat();
+            }
+        });
     }
 
     /// Create a blob cache object for a blob with specified configuration.
@@ -84,6 +107,7 @@ impl BlobFactory {
         &self,
         config: &Arc<FactoryConfig>,
         blob_info: &Arc<BlobInfo>,
+        blobs_need: usize,
     ) -> IOResult<Arc<dyn BlobCache>> {
         let key = BlobCacheMgrKey {
             config: config.clone(),
@@ -92,7 +116,6 @@ impl BlobFactory {
         if let Some(mgr) = self.mgrs.lock().unwrap().get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
-
         let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
         let mgr = match key.config.cache.cache_type.as_str() {
             "blobcache" => {
@@ -101,6 +124,7 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
+                    blobs_need,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
@@ -111,6 +135,7 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
+                    blobs_need,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
@@ -189,6 +214,13 @@ impl BlobFactory {
                 "unsupported backend type '{}'",
                 config.backend_type
             ))),
+        }
+    }
+
+    fn check_cache_stat(&self) {
+        let mgrs = self.mgrs.lock().unwrap();
+        for (_key, mgr) in mgrs.iter() {
+            mgr.check_stat();
         }
     }
 }

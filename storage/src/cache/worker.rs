@@ -5,10 +5,11 @@
 
 use std::io::Result;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tokio::time::interval;
 
 use fuse_backend_rs::transport::FileVolatileSlice;
 use governor::clock::QuantaClock;
@@ -22,6 +23,7 @@ use nydus_utils::async_helper::with_runtime;
 use nydus_utils::mpmc::Channel;
 
 use crate::cache::{BlobCache, BlobIoRange};
+use crate::factory::ASYNC_RUNTIME;
 use crate::RAFS_MAX_CHUNK_SIZE;
 
 /// Configuration information for asynchronous workers.
@@ -85,6 +87,7 @@ pub(crate) struct AsyncWorkerMgr {
     metrics: Arc<BlobcacheMetrics>,
     ping_requests: AtomicU32,
     workers: AtomicU32,
+    active: AtomicBool,
 
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -119,6 +122,7 @@ impl AsyncWorkerMgr {
             metrics,
             ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
+            active: AtomicBool::new(false),
 
             prefetch_channel: Arc::new(Channel::new()),
             prefetch_config,
@@ -139,6 +143,13 @@ impl AsyncWorkerMgr {
 
     /// Stop all working threads.
     pub fn stop(&self) {
+        if self
+            .active
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
         self.prefetch_channel.close();
 
         while self.workers.load(Ordering::Relaxed) > 0 {
@@ -219,7 +230,7 @@ impl AsyncWorkerMgr {
                 return Err(e);
             }
         }
-
+        mgr.active.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -235,6 +246,7 @@ impl AsyncWorkerMgr {
                             blob_cache,
                             offset,
                             size,
+                            state.clone(),
                         ));
                     }
                 }
@@ -296,10 +308,11 @@ impl AsyncWorkerMgr {
     }
 
     async fn handle_blob_prefetch_request(
-        _mgr: Arc<AsyncWorkerMgr>,
+        mgr: Arc<AsyncWorkerMgr>,
         cache: Arc<dyn BlobCache>,
         offset: u64,
         size: u64,
+        req_state: Arc<AtomicU32>,
     ) -> Result<()> {
         trace!(
             "storage: prefetch blob {} offset {} size {}",
@@ -314,12 +327,24 @@ impl AsyncWorkerMgr {
         if let Some(obj) = cache.get_blob_object() {
             if let Err(e) = obj.fetch_range_compressed(offset, size) {
                 warn!(
-                    "storage: failed to prefetch data from blob {}, offset {}, size {}, {}",
+                    "storage: failed to prefetch data from blob {}, offset {}, size {}, {}, will try resend",
                     cache.blob_id(),
                     offset,
                     size,
                     e
                 );
+
+                ASYNC_RUNTIME.spawn(async move {
+                    let mut interval = interval(Duration::from_secs(1));
+                    interval.tick().await;
+                    let msg = AsyncPrefetchMessage::new_blob_prefetch(
+                        req_state,
+                        cache.clone(),
+                        offset,
+                        size,
+                    );
+                    let _ = mgr.send_prefetch_message(msg);
+                });
             }
         } else {
             // This is only supported by localfs backend to prefetch data into page cache,
