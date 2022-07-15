@@ -50,6 +50,8 @@ struct FuseOp {
     timestamp_secs: u64,
 }
 
+const MTAB_PATH: &str = "/etc/mtab";
+
 impl Default for FuseOp {
     fn default() -> Self {
         // unwrap because time can't be earlier than EPOCH.
@@ -435,36 +437,21 @@ fn is_mounted(mp: impl AsRef<Path>) -> Result<bool> {
     Ok(match_mp.is_some())
 }
 
-// TODO: Perhaps, we can't rely on `/proc/self/mounts` to tell if it is mounted.
 #[cfg(target_os = "linux")]
 fn is_mounted(mp: impl AsRef<Path>) -> Result<bool> {
-    let mounts = CString::new("/proc/self/mounts").unwrap();
-    let ty = CString::new("r").unwrap();
+    let dir = mount_dir.as_ref().to_string_lossy().into_owned();
+    let f = File::open(MTAB_PATH)?;
+    let reader = BufReader::new(f);
 
-    let mounts_stream = unsafe {
-        libc::setmntent(
-            mounts.as_ptr() as *const libc::c_char,
-            ty.as_ptr() as *const libc::c_char,
-        )
-    };
-
-    loop {
-        let mnt = unsafe { libc::getmntent(mounts_stream) };
-        if mnt as u32 == libc::PT_NULL {
-            break;
-        }
-
-        // Mount point path
-        if unsafe { CStr::from_ptr((*mnt).mnt_dir) }
-            == CString::new(mp.as_ref().as_os_str().as_bytes())?.as_c_str()
-        {
-            unsafe { libc::endmntent(mounts_stream) };
-            return Ok(true);
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.contains(&dir.as_str()) {
+            if !parts.is_empty() {
+                return Ok(Some(PathBuf::from(parts[0])));
+            }
         }
     }
-
-    unsafe { libc::endmntent(mounts_stream) };
-
     Ok(false)
 }
 
