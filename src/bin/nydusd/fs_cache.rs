@@ -250,7 +250,12 @@ impl FsCacheHandler {
             .write(true)
             .read(true)
             .create(false)
-            .open(path)?;
+            .open(path)
+            .map_err(|e| {
+                error!("Failed to open cachefiles device {}. {}", path, e);
+                e
+            })?;
+
         let poller =
             Poll::new().map_err(|_e| eother!("fscache: failed to create poller for service"))?;
         let waker = Waker::new(poller.registry(), Token(TOKEN_EVENT_WAKER))
