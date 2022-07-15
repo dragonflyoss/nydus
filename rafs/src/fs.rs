@@ -38,7 +38,6 @@ use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
 use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 
-use crate::metadata::layout::RAFS_ROOT_INODE;
 use crate::metadata::{
     Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT, RAFS_MAX_CHUNK_SIZE,
 };
@@ -480,9 +479,10 @@ impl Rafs {
         let sb = self.sb.clone();
         let device = self.device.clone();
         let prefetch_all = self.prefetch_all;
+        let root_ino = self.root_ino();
 
         let _ = std::thread::spawn(move || {
-            Self::do_prefetch(reader, prefetch_files, prefetch_all, sb, device);
+            Self::do_prefetch(root_ino, reader, prefetch_files, prefetch_all, sb, device);
         });
     }
 
@@ -496,6 +496,7 @@ impl Rafs {
     }
 
     fn do_prefetch(
+        root_ino: u64,
         mut reader: RafsIoReader,
         prefetch_files: Option<Vec<PathBuf>>,
         prefetch_all: bool,
@@ -517,6 +518,11 @@ impl Rafs {
             warn!("Prefetch error, {:?}", e);
         });
 
+        let ignore_prefetch_all = prefetch_files
+            .as_ref()
+            .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
+            .unwrap_or(false);
+
         let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
         // Prefetch procedure does not affect rafs mounting
         sb.prefetch_files(&mut reader, inodes, &|desc| {
@@ -528,8 +534,9 @@ impl Rafs {
             info!("No file to be prefetched {:?}", e);
         });
 
-        if prefetch_all {
-            let root = vec![RAFS_ROOT_INODE];
+        if prefetch_all && !ignore_prefetch_all {
+            let root = vec![root_ino];
+
             sb.prefetch_files(&mut reader, Some(root), &|desc| {
                 device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                     warn!("Prefetch error, {:?}", e);
