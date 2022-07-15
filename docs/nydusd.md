@@ -24,6 +24,7 @@ cat /path/to/config-localfs.json
 ```
 
 ### Run With FUSE
+If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md) for more details.
 
 ``` shell
 sudo nydusd \
@@ -34,6 +35,7 @@ sudo nydusd \
 ```
 
 ### Run With Virtio-FS
+If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md) for more details.
 
 Virtio-fs is supported by both [QEMU](https://www.qemu.org/) and [Cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor). To run `nydusd` with virtio-fs support, first start it with `--sock` option to expose a virtio-fs socket endpoint.
 
