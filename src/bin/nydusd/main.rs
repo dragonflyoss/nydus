@@ -5,8 +5,6 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 #![deny(warnings)]
 #![allow(dead_code)]
-#[macro_use(crate_version)]
-extern crate clap;
 #[macro_use]
 extern crate log;
 #[macro_use]
@@ -25,7 +23,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clap::{App, Arg, ArgMatches, SubCommand, Values};
+use clap::{crate_version, App, Arg, ArgMatches, SubCommand, Values};
 use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::Resource;
@@ -204,16 +202,16 @@ const SHARED_DIR_HELP_MESSAGE: &str = "Directory to share between host and guest
 const SHARED_DIR_HELP_MESSAGE: &str =
     "Directory to share by FUSE for testing, which also enables `passthroughfs` mode";
 
-pub fn thread_validator(v: String) -> std::result::Result<(), String> {
-    ensure_threads(v).map(|_| ())
+pub fn thread_validator(v: &str) -> std::result::Result<String, String> {
+    ensure_threads(v).map(|s| s.to_string())
 }
 
 #[cfg(any(feature = "fusedev", feature = "virtiofs"))]
-fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_fs_options(app: App<'static>) -> App<'static> {
     app.arg(
         Arg::with_name("bootstrap")
             .long("bootstrap")
-            .short("B")
+            .short('B')
             .help("Bootstrap file of a rafs filesystem, which also enables `rafs` mode")
             .takes_value(true)
             .requires("config")
@@ -222,7 +220,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     .arg(
         Arg::with_name("shared-dir")
             .long("shared-dir")
-            .short("s")
+            .short('s')
             .help(SHARED_DIR_HELP_MESSAGE)
             .takes_value(true)
             .conflicts_with("bootstrap"),
@@ -230,7 +228,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     .arg(
         Arg::with_name("prefetch-files")
             .long("prefetch-files")
-            .short("P")
+            .short('P')
             .help("List of file/directory to prefetch")
             .takes_value(true)
             .required(false)
@@ -240,7 +238,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     .arg(
         Arg::with_name("virtual-mountpoint")
             .long("virtual-mountpoint")
-            .short("m")
+            .short('m')
             .help("Path within the FUSE/virtiofs device to mount the filesystem")
             .takes_value(true)
             .default_value("/")
@@ -249,11 +247,11 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
 }
 
 #[cfg(feature = "fusedev")]
-fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_fuse_options(app: App<'static>) -> App<'static> {
     app.arg(
         Arg::with_name("mountpoint")
             .long("mountpoint")
-            .short("M")
+            .short('M')
             .help("Path to mount the FUSE filesystem, target for `mount.fuse`")
             .takes_value(true)
             .required(false),
@@ -261,7 +259,7 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
     .arg(
         Arg::with_name("failover-policy")
             .long("failover-policy")
-            .short("F")
+            .short('F')
             .default_value("resend")
             .help("FUSE server failover policy")
             .possible_values(&["resend", "flush"])
@@ -271,24 +269,24 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
     .arg(
         Arg::with_name("threads")
             .long("thread-num")
-            .short("T")
+            .short('T')
             .default_value("1")
             .help("Number of worker threads to serve IO requests")
+            .value_parser(thread_validator)
             .takes_value(true)
-            .required(false)
-            .validator(thread_validator),
+            .required(false),
     )
     .arg(
         Arg::with_name("writable")
             .long("writable")
-            .short("W")
+            .short('W')
             .help("Mounts FUSE filesystem in rw mode")
             .takes_value(false),
     )
 }
 
 #[cfg(feature = "fusedev")]
-fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_fuse_subcmd_options(app: App<'static>) -> App<'static> {
     let subcmd = SubCommand::with_name("fuse").about("Run as a dedicated FUSE server");
     let subcmd = append_fuse_options(subcmd);
     let subcmd = append_fs_options(subcmd);
@@ -296,11 +294,11 @@ fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'stati
 }
 
 #[cfg(feature = "virtiofs")]
-fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_virtiofs_options(app: App<'static>) -> App<'static> {
     app.arg(
         Arg::with_name("hybrid-mode")
             .long("hybrid-mode")
-            .short("H")
+            .short('H')
             .help("Enables both `rafs` and `passthroughfs` modes")
             .required(false)
             .takes_value(false),
@@ -308,7 +306,7 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
     .arg(
         Arg::with_name("sock")
             .long("sock")
-            .short("v")
+            .short('v')
             .help("Vhost-user API socket")
             .takes_value(true)
             .required(false),
@@ -316,20 +314,20 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
 }
 
 #[cfg(feature = "virtiofs")]
-fn append_virtiofs_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_virtiofs_subcmd_options(app: App<'static>) -> App<'static> {
     let subcmd = SubCommand::with_name("virtiofs").about("Run as a dedicated virtiofs server");
     let subcmd = append_virtiofs_options(subcmd);
     let subcmd = append_fs_options(subcmd);
     app.subcommand(subcmd)
 }
 
-fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_services_subcmd_options(app: App<'static>) -> App<'static> {
     let subcmd = SubCommand::with_name("daemon")
         .about("Run as a global daemon hosting multiple blobcache/fscache/virtiofs services.")
         .arg(
             Arg::with_name("fscache")
                 .long("fscache")
-                .short("F")
+                .short('F')
                 .help("Working directory for Linux fscache driver to store cached files")
                 .takes_value(true),
         )
@@ -345,21 +343,21 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
                 .long("fscache-threads")
                 .default_value("1")
                 .help("Number of working threads to serve fscache requests")
+                .value_parser(thread_validator)
                 .takes_value(true)
-                .required(false)
-                .validator(thread_validator),
+                .required(false),
         );
 
     app.subcommand(subcmd)
 }
 
-fn prepare_commandline_options() -> App<'static, 'static> {
+fn prepare_commandline_options() -> App<'static> {
     let cmdline = App::new("nydusd")
         .about("Nydus BlobCache/FsCache/Image Service")
         .arg(
             Arg::with_name("apisock")
                 .long("apisock")
-                .short("A")
+                .short('A')
                 .help("Administration API socket")
                 .takes_value(true)
                 .required(false)
@@ -368,7 +366,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("config")
                 .long("config")
-                .short("C")
+                .short('C')
                 .help("Configuration file")
                 .required(false)
                 .global(true)
@@ -377,7 +375,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("id")
                 .long("id")
-                .short("I")
+                .short('I')
                 .help("Service instance identifier")
                 .takes_value(true)
                 .required(false)
@@ -387,7 +385,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
-                .short("l")
+                .short('l')
                 .help("Log level:")
                 .default_value("info")
                 .possible_values(&["trace", "debug", "info", "warn", "error"])
@@ -398,7 +396,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
-                .short("L")
+                .short('L')
                 .help("Log messages to the file. Default extension \".log\" will be used if no extension specified.")
                 .takes_value(true)
                 .required(false)
@@ -407,7 +405,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("rlimit-nofile")
                 .long("rlimit-nofile")
-                .short("R")
+                .short('R')
                 .default_value("1000000")
                 .help("Set rlimit for maximum file descriptor number (0 leaves it unchanged)")
                 .takes_value(true)
@@ -417,7 +415,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("supervisor")
                 .long("supervisor")
-                .short("S")
+                .short('S')
                 .help("Supervisor API socket")
                 .takes_value(true)
                 .required(false)
@@ -427,7 +425,7 @@ fn prepare_commandline_options() -> App<'static, 'static> {
         .arg(
             Arg::with_name("upgrade")
                 .long("upgrade")
-                .short("U")
+                .short('U')
                 .help("Starts daemon in upgrade mode")
                 .takes_value(false)
                 .required(false)
@@ -521,8 +519,8 @@ fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<(
 }
 
 pub struct SubCmdArgs<'a> {
-    args: &'a ArgMatches<'a>,
-    subargs: &'a ArgMatches<'a>,
+    args: &'a ArgMatches,
+    subargs: &'a ArgMatches,
 }
 
 impl<'a> SubCmdArgs<'a> {
@@ -688,9 +686,9 @@ fn process_default_fs_service(
     _apisock: Option<&str>,
     _is_fuse: bool,
 ) -> Result<()> {
-    return Err(einval!(
+    Err(einval!(
         "Neither fusedev nor virtiofs is enabled, please recompile nydusd with required features!"
-    ));
+    ))
 }
 
 fn process_daemon_arguments(
@@ -707,9 +705,15 @@ fn process_daemon_arguments(
     Ok(())
 }
 
+lazy_static! {
+    static ref BTI_STRING: String = BuildTimeInfo::dump(crate_version!()).0;
+    static ref BIT: BuildTimeInfo = BuildTimeInfo::dump(crate_version!()).1;
+}
+
 fn main() -> Result<()> {
-    let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
-    let cmd_options = prepare_commandline_options().version(bti_string.as_str());
+    // let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
+    let bti = BIT.to_owned();
+    let cmd_options = prepare_commandline_options().version(BTI_STRING.as_ref());
     let args = cmd_options.clone().get_matches();
     let logging_file = args.value_of("log-file").map(|l| l.into());
     // Safe to unwrap because it has default value and possible values are defined

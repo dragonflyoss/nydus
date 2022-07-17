@@ -139,15 +139,15 @@ impl OutputSerializer {
     }
 }
 
-fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
+fn prepare_cmd_args(bti_string: &str) -> App {
     let arg_chunk_dict = Arg::with_name("chunk-dict")
         .long("chunk-dict")
-        .short("M")
+        .short('M')
         .help("Specify a chunk dictionary for chunk deduplication")
         .takes_value(true);
     let arg_prefetch_policy = Arg::with_name("prefetch-policy")
         .long("prefetch-policy")
-        .short("P")
+        .short('P')
         .help("blob data prefetch policy")
         .takes_value(true)
         .required(false)
@@ -156,7 +156,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
 
     // TODO: Try to use yaml to define below options
     App::new("")
-        .version(bti_string.as_str())
+        .version(bti_string)
         .author(crate_authors!())
         .about("Build or inspect RAFS filesystems for nydus accelerated container images.")
         .subcommand(
@@ -171,7 +171,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("source-type")
                         .long("source-type")
-                        .short("t")
+                        .short('t')
                         .help("type of the source:")
                         .takes_value(true)
                         .default_value("directory")
@@ -199,7 +199,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
-                        .short("B")
+                        .short('B')
                         .help("path to store the nydus image's metadata blob")
                         .required_unless("diff-bootstrap-dir")
                         .conflicts_with("diff-bootstrap-dir")
@@ -209,7 +209,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 ).arg(
                     Arg::with_name("blob")
                         .long("blob")
-                        .short("b")
+                        .short('b')
                         .help("path to store nydus image's data blob")
                         .required_unless("backend-type")
                         .required_unless("source-type")
@@ -235,7 +235,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("chunk-size")
                         .long("chunk-size")
-                        .short("S")
+                        .short('S')
                         .help("size of nydus image data chunk, must be power of two and between 0x1000-0x100000:")
                         .default_value("0x100000")
                         .required(false)
@@ -244,7 +244,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("compressor")
                         .long("compressor")
-                        .short("c")
+                        .short('c')
                         .help("algorithm to compress image data blob:")
                         .takes_value(true)
                         .required(false)
@@ -254,7 +254,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("digester")
                         .long("digester")
-                        .short("d")
+                        .short('d')
                         .help("algorithm to digest inodes and data chunks:")
                         .takes_value(true)
                         .required(false)
@@ -264,7 +264,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("fs-version")
                         .long("fs-version")
-                        .short("v")
+                        .short('v')
                         .help("version number of nydus image format:")
                         .required(true)
                         .default_value("5")
@@ -273,7 +273,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("parent-bootstrap")
                         .long("parent-bootstrap")
-                        .short("p")
+                        .short('p')
                         .help("path to parent/referenced image's metadata blob (optional)")
                         .takes_value(true)
                         .required(false),
@@ -284,7 +284,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("repeatable")
                         .long("repeatable")
-                        .short("R")
+                        .short('R')
                         .help("generate reproducible nydus image")
                         .takes_value(false)
                         .required(false),
@@ -299,7 +299,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("whiteout-spec")
                         .long("whiteout-spec")
-                        .short("W")
+                        .short('W')
                         .help("type of whiteout specification:")
                         .takes_value(true)
                         .required(true)
@@ -309,14 +309,14 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("output-json")
                         .long("output-json")
-                        .short("J")
+                        .short('J')
                         .help("JSON output path for build result")
                         .takes_value(true)
                 )
                 .arg(
                     Arg::with_name("aligned-chunk")
                         .long("aligned-chunk")
-                        .short("A")
+                        .short('A')
                         .help("Align data chunks to 4K")
                         .takes_value(false)
                 )
@@ -330,7 +330,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("blob-dir")
                         .long("blob-dir")
-                        .short("D")
+                        .short('D')
                         .help("directory to store nydus image's metadata and data blob")
                         .takes_value(true)
                 )
@@ -358,7 +358,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
-                        .short("B")
+                        .short('B')
                         .help("output path of nydus overlaid bootstrap")
                         .required(true)
                         .takes_value(true),
@@ -382,7 +382,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
-                        .short("B")
+                        .short('B')
                         .help("path to nydus image's metadata blob (required)")
                         .required(true)
                         .takes_value(true),
@@ -390,14 +390,14 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("verbose")
                         .long("verbose")
-                        .short("V")
+                        .short('V')
                         .help("verbose output")
                         .required(false),
                 )
                 .arg(
                     Arg::with_name("output-json")
                         .long("output-json")
-                        .short("J")
+                        .short('J')
                         .help("path to JSON output file")
                         .takes_value(true)
                 )
@@ -408,7 +408,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
-                        .short("B")
+                        .short('B')
                         .help("path to nydus image's metadata blob (required)")
                         .required(true)
                         .takes_value(true),
@@ -416,7 +416,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("request")
                         .long("request")
-                        .short("R")
+                        .short('R')
                         .help("inspect nydus image's filesystem metadata in request mode")
                         .required(false)
                         .takes_value(true),
@@ -428,7 +428,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
-                        .short("B")
+                        .short('B')
                         .help("generate stats information for base image from the specified metadata blob")
                         .required(false)
                         .takes_value(true),
@@ -436,7 +436,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("blob-dir")
                         .long("blob-dir")
-                        .short("D")
+                        .short('D')
                         .help("Generate stats information for base image from the all metadata blobs in the directory")
                         .required(false)
                         .takes_value(true)
@@ -444,7 +444,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("target")
                         .long("target")
-                        .short("T")
+                        .short('T')
                         .help("generate stats information for target image from the specified metadata blob, deduplicating all chunks existing in the base image")
                         .required(false)
                         .takes_value(true),
@@ -452,7 +452,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("output-json")
                         .long("output-json")
-                        .short("J")
+                        .short('J')
                         .help("path to JSON output file")
                         .takes_value(true)
                 )
@@ -463,7 +463,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
-                        .short("B")
+                        .short('B')
                         .help("bootstrap to compact")
                         .required(true)
                         .takes_value(true),
@@ -471,7 +471,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("config")
                         .long("config")
-                        .short("C")
+                        .short('C')
                         .help("config to compactor")
                         .required(true)
                         .takes_value(true),
@@ -493,21 +493,21 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("chunk-dict")
                         .long("chunk-dict")
-                        .short("M")
+                        .short('M')
                         .help("Specify a chunk dictionary for chunk deduplication")
                         .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("output-bootstrap")
                         .long("output-bootstrap")
-                        .short("O")
+                        .short('O')
                         .help("bootstrap to output, default is source bootstrap add suffix .compact")
                         .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("output-json")
                         .long("output-json")
-                        .short("J")
+                        .short('J')
                         .help("path to JSON output file")
                         .takes_value(true))
         )
@@ -517,14 +517,14 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
             .arg(
                 Arg::with_name("bootstrap")
                 .long("bootstrap")
-                .short("B")
+                .short('B')
                 .help("path to bootstrap file")
                 .required(true)
                 .takes_value(true))
             .arg(
                 Arg::with_name("blob")
                 .long("blob")
-                .short("b")
+                .short('b')
                 .help("path to blob file")
                 .required(false)
                 .takes_value(true)
@@ -540,7 +540,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
-                .short("o")
+                .short('o')
                 .help("Specify log file name")
                 .takes_value(true)
                 .required(false)
@@ -549,7 +549,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
-                .short("l")
+                .short('l')
                 .help("Specify log level:")
                 .default_value("info")
                 .possible_values(&["trace", "debug", "info", "warn", "error"])
@@ -557,7 +557,6 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .required(false)
                 .global(true),
         )
-        .get_matches()
 }
 
 fn init_log(matches: &ArgMatches) -> Result<()> {
@@ -576,7 +575,9 @@ fn init_log(matches: &ArgMatches) -> Result<()> {
 fn main() -> Result<()> {
     let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
 
-    let cmd = prepare_cmd_args(bti_string);
+    let mut app = prepare_cmd_args(bti_string.as_ref());
+    let usage = app.render_usage();
+    let cmd = app.get_matches();
 
     init_log(&cmd)?;
 
@@ -598,7 +599,7 @@ fn main() -> Result<()> {
     } else if let Some(matches) = cmd.subcommand_matches("unpack") {
         Command::unpack(matches)
     } else {
-        println!("{}", cmd.usage());
+        println!("{}", usage);
         Ok(())
     }
 }
@@ -887,7 +888,7 @@ impl Command {
         Ok(())
     }
 
-    fn get_bootstrap<'a>(matches: &'a clap::ArgMatches) -> Result<&'a Path> {
+    fn get_bootstrap(matches: &clap::ArgMatches) -> Result<&Path> {
         match matches.value_of("bootstrap") {
             None => bail!("missing parameter `bootstrap`"),
             Some(s) => Ok(Path::new(s)),

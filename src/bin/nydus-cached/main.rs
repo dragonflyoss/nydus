@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("sock")
                 .long("sock")
-                .short("S")
+                .short('S')
                 .help("Service API socket")
                 .takes_value(true)
                 .required(true),
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("config")
                 .long("config")
-                .short("C")
+                .short('C')
                 .help("Configuration file")
                 .takes_value(true)
                 .required(false)
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("log-level")
                 .long("log-level")
-                .short("l")
+                .short('l')
                 .help("Log level:")
                 .default_value("info")
                 .possible_values(&["trace", "debug", "info", "warn", "error"])
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
-                .short("L")
+                .short('L')
                 .help("Log messages to the file. If file extension is not specified, the default extenstion \".log\" will be appended.")
                 .takes_value(true)
                 .required(false)
@@ -71,7 +71,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("test")
                 .long("test")
-                .short("T")
+                .short('T')
                 .help("run as client for tests")
                 .takes_value(false)
                 .required(false),
@@ -79,7 +79,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::with_name("workdir")
                 .long("workdir")
-                .short("W")
+                .short('W')
                 .help("working directory")
                 .takes_value(true)
                 .required(true),

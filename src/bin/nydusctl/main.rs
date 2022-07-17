@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
                 .arg(
                     Arg::with_name("interval")
                         .long("interval")
-                        .short("I")
+                        .short('I')
                         .required(false)
                         .takes_value(true),
                 ),
