@@ -17,7 +17,7 @@ extern crate nydus_rafs as rafs;
 use std::collections::HashMap;
 
 use anyhow::Result;
-use clap::{App, Arg, SubCommand};
+use clap::{Arg, ArgAction, Command};
 
 mod client;
 mod commands;
@@ -27,120 +27,113 @@ use commands::{
 };
 use nydus_app::BuildTimeInfo;
 
+lazy_static! {
+    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (_, build_info) = BuildTimeInfo::dump();
-    let app = App::new("A client to query and configure the nydusd daemon\n")
-        .version(build_info.package_ver.as_str())
+    let app = Command::new("A client to query and configure the nydusd daemon\n")
+        .version(BTI.package_ver.as_str())
         .author(crate_authors!())
         .arg(
-            Arg::with_name("sock")
+            Arg::new("sock")
                 .help("Sets file path for the nydusd API socket")
-                .short("S")
+                .short('S')
                 .long("sock")
                 .required(true)
-                .takes_value(true)
                 .global(false),
         )
         .arg(
-            Arg::with_name("raw")
+            Arg::new("raw")
                 .help("Outputs messages in plain json mode")
-                .short("r")
+                .short('r')
                 .long("raw")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .global(true),
         )
-        .subcommand(SubCommand::with_name("info").about("Gets information about the nydusd daemon"))
+        .subcommand(Command::new("info").about("Gets information about the nydusd daemon"))
         .subcommand(
-            SubCommand::with_name("set")
+            Command::new("set")
                 .about("Configures parameters for the nydusd daemon")
-                .help(
+                .override_help(
                     r#"Configurable parameters:
          <KIND>  : <VALUE>
         log-level: trace, debug, info, warn, error"#,
                 )
                 .arg(
-                    Arg::with_name("KIND")
+                    Arg::new("KIND")
                         .help("the parameter to configure")
                         .required(true)
-                        .takes_value(true)
-                        .possible_values(&["log-level"])
+                        .value_parser(["log-level"])
                         .index(1),
                 )
                 .arg(
-                    Arg::with_name("VALUE")
+                    Arg::new("VALUE")
                         .help("the configuration value")
                         .required(true)
-                        .takes_value(true)
                         .index(2),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("metrics")
+            Command::new("metrics")
                 .about("Gets runtime metrics about backend, cache and filesystems")
                 .arg(
-                    Arg::with_name("category")
+                    Arg::new("category")
                         .help("the metrics category to fetch")
                         .required(true)
-                        .possible_values(&["backend", "cache", "fsstats"])
-                        .takes_value(true)
+                        .value_parser(["backend", "cache", "fsstats"])
                         .index(1),
                 )
                 .arg(
-                    Arg::with_name("interval")
+                    Arg::new("interval")
                         .help("interval to refresh the metrics")
-                        .short("I")
+                        .short('I')
                         .long("interval")
-                        .required(false)
-                        .takes_value(true),
+                        .required(false),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("mount")
+            Command::new("mount")
                 .about("Mounts a new filesystem instance")
                 .arg(
-                    Arg::with_name("source")
+                    Arg::new("source")
                         .help("Storage backend for the filesystem instance")
-                        .short("s")
+                        .short('s')
                         .long("source")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 .arg(
-                    Arg::with_name("config")
+                    Arg::new("config")
                         .help("Configuration file for the new filesystem instance")
-                        .short("c")
+                        .short('c')
                         .long("config")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 .arg(
-                    Arg::with_name("mountpoint")
+                    Arg::new("mountpoint")
                         .help("Mountpoint for the new filesystem instance")
-                        .short("m")
+                        .short('m')
                         .long("mountpoint")
-                        .required(true)
-                        .takes_value(true),
+                        .required(true),
                 )
                 .arg(
-                    Arg::with_name("type")
+                    Arg::new("type")
                         .help("Type of the new filesystem instance")
-                        .short("t")
+                        .short('t')
                         .long("type")
                         .required(true)
-                        .takes_value(true)
-                        .possible_values(&["rafs", "passthrough_fs"]),
+                        .value_parser(["rafs", "passthrough_fs"]),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("umount")
+            Command::new("umount")
                 .about("Umounts a filesystem instance")
                 .arg(
-                    Arg::with_name("mountpoint")
+                    Arg::new("mountpoint")
                         .help("Mountpoint of the filesystem instance")
-                        .short("m")
+                        .short('m')
                         .required(true)
-                        .takes_value(true)
                         .index(1),
                 ),
         );
@@ -148,8 +141,8 @@ async fn main() -> Result<()> {
     let cmd = app.get_matches();
 
     // Safe to unwrap because it is required by Clap
-    let sock = cmd.value_of("sock").unwrap();
-    let raw = cmd.is_present("raw");
+    let sock = cmd.get_one::<String>("sock").map(|s| s.as_str()).unwrap();
+    let raw = cmd.get_flag("raw");
     let client = client::NydusdClient::new(sock);
 
     if let Some(_matches) = cmd.subcommand_matches("info") {
@@ -157,8 +150,8 @@ async fn main() -> Result<()> {
         cmd.execute(raw, &client, None).await?;
     } else if let Some(matches) = cmd.subcommand_matches("set") {
         // Safe to unwrap since the below two arguments are required by clap.
-        let kind = matches.value_of("KIND").unwrap().to_string();
-        let value = matches.value_of("VALUE").unwrap().to_string();
+        let kind = matches.get_one::<String>("KIND").unwrap().to_owned();
+        let value = matches.get_one::<String>("VALUE").unwrap().to_owned();
         let mut items = HashMap::new();
         items.insert(kind, value);
 
@@ -166,10 +159,13 @@ async fn main() -> Result<()> {
         cmd.execute(raw, &client, Some(items)).await?;
     } else if let Some(matches) = cmd.subcommand_matches("metrics") {
         // Safe to unwrap as it is required by clap
-        let category = matches.value_of("category").unwrap();
+        let category = matches
+            .get_one::<String>("category")
+            .map(|s| s.as_str())
+            .unwrap();
         let mut context = HashMap::new();
         matches
-            .value_of("interval")
+            .get_one::<String>("interval")
             .map(|i| context.insert("interval".to_string(), i.to_string()));
 
         match category {
@@ -192,19 +188,19 @@ async fn main() -> Result<()> {
         let mut context = HashMap::new();
         context.insert(
             "source".to_string(),
-            matches.value_of("source").unwrap().to_string(),
+            matches.get_one::<String>("source").unwrap().to_string(),
         );
         context.insert(
             "mountpoint".to_string(),
-            matches.value_of("mountpoint").unwrap().to_string(),
+            matches.get_one::<String>("mountpoint").unwrap().to_string(),
         );
         context.insert(
             "config".to_string(),
-            matches.value_of("config").unwrap().to_string(),
+            matches.get_one::<String>("config").unwrap().to_string(),
         );
         context.insert(
             "type".to_string(),
-            matches.value_of("type").unwrap().to_string(),
+            matches.get_one::<String>("type").unwrap().to_string(),
         );
 
         let cmd = CommandMount {};
@@ -214,7 +210,7 @@ async fn main() -> Result<()> {
         let mut context = HashMap::new();
         context.insert(
             "mountpoint".to_string(),
-            matches.value_of("mountpoint").unwrap().to_string(),
+            matches.get_one::<String>("mountpoint").unwrap().to_string(),
         );
 
         let cmd = CommandUmount {};

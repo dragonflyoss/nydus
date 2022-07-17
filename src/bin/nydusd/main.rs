@@ -23,7 +23,8 @@ use std::io::{Error, ErrorKind, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clap::{App, Arg, ArgMatches, SubCommand, Values};
+use clap::parser::ValuesRef;
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::Resource;
@@ -197,167 +198,155 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
 
 const SHARED_DIR_HELP_MESSAGE: &str = "Local directory to share via passthroughfs FUSE driver";
 
-pub fn thread_validator(v: String) -> std::result::Result<(), String> {
-    ensure_threads(v).map(|_| ())
+pub fn thread_validator(v: &str) -> std::result::Result<String, String> {
+    ensure_threads(v).map(|s| s.to_string())
 }
 
-fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_fs_options(app: Command) -> Command {
     app.arg(
-        Arg::with_name("bootstrap")
+        Arg::new("bootstrap")
             .long("bootstrap")
-            .short("B")
+            .short('B')
             .help("RAFS filesystem metadata file, which also enables `rafs` mode")
-            .takes_value(true)
             .conflicts_with("shared-dir"),
     )
     .arg(
-        Arg::with_name("localfs-dir")
+        Arg::new("localfs-dir")
             .long("localfs-dir")
-            .short("D")
+            .short('D')
             .help(
                 "Enable 'localfs' storage backend by using the directory for blob and cache files",
             )
-            .takes_value(true)
             .conflicts_with("config"),
     )
     .arg(
-        Arg::with_name("shared-dir")
+        Arg::new("shared-dir")
             .long("shared-dir")
-            .short("s")
+            .short('s')
             .help(SHARED_DIR_HELP_MESSAGE)
-            .takes_value(true)
             .conflicts_with("bootstrap"),
     )
     .arg(
-        Arg::with_name("prefetch-files")
+        Arg::new("prefetch-files")
             .long("prefetch-files")
-            .short("P")
+            .short('P')
             .help("List of files/directories to prefetch")
-            .takes_value(true)
             .required(false)
             .requires("bootstrap")
-            .multiple(true),
+            .num_args(1..),
     )
     .arg(
-        Arg::with_name("virtual-mountpoint")
+        Arg::new("virtual-mountpoint")
             .long("virtual-mountpoint")
-            .short("m")
+            .short('m')
             .help("Path within the FUSE/virtiofs device to mount the filesystem")
-            .takes_value(true)
             .default_value("/")
             .required(false),
     )
 }
 
-fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_fuse_options(app: Command) -> Command {
     app.arg(
-        Arg::with_name("mountpoint")
+        Arg::new("mountpoint")
             .long("mountpoint")
-            .short("M")
+            .short('M')
             .help("Path to mount the FUSE filesystem, target for `mount.fuse`")
-            .takes_value(true)
             .required(false),
     )
     .arg(
-        Arg::with_name("failover-policy")
+        Arg::new("failover-policy")
             .long("failover-policy")
             .default_value("resend")
             .help("FUSE server failover policy")
-            .possible_values(&["resend", "flush"])
-            .takes_value(true)
+            .value_parser(["resend", "flush"])
             .required(false),
     )
     .arg(
-        Arg::with_name("threads")
+        Arg::new("threads")
             .long("thread-num")
-            .short("T")
+            .short('T')
             .default_value("4")
             .help("Number of worker threads to serve IO requests")
-            .takes_value(true)
-            .required(false)
-            .validator(thread_validator),
+            .value_parser(thread_validator)
+            .required(false),
     )
     .arg(
-        Arg::with_name("writable")
+        Arg::new("writable")
             .long("writable")
-            .short("W")
-            .help("Mounts FUSE filesystem in rw mode")
-            .takes_value(false),
+            .short('W')
+            .action(ArgAction::SetTrue)
+            .help("Mounts FUSE filesystem in rw mode"),
     )
 }
 
-fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
-    let subcmd = SubCommand::with_name("fuse").about("Run as a dedicated FUSE server");
+fn append_fuse_subcmd_options(cmd: Command) -> Command {
+    let subcmd = Command::new("fuse").about("Run as a dedicated FUSE server");
     let subcmd = append_fuse_options(subcmd);
     let subcmd = append_fs_options(subcmd);
-    app.subcommand(subcmd)
+    cmd.subcommand(subcmd)
 }
 
 #[cfg(feature = "virtiofs")]
-fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> {
-    app.arg(
-        Arg::with_name("hybrid-mode")
+fn append_virtiofs_options(cmd: Command) -> Command {
+    cmd.arg(
+        Arg::new("hybrid-mode")
             .long("hybrid-mode")
-            .short("H")
+            .short('H')
             .help("Enables both `rafs` and `passthroughfs` modes")
-            .required(false)
-            .takes_value(false),
+            .action(ArgAction::SetFalse)
+            .required(false),
     )
     .arg(
-        Arg::with_name("sock")
+        Arg::new("sock")
             .long("sock")
-            .short("v")
+            .short('v')
             .help("Vhost-user API socket")
-            .takes_value(true)
             .required(false),
     )
 }
 
 #[cfg(feature = "virtiofs")]
-fn append_virtiofs_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
-    let subcmd = SubCommand::with_name("virtiofs").about("Run as a dedicated virtiofs server");
+fn append_virtiofs_subcmd_options(cmd: Command) -> Command {
+    let subcmd = Command::new("virtiofs").about("Run as a dedicated virtiofs server");
     let subcmd = append_virtiofs_options(subcmd);
     let subcmd = append_fs_options(subcmd);
-    app.subcommand(subcmd)
+    cmd.subcommand(subcmd)
 }
 
-fn append_fscache_options(app: App<'static, 'static>) -> App<'static, 'static> {
+fn append_fscache_options(app: Command) -> Command {
     app.arg(
-        Arg::with_name("fscache-tag")
+        Arg::new("fscache-tag")
             .long("fscache-tag")
             .help("Tag to identify the fscache daemon instance")
-            .takes_value(true)
             .requires("fscache"),
     )
     .arg(
-        Arg::with_name("fscache-threads")
+        Arg::new("fscache-threads")
             .long("fscache-threads")
             .default_value("4")
             .help("Number of working threads to serve fscache requests")
-            .takes_value(true)
             .required(false)
-            .validator(thread_validator),
+            .value_parser(thread_validator),
     )
 }
 
-fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
-    let subcmd = SubCommand::with_name("singleton")
+fn append_services_subcmd_options(cmd: Command) -> Command {
+    let subcmd = Command::new("singleton")
         .about(
             "Run as a global daemon instance to service multiple blobcache/fscache/fuse services.",
         )
         .arg(
-            Arg::with_name("fscache")
+            Arg::new("fscache")
                 .long("fscache")
-                .short("F")
-                .help("Working directory for Linux fscache driver to store cached files")
-                .takes_value(true),
+                .short('F')
+                .help("Working directory for Linux fscache driver to store cached files"),
         );
     let subcmd = append_fscache_options(subcmd);
 
     // TODO: enable support of fuse service
     /*
     let subcmd = subcmd.arg(
-        Arg::with_name("fuse")
+        Arg::new("fuse")
             .long("fuse")
             .short("f")
             .help("Run as a shared FUSE server"),
@@ -366,95 +355,87 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
     let subcmd = append_fs_options(subcmd);
     */
 
-    app.subcommand(subcmd)
+    cmd.subcommand(subcmd)
 }
 
-fn prepare_commandline_options() -> App<'static, 'static> {
-    let cmdline = App::new("nydusd")
+fn prepare_commandline_options() -> Command {
+    let cmdline = Command::new("nydusd")
         .about("Nydus BlobCache/FsCache/Image Service")
         .arg(
-            Arg::with_name("apisock")
+            Arg::new("apisock")
                 .long("apisock")
-                .short("A")
+                .short('A')
                 .help("Administration API socket")
-                .takes_value(true)
                 .required(false)
                 .global(true),
         )
         .arg(
-            Arg::with_name("config")
+            Arg::new("config")
                 .long("config")
-                .short("C")
+                .short('C')
                 .help("Configuration file")
                 .required(false)
-                .global(true)
-                .takes_value(true),
+                .global(true),
         )
         .arg(
-            Arg::with_name("id")
+            Arg::new("id")
                 .long("id")
-                .short("I")
+                .short('I')
                 .help("Service instance identifier")
-                .takes_value(true)
                 .required(false)
                 .requires("supervisor")
                 .global(true),
         )
         .arg(
-            Arg::with_name("log-level")
+            Arg::new("log-level")
                 .long("log-level")
-                .short("l")
+                .short('l')
                 .help("Log level:")
                 .default_value("info")
-                .possible_values(&["trace", "debug", "info", "warn", "error"])
-                .takes_value(true)
+                .value_parser(["trace", "debug", "info", "warn", "error"])
                 .required(false)
                 .global(true),
         )
         .arg(
-            Arg::with_name("log-file")
+            Arg::new("log-file")
                 .long("log-file")
-                .short("L")
+                .short('L')
                 .help("Log messages to the file. Default extension \".log\" will be used if no extension specified.")
-                .takes_value(true)
                 .required(false)
                 .global(true),
         )
         .arg(
-            Arg::with_name("log-rotation-size")
+            Arg::new("log-rotation-size")
                 .long("log-rotation-size")
                 .help("Specify log rotation size(MB), 0 to disable")
                 .default_value("0")
-                .takes_value(true)
                 .required(false)
                 .global(true),
         )
         .arg(
-            Arg::with_name("rlimit-nofile")
+            Arg::new("rlimit-nofile")
                 .long("rlimit-nofile")
-                .short("R")
+                .short('R')
                 .default_value("1000000")
                 .help("Set rlimit for maximum file descriptor number (0 leaves it unchanged)")
-                .takes_value(true)
                 .required(false)
                 .global(true),
         )
         .arg(
-            Arg::with_name("supervisor")
+            Arg::new("supervisor")
                 .long("supervisor")
-                .short("S")
+                .short('S')
                 .help("Supervisor API socket")
-                .takes_value(true)
                 .required(false)
                 .requires("id")
                 .global(true),
         )
         .arg(
-            Arg::with_name("upgrade")
+            Arg::new("upgrade")
                 .long("upgrade")
-                .short("U")
+                .short('U')
                 .help("Starts daemon in upgrade mode")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .required(false)
                 .global(true),
         );
@@ -499,12 +480,16 @@ fn get_max_rlimit_nofile() -> Result<u64> {
 /// Handle command line option to tune rlimit for maximum file descriptor number.
 fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<()> {
     // `rlimit-nofile` has a default value, so safe to unwrap().
-    let rlimit_nofile: u64 = args.value_of(option_name).unwrap().parse().map_err(|_e| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            "invalid value for option `rlimit-nofile`",
-        )
-    })?;
+    let rlimit_nofile: u64 = args
+        .get_one::<String>(option_name)
+        .unwrap()
+        .parse()
+        .map_err(|_e| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "invalid value for option `rlimit-nofile`",
+            )
+        })?;
 
     if rlimit_nofile != 0 {
         // Ensures there are fds available for other processes so we don't cause resource exhaustion.
@@ -539,8 +524,8 @@ fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<(
 }
 
 pub struct SubCmdArgs<'a> {
-    args: &'a ArgMatches<'a>,
-    subargs: &'a ArgMatches<'a>,
+    args: &'a ArgMatches,
+    subargs: &'a ArgMatches,
 }
 
 impl<'a> SubCmdArgs<'a> {
@@ -548,24 +533,24 @@ impl<'a> SubCmdArgs<'a> {
         SubCmdArgs { args, subargs }
     }
 
-    pub fn value_of(&self, key: &str) -> Option<&str> {
-        if let Some(v) = self.subargs.value_of(key) {
+    pub fn value_of(&self, key: &str) -> Option<&String> {
+        if let Some(v) = self.subargs.get_one::<String>(key) {
             Some(v)
         } else {
-            self.args.value_of(key)
+            self.args.get_one::<String>(key)
         }
     }
 
-    pub fn values_of(&self, key: &str) -> Option<Values> {
-        if let Some(v) = self.subargs.values_of(key) {
+    pub fn values_of(&self, key: &str) -> Option<ValuesRef<&str>> {
+        if let Some(v) = self.subargs.get_many::<&str>(key) {
             Some(v)
         } else {
-            self.args.values_of(key)
+            self.args.get_many::<&str>(key)
         }
     }
 
     pub fn is_present(&self, key: &str) -> bool {
-        self.subargs.is_present(key) || self.args.is_present(key)
+        self.subargs.get_flag(key) || self.args.get_flag(key)
     }
 }
 
@@ -660,7 +645,7 @@ fn process_fs_service(
     };
 
     // Enable all options required by passthroughfs
-    if args.is_present("hybrid-mode") {
+    if !is_fuse && args.is_present("hybrid-mode") {
         opts.no_open = false;
         opts.no_opendir = false;
         opts.killpriv_v2 = true;
@@ -681,7 +666,7 @@ fn process_fs_service(
 
         let p = args
             .value_of("failover-policy")
-            .unwrap_or("flush")
+            .unwrap_or(&"flush".to_string())
             .try_into()
             .map_err(|e| {
                 error!("Invalid failover policy");
@@ -750,16 +735,25 @@ fn process_singleton_arguments(
     Ok(())
 }
 
+lazy_static! {
+    static ref BTI_STRING: String = BuildTimeInfo::dump().0;
+    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
+}
+
 fn main() -> Result<()> {
-    let (bti_string, bti) = BuildTimeInfo::dump();
-    let cmd_options = prepare_commandline_options().version(bti_string.as_str());
-    let args = cmd_options.clone().get_matches();
-    let logging_file = args.value_of("log-file").map(|l| l.into());
+    let bti = BTI.to_owned();
+    let cmd_options = prepare_commandline_options().version(BTI_STRING.as_str());
+    let args = cmd_options.get_matches();
+    let logging_file = args.get_one::<String>("log-file").map(|l| l.into());
     // Safe to unwrap because it has default value and possible values are defined
-    let level = args.value_of("log-level").unwrap().parse().unwrap();
-    let apisock = args.value_of("apisock");
+    let level = args
+        .get_one::<String>("log-level")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let apisock = args.get_one::<String>("apisock").map(|s| s.as_str());
     let rotation_size = args
-        .value_of("log-rotation-size")
+        .get_one::<String>("log-rotation-size")
         .unwrap()
         .parse::<u64>()
         .map_err(|e| einval!(format!("Invalid log rotation size: {}", e)))?;
