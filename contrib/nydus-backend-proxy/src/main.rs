@@ -12,8 +12,8 @@ extern crate clap;
 use std::collections::HashMap;
 use std::env;
 use std::os::unix::io::AsRawFd;
-use std::os::unix::prelude::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{fs, io};
 
 use clap::{App, Arg};
@@ -50,7 +50,7 @@ async fn init_blob_backend(root: &Path) {
 #[derive(Debug)]
 struct BlobBackend {
     root: PathBuf,
-    blobs: HashMap<String, fs::File>,
+    blobs: HashMap<String, Arc<fs::File>>,
 }
 
 impl BlobBackend {
@@ -70,10 +70,14 @@ impl BlobBackend {
                     continue;
                 }
 
-                let std_file = fs::File::open(&filepath).unwrap();
-                self.blobs.insert(digest.into_owned(), std_file);
+                match fs::File::open(&filepath) {
+                    Ok(f) => {
+                        self.blobs.insert(digest.into_owned(), Arc::new(f));
+                    }
+                    Err(e) => warn!("failed to open file {}, {}", digest, e),
+                }
             } else {
-                warn!("%s: Not regular file");
+                debug!("%s: Not regular file");
             }
         }
     }
@@ -144,7 +148,7 @@ struct RangeStream {
     dis: String,
     start: u64,
     len: u64,
-    fd: RawFd,
+    file: Arc<fs::File>,
 }
 
 impl RangeStream {
@@ -156,30 +160,26 @@ impl RangeStream {
 
 impl<'r> Responder<'r, 'static> for RangeStream {
     fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'static> {
-        let rangestring = self.get_rangestr();
-        let size = self.len;
         const BUFSIZE: usize = 4096;
         let mut buf = vec![0; BUFSIZE];
-        let mut read = 0;
+        let mut read = 0u64;
         let startpos = self.start as i64;
-        let raw_fd = self.fd;
+        let size = self.len;
+        let raw_fd = self.file.as_raw_fd();
 
         Response::build()
             .streamed_body(ReaderStream! {
                 while read < size {
-                    let unread = (size - read) as usize;
-                    let allbuf: &mut [u8] = &mut buf[..];
-                    match uio::pread(raw_fd, allbuf, startpos + read as i64) {
-                        Ok(n) => {
+                    match uio::pread(raw_fd, &mut buf, startpos + read as i64) {
+                        Ok(mut n) => {
+                            n = std::cmp::min(n, (size - read) as usize);
+                            read += n as u64;
                             if n == 0 {
                                 break;
-                            }
-                            read += n as u64;
-                            if unread < BUFSIZE {
-                                let part = &allbuf[0..unread];
-                                yield io::Cursor::new(part.to_vec());
+                            } else if n < BUFSIZE {
+                                yield io::Cursor::new(buf[0..n].to_vec());
                             } else {
-                                yield io::Cursor::new(allbuf.to_vec());
+                                yield io::Cursor::new(buf.clone());
                             }
                         }
                         Err(err) => {
@@ -189,9 +189,9 @@ impl<'r> Responder<'r, 'static> for RangeStream {
                     }
                 }
             })
+            .raw_header("Content-Range", self.get_rangestr())
             .raw_header("Docker-Content-Digest", self.dis)
             .raw_header("Content-Type", "application/octet-stream")
-            .raw_header("Content-Range", rangestring)
             .ok()
     }
 }
@@ -215,37 +215,29 @@ async fn fetch(
 
     // Trim "sha256:" prefix
     let dis = &digest[7..];
-    let blob_backend = blob_backend_mut();
 
     //if no range in Request header,return fetch blob response
     if header_data.range.is_empty() {
-        let filepath = blob_backend.await.root.join(&dis);
+        let filepath = blob_backend_mut().await.root.join(&dis);
         NamedFile::open(filepath)
             .await
             .map_err(|_e| Status::NotFound)
             .map(|nf| StoredData::AllFile(FileStream(nf, dis.to_string())))
     } else {
-        let mut guard = blob_backend.await;
-        let mut blobs = &guard.blobs;
-
-        let blob_file = if let Some(f) = blobs.get(dis) {
-            f
+        let mut guard = blob_backend_mut().await;
+        let blob_file = if let Some(f) = guard.blobs.get(dis) {
+            f.clone()
         } else {
             trace!("Blob object not found: {}", dis);
-            // Re-populate blobs map by `readdir()` again to scan if files
-            // are newly added.
+            // Re-populate blobs map by `readdir()` again to scan if files are newly added.
             guard.populate_blobs_map();
             trace!("re-populating to search blob {}", dis);
-            blobs = &guard.blobs;
-
-            match blobs.get(dis) {
-                Some(f) => {
-                    error!("Blob {} not found finally!", dis);
-                    f
-                }
-                None => return Err(Status::NotFound),
-            }
+            guard.blobs.get(dis).cloned().ok_or_else(|| {
+                error!("Blob {} not found finally!", dis);
+                Status::NotFound
+            })?
         };
+        drop(guard);
 
         let metadata = match blob_file.metadata() {
             Ok(meta) => meta,
@@ -264,13 +256,12 @@ async fn fetch(
         };
         let start_pos = ranges[0].start as u64;
         let size = ranges[0].length;
-        let fd = blobs.get(dis).unwrap().as_raw_fd();
 
         Ok(StoredData::Range(RangeStream {
             dis: dis.to_string(),
             len: size,
             start: start_pos,
-            fd,
+            file: blob_file,
         }))
     }
 }
