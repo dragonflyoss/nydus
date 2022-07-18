@@ -157,7 +157,9 @@ func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 }
 
 func (nydusd *Nydusd) Mount() error {
-	nydusd.Umount()
+	// Umount is called to clean up mountpoint in nydusd's mount path
+	// Flag is used as a hint to prevent redundant error message
+	nydusd.Umount(true)
 
 	args := []string{
 		"--config",
@@ -203,11 +205,14 @@ func (nydusd *Nydusd) Mount() error {
 	return nil
 }
 
-func (nydusd *Nydusd) Umount() error {
+func (nydusd *Nydusd) Umount(silent bool) error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
 		cmd := exec.Command("umount", nydusd.MountPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+
+		if !silent {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
 		if err := cmd.Run(); err != nil {
 			return err
 		}

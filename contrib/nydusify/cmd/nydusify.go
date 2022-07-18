@@ -29,6 +29,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/viewer"
 )
 
 var versionGitCommit string
@@ -395,6 +396,59 @@ func main() {
 				}
 
 				return checker.Check(context.Background())
+			},
+		},
+		{
+			Name:    "view",
+			Aliases: []string{"mount"},
+			Usage:   "View/Mount the file system in nydus image",
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
+				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+
+				&cli.StringFlag{Name: "mount-path", Value: "./image-fs", Usage: "The Path for the file system to mount on", EnvVars: []string{"MOUNT_PATH"}},
+				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
+				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image view, will be cleaned up after viewing", EnvVars: []string{"WORK_DIR"}},
+				&cli.StringFlag{Name: "nydusd", Value: "nydusd", Usage: "The nydusd binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUSD"}},
+				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will view file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
+				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
+				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+			},
+			Action: func(c *cli.Context) error {
+				setupLogLevel(c)
+
+				backendType := c.String("backend-type")
+				backendConfig := ""
+				if backendType != "" {
+					_backendConfig, err := parseBackendConfig(
+						c.String("backend-config"), c.String("backend-config-file"),
+					)
+					if err != nil {
+						return err
+					}
+					backendConfig = _backendConfig
+				}
+
+				_, arch, err := provider.ExtractOsArch(c.String("platform"))
+				if err != nil {
+					return err
+				}
+
+				fsViewer, err := viewer.New(viewer.Opt{
+					WorkDir:        c.String("work-dir"),
+					Target:         c.String("target"),
+					TargetInsecure: c.Bool("target-insecure"),
+					MountPath:      c.String("mount-path"),
+					NydusdPath:     c.String("nydusd"),
+					BackendType:    backendType,
+					BackendConfig:  backendConfig,
+					ExpectedArch:   arch,
+				})
+				if err != nil {
+					return err
+				}
+
+				return fsViewer.View(context.Background())
 			},
 		},
 		{
