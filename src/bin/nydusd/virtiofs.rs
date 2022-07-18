@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::thread;
 
 use fuse_backend_rs::api::{server::Server, Vfs};
-use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, Writer};
+use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, VirtioFsWriter};
 use vhost::vhost_user::{message::*, Listener, SlaveFsCacheReq};
 use vhost_user_backend::{
     VhostUserBackend, VhostUserBackendMut, VhostUserDaemon, VringMutex, VringState, VringT,
@@ -75,10 +75,11 @@ impl VhostUserFsBackend {
             let head_index = chain.head_index();
             let mem = chain.memory();
 
-            let reader =
-                Reader::new(mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
-            let writer =
-                Writer::new(mem, chain.clone()).map_err(DaemonError::InvalidDescriptorChain)?;
+            let reader = Reader::from_descriptor_chain(mem, chain.clone())
+                .map_err(DaemonError::InvalidDescriptorChain)?;
+            let writer = VirtioFsWriter::new(mem, chain.clone())
+                .map(|w| w.into())
+                .map_err(DaemonError::InvalidDescriptorChain)?;
 
             self.server
                 .handle_message(

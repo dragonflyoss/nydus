@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
-use fuse_backend_rs::transport::{FileReadWriteVolatile, FileVolatileSlice};
+use fuse_backend_rs::file_buf::FileVolatileSlice;
+use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 use vm_memory::Bytes;
 
 use nydus_api::http::FactoryConfig;

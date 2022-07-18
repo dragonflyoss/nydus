@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use fuse_backend_rs::transport::FileVolatileSlice;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
 
 use crate::utils::{alloc_buf, copyv};
