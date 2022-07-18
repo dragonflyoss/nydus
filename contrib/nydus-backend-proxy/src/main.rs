@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use clap::{App, Arg};
-use nix::sys::uio;
-
 use http_range::HttpRange;
-
+use nix::sys::uio;
 use rocket::fs::{FileServer, NamedFile};
 use rocket::futures::lock::{Mutex, MutexGuard};
 use rocket::http::Status;
@@ -54,6 +52,7 @@ struct BlobBackend {
     root: PathBuf,
     blobs: HashMap<String, fs::File>,
 }
+
 impl BlobBackend {
     fn populate_blobs_map(&mut self) {
         for entry in self
@@ -81,7 +80,7 @@ impl BlobBackend {
 }
 
 #[derive(Debug)]
-pub struct HeaderData {
+struct HeaderData {
     _host: String,
     range: String,
 }
@@ -91,46 +90,45 @@ impl<'r> FromRequest<'r> for HeaderData {
     type Error = Status;
 
     async fn from_request(req: &'r Request<'_>) -> request::Outcome<HeaderData, Self::Error> {
-        let host = match req.headers().get_one("Host") {
-            Some(h) => h.to_string(),
-            None => "".to_string(),
-        };
-        let rangestr = match req.headers().get_one("Range") {
-            Some(h) => h.to_string(),
-            None => "".to_string(),
-        };
-        Outcome::Success(HeaderData {
-            _host: host,
-            range: rangestr,
-        })
+        let headers = req.headers();
+        let _host = headers.get_one("Host").unwrap_or_default().to_string();
+        let range = headers.get_one("Range").unwrap_or_default().to_string();
+
+        Outcome::Success(HeaderData { _host, range })
     }
 }
 
 #[rocket::head("/<_namespace>/<_repo>/blobs/<digest>")]
-pub async fn check(
+async fn check(
     _namespace: PathBuf,
     _repo: PathBuf,
     digest: String,
 ) -> Result<Option<FileStream>, Status> {
+    if !digest.starts_with("sha256:") {
+        return Err(Status::BadRequest);
+    }
+
     // Trim "sha256:" prefix
     let dis = &digest[7..];
     let backend = blob_backend_mut();
     let path = backend.await.root.join(&dis);
-    Ok(NamedFile::open(path)
+
+    NamedFile::open(path)
         .await
-        .ok()
-        .map(|nf| FileStream(nf, dis.to_string())))
+        .map_err(|_e| Status::NotFound)
+        .map(|nf| Some(FileStream(nf, dis.to_string())))
 }
 
 /* fetch blob response
  * NamedFile: blob data
  * String: Docker-Content-Digest
  */
-pub struct FileStream(NamedFile, String);
+struct FileStream(NamedFile, String);
 
 impl<'r> Responder<'r, 'static> for FileStream {
     fn respond_to(self, req: &'r Request<'_>) -> response::Result<'static> {
-        Response::build_from(self.0.respond_to(req)?)
+        let res = self.0.respond_to(req)?;
+        Response::build_from(res)
             .raw_header("Docker-Content-Digest", self.1)
             .raw_header("Content-Type", "application/octet-stream")
             .ok()
@@ -142,7 +140,7 @@ impl<'r> Responder<'r, 'static> for FileStream {
  * dis: Docker-Content-Digest
  * start & end: "Content-Range: bytes <start>-<end>/<size>"
  */
-pub struct RangeStream {
+struct RangeStream {
     dis: String,
     start: u64,
     len: u64,
@@ -165,6 +163,7 @@ impl<'r> Responder<'r, 'static> for RangeStream {
         let mut read = 0;
         let startpos = self.start as i64;
         let raw_fd = self.fd;
+
         Response::build()
             .streamed_body(ReaderStream! {
                 while read < size {
@@ -198,30 +197,33 @@ impl<'r> Responder<'r, 'static> for RangeStream {
 }
 
 #[derive(Responder)]
-pub enum StoredData {
-    AllFile(Option<FileStream>),
+enum StoredData {
+    AllFile(FileStream),
     Range(RangeStream),
 }
 
 #[get("/<_namespace>/<_repo>/blobs/<digest>")]
-pub async fn fetch(
+async fn fetch(
     _namespace: PathBuf,
     _repo: PathBuf,
     digest: String,
     header_data: HeaderData,
 ) -> Result<StoredData, Status> {
+    if !digest.starts_with("sha256:") {
+        return Err(Status::BadRequest);
+    }
+
     // Trim "sha256:" prefix
     let dis = &digest[7..];
     let blob_backend = blob_backend_mut();
+
     //if no range in Request header,return fetch blob response
     if header_data.range.is_empty() {
         let filepath = blob_backend.await.root.join(&dis);
-        return Ok(StoredData::AllFile(
-            NamedFile::open(filepath)
-                .await
-                .ok()
-                .map(|nf| FileStream(nf, dis.to_string())),
-        ));
+        NamedFile::open(filepath)
+            .await
+            .map_err(|_e| Status::NotFound)
+            .map(|nf| StoredData::AllFile(FileStream(nf, dis.to_string())))
     } else {
         let mut guard = blob_backend.await;
         let mut blobs = &guard.blobs;
@@ -278,15 +280,16 @@ async fn main() {
     let cmd = App::new("nydus-backend-proxy")
         .author(crate_authors!())
         .version(crate_version!())
-        .about("A simple HTTP server to serve a local directory as blob backend for nydusd.")
+        .about("A simple HTTP server to provide a fake container registry for nydusd.")
         .arg(
             Arg::with_name("blobsdir")
                 .short("b")
                 .long("blobsdir")
                 .takes_value(true)
-                .help("path to nydus blobs dir"),
+                .help("path to directory hosting nydus blob files"),
         )
         .get_matches();
+    // Safe to unwrap() because `blobsdir` takes a value.
     let path = cmd.value_of("blobsdir").unwrap();
 
     init_blob_backend(Path::new(path)).await;
@@ -297,7 +300,7 @@ async fn main() {
         .launch()
         .await
     {
-        error!("Rocket didn't launch! Err:{:#?}", e);
+        error!("Rocket failed to launch, {:#?}", e);
         std::process::exit(-1);
     }
 }
