@@ -2,8 +2,11 @@
 name = "nydus-backend-proxy"
 version = "0.1.0"
 authors = ["The Nydus Developers"]
+description = "A simple HTTP server to provide a fake container registry for nydusd"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
-license = "Apache-2.0 OR BSD-3-Clause"
+license = "Apache-2.0"
 
 [dependencies]
 rocket = "0.5.0-rc"
