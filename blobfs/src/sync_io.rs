@@ -6,9 +6,9 @@
 //! Fuse passthrough file system, mirroring an existing FS hierarchy.
 
 use super::*;
+use fuse_backend_rs::abi::fuse_abi::CreateIn;
 #[cfg(feature = "virtiofs")]
 use fuse_backend_rs::abi::virtio_fs;
-use fuse_backend_rs::api::CreateIn;
 #[cfg(feature = "virtiofs")]
 use fuse_backend_rs::transport::FsCacheReqHandler;
 use nydus_error::eacces;

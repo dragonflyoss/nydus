@@ -10,8 +10,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.35"
-# pin arc-swap because 1.x version of ArcSwapAny does not implement Clone
-arc-swap = "=0.4"
+arc-swap = "1.5"
 base64 = { version = "0.13.0", optional = true }
 bitflags = "1.2.1"
 blake3 = "1.0"

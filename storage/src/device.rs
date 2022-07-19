@@ -840,11 +840,20 @@ pub trait BlobObject: AsRawFd {
 ///
 /// All blob Io requests are actually served by the underlying [BlobCache] object. A new method
 /// [update()]() is added to switch the storage backend on demand.
-#[derive(Clone)]
 pub struct BlobDevice {
     //meta: ArcSwap<Arc<dyn BlobCache>>,
     blobs: ArcSwap<Vec<Arc<dyn BlobCache>>>,
     blob_count: usize,
+}
+
+impl Clone for BlobDevice {
+    fn clone(&self) -> Self {
+        BlobDevice {
+            // https://docs.rs/arc-swap/latest/arc_swap/docs/limitations/index.html#no-clone-implementation
+            blobs: ArcSwap::new(self.blobs.load_full()),
+            blob_count: self.blob_count,
+        }
+    }
 }
 
 impl BlobDevice {

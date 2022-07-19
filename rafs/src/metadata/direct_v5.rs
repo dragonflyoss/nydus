@@ -180,9 +180,16 @@ impl Drop for DirectMappingState {
 }
 
 /// Directly mmapped Rafs v5 super block.
-#[derive(Clone)]
 pub struct DirectSuperBlockV5 {
     state: ArcSwap<DirectMappingState>,
+}
+
+impl Clone for DirectSuperBlockV5 {
+    fn clone(&self) -> Self {
+        DirectSuperBlockV5 {
+            state: ArcSwap::new(self.state.load_full()),
+        }
+    }
 }
 
 impl DirectSuperBlockV5 {

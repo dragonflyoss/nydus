@@ -647,8 +647,8 @@ mod tests {
         let mut buf2 = [0x0u8];
         let mut buf3 = [0x0u8];
         let bufs = [
-            unsafe { FileVolatileSlice::from_mut_slice(&mut buf2) },
-            unsafe { FileVolatileSlice::from_mut_slice(&mut buf3) },
+            unsafe { FileVolatileSlice::from_raw_ptr(buf2.as_mut_ptr(), buf2.len()) },
+            unsafe { FileVolatileSlice::from_raw_ptr(buf3.as_mut_ptr(), buf3.len()) },
         ];
 
         assert_eq!(blob2.readv(&bufs, 0x1, 2).unwrap(), 2);
