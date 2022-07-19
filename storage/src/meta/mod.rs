@@ -563,6 +563,57 @@ impl BlobMetaInfo {
         }
     }
 
+    /// Try to amplify the request by appending more continuous chunks.
+    pub fn add_more_chunks(
+        &self,
+        chunks: &[BlobIoChunk],
+        max_size: u64,
+    ) -> Option<Vec<BlobIoChunk>> {
+        let infos = &*self.state.chunks;
+        let mut index = chunks[chunks.len() - 1].id() as usize;
+        debug_assert!(index < infos.len());
+        let entry = &infos[index];
+        if self.validate_chunk(entry).is_err() {
+            return None;
+        }
+        let end = entry.compressed_end();
+        if end > self.state.compressed_size {
+            return None;
+        }
+        let batch_end = std::cmp::min(
+            end.checked_add(max_size).unwrap_or(end),
+            self.state.compressed_size,
+        );
+        if batch_end <= end {
+            return None;
+        }
+
+        let mut last_end = end;
+        let mut vec = chunks.to_vec();
+        while index + 1 < infos.len() {
+            index += 1;
+            let entry = &infos[index];
+            if self.validate_chunk(entry).is_err() || entry.compressed_offset() != last_end {
+                break;
+            }
+
+            // Avoid read amplification if next chunk is too big.
+            if entry.compressed_end() > batch_end {
+                break;
+            }
+
+            vec.push(BlobMetaChunk::new(index, &self.state));
+            last_end = entry.compressed_end();
+            if last_end >= batch_end {
+                break;
+            }
+        }
+
+        trace!("try to extend request with {} more bytes", last_end - end);
+
+        Some(vec)
+    }
+
     #[inline]
     fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
         // For stargz blob, self.state.compressed_size == 0, so don't validate it.
