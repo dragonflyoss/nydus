@@ -442,9 +442,13 @@ impl FileCacheEntry {
                             self.adjust_buffer_for_dio(buf)
                         }
                         trace!("persist_chunk idx {}", idx);
-                        Self::persist_chunk(&self.file, offset, buf).map_err(|e| {
-                            eio!(format!("do_fetch_chunk failed to persist data, {:?}", e))
-                        })?;
+                        if let Err(e) = Self::persist_chunk(&self.file, offset, buf) {
+                            bitmap.clear_range_pending(pending[start], (end - start) as u32);
+                            return Err(eio!(format!(
+                                "do_fetch_chunk failed to persist data, {:?}",
+                                e
+                            )));
+                        }
                     }
 
                     bitmap
