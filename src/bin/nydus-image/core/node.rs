@@ -339,7 +339,7 @@ impl Node {
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
         blob_index: u32,
-        chunk_dict: &mut T,
+        layered_chunk_dict: &mut T,
     ) -> Result<u64> {
         if self.is_dir() {
             return Ok(0);
@@ -387,9 +387,9 @@ impl Node {
             chunk.set_id(chunk_id);
 
             // Check whether we already have the same chunk data by matching chunk digest.
-            let exist_chunk = match blob_ctx.chunk_dict.get_chunk(&chunk_id) {
+            let exist_chunk = match blob_ctx.gloabl_chunk_dict.get_chunk(&chunk_id) {
                 Some(v) => Some((v, true)),
-                None => chunk_dict.get_chunk(&chunk_id).map(|v| (v, false)),
+                None => layered_chunk_dict.get_chunk(&chunk_id).map(|v| (v, false)),
             };
             // TODO: we should also compare the actual data to avoid chunk digest conflicts.
             if let Some((cached_chunk, from_dict)) = exist_chunk {
@@ -406,7 +406,9 @@ impl Node {
                     chunk.copy_from(cached_chunk);
                     chunk.set_file_offset(file_offset);
                     if from_dict {
-                        let idx = blob_ctx.chunk_dict.get_real_blob_idx(chunk.blob_index());
+                        let idx = blob_ctx
+                            .gloabl_chunk_dict
+                            .get_real_blob_idx(chunk.blob_index());
                         chunk.set_blob_index(idx);
                     }
                     trace!(
@@ -473,7 +475,7 @@ impl Node {
             )?;
 
             blob_ctx.add_chunk_meta_info(&chunk)?;
-            chunk_dict.add_chunk(chunk.clone());
+            layered_chunk_dict.add_chunk(chunk.clone());
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
                 inner: chunk,

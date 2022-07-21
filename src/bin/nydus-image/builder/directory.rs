@@ -165,7 +165,7 @@ impl Builder for DirectoryBuilder {
                     &mut blob_ctx,
                     blob_index,
                     &mut bootstrap_ctx.nodes,
-                    &mut blob_mgr.chunk_dict_cache,
+                    &mut blob_mgr.layered_chunk_dict,
                 )
             },
             "dump_blob"

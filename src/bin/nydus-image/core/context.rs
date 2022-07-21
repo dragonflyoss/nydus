@@ -321,7 +321,7 @@ pub struct BlobContext {
     /// Scratch data buffer for reading from/writing to disk files.
     pub chunk_data_buf: Vec<u8>,
     /// ChunkDict which would be loaded when builder start
-    pub chunk_dict: Arc<dyn ChunkDict>,
+    pub gloabl_chunk_dict: Arc<dyn ChunkDict>,
     /// Whether the blob is from chunk dict.
     pub chunk_source: ChunkSource,
 
@@ -349,7 +349,7 @@ impl Clone for BlobContext {
             chunk_count: self.chunk_count,
             chunk_size: self.chunk_size,
             chunk_data_buf: self.chunk_data_buf.clone(),
-            chunk_dict: self.chunk_dict.clone(),
+            gloabl_chunk_dict: self.gloabl_chunk_dict.clone(),
             chunk_source: self.chunk_source.clone(),
             writer: None,
         }
@@ -433,7 +433,7 @@ impl BlobContext {
             chunk_count: 0,
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_data_buf: vec![0u8; size],
-            chunk_dict: Arc::new(()),
+            gloabl_chunk_dict: Arc::new(()),
             chunk_source: ChunkSource::Build,
 
             writer,
@@ -441,7 +441,7 @@ impl BlobContext {
     }
 
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
-        self.chunk_dict = dict;
+        self.gloabl_chunk_dict = dict;
     }
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
@@ -514,27 +514,30 @@ pub struct BlobManager {
     /// We can get blob index for a layer by using:
     /// `self.blobs.iter().flatten().collect()[layer_index];`
     blobs: Vec<BlobContext>,
-    /// Chunk dictionary from reference image or base layer.
-    pub chunk_dict_ref: Arc<dyn ChunkDict>,
-    /// Chunk dictionary to hold new chunks from the upper layer.
-    pub chunk_dict_cache: HashChunkDict,
+    /// Chunk dictionary to hold chunks from an extra chunk dict file.
+    /// Used for chunk data de-duplication within the whole image.
+    pub global_chunk_dict: Arc<dyn ChunkDict>,
+    /// Chunk dictionary to hold chunks from all layers.
+    /// Used for chunk data de-duplication between layers (with `--parent-bootstrap`)
+    /// or within layer (with `--inline-bootstrap`).
+    pub layered_chunk_dict: HashChunkDict,
 }
 
 impl BlobManager {
     pub fn new() -> Self {
         Self {
             blobs: Vec::new(),
-            chunk_dict_ref: Arc::new(()),
-            chunk_dict_cache: HashChunkDict::default(),
+            global_chunk_dict: Arc::new(()),
+            layered_chunk_dict: HashChunkDict::default(),
         }
     }
 
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
-        self.chunk_dict_ref = dict
+        self.global_chunk_dict = dict
     }
 
     pub fn get_chunk_dict(&self) -> Arc<dyn ChunkDict> {
-        self.chunk_dict_ref.clone()
+        self.global_chunk_dict.clone()
     }
 
     /// Allocate a blob index sequentially.
@@ -600,16 +603,16 @@ impl BlobManager {
     /// should call this function after import parent bootstrap
     /// otherwise will break blobs order
     pub fn extend_blob_table_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
-        let blobs = self.chunk_dict_ref.get_blobs();
+        let blobs = self.global_chunk_dict.get_blobs();
 
         for blob in blobs.iter() {
             if let Some(real_idx) = self.get_blob_idx_by_id(blob.blob_id()) {
-                self.chunk_dict_ref
+                self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
                 let idx = self.alloc_index()?;
                 self.add(BlobContext::from(ctx, blob.as_ref(), ChunkSource::Dict));
-                self.chunk_dict_ref
+                self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
         }

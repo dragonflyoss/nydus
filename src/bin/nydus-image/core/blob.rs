@@ -29,7 +29,7 @@ impl Blob {
         blob_ctx: &'a mut BlobContext,
         blob_index: u32,
         nodes: &mut Vec<Node>,
-        chunk_dict: &mut T,
+        layered_chunk_dict: &mut T,
     ) -> Result<bool> {
         match ctx.source_type {
             SourceType::Directory => {
@@ -39,7 +39,7 @@ impl Blob {
                 for (idx, inode) in inodes.iter().enumerate() {
                     let node = &mut nodes[*inode];
                     let size = node
-                        .dump_blob(ctx, blob_ctx, blob_index, chunk_dict)
+                        .dump_blob(ctx, blob_ctx, blob_index, layered_chunk_dict)
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
                         blob_ctx.blob_readahead_size += size;
