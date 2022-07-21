@@ -17,7 +17,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use fuse_backend_rs::transport::FileVolatileSlice;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 
 use nydus_api::http::LocalFsConfig;
@@ -97,9 +97,9 @@ impl BlobReader for LocalFsEntry {
         max_size: usize,
     ) -> BackendResult<usize> {
         let mut c = MemSliceCursor::new(bufs);
-        let iovec = c.consume(max_size);
+        let mut iovec = c.consume(max_size);
 
-        readv(self.file.as_raw_fd(), &iovec, offset)
+        readv(self.file.as_raw_fd(), &mut iovec, offset)
             .map(|v| {
                 debug!("local blob file read {} bytes", v);
                 self.trace.record(offset, v as u32);
@@ -647,8 +647,8 @@ mod tests {
         let mut buf2 = [0x0u8];
         let mut buf3 = [0x0u8];
         let bufs = [
-            unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), 1) },
-            unsafe { FileVolatileSlice::new(buf3.as_mut_ptr(), 1) },
+            unsafe { FileVolatileSlice::from_raw_ptr(buf2.as_mut_ptr(), buf2.len()) },
+            unsafe { FileVolatileSlice::from_raw_ptr(buf3.as_mut_ptr(), buf3.len()) },
         ];
 
         assert_eq!(blob2.readv(&bufs, 0x1, 2).unwrap(), 2);
@@ -703,8 +703,8 @@ mod tests {
         let mut buf2 = [0x0u8];
         let mut buf3 = [0x0u8];
         let bufs = [
-            unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), 1) },
-            unsafe { FileVolatileSlice::new(buf3.as_mut_ptr(), 1) },
+            unsafe { FileVolatileSlice::from_raw_ptr(buf2.as_mut_ptr(), buf2.len()) },
+            unsafe { FileVolatileSlice::from_raw_ptr(buf3.as_mut_ptr(), buf3.len()) },
         ];
         assert_eq!(blob2.readv(&bufs, 0x1001, 3).unwrap(), 2);
         assert_eq!(buf2[0], 0x2);

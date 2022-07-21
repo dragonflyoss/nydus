@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 use tokio::time::interval;
 
-use fuse_backend_rs::transport::FileVolatileSlice;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};

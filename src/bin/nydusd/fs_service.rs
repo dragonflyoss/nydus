@@ -223,7 +223,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
                 // TODO: Passthrough Fs needs to enlarge rlimit against host. We can exploit `MountCmd`
                 // `config` field to pass such a configuration into here.
                 let passthrough_fs =
-                    PassthroughFs::new(fs_cfg).map_err(DaemonError::PassthroughFs)?;
+                    PassthroughFs::<()>::new(fs_cfg).map_err(DaemonError::PassthroughFs)?;
                 passthrough_fs
                     .import()
                     .map_err(DaemonError::PassthroughFs)?;

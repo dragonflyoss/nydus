@@ -10,8 +10,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.35"
-# pin arc-swap because 1.x version of ArcSwapAny does not implement Clone
-arc-swap = "=0.4"
+arc-swap = "1.5"
 base64 = { version = "0.13.0", optional = true }
 bitflags = "1.2.1"
 blake3 = "1.0"
@@ -22,7 +21,7 @@ lazy_static = "1.4.0"
 libc = "0.2"
 log = "0.4"
 lz4-sys = "1.9.2"
-nix = "0.23.1"
+nix = "0.24"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 serde_with = { version = "1.6.0", features = ["macros"] }
@@ -30,7 +29,7 @@ sha2 = { version = "0.10.2" }
 sha-1 = { version = "0.10.0", optional = true }
 spmc = "0.3.0"
 url = { version = "2.1.1", optional = true }
-vm-memory = "0.7.0"
+vm-memory = "0.8"
 fuse-backend-rs = { version = "0.9.0" }
 
 nydus-api = { version = "0.1", path = "../api" }
@@ -39,7 +38,7 @@ nydus-storage = { version = "0.5", path = "../storage", features = ["backend-loc
 nydus-utils = { version = "0.3", path = "../utils" }
 
 [dev-dependencies]
-vmm-sys-util = "0.9.0"
+vmm-sys-util = "0.10"
 assert_matches = "1.5.0"
 
 [features]

@@ -5,15 +5,15 @@
 //! Utility helpers to supprt the storage subsystem.
 use std::alloc::{alloc, Layout};
 use std::cmp::{self, min};
-use std::io::{ErrorKind, Result};
+use std::io::{ErrorKind, IoSliceMut, Result};
 use std::os::unix::io::RawFd;
 use std::slice::from_raw_parts_mut;
 
 use fuse_backend_rs::abi::fuse_abi::off64_t;
-use fuse_backend_rs::transport::FileVolatileSlice;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
 #[cfg(target_os = "macos")]
 use libc::{fcntl, radvisory};
-use nix::sys::uio::{preadv, IoVec};
+use nix::sys::uio::preadv;
 use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
@@ -23,7 +23,7 @@ use vm_memory::Bytes;
 use crate::{StorageError, StorageResult};
 
 /// Just a simple wrapper for posix `preadv`. Provide a slice of `IoVec` as input.
-pub fn readv(fd: RawFd, iovec: &[IoVec<&mut [u8]>], offset: u64) -> Result<usize> {
+pub fn readv(fd: RawFd, iovec: &mut [IoSliceMut], offset: u64) -> Result<usize> {
     loop {
         match preadv(fd, iovec, offset as off64_t).map_err(|_| last_error!()) {
             Ok(ret) => return Ok(ret),
@@ -141,8 +141,8 @@ impl<'a> MemSliceCursor<'a> {
     }
 
     /// Consume `size` bytes of memory content from the cursor.
-    pub fn consume(&mut self, mut size: usize) -> Vec<IoVec<&mut [u8]>> {
-        let mut vectors: Vec<IoVec<&mut [u8]>> = Vec::with_capacity(8);
+    pub fn consume(&mut self, mut size: usize) -> Vec<IoSliceMut> {
+        let mut vectors: Vec<IoSliceMut> = Vec::with_capacity(8);
 
         while size > 0 && self.index < self.mem_slice.len() {
             let slice = self.mem_slice[self.index];
@@ -153,7 +153,7 @@ impl<'a> MemSliceCursor<'a> {
                     // Safe because self.offset is valid and we have checked `size`.
                     let p = unsafe { slice.as_ptr().add(self.offset) };
                     let s = unsafe { from_raw_parts_mut(p, size) };
-                    vectors.push(IoVec::from_mut_slice(s));
+                    vectors.push(IoSliceMut::new(s));
                     self.offset += size;
                     break;
                 }
@@ -161,7 +161,7 @@ impl<'a> MemSliceCursor<'a> {
                     // Safe because self.offset is valid and we have checked `size`.
                     let p = unsafe { slice.as_ptr().add(self.offset) };
                     let s = unsafe { from_raw_parts_mut(p, size) };
-                    vectors.push(IoVec::from_mut_slice(s));
+                    vectors.push(IoSliceMut::new(s));
                     self.index += 1;
                     self.offset = 0;
                     break;
@@ -169,7 +169,7 @@ impl<'a> MemSliceCursor<'a> {
                 cmp::Ordering::Less => {
                     let p = unsafe { slice.as_ptr().add(self.offset) };
                     let s = unsafe { from_raw_parts_mut(p, this_left) };
-                    vectors.push(IoVec::from_mut_slice(s));
+                    vectors.push(IoSliceMut::new(s));
                     self.index += 1;
                     self.offset = 0;
                     size -= this_left;
@@ -239,16 +239,15 @@ pub fn digest_check(data: &[u8], digest: &RafsDigest, digester: digest::Algorith
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuse_backend_rs::transport::FileVolatileSlice;
 
     #[test]
     fn test_copyv() {
         let mut dst_buf1 = vec![0x0u8; 4];
         let mut dst_buf2 = vec![0x0u8; 4];
         let volatile_slice_1 =
-            unsafe { FileVolatileSlice::new(dst_buf1.as_mut_ptr(), dst_buf1.len()) };
+            unsafe { FileVolatileSlice::from_raw_ptr(dst_buf1.as_mut_ptr(), dst_buf1.len()) };
         let volatile_slice_2 =
-            unsafe { FileVolatileSlice::new(dst_buf2.as_mut_ptr(), dst_buf2.len()) };
+            unsafe { FileVolatileSlice::from_raw_ptr(dst_buf2.as_mut_ptr(), dst_buf2.len()) };
         let dst_bufs = [volatile_slice_1, volatile_slice_2];
 
         let src_buf_1 = vec![1u8, 2u8, 3u8];
@@ -307,9 +306,9 @@ mod tests {
     #[test]
     fn test_mem_slice_cursor_move() {
         let mut buf1 = vec![0x0u8; 2];
-        let vs1 = unsafe { FileVolatileSlice::new(buf1.as_mut_ptr(), buf1.len()) };
+        let vs1 = unsafe { FileVolatileSlice::from_raw_ptr(buf1.as_mut_ptr(), buf1.len()) };
         let mut buf2 = vec![0x0u8; 2];
-        let vs2 = unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), buf2.len()) };
+        let vs2 = unsafe { FileVolatileSlice::from_raw_ptr(buf2.as_mut_ptr(), buf2.len()) };
         let vs = [vs1, vs2];
 
         let mut cursor = MemSliceCursor::new(&vs);
@@ -344,9 +343,9 @@ mod tests {
     #[test]
     fn test_mem_slice_cursor_consume() {
         let mut buf1 = vec![0x0u8; 2];
-        let vs1 = unsafe { FileVolatileSlice::new(buf1.as_mut_ptr(), buf1.len()) };
+        let vs1 = unsafe { FileVolatileSlice::from_raw_ptr(buf1.as_mut_ptr(), buf1.len()) };
         let mut buf2 = vec![0x0u8; 2];
-        let vs2 = unsafe { FileVolatileSlice::new(buf2.as_mut_ptr(), buf2.len()) };
+        let vs2 = unsafe { FileVolatileSlice::from_raw_ptr(buf2.as_mut_ptr(), buf2.len()) };
         let vs = [vs1, vs2];
 
         let mut cursor = MemSliceCursor::new(&vs);

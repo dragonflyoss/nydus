@@ -23,7 +23,7 @@ path = "src/lib.rs"
 rlimit = "0.8.3"
 log = "0.4.8"
 libc = "0.2"
-vmm-sys-util = "0.9.0"
+vmm-sys-util = "0.10.0"
 clap = "2.33"
 flexi_logger = { version = "0.17" }
 # pin regex to fix RUSTSEC-2022-0013
@@ -34,11 +34,11 @@ serde_with = { version = "1.6.0", features = ["macros"] }
 sha2 = "0.10.2"
 lazy_static = "1.4.0"
 xattr = "0.2.2"
-nix = "0.23.1"
+nix = "0.24.0"
 anyhow = "1.0.35"
 base64 = "0.13.0"
 rust-fsm = "0.6.0"
-vm-memory = { version = "0.7.0", features = ["backend-mmap"], optional = true }
+vm-memory = { version = "0.8.0", features = ["backend-mmap"], optional = true }
 chrono = "0.4.19"
 openssl = { version = "0.10.40", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
@@ -51,11 +51,11 @@ rand_core = "0.6.2"
 tar = "0.4.38"
 mio = { version = "0.8", features = ["os-poll", "os-ext"]}
 
-fuse-backend-rs = { version = "0.9.0" }
-vhost = { version = "0.3.0", features = ["vhost-user-slave"], optional = true }
-vhost-user-backend = { version = "0.1.0", optional = true }
+fuse-backend-rs = { version = "0.9.5" }
+vhost = { version = "0.4.0", features = ["vhost-user-slave"], optional = true }
+vhost-user-backend = { version = "0.5.1", optional = true }
 virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = true }
-virtio-queue = { version = "0.1.0", optional = true }
+virtio-queue = { version = "0.4.0", optional = true }
 
 nydus-api = { version = "0.1.0", path = "api" }
 nydus-app = { version = "0.3.0", path = "app" }
@@ -67,7 +67,6 @@ nydus-blobfs = { version = "0.1.0", path = "blobfs", features = ["virtiofs"], op
 
 [dev-dependencies]
 sendfd = "0.3.3"
-vmm-sys-util = "0.9.0"
 env_logger = "0.8.2"
 rand = "0.8.5"
 

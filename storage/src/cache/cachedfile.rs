@@ -17,7 +17,7 @@ use std::slice;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use fuse_backend_rs::transport::FileVolatileSlice;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nix::unistd::dup;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
@@ -598,10 +598,10 @@ impl FileCacheEntry {
     fn dispatch_cache_fast(&self, cursor: &mut MemSliceCursor, region: &Region) -> Result<usize> {
         let offset = region.blob_address + region.seg.offset as u64;
         let size = region.seg.len as usize;
-        let iovec = cursor.consume(size);
+        let mut iovec = cursor.consume(size);
 
         self.metrics.partial_hits.inc();
-        readv(self.file.as_raw_fd(), &iovec, offset)
+        readv(self.file.as_raw_fd(), &mut iovec, offset)
     }
 
     fn dispatch_cache_slow(&self, cursor: &mut MemSliceCursor, region: &Region) -> Result<usize> {

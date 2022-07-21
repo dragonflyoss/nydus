@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
-use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
+use fuse_backend_rs::transport::{FuseChannel, FuseSession};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
@@ -104,10 +104,8 @@ struct FuseServer {
 
 impl FuseServer {
     fn new(server: Arc<Server<Arc<Vfs>>>, se: &FuseSession) -> Result<FuseServer> {
-        Ok(FuseServer {
-            server,
-            ch: se.new_channel()?,
-        })
+        let ch = se.new_channel().map_err(|e| eother!(e))?;
+        Ok(FuseServer { server, ch })
     }
 
     fn svc_loop(&mut self, metrics_hook: &dyn MetricsHook) -> Result<()> {
@@ -119,9 +117,9 @@ impl FuseServer {
                 warn!("get fuse request failed: {:?}", e);
                 Error::from_raw_os_error(libc::EINVAL)
             })? {
-                if let Err(e) = self
-                    .server
-                    .handle_message(reader, writer, None, Some(metrics_hook))
+                if let Err(e) =
+                    self.server
+                        .handle_message(reader, writer.into(), None, Some(metrics_hook))
                 {
                     match e {
                         fuse_backend_rs::Error::EncodeMessage(_ebadf) => {
@@ -165,7 +163,7 @@ impl FusedevFsService {
         fp: FailoverPolicy,
         readonly: bool,
     ) -> Result<Self> {
-        let session = FuseSession::new(mnt, "rafs", "", readonly)?;
+        let session = FuseSession::new(mnt, "rafs", "", readonly).map_err(|e| eother!(e))?;
         let upgrade_mgr = supervisor
             .as_ref()
             .map(|s| Mutex::new(UpgradeManager::new(s.to_string().into())));
@@ -553,7 +551,13 @@ pub fn create_fuse_daemon(
         if let Some(cmd) = mount_cmd {
             daemon.service.mount(cmd)?;
         }
-        daemon.service.session.lock().unwrap().mount()?;
+        daemon
+            .service
+            .session
+            .lock()
+            .unwrap()
+            .mount()
+            .map_err(|e| eother!(e))?;
         daemon
             .on_event(DaemonStateMachineInput::Mount)
             .map_err(|e| eother!(e))?;

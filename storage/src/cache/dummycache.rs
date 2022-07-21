@@ -22,7 +22,7 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use fuse_backend_rs::transport::FileVolatileSlice;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_api::http::CacheConfig;
 use nydus_utils::{compress, digest};
 
