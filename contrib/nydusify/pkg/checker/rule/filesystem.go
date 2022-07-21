@@ -235,7 +235,7 @@ func (rule *FilesystemRule) verify() error {
 	}
 
 	if !validate {
-		return fmt.Errorf("Failed to verify source image and Nydus image")
+		return errors.Errorf("Failed to verify source image and Nydus image")
 	}
 
 	return nil
@@ -257,7 +257,7 @@ func (rule *FilesystemRule) Validate() error {
 	if err != nil {
 		return err
 	}
-	defer nydusd.Umount()
+	defer nydusd.Umount(false)
 
 	if err := rule.verify(); err != nil {
 		return err
