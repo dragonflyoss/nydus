@@ -15,12 +15,11 @@ use nydus_api::http::{CacheConfig, FileCacheConfig};
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
-use crate::cache::cachedfile::FileCacheEntry;
+use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
-use crate::meta::BlobMetaInfo;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with local storage.
@@ -212,11 +211,12 @@ impl FileCacheEntry {
                 assert_eq!(file_size, blob_info.uncompressed_size());
             }
 
-            Some(Arc::new(BlobMetaInfo::new(
-                &blob_file_path,
-                &blob_info,
-                Some(&reader),
-            )?))
+            let meta = FileCacheMeta::new(
+                blob_file_path.to_string(),
+                blob_info.clone(),
+                Some(reader.clone()),
+            )?;
+            Some(meta)
         } else {
             None
         };

@@ -14,8 +14,9 @@ use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::slice;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
@@ -36,11 +37,69 @@ use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
 
+const DOWNLOAD_META_RETRY_COUNT: u32 = 20;
+const DOWNLOAD_META_RETRY_DELAY: u64 = 500;
+
+#[derive(Default, Clone)]
+pub(crate) struct FileCacheMeta {
+    has_error: Arc<AtomicBool>,
+    meta: Arc<Mutex<Option<Arc<BlobMetaInfo>>>>,
+}
+
+impl FileCacheMeta {
+    pub(crate) fn new(
+        blob_file: String,
+        blob_info: Arc<BlobInfo>,
+        reader: Option<Arc<dyn BlobReader>>,
+    ) -> Result<Self> {
+        let meta = FileCacheMeta {
+            has_error: Arc::new(AtomicBool::new(false)),
+            meta: Arc::new(Mutex::new(None)),
+        };
+        let meta1 = meta.clone();
+
+        std::thread::spawn(move || {
+            let mut retry = 0;
+            while retry < DOWNLOAD_META_RETRY_COUNT {
+                match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
+                    Ok(m) => {
+                        *meta1.meta.lock().unwrap() = Some(Arc::new(m));
+                        return;
+                    }
+                    Err(e) => {
+                        info!("temporarily failed to get blob.meta, {}", e);
+                        std::thread::sleep(Duration::from_millis(DOWNLOAD_META_RETRY_DELAY));
+                        retry += 1;
+                    }
+                }
+            }
+            warn!("failed to get blob.meta");
+            meta1.has_error.store(true, Ordering::Release);
+        });
+
+        Ok(meta)
+    }
+
+    pub(crate) fn get_blob_meta(&self) -> Option<Arc<BlobMetaInfo>> {
+        loop {
+            let meta = self.meta.lock().unwrap();
+            if meta.is_some() {
+                return meta.clone();
+            }
+            drop(meta);
+            if self.has_error.load(Ordering::Acquire) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
 pub(crate) struct FileCacheEntry {
     pub(crate) blob_info: Arc<BlobInfo>,
     pub(crate) chunk_map: Arc<dyn ChunkMap>,
     pub(crate) file: Arc<File>,
-    pub(crate) meta: Option<Arc<BlobMetaInfo>>,
+    pub(crate) meta: Option<FileCacheMeta>,
     pub(crate) metrics: Arc<BlobcacheMetrics>,
     pub(crate) prefetch_state: Arc<AtomicU32>,
     pub(crate) reader: Arc<dyn BlobReader>,
@@ -137,17 +196,26 @@ impl BlobCache for FileCacheEntry {
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
         let mut bios = bios.to_vec();
+        let mut fail = false;
         bios.iter_mut().for_each(|b| {
-            if let Some(chunks_meta) = &self.meta {
-                // TODO: the first blob backend io triggers chunks array download.
-                if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
-                    let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
-                    b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+            if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
+                if let Some(meta) = self.meta.as_ref() {
+                    if let Some(bm) = meta.get_blob_meta() {
+                        let cki = BlobMetaChunk::new(chunk_index as usize, &bm.state);
+                        b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+                    } else {
+                        warn!("failed to get blob.meta for prefetch");
+                        fail = true;
+                    }
                 }
             }
         });
-        bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
-        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
+        if fail {
+            bios = vec![];
+        } else {
+            bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
+            self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
+        }
 
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
@@ -294,14 +362,17 @@ impl BlobCache for FileCacheEntry {
         self.metrics.total.inc();
         self.workers.consume_prefetch_budget(iovec.bi_size);
 
-        if let Some(ref chunks_meta) = self.meta {
-            // TODO: the first blob backend io triggers chunks array download.
-            // Convert `BlocIoChunk::Address` to `BlobIoChunk::Base`.
-            for b in iovec.bi_vec.iter_mut() {
-                if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
-                    let cki = BlobMetaChunk::new(chunk_index as usize, &chunks_meta.state);
-                    b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+        if let Some(meta) = self.meta.as_ref() {
+            if let Some(bm) = meta.get_blob_meta() {
+                // Convert `BlocIoChunk::Address` to `BlobIoChunk::Base`.
+                for b in iovec.bi_vec.iter_mut() {
+                    if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
+                        let cki = BlobMetaChunk::new(chunk_index as usize, &bm.state);
+                        b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+                    }
                 }
+            } else {
+                return Err(einval!("failed to get blob.meta for read"));
             }
         }
 
@@ -334,6 +405,7 @@ impl BlobObject for FileCacheEntry {
 
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
+        let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_compressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
         debug_assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks)
@@ -341,6 +413,7 @@ impl BlobObject for FileCacheEntry {
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
+        let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_uncompressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
         debug_assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks)
@@ -361,8 +434,12 @@ impl BlobObject for FileCacheEntry {
         if range.blob_size < RAFS_DEFAULT_CHUNK_SIZE {
             let max_size = RAFS_DEFAULT_CHUNK_SIZE - range.blob_size;
             if let Some(meta) = self.meta.as_ref() {
-                if let Some(chunks) = meta.add_more_chunks(chunks, max_size) {
-                    return self.do_fetch_chunks(&chunks);
+                if let Some(bm) = meta.get_blob_meta() {
+                    if let Some(chunks) = bm.add_more_chunks(chunks, max_size) {
+                        return self.do_fetch_chunks(&chunks);
+                    }
+                } else {
+                    return Err(einval!("failed to get blob.meta"));
                 }
             }
         }
