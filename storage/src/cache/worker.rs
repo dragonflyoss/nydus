@@ -17,6 +17,7 @@ use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
+use tokio::sync::Semaphore;
 
 use nydus_api::http::BlobPrefetchConfig;
 use nydus_utils::async_helper::with_runtime;
@@ -89,6 +90,7 @@ pub(crate) struct AsyncWorkerMgr {
     workers: AtomicU32,
     active: AtomicBool,
 
+    prefetch_sema: Semaphore,
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
     prefetch_delayed: AtomicU64,
@@ -124,6 +126,7 @@ impl AsyncWorkerMgr {
             workers: AtomicU32::new(0),
             active: AtomicBool::new(false),
 
+            prefetch_sema: Semaphore::new(0),
             prefetch_channel: Arc::new(Channel::new()),
             prefetch_config,
             prefetch_delayed: AtomicU64::new(0),
@@ -235,28 +238,38 @@ impl AsyncWorkerMgr {
     }
 
     async fn handle_prefetch_requests(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
+        // Max 2 active requests per thread.
+        mgr.prefetch_sema.add_permits(2);
+
         while let Ok(msg) = mgr.prefetch_channel.recv().await {
             mgr.handle_prefetch_rate_limit(&msg).await;
+            let mgr2 = mgr.clone();
 
             match msg {
                 AsyncPrefetchMessage::BlobPrefetch(state, blob_cache, offset, size) => {
+                    let _ = mgr2.prefetch_sema.acquire().await;
                     if state.load(Ordering::Acquire) > 0 {
-                        let _ = rt.spawn(Self::handle_blob_prefetch_request(
-                            mgr.clone(),
-                            blob_cache,
-                            offset,
-                            size,
-                            state.clone(),
-                        ));
+                        rt.spawn(async move {
+                            let _ = Self::handle_blob_prefetch_request(
+                                mgr2.clone(),
+                                blob_cache,
+                                offset,
+                                size,
+                                state.clone(),
+                            )
+                            .await;
+                            mgr2.prefetch_sema.add_permits(1);
+                        });
                     }
                 }
                 AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
+                    let _ = mgr2.prefetch_sema.acquire().await;
                     if state.load(Ordering::Acquire) > 0 {
-                        let _ = rt.spawn(Self::handle_fs_prefetch_request(
-                            mgr.clone(),
-                            blob_cache,
-                            req,
-                        ));
+                        rt.spawn(async move {
+                            let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req)
+                                .await;
+                            mgr2.prefetch_sema.add_permits(1);
+                        });
                     }
                 }
                 AsyncPrefetchMessage::Ping => {

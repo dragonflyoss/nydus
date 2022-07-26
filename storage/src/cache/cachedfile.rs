@@ -358,6 +358,15 @@ impl BlobObject for FileCacheEntry {
             }
         }
 
+        if range.blob_size < RAFS_DEFAULT_CHUNK_SIZE {
+            let max_size = RAFS_DEFAULT_CHUNK_SIZE - range.blob_size;
+            if let Some(meta) = self.meta.as_ref() {
+                if let Some(chunks) = meta.add_more_chunks(chunks, max_size) {
+                    return self.do_fetch_chunks(&chunks);
+                }
+            }
+        }
+
         self.do_fetch_chunks(chunks)
     }
 }
@@ -631,7 +640,8 @@ impl FileCacheEntry {
         }
 
         let blob_size = region.blob_len as usize;
-        debug!("total backend data {}KB", blob_size / 1024);
+        debug!("try to read {} bytes from backend", blob_size);
+
         let mut chunks = self.read_chunks(region.blob_address, blob_size, &region.chunks)?;
         assert_eq!(region.chunks.len(), chunks.len());
 
