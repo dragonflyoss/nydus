@@ -112,8 +112,9 @@ impl BlobFactory {
         let key = BlobCacheMgrKey {
             config: config.clone(),
         };
+        let mut guard = self.mgrs.lock().unwrap();
         // Use the existing blob cache manager if there's one with the same configuration.
-        if let Some(mgr) = self.mgrs.lock().unwrap().get(&key) {
+        if let Some(mgr) = guard.get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
         let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
@@ -147,7 +148,6 @@ impl BlobFactory {
             }
         };
 
-        let mut guard = self.mgrs.lock().unwrap();
         let mgr = guard.entry(key).or_insert_with(|| mgr);
 
         mgr.get_blob_cache(blob_info)
