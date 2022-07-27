@@ -11,7 +11,6 @@ use std::thread;
 use std::time::Duration;
 use tokio::time::interval;
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
@@ -84,6 +83,7 @@ impl AsyncPrefetchMessage {
     }
 }
 
+/// An asynchronous task manager for data prefetching
 pub(crate) struct AsyncWorkerMgr {
     metrics: Arc<BlobcacheMetrics>,
     ping_requests: AtomicU32,
@@ -114,7 +114,7 @@ impl AsyncWorkerMgr {
         };
         let prefetch_limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
             info!(
-                "stroage: prefetch bandwidth will be limited at {}Bytes/S",
+                "storage: prefetch bandwidth will be limited at {}Bytes/S",
                 v
             );
             Arc::new(RateLimiter::direct(Quota::per_second(v)))
@@ -189,10 +189,9 @@ impl AsyncWorkerMgr {
     }
 
     /// Consume network bandwidth budget for prefetching.
-    pub fn consume_prefetch_budget(&self, buffers: &[FileVolatileSlice]) {
+    pub fn consume_prefetch_budget(&self, size: u32) {
         if self.prefetch_inflight.load(Ordering::Relaxed) > 0 {
-            let size = buffers.iter().fold(0, |v, i| v + i.len());
-            if let Some(v) = NonZeroU32::new(std::cmp::min(size, u32::MAX as usize) as u32) {
+            if let Some(v) = NonZeroU32::new(size) {
                 // Try to consume budget but ignore result.
                 if let Some(limiter) = self.prefetch_limiter.as_ref() {
                     let _ = limiter.check_n(v);

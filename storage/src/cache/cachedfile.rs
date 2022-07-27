@@ -292,7 +292,7 @@ impl BlobCache for FileCacheEntry {
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
         debug_assert!(iovec.validate());
         self.metrics.total.inc();
-        self.workers.consume_prefetch_budget(buffers);
+        self.workers.consume_prefetch_budget(iovec.bi_size);
 
         if let Some(ref chunks_meta) = self.meta {
             // TODO: the first blob backend io triggers chunks array download.
