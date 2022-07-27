@@ -189,10 +189,9 @@ impl AsyncWorkerMgr {
     }
 
     /// Consume network bandwidth budget for prefetching.
-    pub fn consume_prefetch_budget(&self, buffers: &[FileVolatileSlice]) {
+    pub fn consume_prefetch_budget(&self, size: u32) {
         if self.prefetch_inflight.load(Ordering::Relaxed) > 0 {
-            let size = buffers.iter().fold(0, |v, i| v + i.len());
-            if let Some(v) = NonZeroU32::new(std::cmp::min(size, u32::MAX as usize) as u32) {
+            if let Some(v) = NonZeroU32::new(size) {
                 // Try to consume budget but ignore result.
                 if let Some(limiter) = self.prefetch_limiter.as_ref() {
                     let _ = limiter.check_n(v);
