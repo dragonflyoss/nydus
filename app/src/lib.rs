@@ -180,6 +180,12 @@ pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Resu
     }
 
     log::set_max_level(level);
+
+    // Dump panic info and backtrace to logger.
+    log_panics::Config::new()
+        .backtrace_mode(log_panics::BacktraceMode::Resolved)
+        .install_panic_hook();
+
     Ok(())
 }
 

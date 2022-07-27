@@ -717,6 +717,7 @@ fn main() -> Result<()> {
     let apisock = args.value_of("apisock");
 
     setup_logging(logging_file, level)?;
+
     dump_program_info(crate_version!());
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
