@@ -581,13 +581,7 @@ impl OndiskInodeWrapper {
 
         let blob = blob_table[blob_index as usize].clone();
 
-        BlobIoDesc::new(
-            blob,
-            io_chunk,
-            content_offset,
-            content_len as usize,
-            user_io,
-        )
+        BlobIoDesc::new(blob, io_chunk, content_offset, content_len, user_io)
     }
 
     fn chunk_size(&self) -> u32 {
@@ -1239,7 +1233,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         let mut descs = BlobIoVec::new();
         descs.bi_vec.push(desc);
-        descs.bi_size += content_len as usize;
+        descs.bi_size += content_len;
         left -= content_len;
 
         if left != 0 {
@@ -1260,9 +1254,8 @@ impl RafsInode for OndiskInodeWrapper {
                     descs = BlobIoVec::new();
                 }
 
-                // TODO: change type of bi_size to u32
                 descs.bi_vec.push(desc);
-                descs.bi_size += content_len as usize;
+                descs.bi_size += content_len;
                 left -= content_len;
                 if left == 0 {
                     break;

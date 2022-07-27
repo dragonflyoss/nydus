@@ -516,7 +516,7 @@ pub struct BlobIoDesc {
     /// Offset from start of the chunk for the IO operation.
     pub offset: u32,
     /// Size of the IO operation
-    pub size: usize,
+    pub size: u32,
     /// Whether it's a user initiated IO, otherwise is a storage system internal IO.
     ///
     /// It might be initiated by user io amplification. With this flag, lower device
@@ -530,7 +530,7 @@ impl BlobIoDesc {
         blob: Arc<BlobInfo>,
         chunkinfo: BlobIoChunk,
         offset: u32,
-        size: usize,
+        size: u32,
         user_io: bool,
     ) -> Self {
         BlobIoDesc {
@@ -575,8 +575,9 @@ pub struct BlobIoVec {
     /// Blob IO flags.
     pub bi_flags: u32,
     /// Total size of blob IOs to be performed.
-    pub bi_size: usize,
+    pub bi_size: u32,
     /// Array of blob IOs, these IOs should executed sequentially.
+    // TODO: As bi_vec must stay within the same blob, move BlobInfo out here?
     pub bi_vec: Vec<BlobIoDesc>,
 }
 
@@ -933,7 +934,7 @@ impl BlobDevice {
             let mut f = BlobDeviceIoVec::new(self, desc);
             // The `off` parameter to w.write_from() is actually ignored by
             // BlobV5IoVec::read_vectored_at_volatile()
-            w.write_from(&mut f, size, 0)
+            w.write_from(&mut f, size as usize, 0)
         }
     }
 

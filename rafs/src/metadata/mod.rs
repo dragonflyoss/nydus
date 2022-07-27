@@ -716,7 +716,7 @@ impl RafsSuper {
             // Issue a prefetch request since target is large enough.
             // As files belonging to the same directory are arranged in adjacent,
             // it should fetch a range of blob in batch.
-            if flush || desc.bi_size >= (4 * RAFS_DEFAULT_CHUNK_SIZE) as usize {
+            if flush || desc.bi_size >= (4 * RAFS_DEFAULT_CHUNK_SIZE) as u32 {
                 trace!("fetching head bio size {}", desc.bi_size);
                 fetcher(desc);
                 desc.reset();

@@ -11,7 +11,6 @@ use std::thread;
 use std::time::Duration;
 use tokio::time::interval;
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
@@ -84,6 +83,7 @@ impl AsyncPrefetchMessage {
     }
 }
 
+/// An asynchronous task manager for data prefetching
 pub(crate) struct AsyncWorkerMgr {
     metrics: Arc<BlobcacheMetrics>,
     ping_requests: AtomicU32,
@@ -114,7 +114,7 @@ impl AsyncWorkerMgr {
         };
         let prefetch_limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
             info!(
-                "stroage: prefetch bandwidth will be limited at {}Bytes/S",
+                "storage: prefetch bandwidth will be limited at {}Bytes/S",
                 v
             );
             Arc::new(RateLimiter::direct(Quota::per_second(v)))

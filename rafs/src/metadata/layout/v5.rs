@@ -1308,7 +1308,7 @@ fn add_chunk_to_bio_desc(
         blob,
         chunk.into(),
         chunk_start as u32,
-        (chunk_end - chunk_start) as usize,
+        (chunk_end - chunk_start) as u32,
         user_io,
     );
     desc.bi_size += bio.size;
@@ -1675,7 +1675,7 @@ pub mod tests {
                 assert_eq!(desc.bi_vec.len(), 1);
                 let bio = &desc.bi_vec[0];
                 assert_eq!(*expected_chunk_start, bio.offset);
-                assert_eq!(*expected_size as usize, bio.size);
+                assert_eq!(*expected_size as u32, bio.size);
             }
         }
     }

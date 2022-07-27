@@ -145,13 +145,21 @@ impl BlobCache for DummyCache {
                 let mut d = alloc_buf(bio.chunkinfo.uncompress_size() as usize);
                 self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), false, None)?;
                 buffer_holder.push(d);
+                // Even a merged IO can hardly reach u32::MAX. So this is safe
                 user_size += bio.size;
             }
         }
 
-        copyv(&buffer_holder, bufs, offset as usize, user_size, 0, 0)
-            .map(|(n, _)| n)
-            .map_err(|e| eother!(e))
+        copyv(
+            &buffer_holder,
+            bufs,
+            offset as usize,
+            user_size as usize,
+            0,
+            0,
+        )
+        .map(|(n, _)| n)
+        .map_err(|e| eother!(e))
     }
 }
 
