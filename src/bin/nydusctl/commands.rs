@@ -334,10 +334,12 @@ impl CommandDaemon {
 Version:                {version}
 Status:                 {state}
 Profile:                {profile}
+Commit:                 {git_commit}
 "#,
                     version = version_info["package_ver"],
                     state = i["state"],
                     profile = version_info["profile"],
+                    git_commit = version_info["git_commit"],
                 );
 
                 if !backend_list.is_empty() {
