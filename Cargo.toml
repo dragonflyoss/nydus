@@ -49,7 +49,7 @@ hyper = "0.14.11"
 # pin rand_core to bring in fix for https://rustsec.org/advisories/RUSTSEC-2021-0023
 rand_core = "0.6.2"
 tar = "0.4.38"
-mio = { version = "0.8", features = ["os-poll", "os-ext"]}
+mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 
 fuse-backend-rs = { version = "0.9.5" }
 vhost = { version = "0.4.0", features = ["vhost-user-slave"], optional = true }
