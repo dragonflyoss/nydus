@@ -7,6 +7,7 @@ license = "Apache-2.0 OR BSD-3-Clause"
 homepage = "https://nydus.dev/"
 repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
+resolver = "2"
 
 [profile.release]
 panic = "abort"
@@ -29,7 +30,6 @@ clap = "2.33"
 regex = "1.5.5"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
-serde_with = { version = "1.6.0", features = ["macros"] }
 sha2 = "0.10.2"
 time = { version = "0.3.14", features = ["serde-human-readable"] }
 lazy_static = "1.4.0"

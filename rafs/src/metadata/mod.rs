@@ -24,7 +24,6 @@ use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoMerge, BlobIoVec};
 
 use self::layout::v5::RafsV5PrefetchTable;
@@ -273,7 +272,6 @@ impl Display for RafsSuperFlags {
 }
 
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
-#[serde_as]
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
     /// Filesystem magic number.
@@ -288,7 +286,6 @@ pub struct RafsSuperMeta {
     pub chunk_size: u32,
     /// Number of inodes in the filesystem.
     pub inodes_count: u64,
-    #[serde_as(as = "DisplayFromStr")]
     /// V5: superblock flags for Rafs v5.
     pub flags: RafsSuperFlags,
     /// Number of inode entries in inode offset table.

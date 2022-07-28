@@ -837,7 +837,7 @@ pub fn start_http_thread(
     from_api: Receiver<ApiResponse>,
 ) -> Result<(thread::JoinHandle<Result<()>>, Arc<Waker>)> {
     // Try to remove existed unix domain socket
-    std::fs::remove_file(path).unwrap_or_default();
+    let _ = fs::remove_file(path);
     let socket_path = PathBuf::from(path);
 
     let mut poll = Poll::new()?;
