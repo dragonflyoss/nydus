@@ -87,6 +87,6 @@ jobs:
                 --target localhost:5000/$I:nydus-nightly-v6 \
                 --backend-config-file ./backend.json --backend-type registry
 
-            sudo fsck.erofs -d9 output/nydus_bootstrap 
+            sudo fsck.erofs -d1 output/nydus_bootstrap
             sudo rm -rf ./output
           done
