@@ -13,13 +13,12 @@ use nydus_api::http::{CacheConfig, FsCacheConfig};
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
-use crate::cache::cachedfile::FileCacheEntry;
+use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{BlobStateMap, IndexedChunkMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
-use crate::meta::BlobMetaInfo;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with Linux fscache subsystem.
@@ -211,11 +210,8 @@ impl FileCacheEntry {
             .map_err(|_e| eio!("failed to get blob reader"))?;
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let meta = if blob_info.meta_ci_is_valid() {
-            Some(Arc::new(BlobMetaInfo::new(
-                &blob_file_path,
-                &blob_info,
-                Some(&reader),
-            )?))
+            let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
+            Some(meta)
         } else {
             None
         };
