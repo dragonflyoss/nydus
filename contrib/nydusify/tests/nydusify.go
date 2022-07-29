@@ -90,7 +90,6 @@ func (nydusify *Nydusify) GetBootstarpFilePath() string {
 
 func (nydusify *Nydusify) Convert(t *testing.T) {
 	host := nydusify.Registry.Host()
-
 	buildCache := ""
 	if nydusify.Cache != "" {
 		buildCache = host + "/" + nydusify.Cache
@@ -155,7 +154,6 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 
 func (nydusify *Nydusify) Check(t *testing.T) {
 	host := nydusify.Registry.Host()
-
 	checker, err := checker.New(checker.Opt{
 		WorkDir:        filepath.Join(nydusify.workDir, nydusify.Target),
 		Source:         host + "/" + nydusify.Source,
@@ -164,8 +162,6 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 		TargetInsecure: true,
 		NydusImagePath: nydusImagePath,
 		NydusdPath:     nydusdPath,
-		BackendType:    nydusify.backendType,
-		BackendConfig:  nydusify.backendConfig,
 		ExpectedArch:   "amd64",
 	})
 	assert.Nil(t, err)

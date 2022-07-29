@@ -139,6 +139,8 @@ func (checker *Checker) Check(ctx context.Context) error {
 		&rule.FilesystemRule{
 			Source:          checker.Source,
 			SourceMountPath: filepath.Join(checker.WorkDir, "fs/source_mounted"),
+			Target:          checker.Target,
+			TargetInsecure:  checker.TargetInsecure,
 			NydusdConfig: tool.NydusdConfig{
 				NydusdPath:     checker.NydusdPath,
 				BackendType:    checker.BackendType,
