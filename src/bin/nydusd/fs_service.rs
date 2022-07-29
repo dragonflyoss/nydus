@@ -17,6 +17,7 @@ use nydus::{FsBackendDesc, FsBackendType};
 use rafs::fs::{Rafs, RafsConfig};
 use rafs::{trim_backend_config, RafsError, RafsIoRead};
 use serde::{self, Deserialize, Serialize};
+use storage::factory::BLOB_FACTORY;
 
 use crate::daemon::DaemonResult;
 use crate::upgrade::{self, UpgradeManager};
@@ -148,6 +149,9 @@ pub trait FsService: Send + Sync {
             // Remove mount opaque from UpgradeManager
             upgrade::remove_mounts_state(&mut mgr_guard, cmd)?;
         }
+
+        debug!("try to gc unused blobs");
+        BLOB_FACTORY.gc(None);
 
         Ok(())
     }
