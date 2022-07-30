@@ -653,6 +653,8 @@ impl BlobIoVec {
 }
 
 /// A segment representing a continuous range for a blob IO operation.
+/// It can span multiple chunks while the `offset` is where the user io starts
+/// within the first chunk and `len` is the total user io length of these chunks.
 #[derive(Clone, Debug, Default)]
 pub struct BlobIoSegment {
     /// Start position of the range within the chunk
@@ -669,7 +671,6 @@ impl BlobIoSegment {
 
     #[inline]
     pub fn append(&mut self, _offset: u32, len: u32) {
-        debug_assert!(self.offset + self.len == _offset);
         debug_assert!(_offset.checked_add(len).is_some());
         debug_assert!((self.offset + self.len).checked_add(len).is_some());
 
