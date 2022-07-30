@@ -214,7 +214,7 @@ impl AsyncWorkerMgr {
                         .fetch_add(1, Ordering::Relaxed);
 
                     with_runtime(|rt| {
-                        rt.block_on(Self::handle_prefetch_requests(mgr2.clone(), rt));
+                        rt.block_on(Self::handle_prefetch_requests(mgr2.clone(), &ASYNC_RUNTIME));
                     });
 
                     mgr2.metrics
@@ -264,9 +264,8 @@ impl AsyncWorkerMgr {
                 AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
                     let _ = mgr2.prefetch_sema.acquire().await;
                     if state.load(Ordering::Acquire) > 0 {
-                        rt.spawn(async move {
-                            let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req)
-                                .await;
+                        rt.spawn_blocking(move || {
+                            let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req);
                             mgr2.prefetch_sema.add_permits(1);
                         });
                     }
@@ -367,7 +366,7 @@ impl AsyncWorkerMgr {
         Ok(())
     }
 
-    async fn handle_fs_prefetch_request(
+    fn handle_fs_prefetch_request(
         mgr: Arc<AsyncWorkerMgr>,
         cache: Arc<dyn BlobCache>,
         req: BlobIoRange,
