@@ -221,7 +221,7 @@ impl BlobObject for RemoteBlob {
         }
     }
 
-    fn fetch_chunks(&self, _range: &BlobIoRange) -> Result<usize> {
+    fn prefetch_chunks(&self, _range: &BlobIoRange) -> Result<usize> {
         Err(enosys!())
     }
 }

@@ -419,16 +419,27 @@ impl BlobObject for FileCacheEntry {
         self.do_fetch_chunks(&chunks)
     }
 
-    fn fetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
+    fn prefetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
         let chunks = &range.chunks;
         if chunks.is_empty() {
             return Ok(0);
         }
 
+        let mut ready_or_pending =
+            matches!(self.chunk_map.is_ready_or_pending(&chunks[0]), Ok(true));
         for idx in 1..chunks.len() {
             if chunks[idx - 1].id() + 1 != chunks[idx].id() {
                 return Err(einval!("chunks for fetch_chunks() must be continuous"));
             }
+            if ready_or_pending
+                && !matches!(self.chunk_map.is_ready_or_pending(&chunks[idx]), Ok(true))
+            {
+                ready_or_pending = false;
+            }
+        }
+        // All chunks to be prefetched are already pending for downloading, no need to reissue.
+        if ready_or_pending {
+            return Ok(0);
         }
 
         if range.blob_size < RAFS_DEFAULT_CHUNK_SIZE {

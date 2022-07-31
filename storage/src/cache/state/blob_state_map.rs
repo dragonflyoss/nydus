@@ -97,6 +97,11 @@ where
         self.c.is_ready(chunk)
     }
 
+    fn is_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
+        let index = C::get_index(chunk);
+        Ok(self.inflight_tracer.lock().unwrap().get(&index).is_some())
+    }
+
     fn check_ready_and_mark_pending(&self, chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
         let mut ready = self.c.is_ready(chunk).map_err(StorageError::CacheIndex)?;
 

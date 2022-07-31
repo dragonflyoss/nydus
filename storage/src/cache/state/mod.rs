@@ -56,6 +56,20 @@ pub trait ChunkMap: Any + Send + Sync {
     /// Check whether the chunk is ready for use.
     fn is_ready(&self, chunk: &dyn BlobChunkInfo) -> Result<bool>;
 
+    /// Check whether the chunk is pending for downloading.
+    fn is_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Check whether a chunk is ready for use or pending for downloading.
+    fn is_ready_or_pending(&self, chunk: &dyn BlobChunkInfo) -> Result<bool> {
+        if matches!(self.is_pending(chunk), Ok(true)) {
+            Ok(true)
+        } else {
+            self.is_ready(chunk)
+        }
+    }
+
     /// Check whether the chunk is ready for use, and mark it as pending if not ready yet.
     ///
     /// The function returns:

@@ -395,7 +395,7 @@ impl AsyncWorkerMgr {
         mgr.metrics.prefetch_data_amount.add(blob_size);
 
         if let Some(obj) = cache.get_blob_object() {
-            obj.fetch_chunks(&req)?;
+            obj.prefetch_chunks(&req)?;
         } else {
             cache.prefetch_range(&req)?;
         }
