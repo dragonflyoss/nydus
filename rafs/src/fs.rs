@@ -530,7 +530,7 @@ impl Rafs {
             }
         }
 
-        let ignore_prefetch_all = prefetch_files
+        let mut ignore_prefetch_all = prefetch_files
             .as_ref()
             .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
             .unwrap_or(false);
@@ -539,27 +539,32 @@ impl Rafs {
         // - prefetch listed passed in by user
         // - or file prefetch list in metadata
         let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-        sb.prefetch_files(&mut reader, inodes, &|desc| {
-            device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
-                warn!("Prefetch error, {:?}", e);
-            });
-        })
-        .unwrap_or_else(|e| {
-            info!("No file to be prefetched {:?}", e);
+        let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
+            if desc.bi_size > 0 {
+                device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                    warn!("Prefetch error, {:?}", e);
+                });
+            }
         });
+        match res {
+            Ok(true) => ignore_prefetch_all = true,
+            Ok(false) => {}
+            Err(e) => info!("No file to be prefetched {:?}", e),
+        }
 
         // Last optionally prefetch all data
         if prefetch_all && !ignore_prefetch_all {
             let root = vec![root_ino];
-
-            sb.prefetch_files(&mut reader, Some(root), &|desc| {
-                device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
-                    warn!("Prefetch error, {:?}", e);
-                });
-            })
-            .unwrap_or_else(|e| {
-                info!("No file to be prefetched {:?}", e);
+            let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
+                if desc.bi_size > 0 {
+                    device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                        warn!("Prefetch error, {:?}", e);
+                    });
+                }
             });
+            if let Err(e) = res {
+                info!("No file to be prefetched {:?}", e);
+            }
         }
     }
 

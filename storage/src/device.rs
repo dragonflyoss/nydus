@@ -950,6 +950,7 @@ impl BlobDevice {
                 let _ = blob.prefetch(blob.clone(), &prefetches[idx..idx + 1], &[]);
             }
         }
+
         for io_vec in io_vecs.iter() {
             if let Some(blob) = self.get_blob_by_iovec(io_vec) {
                 let _ = blob

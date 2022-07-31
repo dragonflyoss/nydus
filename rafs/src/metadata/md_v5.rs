@@ -83,13 +83,18 @@ impl RafsSuper {
         Ok(meta_size as usize)
     }
 
-    pub(crate) fn prefetch_data_v5<F>(&self, r: &mut RafsIoReader, fetcher: F) -> RafsResult<usize>
+    pub(crate) fn prefetch_data_v5<F>(
+        &self,
+        r: &mut RafsIoReader,
+        root_nid: Inode,
+        fetcher: F,
+    ) -> RafsResult<bool>
     where
         F: Fn(&mut BlobIoVec),
     {
         let hint_entries = self.meta.prefetch_table_entries as usize;
         if hint_entries == 0 {
-            return Ok(0);
+            return Ok(false);
         }
 
         let mut prefetch_table = RafsV5PrefetchTable::new();
@@ -107,10 +112,14 @@ impl RafsSuper {
                 ))
             })?;
 
+        let mut found_root_inode = false;
         for ino in prefetch_table.inodes {
             // Inode number 0 is invalid, it was added because prefetch table has to be aligned.
             if ino == 0 {
                 break;
+            }
+            if ino as Inode == root_nid {
+                found_root_inode = true;
             }
             debug!("hint prefetch inode {}", ino);
             self.prefetch_data(ino as u64, &mut head_desc, &mut hardlinks, &fetcher)
@@ -119,7 +128,7 @@ impl RafsSuper {
         // The left chunks whose size is smaller than 4MB will be fetched here.
         fetcher(&mut head_desc);
 
-        Ok(hint_entries)
+        Ok(found_root_inode)
     }
 
     pub(crate) fn skip_v5_superblock(&self, r: &mut RafsIoReader) -> Result<()> {

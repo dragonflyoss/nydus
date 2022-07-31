@@ -585,7 +585,6 @@ impl RafsInode for CachedInodeV5 {
 
         for child_inode in &self.i_child {
             if child_inode.is_dir() {
-                trace!("Got dir {:?}", child_inode.name());
                 child_dirs.push(child_inode.clone());
             } else if !child_inode.is_empty_size() {
                 descendants.push(child_inode.clone());
