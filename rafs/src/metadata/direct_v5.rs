@@ -821,7 +821,6 @@ impl RafsInode for OndiskInodeWrapper {
         for idx in child_index..(child_index + child_count) {
             let child_inode = self.mapping.get_inode(idx, false).unwrap();
             if child_inode.is_dir() {
-                trace!("Got dir {:?}", child_inode.name());
                 child_dirs.push(child_inode);
             } else if !child_inode.is_empty_size() {
                 descendants.push(child_inode);

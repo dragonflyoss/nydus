@@ -639,9 +639,10 @@ impl RafsSuper {
     pub fn prefetch_files(
         &self,
         r: &mut RafsIoReader,
+        root_nid: Inode,
         files: Option<Vec<Inode>>,
         fetcher: &dyn Fn(&mut BlobIoVec),
-    ) -> RafsResult<()> {
+    ) -> RafsResult<bool> {
         // Try to prefetch files according to the list specified by the `--prefetch-files` option.
         if let Some(files) = files {
             // Avoid prefetching multiple times for hardlinks to the same file.
@@ -651,18 +652,17 @@ impl RafsSuper {
                 bi_flags: 0,
                 bi_vec: Vec::new(),
             };
-
             for f_ino in files {
                 self.prefetch_data(f_ino, &mut head_desc, &mut hardlinks, fetcher)
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
             // Flush the pending prefetch requests.
             fetcher(&mut head_desc);
-            Ok(())
+            Ok(false)
         } else if self.meta.is_v5() {
-            self.prefetch_data_v5(r, fetcher).map(|_| ())
+            self.prefetch_data_v5(r, root_nid, fetcher)
         } else if self.meta.is_v6() {
-            self.prefetch_data_v6(r, fetcher).map(|_| ())
+            self.prefetch_data_v6(r, root_nid, fetcher)
         } else {
             Err(RafsError::Prefetch(
                 "Unknown filesystem version, prefetch disabled".to_string(),
@@ -730,9 +730,6 @@ impl RafsSuper {
 
         if inode.is_dir() {
             let mut descendants = Vec::new();
-            // FIXME: Collecting descendants in DFS(Deep-First-Search) way impacts merging
-            // possibility, which means a single Merging Request spans multiple directories.
-            // But only files in the same directory are located closely in blob.
             let _ = inode.collect_descendants_inodes(&mut descendants)?;
             for i in descendants.iter() {
                 Self::prefetch_inode(i, head_desc, hardlinks, try_prefetch)?;
