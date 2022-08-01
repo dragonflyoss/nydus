@@ -462,7 +462,10 @@ impl FsCacheHandler {
             e.insert((FsCacheObject::DataBlob(fsblob.clone()), msg.fd));
             state.id_to_config_map.insert(hdr.object_id, config.clone());
             let blob_size = config.blob_info().deref().uncompressed_size();
-            Self::init_blobcache(fsblob);
+            let barrier = Arc::new(Barrier::new(2));
+            Self::init_blobcache(fsblob, Arc::clone(&barrier));
+            // make sure the blobcache init thread gets wlock before user daemon receives first ondemand request.
+            barrier.wait();
             format!("copen {},{}", hdr.msg_id, blob_size)
         } else {
             unsafe { libc::close(msg.fd as i32) };
@@ -470,9 +473,10 @@ impl FsCacheHandler {
         }
     }
 
-    fn init_blobcache(fsblob: Arc<RwLock<FsCacheBlobCache>>) {
+    fn init_blobcache(fsblob: Arc<RwLock<FsCacheBlobCache>>, barrier: Arc<Barrier>) {
         thread::spawn(move || {
             let mut guard = fsblob.write().unwrap();
+            barrier.wait();
             //for now FsCacheBlobCache only init once, should not have blobcache associated with it
             assert!(guard.get_blobcache().is_none());
             for _ in 0..BLOBCACHE_INIT_RETRY {
