@@ -196,8 +196,8 @@ def test_prefetch_with_cache(
 
     nc = NydusAPIClient(rafs.get_apisock())
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_scratch_image.rootfs())
-    m = nc.get_blobcache_metrics()
     time.sleep(0.3)
+    m = nc.get_blobcache_metrics()
     assert m["prefetch_data_amount"] != 0
 
     workload_gen.setup_workload_generator()
@@ -549,7 +549,7 @@ def test_pseudo_fs(nydus_anchor, nydus_image, rafs_conf: RafsConf):
     nc.umount_rafs("/pseudo3")
 
 
-def test_shared_blobcache(nydus_anchor, nydus_image, rafs_conf: RafsConf):
+def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: RafsConf):
     """
     description:
         Start more than one nydusd, let them share the same blobcache.
@@ -588,7 +588,10 @@ def test_shared_blobcache(nydus_anchor, nydus_image, rafs_conf: RafsConf):
     for case in cases:
         case[1].finish_torture_read()
         # Ensure that blob & bitmap files are included in blobcache dir.
-        assert len(os.listdir(nydus_anchor.blobcache_dir)) == 2
+        if int(nydus_anchor.fs_version) == 5:
+            assert len(os.listdir(nydus_anchor.blobcache_dir)) == 2
+        elif int(nydus_anchor.fs_version) == 6:
+            assert len(os.listdir(nydus_anchor.blobcache_dir)) == 3
 
     for case in cases:
         case[0].umount()
