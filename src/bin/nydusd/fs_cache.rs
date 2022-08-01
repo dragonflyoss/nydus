@@ -201,7 +201,7 @@ impl TryFrom<&[u8]> for FsCacheMsgRead {
     }
 }
 
-struct FsCacheBootStrap {
+struct FsCacheBootstrap {
     bootstrap_file: File,
     cache_file: File,
 }
@@ -225,7 +225,7 @@ impl FsCacheBlobCache {
 
 #[derive(Clone)]
 enum FsCacheObject {
-    Bootstrap(Arc<FsCacheBootStrap>),
+    Bootstrap(Arc<FsCacheBootstrap>),
     DataBlob(Arc<RwLock<FsCacheBlobCache>>),
 }
 
@@ -615,7 +615,7 @@ impl FsCacheHandler {
                         let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
                         let bootstrap_fd = f.as_raw_fd();
                         let cachefile_fd = cache_file.as_raw_fd();
-                        let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootStrap {
+                        let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootstrap {
                             bootstrap_file: f,
                             cache_file,
                         }));
