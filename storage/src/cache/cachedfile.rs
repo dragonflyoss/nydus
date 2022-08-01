@@ -327,7 +327,7 @@ impl BlobCache for FileCacheEntry {
             let blob_offset = pending[start].compress_offset();
             let blob_end = pending[end].compress_offset() + pending[end].compress_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
-            match self.read_chunks(blob_offset, blob_size, &pending[start..end]) {
+            match self.read_chunks(blob_offset, blob_size, &pending[start..end], true) {
                 Ok(v) => {
                     total_size += blob_size;
                     for idx in start..end {
@@ -408,7 +408,7 @@ impl BlobObject for FileCacheEntry {
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_compressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
         debug_assert!(!chunks.is_empty());
-        self.do_fetch_chunks(&chunks)
+        self.do_fetch_chunks(&chunks, true)
     }
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
@@ -416,7 +416,7 @@ impl BlobObject for FileCacheEntry {
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_uncompressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
         debug_assert!(!chunks.is_empty());
-        self.do_fetch_chunks(&chunks)
+        self.do_fetch_chunks(&chunks, false)
     }
 
     fn prefetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
@@ -447,7 +447,7 @@ impl BlobObject for FileCacheEntry {
             if let Some(meta) = self.meta.as_ref() {
                 if let Some(bm) = meta.get_blob_meta() {
                     if let Some(chunks) = bm.add_more_chunks(chunks, max_size) {
-                        return self.do_fetch_chunks(&chunks);
+                        return self.do_fetch_chunks(&chunks, true);
                     }
                 } else {
                     return Err(einval!("failed to get blob.meta"));
@@ -455,12 +455,12 @@ impl BlobObject for FileCacheEntry {
             }
         }
 
-        self.do_fetch_chunks(chunks)
+        self.do_fetch_chunks(chunks, true)
     }
 }
 
 impl FileCacheEntry {
-    fn do_fetch_chunks(&self, chunks: &[BlobIoChunk]) -> Result<usize> {
+    fn do_fetch_chunks(&self, chunks: &[BlobIoChunk], prefetch: bool) -> Result<usize> {
         if self.is_stargz() {
             // FIXME: for stargz, we need to implement fetching multiple chunks. here
             // is a heavy overhead workaround, needs to be optimized.
@@ -518,7 +518,12 @@ impl FileCacheEntry {
                 chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
 
-            match self.read_chunks(blob_offset, blob_size, &chunks[start_idx..=end_idx]) {
+            match self.read_chunks(
+                blob_offset,
+                blob_size,
+                &chunks[start_idx..=end_idx],
+                prefetch,
+            ) {
                 Ok(mut v) => {
                     total_size += blob_size;
                     trace!(
@@ -586,7 +591,6 @@ impl FileCacheEntry {
     // - Optionally there may be some prefetch/read amplify requests following the user io request.
     // - The optional prefetch/read amplify requests may be silently dropped.
     fn read_iter(&self, bios: &mut [BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
-        debug!("bios {:?}", bios);
         // Merge requests with continuous blob addresses.
         let requests = self
             .merge_requests_for_user(bios, RAFS_DEFAULT_CHUNK_SIZE as usize * 2)
@@ -667,7 +671,7 @@ impl FileCacheEntry {
                 } else {
                     BlobIoTag::Internal(chunk.compress_offset())
                 };
-                // NOTE: Only this request region can steal more chunks from backend with user io.
+                // NOTE: Only this request region can read more chunks from backend with user io.
                 state.push(
                     RegionType::Backend,
                     chunk.compress_offset(),
@@ -728,9 +732,14 @@ impl FileCacheEntry {
         }
 
         let blob_size = region.blob_len as usize;
-        debug!("try to read {} bytes from backend", blob_size);
+        debug!(
+            "{} try to read {} bytes of {} chunks from backend",
+            std::thread::current().name().unwrap_or_default(),
+            blob_size,
+            region.chunks.len()
+        );
 
-        let mut chunks = self.read_chunks(region.blob_address, blob_size, &region.chunks)?;
+        let mut chunks = self.read_chunks(region.blob_address, blob_size, &region.chunks, false)?;
         assert_eq!(region.chunks.len(), chunks.len());
 
         let mut chunk_buffers = Vec::with_capacity(region.chunks.len());

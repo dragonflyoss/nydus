@@ -21,6 +21,7 @@ use std::fs::File;
 use std::io::Result;
 use std::slice;
 use std::sync::Arc;
+use std::time::Instant;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::{compress, digest};
@@ -193,9 +194,11 @@ pub trait BlobCache: Send + Sync {
         blob_offset: u64,
         blob_size: usize,
         chunks: &[BlobIoChunk],
+        prefetch: bool,
     ) -> Result<Vec<Vec<u8>>> {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
+        let start = Instant::now();
         let nr_read = self
             .reader()
             .read(c_buf.as_mut_slice(), blob_offset)
@@ -206,6 +209,15 @@ pub trait BlobCache: Send + Sync {
                 blob_size, nr_read
             )));
         }
+        let duration = Instant::now().duration_since(start).as_millis();
+        debug!(
+            "read_chunks: {} {} {} bytes at {}, duration {}ms",
+            std::thread::current().name().unwrap_or_default(),
+            if prefetch { "prefetch" } else { "fetch" },
+            blob_size,
+            blob_offset,
+            duration
+        );
 
         let mut last = blob_offset;
         let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(chunks.len());

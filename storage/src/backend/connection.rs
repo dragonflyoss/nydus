@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderMap;
 use reqwest::{
@@ -346,20 +346,15 @@ impl Connection {
         catch_status: bool,
         proxy: bool,
     ) -> ConnectionResult<Response> {
-        debug!(
-            "Request: {} {} headers: {:?}, proxy: {}, data: {}",
-            method,
-            url,
-            {
-                let mut display_headers = headers.clone();
-                display_headers.remove(HEADER_AUTHORIZATION);
-                display_headers
-            },
-            proxy,
-            data.is_some(),
-        );
+        let display_headers = {
+            let mut display_headers = headers.clone();
+            display_headers.remove(HEADER_AUTHORIZATION);
+            display_headers
+        };
+        let has_data = data.is_some();
+        let start = Instant::now();
 
-        let mut rb = client.request(method, url).headers(headers);
+        let mut rb = client.request(method.clone(), url).headers(headers);
         if let Some(q) = query.as_ref() {
             rb = rb.query(q);
         }
@@ -381,6 +376,17 @@ impl Connection {
         } else {
             ret = rb.body("").send();
         }
+
+        debug!(
+            "{} Request: {} {} headers: {:?}, proxy: {}, data: {}, duration: {}ms",
+            std::thread::current().name().unwrap_or_default(),
+            method,
+            url,
+            display_headers,
+            proxy,
+            has_data,
+            Instant::now().duration_since(start).as_millis(),
+        );
 
         match ret {
             Err(err) => Err(ConnectionError::Common(err)),
