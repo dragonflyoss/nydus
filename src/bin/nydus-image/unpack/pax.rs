@@ -1,3 +1,4 @@
+use nix::unistd::{Gid, Group, Uid, User};
 use std::{
     collections::HashMap,
     ffi::OsStr,
@@ -94,6 +95,33 @@ impl OCIDirBuilder {
     }
 }
 
+fn set_header_by_inode(inode: &dyn RafsInode, header: &mut Header) -> Result<()> {
+    let inode = InodeWrapper::from_inode_info(inode);
+    header.set_size(inode.size());
+    header.set_mtime(inode.mtime());
+    header.set_uid(inode.uid() as u64);
+    header.set_gid(inode.gid() as u64);
+
+    // To make the unpacked tar consistent with the OCI-formatted tar before the pack,
+    // we need to backfill the username and groupname in the tar header, which may
+    // break the repeatable build when unpacking in different hosts, but actually has
+    // little effect.
+    let username = User::from_uid(Uid::from_raw(inode.uid()))
+        .unwrap_or(None)
+        .map(|user| user.name)
+        .unwrap_or_default();
+    header.set_username(&username)?;
+    let groupname = Group::from_gid(Gid::from_raw(inode.gid()))
+        .unwrap_or(None)
+        .map(|group| group.name)
+        .unwrap_or_default();
+    header.set_groupname(&groupname)?;
+
+    header.set_mode(Util::mask_mode(inode.mode()));
+
+    Ok(())
+}
+
 impl SectionBuilder for OCIDirBuilder {
     fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
         node.is_dir()
@@ -106,15 +134,11 @@ impl SectionBuilder for OCIDirBuilder {
 
         let mut header = Header::new_ustar();
         header.set_entry_type(EntryType::dir());
-        header.set_size(0);
         header.set_device_major(0).unwrap();
         header.set_device_minor(0).unwrap();
 
-        let node = InodeWrapper::from_inode_info(inode);
-        header.set_mtime(node.mtime());
-        header.set_uid(node.uid() as u64);
-        header.set_gid(node.gid() as u64);
-        header.set_mode(Util::mask_mode(node.mode()));
+        set_header_by_inode(inode, &mut header)?;
+        header.set_size(0);
 
         let mut extensions = Vec::with_capacity(2);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
@@ -189,13 +213,7 @@ impl SectionBuilder for OCIRegBuilder {
         header.set_entry_type(EntryType::file());
         header.set_device_major(0).unwrap();
         header.set_device_minor(0).unwrap();
-
-        let node = InodeWrapper::from_inode_info(inode);
-        header.set_mtime(node.mtime());
-        header.set_uid(node.uid() as u64);
-        header.set_gid(node.gid() as u64);
-        header.set_mode(Util::mask_mode(node.mode()));
-        header.set_size(node.size());
+        set_header_by_inode(inode, &mut header)?;
 
         let mut extensions = Vec::with_capacity(2);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
@@ -331,13 +349,7 @@ impl PAXSpecialSectionBuilder {
     ) -> Result<Vec<TarSection>> {
         let mut header = Header::new_ustar();
         header.set_entry_type(entry_type);
-
-        let node = InodeWrapper::from_inode_info(inode);
-        header.set_mtime(node.mtime());
-        header.set_uid(node.uid() as u64);
-        header.set_gid(node.gid() as u64);
-        header.set_mode(Util::mask_mode(node.mode()));
-        header.set_size(node.size());
+        set_header_by_inode(inode, &mut header)?;
 
         let dev_id = self.cal_dev(inode.rdev() as u64);
         header.set_device_major(dev_id.0)?;
@@ -486,16 +498,11 @@ impl PAXLinkBuilder {
         link: &Path,
     ) -> Result<Vec<TarSection>> {
         let mut header = Header::new_ustar();
+        set_header_by_inode(inode, &mut header)?;
         header.set_entry_type(entry_type);
         header.set_size(0);
         header.set_device_major(0).unwrap();
         header.set_device_minor(0).unwrap();
-
-        let node = InodeWrapper::from_inode_info(inode);
-        header.set_mtime(node.mtime());
-        header.set_uid(node.uid() as u64);
-        header.set_gid(node.gid() as u64);
-        header.set_mode(Util::mask_mode(node.mode()));
 
         let mut extensions = Vec::with_capacity(3);
         if let Some(extension) = PAXUtil::set_path(&mut header, path)? {
