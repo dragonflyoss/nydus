@@ -82,19 +82,19 @@ impl BlobChunkInfo for MockChunkInfo {
         self.is_compressed
     }
 
-    fn uncompress_size(&self) -> u32 {
+    fn uncompressed_size(&self) -> u32 {
         self.uncompress_size
     }
 
-    fn uncompress_offset(&self) -> u64 {
+    fn uncompressed_offset(&self) -> u64 {
         self.uncompress_offset
     }
 
-    fn compress_size(&self) -> u32 {
+    fn compressed_size(&self) -> u32 {
         self.compress_size
     }
 
-    fn compress_offset(&self) -> u64 {
+    fn compressed_offset(&self) -> u64 {
         self.compress_offset
     }
 

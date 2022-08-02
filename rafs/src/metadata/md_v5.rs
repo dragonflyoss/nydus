@@ -141,8 +141,8 @@ impl RafsSuper {
         for d in more {
             let head_ck = &d.bi_vec[0].chunkinfo.as_base();
 
-            if last_chunk.compress_offset() + last_chunk.compress_size() as u64
-                != head_ck.compress_offset()
+            if last_chunk.compressed_offset() + last_chunk.compressed_size() as u64
+                != head_ck.compressed_offset()
             {
                 break;
             }

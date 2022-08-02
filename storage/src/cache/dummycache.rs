@@ -128,7 +128,7 @@ impl BlobCache for DummyCache {
         let bios_len = bios.len();
         let offset = bios[0].offset;
         //let chunk = bios[0].chunkinfo.as_v5()?;
-        let d_size = bios[0].chunkinfo.uncompress_size() as usize;
+        let d_size = bios[0].chunkinfo.uncompressed_size() as usize;
         // Use the destination buffer to receive the uncompressed data if possible.
         if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
             if !bios[0].user_io {
@@ -142,7 +142,7 @@ impl BlobCache for DummyCache {
         let mut buffer_holder: Vec<Vec<u8>> = Vec::with_capacity(bios.len());
         for bio in bios.iter() {
             if bio.user_io {
-                let mut d = alloc_buf(bio.chunkinfo.uncompress_size() as usize);
+                let mut d = alloc_buf(bio.chunkinfo.uncompressed_size() as usize);
                 self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), false, None)?;
                 buffer_holder.push(d);
                 // Even a merged IO can hardly reach u32::MAX. So this is safe

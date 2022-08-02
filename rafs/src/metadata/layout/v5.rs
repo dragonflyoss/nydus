@@ -1083,13 +1083,13 @@ pub struct RafsV5ChunkInfo {
     /// chunk flags
     pub flags: BlobChunkFlags, // 40
     /// compressed size in blob
-    pub compress_size: u32,
+    pub compressed_size: u32,
     /// uncompressed size in blob
-    pub uncompress_size: u32, // 48
+    pub uncompressed_size: u32, // 48
     /// compressed offset in blob
-    pub compress_offset: u64, // 56
+    pub compressed_offset: u64, // 56
     /// uncompressed offset in blob
-    pub uncompress_offset: u64, // 64
+    pub uncompressed_offset: u64, // 64
     /// offset in file
     pub file_offset: u64, // 72
     /// chunk index, it's allocated sequentially and starting from 0 for one blob.
@@ -1125,10 +1125,10 @@ impl Display for RafsV5ChunkInfo {
             f,
             "file_offset {}, compress_offset {}, compress_size {}, uncompress_offset {}, uncompress_size {}, blob_index {}, block_id {}, index {}, is_compressed {}",
             self.file_offset,
-            self.compress_offset,
-            self.compress_size,
-            self.uncompress_offset,
-            self.uncompress_size,
+            self.compressed_offset,
+            self.compressed_size,
+            self.uncompressed_offset,
+            self.uncompressed_size,
             self.blob_index,
             self.block_id,
             self.index,
@@ -1285,7 +1285,7 @@ fn add_chunk_to_bio_desc(
     user_io: bool,
 ) -> bool {
     // The chunk is ahead of the start of the range.
-    if offset >= (chunk.file_offset() + chunk.uncompress_size() as u64) {
+    if offset >= (chunk.file_offset() + chunk.uncompressed_size() as u64) {
         return true;
     }
     // The chunk is passing the end of the range.
@@ -1298,10 +1298,10 @@ fn add_chunk_to_bio_desc(
     } else {
         0
     };
-    let chunk_end = if end < (chunk.file_offset() + chunk.uncompress_size() as u64) {
+    let chunk_end = if end < (chunk.file_offset() + chunk.uncompressed_size() as u64) {
         end - chunk.file_offset()
     } else {
-        chunk.uncompress_size() as u64
+        chunk.uncompressed_size() as u64
     };
 
     let bio = BlobIoDesc::new(
@@ -1611,10 +1611,10 @@ pub mod tests {
         }
 
         impl_getter!(blob_index, blob_index, u32);
-        impl_getter!(compress_offset, compress_offset, u64);
-        impl_getter!(compress_size, compress_size, u32);
-        impl_getter!(uncompress_offset, uncompress_offset, u64);
-        impl_getter!(uncompress_size, uncompress_size, u32);
+        impl_getter!(compressed_offset, compress_offset, u64);
+        impl_getter!(compressed_size, compress_size, u32);
+        impl_getter!(uncompressed_offset, uncompress_offset, u64);
+        impl_getter!(uncompressed_size, uncompress_size, u32);
     }
 
     impl BlobV5ChunkInfo for MockChunkInfo {

@@ -1683,43 +1683,43 @@ impl ChunkWrapper {
 
     pub fn compressed_offset(&self) -> u64 {
         match self {
-            ChunkWrapper::V5(c) => c.compress_offset,
-            ChunkWrapper::V6(c) => c.compress_offset,
+            ChunkWrapper::V5(c) => c.compressed_offset,
+            ChunkWrapper::V6(c) => c.compressed_offset,
         }
     }
 
     pub fn set_compressed_offset(&mut self, offset: u64) {
         match self {
-            ChunkWrapper::V5(c) => c.compress_offset = offset,
-            ChunkWrapper::V6(c) => c.compress_offset = offset,
+            ChunkWrapper::V5(c) => c.compressed_offset = offset,
+            ChunkWrapper::V6(c) => c.compressed_offset = offset,
         }
     }
 
     pub fn compressed_size(&self) -> u32 {
         match self {
-            ChunkWrapper::V5(c) => c.compress_size,
-            ChunkWrapper::V6(c) => c.compress_size,
+            ChunkWrapper::V5(c) => c.compressed_size,
+            ChunkWrapper::V6(c) => c.compressed_size,
         }
     }
 
     pub fn uncompressed_offset(&self) -> u64 {
         match self {
-            ChunkWrapper::V5(c) => c.uncompress_offset,
-            ChunkWrapper::V6(c) => c.uncompress_offset,
+            ChunkWrapper::V5(c) => c.uncompressed_offset,
+            ChunkWrapper::V6(c) => c.uncompressed_offset,
         }
     }
 
     pub fn set_uncompressed_offset(&mut self, offset: u64) {
         match self {
-            ChunkWrapper::V5(c) => c.uncompress_offset = offset,
-            ChunkWrapper::V6(c) => c.uncompress_offset = offset,
+            ChunkWrapper::V5(c) => c.uncompressed_offset = offset,
+            ChunkWrapper::V6(c) => c.uncompressed_offset = offset,
         }
     }
 
     pub fn uncompressed_size(&self) -> u32 {
         match self {
-            ChunkWrapper::V5(c) => c.uncompress_size,
-            ChunkWrapper::V6(c) => c.uncompress_size,
+            ChunkWrapper::V5(c) => c.uncompressed_size,
+            ChunkWrapper::V6(c) => c.uncompressed_size,
         }
     }
 
@@ -1755,10 +1755,10 @@ impl ChunkWrapper {
                 c.index = chunk_index;
                 c.blob_index = blob_index;
                 c.file_offset = file_offset;
-                c.compress_size = compressed_size as u32;
-                c.compress_offset = compressed_offset;
-                c.uncompress_size = chunk_size;
-                c.uncompress_offset = uncompressed_offset;
+                c.compressed_size = compressed_size as u32;
+                c.compressed_offset = compressed_offset;
+                c.uncompressed_size = chunk_size;
+                c.uncompressed_offset = uncompressed_offset;
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
@@ -1767,10 +1767,10 @@ impl ChunkWrapper {
                 c.index = chunk_index;
                 c.blob_index = blob_index;
                 c.file_offset = file_offset;
-                c.compress_size = compressed_size as u32;
-                c.compress_offset = compressed_offset;
-                c.uncompress_size = chunk_size;
-                c.uncompress_offset = uncompressed_offset;
+                c.compressed_size = compressed_size as u32;
+                c.compressed_offset = compressed_offset;
+                c.uncompressed_size = chunk_size;
+                c.uncompressed_offset = uncompressed_offset;
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
@@ -1855,10 +1855,10 @@ fn to_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
         block_id: *cki.chunk_id(),
         blob_index: cki.blob_index(),
         flags: cki.flags(),
-        compress_size: cki.compress_size(),
-        uncompress_size: cki.uncompress_size(),
-        compress_offset: cki.compress_offset(),
-        uncompress_offset: cki.uncompress_offset(),
+        compressed_size: cki.compressed_size(),
+        uncompressed_size: cki.uncompressed_size(),
+        compressed_offset: cki.compressed_offset(),
+        uncompressed_offset: cki.uncompressed_offset(),
         file_offset: cki.file_offset(),
         index: cki.index(),
         reserved: 0u32,

@@ -719,9 +719,9 @@ impl ChunkReader {
     }
 
     fn load_chunk(&mut self, chunk: &dyn BlobChunkInfo) -> Result<()> {
-        let mut buf = alloc_buf(chunk.compress_size() as usize);
+        let mut buf = alloc_buf(chunk.compressed_size() as usize);
         self.reader
-            .read(buf.as_mut_slice(), chunk.compress_offset())
+            .read(buf.as_mut_slice(), chunk.compressed_offset())
             .map_err(|err| {
                 error!("fail to read chunk, error: {:?}", err);
                 anyhow!("fail to read chunk, error: {:?}", err)
@@ -732,7 +732,7 @@ impl ChunkReader {
             return Ok(());
         }
 
-        let mut data = vec![0u8; chunk.uncompress_size() as usize];
+        let mut data = vec![0u8; chunk.uncompressed_size() as usize];
         compress::decompress(
             buf.as_mut_slice(),
             None,

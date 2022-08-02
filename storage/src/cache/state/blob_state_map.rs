@@ -126,7 +126,7 @@ where
                 warn!(
                     "Waiting for backend IO expires. chunk index {}, compressed offset {}",
                     index,
-                    chunk.compress_offset()
+                    chunk.compressed_offset()
                 );
 
                 Err(StorageError::Timeout)
@@ -423,19 +423,19 @@ pub(crate) mod tests {
             0
         }
 
-        fn compress_offset(&self) -> u64 {
+        fn compressed_offset(&self) -> u64 {
             unimplemented!();
         }
 
-        fn compress_size(&self) -> u32 {
+        fn compressed_size(&self) -> u32 {
             unimplemented!();
         }
 
-        fn uncompress_offset(&self) -> u64 {
+        fn uncompressed_offset(&self) -> u64 {
             unimplemented!();
         }
 
-        fn uncompress_size(&self) -> u32 {
+        fn uncompressed_size(&self) -> u32 {
             unimplemented!();
         }
 

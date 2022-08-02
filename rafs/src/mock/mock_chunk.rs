@@ -71,10 +71,10 @@ impl BlobChunkInfo for MockChunkInfo {
     }
 
     impl_getter!(blob_index, c_blob_index, u32);
-    impl_getter!(compress_offset, c_compress_offset, u64);
-    impl_getter!(compress_size, c_compr_size, u32);
-    impl_getter!(uncompress_offset, c_decompress_offset, u64);
-    impl_getter!(uncompress_size, c_decompress_size, u32);
+    impl_getter!(compressed_offset, c_compress_offset, u64);
+    impl_getter!(compressed_size, c_compr_size, u32);
+    impl_getter!(uncompressed_offset, c_decompress_offset, u64);
+    impl_getter!(uncompressed_size, c_decompress_size, u32);
 }
 
 impl BlobV5ChunkInfo for MockChunkInfo {

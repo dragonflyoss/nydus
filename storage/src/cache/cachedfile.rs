@@ -213,7 +213,7 @@ impl BlobCache for FileCacheEntry {
         if fail {
             bios = vec![];
         } else {
-            bios.sort_by_key(|entry| entry.chunkinfo.compress_offset());
+            bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
             self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         }
 
@@ -277,7 +277,7 @@ impl BlobCache for FileCacheEntry {
         if !self.chunk_map.is_persist() {
             let mut d_size = 0;
             for c in range.chunks.iter() {
-                d_size = std::cmp::max(d_size, c.uncompress_size() as usize);
+                d_size = std::cmp::max(d_size, c.uncompressed_size() as usize);
             }
             let mut buf = alloc_buf(d_size);
 
@@ -289,7 +289,7 @@ impl BlobCache for FileCacheEntry {
 
                 // For digested chunk map, we must check whether the cached data is valid because
                 // the digested chunk map cannot persist readiness state.
-                let d_size = c.uncompress_size() as usize;
+                let d_size = c.uncompressed_size() as usize;
                 match self.read_raw_chunk(c, &mut buf[0..d_size], true, None) {
                     Ok(_v) => {
                         // The cached data is valid, set the chunk as ready.
@@ -324,17 +324,17 @@ impl BlobCache for FileCacheEntry {
             }
 
             // Find a range with continuous chunk id
-            let blob_offset = pending[start].compress_offset();
-            let blob_end = pending[end].compress_offset() + pending[end].compress_size() as u64;
+            let blob_offset = pending[start].compressed_offset();
+            let blob_end = pending[end].compressed_offset() + pending[end].compressed_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
             match self.read_chunks(blob_offset, blob_size, &pending[start..end], true) {
                 Ok(v) => {
                     total_size += blob_size;
                     for idx in start..end {
                         let offset = if self.is_compressed {
-                            pending[idx].compress_offset()
+                            pending[idx].compressed_offset()
                         } else {
-                            pending[idx].uncompress_offset()
+                            pending[idx].uncompressed_offset()
                         };
                         match Self::persist_chunk(&self.file, offset, &v[idx - start]) {
                             Ok(_) => {
@@ -465,7 +465,7 @@ impl FileCacheEntry {
             // FIXME: for stargz, we need to implement fetching multiple chunks. here
             // is a heavy overhead workaround, needs to be optimized.
             for chunk in chunks {
-                let mut buf = alloc_buf(chunk.uncompress_size() as usize);
+                let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
                 self.read_raw_chunk(chunk, &mut buf, false, None)
                     .map_err(|e| {
                         eio!(format!(
@@ -476,12 +476,14 @@ impl FileCacheEntry {
                 if self.dio_enabled {
                     self.adjust_buffer_for_dio(&mut buf)
                 }
-                Self::persist_chunk(&self.file, chunk.uncompress_offset(), &buf).map_err(|e| {
-                    eio!(format!(
-                        "do_fetch_chunk failed to persist stargz chunk, {:?}",
-                        e
-                    ))
-                })?;
+                Self::persist_chunk(&self.file, chunk.uncompressed_offset(), &buf).map_err(
+                    |e| {
+                        eio!(format!(
+                            "do_fetch_chunk failed to persist stargz chunk, {:?}",
+                            e
+                        ))
+                    },
+                )?;
                 self.chunk_map
                     .set_ready_and_clear_pending(chunk.as_base())
                     .unwrap_or_else(|e| error!("set stargz chunk ready failed, {}", e));
@@ -513,9 +515,9 @@ impl FileCacheEntry {
 
             let start_idx = (pending[start] - chunk_index) as usize;
             let end_idx = start_idx + (end - start) - 1;
-            let blob_offset = chunks[start_idx].compress_offset();
+            let blob_offset = chunks[start_idx].compressed_offset();
             let blob_end =
-                chunks[end_idx].compress_offset() + chunks[end_idx].compress_size() as u64;
+                chunks[end_idx].compressed_offset() + chunks[end_idx].compressed_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
 
             match self.read_chunks(
@@ -535,9 +537,9 @@ impl FileCacheEntry {
                     );
                     for idx in start_idx..=end_idx {
                         let offset = if self.is_compressed {
-                            chunks[idx].compress_offset()
+                            chunks[idx].compressed_offset()
                         } else {
-                            chunks[idx].uncompress_offset()
+                            chunks[idx].uncompressed_offset()
                         };
                         let buf = &mut v[idx - start_idx];
                         if self.dio_enabled {
@@ -635,8 +637,8 @@ impl FileCacheEntry {
                 if req.tags[i].is_user_io() {
                     state.push(
                         RegionType::CacheFast,
-                        chunk.uncompress_offset(),
-                        chunk.uncompress_size(),
+                        chunk.uncompressed_offset(),
+                        chunk.uncompressed_size(),
                         req.tags[i].clone(),
                         None,
                     )?;
@@ -653,8 +655,8 @@ impl FileCacheEntry {
                 if req.tags[i].is_user_io() {
                     state.push(
                         RegionType::CacheSlow,
-                        chunk.uncompress_offset(),
-                        chunk.uncompress_size(),
+                        chunk.uncompressed_offset(),
+                        chunk.uncompressed_size(),
                         req.tags[i].clone(),
                         Some(req.chunks[i].clone()),
                     )?;
@@ -669,13 +671,13 @@ impl FileCacheEntry {
                 let tag = if let BlobIoTag::User(ref s) = req.tags[i] {
                     BlobIoTag::User(s.clone())
                 } else {
-                    BlobIoTag::Internal(chunk.compress_offset())
+                    BlobIoTag::Internal(chunk.compressed_offset())
                 };
                 // NOTE: Only this request region can read more chunks from backend with user io.
                 state.push(
                     RegionType::Backend,
-                    chunk.compress_offset(),
-                    chunk.compress_size(),
+                    chunk.compressed_offset(),
+                    chunk.compressed_size(),
                     tag,
                     Some(chunk.clone()),
                 )?;
@@ -711,7 +713,7 @@ impl FileCacheEntry {
         for (i, c) in region.chunks.iter().enumerate() {
             let user_offset = if i == 0 { region.seg.offset } else { 0 };
             let size = std::cmp::min(
-                c.uncompress_size() - user_offset,
+                c.uncompressed_size() - user_offset,
                 region.seg.len - total_read as u32,
             );
             total_read += self.read_single_chunk(c, user_offset, size, cursor)?;
@@ -777,9 +779,9 @@ impl FileCacheEntry {
         let delayed_chunk_map = self.chunk_map.clone();
         let file = self.file.clone();
         let offset = if self.is_compressed {
-            chunk_info.compress_offset()
+            chunk_info.compressed_offset()
         } else {
-            chunk_info.uncompress_offset()
+            chunk_info.uncompressed_offset()
         };
         let metrics = self.metrics.clone();
 
@@ -792,14 +794,14 @@ impl FileCacheEntry {
                     .unwrap_or_else(|e| {
                         error!(
                             "Failed change caching state for chunk of offset {}, {:?}",
-                            chunk_info.compress_offset(),
+                            chunk_info.compressed_offset(),
                             e
                         )
                     }),
                 Err(e) => {
                     error!(
                         "Persist chunk of offset {} failed, {:?}",
-                        chunk_info.compress_offset(),
+                        chunk_info.compressed_offset(),
                         e
                     );
                     delayed_chunk_map.clear_pending(chunk_info.as_base())
@@ -843,11 +845,11 @@ impl FileCacheEntry {
         size: u32,
         mem_cursor: &mut MemSliceCursor,
     ) -> Result<usize> {
-        debug!("single bio, blob offset {}", chunk.compress_offset());
+        debug!("single bio, blob offset {}", chunk.compressed_offset());
 
         let is_ready = self.chunk_map.is_ready(chunk.as_base())?;
         let buffer_holder;
-        let d_size = chunk.uncompress_size() as usize;
+        let d_size = chunk.uncompressed_size() as usize;
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
 
         // Try to read and validate data from cache if:
@@ -875,7 +877,7 @@ impl FileCacheEntry {
         } else {
             let persist_compressed = |buffer: &[u8]| match Self::persist_chunk(
                 &self.file,
-                chunk.compress_offset(),
+                chunk.compressed_offset(),
                 buffer,
             ) {
                 Ok(_) => {
@@ -913,9 +915,9 @@ impl FileCacheEntry {
 
     fn read_file_cache(&self, chunk: &BlobIoChunk, buffer: &mut [u8]) -> Result<()> {
         let offset = if self.is_compressed {
-            chunk.compress_offset()
+            chunk.compressed_offset()
         } else {
-            chunk.uncompress_offset()
+            chunk.uncompressed_offset()
         };
 
         let mut d;
@@ -924,7 +926,7 @@ impl FileCacheEntry {
             //
             // gzip is special that it doesn't carry compress_size, instead, we make an IO stream
             // out of the file cache. So no need for an internal buffer here.
-            let c_size = chunk.compress_size() as usize;
+            let c_size = chunk.compressed_size() as usize;
             d = alloc_buf(c_size);
             d.as_mut_slice()
         } else {

@@ -709,11 +709,11 @@ impl CachedChunkInfoV5 {
         self.c_block_id = Arc::new(chunk.block_id);
         self.c_blob_index = chunk.blob_index;
         self.c_index = chunk.index;
-        self.c_compress_offset = chunk.compress_offset;
-        self.c_uncompress_offset = chunk.uncompress_offset;
-        self.c_uncompress_size = chunk.uncompress_size;
+        self.c_compress_offset = chunk.compressed_offset;
+        self.c_uncompress_offset = chunk.uncompressed_offset;
+        self.c_uncompress_size = chunk.uncompressed_size;
         self.c_file_offset = chunk.file_offset;
-        self.c_compr_size = chunk.compress_size;
+        self.c_compr_size = chunk.compressed_size;
         self.c_flags = chunk.flags;
     }
 }
@@ -740,10 +740,10 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
     }
 
     impl_getter!(blob_index, c_blob_index, u32);
-    impl_getter!(compress_offset, c_compress_offset, u64);
-    impl_getter!(compress_size, c_compr_size, u32);
-    impl_getter!(uncompress_offset, c_uncompress_offset, u64);
-    impl_getter!(uncompress_size, c_uncompress_size, u32);
+    impl_getter!(compressed_offset, c_compress_offset, u64);
+    impl_getter!(compressed_size, c_compr_size, u32);
+    impl_getter!(uncompressed_offset, c_uncompress_offset, u64);
+    impl_getter!(uncompressed_size, c_uncompress_size, u32);
 }
 
 impl BlobV5ChunkInfo for CachedChunkInfoV5 {
@@ -810,10 +810,10 @@ mod cached_tests {
         ondisk_inode.i_mode = libc::S_IFREG as u32;
         ondisk_inode.i_nlink = 1;
         let mut chunk = RafsV5ChunkInfo::new();
-        chunk.uncompress_size = 8192;
-        chunk.uncompress_offset = 0;
-        chunk.compress_offset = 0;
-        chunk.compress_size = 4096;
+        chunk.uncompressed_size = 8192;
+        chunk.uncompressed_offset = 0;
+        chunk.compressed_offset = 0;
+        chunk.compressed_size = 4096;
         let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
             symlink: None,
@@ -840,10 +840,10 @@ mod cached_tests {
         assert_eq!(attr.ino, 3);
         assert_eq!(attr.size, 8192);
         let cached_chunk = cached_inode.get_chunk_info(0).unwrap();
-        assert_eq!(cached_chunk.compress_size(), 4096);
-        assert_eq!(cached_chunk.uncompress_size(), 8192);
-        assert_eq!(cached_chunk.compress_offset(), 0);
-        assert_eq!(cached_chunk.uncompress_offset(), 0);
+        assert_eq!(cached_chunk.compressed_size(), 4096);
+        assert_eq!(cached_chunk.uncompressed_size(), 8192);
+        assert_eq!(cached_chunk.compressed_offset(), 0);
+        assert_eq!(cached_chunk.uncompressed_offset(), 0);
         let c_xattr = cached_inode.get_xattrs().unwrap();
         for k in c_xattr.iter() {
             let k = OsStr::from_bytes(k);
@@ -928,13 +928,13 @@ mod cached_tests {
         let mut size = ondisk_inode.i_size;
         for i in 0..ondisk_inode.i_child_count {
             let mut chunk = RafsV5ChunkInfo::new();
-            chunk.uncompress_size = cmp::min(1024 * 1024, size as u32);
-            chunk.uncompress_offset = (i * 1024 * 1024) as u64;
-            chunk.compress_size = chunk.uncompress_size / 2;
-            chunk.compress_offset = ((i * 1024 * 1024) / 2) as u64;
-            chunk.file_offset = chunk.uncompress_offset;
+            chunk.uncompressed_size = cmp::min(1024 * 1024, size as u32);
+            chunk.uncompressed_offset = (i * 1024 * 1024) as u64;
+            chunk.compressed_size = chunk.uncompressed_size / 2;
+            chunk.compressed_offset = ((i * 1024 * 1024) / 2) as u64;
+            chunk.file_offset = chunk.uncompressed_offset;
             chunk.store(&mut writer).unwrap();
-            size -= chunk.uncompress_size as u64;
+            size -= chunk.uncompressed_size as u64;
         }
         f.seek(Start(0)).unwrap();
         let mut meta = Arc::new(RafsSuperMeta::default());
