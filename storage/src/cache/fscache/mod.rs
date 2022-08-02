@@ -231,7 +231,6 @@ impl FileCacheEntry {
             blob_uncompressed_size: blob_info.uncompressed_size(),
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
-            is_get_blob_object_supported: true,
             is_compressed: false,
             is_direct_chunkmap: true,
             is_stargz: blob_info.is_stargz(),

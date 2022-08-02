@@ -172,11 +172,6 @@ pub trait BlobCache: Send + Sync {
     /// It should be paired with start_prefetch().
     fn stop_prefetch(&self) -> StorageResult<()>;
 
-    /// Execute filesystem data prefetch.
-    fn prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {
-        Err(enosys!("doesn't support prefetch_range()"))
-    }
-
     /// Read chunk data described by the blob Io descriptors from the blob cache into the buffer.
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize>;
 

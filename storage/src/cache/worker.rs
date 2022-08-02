@@ -394,11 +394,9 @@ impl AsyncWorkerMgr {
         mgr.metrics.prefetch_mr_count.inc();
         mgr.metrics.prefetch_data_amount.add(blob_size);
 
-        if let Some(obj) = cache.get_blob_object() {
-            obj.prefetch_chunks(&req)?;
-        } else {
-            cache.prefetch_range(&req)?;
-        }
+        // Safe to unwrap since FileCacheEntry implements both of the two traits.
+        let obj = cache.get_blob_object().unwrap();
+        obj.prefetch_chunks(&req)?;
 
         Ok(())
     }

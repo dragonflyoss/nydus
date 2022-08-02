@@ -236,7 +236,6 @@ impl FileCacheEntry {
             blob_uncompressed_size,
             compressor,
             digester,
-            is_get_blob_object_supported,
             is_compressed,
             is_direct_chunkmap,
             is_stargz,

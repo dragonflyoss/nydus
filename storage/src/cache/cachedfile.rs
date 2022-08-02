@@ -111,7 +111,6 @@ pub(crate) struct FileCacheEntry {
     pub(crate) compressor: compress::Algorithm,
     pub(crate) digester: digest::Algorithm,
     // Whether `get_blob_object()` is supported.
-    pub(crate) is_get_blob_object_supported: bool,
     // The compressed data instead of uncompressed data is cached if `compressed` is true.
     pub(crate) is_compressed: bool,
     // Whether direct chunkmap is used.
@@ -182,11 +181,7 @@ impl BlobCache for FileCacheEntry {
     }
 
     fn get_blob_object(&self) -> Option<&dyn BlobObject> {
-        if self.is_get_blob_object_supported {
-            Some(self)
-        } else {
-            None
-        }
+        Some(self)
     }
 
     fn prefetch(
@@ -270,91 +265,6 @@ impl BlobCache for FileCacheEntry {
                 return Ok(());
             }
         }
-    }
-
-    fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {
-        let mut pending = Vec::with_capacity(range.chunks.len());
-        if !self.chunk_map.is_persist() {
-            let mut d_size = 0;
-            for c in range.chunks.iter() {
-                d_size = std::cmp::max(d_size, c.uncompress_size() as usize);
-            }
-            let mut buf = alloc_buf(d_size);
-
-            for c in range.chunks.iter() {
-                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_base()) {
-                    // The chunk is ready, so skip it.
-                    continue;
-                }
-
-                // For digested chunk map, we must check whether the cached data is valid because
-                // the digested chunk map cannot persist readiness state.
-                let d_size = c.uncompress_size() as usize;
-                match self.read_raw_chunk(c, &mut buf[0..d_size], true, None) {
-                    Ok(_v) => {
-                        // The cached data is valid, set the chunk as ready.
-                        let _ = self
-                            .chunk_map
-                            .set_ready_and_clear_pending(c.as_base())
-                            .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
-                    }
-                    Err(_e) => {
-                        // The cached data is invalid, queue the chunk for reading from backend.
-                        pending.push(c.clone());
-                    }
-                }
-            }
-        } else {
-            for c in range.chunks.iter() {
-                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_base()) {
-                    // The chunk is ready, so skip it.
-                    continue;
-                } else {
-                    pending.push(c.clone());
-                }
-            }
-        }
-
-        let mut total_size = 0;
-        let mut start = 0;
-        while start < pending.len() {
-            let mut end = start + 1;
-            while end < pending.len() && pending[end].id() == pending[end - 1].id() + 1 {
-                end += 1;
-            }
-
-            // Find a range with continuous chunk id
-            let blob_offset = pending[start].compress_offset();
-            let blob_end = pending[end].compress_offset() + pending[end].compress_size() as u64;
-            let blob_size = (blob_end - blob_offset) as usize;
-            match self.read_chunks(blob_offset, blob_size, &pending[start..end], true) {
-                Ok(v) => {
-                    total_size += blob_size;
-                    for idx in start..end {
-                        let offset = if self.is_compressed {
-                            pending[idx].compress_offset()
-                        } else {
-                            pending[idx].uncompress_offset()
-                        };
-                        match Self::persist_chunk(&self.file, offset, &v[idx - start]) {
-                            Ok(_) => {
-                                let _ = self.chunk_map.set_ready_and_clear_pending(&pending[idx]);
-                            }
-                            Err(_) => self.chunk_map.clear_pending(&pending[idx]),
-                        }
-                    }
-                }
-                Err(_e) => {
-                    for chunk in pending.iter().take(end).skip(start) {
-                        self.chunk_map.clear_pending(chunk);
-                    }
-                }
-            }
-
-            start = end;
-        }
-
-        Ok(total_size)
     }
 
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
