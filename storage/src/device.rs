@@ -379,16 +379,16 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     fn blob_index(&self) -> u32;
 
     /// Get the chunk offset in the compressed blob.
-    fn compress_offset(&self) -> u64;
+    fn compressed_offset(&self) -> u64;
 
     /// Get the size of the compressed chunk.
-    fn compress_size(&self) -> u32;
+    fn compressed_size(&self) -> u32;
 
     /// Get the chunk offset in the uncompressed blob.
-    fn uncompress_offset(&self) -> u64;
+    fn uncompressed_offset(&self) -> u64;
 
     /// Get the size of the uncompressed chunk.
-    fn uncompress_size(&self) -> u32;
+    fn uncompressed_size(&self) -> u32;
 
     /// Check whether the chunk is compressed or not.
     ///
@@ -471,26 +471,26 @@ impl BlobChunkInfo for BlobIoChunk {
         self.as_base().blob_index()
     }
 
-    fn compress_offset(&self) -> u64 {
+    fn compressed_offset(&self) -> u64 {
         // BlobIoChunk::Address is a medium type to pass chunk IO description
         // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
         // causes panic. So this is a workaround to avoid panic.
         match self {
             Self::Address(_, _) => 0,
-            _ => self.as_base().compress_offset(),
+            _ => self.as_base().compressed_offset(),
         }
     }
 
-    fn compress_size(&self) -> u32 {
-        self.as_base().compress_size()
+    fn compressed_size(&self) -> u32 {
+        self.as_base().compressed_size()
     }
 
-    fn uncompress_offset(&self) -> u64 {
-        self.as_base().uncompress_offset()
+    fn uncompressed_offset(&self) -> u64 {
+        self.as_base().uncompressed_offset()
     }
 
-    fn uncompress_size(&self) -> u32 {
-        self.as_base().uncompress_size()
+    fn uncompressed_size(&self) -> u32 {
+        self.as_base().uncompressed_size()
     }
 
     fn is_compressed(&self) -> bool {
@@ -547,7 +547,7 @@ impl Debug for BlobIoDesc {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("RafsBio")
             .field("blob index", &self.blob.blob_index)
-            .field("blob compress offset", &self.chunkinfo.compress_offset())
+            .field("blob compress offset", &self.chunkinfo.compressed_offset())
             .field("chunk id", &self.chunkinfo.id())
             .field("file offset", &self.offset)
             .field("size", &self.size)
@@ -559,9 +559,9 @@ impl Debug for BlobIoDesc {
 impl BlobIoDesc {
     /// Check whether the `other` BlobIoDesc is continuous to current one.
     pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
-        let offset = self.chunkinfo.compress_offset();
-        let prev_size = prev.chunkinfo.compress_size() as u64;
-        if let Some(prev_end) = prev.chunkinfo.compress_offset().checked_add(prev_size) {
+        let offset = self.chunkinfo.compressed_offset();
+        let prev_size = prev.chunkinfo.compressed_size() as u64;
+        if let Some(prev_end) = prev.chunkinfo.compressed_offset().checked_add(prev_size) {
             prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
         } else {
             false
@@ -729,8 +729,8 @@ impl Debug for BlobIoRange {
 impl BlobIoRange {
     /// Create a new instance of `BlobIoRange`.
     pub fn new(bio: &BlobIoDesc, capacity: usize) -> Self {
-        let blob_size = bio.chunkinfo.compress_size() as u64;
-        let blob_offset = bio.chunkinfo.compress_offset();
+        let blob_size = bio.chunkinfo.compressed_size() as u64;
+        let blob_offset = bio.chunkinfo.compressed_offset();
         assert!(blob_offset.checked_add(blob_size).is_some());
 
         let mut chunks = Vec::with_capacity(capacity);
@@ -752,9 +752,9 @@ impl BlobIoRange {
         self.tags.push(Self::tag_from_desc(bio));
         self.chunks.push(bio.chunkinfo.clone());
         debug_assert!(
-            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compress_offset())
+            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compressed_offset())
         );
-        self.blob_size += bio.chunkinfo.compress_size() as u64;
+        self.blob_size += bio.chunkinfo.compressed_size() as u64;
         debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
     }
 
@@ -792,7 +792,7 @@ impl BlobIoRange {
         if bio.user_io {
             BlobIoTag::User(BlobIoSegment::new(bio.offset, bio.size as u32))
         } else {
-            BlobIoTag::Internal(bio.chunkinfo.compress_offset())
+            BlobIoTag::Internal(bio.chunkinfo.compressed_offset())
         }
     }
 }
@@ -1188,10 +1188,10 @@ mod tests {
         let iochunk: BlobIoChunk = chunk.clone().into();
 
         assert_eq!(iochunk.id(), 3);
-        assert_eq!(iochunk.compress_offset(), 0x1000);
-        assert_eq!(iochunk.compress_size(), 0x100);
-        assert_eq!(iochunk.uncompress_offset(), 0x2000);
-        assert_eq!(iochunk.uncompress_size(), 0x200);
+        assert_eq!(iochunk.compressed_offset(), 0x1000);
+        assert_eq!(iochunk.compressed_size(), 0x100);
+        assert_eq!(iochunk.uncompressed_offset(), 0x2000);
+        assert_eq!(iochunk.uncompressed_size(), 0x200);
         assert!(!iochunk.is_compressed());
         assert!(!iochunk.is_hole());
     }

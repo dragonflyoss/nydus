@@ -59,7 +59,7 @@ struct BlobIoMergeState<'a, F: FnMut(BlobIoRange)> {
 impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
     /// Create a new instance of 'IoMergeState`.
     pub fn new(bio: &'a BlobIoDesc, cb: F) -> Self {
-        let size = bio.chunkinfo.compress_size();
+        let size = bio.chunkinfo.compressed_size();
 
         BlobIoMergeState {
             cb,
@@ -77,11 +77,11 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
     /// Push the a new io descriptor into the pending list.
     #[inline]
     pub fn push(&mut self, bio: &'a BlobIoDesc) {
-        let size = bio.chunkinfo.compress_size();
+        let size = bio.chunkinfo.compressed_size();
 
         debug_assert!(self.size.checked_add(size).is_some());
         self.bios.push(bio);
-        self.size += bio.chunkinfo.compress_size();
+        self.size += bio.chunkinfo.compressed_size();
     }
 
     /// Issue the pending io descriptors.
@@ -223,9 +223,9 @@ pub trait BlobCache: Send + Sync {
         let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             // Ensure BlobIoChunk is valid and continuous.
-            let offset = chunk.compress_offset();
-            let size = chunk.compress_size();
-            let d_size = chunk.uncompress_size() as usize;
+            let offset = chunk.compressed_offset();
+            let size = chunk.compressed_size();
+            let d_size = chunk.uncompressed_size() as usize;
             if offset != last
                 || offset - blob_offset > usize::MAX as u64
                 || offset.checked_add(size as u64).is_none()
@@ -263,7 +263,7 @@ pub trait BlobCache: Send + Sync {
         raw_hook: Option<&dyn Fn(&[u8])>,
     ) -> Result<usize> {
         let mut d;
-        let offset = chunk.compress_offset();
+        let offset = chunk.compressed_offset();
         let raw_chunk = if chunk.is_compressed() {
             // Need a scratch buffer to decompress compressed data.
             let c_size = if self.is_stargz() {
@@ -274,7 +274,7 @@ pub trait BlobCache: Send + Sync {
                 let max_size = cmp::min(max_size, usize::MAX as u64);
                 compress::compute_compressed_gzip_size(buffer.len(), max_size as usize)
             } else {
-                chunk.compress_size() as usize
+                chunk.compressed_size() as usize
             };
             d = alloc_buf(c_size);
             d.as_mut_slice()
@@ -328,7 +328,7 @@ pub trait BlobCache: Send + Sync {
             buffer.copy_from_slice(raw_buffer);
         }
 
-        let d_size = chunk.uncompress_size() as usize;
+        let d_size = chunk.uncompressed_size() as usize;
         if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
         } else if (self.need_validate() || force_validation)

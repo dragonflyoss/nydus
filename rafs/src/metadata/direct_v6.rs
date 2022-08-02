@@ -321,7 +321,7 @@ impl DirectSuperBlockV6 {
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
             v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
             v6_chunk.set_blob_comp_index(chunk.id());
-            v6_chunk.set_block_addr((chunk.uncompress_offset() / EROFS_BLOCK_SIZE) as u32);
+            v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
             chunk_dict.insert(v6_chunk, chunk);
         }
 
@@ -1361,10 +1361,10 @@ impl BlobChunkInfo for DirectChunkInfoV6 {
     }
 
     impl_chunkinfo_getter!(blob_index, u32);
-    impl_chunkinfo_getter!(compress_offset, u64);
-    impl_chunkinfo_getter!(compress_size, u32);
-    impl_chunkinfo_getter!(uncompress_offset, u64);
-    impl_chunkinfo_getter!(uncompress_size, u32);
+    impl_chunkinfo_getter!(compressed_offset, u64);
+    impl_chunkinfo_getter!(compressed_size, u32);
+    impl_chunkinfo_getter!(uncompressed_offset, u64);
+    impl_chunkinfo_getter!(uncompressed_size, u32);
 }
 
 impl BlobV5ChunkInfo for DirectChunkInfoV6 {

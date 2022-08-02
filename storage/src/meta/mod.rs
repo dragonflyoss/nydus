@@ -803,19 +803,19 @@ impl BlobChunkInfo for BlobMetaChunk {
         self.meta.blob_index
     }
 
-    fn compress_offset(&self) -> u64 {
+    fn compressed_offset(&self) -> u64 {
         self.meta.chunks[self.chunk_index].compressed_offset()
     }
 
-    fn compress_size(&self) -> u32 {
+    fn compressed_size(&self) -> u32 {
         self.meta.chunks[self.chunk_index].compressed_size()
     }
 
-    fn uncompress_offset(&self) -> u64 {
+    fn uncompressed_offset(&self) -> u64 {
         self.meta.chunks[self.chunk_index].uncompressed_offset()
     }
 
-    fn uncompress_size(&self) -> u32 {
+    fn uncompressed_size(&self) -> u32 {
         self.meta.chunks[self.chunk_index].uncompressed_size()
     }
 
@@ -962,10 +962,10 @@ mod tests {
         assert_eq!(vec.len(), 1);
         assert_eq!(vec[0].blob_index(), 1);
         assert_eq!(vec[0].id(), 0);
-        assert_eq!(vec[0].compress_offset(), 0);
-        assert_eq!(vec[0].compress_size(), 0x1000);
-        assert_eq!(vec[0].uncompress_offset(), 0);
-        assert_eq!(vec[0].uncompress_size(), 0x1001);
+        assert_eq!(vec[0].compressed_offset(), 0);
+        assert_eq!(vec[0].compressed_size(), 0x1000);
+        assert_eq!(vec[0].uncompressed_offset(), 0);
+        assert_eq!(vec[0].uncompressed_size(), 0x1001);
         assert!(vec[0].is_compressed());
         assert!(!vec[0].is_hole());
 
@@ -973,10 +973,10 @@ mod tests {
         assert_eq!(vec.len(), 2);
         assert_eq!(vec[1].blob_index(), 1);
         assert_eq!(vec[1].id(), 1);
-        assert_eq!(vec[1].compress_offset(), 0x1000);
-        assert_eq!(vec[1].compress_size(), 0x2000);
-        assert_eq!(vec[1].uncompress_offset(), 0x2000);
-        assert_eq!(vec[1].uncompress_size(), 0x2000);
+        assert_eq!(vec[1].compressed_offset(), 0x1000);
+        assert_eq!(vec[1].compressed_size(), 0x2000);
+        assert_eq!(vec[1].uncompressed_offset(), 0x2000);
+        assert_eq!(vec[1].uncompressed_size(), 0x2000);
         assert!(!vec[1].is_compressed());
         assert!(!vec[1].is_hole());
 

@@ -390,7 +390,7 @@ Blocks:             {blocks}"#,
             if let Ok(Some(chunks)) = Self::list_chunks(bootstrap, inode, offset) {
                 drop(guard);
                 for c in chunks {
-                    if c.compress_offset == offset_in_blob {
+                    if c.compressed_offset == offset_in_blob {
                         let path = self.path_from_ino(inode.parent()).unwrap();
                         println!(
                             r#"
@@ -401,10 +401,10 @@ Blocks:             {blocks}"#,
 "#,
                             name.to_string_lossy(),
                             path.to_string_lossy(),
-                            c.compress_offset,
-                            c.compress_size,
-                            c.uncompress_offset,
-                            c.uncompress_size,
+                            c.compressed_offset,
+                            c.compressed_size,
+                            c.uncompressed_offset,
+                            c.uncompressed_size,
                             c.block_id,
                             if let Ok(blob_id) = self.state.get_blob_id(c.blob_index) {
                                 blob_id
@@ -557,10 +557,10 @@ Blocks:             {blocks}"#,
                             i,
                             chunk_index = c.index,
                             file_offset = c.file_offset,
-                            compressed_size = c.compress_size,
-                            decompressed_size = c.uncompress_size,
-                            decompressed_offset = c.uncompress_offset,
-                            compressed_offset = c.compress_offset,
+                            compressed_size = c.compressed_size,
+                            decompressed_size = c.uncompressed_size,
+                            decompressed_offset = c.uncompressed_offset,
+                            compressed_offset = c.compressed_offset,
                             blob_id = blob_id,
                             chunk_id = c.block_id
                         );
