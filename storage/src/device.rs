@@ -21,6 +21,8 @@
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
 use std::any::Any;
 use std::cmp;
+use std::collections::hash_map::Drain;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{self, Error};
@@ -652,6 +654,38 @@ impl BlobIoVec {
     }
 }
 
+/// Helper structure to merge blob IOs to reduce IO requests.
+#[derive(Default)]
+pub struct BlobIoMerge {
+    map: HashMap<String, BlobIoVec>,
+    current: String,
+}
+
+impl BlobIoMerge {
+    /// Append an `BlobIoVec` object to the merge state object.
+    pub fn append(&mut self, desc: BlobIoVec) {
+        if !desc.bi_vec.is_empty() {
+            let id = desc.bi_vec[0].blob.blob_id.to_string();
+            if let Some(prev) = self.map.get_mut(&id) {
+                prev.append(desc);
+            } else {
+                self.map.insert(id.clone(), desc);
+            }
+            self.current = id;
+        }
+    }
+
+    /// Drain elements in the cache.
+    pub fn drain(&mut self) -> Drain<'_, String, BlobIoVec> {
+        self.map.drain()
+    }
+
+    /// Get current element.
+    pub fn get_current_element(&mut self) -> Option<&mut BlobIoVec> {
+        self.map.get_mut(&self.current)
+    }
+}
+
 /// A segment representing a continuous range for a blob IO operation.
 /// It can span multiple chunks while the `offset` is where the user io starts
 /// within the first chunk and `len` is the total user io length of these chunks.
@@ -717,7 +751,7 @@ pub struct BlobIoRange {
 
 impl Debug for BlobIoRange {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        f.debug_struct("ChunkIoMerged")
+        f.debug_struct("BlobIoRange")
             .field("blob id", &self.blob_info.blob_id())
             .field("blob offset", &self.blob_offset)
             .field("blob size", &self.blob_size)
