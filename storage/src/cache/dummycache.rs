@@ -40,7 +40,6 @@ struct DummyCache {
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
     is_stargz: bool,
-    prefetch: bool,
     validate: bool,
 }
 
@@ -84,26 +83,10 @@ impl BlobCache for DummyCache {
     fn prefetch(
         &self,
         _blob_cache: Arc<dyn BlobCache>,
-        prefetches: &[BlobPrefetchRequest],
+        _prefetches: &[BlobPrefetchRequest],
         _bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
-        if self.prefetch {
-            let mut cnt = 0usize;
-            for p in prefetches.iter() {
-                if p.blob_id == self.blob_id
-                    && self
-                        .reader
-                        .prefetch_blob_data_range(p.offset, p.len)
-                        .is_ok()
-                {
-                    cnt += 1;
-                    break;
-                }
-            }
-            Ok(cnt)
-        } else {
-            Err(StorageError::Unsupported)
-        }
+        Err(StorageError::Unsupported)
     }
 
     fn start_prefetch(&self) -> StorageResult<()> {
@@ -111,10 +94,6 @@ impl BlobCache for DummyCache {
     }
 
     fn stop_prefetch(&self) -> StorageResult<()> {
-        if self.prefetch {
-            let _ = self.reader.stop_data_prefetch();
-        }
-
         Ok(())
     }
 
@@ -172,7 +151,6 @@ impl BlobCache for DummyCache {
 pub struct DummyCacheMgr {
     backend: Arc<dyn BlobBackend>,
     cached: bool,
-    prefetch: bool,
     validate: bool,
     closed: AtomicBool,
 }
@@ -183,13 +161,11 @@ impl DummyCacheMgr {
         config: CacheConfig,
         backend: Arc<dyn BlobBackend>,
         cached: bool,
-        enable_prefetch: bool,
     ) -> Result<DummyCacheMgr> {
         Ok(DummyCacheMgr {
             backend,
             cached,
             validate: config.cache_validate,
-            prefetch: enable_prefetch,
             closed: AtomicBool::new(false),
         })
     }
@@ -226,7 +202,6 @@ impl BlobCacheMgr for DummyCacheMgr {
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
             is_stargz: blob_info.is_stargz(),
-            prefetch: self.prefetch,
             validate: self.validate,
         }))
     }

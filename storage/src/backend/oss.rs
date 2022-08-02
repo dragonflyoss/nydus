@@ -186,18 +186,6 @@ impl BlobReader for OssReader {
             .map(|size| size as usize)?)
     }
 
-    fn prefetch_blob_data_range(&self, _ra_offset: u64, _ra_size: u64) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
-
-    fn stop_data_prefetch(&self) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Oss backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
-
     fn metrics(&self) -> &BackendMetrics {
         &self.metrics
     }

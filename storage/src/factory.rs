@@ -142,7 +142,7 @@ impl BlobFactory {
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
             _ => {
-                let mgr = DummyCacheMgr::new(config.cache.clone(), backend, false, false)?;
+                let mgr = DummyCacheMgr::new(config.cache.clone(), backend, false)?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
