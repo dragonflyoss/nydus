@@ -90,7 +90,7 @@ pub(crate) struct AsyncWorkerMgr {
     workers: AtomicU32,
     active: AtomicBool,
 
-    prefetch_sema: Semaphore,
+    prefetch_sema: Arc<Semaphore>,
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
     prefetch_delayed: AtomicU64,
@@ -126,7 +126,7 @@ impl AsyncWorkerMgr {
             workers: AtomicU32::new(0),
             active: AtomicBool::new(false),
 
-            prefetch_sema: Semaphore::new(0),
+            prefetch_sema: Arc::new(Semaphore::new(0)),
             prefetch_channel: Arc::new(Channel::new()),
             prefetch_config,
             prefetch_delayed: AtomicU64::new(0),
@@ -237,8 +237,8 @@ impl AsyncWorkerMgr {
     }
 
     async fn handle_prefetch_requests(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
-        // Max 2 active requests per thread.
-        mgr.prefetch_sema.add_permits(2);
+        // Max 1 active requests per thread.
+        mgr.prefetch_sema.add_permits(1);
 
         while let Ok(msg) = mgr.prefetch_channel.recv().await {
             mgr.handle_prefetch_rate_limit(&msg).await;
@@ -246,7 +246,9 @@ impl AsyncWorkerMgr {
 
             match msg {
                 AsyncPrefetchMessage::BlobPrefetch(state, blob_cache, offset, size) => {
-                    let _ = mgr2.prefetch_sema.acquire().await;
+                    let token = Semaphore::acquire_owned(mgr2.prefetch_sema.clone())
+                        .await
+                        .unwrap();
                     if state.load(Ordering::Acquire) > 0 {
                         rt.spawn(async move {
                             let _ = Self::handle_blob_prefetch_request(
@@ -257,17 +259,19 @@ impl AsyncWorkerMgr {
                                 state.clone(),
                             )
                             .await;
-                            mgr2.prefetch_sema.add_permits(1);
+                            drop(token);
                         });
                     }
                 }
                 AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
-                    let _ = mgr2.prefetch_sema.acquire().await;
+                    let token = Semaphore::acquire_owned(mgr2.prefetch_sema.clone())
+                        .await
+                        .unwrap();
                     if state.load(Ordering::Acquire) > 0 {
                         rt.spawn(async move {
                             let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req)
                                 .await;
-                            mgr2.prefetch_sema.add_permits(1);
+                            drop(token)
                         });
                     }
                 }
@@ -391,7 +395,7 @@ impl AsyncWorkerMgr {
         mgr.metrics.prefetch_data_amount.add(blob_size);
 
         if let Some(obj) = cache.get_blob_object() {
-            obj.fetch_chunks(&req)?;
+            obj.prefetch_chunks(&req)?;
         } else {
             cache.prefetch_range(&req)?;
         }
