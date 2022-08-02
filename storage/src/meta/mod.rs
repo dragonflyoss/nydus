@@ -1025,18 +1025,6 @@ mod tests {
             Ok(ret)
         }
 
-        fn prefetch_blob_data_range(
-            &self,
-            _blob_readahead_offset: u64,
-            _blob_readahead_size: u64,
-        ) -> BackendResult<()> {
-            Ok(())
-        }
-
-        fn stop_data_prefetch(&self) -> BackendResult<()> {
-            Ok(())
-        }
-
         fn metrics(&self) -> &BackendMetrics {
             &self.metrics
         }

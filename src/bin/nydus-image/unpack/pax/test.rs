@@ -41,14 +41,6 @@ impl BlobReader for MockBlobReader {
     fn blob_size(&self) -> storage::backend::BackendResult<u64> {
         todo!();
     }
-
-    fn prefetch_blob_data_range(&self, _: u64, _: u64) -> storage::backend::BackendResult<()> {
-        todo!();
-    }
-
-    fn stop_data_prefetch(&self) -> storage::backend::BackendResult<()> {
-        todo!();
-    }
 }
 
 struct MockChunkInfo {

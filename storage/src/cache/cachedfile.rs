@@ -263,8 +263,6 @@ impl BlobCache for FileCacheEntry {
                 warn!("storage: inaccurate prefetch status");
             }
             if val == 0 || val == 1 {
-                // Stop the localfs legacy prefetch worker thread to read data into page cache.
-                let _ = self.reader.stop_data_prefetch();
                 self.workers
                     .flush_pending_prefetch_requests(self.blob_info.blob_id());
                 return Ok(());

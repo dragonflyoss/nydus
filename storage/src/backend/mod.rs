@@ -132,21 +132,6 @@ pub trait BlobReader: Send + Sync {
         }
     }
 
-    /// Give hints to prefetch blob data range.
-    ///
-    /// This is a really complex interface, which does following for localfs backend:
-    /// - prefetch blob data if access trace log file is present
-    /// - prefetch blob data according to the given range hint if access trace log file is missing
-    /// - generate access log if access trace log file is missing
-    ///
-    /// This method only prefetch blob data from storage backends, it doesn't cache data in the
-    /// blob cache subsystem. So it's useful for disk and file system based storage backends, but
-    /// it may not help for Registry/OSS based storage backends.
-    fn prefetch_blob_data_range(&self, ra_offset: u64, ra_size: u64) -> BackendResult<()>;
-
-    /// Stop the background data prefetching tasks.
-    fn stop_data_prefetch(&self) -> BackendResult<()>;
-
     /// Get metrics object.
     fn metrics(&self) -> &BackendMetrics;
 

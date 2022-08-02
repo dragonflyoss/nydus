@@ -515,18 +515,6 @@ impl BlobReader for RegistryReader {
             .map_err(BackendError::Registry)
     }
 
-    fn prefetch_blob_data_range(&self, _ra_offset: u64, _ra_size: u64) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Registry backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
-
-    fn stop_data_prefetch(&self) -> BackendResult<()> {
-        Err(BackendError::Unsupported(
-            "Registry backend does not support prefetch as per on-disk blob entries".to_string(),
-        ))
-    }
-
     fn metrics(&self) -> &BackendMetrics {
         &self.metrics
     }

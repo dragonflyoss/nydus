@@ -363,9 +363,7 @@ impl AsyncWorkerMgr {
                 });
             }
         } else {
-            // This is only supported by localfs backend to prefetch data into page cache,
-            // or to generate/apply file trace log.
-            let _ = cache.reader().prefetch_blob_data_range(offset, size);
+            warn!("prefetch blob range is not supported");
         }
 
         Ok(())
