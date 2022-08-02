@@ -223,7 +223,7 @@ pub struct CacheConfig {
     pub cache_validate: bool,
     /// Configuration for blob data prefetching.
     #[serde(skip_serializing, skip_deserializing)]
-    pub prefetch_config: BlobPrefetchConfig,
+    pub prefetch_config: PrefetchConfig,
 }
 
 /// Configuration information to create blob cache manager.
@@ -261,7 +261,7 @@ pub struct BlobCacheEntryConfig {
     pub cache_config: Value,
     /// Configuration for data prefetch.
     #[serde(default)]
-    pub prefetch_config: BlobPrefetchConfig,
+    pub prefetch_config: PrefetchConfig,
     /// Optional file path for metadata blobs.
     #[serde(default)]
     pub metadata_path: Option<String>,
@@ -289,7 +289,7 @@ pub struct BlobCacheEntry {
     pub domain_id: String,
     /// Deprecated: data prefetch configuration: BlobPrefetchConfig.
     #[serde(default)]
-    pub fs_prefetch: Option<BlobPrefetchConfig>,
+    pub fs_prefetch: Option<PrefetchConfig>,
 }
 
 /// Configuration information for a list of cached blob objects.
@@ -313,17 +313,87 @@ pub struct BlobCacheObjectId {
     pub blob_id: String,
 }
 
+fn default_prefetch_all() -> bool {
+    true
+}
+
+fn default_prefetch_threads_count() -> u32 {
+    8
+}
+
+pub fn default_prefetch_merging_size() -> u32 {
+    1024 * 1024
+}
+
 /// Configuration information for blob data prefetching.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct BlobPrefetchConfig {
-    /// Whether to enable blob data prefetching.
+pub struct PrefetchConfig {
+    /// Whether to enable data prefetching.
+    #[serde(default)]
     pub enable: bool,
-    /// Number of data prefetching working threads.
-    pub threads_count: usize,
-    /// The maximum size of a merged IO request.
-    pub merging_size: usize,
-    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
-    pub bandwidth_rate: u32,
+
+    /// Whether to prefetch all data.
+    #[serde(default = "default_prefetch_all")]
+    pub prefetch_all: bool,
+
+    /// Number of data prefetching worker threads.
+    #[serde(default = "default_prefetch_threads_count")]
+    pub threads_count: u32,
+
+    /// Size of merging window to reduce requests to storage backends.
+    ///
+    /// - < 512K: changed to 512K
+    /// - >= 16M: changed to 16M
+    /// - otherwise unchanged
+    #[serde(default = "default_prefetch_merging_size")]
+    pub merging_size: u32,
+
+    /// Network bandwidth limitation for data prefetching, in unit of bytes.
+    ///
+    ///
+    /// It sets a limit to prefetch bandwidth usage in order to
+    /// reduce congestion with normal user IO.
+    /// - 0: unlimited network bandwidth
+    /// - < 16MB: changed to RAFS_DEFAULT_CHUNK_SIZE
+    /// - >= 16MB: -- configured network bandwidth limitation.
+    #[serde(default, alias = "bandwidth_rate")]
+    pub bandwidth: u32,
+}
+
+impl PrefetchConfig {
+    /// Validate and fix prefetch configuration.
+    pub fn validate_configuration(&mut self) {
+        if self.threads_count > 512 {
+            warn!(
+                "PrefetchConfig.threads_count has been changed from {} to {}",
+                self.threads_count,
+                default_prefetch_threads_count()
+            );
+            self.threads_count = default_prefetch_threads_count();
+        }
+
+        if self.merging_size < 512 * 1024 {
+            warn!(
+                "PrefetchConfig.merging_size has been changed from {} to 512KB",
+                self.merging_size
+            );
+            self.merging_size = 512 * 1024;
+        } else if self.merging_size > 16 * 1024 * 1024 {
+            warn!(
+                "PrefetchConfig.merging_size has been changed from {} to 16MB",
+                self.merging_size
+            );
+            self.merging_size = 16 * 1024 * 1024;
+        }
+
+        if self.bandwidth > 0 && self.bandwidth < 16 * 1024 * 1024 {
+            warn!(
+                "PrefetchConfig.bandwidth has been changed from {} to 16MB",
+                self.bandwidth
+            );
+            self.bandwidth = 16 * 1024 * 1024;
+        }
+    }
 }
 
 /// Configuration information for file cache.
@@ -952,11 +1022,11 @@ mod tests {
 
     #[test]
     fn test_blob_prefetch_config() {
-        let config = BlobPrefetchConfig::default();
+        let config = PrefetchConfig::default();
         assert!(!config.enable);
         assert_eq!(config.threads_count, 0);
         assert_eq!(config.merging_size, 0);
-        assert_eq!(config.bandwidth_rate, 0);
+        assert_eq!(config.bandwidth, 0);
 
         let content = r#"{
             "enable": true,
@@ -964,11 +1034,11 @@ mod tests {
             "merging_size": 4,
             "bandwidth_rate": 5
         }"#;
-        let config: BlobPrefetchConfig = serde_json::from_str(content).unwrap();
+        let config: PrefetchConfig = serde_json::from_str(content).unwrap();
         assert!(config.enable);
         assert_eq!(config.threads_count, 2);
         assert_eq!(config.merging_size, 4);
-        assert_eq!(config.bandwidth_rate, 5);
+        assert_eq!(config.bandwidth, 5);
     }
 
     #[test]

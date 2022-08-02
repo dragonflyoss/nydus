@@ -20,6 +20,7 @@ use std::{thread, time};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use nydus_api::http::default_prefetch_merging_size;
 use storage::cache::BlobCache;
 use storage::device::BlobPrefetchRequest;
 use storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
@@ -516,8 +517,8 @@ impl FsCacheHandler {
             .merging_size
             .checked_next_power_of_two()
         {
-            None => rafs::fs::default_merging_size() as u64,
-            Some(1) => rafs::fs::default_merging_size() as u64,
+            None => default_prefetch_merging_size() as u64,
+            Some(1) => default_prefetch_merging_size() as u64,
             Some(s) => s as u64,
         };
         let blob_size = blob_info.compressed_size();

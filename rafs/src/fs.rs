@@ -11,12 +11,10 @@
 //! `fuse_backend_rs::FileSystem` trait, so an instance of [Rafs] could be registered to a fuse
 //! backend server. A [Rafs] instance receives fuse requests from a fuse backend server, parsing
 //! the request and filesystem metadata, and eventually ask the storage backend to fetch requested
-//! data. There are also [FsPrefetchControl](struct.FsPrefetchControl.html) and
-//! [RafsConfig](struct.RafsConfig.html) to configure an [Rafs] instance.
+//! data. There is also [RafsConfig](struct.RafsConfig.html) to configure an [Rafs] instance.
 
 use std::any::Any;
 use std::cmp;
-use std::convert::TryFrom;
 use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::fs::File;
@@ -34,14 +32,12 @@ use fuse_backend_rs::api::BackendFileSystem;
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
-use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
+use nydus_api::http::{FactoryConfig, PrefetchConfig};
 use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
-use crate::metadata::{
-    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT, RAFS_MAX_CHUNK_SIZE,
-};
+use crate::metadata::{Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT};
 use crate::{RafsError, RafsIoReader, RafsResult};
 
 /// Type of RAFS fuse handle.
@@ -52,78 +48,11 @@ pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
 
-fn default_threads_count() -> usize {
-    8
-}
-
-pub fn default_merging_size() -> usize {
-    128 * 1024
-}
-
-fn default_prefetch_all() -> bool {
-    true
-}
-
 fn default_amplify_io() -> u32 {
     128 * 1024
 }
 
-/// Configuration information for filesystem data prefetch.
-#[derive(Clone, Default, Deserialize)]
-pub struct FsPrefetchControl {
-    /// Whether the filesystem layer data prefetch is enabled or not.
-    #[serde(default)]
-    pub enable: bool,
-
-    /// How many working threads to prefetch data.
-    #[serde(default = "default_threads_count")]
-    pub threads_count: usize,
-
-    /// Window size in unit of bytes to merge request to backend.
-    #[serde(default = "default_merging_size")]
-    pub merging_size: usize,
-
-    /// Network bandwidth limitation for prefetching.
-    ///
-    /// In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
-    /// reduce congestion with normal user IO.
-    /// bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
-    /// bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
-    ///                        Please note that if the value is less than Rafs chunk size,
-    ///                        it will be raised to the chunk size.
-    #[serde(default)]
-    pub bandwidth_rate: u32,
-
-    /// Whether to prefetch all filesystem data.
-    #[serde(default = "default_prefetch_all")]
-    pub prefetch_all: bool,
-}
-
-impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
-    type Error = RafsError;
-
-    fn try_from(c: &RafsConfig) -> RafsResult<Self> {
-        if c.fs_prefetch.merging_size as u64 > RAFS_MAX_CHUNK_SIZE {
-            return Err(RafsError::Configure(
-                "merging size can't exceed max chunk size".to_string(),
-            ));
-        } else if c.fs_prefetch.enable && c.fs_prefetch.threads_count == 0 {
-            return Err(RafsError::Configure(
-                "try to enable fs prefetching with zero working threads".to_string(),
-            ));
-        }
-
-        Ok(BlobPrefetchConfig {
-            enable: c.fs_prefetch.enable,
-            threads_count: c.fs_prefetch.threads_count,
-            merging_size: c.fs_prefetch.merging_size,
-            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
-        })
-    }
-}
-
 /// Not everything can be safely exported from configuration.
-/// We trim the unneeded info from here.
 #[macro_export]
 macro_rules! trim_backend_config {
     ($config:expr, $($i:expr),*) => {
@@ -149,7 +78,7 @@ pub struct RafsConfig {
     pub iostats_files: bool,
     /// Filesystem prefetching configuration.
     #[serde(default)]
-    pub fs_prefetch: FsPrefetchControl,
+    pub fs_prefetch: PrefetchConfig,
     /// Enable extended attributes.
     #[serde(default)]
     pub enable_xattr: bool,
@@ -356,7 +285,8 @@ impl Rafs {
     fn prepare_storage_conf(conf: &RafsConfig) -> RafsResult<Arc<FactoryConfig>> {
         let mut storage_conf = conf.device.clone();
         storage_conf.cache.cache_validate = conf.digest_validate;
-        storage_conf.cache.prefetch_config = TryFrom::try_from(conf)?;
+        storage_conf.cache.prefetch_config = conf.fs_prefetch.clone();
+        storage_conf.cache.prefetch_config.validate_configuration();
         Ok(Arc::new(storage_conf))
     }
 
@@ -968,7 +898,6 @@ impl FileSystem for Rafs {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     use crate::RafsIoRead;
 
     pub fn new_rafs_backend() -> Box<Rafs> {
@@ -1095,33 +1024,5 @@ pub(crate) mod tests {
                 assert_eq!(e.inode, 0);
             }
         }
-    }
-
-    #[test]
-    fn test_fsprefetchcontrol_from_rafs_config() {
-        let mut config = RafsConfig {
-            fs_prefetch: FsPrefetchControl {
-                enable: false,
-                threads_count: 0,
-                merging_size: 0,
-                bandwidth_rate: 0,
-                prefetch_all: false,
-            },
-            ..Default::default()
-        };
-
-        config.fs_prefetch.enable = true;
-        assert!(BlobPrefetchConfig::try_from(&config).is_err());
-
-        config.fs_prefetch.threads_count = 1;
-        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
-
-        config.fs_prefetch.merging_size = RAFS_MAX_CHUNK_SIZE as usize + 1;
-        assert!(BlobPrefetchConfig::try_from(&config).is_err());
-
-        config.fs_prefetch.merging_size = RAFS_DEFAULT_CHUNK_SIZE as usize;
-        config.fs_prefetch.bandwidth_rate = 1;
-        config.fs_prefetch.prefetch_all = true;
-        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
     }
 }

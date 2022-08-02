@@ -21,13 +21,14 @@ use std::time::Duration;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nix::unistd::dup;
+use nydus_api::http::PrefetchConfig;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::{compress, digest};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
+use crate::cache::worker::{AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
@@ -122,7 +123,7 @@ pub(crate) struct FileCacheEntry {
     pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
     pub(crate) need_validate: bool,
-    pub(crate) prefetch_config: Arc<AsyncPrefetchConfig>,
+    pub(crate) prefetch_config: Arc<PrefetchConfig>,
 }
 
 impl FileCacheEntry {
@@ -229,7 +230,7 @@ impl BlobCache for FileCacheEntry {
         }
 
         // Then handle fs prefetch
-        let merging_size = self.prefetch_config.merging_size;
+        let merging_size = self.prefetch_config.merging_size as usize;
         BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
             let msg = AsyncPrefetchMessage::new_fs_prefetch(
                 self.prefetch_state.clone(),

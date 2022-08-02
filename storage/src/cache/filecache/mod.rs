@@ -11,13 +11,13 @@ use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
 
-use nydus_api::http::{CacheConfig, FileCacheConfig};
+use nydus_api::http::{CacheConfig, FileCacheConfig, PrefetchConfig};
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
+use crate::cache::worker::AsyncWorkerMgr;
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 
@@ -30,7 +30,7 @@ pub struct FileCacheMgr {
     blobs_need: usize,
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
-    prefetch_config: Arc<AsyncPrefetchConfig>,
+    prefetch_config: Arc<PrefetchConfig>,
     runtime: Arc<Runtime>,
     worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
@@ -53,7 +53,7 @@ impl FileCacheMgr {
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
         let work_dir = blob_config.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
-        let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
+        let prefetch_config: Arc<PrefetchConfig> = Arc::new(config.prefetch_config);
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         Ok(FileCacheMgr {
@@ -170,7 +170,7 @@ impl FileCacheEntry {
     fn new_file_cache(
         mgr: &FileCacheMgr,
         blob_info: Arc<BlobInfo>,
-        prefetch_config: Arc<AsyncPrefetchConfig>,
+        prefetch_config: Arc<PrefetchConfig>,
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {

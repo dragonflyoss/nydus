@@ -18,36 +18,12 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
 
-use nydus_api::http::BlobPrefetchConfig;
+use nydus_api::http::PrefetchConfig;
 use nydus_utils::async_helper::with_runtime;
 use nydus_utils::mpmc::Channel;
 
 use crate::cache::{BlobCache, BlobIoRange};
 use crate::factory::ASYNC_RUNTIME;
-use crate::RAFS_MAX_CHUNK_SIZE;
-
-/// Configuration information for asynchronous workers.
-pub(crate) struct AsyncPrefetchConfig {
-    /// Whether or not to enable prefetch.
-    pub enable: bool,
-    /// Number of working threads.
-    pub threads_count: usize,
-    /// Window size to merge/amplify requests.
-    pub merging_size: usize,
-    /// Network bandwidth for prefetch, in unit of Bytes and Zero means no rate limit is set.
-    pub bandwidth_rate: u32,
-}
-
-impl From<BlobPrefetchConfig> for AsyncPrefetchConfig {
-    fn from(p: BlobPrefetchConfig) -> Self {
-        AsyncPrefetchConfig {
-            enable: p.enable,
-            threads_count: p.threads_count,
-            merging_size: p.merging_size,
-            bandwidth_rate: p.bandwidth_rate,
-        }
-    }
-}
 
 /// Asynchronous service request message.
 pub(crate) enum AsyncPrefetchMessage {
@@ -92,7 +68,7 @@ pub(crate) struct AsyncWorkerMgr {
 
     prefetch_sema: Arc<Semaphore>,
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
-    prefetch_config: Arc<AsyncPrefetchConfig>,
+    prefetch_config: Arc<PrefetchConfig>,
     prefetch_delayed: AtomicU64,
     prefetch_inflight: AtomicU32,
     prefetch_limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
@@ -102,17 +78,9 @@ impl AsyncWorkerMgr {
     /// Create a new instance of `AsyncWorkerMgr`.
     pub fn new(
         metrics: Arc<BlobcacheMetrics>,
-        prefetch_config: Arc<AsyncPrefetchConfig>,
+        prefetch_config: Arc<PrefetchConfig>,
     ) -> Result<Self> {
-        // If the given value is less than maximum blob chunk size, it exceeds burst size of the
-        // limiter ending up with throttling all throughput, so ensure bandwidth is bigger than
-        // the maximum chunk size.
-        let tweaked_bw_limit = if prefetch_config.bandwidth_rate != 0 {
-            std::cmp::max(RAFS_MAX_CHUNK_SIZE as u32, prefetch_config.bandwidth_rate)
-        } else {
-            0
-        };
-        let prefetch_limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
+        let prefetch_limiter = NonZeroU32::new(prefetch_config.bandwidth).map(|v| {
             info!(
                 "storage: prefetch bandwidth will be limited at {}Bytes/S",
                 v
@@ -419,11 +387,12 @@ mod tests {
     fn test_worker_mgr_new() {
         let tmpdir = TempDir::new().unwrap();
         let metrics = BlobcacheMetrics::new("test1", tmpdir.as_path().to_str().unwrap());
-        let config = Arc::new(AsyncPrefetchConfig {
+        let config = Arc::new(PrefetchConfig {
             enable: true,
+            prefetch_all: false,
             threads_count: 2,
             merging_size: 0x100000,
-            bandwidth_rate: 0x100000,
+            bandwidth: 0x100000,
         });
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
@@ -458,11 +427,12 @@ mod tests {
     fn test_worker_mgr_rate_limiter() {
         let tmpdir = TempDir::new().unwrap();
         let metrics = BlobcacheMetrics::new("test1", tmpdir.as_path().to_str().unwrap());
-        let config = Arc::new(AsyncPrefetchConfig {
+        let config = Arc::new(PrefetchConfig {
             enable: true,
+            prefetch_all: false,
             threads_count: 4,
             merging_size: 0x1000000,
-            bandwidth_rate: 0x1000000,
+            bandwidth: 0x1000000,
         });
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
