@@ -560,8 +560,6 @@ impl PAXUtil {
     }
 
     fn set_link(header: &mut Header, path: &Path) -> Result<Option<PAXRecord>> {
-        let path = Util::normalize_path(path).with_context(|| "fail to normalize path")?;
-
         let max_len = header.as_old().linkname.len();
         if path.as_os_str().len() <= max_len {
             return header
@@ -575,7 +573,7 @@ impl PAXUtil {
             v: path.to_owned().into_os_string().into_vec(),
         };
 
-        let path = Util::truncate_path(&path, max_len)
+        let path = Util::truncate_path(path, max_len)
             .with_context(|| "fail to truncate link for pax header")?;
 
         header
