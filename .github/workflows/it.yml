@@ -55,7 +55,6 @@ jobs:
           make -e ARCH=$arch -e CARGO=cross static-release
           make release  -C contrib/nydus-backend-proxy/
           #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
-          #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-cached .
           #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
           #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusctl .
           #sudo mv target-virtiofs/$arch-unknown-linux-musl/release/nydusd nydusd-virtiofs

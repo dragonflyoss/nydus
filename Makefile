@@ -96,7 +96,7 @@ ut:
 	RUST_BACKTRACE=1 ${CARGO} test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 macos-fusedev:
-	${CARGO} build --target ${ARCH}-apple-darwin --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image --bin nydus-cached
+	${CARGO} build --target ${ARCH}-apple-darwin --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image
 
 macos-ut:
 	${CARGO} clippy --target-dir ${current_dir}/target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings

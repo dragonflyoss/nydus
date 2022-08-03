@@ -36,7 +36,6 @@ jobs:
         rustup component add rustfmt clippy
         make -e ARCH=$arch -e CARGO=cross static-release
         sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-cached .
         sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
         sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusctl .
         sudo mv target-virtiofs/$arch-unknown-linux-musl/release/nydusd nydusd-virtiofs
@@ -49,7 +48,6 @@ jobs:
         path: |
           nydusd-fusedev
           nydusd-virtiofs
-          nydus-cached
           nydus-image
           nydusctl
           configs
@@ -76,7 +74,6 @@ jobs:
         rustup target install $arch-apple-darwin
         make -e ARCH=$arch macos-fusedev
         sudo mv target-fusedev/$arch-apple-darwin/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/$arch-apple-darwin/release/nydus-cached .
         sudo mv target-fusedev/$arch-apple-darwin/release/nydus-image .
         sudo mv target-fusedev/$arch-apple-darwin/release/nydusctl .
         sudo cp -r misc/configs .
