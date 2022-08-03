@@ -1185,7 +1185,6 @@ impl RafsInode for OndiskInodeWrapper {
                                            name: OsString,
                                            ino,
                                            offset| {
-            // Safe to unwrap since it must have child inode.
             if let Some(child_inode) = inode {
                 if child_inode.is_dir() {
                     child_dirs.push(child_inode);
@@ -1198,6 +1197,7 @@ impl RafsInode for OndiskInodeWrapper {
             }
         })
         .unwrap();
+
         for d in child_dirs {
             // EROFS packs dot and dotdot, so skip them two.
             if d.name() == "." || d.name() == ".." {

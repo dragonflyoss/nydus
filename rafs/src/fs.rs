@@ -37,6 +37,7 @@ use serde::Deserialize;
 use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
 use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
+use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::metadata::{
     Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT, RAFS_MAX_CHUNK_SIZE,
@@ -503,48 +504,67 @@ impl Rafs {
         sb: Arc<RafsSuper>,
         device: BlobDevice,
     ) {
-        // Without too much layout concern, just prefetch a certain range from backend.
-        let prefetches = sb
-            .superblock
-            .get_blob_infos()
-            .iter()
-            .map(|b| BlobPrefetchRequest {
-                blob_id: b.blob_id().to_owned(),
-                offset: b.readahead_offset(),
-                len: b.readahead_size(),
-            })
-            .collect::<Vec<BlobPrefetchRequest>>();
-        device.prefetch(&[], &prefetches).unwrap_or_else(|e| {
-            warn!("Prefetch error, {:?}", e);
-        });
+        // First do range based prefetch for rafs v6.
+        if sb.meta.is_v6() {
+            let mut prefetches = Vec::new();
 
-        let ignore_prefetch_all = prefetch_files
+            for blob in sb.superblock.get_blob_infos() {
+                let sz = blob.readahead_size();
+                if sz > 0 {
+                    let mut offset = 0;
+                    while offset < sz {
+                        let len = cmp::min(sz - offset, RAFS_DEFAULT_CHUNK_SIZE);
+                        prefetches.push(BlobPrefetchRequest {
+                            blob_id: blob.blob_id().to_owned(),
+                            offset,
+                            len,
+                        });
+                        offset += len;
+                    }
+                }
+            }
+            if !prefetches.is_empty() {
+                device.prefetch(&[], &prefetches).unwrap_or_else(|e| {
+                    warn!("Prefetch error, {:?}", e);
+                });
+            }
+        }
+
+        let mut ignore_prefetch_all = prefetch_files
             .as_ref()
             .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
             .unwrap_or(false);
 
+        // Then do file based prefetch based on:
+        // - prefetch listed passed in by user
+        // - or file prefetch list in metadata
         let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-        // Prefetch procedure does not affect rafs mounting
-        sb.prefetch_files(&mut reader, inodes, &|desc| {
-            device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
-                warn!("Prefetch error, {:?}", e);
-            });
-        })
-        .unwrap_or_else(|e| {
-            info!("No file to be prefetched {:?}", e);
-        });
-
-        if prefetch_all && !ignore_prefetch_all {
-            let root = vec![root_ino];
-
-            sb.prefetch_files(&mut reader, Some(root), &|desc| {
+        let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
+            if desc.bi_size > 0 {
                 device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                     warn!("Prefetch error, {:?}", e);
                 });
-            })
-            .unwrap_or_else(|e| {
-                info!("No file to be prefetched {:?}", e);
+            }
+        });
+        match res {
+            Ok(true) => ignore_prefetch_all = true,
+            Ok(false) => {}
+            Err(e) => info!("No file to be prefetched {:?}", e),
+        }
+
+        // Last optionally prefetch all data
+        if prefetch_all && !ignore_prefetch_all {
+            let root = vec![root_ino];
+            let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
+                if desc.bi_size > 0 {
+                    device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                        warn!("Prefetch error, {:?}", e);
+                    });
+                }
             });
+            if let Err(e) = res {
+                info!("No file to be prefetched {:?}", e);
+            }
         }
     }
 
