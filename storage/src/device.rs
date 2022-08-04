@@ -665,13 +665,15 @@ impl BlobIoMerge {
     /// Append an `BlobIoVec` object to the merge state object.
     pub fn append(&mut self, desc: BlobIoVec) {
         if !desc.bi_vec.is_empty() {
-            let id = desc.bi_vec[0].blob.blob_id.to_string();
-            if let Some(prev) = self.map.get_mut(&id) {
+            let id = desc.bi_vec[0].blob.blob_id.as_str();
+            if self.current != id {
+                self.current = id.to_string();
+            }
+            if let Some(prev) = self.map.get_mut(id) {
                 prev.append(desc);
             } else {
-                self.map.insert(id.clone(), desc);
+                self.map.insert(id.to_string(), desc);
             }
-            self.current = id;
         }
     }
 
