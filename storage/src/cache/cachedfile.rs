@@ -316,18 +316,16 @@ impl BlobCache for FileCacheEntry {
         let mut total_size = 0;
         let mut start = 0;
         while start < pending.len() {
+            // Be careful that `end` is inclusive.
             let mut end = start;
 
-            // `end` should be inclusive within `pending` slice.
+            // Figure out the range with continuous chunk ids.
             while end < pending.len() - 1 && pending[end + 1].id() == pending[end].id() + 1 {
                 end += 1;
             }
 
-            // Find a range with continuous chunk id
+            // Don't forget to clear its pending state whenever backend IO fails.
             let blob_offset = pending[start].compressed_offset();
-
-            // NOTE: Please be aware that being fetched chunks include index=`end` chunk in below `pending` slice.
-            // Do't forget to clear its pending state whenever backend IO fails.
             let blob_end = pending[end].compressed_offset() + pending[end].compressed_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
 
@@ -349,7 +347,7 @@ impl BlobCache for FileCacheEntry {
                     }
                 }
                 Err(_e) => {
-                    // NOTE: We must clear pending flag for `end` chunk.
+                    // Clear the pending flag for all chunks in processing.
                     for chunk in &mut pending[start..=end] {
                         self.chunk_map.clear_pending(chunk);
                     }
