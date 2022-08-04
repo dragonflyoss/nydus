@@ -255,7 +255,10 @@ impl FileCacheEntry {
         // The builder now records the number of chunks in the blob table, so we can
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
-        let chunk_map: Arc<dyn ChunkMap> = if mgr.disable_indexed_map
+
+        let is_v5 = !blob_info.meta_ci_is_valid();
+
+        let chunk_map: Arc<dyn ChunkMap> = if (is_v5 && mgr.disable_indexed_map)
             || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
         {
             direct_chunkmap = false;
