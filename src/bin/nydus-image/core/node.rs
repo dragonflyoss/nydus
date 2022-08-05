@@ -244,7 +244,7 @@ impl Display for Node {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_size {} i_name_size {} i_symlink_size {} has_xattr {} link {:?}",
+            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_size {} i_blocks {} i_name_size {} i_symlink_size {} has_xattr {} link {:?} i_mtime {} i_mtime_nsec {}",
             self.file_type(),
             self.target(),
             self.index,
@@ -255,10 +255,13 @@ impl Display for Node {
             self.inode.child_count(),
             self.inode.nlink(),
             self.inode.size(),
+            self.inode.blocks(),
             self.inode.name_size(),
             self.inode.symlink_size(),
             self.inode.has_xattr(),
             self.symlink,
+            self.inode.mtime(),
+            self.inode.mtime_nsec(),
         )
     }
 }
@@ -833,6 +836,23 @@ impl Node {
         Ok(())
     }
 
+    // Xattr paris are located into bootstrap rather than blob, however, we should
+    // also reflect the size they consume like other file system. We don't
+    // directly use local file's metadata for `i_block` since we are purchasing
+    // "reproducible build" which means nydus image can be built from anywhere with
+    // the unique image built.
+    // TODO: The real size occupied within blob is compressed. Therefore, the
+    // sum of all chunks' size should be more accurate. But we don't know the size
+    // right now since compression is not acted yet. Try to make this accurate later.
+    pub fn set_v5_inode_blocks(&mut self) {
+        if let InodeWrapper::V5(_) = self.inode {
+            self.inode.set_blocks(div_round_up(
+                self.inode.size() + self.xattrs.aligned_size_v5() as u64,
+                512,
+            ));
+        }
+    }
+
     fn build_inode_stat(&mut self) -> Result<()> {
         let meta = self.meta()?;
 
@@ -847,8 +867,28 @@ impl Node {
         // (blob + bootstrap in one tar layer), which causes the layer hash to change and wastes
         // registry storage space, so the mtime of the root directory is forced to be ignored here.
         let ignore_mtime = self.is_root();
-        self.inode
-            .set_inode_info(&meta, &self.xattrs, self.explicit_uidgid, ignore_mtime);
+
+        self.inode.set_mode(meta.st_mode());
+        if self.explicit_uidgid {
+            self.inode.set_uid(meta.st_uid());
+            self.inode.set_gid(meta.st_gid());
+        }
+        if !ignore_mtime {
+            self.inode.set_mtime(meta.st_mtime() as u64);
+            self.inode.set_mtime_nsec(meta.st_mtime_nsec() as u32);
+        }
+        self.inode.set_projid(0);
+        self.inode.set_rdev(meta.st_rdev() as u32);
+        // Ignore actual nlink value and calculate from rootfs directory instead
+        self.inode.set_nlink(1);
+
+        // Since different filesystems may get different directory sizes/blocks,
+        // calculate these two values later.
+        if !self.is_dir() {
+            self.inode.set_size(meta.st_size());
+            // Set inode blocks for RAFS v5 dir, v6 dir's will be calculated by runtime.
+            self.set_v5_inode_blocks();
+        }
 
         Ok(())
     }
@@ -1291,6 +1331,13 @@ impl InodeWrapper {
         }
     }
 
+    pub fn set_mode(&mut self, mode: u32) {
+        match self {
+            InodeWrapper::V5(i) => i.i_mode = mode,
+            InodeWrapper::V6(i) => i.i_mode = mode,
+        }
+    }
+
     pub fn is_dir(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_dir(),
@@ -1426,10 +1473,24 @@ impl InodeWrapper {
         }
     }
 
+    pub fn set_uid(&mut self, uid: u32) {
+        match self {
+            InodeWrapper::V5(i) => i.i_uid = uid,
+            InodeWrapper::V6(i) => i.i_uid = uid,
+        }
+    }
+
     pub fn gid(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_gid,
             InodeWrapper::V6(i) => i.i_gid,
+        }
+    }
+
+    pub fn set_gid(&mut self, gid: u32) {
+        match self {
+            InodeWrapper::V5(i) => i.i_gid = gid,
+            InodeWrapper::V6(i) => i.i_gid = gid,
         }
     }
 
@@ -1440,6 +1501,13 @@ impl InodeWrapper {
         }
     }
 
+    pub fn set_mtime(&mut self, mtime: u64) {
+        match self {
+            InodeWrapper::V5(i) => i.i_mtime = mtime,
+            InodeWrapper::V6(i) => i.i_mtime = mtime,
+        }
+    }
+
     pub fn mtime_nsec(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_mtime_nsec,
@@ -1447,10 +1515,38 @@ impl InodeWrapper {
         }
     }
 
+    pub fn set_mtime_nsec(&mut self, mtime_nsec: u32) {
+        match self {
+            InodeWrapper::V5(i) => i.i_mtime_nsec = mtime_nsec,
+            InodeWrapper::V6(i) => i.i_mtime_nsec = mtime_nsec,
+        }
+    }
+
     pub fn blocks(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_blocks,
             InodeWrapper::V6(i) => i.i_blocks,
+        }
+    }
+
+    pub fn set_blocks(&mut self, blocks: u64) {
+        match self {
+            InodeWrapper::V5(i) => i.i_blocks = blocks,
+            InodeWrapper::V6(i) => i.i_blocks = blocks,
+        }
+    }
+
+    pub fn set_rdev(&mut self, rdev: u32) {
+        match self {
+            InodeWrapper::V5(i) => i.i_rdev = rdev,
+            InodeWrapper::V6(i) => i.i_rdev = rdev,
+        }
+    }
+
+    pub fn set_projid(&mut self, projid: u32) {
+        match self {
+            InodeWrapper::V5(i) => i.i_projid = projid,
+            InodeWrapper::V6(i) => i.i_projid = projid,
         }
     }
 
@@ -1489,7 +1585,7 @@ impl InodeWrapper {
         }
     }
 
-    fn set_name_size(&mut self, size: usize) {
+    pub fn set_name_size(&mut self, size: usize) {
         debug_assert!(size < u16::MAX as usize);
         match self {
             InodeWrapper::V5(i) => i.i_name_size = size as u16,
@@ -1543,63 +1639,6 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_child_count = count,
             InodeWrapper::V6(i) => i.i_child_count = count,
-        }
-    }
-
-    fn set_inode_info<T: MetadataExt>(
-        &mut self,
-        meta: &T,
-        xattrs: &RafsXAttrs,
-        explicit_uidgid: bool,
-        ignore_mtime: bool,
-    ) {
-        match self {
-            InodeWrapper::V5(i) => {
-                i.i_mode = meta.st_mode();
-                if explicit_uidgid {
-                    i.i_uid = meta.st_uid();
-                    i.i_gid = meta.st_gid();
-                }
-                if !ignore_mtime {
-                    i.i_mtime = meta.st_mtime() as u64;
-                    i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
-                }
-                i.i_projid = 0;
-                i.i_size = meta.st_size();
-                i.i_rdev = meta.st_rdev() as u32;
-                // Ignore actual nlink value and calculate from rootfs directory instead
-                i.i_nlink = 1;
-
-                // Xattr paris are located into bootstrap rather than blob, however, we should
-                // also reflect the size they consume like other file system. We don't
-                // directly use local file's metadata for `i_block` since we are purchasing
-                // "reproducible build" which means nydus image can be built from anywhere with
-                // the unique image built.
-                i.i_blocks = div_round_up(i.i_size + xattrs.aligned_size_v5() as u64, 512);
-            }
-            InodeWrapper::V6(i) => {
-                i.i_mode = meta.st_mode();
-                if explicit_uidgid {
-                    i.i_uid = meta.st_uid();
-                    i.i_gid = meta.st_gid();
-                }
-                if !ignore_mtime {
-                    i.i_mtime = meta.st_mtime() as u64;
-                    i.i_mtime_nsec = meta.st_mtime_nsec() as u32;
-                }
-                i.i_projid = 0;
-                i.i_size = meta.st_size();
-                i.i_rdev = meta.st_rdev() as u32;
-                // Ignore actual nlink value and calculate from rootfs directory instead
-                i.i_nlink = 1;
-
-                // Xattr paris are located into bootstrap rather than blob, however, we should
-                // also reflect the size they consume like other file system. We don't
-                // directly use local file's metadata for `i_block` since we are purchasing
-                // "reproducible build" which means nydus image can be built from anywhere with
-                // the unique image built.
-                i.i_blocks = div_round_up(i.i_size + xattrs.aligned_size_v5() as u64, 512);
-            }
         }
     }
 

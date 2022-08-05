@@ -17,6 +17,12 @@ use crate::core::context::{
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
+use nydus_utils::try_round_up_4k;
+
+// The RAFS v5 format does not have directory entries, so for ensuring
+// that the directory size is independent of the host filesystem for
+// reproducible builds, we define a virtual dummy value here.
+const RAFS_V5_VIRTUAL_ENTRY_SIZE: u8 = 8;
 
 const TAR_BLOB_NAME: &str = "image.blob";
 const TAR_BOOTSTRAP_NAME: &str = "image.boot";
@@ -71,6 +77,7 @@ impl FilesystemTreeBuilder {
 
             let mut child = Tree::new(child);
             child.children = self.load_children(ctx, bootstrap_ctx, &mut child.node, layer_idx)?;
+            DirectoryBuilder::set_v5_dir_size(&ctx.fs_version, &mut child);
             result.push(child);
         }
 
@@ -83,6 +90,26 @@ pub(crate) struct DirectoryBuilder {}
 impl DirectoryBuilder {
     pub fn new() -> Self {
         Self {}
+    }
+
+    // Since different filesystems may calculate different directory sizes,
+    // for RAFS v5, nydus needs to implement the directory size calculation
+    // itself to achieve reproducible builds on different hosts or filesystems.
+    // For RAFS v6, the directory size is calculated by actual entries later.
+    fn set_v5_dir_size(fs_version: &RafsVersion, tree: &mut Tree) {
+        if !tree.node.is_dir() || !fs_version.is_v5() {
+            return;
+        }
+        let mut d_size = 0u64;
+        for child in tree.children.iter() {
+            d_size += child.node.inode.name_size() as u64 + RAFS_V5_VIRTUAL_ENTRY_SIZE as u64;
+        }
+        if d_size == 0 {
+            tree.node.inode.set_size(4096);
+        } else {
+            tree.node.inode.set_size(try_round_up_4k(d_size).unwrap());
+        }
+        tree.node.set_v5_inode_blocks();
     }
 
     /// Build node tree from a filesystem directory
@@ -108,6 +135,7 @@ impl DirectoryBuilder {
             { tree_builder.load_children(ctx, bootstrap_ctx, &mut tree.node, layer_idx) },
             "load_from_directory"
         )?;
+        Self::set_v5_dir_size(&ctx.fs_version, &mut tree);
 
         Ok(tree)
     }
