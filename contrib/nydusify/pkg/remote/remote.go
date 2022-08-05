@@ -6,7 +6,9 @@ package remote
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/containerd/containerd/content"
@@ -26,12 +28,14 @@ type Remote struct {
 	// and is destroyed when the request completes. When a registry token expires,
 	// the resolver does not re-apply for a new token, so it's better to create a
 	// new resolver instance using resolverFunc for each request.
-	resolverFunc func() remotes.Resolver
+	resolverFunc func(insecure bool) remotes.Resolver
 	pushed       sync.Map
+
+	retryWithHTTP bool
 }
 
 // New creates remote instance from docker remote resolver
-func New(ref string, resolverFunc func() remotes.Resolver) (*Remote, error) {
+func New(ref string, resolverFunc func(bool) remotes.Resolver) (*Remote, error) {
 	parsed, err := reference.ParseNormalizedNamed(ref)
 	if err != nil {
 		return nil, err
@@ -42,6 +46,18 @@ func New(ref string, resolverFunc func() remotes.Resolver) (*Remote, error) {
 		parsed:       parsed,
 		resolverFunc: resolverFunc,
 	}, nil
+}
+
+func (remote *Remote) MaybeWithHTTP(err error) {
+	parsed, _ := reference.ParseNormalizedNamed(remote.Ref)
+	if parsed != nil {
+		host := reference.Domain(parsed)
+		// If the error message includes the current registry host string, it
+		// implies that we can retry the request with plain HTTP.
+		if strings.Contains(err.Error(), fmt.Sprintf("/%s/", host)) {
+			remote.retryWithHTTP = true
+		}
+	}
 }
 
 // Push pushes blob to registry
@@ -63,7 +79,7 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 	}
 
 	// Create a new resolver instance for the request
-	pusher, err := remote.resolverFunc().Pusher(ctx, ref)
+	pusher, err := remote.resolverFunc(remote.retryWithHTTP).Pusher(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -90,7 +106,7 @@ func (remote *Remote) Pull(ctx context.Context, desc ocispec.Descriptor, byDiges
 	}
 
 	// Create a new resolver instance for the request
-	puller, err := remote.resolverFunc().Fetcher(ctx, ref)
+	puller, err := remote.resolverFunc(remote.retryWithHTTP).Fetcher(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +124,7 @@ func (remote *Remote) Resolve(ctx context.Context) (*ocispec.Descriptor, error) 
 	ref := reference.TagNameOnly(remote.parsed).String()
 
 	// Create a new resolver instance for the request
-	_, desc, err := remote.resolverFunc().Resolve(ctx, ref)
+	_, desc, err := remote.resolverFunc(remote.retryWithHTTP).Resolve(ctx, ref)
 	if err != nil {
 		return nil, err
 	}

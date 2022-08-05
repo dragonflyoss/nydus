@@ -9,7 +9,7 @@ import (
 
 func main() {
 	// Configurable parameters for converter
-	wordDir := "./tmp"
+	workDir := "./tmp"
 	nydusImagePath := "/path/to/nydus-image"
 	source := "localhost:5000/ubuntu:latest"
 	target := "localhost:5000/ubuntu:latest-nydus"
@@ -39,18 +39,13 @@ func main() {
 		panic(err)
 	}
 
-	// Source provider gets source image manifest, config, and layer
-	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, wordDir, "linux/amd64")
-	if err != nil {
-		panic(err)
-	}
-
 	opt := converter.Opt{
-		Logger:          logger,
-		SourceProviders: sourceProviders,
-		TargetRemote:    targetRemote,
+		Logger:         logger,
+		TargetPlatform: "linux/amd64",
+		SourceRemote:   sourceRemote,
+		TargetRemote:   targetRemote,
 
-		WorkDir:          wordDir,
+		WorkDir:          workDir,
 		PrefetchPatterns: "/",
 		NydusImagePath:   nydusImagePath,
 		MultiPlatform:    false,

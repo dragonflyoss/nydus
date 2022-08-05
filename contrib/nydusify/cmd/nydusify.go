@@ -185,8 +185,8 @@ func main() {
 				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
 				&cli.StringFlag{Name: "target", Required: false, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
 				&cli.StringFlag{Name: "target-suffix", Required: false, Usage: "Add suffix to source image reference as target image reference, conflict with --target", EnvVars: []string{"TARGET_SUFFIX"}},
-				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS source registry", EnvVars: []string{"SOURCE_INSECURE"}},
+				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS target registry", EnvVars: []string{"TARGET_INSECURE"}},
 				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image conversion", EnvVars: []string{"WORK_DIR"}},
 				&cli.StringFlag{Name: "prefetch-dir", Value: "", Usage: "Prefetched directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
 				&cli.BoolFlag{Name: "prefetch-patterns", Value: false, Usage: "Prefetched file path patterns from STDIN, specify absolute/relative path of rootfs line by line", EnvVars: []string{"PREFETCH_PATTERNS"}},
@@ -268,23 +268,11 @@ func main() {
 					return err
 				}
 
-				sourceDir := filepath.Join(c.String("work-dir"), "source")
-				if err := os.RemoveAll(sourceDir); err != nil {
-					return err
-				}
-				if err := os.MkdirAll(sourceDir, 0755); err != nil {
-					return err
-				}
 				sourceRemote, err := provider.DefaultRemote(c.String("source"), c.Bool("source-insecure"))
 				if err != nil {
 					return errors.Wrap(err, "Parse source reference")
 				}
 				targetPlatform := c.String("platform")
-
-				sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir, targetPlatform)
-				if err != nil {
-					return errors.Wrap(err, "Parse source image")
-				}
 
 				targetRemote, err := provider.DefaultRemote(target, c.Bool("target-insecure"))
 				if err != nil {
@@ -296,10 +284,15 @@ func main() {
 					return err
 				}
 
-				opt := converter.Opt{
-					Logger:          logger,
-					SourceProviders: sourceProviders,
+				metrics.Register(fileexporter.New(filepath.Join(c.String("work-dir"), "conversion_metrics.prom")))
+				defer metrics.Export()
 
+				opt := converter.Opt{
+					Logger: logger,
+
+					TargetPlatform: targetPlatform,
+
+					SourceRemote: sourceRemote,
 					TargetRemote: targetRemote,
 
 					CacheRemote:     cacheRemote,
@@ -318,7 +311,6 @@ func main() {
 					BackendAlignedChunk: c.Bool("backend-aligned-chunk"),
 
 					NydusifyVersion: version,
-					Source:          c.String("source"),
 					FsVersion:       fsVersion,
 
 					ChunkDict: converter.ChunkDictOpt{
@@ -333,9 +325,6 @@ func main() {
 					return err
 				}
 
-				metrics.Register(fileexporter.New(filepath.Join(opt.WorkDir, "conversion_metrics.prom")))
-				defer metrics.Export()
-
 				return cvt.Convert(context.Background())
 			},
 		},
@@ -346,8 +335,8 @@ func main() {
 				&cli.StringFlag{Name: "source", Required: false, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
 				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
 
-				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Allow http/insecure source registry communication", EnvVars: []string{"SOURCE_INSECURE"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS source registry", EnvVars: []string{"SOURCE_INSECURE"}},
+				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS target registry", EnvVars: []string{"TARGET_INSECURE"}},
 
 				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Ensure the target image represents a manifest list, and it should consist of OCI and Nydus manifest", EnvVars: []string{"MULTI_PLATFORM"}},
 				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
