@@ -247,7 +247,7 @@ impl Connection {
         &self,
         method: Method,
         url: &str,
-        query: Option<Vec<(&str, &str)>>,
+        query: Option<&[(&str, &str)]>,
         data: Option<ReqBody<R>>,
         headers: HeaderMap,
         catch_status: bool,
@@ -286,11 +286,11 @@ impl Connection {
                         }
                     }
                 }
-                // If proxy server respond invalid status code or http connection failed, we need to
+                // If proxy server responds invalid status code or http connection failed, we need to
                 // fallback to origin server, the policy only applicable to non-upload operation
-                warn!("Request proxy server failed, fallback to origin server");
+                warn!("Request proxy server failed, fallback to original server");
             } else {
-                warn!("Proxy server not health, fallback to origin server");
+                warn!("Proxy server is not healthy, fallback to original server");
             }
         }
 
@@ -340,7 +340,7 @@ impl Connection {
         client: &Client,
         method: Method,
         url: &str,
-        query: &Option<Vec<(&str, &str)>>,
+        query: &Option<&[(&str, &str)]>,
         data: Option<ReqBody<R>>,
         headers: HeaderMap,
         catch_status: bool,

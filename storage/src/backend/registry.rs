@@ -25,6 +25,11 @@ const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 
+const REDIRECTED_STATUS_CODE: [StatusCode; 2] = [
+    StatusCode::MOVED_PERMANENTLY,
+    StatusCode::TEMPORARY_REDIRECT,
+];
+
 /// Error codes related to registry storage backend operations.
 #[derive(Debug)]
 pub enum RegistryError {
@@ -166,7 +171,7 @@ impl RegistryState {
         // the query and in the body to be compatible with different registry
         // implementations, which have been tested on these platforms:
         // docker hub, harbor, github ghcr, aliyun acr.
-        let query = vec![
+        let query = [
             ("service", auth.service.as_str()),
             ("scope", auth.scope.as_str()),
             ("grant_type", "password"),
@@ -189,7 +194,7 @@ impl RegistryState {
             .call::<&[u8]>(
                 Method::GET,
                 auth.realm.as_str(),
-                Some(query),
+                Some(&query),
                 Some(ReqBody::Form(form)),
                 headers,
                 true,
@@ -431,13 +436,9 @@ impl RegistryReader {
             resp =
                 self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?;
             let status = resp.status();
+
             // Handle redirect request and cache redirect url
-            if vec![
-                StatusCode::MOVED_PERMANENTLY,
-                StatusCode::TEMPORARY_REDIRECT,
-            ]
-            .contains(&status)
-            {
+            if REDIRECTED_STATUS_CODE.contains(&status) {
                 if let Some(location) = resp.headers().get("location") {
                     let location = location.to_str().unwrap();
                     let mut location = Url::parse(location).map_err(RegistryError::Url)?;
