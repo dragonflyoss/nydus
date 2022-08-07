@@ -320,11 +320,11 @@ pub struct BlobContext {
     /// Final compressed blob file size.
     pub compressed_blob_size: u64,
     /// Final expected blob cache file size.
-    pub decompressed_blob_size: u64,
+    pub uncompressed_blob_size: u64,
 
     /// Current blob offset cursor for writing to disk file.
-    pub compress_offset: u64,
-    pub decompress_offset: u64,
+    pub compressed_offset: u64,
+    pub uncompressed_offset: u64,
 
     /// The number of counts in a blob by the index of blob table.
     pub chunk_count: u32,
@@ -353,10 +353,10 @@ impl Clone for BlobContext {
             blob_meta_header: self.blob_meta_header,
 
             compressed_blob_size: self.compressed_blob_size,
-            decompressed_blob_size: self.decompressed_blob_size,
+            uncompressed_blob_size: self.uncompressed_blob_size,
 
-            compress_offset: self.compress_offset,
-            decompress_offset: self.decompress_offset,
+            compressed_offset: self.compressed_offset,
+            uncompressed_offset: self.uncompressed_offset,
 
             chunk_count: self.chunk_count,
             chunk_size: self.chunk_size,
@@ -389,7 +389,7 @@ impl BlobContext {
 
         blob_ctx.blob_readahead_size = blob.readahead_size();
         blob_ctx.chunk_count = blob.chunk_count();
-        blob_ctx.decompressed_blob_size = blob.uncompressed_size();
+        blob_ctx.uncompressed_blob_size = blob.uncompressed_size();
         blob_ctx.compressed_blob_size = blob.compressed_size();
         blob_ctx.chunk_size = blob.chunk_size();
         blob_ctx.chunk_source = chunk_source;
@@ -437,10 +437,10 @@ impl BlobContext {
             blob_meta_header: BlobMetaHeaderOndisk::default(),
 
             compressed_blob_size: 0,
-            decompressed_blob_size: 0,
+            uncompressed_blob_size: 0,
 
-            compress_offset: blob_offset,
-            decompress_offset: 0,
+            compressed_offset: blob_offset,
+            uncompressed_offset: 0,
 
             chunk_count: 0,
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
@@ -639,7 +639,7 @@ impl BlobManager {
             let blob_id = ctx.blob_id.clone();
             let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
             let chunk_count = ctx.chunk_count;
-            let decompressed_blob_size = ctx.decompressed_blob_size;
+            let decompressed_blob_size = ctx.uncompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
             let blob_features = BlobFeatures::empty();
             let mut flags = RafsSuperFlags::empty();
@@ -930,12 +930,14 @@ impl Default for BuildContext {
     }
 }
 
+/// Information about generated data blobs.
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct BuildOutputBlob {
     pub blob_id: String,
     pub blob_size: u64,
 }
 
+/// Information about generated metadata blobs.
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct BuildOutputArtifact {
     // Bootstrap file name in this build.
@@ -947,15 +949,13 @@ pub struct BuildOutputArtifact {
 /// BuildOutput represents the output in this build.
 #[derive(Default, Debug, Clone)]
 pub struct BuildOutput {
-    /// Artifacts (bootstrap + blob) for all layer in this build, vector
-    /// index equals layer index.
+    /// Artifacts (bootstrap + blob) for all layer in this build, vector index equals layer index.
     pub artifacts: Vec<BuildOutputArtifact>,
     /// Blob ids in the blob table of last bootstrap.
     pub blobs: Vec<String>,
     /// The size of output blob in this build.
     pub last_blob_size: Option<u64>,
-    /// The name of output bootstrap in this build, in diff build, it's
-    /// the bootstrap of last layer.
+    /// The name of output bootstrap in this build, in diff build, it's the bootstrap of last layer.
     pub last_bootstrap_name: String,
 }
 

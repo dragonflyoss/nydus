@@ -112,7 +112,7 @@ impl Blob {
 
     pub(crate) fn dump_meta_data(ctx: &BuildContext, blob_ctx: &mut BlobContext) -> Result<()> {
         // Dump is only required if there is chunk in the blob or blob meta info enabled
-        if !blob_ctx.blob_meta_info_enabled || blob_ctx.decompressed_blob_size == 0 {
+        if !blob_ctx.blob_meta_info_enabled || blob_ctx.uncompressed_blob_size == 0 {
             return Ok(());
         }
 

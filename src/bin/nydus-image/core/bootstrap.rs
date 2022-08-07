@@ -148,11 +148,11 @@ impl Bootstrap {
             parent.inode.set_child_index(index);
             parent.inode.set_child_count(tree.children.len() as u32);
             if ctx.fs_version.is_v6() {
-                parent.dir_set_v6_offset(bootstrap_ctx, tree.node.get_dir_d_size(tree)?)?;
+                parent.v6_set_dir_offset(bootstrap_ctx, tree.node.v6_dir_d_size(tree)?)?;
             }
         }
 
-        tree.node.offset = parent.offset;
+        tree.node.v6_offset = parent.v6_offset;
         // alignment for inode, which is 32 bytes;
         bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
 
@@ -195,7 +195,7 @@ impl Bootstrap {
             // update bootstrap_ctx.offset for rafs v6.
             if !child.node.is_dir() {
                 if ctx.fs_version.is_v6() {
-                    child.node.set_v6_offset(bootstrap_ctx);
+                    child.node.v6_set_offset(bootstrap_ctx);
                 }
                 bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
             }
@@ -269,9 +269,9 @@ impl Bootstrap {
         // so we add an allow annotation here.
         #[allow(clippy::useless_conversion)]
         {
-            node.dirents
-                .push((node.offset, OsString::from("."), libc::S_IFDIR.into()));
-            node.dirents
+            node.v6_dirents
+                .push((node.v6_offset, OsString::from("."), libc::S_IFDIR.into()));
+            node.v6_dirents
                 .push((parent_offset, OsString::from(".."), libc::S_IFDIR.into()));
         }
 
@@ -281,11 +281,11 @@ impl Bootstrap {
                 "{:?} child {:?} offset {}, mode {}",
                 tree.node.name(),
                 child.node.name(),
-                child.node.offset,
+                child.node.v6_offset,
                 child.node.inode.mode()
             );
-            node.dirents.push((
-                child.node.offset,
+            node.v6_dirents.push((
+                child.node.v6_offset,
                 child.node.name().to_os_string(),
                 child.node.inode.mode(),
             ));
@@ -295,11 +295,11 @@ impl Bootstrap {
             }
         }
         /* XXX: `.' and `..' should be sorted globally too */
-        node.dirents
+        node.v6_dirents
             .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()) as std::cmp::Ordering);
 
         for dir in dirs {
-            self.update_dirents(nodes, dir, tree.node.offset);
+            self.update_dirents(nodes, dir, tree.node.v6_offset);
         }
     }
 
@@ -523,12 +523,12 @@ impl Bootstrap {
         //
         //  EROFS_SUPER_OFFSET
         //     |
-        // +---+---------+------------+-------------+-------------------------------------------------------------------+
-        // |   |         |            |             |                                                                   |
-        // |1k |super    |extended    | blob table  | inodes                                                            |
-        // |   |block    |superblock+ |             |                                                                   |
-        // |   |         |devslot     |             |                                                                   |
-        // +---+---------+------------+-------------+-------------------------------------------------------------------+
+        // +---+---------+------------+-------------+----------------------------------------------+
+        // |   |         |            |             |                                              |
+        // |1k |super    |extended    | blob table  | inodes                                       |
+        // |   |block    |superblock+ |             |                                              |
+        // |   |         |devslot     |             |                                              |
+        // +---+---------+------------+-------------+----------------------------------------------+
 
         let blob_table_size = blob_table.size() as u64;
 
@@ -582,7 +582,7 @@ impl Bootstrap {
         // When using nid 0 as root nid,
         // the root directory will not be shown by glibc's getdents/readdir.
         // Because in some OS, ino == 0 represents corresponding file is deleted.
-        let orig_meta_addr = bootstrap_ctx.nodes[0].offset - EROFS_BLOCK_SIZE;
+        let orig_meta_addr = bootstrap_ctx.nodes[0].v6_offset - EROFS_BLOCK_SIZE;
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
@@ -593,7 +593,7 @@ impl Bootstrap {
         };
 
         let root_nid = calculate_nid(
-            bootstrap_ctx.nodes[0].offset - orig_meta_addr + meta_addr,
+            bootstrap_ctx.nodes[0].v6_offset - orig_meta_addr + meta_addr,
             meta_addr,
         );
 
@@ -654,10 +654,10 @@ impl Bootstrap {
             {
                 for node in &mut bootstrap_ctx.nodes {
                     node.dump_bootstrap_v6(
+                        ctx,
                         bootstrap_ctx.writer.as_mut(),
                         orig_meta_addr,
                         meta_addr,
-                        ctx,
                         &mut chunk_cache,
                     )
                     .context("failed to dump bootstrap")?;

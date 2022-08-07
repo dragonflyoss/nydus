@@ -195,15 +195,15 @@ impl Prefetch {
                 trace!(
                     "v6 prefetch table: map node index {} to offset {} nid {} path {:?} name {:?}",
                     i,
-                    nodes[array_index].offset,
-                    calculate_nid(nodes[array_index].offset, meta_addr),
+                    nodes[array_index].v6_offset,
+                    calculate_nid(nodes[array_index].v6_offset, meta_addr),
                     nodes[array_index].path(),
                     nodes[array_index].name()
                 );
                 // 32bit nid can represent 128GB bootstrap, it is large enough, no need
                 // to worry about casting here
                 prefetch_table
-                    .add_entry(calculate_nid(nodes[array_index].offset, meta_addr) as u32);
+                    .add_entry(calculate_nid(nodes[array_index].v6_offset, meta_addr) as u32);
             }
             Some(prefetch_table)
         } else {

@@ -6,14 +6,15 @@ use anyhow::Result;
 
 use crate::core::context::{BlobManager, BootstrapManager, BuildContext, BuildOutput};
 
-pub(crate) use diff::DiffBuilder;
-pub(crate) use directory::DirectoryBuilder;
-pub(crate) use stargz::StargzBuilder;
+pub(crate) use self::diff::DiffBuilder;
+pub(crate) use self::directory::DirectoryBuilder;
+pub(crate) use self::stargz::StargzBuilder;
 
 mod diff;
 mod directory;
 mod stargz;
 
+/// Trait to generate a Nydus image from the source.
 pub(crate) trait Builder {
     fn build(
         &mut self,

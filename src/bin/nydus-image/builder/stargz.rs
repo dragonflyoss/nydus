@@ -370,24 +370,24 @@ impl StargzIndexTreeBuilder {
                 continue;
             }
 
-            // Figure out decompress_size for the last chunk entry of regular file
-            let mut decompress_size = entry.chunk_size;
+            // Figure out uncompress_size for the last chunk entry of regular file
+            let mut uncompress_size = entry.chunk_size;
             if entry.is_chunk() && entry.chunk_size == 0 {
                 if let Some(reg_entry) = last_reg_entry {
-                    decompress_size = reg_entry.size - entry.chunk_offset;
+                    uncompress_size = reg_entry.size - entry.chunk_offset;
                 }
             }
-            // Figure out decompress_size for regular file entry
+            // Figure out uncompress_size for regular file entry
             if entry.chunk_size == 0 && entry.size != 0 {
-                decompress_size = entry.size;
+                uncompress_size = entry.size;
             }
 
-            if (entry.is_reg() || entry.is_chunk()) && decompress_size != 0 {
+            if (entry.is_reg() || entry.is_chunk()) && uncompress_size != 0 {
                 let aligned_chunk_size = if ctx.aligned_chunk {
                     // Safe to unwrap because `chunk_size` is much less than u32::MAX.
-                    try_round_up_4k(decompress_size).unwrap()
+                    try_round_up_4k(uncompress_size).unwrap()
                 } else {
-                    decompress_size
+                    uncompress_size
                 };
                 let pre_uncompress_offset = uncompress_offset;
                 uncompress_offset += aligned_chunk_size;
@@ -400,7 +400,7 @@ impl StargzIndexTreeBuilder {
                     flags: BlobChunkFlags::COMPRESSED,
                     // No available data on entry
                     compressed_size: 0,
-                    uncompressed_size: decompress_size as u32,
+                    uncompressed_size: uncompress_size as u32,
                     compressed_offset: entry.offset as u64,
                     uncompressed_offset: pre_uncompress_offset,
                     file_offset: entry.chunk_offset as u64,
@@ -574,12 +574,12 @@ impl StargzIndexTreeBuilder {
             xattrs,
             layer_idx,
             ctime: 0,
-            offset: 0,
-            dirents: Vec::<(u64, OsString, u32)>::new(),
+            v6_offset: 0,
+            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
             v6_force_extended_inode: false,
-            dirents_offset: 0,
+            v6_dirents_offset: 0,
         })
     }
 }
@@ -598,7 +598,7 @@ impl StargzBuilder {
         blob_ctx: &mut BlobContext,
         blob_mgr: &mut BlobManager,
     ) -> Result<()> {
-        let mut decompressed_blob_size = 0u64;
+        let mut uncompressed_blob_size = 0u64;
         let mut compressed_blob_size = 0u64;
         let blob_index = blob_mgr.alloc_index()?;
 
@@ -649,12 +649,12 @@ impl StargzBuilder {
                 if let Some(chunk_index) = chunk_map.get(chunk.inner.id()) {
                     chunk.inner.set_index(*chunk_index);
                 }
-                // This method is used here to calculate decompressed_blob_size to
+                // This method is used here to calculate uncompressed_blob_size to
                 // be compatible with the possible 4k alignment requirement of
                 // uncompressed_offset (RAFS v6).
-                decompressed_blob_size = std::cmp::max(
+                uncompressed_blob_size = std::cmp::max(
                     chunk.inner.uncompressed_offset() + chunk.inner.uncompressed_size() as u64,
-                    decompressed_blob_size,
+                    uncompressed_blob_size,
                 );
                 compressed_blob_size += chunk.inner.compressed_size() as u64;
                 inode_hasher.digest_update(chunk.inner.id().as_ref());
@@ -671,7 +671,7 @@ impl StargzBuilder {
             node.inode.set_digest(digest);
         }
 
-        blob_ctx.decompressed_blob_size = decompressed_blob_size;
+        blob_ctx.uncompressed_blob_size = uncompressed_blob_size;
         blob_ctx.compressed_blob_size = compressed_blob_size;
 
         Ok(())
@@ -724,7 +724,7 @@ impl Builder for StargzBuilder {
 
         // Dump blob meta
         Blob::dump_meta_data(ctx, &mut blob_ctx)?;
-        if blob_ctx.decompressed_blob_size > 0 {
+        if blob_ctx.uncompressed_blob_size > 0 {
             blob_mgr.add(blob_ctx);
         }
 
