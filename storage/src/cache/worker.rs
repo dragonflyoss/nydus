@@ -52,9 +52,9 @@ impl From<BlobPrefetchConfig> for AsyncPrefetchConfig {
 /// Asynchronous service request message.
 pub(crate) enum AsyncPrefetchMessage {
     /// Asynchronous blob layer prefetch request with (offset, size) of blob on storage backend.
-    BlobPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, u64, u64),
+    BlobPrefetch(Arc<dyn BlobCache>, u64, u64),
     /// Asynchronous file-system layer prefetch request.
-    FsPrefetch(Arc<AtomicU32>, Arc<dyn BlobCache>, BlobIoRange),
+    FsPrefetch(Arc<dyn BlobCache>, BlobIoRange),
     #[cfg_attr(not(test), allow(unused))]
     /// Ping for test.
     Ping,
@@ -64,22 +64,13 @@ pub(crate) enum AsyncPrefetchMessage {
 
 impl AsyncPrefetchMessage {
     /// Create a new asynchronous filesystem prefetch request message.
-    pub fn new_fs_prefetch(
-        req_state: Arc<AtomicU32>,
-        blob_cache: Arc<dyn BlobCache>,
-        req: BlobIoRange,
-    ) -> Self {
-        AsyncPrefetchMessage::FsPrefetch(req_state, blob_cache, req)
+    pub fn new_fs_prefetch(blob_cache: Arc<dyn BlobCache>, req: BlobIoRange) -> Self {
+        AsyncPrefetchMessage::FsPrefetch(blob_cache, req)
     }
 
     /// Create a new asynchronous blob prefetch request message.
-    pub fn new_blob_prefetch(
-        req_state: Arc<AtomicU32>,
-        blob_cache: Arc<dyn BlobCache>,
-        offset: u64,
-        size: u64,
-    ) -> Self {
-        AsyncPrefetchMessage::BlobPrefetch(req_state, blob_cache, offset, size)
+    pub fn new_blob_prefetch(blob_cache: Arc<dyn BlobCache>, offset: u64, size: u64) -> Self {
+        AsyncPrefetchMessage::BlobPrefetch(blob_cache, offset, size)
     }
 }
 
@@ -178,11 +169,13 @@ impl AsyncWorkerMgr {
     pub fn flush_pending_prefetch_requests(&self, blob_id: &str) {
         self.prefetch_channel
             .flush_pending_prefetch_requests(|t| match t {
-                AsyncPrefetchMessage::BlobPrefetch(state, blob, _, _) => {
-                    blob_id == blob.blob_id() && state.load(Ordering::Acquire) == 0
+                AsyncPrefetchMessage::BlobPrefetch(blob, _, _) => {
+                    blob_id == blob.blob_id()
+                        && blob.get_prefetch_state().unwrap().load(Ordering::Acquire) == 0
                 }
-                AsyncPrefetchMessage::FsPrefetch(state, blob, _) => {
-                    blob_id == blob.blob_id() && state.load(Ordering::Acquire) == 0
+                AsyncPrefetchMessage::FsPrefetch(blob, _) => {
+                    blob_id == blob.blob_id()
+                        && blob.get_prefetch_state().unwrap().load(Ordering::Acquire) == 0
                 }
                 _ => false,
             });
@@ -245,29 +238,29 @@ impl AsyncWorkerMgr {
             let mgr2 = mgr.clone();
 
             match msg {
-                AsyncPrefetchMessage::BlobPrefetch(state, blob_cache, offset, size) => {
+                AsyncPrefetchMessage::BlobPrefetch(blob_cache, offset, size) => {
                     let token = Semaphore::acquire_owned(mgr2.prefetch_sema.clone())
                         .await
                         .unwrap();
-                    if state.load(Ordering::Acquire) > 0 {
+                    if blob_cache.is_prefetch_active() {
                         rt.spawn(async move {
                             let _ = Self::handle_blob_prefetch_request(
                                 mgr2.clone(),
                                 blob_cache,
                                 offset,
                                 size,
-                                state.clone(),
                             )
                             .await;
                             drop(token);
                         });
                     }
                 }
-                AsyncPrefetchMessage::FsPrefetch(state, blob_cache, req) => {
+                AsyncPrefetchMessage::FsPrefetch(blob_cache, req) => {
                     let token = Semaphore::acquire_owned(mgr2.prefetch_sema.clone())
                         .await
                         .unwrap();
-                    if state.load(Ordering::Acquire) > 0 {
+
+                    if blob_cache.is_prefetch_active() {
                         rt.spawn(async move {
                             let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req)
                                 .await;
@@ -289,15 +282,15 @@ impl AsyncWorkerMgr {
         // Allocate network bandwidth budget
         if let Some(limiter) = &self.prefetch_limiter {
             let size = match msg {
-                AsyncPrefetchMessage::BlobPrefetch(state, _blob_cache, _offset, size) => {
-                    if state.load(Ordering::Acquire) > 0 {
+                AsyncPrefetchMessage::BlobPrefetch(blob_cache, _offset, size) => {
+                    if blob_cache.is_prefetch_active() {
                         *size
                     } else {
                         0
                     }
                 }
-                AsyncPrefetchMessage::FsPrefetch(state, _blob_cache, req) => {
-                    if state.load(Ordering::Acquire) > 0 {
+                AsyncPrefetchMessage::FsPrefetch(blob_cache, req) => {
+                    if blob_cache.is_prefetch_active() {
                         req.blob_size
                     } else {
                         0
@@ -328,7 +321,6 @@ impl AsyncWorkerMgr {
         cache: Arc<dyn BlobCache>,
         offset: u64,
         size: u64,
-        req_state: Arc<AtomicU32>,
     ) -> Result<()> {
         trace!(
             "storage: prefetch blob {} offset {} size {}",
@@ -353,12 +345,7 @@ impl AsyncWorkerMgr {
                 ASYNC_RUNTIME.spawn(async move {
                     let mut interval = interval(Duration::from_secs(1));
                     interval.tick().await;
-                    let msg = AsyncPrefetchMessage::new_blob_prefetch(
-                        req_state,
-                        cache.clone(),
-                        offset,
-                        size,
-                    );
+                    let msg = AsyncPrefetchMessage::new_blob_prefetch(cache.clone(), offset, size);
                     let _ = mgr.send_prefetch_message(msg);
                 });
             }
