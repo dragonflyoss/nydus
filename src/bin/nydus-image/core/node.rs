@@ -479,7 +479,7 @@ impl Node {
 
     pub fn dump_bootstrap_v5(
         &self,
-        ctx: &BuildContext,
+        ctx: &mut BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
     ) -> Result<()> {
         debug!("[{}]\t{}", self.overlay, self);
@@ -501,6 +501,7 @@ impl Node {
                 self.xattrs
                     .store_v5(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
+                ctx.has_xattr = true;
             }
 
             // Dump chunk info
@@ -723,6 +724,7 @@ impl Node {
                 self.xattrs
                     .store_v6(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
+                ctx.has_xattr = true;
             }
 
             // Dump chunk indexes
@@ -751,6 +753,7 @@ impl Node {
                 self.xattrs
                     .store_v6(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
+                ctx.has_xattr = true;
             }
 
             // write symlink.
@@ -783,6 +786,7 @@ impl Node {
                 self.xattrs
                     .store_v6(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
+                ctx.has_xattr = true;
             }
         }
 
