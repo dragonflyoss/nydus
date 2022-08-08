@@ -66,9 +66,10 @@ class NydusAnchor:
 
         artifacts = kwargs.pop("artifacts")
         self.containerd_bin = artifacts["containerd"]
-        if artifacts["ossutil_bin"]:
+
+        try:
             self.ossutil_bin = artifacts["ossutil_bin"]
-        else:
+        except KeyError:
             self.ossutil_bin = (
                 "framework/bin/ossutil64.x86"
                 if self.machine != "aarch64"
@@ -81,11 +82,14 @@ class NydusAnchor:
 
         self.fs_version = kwargs.pop("fs_version", 6)
 
-        oss_conf = kwargs.pop("oss")
-        self.oss_ak_id = oss_conf["ak_id"]
-        self.oss_ak_secret = oss_conf["ak_secret"]
-        self.oss_bucket = oss_conf["bucket"]
-        self.oss_endpoint = oss_conf["endpoint"]
+        try:
+            oss_conf = kwargs.pop("oss")
+            self.oss_ak_id = oss_conf["ak_id"]
+            self.oss_ak_secret = oss_conf["ak_secret"]
+            self.oss_bucket = oss_conf["bucket"]
+            self.oss_endpoint = oss_conf["endpoint"]
+        except KeyError:
+            pass
 
         self.logging_file_path = kwargs.pop("logging_file")
         self.logging_file = self.decide_logging_file()

@@ -213,6 +213,9 @@ class RafsConf:
         return self
 
     def enable_validation(self):
+        if int(self.anchor.fs_version) == 6:
+            return self
+
         self._configure_rafs("digest_validate", True)
         return self
 
