@@ -1066,20 +1066,27 @@ impl Node {
     }
 
     /// Set node offset in bootstrap and return the next position.
-    pub fn v6_set_offset(&mut self, bootstrap_ctx: &mut BootstrapContext) {
+    pub fn v6_set_offset(
+        &mut self,
+        bootstrap_ctx: &mut BootstrapContext,
+        v6_hardlink_offset: Option<u64>,
+    ) {
         if self.is_reg() {
-            let size = self.v6_size_with_xattr() as u64;
-            let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-
-            // We first try to allocate space from used blocks.
-            // If no available used block exists, we allocate sequentially.
-            let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
-            self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
-            if self.v6_offset == 0 {
-                self.v6_offset = bootstrap_ctx.offset;
-                bootstrap_ctx.offset += size;
-                bootstrap_ctx.align_offset(unit);
-                bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
+            if let Some(v6_hardlink_offset) = v6_hardlink_offset {
+                self.v6_offset = v6_hardlink_offset;
+            } else {
+                let size = self.v6_size_with_xattr() as u64;
+                let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
+                // We first try to allocate space from used blocks.
+                // If no available used block exists, we allocate sequentially.
+                let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
+                self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
+                if self.v6_offset == 0 {
+                    self.v6_offset = bootstrap_ctx.offset;
+                    bootstrap_ctx.offset += size;
+                    bootstrap_ctx.align_offset(unit);
+                    bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
+                }
             }
             self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
         } else if self.is_symlink() {
@@ -1938,7 +1945,7 @@ mod tests {
         // reg file.
         // "1" is used only for testing purpose, in practice
         // it's always aligned to 32 bytes.
-        node.v6_set_offset(&mut bootstrap_ctx);
+        node.v6_set_offset(&mut bootstrap_ctx, None);
         assert_eq!(node.v6_offset, 0);
         assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
         assert!(node.v6_compact_inode);
