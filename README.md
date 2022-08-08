@@ -122,7 +122,7 @@ Browse the documentation to learn more. Here are some topics you may be interest
 - [Nydus Design Doc](./docs/nydus-design.md)
 - Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
 - [EROFS, What Are We Doing Now For Containers?](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)
-- [The Evolution of the Nydus Image Acceleration](https://d7y.io/blog/2022/06/06/evolution-of-nydus/)
+- [The Evolution of the Nydus Image Acceleration](https://d7y.io/blog/2022/06/06/evolution-of-nydus/) <[Video](https://youtu.be/yr6CB1JN1xg)>
 
 ## Run with macos
 
@@ -140,7 +140,7 @@ Nydus aims to form a **vendor-neutral opensource** image distribution solution t
 Questions, bug reports, technical discussion, feature requests and contribution are always welcomed!
 
 We're very pleased to hear your use cases any time.
-Feel free to reach/join us via Slack and Dingtalk
+Feel free to reach/join us via Slack and/or Dingtalk
 
 - Slack
 
@@ -153,3 +153,7 @@ Feel free to reach/join us via Slack and Dingtalk
   You can also search our talking group by number _34971767_ and QR code
 
 <img src="./misc/dingtalk.jpg" width="250" height="300"/>
+
+Nydus bi-weekly technical community meeting is also regularly available, currrently held on Wednesdays
+at 06:00 UTC starting from Aug 10, 2022.
+For more details, please see our [HackMD](https://hackmd.io/@Nydus/Bk8u2X0p9) page.
