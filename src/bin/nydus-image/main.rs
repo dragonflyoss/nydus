@@ -36,8 +36,8 @@ use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
 use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, BuildOutputArtifact,
-    RafsVersion, SourceType,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, RafsVersion,
+    SourceType,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
@@ -63,8 +63,6 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 pub struct OutputSerializer {
     /// The binary version of builder (nydus-image).
     version: String,
-    /// Represents all artifacts(bootstrap + blob) ordered by layer.
-    artifacts: Vec<BuildOutputArtifact>,
     /// Represents all blob in blob table ordered by blob index, this field
     /// only include the layer that does have a blob, and should be deprecated
     /// in future, use `artifacts` field to replace.
@@ -95,7 +93,6 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
-                artifacts: build_output.artifacts,
                 blobs: build_output.blobs,
                 trace,
             };
@@ -127,7 +124,6 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
-                artifacts: Vec::new(),
                 blobs: blob_ids,
                 trace,
             };
@@ -688,12 +684,12 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
-        if let Some(bootstrap_path) =
-            bootstrap_mgr.get_bootstrap_path(&build_output.last_bootstrap_name)
-        {
-            Self::validate_image(matches, &bootstrap_path)?;
-            info!("build successfully: {:?}", build_output,);
+        if !inline_bootstrap {
+            let bootstrap_path = Self::get_bootstrap(matches)?;
+            Self::validate_image(matches, bootstrap_path)
+                .context("failed to validate bootstrap")?;
         }
+        info!("build successfully: {:?}", build_output,);
 
         OutputSerializer::dump(matches, build_output, build_info)?;
 
