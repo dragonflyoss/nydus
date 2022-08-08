@@ -19,7 +19,7 @@
 //!   The [is_chunk_cached()](../trait.BlobCache.html#tymethod.is_chunk_cached) method always
 //!   return true to enable data prefetching.
 use std::io::Result;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -48,12 +48,12 @@ impl BlobCache for DummyCache {
         &self.blob_id
     }
 
-    fn blob_compressed_size(&self) -> Result<u64> {
-        self.reader.blob_size().map_err(|e| eother!(e))
-    }
-
     fn blob_uncompressed_size(&self) -> Result<u64> {
         unimplemented!();
+    }
+
+    fn blob_compressed_size(&self) -> Result<u64> {
+        self.reader.blob_size().map_err(|e| eother!(e))
     }
 
     fn compressor(&self) -> compress::Algorithm {
@@ -93,12 +93,12 @@ impl BlobCache for DummyCache {
         Ok(())
     }
 
-    fn get_prefetch_state(&self) -> StorageResult<&AtomicU32> {
-        Err(StorageError::Unsupported)
-    }
-
     fn stop_prefetch(&self) -> StorageResult<()> {
         Ok(())
+    }
+
+    fn is_prefetch_active(&self) -> bool {
+        false
     }
 
     fn read(&self, iovec: &mut BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {

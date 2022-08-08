@@ -170,12 +170,10 @@ impl AsyncWorkerMgr {
         self.prefetch_channel
             .flush_pending_prefetch_requests(|t| match t {
                 AsyncPrefetchMessage::BlobPrefetch(blob, _, _) => {
-                    blob_id == blob.blob_id()
-                        && blob.get_prefetch_state().unwrap().load(Ordering::Acquire) == 0
+                    blob_id == blob.blob_id() && !blob.is_prefetch_active()
                 }
                 AsyncPrefetchMessage::FsPrefetch(blob, _) => {
-                    blob_id == blob.blob_id()
-                        && blob.get_prefetch_state().unwrap().load(Ordering::Acquire) == 0
+                    blob_id == blob.blob_id() && !blob.is_prefetch_active()
                 }
                 _ => false,
             });
