@@ -3,8 +3,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! An in-memory RAFS inode for image building and inspection.
-
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
@@ -22,27 +20,31 @@ use std::str::FromStr;
 use anyhow::{Context, Error, Result};
 use sha2::digest::Digest;
 
+use nydus_rafs::metadata::cached_v5::{CachedChunkInfoV5, CachedInodeV5};
+use nydus_rafs::metadata::direct_v5::{
+    DirectChunkInfoV5, OndiskInodeWrapper as OndiskInodeWrapperV5,
+};
+use nydus_rafs::metadata::direct_v6::{
+    DirectChunkInfoV6, OndiskInodeWrapper as OndiskInodeWrapperV6,
+};
+use nydus_rafs::metadata::layout::v5::{
+    RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
+};
+use nydus_rafs::metadata::layout::v6::{
+    align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
+    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, EROFS_BLOCK_SIZE,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+};
+use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::{Inode, RafsInode, RafsStore};
+use nydus_rafs::RafsIoWrite;
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo};
 use nydus_utils::{
     compress,
     digest::{DigestHasher, RafsDigest},
     div_round_up, round_down_4k, round_up, try_round_up_4k, ByteSize,
 };
-use rafs::metadata::cached_v5::{CachedChunkInfoV5, CachedInodeV5};
-use rafs::metadata::direct_v5::{DirectChunkInfoV5, OndiskInodeWrapper as OndiskInodeWrapperV5};
-use rafs::metadata::direct_v6::{DirectChunkInfoV6, OndiskInodeWrapper as OndiskInodeWrapperV6};
-use rafs::metadata::layout::v5::{
-    RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags, RafsV5InodeWrapper,
-};
-use rafs::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode, EROFS_BLOCK_SIZE,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
-};
-use rafs::metadata::layout::RafsXAttrs;
-use rafs::metadata::{Inode, RafsInode, RafsStore};
-use rafs::RafsIoWrite;
-use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobChunkInfo};
 
 use super::chunk_dict::{ChunkDict, DigestWithBlobIndex};
 use super::context::{BlobContext, BootstrapContext, BuildContext, RafsVersion};
@@ -58,6 +60,7 @@ pub const OCISPEC_WHITEOUT_OPAQUE: &str = ".wh..wh..opq";
 pub const OVERLAYFS_WHITEOUT_OPAQUE: &str = "trusted.overlay.opaque";
 
 // # Overlayfs Whiteout
+//
 // In order to support rm and rmdir without changing the lower filesystem, an overlay filesystem
 // needs to record in the upper filesystem that files have been removed. This is done using
 // whiteouts and opaque directories (non-directories are always opaque).
@@ -167,14 +170,14 @@ impl Display for NodeChunk {
     }
 }
 
-/// ChunkSource flags chunk original source in bootstrap.
+/// Where the chunk data is actually stored.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum ChunkSource {
-    /// Chunk from parent bootstrap.
+    /// A reference to chunk in parent image.
     Parent,
-    /// Chunk from this build workflow.
+    /// Chunk is stored in data blob owned by current image.
     Build,
-    /// Chunk from chunk dict bootstrap.
+    /// A reference to chunk in chunk dictionary.
     Dict,
 }
 
@@ -188,7 +191,7 @@ impl Display for ChunkSource {
     }
 }
 
-/// Rafs inode information to support image building and parsing.
+/// An in-memory representation of RAFS inode for image building and inspection.
 #[derive(Clone)]
 pub struct Node {
     /// Assigned RAFS inode number.
@@ -196,7 +199,7 @@ pub struct Node {
     /// Device id associated with the source inode.
     ///
     /// A source directory may contain multiple partitions from different hard disk, so
-    /// a pair of (real_ino, dev) is needed to uniquely identify an inode from source directory.
+    /// a pair of (src_ino, src_dev) is needed to uniquely identify an inode from source directory.
     pub src_dev: u64,
     /// Inode number of the source inode, from fs stat().
     pub src_ino: Inode,
@@ -212,32 +215,33 @@ pub struct Node {
     pub symlink: Option<OsString>,
     /// Overlay type for layered build
     pub overlay: Overlay,
-    /// Whether it's a compact inode or an extended inode.
-    pub v6_compact_inode: bool,
-    /// Whether it forcely uses an extended inode.
-    pub v6_force_extended_inode: bool,
     /// Whether the explicit UID/GID feature is enabled or not.
     pub explicit_uidgid: bool,
     /// Absolute path of the source root directory.
-    pub(crate) source: PathBuf,
+    pub source: PathBuf,
     /// Absolute path of the source file/directory.
-    pub(crate) path: PathBuf,
+    pub path: PathBuf,
     /// Absolute path within the target RAFS filesystem.
-    pub(crate) target: PathBuf,
+    pub target: PathBuf,
     /// Parsed version of `target`.
-    pub(crate) target_vec: Vec<OsString>,
-    /// Layer index where node located.
+    pub target_vec: Vec<OsString>,
+    /// Layer index where node is located.
     pub layer_idx: u16,
     /// Last status change time of the file, in nanoseconds.
     pub ctime: i64,
-    /// Used by rafsv6 inode datalayout
+
+    /// V6: whether it's a compact inode or an extended inode.
+    pub v6_compact_inode: bool,
+    /// V6: whether it's forced to use an extended inode.
+    pub v6_force_extended_inode: bool,
+    /// V6: inode data layout.
     pub v6_datalayout: u16,
-    /// Used by rafsv6 nid calculation
-    pub offset: u64,
-    /// Used by Rafsv6 to build a Dir inode
-    pub dirents: Vec<(u64, OsString, u32)>,
-    /// Used by v6 directory file, indicates its dirents offset
-    pub dirents_offset: u64,
+    /// V6: offset to calculate nid.
+    pub v6_offset: u64,
+    /// V6: information to build directory entries.
+    pub v6_dirents: Vec<(u64, OsString, u32)>,
+    /// V6: offset to build directory entries.
+    pub v6_dirents_offset: u64,
 }
 
 impl Display for Node {
@@ -278,7 +282,6 @@ impl Node {
     ) -> Result<Node> {
         let target = Self::generate_target(&path, &source);
         let target_vec = Self::generate_target_vec(&target);
-
         let mut node = Node {
             index: 0,
             src_ino: 0,
@@ -296,18 +299,20 @@ impl Node {
             explicit_uidgid,
             layer_idx: 0,
             ctime: 0,
-            offset: 0,
-            dirents: Vec::new(),
+            v6_offset: 0,
+            v6_dirents: Vec::new(),
             v6_datalayout: EROFS_INODE_FLAT_PLAIN,
             v6_force_extended_inode,
             v6_compact_inode: false,
-            dirents_offset: 0,
+            v6_dirents_offset: 0,
         };
 
         node.build_inode(chunk_size)
             .context("failed to build inode")?;
+        if version.is_v6() {
+            node.v6_set_inode_compact();
+        }
 
-        node.set_v6_inode_compact();
         Ok(node)
     }
 
@@ -351,7 +356,7 @@ impl Node {
         for i in 0..self.inode.child_count() {
             let chunk_size = blob_ctx.chunk_size;
             let file_offset = i as u64 * chunk_size as u64;
-            let chunk_size = if i == self.inode.child_count() - 1 {
+            let uncompressed_size = if i == self.inode.child_count() - 1 {
                 (self.inode.size() as u64)
                     .checked_sub((chunk_size * i) as u64)
                     .ok_or_else(|| {
@@ -361,12 +366,10 @@ impl Node {
                 chunk_size
             };
 
-            let chunk_data = &mut blob_ctx.chunk_data_buf[0..chunk_size as usize];
+            let chunk_data = &mut blob_ctx.chunk_data_buf[0..uncompressed_size as usize];
             file.read_exact(chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
-            // TODO: check for hole chunks. One possible way is to always save
-            // a global hole chunk and check for digest duplication
             let chunk_id = RafsDigest::from_buf(chunk_data, ctx.digester);
             inode_hasher.digest_update(chunk_id.as_ref());
 
@@ -378,15 +381,15 @@ impl Node {
                 Some(v) => Some((v, true)),
                 None => chunk_dict.get_chunk(&chunk_id).map(|v| (v, false)),
             };
+            // TODO: we should also compare the actual data to avoid chunk digest conflicts.
             if let Some((cached_chunk, from_dict)) = exist_chunk {
-                // TODO: we should also compare the actual data to avoid chunk digest conflicts.
                 // hole cached_chunk may have zero uncompressed size
                 if cached_chunk.uncompressed_size() == 0
-                    || cached_chunk.uncompressed_size() == chunk_size
+                    || cached_chunk.uncompressed_size() == uncompressed_size
                 {
                     // The chunks of hardlink should be always deduplicated.
                     if !self.is_hardlink() {
-                        event_tracer!("dedup_decompressed_size", +chunk_size);
+                        event_tracer!("dedup_uncompressed_size", +uncompressed_size);
                         event_tracer!("dedup_chunks", +1);
                     }
 
@@ -419,28 +422,27 @@ impl Node {
             // Compress chunk data
             let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
                 .with_context(|| format!("failed to compress node file {:?}", self.path))?;
-            let compressed_size = compressed.len();
-
-            // Move cursor to offset of next chunk
+            let compressed_size = compressed.len() as u32;
             let aligned_chunk_size = if ctx.aligned_chunk {
                 // Safe to unwrap because `chunk_size` is much less than u32::MAX.
-                try_round_up_4k(chunk_size).unwrap()
+                try_round_up_4k(uncompressed_size).unwrap()
             } else {
-                chunk_size
+                uncompressed_size
             };
 
-            let pre_decompress_offset = blob_ctx.decompress_offset;
-            let pre_compress_offset = blob_ctx.compress_offset;
+            // Move cursor to offset of next chunk
+            let compressed_offset = blob_ctx.compressed_offset;
+            let uncompressed_offset = blob_ctx.uncompressed_offset;
+            blob_ctx.compressed_offset += compressed_size as u64;
+            blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
 
-            blob_ctx.compress_offset += compressed_size as u64;
-            blob_ctx.decompressed_blob_size =
-                blob_ctx.decompress_offset + aligned_chunk_size as u64;
             blob_ctx.compressed_blob_size += compressed_size as u64;
-            blob_ctx.decompress_offset += aligned_chunk_size as u64;
+            blob_ctx.uncompressed_blob_size =
+                blob_ctx.uncompressed_offset + aligned_chunk_size as u64;
             blob_ctx.blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
-            event_tracer!("blob_decompressed_size", +chunk_size);
+            event_tracer!("blob_uncompressed_size", +uncompressed_size);
             event_tracer!("blob_compressed_size", +compressed_size);
             if let Some(writer) = &mut blob_ctx.writer {
                 writer
@@ -453,10 +455,10 @@ impl Node {
                 blob_index,
                 chunk_index,
                 file_offset,
-                pre_decompress_offset,
-                pre_compress_offset,
+                uncompressed_offset,
+                uncompressed_size,
+                compressed_offset,
                 compressed_size,
-                chunk_size,
                 is_compressed,
             )?;
 
@@ -479,10 +481,9 @@ impl Node {
         &self,
         ctx: &BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         debug!("[{}]\t{}", self.overlay, self);
 
-        let mut node_size = 0;
         if let InodeWrapper::V5(raw_inode) = &self.inode {
             // Dump inode info
             let name = self.name();
@@ -491,18 +492,15 @@ impl Node {
                 symlink: self.symlink.as_deref(),
                 inode: raw_inode,
             };
-            let inode_size = inode
+            inode
                 .store(f_bootstrap)
                 .context("failed to dump inode to bootstrap")?;
-            node_size += inode_size;
 
             // Dump inode xattr
             if !self.xattrs.is_empty() {
-                let xattr_size = self
-                    .xattrs
+                self.xattrs
                     .store_v5(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
-                node_size += xattr_size;
             }
 
             // Dump chunk info
@@ -511,85 +509,62 @@ impl Node {
             }
 
             for chunk in &self.chunks {
-                let chunk_size = chunk
+                chunk
                     .inner
                     .store(f_bootstrap)
                     .context("failed to dump chunk info to bootstrap")?;
-                node_size += chunk_size;
                 trace!("\t\tchunk: {} compressor {}", chunk, ctx.compressor,);
             }
 
-            Ok(node_size)
+            Ok(())
         } else {
-            bail!("dump_bootstrap_v5 should not use v6 inode");
-        }
-    }
-
-    fn set_v6_inode_compact(&mut self) {
-        if self.v6_force_extended_inode
-            || self.inode.uid() > std::u16::MAX as u32
-            || self.inode.gid() > std::u16::MAX as u32
-            || self.inode.nlink() > std::u16::MAX as u32
-            || self.inode.size() > std::u32::MAX as u64
-            || self.path.extension() == Some(OsStr::new("pyc"))
-        {
-            self.v6_compact_inode = false;
-        } else {
-            self.v6_compact_inode = true;
-        }
-    }
-
-    fn new_rafsv6_inode(&mut self) -> Box<dyn RafsV6OndiskInode> {
-        match self.v6_compact_inode {
-            true => Box::new(RafsV6InodeCompact::new()),
-            false => Box::new(RafsV6InodeExtended::new()),
+            bail!("dump_bootstrap_v5() encounters non-v5-inode");
         }
     }
 
     pub fn dump_bootstrap_v6(
         &mut self,
+        ctx: &mut BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
         orig_meta_addr: u64,
         meta_addr: u64,
-        ctx: &mut BuildContext,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, ChunkWrapper>,
-    ) -> Result<usize> {
-        let mut inode = self.new_rafsv6_inode();
+    ) -> Result<()> {
+        let meta_offset = meta_addr - orig_meta_addr;
+        let mut inode = self.v6_new_inode();
 
-        inode.set_size(self.inode.size());
-        // FIXME
+        assert!(self.inode.ino() <= i32::MAX as Inode);
         inode.set_ino(self.inode.ino() as u32);
+        inode.set_size(self.inode.size());
         inode.set_uidgid(self.inode.uid(), self.inode.gid());
         inode.set_mtime(self.inode.mtime(), self.inode.mtime_nsec());
         inode.set_nlink(self.inode.nlink());
         inode.set_mode(self.inode.mode() as u16);
         inode.set_data_layout(self.v6_datalayout);
         inode.set_xattr_inline_count(self.xattrs.count_v6() as u16);
-
         if self.is_special() {
             inode.set_rdev(self.rdev as u32);
         }
 
         // update all the inodes's offset according to the new 'meta_addr'.
-        self.offset = self.offset - orig_meta_addr + meta_addr;
+        self.v6_offset += meta_offset;
 
-        // Only dir and symlink file can be of EROFS_INODE_FLAT_INLINE layout,
-        // so the `dirents_offset` is only used for these two types.
-        // For other types, the `dirents_offset` will always be 0,
-        // To avoid overflow, we add this check.
+        // The EROFS_INODE_FLAT_INLINE layout is valid for directory and symlink only, so
+        // `dirents_offset` is useful for these two types too, otherwise `dirents_offset` should
+        // always be zero. Enforce the check to avoid overflow of `dirents_offset`.
         if self.is_dir() || self.is_symlink() {
-            self.dirents_offset = self.dirents_offset + meta_addr - orig_meta_addr;
+            self.v6_dirents_offset += meta_offset;
         }
 
         if self.is_dir() {
             // the 1st 4k block after dir inode.
-            let mut dirent_off = self.dirents_offset;
-
+            let mut dirent_off = self.v6_dirents_offset;
             inode.set_u((dirent_off / EROFS_BLOCK_SIZE) as u32);
+
             // Dump inode
-            trace!("{:?} dir inode: offset {}", self.target, self.offset);
+            trace!("{:?} dir inode: offset {}", self.target, self.v6_offset);
             f_bootstrap
-                .seek(SeekFrom::Start(self.offset))
+                .seek(SeekFrom::Start(self.v6_offset))
                 .context("failed seek for dir inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
 
@@ -608,12 +583,16 @@ impl Node {
             let mut used: u64 = 0;
             let mut dirents: Vec<(RafsV6Dirent, &OsString)> = Vec::new();
 
-            trace!("{:?} self.dirents.len {}", self.target, self.dirents.len());
+            trace!(
+                "{:?} self.dirents.len {}",
+                self.target,
+                self.v6_dirents.len()
+            );
             // fill dir blocks one by one
-            for (offset, name, file_type) in self.dirents.iter() {
+            for (offset, name, file_type) in self.v6_dirents.iter() {
                 let len = name.len() + size_of::<RafsV6Dirent>();
+                // write to bootstrap when it will exceed EROFS_BLOCK_SIZE
                 if used + len as u64 > EROFS_BLOCK_SIZE {
-                    // write to bootstrap
                     for (entry, name) in dirents.iter_mut() {
                         trace!("{:?} nameoff {}", name, nameoff);
                         entry.set_name_offset(nameoff as u16);
@@ -652,7 +631,7 @@ impl Node {
                     RafsV6Dirent::file_type(*file_type)
                 );
                 let entry = RafsV6Dirent::new(
-                    calculate_nid(*offset - orig_meta_addr + meta_addr, meta_addr),
+                    calculate_nid(*offset + meta_offset, meta_addr),
                     0,
                     RafsV6Dirent::file_type(*file_type),
                 );
@@ -699,7 +678,7 @@ impl Node {
                 }
 
                 let tail_off = match self.v6_datalayout {
-                    EROFS_INODE_FLAT_INLINE => self.offset + self.size_with_xattr() as u64,
+                    EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr() as u64,
                     EROFS_INODE_FLAT_PLAIN => dirent_off,
                     _ => unimplemented!(),
                 };
@@ -735,7 +714,7 @@ impl Node {
             }
             // Dump inode
             f_bootstrap
-                .seek(SeekFrom::Start(self.offset))
+                .seek(SeekFrom::Start(self.v6_offset))
                 .context("failed seek for dir inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
 
@@ -748,7 +727,7 @@ impl Node {
 
             // Dump chunk indexes
             let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-            let chunk_off = align_offset(self.offset + self.size_with_xattr() as u64, unit);
+            let chunk_off = align_offset(self.v6_offset + self.v6_size_with_xattr() as u64, unit);
             f_bootstrap
                 .seek(SeekFrom::Start(chunk_off))
                 .context("failed seek for dir inode")?;
@@ -756,14 +735,14 @@ impl Node {
                 .write(chunks.as_slice())
                 .context("failed to write chunkindexes")?;
         } else if self.is_symlink() {
-            let data_off = self.dirents_offset;
+            let data_off = self.v6_dirents_offset;
 
             // TODO: check whether 'i_u' is used at all in case of
             // inline symlink.
             inode.set_u((data_off / EROFS_BLOCK_SIZE) as u32);
             // Dump inode
             f_bootstrap
-                .seek(SeekFrom::Start(self.offset))
+                .seek(SeekFrom::Start(self.v6_offset))
                 .context("failed seek for symlink inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
 
@@ -777,7 +756,7 @@ impl Node {
             // write symlink.
             if let Some(symlink) = &self.symlink {
                 let tail_off = if self.v6_datalayout == EROFS_INODE_FLAT_INLINE {
-                    self.offset + self.size_with_xattr() as u64
+                    self.v6_offset + self.v6_size_with_xattr() as u64
                 } else {
                     assert_eq!(self.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
                     data_off
@@ -795,7 +774,7 @@ impl Node {
         } else {
             // Dump inode
             f_bootstrap
-                .seek(SeekFrom::Start(self.offset))
+                .seek(SeekFrom::Start(self.v6_offset))
                 .context("failed seek for dir inode")?;
             inode.store(f_bootstrap).context("failed to store inode")?;
 
@@ -807,8 +786,7 @@ impl Node {
             }
         }
 
-        // FIXME: return a real size
-        Ok(0)
+        Ok(())
     }
 
     fn build_inode_xattr(&mut self) -> Result<()> {
@@ -836,15 +814,15 @@ impl Node {
         Ok(())
     }
 
-    // Xattr paris are located into bootstrap rather than blob, however, we should
-    // also reflect the size they consume like other file system. We don't
-    // directly use local file's metadata for `i_block` since we are purchasing
-    // "reproducible build" which means nydus image can be built from anywhere with
-    // the unique image built.
-    // TODO: The real size occupied within blob is compressed. Therefore, the
-    // sum of all chunks' size should be more accurate. But we don't know the size
-    // right now since compression is not acted yet. Try to make this accurate later.
-    pub fn set_v5_inode_blocks(&mut self) {
+    /// Calculate and set `i_blocks` for inode.
+    ///
+    /// In order to support repeatable build, we can't reuse `i_blocks` from source filesystems,
+    /// so let's calculate it by ourself for stable `i_block`.
+    ///
+    /// Normal filesystem includes the space occupied by Xattr into the directory size,
+    /// let's follow the normal behavior.
+    pub fn set_inode_blocks(&mut self) {
+        // Set inode blocks for RAFS v5 inode, v6 will be calculate it at runtime.
         if let InodeWrapper::V5(_) = self.inode {
             self.inode.set_blocks(div_round_up(
                 self.inode.size() + self.xattrs.aligned_size_v5() as u64,
@@ -861,18 +839,18 @@ impl Node {
         self.rdev = meta.st_rdev();
         self.ctime = meta.st_ctime();
 
+        self.inode.set_mode(meta.st_mode());
+        if self.explicit_uidgid {
+            self.inode.set_uid(meta.st_uid());
+            self.inode.set_gid(meta.st_gid());
+        }
+
         // Usually the root directory is created by the build tool (nydusify/buildkit/acceld)
         // and the mtime of the root directory is different for each build, which makes it
         // completely impossible to achieve repeatable builds, especially in a tar build scenario
         // (blob + bootstrap in one tar layer), which causes the layer hash to change and wastes
         // registry storage space, so the mtime of the root directory is forced to be ignored here.
         let ignore_mtime = self.is_root();
-
-        self.inode.set_mode(meta.st_mode());
-        if self.explicit_uidgid {
-            self.inode.set_uid(meta.st_uid());
-            self.inode.set_gid(meta.st_gid());
-        }
         if !ignore_mtime {
             self.inode.set_mtime(meta.st_mtime() as u64);
             self.inode.set_mtime_nsec(meta.st_mtime_nsec() as u32);
@@ -882,12 +860,12 @@ impl Node {
         // Ignore actual nlink value and calculate from rootfs directory instead
         self.inode.set_nlink(1);
 
-        // Since different filesystems may get different directory sizes/blocks,
-        // calculate these two values later.
+        // Different filesystem may have different algorithms to calculate size/blocks for
+        // directory entries, so let's ignore the value provided by source filesystem and
+        // calculate it later by ourself.
         if !self.is_dir() {
             self.inode.set_size(meta.st_size());
-            // Set inode blocks for RAFS v5 dir, v6 dir's will be calculated by runtime.
-            self.set_v5_inode_blocks();
+            self.set_inode_blocks();
         }
 
         Ok(())
@@ -902,6 +880,7 @@ impl Node {
             .with_context(|| format!("failed to build inode {:?}", self.path))?;
 
         if self.is_reg() {
+            // Reuse `child_count` to store `chunk_count` for normal files.
             self.inode
                 .set_child_count(self.chunk_count(chunk_size as u64));
         } else if self.is_symlink() {
@@ -1026,19 +1005,213 @@ impl Node {
     pub fn target(&self) -> &PathBuf {
         &self.target
     }
+}
 
-    pub fn size_with_xattr(&self) -> usize {
+impl Node {
+    fn v6_new_inode(&mut self) -> Box<dyn RafsV6OndiskInode> {
+        match self.v6_compact_inode {
+            true => Box::new(RafsV6InodeCompact::new()),
+            false => Box::new(RafsV6InodeExtended::new()),
+        }
+    }
+
+    pub fn v6_size_with_xattr(&self) -> usize {
         match self.inode {
             // this is not used by v5, put a dummy one.
             InodeWrapper::V5(_i) => 0,
             InodeWrapper::V6(_i) => {
-                (if self.v6_compact_inode {
+                let inode_size = if self.v6_compact_inode {
                     size_of::<RafsV6InodeCompact>()
                 } else {
                     size_of::<RafsV6InodeExtended>()
-                }) + self.xattrs.aligned_size_v6()
+                };
+                inode_size + self.xattrs.aligned_size_v6()
             }
         }
+    }
+
+    pub fn v6_dir_d_size(&self, tree: &Tree) -> Result<u64> {
+        ensure!(self.is_dir(), "{} is not a directory", self);
+        // Use length in byte, instead of length in character.
+        let mut d_size: u64 = (".".as_bytes().len()
+            + size_of::<RafsV6Dirent>()
+            + "..".as_bytes().len()
+            + size_of::<RafsV6Dirent>()) as u64;
+
+        // Safe as we have check tree above.
+        for child in tree.children.iter() {
+            let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
+            // erofs disk format requires dirent to be aligned with 4096.
+            if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
+                d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE) * EROFS_BLOCK_SIZE;
+            }
+            d_size += len as u64;
+        }
+
+        Ok(d_size)
+    }
+
+    fn v6_set_inode_compact(&mut self) {
+        if self.v6_force_extended_inode
+            || self.inode.uid() > u16::MAX as u32
+            || self.inode.gid() > u16::MAX as u32
+            || self.inode.nlink() > u16::MAX as u32
+            || self.inode.size() > u32::MAX as u64
+            || self.path.extension() == Some(OsStr::new("pyc"))
+        {
+            self.v6_compact_inode = false;
+        } else {
+            self.v6_compact_inode = true;
+        }
+    }
+
+    /// Set node offset in bootstrap and return the next position.
+    pub fn v6_set_offset(&mut self, bootstrap_ctx: &mut BootstrapContext) {
+        if self.is_reg() {
+            let size = self.v6_size_with_xattr() as u64;
+            let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
+
+            // We first try to allocate space from used blocks.
+            // If no available used block exists, we allocate sequentially.
+            let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
+            self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
+            if self.v6_offset == 0 {
+                self.v6_offset = bootstrap_ctx.offset;
+                bootstrap_ctx.offset += size;
+                bootstrap_ctx.align_offset(unit);
+                bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
+            }
+            self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
+        } else if self.is_symlink() {
+            self.v6_set_offset_with_tail(bootstrap_ctx, self.inode.size());
+        } else {
+            self.v6_offset = bootstrap_ctx.offset;
+            bootstrap_ctx.offset += self.v6_size_with_xattr() as u64;
+        }
+    }
+
+    pub fn v6_set_dir_offset(
+        &mut self,
+        bootstrap_ctx: &mut BootstrapContext,
+        d_size: u64,
+    ) -> Result<()> {
+        ensure!(self.is_dir(), "{} is not a directory", self);
+
+        // Dir isize is the total bytes of 'dirents + names'.
+        self.inode.set_size(d_size);
+        self.v6_set_offset_with_tail(bootstrap_ctx, d_size);
+
+        Ok(())
+    }
+
+    // For DIR inode, size is the total bytes of 'dirents + names'.
+    // For symlink, size is the length of symlink name.
+    fn v6_set_offset_with_tail(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
+        // TODO: a hashmap of non-full blocks
+
+        //          |    avail       |
+        // +--------+-----------+----+ +-----------------------+
+        // |        |inode+tail | free |   dirents+names       |
+        // |        |           |    | |                       |
+        // +--------+-----------+----+ +-----------------------+
+        //
+        //          |    avail       |
+        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        // |        |inode      | free |   dirents+names       | | tail    | free        |
+        // |        |           |    | |                       | |         |             |
+        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        //
+        //
+        //          |    avail       |
+        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        // |        |     inode      + |   dirents+names       | | tail    | free        |
+        // |        |                | |                       | |         |             |
+        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
+        //
+        //
+        //          |    avail       |
+        // +--------+----------------+ +--------------+--------+ +-----------------------+
+        // |        |     inode      | |  inode+tail  | free   | | dirents+names         |
+        // |        |                | |              |        | |                       |
+        // +--------+----------------+ +--------------+--------+ +-----------------------+
+        //          |         inode                   |
+        //
+        //          |    avail       |
+        // +--------+----------------+ +--------------+--------+ +-----------------------+ +-------+---------------+
+        // |        |     inode      | |  inode       | free   | | dirents+names         | | tail  |    free       |
+        // |        |                | |              |        | |                       | |       |               |
+        // +--------+----------------+ +--------------+--------+ +-----------------------+ +-------+---------------+
+        //          |         inode                   |
+        //
+        //
+        let inode_size = self.v6_size_with_xattr() as u64;
+        let tail: u64 = d_size % EROFS_BLOCK_SIZE;
+
+        // We use a simple inline strategy here:
+        // If the inode size with xattr + tail data size <= EROFS_BLOCK_SIZE,
+        // we choose to inline it.
+        // Firstly, if it's bigger than EROFS_BLOCK_SIZE,
+        // in most cases, we can assume that the tail data size is close to EROFS_BLOCK_SIZE,
+        // in this condition, even if we don't inline the tail data, there won't be much waste.
+        // Secondly, the `available_blocks` that we maintain in the `BootstrapCtx`,
+        // since it contain only single blocks with some unsed space, the available space can only be smaller than EROFS_BLOCK_SIZE,
+        // therefore we can't use our used blocks to store the inode plus the tail data bigger than EROFS_BLOCK_SIZE.
+        let should_inline = tail != 0 && (inode_size + tail) <= EROFS_BLOCK_SIZE;
+
+        // If should inline, we first try to allocate space for the inode together with tail data using used blocks.
+        // If no available used block exists, we try to allocate space from current block.
+        // If current block doesn't have enough space, we append it to `available_blocks`,
+        // and we allocate space from the next block.
+        // For the remaining data, we allocate space for it sequentially.
+        self.v6_datalayout = if should_inline {
+            self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size + tail);
+            if self.v6_offset == 0 {
+                let available = EROFS_BLOCK_SIZE - bootstrap_ctx.offset % EROFS_BLOCK_SIZE;
+                if available < inode_size + tail {
+                    bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
+                    bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+                }
+
+                self.v6_offset = bootstrap_ctx.offset;
+                bootstrap_ctx.offset += inode_size + tail;
+            }
+
+            if d_size != tail {
+                bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
+                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+            }
+            self.v6_dirents_offset = bootstrap_ctx.offset;
+            bootstrap_ctx.offset += round_down_4k(d_size);
+
+            EROFS_INODE_FLAT_INLINE
+        } else {
+            // Otherwise, we first try to allocate space for the inode from used blocks.
+            // If no available used block exists, we allocate space sequentially.
+            // Then we allocate space for all data.
+            self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size);
+            if self.v6_offset == 0 {
+                self.v6_offset = bootstrap_ctx.offset;
+                bootstrap_ctx.offset += inode_size;
+            }
+
+            bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
+            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+            self.v6_dirents_offset = bootstrap_ctx.offset;
+            bootstrap_ctx.offset += d_size;
+            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+
+            EROFS_INODE_FLAT_PLAIN
+        };
+
+        trace!(
+            "{:?} inode offset {} ctx offset {} d_size {} dirents_offset {} datalayout {}",
+            self.name(),
+            self.v6_offset,
+            bootstrap_ctx.offset,
+            d_size,
+            self.v6_dirents_offset,
+            self.v6_datalayout
+        );
     }
 }
 
@@ -1117,183 +1290,12 @@ impl Node {
 
         None
     }
-
-    /// Set node offset in bootstrap and return the next position.
-    pub(crate) fn set_v6_offset(&mut self, bootstrap_ctx: &mut BootstrapContext) {
-        if self.is_reg() {
-            let size = self.size_with_xattr() as u64;
-            let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-
-            // We first try to allocate space from used blocks.
-            // If no available used block exists, we allocate sequentially.
-            let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
-            self.offset = bootstrap_ctx.allocate_available_block(total_size);
-            if self.offset == 0 {
-                self.offset = bootstrap_ctx.offset;
-                bootstrap_ctx.offset += size;
-                bootstrap_ctx.align_offset(unit);
-                bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
-            }
-            self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
-        } else if self.is_symlink() {
-            self.set_v6_offset_with_tail(bootstrap_ctx, self.inode.size());
-        } else {
-            self.offset = bootstrap_ctx.offset;
-            bootstrap_ctx.offset += self.size_with_xattr() as u64;
-        }
-    }
-
-    pub(crate) fn get_dir_d_size(&self, tree: &Tree) -> Result<u64> {
-        ensure!(self.is_dir(), "{} is not a directory", self);
-        // Use length in byte, instead of length in character.
-        // Because some characters could occupy more than one byte.
-        let mut d_size: u64 = (".".as_bytes().len()
-            + size_of::<RafsV6Dirent>()
-            + "..".as_bytes().len()
-            + size_of::<RafsV6Dirent>()) as u64;
-
-        // Safe as we have check tree above.
-        for child in tree.children.iter() {
-            let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
-            // erofs disk format requires dirent to be aligned with 4096.
-            if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
-                d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE) * EROFS_BLOCK_SIZE;
-            }
-            d_size += len as u64;
-        }
-        Ok(d_size)
-    }
-
-    pub fn dir_set_v6_offset(
-        &mut self,
-        bootstrap_ctx: &mut BootstrapContext,
-        d_size: u64,
-    ) -> Result<()> {
-        ensure!(self.is_dir(), "{} is not a directory", self);
-
-        // Dir isize is the total bytes of 'dirents + names'.
-        self.inode.set_size(d_size);
-        self.set_v6_offset_with_tail(bootstrap_ctx, d_size);
-
-        Ok(())
-    }
-
-    // For DIR inode, size is the total bytes of 'dirents + names'.
-    // For symlink, size is the length of symlink name.
-    fn set_v6_offset_with_tail(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
-        // TODO: a hashmap of non-full blocks
-
-        //          |    avail       |
-        // +--------+-----------+----+ +-----------------------+
-        // |        |inode+tail | free |   dirents+names       |
-        // |        |           |    | |                       |
-        // +--------+-----------+----+ +-----------------------+
-        //
-        //          |    avail       |
-        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
-        // |        |inode      | free |   dirents+names       | | tail    | free        |
-        // |        |           |    | |                       | |         |             |
-        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
-        //
-        //
-        //          |    avail       |
-        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
-        // |        |     inode      + |   dirents+names       | | tail    | free        |
-        // |        |                | |                       | |         |             |
-        // +--------+-----------+----+ +-----------------------+ +---------+-------------+
-        //
-        //
-        //          |    avail       |
-        // +--------+----------------+ +--------------+--------+ +-----------------------+
-        // |        |     inode      | |  inode+tail  | free   | | dirents+names         |
-        // |        |                | |              |        | |                       |
-        // +--------+----------------+ +--------------+--------+ +-----------------------+
-        //          |         inode                   |
-        //
-        //          |    avail       |
-        // +--------+----------------+ +--------------+--------+ +-----------------------+ +-------+---------------+
-        // |        |     inode      | |  inode       | free   | | dirents+names         | | tail  |    free       |
-        // |        |                | |              |        | |                       | |       |               |
-        // +--------+----------------+ +--------------+--------+ +-----------------------+ +-------+---------------+
-        //          |         inode                   |
-        //
-        //
-        let inode_size = self.size_with_xattr() as u64;
-        let tail: u64 = d_size % EROFS_BLOCK_SIZE;
-
-        // We use a simple inline strategy here:
-        // If the inode size with xattr + tail data size <= EROFS_BLOCK_SIZE,
-        // we choose to inline it.
-        // Firstly, if it's bigger than EROFS_BLOCK_SIZE,
-        // in most cases, we can assume that the tail data size is close to EROFS_BLOCK_SIZE,
-        // in this condition, even if we don't inline the tail data, there won't be much waste.
-        // Secondly, the `available_blocks` that we maintain in the `BootstrapCtx`,
-        // since it contain only single blocks with some unsed space, the available space can only be smaller than EROFS_BLOCK_SIZE,
-        // therefore we can't use our used blocks to store the inode plus the tail data bigger than EROFS_BLOCK_SIZE.
-        let should_inline = tail != 0 && (inode_size + tail) <= EROFS_BLOCK_SIZE;
-
-        // If should inline, we first try to allocate space for the inode together with tail data using used blocks.
-        // If no available used block exists, we try to allocate space from current block.
-        // If current block doesn't have enough space, we append it to `available_blocks`,
-        // and we allocate space from the next block.
-        // For the remaining data, we allocate space for it sequentially.
-        self.v6_datalayout = if should_inline {
-            self.offset = bootstrap_ctx.allocate_available_block(inode_size + tail);
-            if self.offset == 0 {
-                let available = EROFS_BLOCK_SIZE - bootstrap_ctx.offset % EROFS_BLOCK_SIZE;
-                if available < inode_size + tail {
-                    bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-                    bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-                }
-
-                self.offset = bootstrap_ctx.offset;
-                bootstrap_ctx.offset += inode_size + tail;
-            }
-
-            if d_size != tail {
-                bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-            }
-            self.dirents_offset = bootstrap_ctx.offset;
-            bootstrap_ctx.offset += round_down_4k(d_size);
-
-            EROFS_INODE_FLAT_INLINE
-        } else {
-            // Otherwise, we first try to allocate space for the inode from used blocks.
-            // If no available used block exists, we allocate space sequentially.
-            // Then we allocate space for all data.
-            self.offset = bootstrap_ctx.allocate_available_block(inode_size);
-            if self.offset == 0 {
-                self.offset = bootstrap_ctx.offset;
-                bootstrap_ctx.offset += inode_size;
-            }
-
-            bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-            self.dirents_offset = bootstrap_ctx.offset;
-            bootstrap_ctx.offset += d_size;
-            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
-
-            EROFS_INODE_FLAT_PLAIN
-        };
-
-        trace!(
-            "{:?} inode offset {} ctx offset {} d_size {} dirents_offset {} datalayout {}",
-            self.name(),
-            self.offset,
-            bootstrap_ctx.offset,
-            d_size,
-            self.dirents_offset,
-            self.v6_datalayout
-        );
-    }
 }
 
 #[derive(Clone, Debug)]
 pub enum InodeWrapper {
     V5(RafsV5Inode),
-    // In order to reuse v5 code, we still need to use v5 inode but
-    // with a different wrapper.
+    // Reuse `RafsV5Inode` for v6 with a different wrapper to reduce duplicated code.
     V6(RafsV5Inode),
 }
 
@@ -1653,7 +1655,7 @@ impl InodeWrapper {
 #[derive(Clone, Debug)]
 pub enum ChunkWrapper {
     V5(RafsV5ChunkInfo),
-    // see InodeWrapper V6.
+    // Reuse `RafsV5ChunkInfo` for v6 with a different wrapper to reduce duplicated code.
     V6(RafsV5ChunkInfo),
 }
 
@@ -1784,9 +1786,9 @@ impl ChunkWrapper {
         chunk_index: u32,
         file_offset: u64,
         uncompressed_offset: u64,
+        uncompressed_size: u32,
         compressed_offset: u64,
-        compressed_size: usize,
-        chunk_size: u32,
+        compressed_size: u32,
         is_compressed: bool,
     ) -> Result<()> {
         match self {
@@ -1794,10 +1796,10 @@ impl ChunkWrapper {
                 c.index = chunk_index;
                 c.blob_index = blob_index;
                 c.file_offset = file_offset;
-                c.compressed_size = compressed_size as u32;
                 c.compressed_offset = compressed_offset;
-                c.uncompressed_size = chunk_size;
+                c.compressed_size = compressed_size;
                 c.uncompressed_offset = uncompressed_offset;
+                c.uncompressed_size = uncompressed_size;
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
@@ -1806,10 +1808,10 @@ impl ChunkWrapper {
                 c.index = chunk_index;
                 c.blob_index = blob_index;
                 c.file_offset = file_offset;
-                c.compressed_size = compressed_size as u32;
                 c.compressed_offset = compressed_offset;
-                c.uncompressed_size = chunk_size;
+                c.compressed_size = compressed_size;
                 c.uncompressed_offset = uncompressed_offset;
+                c.uncompressed_size = uncompressed_size;
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
@@ -1839,7 +1841,7 @@ impl ChunkWrapper {
     pub(crate) fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         match self {
             ChunkWrapper::V5(c) => c.store(w).context("failed to store rafs v5 chunk"),
-            ChunkWrapper::V6(c) => c.store(w).context("failed to store rafs v5 chunk"),
+            ChunkWrapper::V6(c) => c.store(w).context("failed to store rafs v6 chunk"),
         }
     }
 }
@@ -1936,8 +1938,8 @@ mod tests {
         // reg file.
         // "1" is used only for testing purpose, in practice
         // it's always aligned to 32 bytes.
-        node.set_v6_offset(&mut bootstrap_ctx);
-        assert_eq!(node.offset, 0);
+        node.v6_set_offset(&mut bootstrap_ctx);
+        assert_eq!(node.v6_offset, 0);
         assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
         assert!(node.v6_compact_inode);
         assert_eq!(bootstrap_ctx.offset, 32);
@@ -1955,51 +1957,51 @@ mod tests {
         .unwrap();
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 4064)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4064)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-        assert_eq!(dir_node.offset, 4096);
+        assert_eq!(dir_node.v6_offset, 4096);
         assert_eq!(bootstrap_ctx.offset, 8192);
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 4096)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
-        assert_eq!(dir_node.offset, 32);
-        assert_eq!(dir_node.dirents_offset, 8192);
+        assert_eq!(dir_node.v6_offset, 32);
+        assert_eq!(dir_node.v6_dirents_offset, 8192);
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 8160)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 8160)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-        assert_eq!(dir_node.offset, 8192 + 4096);
-        assert_eq!(dir_node.dirents_offset, 8192 + 4096 + 4096);
+        assert_eq!(dir_node.v6_offset, 8192 + 4096);
+        assert_eq!(dir_node.v6_dirents_offset, 8192 + 4096 + 4096);
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096 + 8192);
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 8161)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 8161)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
-        assert_eq!(dir_node.offset, 64);
-        assert_eq!(dir_node.dirents_offset, 8192 + 4096 + 8192);
+        assert_eq!(dir_node.v6_offset, 64);
+        assert_eq!(dir_node.v6_dirents_offset, 8192 + 4096 + 8192);
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096 + 8192 + 8192);
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 3968)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4096 + 3968)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-        assert_eq!(dir_node.offset, 96);
-        assert_eq!(dir_node.dirents_offset, 8192 + 4096 + 8192 + 8192);
+        assert_eq!(dir_node.v6_offset, 96);
+        assert_eq!(dir_node.v6_dirents_offset, 8192 + 4096 + 8192 + 8192);
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096 + 8192 + 8192 + 4096);
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 4096 + 2048)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4096 + 2048)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-        assert_eq!(dir_node.offset, 8192 + 4096 + 8192 + 8192 + 4096);
+        assert_eq!(dir_node.v6_offset, 8192 + 4096 + 8192 + 8192 + 4096);
         assert_eq!(
-            dir_node.dirents_offset,
+            dir_node.v6_dirents_offset,
             8192 + 4096 + 8192 + 8192 + 4096 + 4096
         );
         assert_eq!(
@@ -2008,10 +2010,10 @@ mod tests {
         );
 
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 1985)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 1985)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
-        assert_eq!(dir_node.offset, 8192 + 4096 + 8192 + 8192 + 4096 + 8192);
+        assert_eq!(dir_node.v6_offset, 8192 + 4096 + 8192 + 8192 + 4096 + 8192);
         assert_eq!(
             bootstrap_ctx.offset,
             8192 + 4096 + 8192 + 8192 + 4096 + 8192 + 32 + 1985
@@ -2019,11 +2021,11 @@ mod tests {
 
         bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
         dir_node
-            .dir_set_v6_offset(&mut bootstrap_ctx, 1984)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 1984)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(
-            dir_node.offset,
+            dir_node.v6_offset,
             8192 + 4096 + 8192 + 8192 + 4096 + 2048 + 32
         );
         assert_eq!(

@@ -30,7 +30,7 @@ use super::node::{
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
-pub(crate) struct Tree {
+pub struct Tree {
     /// Filesystem node.
     pub node: Node,
     /// Children tree nodes.
@@ -352,12 +352,12 @@ impl<'a> MetadataTreeBuilder<'a> {
             xattrs,
             layer_idx: 0,
             ctime: 0,
-            offset: 0,
-            dirents: Vec::<(u64, OsString, u32)>::new(),
+            v6_offset: 0,
+            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
             v6_force_extended_inode: false,
-            dirents_offset: 0,
+            v6_dirents_offset: 0,
         })
     }
 }
