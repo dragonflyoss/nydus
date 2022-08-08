@@ -19,7 +19,7 @@
 //!   The [is_chunk_cached()](../trait.BlobCache.html#tymethod.is_chunk_cached) method always
 //!   return true to enable data prefetching.
 use std::io::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -91,6 +91,10 @@ impl BlobCache for DummyCache {
 
     fn start_prefetch(&self) -> StorageResult<()> {
         Ok(())
+    }
+
+    fn get_prefetch_state(&self) -> StorageResult<&AtomicU32> {
+        Err(StorageError::Unsupported)
     }
 
     fn stop_prefetch(&self) -> StorageResult<()> {
