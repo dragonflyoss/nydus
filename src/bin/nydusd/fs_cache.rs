@@ -423,7 +423,6 @@ impl FsCacheHandler {
         let domain_id = msg
             .volume_key
             .strip_prefix("erofs,")
-            //.unwrap_or(msg.volume_key.as_str());
             .unwrap_or_else(|| msg.volume_key.as_str());
 
         let key = generate_blob_key(domain_id, &msg.cookie_key);
