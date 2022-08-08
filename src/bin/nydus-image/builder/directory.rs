@@ -7,27 +7,15 @@ use std::fs::DirEntry;
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use nydus_utils::try_round_up_4k;
 
 use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
     BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
-    RafsVersion,
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
-
-// Filesystem may have different algorithms to calculate `i_size` for directory entries,
-// which may break "repeatable build". To support repeatable build, instead of reuse the value
-// provided by the source filesystem, we use our own algorithm to calculate `i_size` for directory
-// entries for stable `i_size`.
-//
-// Rafs v6 already has its own algorithm to calculate `i_size` for directory entries, but we don't
-// have directory entries for Rafs v5. So let's generate a pseudo `i_size` for Rafs v5 directory
-// inode.
-const RAFS_V5_VIRTUAL_ENTRY_SIZE: u64 = 8;
 
 const TAR_BLOB_NAME: &str = "image.blob";
 const TAR_BOOTSTRAP_NAME: &str = "image.boot";
@@ -82,7 +70,7 @@ impl FilesystemTreeBuilder {
 
             let mut child = Tree::new(child);
             child.children = self.load_children(ctx, bootstrap_ctx, &mut child.node, layer_idx)?;
-            DirectoryBuilder::set_v5_dir_size(ctx.fs_version, &mut child);
+            child.node.v5_set_dir_size(ctx.fs_version, &child.children);
             result.push(child);
         }
 
@@ -95,30 +83,6 @@ pub(crate) struct DirectoryBuilder {}
 impl DirectoryBuilder {
     pub fn new() -> Self {
         Self {}
-    }
-
-    // Filesystem may have different algorithms to calculate `i_size` for directory entries,
-    // which may break "repeatable build". To support repeatable build, instead of reuse the value
-    // provided by the source filesystem, we use our own algorithm to calculate `i_size` for
-    // directory entries for stable `i_size`.
-    //
-    // Rafs v6 already has its own algorithm to calculate `i_size` for directory entries, but we
-    // don't have directory entries for Rafs v5. So let's generate a pseudo `i_size` for Rafs v5
-    // directory inode.
-    fn set_v5_dir_size(fs_version: RafsVersion, tree: &mut Tree) {
-        if !tree.node.is_dir() || !fs_version.is_v5() {
-            return;
-        }
-        let mut d_size = 0u64;
-        for child in tree.children.iter() {
-            d_size += child.node.inode.name_size() as u64 + RAFS_V5_VIRTUAL_ENTRY_SIZE;
-        }
-        if d_size == 0 {
-            tree.node.inode.set_size(4096);
-        } else {
-            tree.node.inode.set_size(try_round_up_4k(d_size).unwrap());
-        }
-        tree.node.set_inode_blocks();
     }
 
     /// Build node tree from a filesystem directory
@@ -144,7 +108,7 @@ impl DirectoryBuilder {
             { tree_builder.load_children(ctx, bootstrap_ctx, &mut tree.node, layer_idx) },
             "load_from_directory"
         )?;
-        Self::set_v5_dir_size(ctx.fs_version, &mut tree);
+        tree.node.v5_set_dir_size(ctx.fs_version, &tree.children);
 
         Ok(tree)
     }
