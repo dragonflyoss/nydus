@@ -21,7 +21,7 @@ impl NydusdClient {
     }
 
     fn build_uri(&self, path: &str, query: Option<Vec<(&str, &str)>>) -> HyperUri {
-        let mut endpoint = format!("/api/v1/{}", path);
+        let mut endpoint = format!("/api/{}", path);
 
         if let Some(q) = query {
             let mut params = String::new();

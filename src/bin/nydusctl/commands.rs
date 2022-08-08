@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;
 
-use crate::client::NydusdClient;
 use anyhow::Result;
-
 use nydus::{FsBackendDesc, FsBackendType};
 use rafs::fs::RafsConfig;
+
+use crate::client::NydusdClient;
 
 type CommandParams = HashMap<String, String>;
 
@@ -55,7 +55,7 @@ impl CommandCache {
         client: &NydusdClient,
         _params: Option<CommandParams>,
     ) -> Result<()> {
-        let metrics = client.get("metrics/blobcache").await?;
+        let metrics = client.get("v1/metrics/blobcache").await?;
         let m = metrics.as_object().unwrap();
 
         if raw {
@@ -124,14 +124,14 @@ impl CommandBackend {
         client: &NydusdClient,
         params: Option<CommandParams>,
     ) -> Result<()> {
-        let metrics = client.get("metrics/backend").await?;
+        let metrics = client.get("v1/metrics/backend").await?;
 
         let interval = load_param_interval(&params)?;
         if let Some(i) = interval {
             let mut last = metrics;
             loop {
                 sleep(Duration::from_secs(i as u64));
-                let current = client.get("metrics/backend").await?;
+                let current = client.get("v1/metrics/backend").await?;
 
                 let delta_data = metric_delta(&last, &current, "read_amount_total");
                 let delta_requests = metric_delta(&last, &current, "read_count");
@@ -278,7 +278,7 @@ impl CommandFsStats {
         client: &NydusdClient,
         _params: Option<CommandParams>,
     ) -> Result<()> {
-        let metrics = client.get("metrics").await?;
+        let metrics = client.get("v1/metrics").await?;
         let m = metrics.as_object().unwrap();
         let fop_counter = m["fop_hits"].as_array().unwrap();
         if raw {
@@ -361,9 +361,9 @@ impl CommandDaemon {
             }
 
             let data = serde_json::to_string(&real)?;
-            client.put("daemon", Some(data)).await?;
+            client.put("v1/daemon", Some(data)).await?;
         } else {
-            let info = client.get("daemon").await?;
+            let info = client.get("v1/daemon").await?;
             let i = info.as_object().unwrap();
 
             if raw {
@@ -438,7 +438,11 @@ impl CommandMount {
         let cmd = json!({"source": source, "fs_type": fs_type, "config": config}).to_string();
 
         client
-            .post("mount", Some(cmd), Some(vec![("mountpoint", mountpoint)]))
+            .post(
+                "v1/mount",
+                Some(cmd),
+                Some(vec![("mountpoint", mountpoint)]),
+            )
             .await
     }
 }
@@ -456,7 +460,7 @@ impl CommandUmount {
         let mountpoint = &p["mountpoint"];
 
         client
-            .delete("mount", None, Some(vec![("mountpoint", mountpoint)]))
+            .delete("v1/mount", None, Some(vec![("mountpoint", mountpoint)]))
             .await
     }
 }
