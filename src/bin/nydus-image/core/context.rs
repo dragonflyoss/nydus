@@ -78,7 +78,6 @@ impl RafsVersion {
 pub enum SourceType {
     Directory,
     StargzIndex,
-    Diff,
 }
 
 impl Default for SourceType {
@@ -93,7 +92,6 @@ impl FromStr for SourceType {
         match s {
             "directory" => Ok(Self::Directory),
             "stargz_index" => Ok(Self::StargzIndex),
-            "diff" => Ok(Self::Diff),
             _ => Err(anyhow!("invalid source type")),
         }
     }
@@ -842,7 +840,6 @@ pub struct BuildContext {
     /// Path of source to build the image from:
     /// - Directory: `source_path` should be a directory path
     /// - StargzIndex: `source_path` should be a stargz index json file path
-    /// - Diff: `source_path` should be a directory path
     pub source_path: PathBuf,
 
     /// Track file/chunk prefetch state.
