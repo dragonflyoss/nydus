@@ -63,12 +63,9 @@ func (job *mountJob) Umount() error {
 type Opt struct {
 	Logger provider.ProgressLogger
 
-	// SourceProviders should be a slice, which means it can support multi-platforms,
-	// for example `linux/amd64` and `linux/arm64`, Nydusify will pick one or more
-	// to convert to Nydus image in the future.
-	SourceProviders []provider.SourceProvider
-
-	TargetRemote *remote.Remote
+	TargetPlatform string
+	SourceRemote   *remote.Remote
+	TargetRemote   *remote.Remote
 
 	CacheRemote     *remote.Remote
 	CacheMaxRecords uint
@@ -87,17 +84,18 @@ type Opt struct {
 	BackendAlignedChunk bool
 
 	NydusifyVersion string
-	Source          string
 
 	ChunkDict ChunkDictOpt
 	FsVersion string
 }
 
 type Converter struct {
-	Logger          provider.ProgressLogger
-	SourceProviders []provider.SourceProvider
+	Logger provider.ProgressLogger
 
-	TargetRemote *remote.Remote
+	TargetPlatform string
+	SourceDir      string
+	SourceRemote   *remote.Remote
+	TargetRemote   *remote.Remote
 
 	CacheRemote     *remote.Remote
 	CacheMaxRecords uint
@@ -114,7 +112,6 @@ type Converter struct {
 	BackendAlignedChunk bool
 
 	NydusifyVersion string
-	Source          string
 
 	storageBackend backend.Backend
 
@@ -139,9 +136,19 @@ func New(opt Opt) (*Converter, error) {
 		return nil, err
 	}
 
+	sourceDir := filepath.Join(opt.WorkDir, "source")
+	if err := os.RemoveAll(sourceDir); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		return nil, err
+	}
+
 	return &Converter{
 		Logger:              opt.Logger,
-		SourceProviders:     opt.SourceProviders,
+		TargetPlatform:      opt.TargetPlatform,
+		SourceDir:           sourceDir,
+		SourceRemote:        opt.SourceRemote,
 		TargetRemote:        opt.TargetRemote,
 		CacheRemote:         opt.CacheRemote,
 		CacheMaxRecords:     opt.CacheMaxRecords,
@@ -154,7 +161,6 @@ func New(opt Opt) (*Converter, error) {
 		BackendForcePush:    opt.BackendForcePush,
 		BackendAlignedChunk: opt.BackendAlignedChunk,
 		NydusifyVersion:     opt.NydusifyVersion,
-		Source:              opt.Source,
 
 		storageBackend: backend,
 
@@ -168,7 +174,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 
 	logrus.Infof("Converting to %s", cvt.TargetRemote.Ref)
 
-	repo, err := imageRepository(cvt.Source)
+	repo, err := imageRepository(cvt.SourceRemote.Ref)
 	if err != nil {
 		logrus.Warnf("parse image reference %v", err)
 	}
@@ -220,16 +226,20 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 		return errors.Wrap(err, "Create build flow")
 	}
 
-	if cvt.SourceProviders == nil || len(cvt.SourceProviders) == 0 {
-		return errors.New("Invalid source provider")
+	// SourceProviders should be a slice, which means it can support multi-platforms,
+	// for example `linux/amd64` and `linux/arm64`, Nydusify will pick one or more
+	// to convert to Nydus image in the future.
+	sourceProviders, err := provider.DefaultSource(context.Background(), cvt.SourceRemote, cvt.SourceDir, cvt.TargetPlatform)
+	if err != nil {
+		return errors.Wrap(err, "Parse source image")
 	}
 
 	// In fact, during parsing image manifest, only one interested tag is inserted.
-	if len(cvt.SourceProviders) != 1 {
+	if len(sourceProviders) != 1 {
 		return errors.New("Should have only one source image")
 	}
 
-	sourceProvider := cvt.SourceProviders[0]
+	sourceProvider := sourceProviders[0]
 	sourceLayers, err := sourceProvider.Layers(ctx)
 	if err != nil {
 		return errors.Wrap(err, "Get source layers")
@@ -332,7 +342,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 	// the source image is built from a Dockerfile.
 	if sourceManifest != nil {
 		buildInfo.SetSourceReference(SourceReference{
-			Reference: cvt.Source,
+			Reference: cvt.SourceRemote.Ref,
 			Digest:    sourceManifest.Digest.String(),
 		})
 	}
@@ -391,6 +401,14 @@ func (cvt *Converter) Convert(ctx context.Context) error {
 			cvt.CacheRemote = nil
 			retryDone := logger.Log(ctx, "Retrying to convert without cache", nil)
 			return retryDone(cvt.convert(ctx))
+		}
+		if utils.RetryWithHTTP(err) {
+			cvt.SourceRemote.MaybeWithHTTP(err)
+			cvt.TargetRemote.MaybeWithHTTP(err)
+			if cvt.CacheRemote != nil {
+				cvt.CacheRemote.MaybeWithHTTP(err)
+			}
+			return cvt.convert(ctx)
 		}
 		return errors.Wrap(err, "Failed to convert")
 	}

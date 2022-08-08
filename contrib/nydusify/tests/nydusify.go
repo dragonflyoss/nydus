@@ -99,14 +99,7 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	logger, err := provider.DefaultLogger()
 	assert.Nil(t, err)
 
-	sourceDir := filepath.Join(nydusify.workDir, "source")
-	err = os.MkdirAll(sourceDir, 0755)
-	assert.Nil(t, err)
-
 	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
-	assert.Nil(t, err)
-
-	sourceProviders, err := provider.DefaultSource(context.Background(), sourceRemote, sourceDir, "linux/amd64")
 	assert.Nil(t, err)
 
 	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
@@ -120,10 +113,11 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	}
 
 	opt := converter.Opt{
-		Logger:          logger,
-		SourceProviders: sourceProviders,
+		Logger: logger,
 
-		TargetRemote: targetRemote,
+		TargetPlatform: "linux/amd64",
+		SourceRemote:   sourceRemote,
+		TargetRemote:   targetRemote,
 
 		CacheRemote:     cacheRemote,
 		CacheMaxRecords: 10,

@@ -21,7 +21,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 )
 
-func newDefaultClient() *http.Client {
+func newDefaultClient(skipTLSVerify bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
@@ -36,6 +36,9 @@ func newDefaultClient() *http.Client {
 			ExpectContinueTimeout: 5 * time.Second,
 			DisableKeepAlives:     true,
 			TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: skipTLSVerify,
+			},
 		},
 	}
 }
@@ -47,22 +50,15 @@ type withCredentialFunc = func(string) (string, string, error)
 // withRemote creates an remote instance, it uses the implemention of containerd
 // docker remote to access image from remote registry.
 func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote.Remote, error) {
-	resolverFunc := func() remotes.Resolver {
+	resolverFunc := func(retryWithHTTP bool) remotes.Resolver {
 		registryHosts := docker.ConfigureDefaultRegistries(
 			docker.WithAuthorizer(docker.NewAuthorizer(
-				newDefaultClient(),
+				newDefaultClient(insecure),
 				credFunc,
 			)),
-			docker.WithClient(newDefaultClient()),
+			docker.WithClient(newDefaultClient(insecure)),
 			docker.WithPlainHTTP(func(host string) (bool, error) {
-				_insecure, err := docker.MatchLocalhost(host)
-				if err != nil {
-					return false, err
-				}
-				if _insecure {
-					return true, nil
-				}
-				return insecure, nil
+				return retryWithHTTP, nil
 			}),
 		)
 

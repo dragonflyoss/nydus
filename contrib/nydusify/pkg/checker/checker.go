@@ -79,6 +79,22 @@ func New(opt Opt) (*Checker, error) {
 // Check checks Nydus image, and outputs image information to work
 // directory, the check workflow is composed of various rules.
 func (checker *Checker) Check(ctx context.Context) error {
+	if err := checker.check(ctx); err != nil {
+		if utils.RetryWithHTTP(err) {
+			if checker.sourceParser != nil {
+				checker.sourceParser.Remote.MaybeWithHTTP(err)
+			}
+			checker.targetParser.Remote.MaybeWithHTTP(err)
+			return checker.check(ctx)
+		}
+		return err
+	}
+	return nil
+}
+
+// Check checks Nydus image, and outputs image information to work
+// directory, the check workflow is composed of various rules.
+func (checker *Checker) check(ctx context.Context) error {
 	targetParsed, err := checker.targetParser.Parse(ctx)
 	if err != nil {
 		return errors.Wrap(err, "parse Nydus image")
