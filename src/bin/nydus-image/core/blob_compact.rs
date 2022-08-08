@@ -585,7 +585,7 @@ impl BlobCompactor {
             None,
             false,
         );
-        let mut bootstrap_mgr =
+        let bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
         let mut ori_blob_mgr = BlobManager::new();
@@ -617,7 +617,6 @@ impl BlobCompactor {
         // blobs have already been dumped, dump bootstrap only
         let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
         bootstrap.dump(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
-        bootstrap_mgr.add(bootstrap_ctx);
         Ok(Some(BuildOutput::new(
             &compactor.new_blob_mgr,
             &bootstrap_mgr,

@@ -6,11 +6,9 @@ use anyhow::Result;
 
 use crate::core::context::{BlobManager, BootstrapManager, BuildContext, BuildOutput};
 
-pub(crate) use self::diff::DiffBuilder;
 pub(crate) use self::directory::DirectoryBuilder;
 pub(crate) use self::stargz::StargzBuilder;
 
-mod diff;
 mod directory;
 mod stargz;
 

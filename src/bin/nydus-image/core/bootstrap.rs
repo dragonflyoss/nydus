@@ -508,9 +508,7 @@ impl Bootstrap {
             Result<()>
         )?;
 
-        bootstrap_ctx
-            .writer
-            .finalize(Some(bootstrap_ctx.name.to_string()))?;
+        bootstrap_ctx.writer.finalize(Some(String::default()))?;
 
         Ok(())
     }
@@ -748,9 +746,7 @@ impl Bootstrap {
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
 
-        bootstrap_ctx
-            .writer
-            .finalize(Some(bootstrap_ctx.name.to_string()))?;
+        bootstrap_ctx.writer.finalize(Some(String::default()))?;
 
         Ok(())
     }

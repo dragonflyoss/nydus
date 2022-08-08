@@ -15,7 +15,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, Result};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
@@ -78,7 +77,6 @@ impl RafsVersion {
 pub enum SourceType {
     Directory,
     StargzIndex,
-    Diff,
 }
 
 impl Default for SourceType {
@@ -93,7 +91,6 @@ impl FromStr for SourceType {
         match s {
             "directory" => Ok(Self::Directory),
             "stargz_index" => Ok(Self::StargzIndex),
-            "diff" => Ok(Self::Diff),
             _ => Err(anyhow!("invalid source type")),
         }
     }
@@ -110,15 +107,6 @@ pub enum ArtifactStorage {
 impl Default for ArtifactStorage {
     fn default() -> Self {
         Self::SingleFile(PathBuf::new())
-    }
-}
-
-impl ArtifactStorage {
-    fn get_path(&self, name: &str) -> PathBuf {
-        match self {
-            Self::SingleFile(path) => path.to_path_buf(),
-            Self::FileDir(base) => base.join(name),
-        }
     }
 }
 
@@ -692,9 +680,6 @@ pub struct BootstrapContext {
     pub nodes: Vec<Node>,
     /// Current position to write in f_bootstrap
     pub offset: u64,
-    /// Bootstrap file name, only be used for diff build.
-    pub name: String,
-    pub blobs: Vec<BuildOutputBlob>,
     /// Not fully used blocks
     pub available_blocks: Vec<VecDeque<u64>>,
     pub writer: Box<dyn RafsIoWrite>,
@@ -713,8 +698,6 @@ impl BootstrapContext {
             inode_map: HashMap::new(),
             nodes: Vec::new(),
             offset: EROFS_BLOCK_SIZE,
-            name: String::new(),
-            blobs: Vec::new(),
             available_blocks: vec![
                 VecDeque::new();
                 EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
@@ -769,11 +752,7 @@ impl BootstrapContext {
 pub struct BootstrapManager {
     /// Parent bootstrap file reader.
     pub f_parent_bootstrap: Option<RafsIoReader>,
-    bootstrap_storage: Option<ArtifactStorage>,
-    /// The vector index will be as the layer index.
-    /// We can get the bootstrap of a layer by using:
-    /// `self.bootstraps[layer_index];`
-    bootstraps: Vec<BootstrapContext>,
+    pub bootstrap_storage: Option<ArtifactStorage>,
 }
 
 impl BootstrapManager {
@@ -784,7 +763,6 @@ impl BootstrapManager {
         Self {
             f_parent_bootstrap,
             bootstrap_storage,
-            bootstraps: Vec::new(),
         }
     }
 
@@ -794,22 +772,6 @@ impl BootstrapManager {
             self.f_parent_bootstrap.is_some(),
             fifo,
         )
-    }
-
-    pub fn add(&mut self, bootstrap_ctx: BootstrapContext) {
-        self.bootstraps.push(bootstrap_ctx);
-    }
-
-    pub fn get_bootstraps(&self) -> &Vec<BootstrapContext> {
-        &self.bootstraps
-    }
-
-    pub fn get_last_bootstrap(&self) -> Option<String> {
-        self.bootstraps.last().map(|b| b.name.to_owned())
-    }
-
-    pub fn get_bootstrap_path(&self, name: &str) -> Option<PathBuf> {
-        self.bootstrap_storage.as_ref().map(|s| s.get_path(name))
     }
 }
 
@@ -842,7 +804,6 @@ pub struct BuildContext {
     /// Path of source to build the image from:
     /// - Directory: `source_path` should be a directory path
     /// - StargzIndex: `source_path` should be a stargz index json file path
-    /// - Diff: `source_path` should be a directory path
     pub source_path: PathBuf,
 
     /// Track file/chunk prefetch state.
@@ -930,57 +891,20 @@ impl Default for BuildContext {
     }
 }
 
-/// Information about generated data blobs.
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
-pub struct BuildOutputBlob {
-    pub blob_id: String,
-    pub blob_size: u64,
-}
-
-/// Information about generated metadata blobs.
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
-pub struct BuildOutputArtifact {
-    // Bootstrap file name in this build.
-    pub bootstrap_name: String,
-    // The blobs in blob table of this bootstrap.
-    pub blobs: Vec<BuildOutputBlob>,
-}
-
 /// BuildOutput represents the output in this build.
 #[derive(Default, Debug, Clone)]
 pub struct BuildOutput {
-    /// Artifacts (bootstrap + blob) for all layer in this build, vector index equals layer index.
-    pub artifacts: Vec<BuildOutputArtifact>,
-    /// Blob ids in the blob table of last bootstrap.
+    /// Blob ids in the blob table of bootstrap.
     pub blobs: Vec<String>,
     /// The size of output blob in this build.
-    pub last_blob_size: Option<u64>,
-    /// The name of output bootstrap in this build, in diff build, it's the bootstrap of last layer.
-    pub last_bootstrap_name: String,
+    pub blob_size: Option<u64>,
 }
 
 impl BuildOutput {
-    pub fn new(blob_mgr: &BlobManager, bootstrap_mgr: &BootstrapManager) -> Result<BuildOutput> {
-        let bootstraps = bootstrap_mgr.get_bootstraps();
-        let mut artifacts = Vec::new();
-        for bootstrap in bootstraps {
-            artifacts.push(BuildOutputArtifact {
-                bootstrap_name: bootstrap.name.clone(),
-                blobs: bootstrap.blobs.clone(),
-            });
-        }
+    pub fn new(blob_mgr: &BlobManager, _bootstrap_mgr: &BootstrapManager) -> Result<BuildOutput> {
         let blobs = blob_mgr.get_blob_ids();
+        let blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
 
-        let last_blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
-        let last_bootstrap_name = bootstrap_mgr
-            .get_last_bootstrap()
-            .ok_or_else(|| anyhow!("can't get last bootstrap"))?;
-
-        Ok(Self {
-            artifacts,
-            blobs,
-            last_blob_size,
-            last_bootstrap_name,
-        })
+        Ok(Self { blobs, blob_size })
     }
 }

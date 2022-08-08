@@ -195,7 +195,6 @@ impl Builder for DirectoryBuilder {
             blob_writer.finalize(blob_id)?;
         }
 
-        bootstrap_mgr.add(bootstrap_ctx);
         BuildOutput::new(blob_mgr, bootstrap_mgr)
     }
 }

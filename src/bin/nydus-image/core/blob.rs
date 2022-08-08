@@ -32,7 +32,7 @@ impl Blob {
         chunk_dict: &mut T,
     ) -> Result<bool> {
         match ctx.source_type {
-            SourceType::Directory | SourceType::Diff => {
+            SourceType::Directory => {
                 let (inodes, prefetch_entries) = blob_ctx
                     .blob_layout
                     .layout_blob_simple(&ctx.prefetch, nodes)?;
