@@ -168,6 +168,7 @@ impl Bootstrap {
             // Hardlink handle, all hardlink nodes' ino, nlink should be the same,
             // because the real_ino may be conflicted between different layers,
             // so we need to find hardlink node index list in the layer where the node is located.
+            let mut v6_hardlink_offset: Option<u64> = None;
             if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&(
                 child.node.layer_idx,
                 child.node.src_ino,
@@ -182,6 +183,8 @@ impl Bootstrap {
                     nodes[*idx as usize - 1].inode.set_nlink(nlink);
                 }
                 indexes.push(index);
+                // set offset for rafs v6 hardlinks
+                v6_hardlink_offset = Some(nodes[indexes[0] as usize - 1].v6_offset);
             } else {
                 child.node.inode.set_ino(index);
                 child.node.inode.set_nlink(1);
@@ -195,7 +198,7 @@ impl Bootstrap {
             // update bootstrap_ctx.offset for rafs v6.
             if !child.node.is_dir() {
                 if ctx.fs_version.is_v6() {
-                    child.node.v6_set_offset(bootstrap_ctx);
+                    child.node.v6_set_offset(bootstrap_ctx, v6_hardlink_offset);
                 }
                 bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
             }
