@@ -417,8 +417,6 @@ pub enum BlobIoChunk {
     // Try to avoid the value conversion? Maybe, we can just use trait object `BlobChunkInfo`
     // in the storage module rather than `BlobIoChunk`, it makes data conversion complicated.
     Base(Arc<dyn BlobChunkInfo>),
-    // For rafs v5 to pass chunk info to storage module.
-    V5(Arc<dyn self::v5::BlobV5ChunkInfo>),
 }
 
 impl BlobIoChunk {
@@ -426,18 +424,8 @@ impl BlobIoChunk {
     pub fn as_base(&self) -> &(dyn BlobChunkInfo) {
         match self {
             BlobIoChunk::Base(v) => &**v,
-            BlobIoChunk::V5(v) => v.as_base(),
+            // BlobIoChunk::V5(v) => v.as_base(),
             _ => panic!(),
-        }
-    }
-
-    /// Convert to an reference of `BlobV5ChunkInfo` trait object.
-    pub fn as_v5(&self) -> std::io::Result<&Arc<dyn self::v5::BlobV5ChunkInfo>> {
-        match self {
-            BlobIoChunk::V5(v) => Ok(v),
-            _ => Err(einval!(
-                "BlobIoChunk doesn't contain a BlobV5ChunkInfo object."
-            )),
         }
     }
 }
@@ -445,12 +433,6 @@ impl BlobIoChunk {
 impl From<Arc<dyn BlobChunkInfo>> for BlobIoChunk {
     fn from(v: Arc<dyn BlobChunkInfo>) -> Self {
         BlobIoChunk::Base(v)
-    }
-}
-
-impl From<Arc<dyn self::v5::BlobV5ChunkInfo>> for BlobIoChunk {
-    fn from(v: Arc<dyn self::v5::BlobV5ChunkInfo>) -> Self {
-        BlobIoChunk::V5(v)
     }
 }
 

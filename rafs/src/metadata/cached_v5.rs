@@ -670,20 +670,20 @@ impl RafsV5InodeOps for CachedInodeV5 {
 #[derive(Clone, Default, Debug)]
 pub struct CachedChunkInfoV5 {
     // block hash
-    c_block_id: Arc<RafsDigest>,
+    block_id: Arc<RafsDigest>,
     // blob containing the block
-    c_blob_index: u32,
+    blob_index: u32,
     // chunk index in blob
-    c_index: u32,
+    index: u32,
     // position of the block within the file
-    c_file_offset: u64,
+    file_offset: u64,
     // offset of the block within the blob
-    c_compress_offset: u64,
-    c_uncompress_offset: u64,
+    compressed_offset: u64,
+    uncompressed_offset: u64,
     // size of the block, compressed
-    c_compr_size: u32,
-    c_uncompress_size: u32,
-    c_flags: BlobChunkFlags,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    flags: BlobChunkFlags,
 }
 
 impl CachedChunkInfoV5 {
@@ -705,21 +705,21 @@ impl CachedChunkInfoV5 {
     }
 
     fn copy_from_ondisk(&mut self, chunk: &RafsV5ChunkInfo) {
-        self.c_block_id = Arc::new(chunk.block_id);
-        self.c_blob_index = chunk.blob_index;
-        self.c_index = chunk.index;
-        self.c_compress_offset = chunk.compressed_offset;
-        self.c_uncompress_offset = chunk.uncompressed_offset;
-        self.c_uncompress_size = chunk.uncompressed_size;
-        self.c_file_offset = chunk.file_offset;
-        self.c_compr_size = chunk.compressed_size;
-        self.c_flags = chunk.flags;
+        self.block_id = Arc::new(chunk.block_id);
+        self.blob_index = chunk.blob_index;
+        self.index = chunk.index;
+        self.compressed_offset = chunk.compressed_offset;
+        self.uncompressed_offset = chunk.uncompressed_offset;
+        self.uncompressed_size = chunk.uncompressed_size;
+        self.file_offset = chunk.file_offset;
+        self.compressed_size = chunk.compressed_size;
+        self.flags = chunk.flags;
     }
 }
 
 impl BlobChunkInfo for CachedChunkInfoV5 {
     fn chunk_id(&self) -> &RafsDigest {
-        &self.c_block_id
+        &self.block_id
     }
 
     fn id(&self) -> u32 {
@@ -727,22 +727,22 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
     }
 
     fn is_compressed(&self) -> bool {
-        self.c_flags.contains(BlobChunkFlags::COMPRESSED)
+        self.flags.contains(BlobChunkFlags::COMPRESSED)
     }
 
     fn is_hole(&self) -> bool {
-        self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
+        self.flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    impl_getter!(blob_index, c_blob_index, u32);
-    impl_getter!(compressed_offset, c_compress_offset, u64);
-    impl_getter!(compressed_size, c_compr_size, u32);
-    impl_getter!(uncompressed_offset, c_uncompress_offset, u64);
-    impl_getter!(uncompressed_size, c_uncompress_size, u32);
+    impl_getter!(blob_index, blob_index, u32);
+    impl_getter!(compressed_offset, compressed_offset, u64);
+    impl_getter!(compressed_size, compressed_size, u32);
+    impl_getter!(uncompressed_offset, uncompressed_offset, u64);
+    impl_getter!(uncompressed_size, uncompressed_size, u32);
 }
 
 impl BlobV5ChunkInfo for CachedChunkInfoV5 {
@@ -750,9 +750,9 @@ impl BlobV5ChunkInfo for CachedChunkInfoV5 {
         self
     }
 
-    impl_getter!(index, c_index, u32);
-    impl_getter!(file_offset, c_file_offset, u64);
-    impl_getter!(flags, c_flags, BlobChunkFlags);
+    impl_getter!(index, index, u32);
+    impl_getter!(file_offset, file_offset, u64);
+    impl_getter!(flags, flags, BlobChunkFlags);
 }
 
 impl From<&RafsV5ChunkInfo> for CachedChunkInfoV5 {

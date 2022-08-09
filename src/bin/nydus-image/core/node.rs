@@ -1940,7 +1940,7 @@ fn to_rafsv5_inode(inode: &dyn RafsInode) -> RafsV5Inode {
     }
 }
 
-/// Construct a `RafsV5ChunkInfo` object from a `dyn RafsChunkInfo` object.
+/// Construct a `RafsV5ChunkInfo` object from a `dyn BlobChunkInfo` object.
 fn to_rafsv5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
     RafsV5ChunkInfo {
         block_id: *cki.chunk_id(),
