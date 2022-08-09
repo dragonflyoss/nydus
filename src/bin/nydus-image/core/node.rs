@@ -368,7 +368,7 @@ impl Node {
             let file_offset = i as u64 * chunk_size as u64;
             let uncompressed_size = if i == self.inode.child_count() - 1 {
                 (self.inode.size() as u64)
-                    .checked_sub((chunk_size * i) as u64)
+                    .checked_sub(chunk_size as u64 * i as u64)
                     .ok_or_else(|| {
                         anyhow!("the rest chunk size of inode is bigger than chunk_size")
                     })? as u32
