@@ -154,9 +154,9 @@ def test_blobcache(
     rafs.thread_num(4).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
+    time.sleep(0.5)
     m = nc.get_blobcache_metrics()
     # TODO: Open this check when prefetch is fixed.
-    time.sleep(1)
     assert m["prefetch_data_amount"] != 0
 
     wg = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)

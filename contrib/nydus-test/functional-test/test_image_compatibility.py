@@ -10,6 +10,7 @@ import random
 from nydusd_client import NydusAPIClient
 import time
 
+
 @pytest.mark.skip(reason="Constantly failed for no reason.")
 @pytest.mark.parametrize("thread_cnt", [4])
 @pytest.mark.parametrize("compressor", [Compressor.LZ4_BLOCK, Compressor.NONE])
@@ -72,8 +73,8 @@ def test_prefetch_with_cache(
 
     nc = NydusAPIClient(rafs.get_apisock())
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_scratch_image.rootfs())
+    time.sleep(0.5)
     m = nc.get_blobcache_metrics()
-    time.sleep(0.3)
     assert m["prefetch_data_amount"] != 0
 
     workload_gen.verify_entire_fs()
