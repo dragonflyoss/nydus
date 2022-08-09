@@ -20,10 +20,7 @@ use std::cmp;
 use std::fs::File;
 use std::io::Result;
 use std::slice;
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Instant;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -175,12 +172,8 @@ pub trait BlobCache: Send + Sync {
     /// It should be paired with start_prefetch().
     fn stop_prefetch(&self) -> StorageResult<()>;
 
-    fn get_prefetch_state(&self) -> StorageResult<&AtomicU32>;
-
-    fn is_prefetch_active(&self) -> bool {
-        // Safe to unwrap since only dummy cache returns error
-        self.get_prefetch_state().unwrap().load(Ordering::Acquire) > 0
-    }
+    // Check whether data prefetch is still active.
+    fn is_prefetch_active(&self) -> bool;
 
     /// Execute filesystem data prefetch.
     fn prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {

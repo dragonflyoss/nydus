@@ -149,12 +149,12 @@ impl BlobCache for FileCacheEntry {
         self.blob_info.blob_id()
     }
 
-    fn blob_compressed_size(&self) -> Result<u64> {
-        Ok(self.blob_compressed_size)
-    }
-
     fn blob_uncompressed_size(&self) -> Result<u64> {
         Ok(self.blob_uncompressed_size)
+    }
+
+    fn blob_compressed_size(&self) -> Result<u64> {
+        Ok(self.blob_compressed_size)
     }
 
     fn compressor(&self) -> compress::Algorithm {
@@ -242,10 +242,6 @@ impl BlobCache for FileCacheEntry {
         Ok(())
     }
 
-    fn get_prefetch_state(&self) -> StorageResult<&AtomicU32> {
-        Ok(&self.prefetch_state)
-    }
-
     fn stop_prefetch(&self) -> StorageResult<()> {
         loop {
             let val = self.prefetch_state.load(Ordering::Acquire);
@@ -267,6 +263,10 @@ impl BlobCache for FileCacheEntry {
                 return Ok(());
             }
         }
+    }
+
+    fn is_prefetch_active(&self) -> bool {
+        self.prefetch_state.load(Ordering::Acquire) > 0
     }
 
     fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {
