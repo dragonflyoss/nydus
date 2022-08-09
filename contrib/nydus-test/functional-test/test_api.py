@@ -254,9 +254,9 @@ def test_api_mount_with_prefetch(
     )
 
     # Only one rafs mountpoint exists, so whether set rafs id or not is not important.
+    time.sleep(0.5)
     m = nc.get_blobcache_metrics()
-    # TODO this won't pass
-    # assert m["prefetch_data_amount"] != 0
+    assert m["prefetch_data_amount"] != 0
 
     wg = WorkloadGen(
         os.path.join(nydus_anchor.mount_point, "pseudo_fs_1"), nydus_image.rootfs()
