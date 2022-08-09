@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rs"
-version = "2.1.0-alpha2"
+version = "2.1.0-rc1"
 dependencies = [
  "anyhow",
  "base64",
