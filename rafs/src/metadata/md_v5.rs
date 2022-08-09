@@ -3,6 +3,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use storage::device::BlobChunkFlags;
+
 use super::cached_v5::CachedSuperBlockV5;
 use super::direct_v5::DirectSuperBlockV5;
 use super::layout::v5::{RafsV5PrefetchTable, RafsV5SuperBlock};
@@ -233,6 +235,53 @@ impl RafsSuper {
 
         Ok(())
     }
+}
+
+/// Represents backend storage chunked IO address for V5 since V5 format has to
+/// load below chunk address from rafs layer and pass it to storage layer.
+pub struct V5IoChunk {
+    // block hash
+    pub block_id: Arc<RafsDigest>,
+    // blob containing the block
+    pub blob_index: u32,
+    // chunk index in blob
+    pub index: u32,
+    // position of the block within the file
+    // offset of the block within the blob
+    pub compressed_offset: u64,
+    pub uncompressed_offset: u64,
+    // size of the block, compressed
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+    pub flags: BlobChunkFlags,
+}
+
+impl BlobChunkInfo for V5IoChunk {
+    fn chunk_id(&self) -> &RafsDigest {
+        &self.block_id
+    }
+
+    fn id(&self) -> u32 {
+        self.index
+    }
+
+    fn is_compressed(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::COMPRESSED)
+    }
+
+    fn is_hole(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::HOLECHUNK)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    impl_getter!(blob_index, blob_index, u32);
+    impl_getter!(compressed_offset, compressed_offset, u64);
+    impl_getter!(compressed_size, compressed_size, u32);
+    impl_getter!(uncompressed_offset, uncompressed_offset, u64);
+    impl_getter!(uncompressed_size, uncompressed_size, u32);
 }
 
 #[cfg(test)]

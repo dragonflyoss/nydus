@@ -44,9 +44,10 @@ use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{compress, ByteSize};
-use storage::device::{BlobFeatures, BlobIoDesc, BlobIoVec};
+use storage::device::{BlobChunkInfo, BlobFeatures, BlobIoChunk, BlobIoDesc, BlobIoVec};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER_VERSION_V5};
+use crate::metadata::md_v5::V5IoChunk;
 use crate::metadata::{
     Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
@@ -1304,9 +1305,21 @@ fn add_chunk_to_bio_desc(
         chunk.uncompressed_size() as u64
     };
 
+    let io_chunk = Arc::new(V5IoChunk {
+        // TODO: try to make `chunk_id` return Arc<RafsDigest> to get rid of potential memory copy
+        block_id: Arc::new(*chunk.chunk_id()),
+        blob_index: chunk.blob_index(),
+        index: chunk.index(),
+        compressed_offset: chunk.compressed_offset(),
+        uncompressed_offset: chunk.uncompressed_offset(),
+        compressed_size: chunk.compressed_size(),
+        uncompressed_size: chunk.uncompressed_size(),
+        flags: chunk.flags(),
+    }) as Arc<dyn BlobChunkInfo>;
+
     let bio = BlobIoDesc::new(
         blob,
-        chunk.into(),
+        BlobIoChunk::Base(io_chunk),
         chunk_start as u32,
         (chunk_end - chunk_start) as u32,
         user_io,
