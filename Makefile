@@ -3,13 +3,16 @@ all: build
 TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
-RUST_TARGET ?= $(shell uname -m)-unknown-linux-musl
+RUST_TARGET_STATIC ?= $(shell uname -m)-unknown-linux-musl
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
 
-FUSEDEV_COMMON = --target-dir ${current_dir}/target-fusedev --features=fusedev --release
-VIRIOFS_COMMON = --target-dir ${current_dir}/target-virtiofs --features=virtiofs --release
+CARGO_COMMON ?= 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+	CARGO_COMMON += --features=virtiofs
+endif
 
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 env_go_path := $(shell go env GOPATH 2> /dev/null)
@@ -36,18 +39,7 @@ define build_golang
 	fi
 endef
 
-# Build nydus respecting different features
-# $(1) is the specified feature. [fusedev, virtiofs]
-define build_nydus
-	${CARGO} build --features=$(1) --target-dir ${current_dir}/target-$(1) $(CARGO_BUILD_FLAGS)
-endef
-
-define static_check
-	# Cargo will skip checking if it is already checked
-	${CARGO} clippy --features=$(1) --workspace --bins --tests --target-dir ${current_dir}/target-$(1) -- -Dwarnings
-endef
-
-.PHONY: all .release_version .format .musl_target build release static-release fusedev-release virtiofs-release virtiofs fusedev
+.PHONY: all .release_version .format .musl_target build release static-release
 
 .release_version:
 	$(eval CARGO_BUILD_FLAGS += --release)
@@ -56,67 +48,48 @@ endef
 	${CARGO} fmt -- --check
 
 .musl_target:
-	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET})
+	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET_STATIC})
 
 # Targets that are exposed to developers and users.
-build: .format fusedev virtiofs
-release: fusedev-release virtiofs-release
-fusedev-release: .format .release_version fusedev
-virtiofs-release: .format .release_version virtiofs
-static-release: static-fusedev static-virtiofs
-static-fusedev: .musl_target .format .release_version fusedev
-static-virtiofs: .musl_target .format .release_version virtiofs
+build: .format
+	${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
+	# Cargo will skip checking if it is already checked
+	${CARGO} clippy $(CARGO_COMMON) --workspace --bins --tests -- -Dwarnings
 
-virtiofs:
-	# TODO: switch to --out-dir when it moves to stable
-	# For now we build with separate target directories
-	$(call build_nydus,$@,$@)
-	$(call static_check,$@,target-$@)
+release: .format .release_version build
 
-fusedev:
-	$(call build_nydus,$@,$@)
-	$(call static_check,$@,target-$@)
+static-release: .musl_target .format .release_version build
 
 clean:
 	${CARGO} clean
-	${CARGO} clean --target-dir ${current_dir}/target-virtiofs
-	${CARGO} clean --target-dir ${current_dir}/target-fusedev
 
-install: fusedev-release
-	@sudo install -D -m 755 target-fusedev/release/nydusd /usr/local/bin/nydusd
-	@sudo install -D -m 755 target-fusedev/release/nydus-image /usr/local/bin/nydus-image
-	@sudo install -D -m 755 target-fusedev/release/nydusctl /usr/local/bin/nydusctl
+install: release
+	@sudo install -D -m 755 target/release/nydusd /usr/local/bin/nydusd
+	@sudo install -D -m 755 target/release/nydus-image /usr/local/bin/nydus-image
+	@sudo install -D -m 755 target/release/nydusctl /usr/local/bin/nydusctl
 
-# If virtiofs test must be performed, only run binary part
-# Use same traget to avoid re-compile for differnt targets like gnu and musl
 ut:
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(FUSEDEV_COMMON) -- --skip integration --nocapture --test-threads=8
-# If virtiofs test must be performed, only run binary part since other package is not affected by feature - virtiofs
-# Use same traget to avoid re-compile for differnt targets like gnu and musl
-	RUST_BACKTRACE=1 ${CARGO} test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(CARGO_COMMON) -- --skip integration --nocapture --test-threads=8
+
+smoke: ut
+	# TODO: Put each test function into separated rs file.
+	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(CARGO_COMMON) -- --nocapture --test-threads=8
 
 macos-fusedev:
-	${CARGO} build --target ${RUST_TARGET} --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image
+	${CARGO} build --target ${RUST_TARGET_STATIC} --release --bin nydusctl --bin nydusd --bin nydus-image
 
 macos-ut:
-	${CARGO} clippy --target-dir ${current_dir}/target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings
+	${CARGO} clippy --bin nydusd --release --workspace -- -Dwarnings
 	echo "Testing packages: ${PACKAGES}"
-	$(foreach var,$(PACKAGES),${CARGO} test $(FUSEDEV_COMMON) -p $(var);)
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test $(FUSEDEV_COMMON) --bin nydusd -- --nocapture --test-threads=8
+	$(foreach var,$(PACKAGES),${CARGO} test $(CARGO_COMMON) -p $(var);)
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test $(CARGO_COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 docker-static:
-	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET} misc/musl-static
-	docker run --rm ${CARGO_BUILD_GEARS} -e RUST_TARGET=${RUST_TARGET} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
-
-# Run smoke test including general integration tests and unit tests in container.
-# Nydus binaries should already be prepared.
-smoke: ut
-	# No need to involve `clippy check` here as build from target `virtiofs` or `fusedev` always does so.
-	# TODO: Put each test function into separated rs file.
-	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(FUSEDEV_COMMON) -- --nocapture --test-threads=8
+	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/musl-static
+	docker run --rm ${CARGO_BUILD_GEARS} -e RUST_TARGET=${RUST_TARGET_STATIC} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
 
 docker-nydus-smoke:
-	docker build -t nydus-smoke --build-arg RUST_TARGET=${RUST_TARGET} misc/nydus-smoke
+	docker build -t nydus-smoke --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/nydus-smoke
 	docker run --rm --privileged ${CARGO_BUILD_GEARS} \
 		-e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) \
 		-v ~/.cargo:/root/.cargo \
@@ -196,8 +169,8 @@ all-contrib-test: nydusify-test ctr-remote-test \
 				nydus-overlayfs-test docker-nydus-graphdriver-test
 
 docker-example: all-static-release
-	cp ${current_dir}/target-fusedev/${RUST_TARGET}/release/nydusd misc/example
-	cp ${current_dir}/target-fusedev/${RUST_TARGET}/release/nydus-image misc/example
+	cp ${current_dir}/target/${RUST_TARGET_STATIC}/release/nydusd misc/example
+	cp ${current_dir}/target/${RUST_TARGET_STATIC}/release/nydus-image misc/example
 	cp contrib/nydusify/cmd/nydusify misc/example
 	docker build -t nydus-rs-example misc/example
 	@cid=$(shell docker run --rm -t -d --privileged $(dind_cache_mount) nydus-rs-example)

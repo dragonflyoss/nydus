@@ -102,7 +102,7 @@ impl Nydusd {
         spawn(move || {
             exec(
                 format!(
-                    "{} {} --config {:?} --apisock {:?} --mountpoint {:?} {} --log-level info --id {:?} --supervisor {:?}",
+                    "{} {} fuse --config {:?} --apisock {:?} --mountpoint {:?} {} --log-level info --id {:?} --supervisor {:?}",
                     nydusd,
                     upgrade_arg,
                     work_dir.join("config.json"),

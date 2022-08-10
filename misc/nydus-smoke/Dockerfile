@@ -9,4 +9,4 @@ RUN apt update && apt install -y tree
 
 WORKDIR /nydus-rs
 
-CMD make fusedev-release smoke
+CMD make release smoke
