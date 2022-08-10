@@ -29,7 +29,7 @@ fn load_param_interval(params: &Option<CommandParams>) -> Result<Option<u32>> {
     }
 }
 
-pub(crate) struct CommandBlobcache {}
+pub(crate) struct CommandCache {}
 
 macro_rules! items_map(
     { $($key:expr => $value:expr),+ } => {
@@ -48,7 +48,7 @@ lazy_static! {
         items_map!("log-level" => "log_level");
 }
 
-impl CommandBlobcache {
+impl CommandCache {
     pub async fn execute(
         &self,
         raw: bool,
