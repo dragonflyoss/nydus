@@ -6,6 +6,8 @@ import os
 import signal
 from typing import Tuple
 import io
+import string
+import random
 
 try:
     import psutil
@@ -321,7 +323,7 @@ def mess_file(path):
 
 
 # based on https://stackoverflow.com/a/42865957/2002471
-units = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}
+units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
 
 
 def parse_size(size):
@@ -623,3 +625,8 @@ def parse_stargz(stargz):
 
 def docker_image_repo(reference):
     return posixpath.basename(reference).split(":")[0]
+
+
+def random_string(l=64):
+    res = "".join(random.choices(string.ascii_uppercase + string.digits, k=l))
+    return res
