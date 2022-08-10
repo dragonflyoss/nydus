@@ -86,6 +86,7 @@ clean:
 install: fusedev-release
 	@sudo install -D -m 755 target-fusedev/release/nydusd /usr/local/bin/nydusd
 	@sudo install -D -m 755 target-fusedev/release/nydus-image /usr/local/bin/nydus-image
+	@sudo install -D -m 755 target-fusedev/release/nydusctl /usr/local/bin/nydusctl
 
 # If virtiofs test must be performed, only run binary part
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
