@@ -26,7 +26,7 @@ use nydus_utils::compress;
 use nydus_utils::digest::RafsDigest;
 
 use crate::backend::BlobReader;
-use crate::device::{BlobChunkInfo, BlobInfo, BlobIoChunk};
+use crate::device::{BlobChunkInfo, BlobInfo};
 use crate::utils::alloc_buf;
 
 const BLOB_METADATA_MAX_CHUNKS: u32 = 0xf_ffff;
@@ -425,7 +425,7 @@ impl BlobMetaInfo {
         start: u64,
         size: u64,
         batch_size: u64,
-    ) -> Result<Vec<BlobIoChunk>> {
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.uncompressed_size {
             return Err(einval!(format!(
@@ -509,7 +509,7 @@ impl BlobMetaInfo {
         start: u64,
         size: u64,
         batch_size: u64,
-    ) -> Result<Vec<BlobIoChunk>> {
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let end = start.checked_add(size).ok_or_else(|| einval!())?;
         if end > self.state.compressed_size {
             return Err(einval!(format!(
@@ -566,9 +566,9 @@ impl BlobMetaInfo {
     /// Try to amplify the request by appending more continuous chunks.
     pub fn add_more_chunks(
         &self,
-        chunks: &[BlobIoChunk],
+        chunks: &[Arc<dyn BlobChunkInfo>],
         max_size: u64,
-    ) -> Option<Vec<BlobIoChunk>> {
+    ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
         let infos = &*self.state.chunks;
         let mut index = chunks[chunks.len() - 1].id() as usize;
         debug_assert!(index < infos.len());
@@ -781,12 +781,12 @@ pub struct BlobMetaChunk {
 
 impl BlobMetaChunk {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new(chunk_index: usize, meta: &Arc<BlobMetaState>) -> BlobIoChunk {
+    pub(crate) fn new(chunk_index: usize, meta: &Arc<BlobMetaState>) -> Arc<dyn BlobChunkInfo> {
         debug_assert!(chunk_index <= u32::MAX as usize);
-        BlobIoChunk::Base(Arc::new(BlobMetaChunk {
+        Arc::new(BlobMetaChunk {
             chunk_index,
             meta: meta.clone(),
-        }) as Arc<dyn BlobChunkInfo>)
+        }) as Arc<dyn BlobChunkInfo>
     }
 }
 

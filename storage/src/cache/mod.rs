@@ -29,8 +29,7 @@ use nydus_utils::{compress, digest};
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::ChunkMap;
 use crate::device::{
-    BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject,
-    BlobPrefetchRequest,
+    BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, digest_check};
 use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
@@ -196,7 +195,7 @@ pub trait BlobCache: Send + Sync {
         &self,
         blob_offset: u64,
         blob_size: usize,
-        chunks: &[BlobIoChunk],
+        chunks: &[Arc<dyn BlobChunkInfo>],
         prefetch: bool,
     ) -> Result<Vec<Vec<u8>>> {
         // Read requested data from the backend by altogether.
@@ -244,7 +243,14 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
 
-            self.process_raw_chunk(chunk, buf, None, &mut buffer, chunk.is_compressed(), false)?;
+            self.process_raw_chunk(
+                chunk.as_ref(),
+                buf,
+                None,
+                &mut buffer,
+                chunk.is_compressed(),
+                false,
+            )?;
             buffers.push(buffer);
             last = offset + size as u64;
         }
@@ -260,7 +266,7 @@ pub trait BlobCache: Send + Sync {
     /// `raw_hook` provides caller a chance to read fetched compressed chunk data.
     fn read_raw_chunk(
         &self,
-        chunk: &BlobIoChunk,
+        chunk: &dyn BlobChunkInfo,
         buffer: &mut [u8],
         force_validation: bool,
         raw_hook: Option<&dyn Fn(&[u8])>,
@@ -292,7 +298,7 @@ pub trait BlobCache: Send + Sync {
         }
 
         self.process_raw_chunk(
-            chunk.as_base(),
+            chunk,
             raw_chunk,
             None,
             buffer,
