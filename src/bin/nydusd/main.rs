@@ -19,7 +19,6 @@ extern crate nydus_error;
 extern crate nydus_rafs as rafs;
 extern crate nydus_storage as storage;
 
-#[cfg(feature = "fusedev")]
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,9 +39,7 @@ use crate::service_controller::create_daemon;
 
 use nydus::ensure_threads;
 
-#[cfg(feature = "fusedev")]
 mod fusedev;
-#[cfg(feature = "virtiofs")]
 mod virtiofs;
 
 mod api_server_glue;
@@ -197,18 +194,12 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     DAEMON_CONTROLLER.shutdown();
 }
 
-#[cfg(feature = "virtiofs")]
-const SHARED_DIR_HELP_MESSAGE: &str = "Directory to share between host and guest by virtiofs, which also enables `passthroughfs` mode";
-
-#[cfg(feature = "fusedev")]
-const SHARED_DIR_HELP_MESSAGE: &str =
-    "Directory to share by FUSE for testing, which also enables `passthroughfs` mode";
+const SHARED_DIR_HELP_MESSAGE: &str = "Local directory to share via `passthroughfs` mode";
 
 pub fn thread_validator(v: String) -> std::result::Result<(), String> {
     ensure_threads(v).map(|_| ())
 }
 
-#[cfg(any(feature = "fusedev", feature = "virtiofs"))]
 fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     app.arg(
         Arg::with_name("bootstrap")
@@ -248,7 +239,6 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     )
 }
 
-#[cfg(feature = "fusedev")]
 fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
     app.arg(
         Arg::with_name("mountpoint")
@@ -287,7 +277,6 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
     )
 }
 
-#[cfg(feature = "fusedev")]
 fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
     let subcmd = SubCommand::with_name("fuse").about("Run as a dedicated FUSE server");
     let subcmd = append_fuse_options(subcmd);
@@ -295,7 +284,6 @@ fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'stati
     app.subcommand(subcmd)
 }
 
-#[cfg(feature = "virtiofs")]
 fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     app.arg(
         Arg::with_name("hybrid-mode")
@@ -315,12 +303,30 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
     )
 }
 
-#[cfg(feature = "virtiofs")]
 fn append_virtiofs_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
     let subcmd = SubCommand::with_name("virtiofs").about("Run as a dedicated virtiofs server");
     let subcmd = append_virtiofs_options(subcmd);
     let subcmd = append_fs_options(subcmd);
     app.subcommand(subcmd)
+}
+
+fn append_fscache_options(app: App<'static, 'static>) -> App<'static, 'static> {
+    app.arg(
+        Arg::with_name("fscache-tag")
+            .long("fscache-tag")
+            .help("Tag to identify the fscache daemon instance")
+            .takes_value(true)
+            .requires("fscache"),
+    )
+    .arg(
+        Arg::with_name("fscache-threads")
+            .long("fscache-threads")
+            .default_value("4")
+            .help("Number of working threads to serve fscache requests")
+            .takes_value(true)
+            .required(false)
+            .validator(thread_validator),
+    )
 }
 
 fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
@@ -329,27 +335,25 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
         .arg(
             Arg::with_name("fscache")
                 .long("fscache")
-                .short("F")
                 .help("Working directory for Linux fscache driver to store cached files")
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("fscache-tag")
-                .long("fscache-tag")
-                .help("Tag to identify the fscache daemon instance")
-                .takes_value(true)
-                .requires("fscache"),
+            Arg::with_name("fuse")
+                .long("fuse")
+                .help("Run as a dedicated FUSE server")
+                .takes_value(true),
         )
         .arg(
-            Arg::with_name("fscache-threads")
-                .long("fscache-threads")
-                .default_value("4")
-                .help("Number of working threads to serve fscache requests")
-                .takes_value(true)
-                .required(false)
-                .validator(thread_validator),
+            Arg::with_name("virtiofs")
+                .long("virtiofs")
+                .help("Run as a dedicated virtiofs server")
+                .takes_value(true),
         );
-
+    let subcmd = append_fscache_options(subcmd);
+    let subcmd = append_virtiofs_options(subcmd);
+    let subcmd = append_fuse_options(subcmd);
+    let subcmd = append_fs_options(subcmd);
     app.subcommand(subcmd)
 }
 
@@ -443,16 +447,11 @@ fn prepare_commandline_options() -> App<'static, 'static> {
                 .global(true),
         );
 
-    #[cfg(feature = "fusedev")]
     let cmdline = append_fuse_subcmd_options(cmdline);
-    #[cfg(feature = "virtiofs")]
     let cmdline = append_virtiofs_subcmd_options(cmdline);
 
-    #[cfg(feature = "fusedev")]
     let cmdline = append_fuse_options(cmdline);
-    #[cfg(feature = "virtiofs")]
     let cmdline = append_virtiofs_options(cmdline);
-    #[cfg(any(feature = "fusedev", feature = "virtiofs"))]
     let cmdline = append_fs_options(cmdline);
 
     append_services_subcmd_options(cmdline)
@@ -560,7 +559,6 @@ impl<'a> SubCmdArgs<'a> {
     }
 }
 
-#[cfg(any(feature = "fusedev", feature = "virtiofs"))]
 fn process_default_fs_service(
     args: SubCmdArgs,
     bti: BuildTimeInfo,
@@ -628,7 +626,6 @@ fn process_default_fs_service(
     let daemon_id = args.value_of("id").map(|id| id.to_string());
     let supervisor = args.value_of("supervisor").map(|s| s.to_string());
 
-    #[cfg(feature = "fusedev")]
     if is_fuse {
         // threads means number of fuse service threads
         let threads: u32 = args
@@ -676,10 +673,7 @@ fn process_default_fs_service(
             })?
         };
         DAEMON_CONTROLLER.set_daemon(daemon);
-    }
-
-    #[cfg(feature = "virtiofs")]
-    if !is_fuse {
+    } else if !is_fuse {
         let vu_sock = args.value_of("sock").ok_or_else(|| {
             DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
         })?;
@@ -690,18 +684,6 @@ fn process_default_fs_service(
     }
 
     Ok(())
-}
-
-#[cfg(not(any(feature = "fusedev", feature = "virtiofs")))]
-fn process_default_fs_service(
-    _args: SubCmdArgs,
-    _bti: BuildTimeInfo,
-    _apisock: Option<&str>,
-    _is_fuse: bool,
-) -> Result<()> {
-    return Err(einval!(
-        "Neither fusedev nor virtiofs is enabled, please recompile nydusd with required features!"
-    ));
 }
 
 fn process_daemon_arguments(
@@ -757,13 +739,15 @@ fn main() -> Result<()> {
             process_default_fs_service(subargs, bti, apisock, false)?;
         }
         _ => {
-            let subargs = SubCmdArgs::new(&args, &args);
-            #[cfg(feature = "fusedev")]
-            process_default_fs_service(subargs, bti, apisock, true)?;
-            #[cfg(feature = "virtiofs")]
-            process_default_fs_service(subargs, bti, apisock, false)?;
-            #[cfg(not(any(feature = "fusedev", feature = "virtiofs")))]
-            process_default_fs_service(subargs, bti, apisock, false)?;
+            // let subargs = SubCmdArgs::new(&args, &args);
+            // let run_mode = subargs.value_of("run-mode").unwrap();
+            // let mut is_fuse = false;
+            // if run_mode == "fusedev" {
+            //     is_fuse = true;
+            // }
+            // process_default_fs_service(subargs, bti, apisock, is_fuse)?;
+            info!("Please specify a run mode");
+            return Ok(());
         }
     }
 
