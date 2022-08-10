@@ -799,7 +799,7 @@ def test_build_image_param_blobid(
     """
     # More strict id check?
     nydus_image.set_backend(Backend.BACKEND_PROXY).set_param(
-        "blob-id", uuid.uuid4()
+        "blob-id", utils.random_string()
     ).create_image()
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
