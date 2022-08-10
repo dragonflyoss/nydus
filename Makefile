@@ -8,8 +8,7 @@ CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
 
-FUSEDEV_COMMON = --target-dir ${current_dir}/target-fusedev --features=fusedev --release
-VIRIOFS_COMMON = --target-dir ${current_dir}/target-virtiofs --features=virtiofs --release
+COMMON = --target-dir ${current_dir}/target --release
 
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 env_go_path := $(shell go env GOPATH 2> /dev/null)
@@ -36,15 +35,14 @@ define build_golang
 	fi
 endef
 
-# Build nydus respecting different features
-# $(1) is the specified feature. [fusedev, virtiofs]
+# Build nydus
 define build_nydus
-	${CARGO} build --features=$(1) --target-dir ${current_dir}/target-$(1) $(CARGO_BUILD_FLAGS)
+	${CARGO} build --target-dir ${current_dir}/target $(CARGO_BUILD_FLAGS)
 endef
 
 define static_check
 	# Cargo will skip checking if it is already checked
-	${CARGO} clippy --features=$(1) --workspace --bins --tests --target-dir ${current_dir}/target-$(1) -- -Dwarnings
+	${CARGO} clippy --workspace --bins --tests --target-dir ${current_dir}/target -- -Dwarnings
 endef
 
 .PHONY: all .release_version .format .musl_target build release static-release fusedev-release virtiofs-release virtiofs fusedev
@@ -59,50 +57,35 @@ endef
 	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET})
 
 # Targets that are exposed to developers and users.
-build: .format fusedev virtiofs
-release: fusedev-release virtiofs-release
-fusedev-release: .format .release_version fusedev
-virtiofs-release: .format .release_version virtiofs
-static-release: static-fusedev static-virtiofs
-static-fusedev: .musl_target .format .release_version fusedev
-static-virtiofs: .musl_target .format .release_version virtiofs
-
-virtiofs:
-	# TODO: switch to --out-dir when it moves to stable
-	# For now we build with separate target directories
-	$(call build_nydus,$@,$@)
-	$(call static_check,$@,target-$@)
-
-fusedev:
-	$(call build_nydus,$@,$@)
-	$(call static_check,$@,target-$@)
+build: .format
+	$(call build_nydus)
+	$(call static_check)
+release: .format .release_version build
+static-release: .musl_target .format .release_version build
 
 clean:
 	${CARGO} clean
-	${CARGO} clean --target-dir ${current_dir}/target-virtiofs
-	${CARGO} clean --target-dir ${current_dir}/target-fusedev
 
-install: fusedev-release
-	@sudo install -D -m 755 target-fusedev/release/nydusd /usr/local/bin/nydusd
-	@sudo install -D -m 755 target-fusedev/release/nydus-image /usr/local/bin/nydus-image
-	@sudo install -D -m 755 target-fusedev/release/nydusctl /usr/local/bin/nydusctl
+install: release
+	@sudo install -D -m 755 target/release/nydusd /usr/local/bin/nydusd
+	@sudo install -D -m 755 target/release/nydus-image /usr/local/bin/nydus-image
+	@sudo install -D -m 755 target/release/nydusctl /usr/local/bin/nydusctl
 
 # If virtiofs test must be performed, only run binary part
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
 ut:
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(FUSEDEV_COMMON) -- --skip integration --nocapture --test-threads=8
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(COMMON) -- --skip integration --nocapture --test-threads=8
 # If virtiofs test must be performed, only run binary part since other package is not affected by feature - virtiofs
 # Use same traget to avoid re-compile for differnt targets like gnu and musl
-	RUST_BACKTRACE=1 ${CARGO} test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
+	RUST_BACKTRACE=1 ${CARGO} test $(COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 macos-fusedev:
-	${CARGO} build --target ${RUST_TARGET} --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image
-
+	${CARGO} build --target ${RUST_TARGET} --target-dir ${current_dir}/target --release --bin nydusctl --bin nydusd --bin nydus-image
 macos-ut:
-	${CARGO} clippy --target-dir ${current_dir}/target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings
+	${CARGO} clippy --bin nydusd --target-dir ${current_dir}/target --release --workspace -- -Dwarnings
 	echo "Testing packages: ${PACKAGES}"
-	$(foreach var,$(PACKAGES),${CARGO} test $(FUSEDEV_COMMON) -p $(var);)
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test $(FUSEDEV_COMMON) --bin nydusd -- --nocapture --test-threads=8
+	$(foreach var,$(PACKAGES),${CARGO} test $(COMMON) -p $(var);)
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test $(COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 docker-static:
 	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET} misc/musl-static
@@ -113,7 +96,7 @@ docker-static:
 smoke: ut
 	# No need to involve `clippy check` here as build from target `virtiofs` or `fusedev` always does so.
 	# TODO: Put each test function into separated rs file.
-	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(FUSEDEV_COMMON) -- --nocapture --test-threads=8
+	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(COMMON) -- --nocapture --test-threads=8
 
 docker-nydus-smoke:
 	docker build -t nydus-smoke --build-arg RUST_TARGET=${RUST_TARGET} misc/nydus-smoke

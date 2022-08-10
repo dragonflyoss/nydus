@@ -70,8 +70,7 @@ env_logger = "0.8.2"
 rand = "0.8.5"
 
 [features]
-fusedev = ["fuse-backend-rs/fusedev"]
-virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings"]
+default = ["fuse-backend-rs/fusedev", "fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings"]
 
 [workspace]
 members = ["api", "app", "error", "rafs", "storage", "utils", "blobfs"]

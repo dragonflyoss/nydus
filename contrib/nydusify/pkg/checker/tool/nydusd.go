@@ -165,6 +165,7 @@ func (nydusd *Nydusd) Mount() error {
 	nydusd.Umount(true)
 
 	args := []string{
+		"fuse",
 		"--config",
 		nydusd.ConfigPath,
 		"--mountpoint",
