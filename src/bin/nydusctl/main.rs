@@ -22,7 +22,7 @@ mod client;
 mod commands;
 
 use commands::{
-    CommandBackend, CommandBlobcache, CommandDaemon, CommandFsStats, CommandMount, CommandUmount,
+    CommandBackend, CommandCache, CommandDaemon, CommandFsStats, CommandMount, CommandUmount,
 };
 
 #[tokio::main]
@@ -74,13 +74,13 @@ async fn main() -> Result<()> {
         .subcommand(
             SubCommand::with_name("metrics")
                 .about(
-                    "Query nydus metrics. Possible metrics category: fsstats; blobcache; backend",
+                    "Query nydus metrics. Possible metrics category: fsstats; cache; backend",
                 )
                 .arg(
                     Arg::with_name("category")
-                        .help("Show the category of metrics: blobcache, backend, fsstats")
+                        .help("Show the category of metrics: cache, backend, fsstats")
                         .required(true)
-                        .possible_values(&["blobcache", "backend", "fsstats"])
+                        .possible_values(&["cache", "backend", "fsstats"])
                         .takes_value(true)
                         .index(1),
                 )
@@ -169,8 +169,8 @@ async fn main() -> Result<()> {
             .map(|i| context.insert("interval".to_string(), i.to_string()));
 
         match category {
-            "blobcache" => {
-                let cmd = CommandBlobcache {};
+            "cache" => {
+                let cmd = CommandCache {};
                 cmd.execute(raw, &client, None).await?
             }
             "backend" => {
