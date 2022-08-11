@@ -3,19 +3,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Help library to manage network connections.
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Read;
-use std::io::Result;
+use std::io::{Read, Result};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use reqwest::header::HeaderMap;
 use reqwest::{
     self,
     blocking::{Body, Client, Response},
+    header::HeaderMap,
     redirect::Policy,
     Method, StatusCode, Url,
 };
@@ -23,6 +23,12 @@ use reqwest::{
 use nydus_api::http::{OssConfig, ProxyConfig, RegistryConfig};
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
+
+const RATE_LIMITED_LOG_TIME: u8 = 2;
+
+thread_local! {
+    pub static LAST_FALLBACK_AT: RefCell<SystemTime> = RefCell::new(UNIX_EPOCH);
+}
 
 /// Error codes related to network communication.
 #[derive(Debug)]
@@ -41,8 +47,8 @@ type ConnectionResult<T> = std::result::Result<T, ConnectionError>;
 pub(crate) struct ConnectionConfig {
     pub proxy: ProxyConfig,
     pub skip_verify: bool,
-    pub timeout: u64,
-    pub connect_timeout: u64,
+    pub timeout: u32,
+    pub connect_timeout: u32,
     pub retry_limit: u8,
 }
 
@@ -210,17 +216,33 @@ impl Connection {
                 thread::spawn(move || {
                     let proxy = conn.proxy.as_ref().unwrap();
                     let ping_url = proxy.health.ping_url.as_ref().unwrap();
+                    let mut last_success = true;
 
                     loop {
                         let client = Client::new();
                         let _ = client
                             .get(ping_url.clone())
-                            .timeout(Duration::from_secs(connect_timeout))
+                            .timeout(Duration::from_secs(connect_timeout as u64))
                             .send()
                             .map(|resp| {
-                                proxy.health.set(is_success_status(resp.status()));
+                                let success = is_success_status(resp.status());
+                                if last_success && !success {
+                                    warn!(
+                                    "Detected proxy unhealthy when pinging proxy, response status {}",
+                                    resp.status());
+                                } else if !last_success && success {
+                                    info!("Proxy recovered!")
+                                }
+                                last_success = success;
+                                proxy.health.set(success);
                             })
-                            .map_err(|_e| proxy.health.set(false));
+                            .map_err(|e| {
+                                if last_success {
+                                    warn!("Detected proxy unhealthy when ping proxy, {}", e);
+                                }
+                                last_success = false;
+                                proxy.health.set(false)
+                            });
 
                         if conn.shutdown.load(Ordering::Acquire) {
                             break;
@@ -290,7 +312,15 @@ impl Connection {
                 // fallback to origin server, the policy only applicable to non-upload operation
                 warn!("Request proxy server failed, fallback to original server");
             } else {
-                warn!("Proxy server is not healthy, fallback to original server");
+                LAST_FALLBACK_AT.with(|f| {
+                    let current = SystemTime::now();
+                    if current.duration_since(*f.borrow()).unwrap().as_secs()
+                        >= RATE_LIMITED_LOG_TIME as u64
+                    {
+                        warn!("Proxy server is not healthy, fallback to original server");
+                        f.replace(current);
+                    }
+                })
             }
         }
 
@@ -308,12 +338,12 @@ impl Connection {
 
     fn build_connection(proxy: &str, config: &ConnectionConfig) -> Result<Client> {
         let connect_timeout = if config.connect_timeout != 0 {
-            Some(Duration::from_secs(config.connect_timeout))
+            Some(Duration::from_secs(config.connect_timeout as u64))
         } else {
             None
         };
         let timeout = if config.timeout != 0 {
-            Some(Duration::from_secs(config.timeout))
+            Some(Duration::from_secs(config.timeout as u64))
         } else {
             None
         };

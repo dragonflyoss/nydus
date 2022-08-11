@@ -141,10 +141,10 @@ pub struct OssConfig {
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
-    pub timeout: u64,
+    pub timeout: u32,
     /// Drop the read request once http connection timeout, in seconds.
     #[serde(default = "default_http_timeout")]
-    pub connect_timeout: u64,
+    pub connect_timeout: u32,
     /// Retry count when read request failed.
     pub retry_limit: u8,
     /// Oss endpoint
@@ -176,10 +176,10 @@ pub struct RegistryConfig {
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
-    pub timeout: u64,
+    pub timeout: u32,
     /// Drop the read request once http connection timeout, in seconds.
     #[serde(default = "default_http_timeout")]
-    pub connect_timeout: u64,
+    pub connect_timeout: u32,
     /// Retry count when read request failed.
     pub retry_limit: u8,
     /// Registry http scheme, either 'http' or 'https'
@@ -932,7 +932,7 @@ fn default_http_scheme() -> String {
     "https".to_string()
 }
 
-fn default_http_timeout() -> u64 {
+fn default_http_timeout() -> u32 {
     5
 }
 
