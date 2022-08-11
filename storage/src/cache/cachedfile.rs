@@ -202,7 +202,8 @@ impl BlobCache for FileCacheEntry {
                 if let Some(meta) = self.meta.as_ref() {
                     if let Some(bm) = meta.get_blob_meta() {
                         let cki = BlobMetaChunk::new(chunk_index as usize, &bm.state);
-                        b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+                        // TODO: Improve the type conversion
+                        b.chunkinfo = BlobIoChunk::Base(cki);
                     } else {
                         warn!("failed to get blob.meta for prefetch");
                         fail = true;
@@ -279,7 +280,7 @@ impl BlobCache for FileCacheEntry {
             let mut buf = alloc_buf(d_size);
 
             for c in range.chunks.iter() {
-                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_base()) {
+                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_ref()) {
                     // The chunk is ready, so skip it.
                     continue;
                 }
@@ -287,12 +288,12 @@ impl BlobCache for FileCacheEntry {
                 // For digested chunk map, we must check whether the cached data is valid because
                 // the digested chunk map cannot persist readiness state.
                 let d_size = c.uncompressed_size() as usize;
-                match self.read_raw_chunk(c, &mut buf[0..d_size], true, None) {
+                match self.read_raw_chunk(c.as_ref(), &mut buf[0..d_size], true, None) {
                     Ok(_v) => {
                         // The cached data is valid, set the chunk as ready.
                         let _ = self
                             .chunk_map
-                            .set_ready_and_clear_pending(c.as_base())
+                            .set_ready_and_clear_pending(c.as_ref())
                             .map_err(|e| error!("Failed to set chunk ready: {:?}", e));
                     }
                     Err(_e) => {
@@ -303,7 +304,7 @@ impl BlobCache for FileCacheEntry {
             }
         } else {
             for c in range.chunks.iter() {
-                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_base()) {
+                if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_ref()) {
                     // The chunk is ready, so skip it.
                     continue;
                 } else {
@@ -339,16 +340,18 @@ impl BlobCache for FileCacheEntry {
                         };
                         match Self::persist_chunk(&self.file, offset, &v[idx - start]) {
                             Ok(_) => {
-                                let _ = self.chunk_map.set_ready_and_clear_pending(&pending[idx]);
+                                let _ = self
+                                    .chunk_map
+                                    .set_ready_and_clear_pending(pending[idx].as_ref());
                             }
-                            Err(_) => self.chunk_map.clear_pending(&pending[idx]),
+                            Err(_) => self.chunk_map.clear_pending(pending[idx].as_ref()),
                         }
                     }
                 }
                 Err(_e) => {
                     // Clear the pending flag for all chunks in processing.
                     for chunk in &mut pending[start..=end] {
-                        self.chunk_map.clear_pending(chunk);
+                        self.chunk_map.clear_pending(chunk.as_ref());
                     }
                 }
             }
@@ -366,11 +369,12 @@ impl BlobCache for FileCacheEntry {
 
         if let Some(meta) = self.meta.as_ref() {
             if let Some(bm) = meta.get_blob_meta() {
-                // Convert `BlocIoChunk::Address` to `BlobIoChunk::Base`.
+                // Convert `BlocIoChunk::Address` to `BlobIoChunk::Base` since rafs v6 has no chunks' meta
+                // in bootstrap.
                 for b in iovec.bi_vec.iter_mut() {
                     if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
-                        let cki = BlobMetaChunk::new(chunk_index as usize, &bm.state);
-                        b.chunkinfo = BlobIoChunk::Base(Arc::new(cki));
+                        b.chunkinfo =
+                            BlobIoChunk::Base(BlobMetaChunk::new(chunk_index as usize, &bm.state));
                     }
                 }
             } else {
@@ -427,14 +431,19 @@ impl BlobObject for FileCacheEntry {
             return Ok(0);
         }
 
-        let mut ready_or_pending =
-            matches!(self.chunk_map.is_ready_or_pending(&chunks[0]), Ok(true));
+        let mut ready_or_pending = matches!(
+            self.chunk_map.is_ready_or_pending(chunks[0].as_ref()),
+            Ok(true)
+        );
         for idx in 1..chunks.len() {
             if chunks[idx - 1].id() + 1 != chunks[idx].id() {
                 return Err(einval!("chunks for fetch_chunks() must be continuous"));
             }
             if ready_or_pending
-                && !matches!(self.chunk_map.is_ready_or_pending(&chunks[idx]), Ok(true))
+                && !matches!(
+                    self.chunk_map.is_ready_or_pending(chunks[idx].as_ref()),
+                    Ok(true)
+                )
             {
                 ready_or_pending = false;
             }
@@ -462,13 +471,13 @@ impl BlobObject for FileCacheEntry {
 }
 
 impl FileCacheEntry {
-    fn do_fetch_chunks(&self, chunks: &[BlobIoChunk], prefetch: bool) -> Result<usize> {
+    fn do_fetch_chunks(&self, chunks: &[Arc<dyn BlobChunkInfo>], prefetch: bool) -> Result<usize> {
         if self.is_stargz() {
             // FIXME: for stargz, we need to implement fetching multiple chunks. here
             // is a heavy overhead workaround, needs to be optimized.
             for chunk in chunks {
                 let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                self.read_raw_chunk(chunk, &mut buf, false, None)
+                self.read_raw_chunk(chunk.as_ref(), &mut buf, false, None)
                     .map_err(|e| {
                         eio!(format!(
                             "read_raw_chunk failed to read and decompress stargz chunk, {:?}",
@@ -487,7 +496,7 @@ impl FileCacheEntry {
                     },
                 )?;
                 self.chunk_map
-                    .set_ready_and_clear_pending(chunk.as_base())
+                    .set_ready_and_clear_pending(chunk.as_ref())
                     .unwrap_or_else(|e| error!("set stargz chunk ready failed, {}", e));
             }
             return Ok(0);
@@ -621,7 +630,7 @@ impl FileCacheEntry {
 
         trace!("dispatch single io range {:?}", req);
         for (i, chunk) in req.chunks.iter().enumerate() {
-            let is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_base()) {
+            let is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
                 Ok(true) => true,
                 Ok(false) => false,
                 Err(StorageError::Timeout) => false, // Retry if waiting for inflight IO timeouts
@@ -666,7 +675,7 @@ impl FileCacheEntry {
                     state.commit();
                     // On slow path, don't try to handle internal(read amplification) IO.
                     if !is_ready {
-                        self.chunk_map.clear_pending(chunk.as_base());
+                        self.chunk_map.clear_pending(chunk.as_ref());
                     }
                 }
             } else {
@@ -718,7 +727,7 @@ impl FileCacheEntry {
                 c.uncompressed_size() - user_offset,
                 region.seg.len - total_read as u32,
             );
-            total_read += self.read_single_chunk(c, user_offset, size, cursor)?;
+            total_read += self.read_single_chunk(c.clone(), user_offset, size, cursor)?;
         }
 
         Ok(total_read)
@@ -730,7 +739,7 @@ impl FileCacheEntry {
         } else if !region.has_user_io() {
             debug!("No user data");
             for c in &region.chunks {
-                self.chunk_map.clear_pending(c.as_base());
+                self.chunk_map.clear_pending(c.as_ref());
             }
             return Ok(0);
         }
@@ -777,7 +786,7 @@ impl FileCacheEntry {
         Ok(total_read)
     }
 
-    fn delay_persist(&self, chunk_info: BlobIoChunk, buffer: Arc<DataBuffer>) {
+    fn delay_persist(&self, chunk_info: Arc<dyn BlobChunkInfo>, buffer: Arc<DataBuffer>) {
         let delayed_chunk_map = self.chunk_map.clone();
         let file = self.file.clone();
         let offset = if self.is_compressed {
@@ -792,7 +801,7 @@ impl FileCacheEntry {
             metrics.buffered_backend_size.sub(buffer.size() as u64);
             match Self::persist_chunk(&file, offset, buffer.slice()) {
                 Ok(_) => delayed_chunk_map
-                    .set_ready_and_clear_pending(chunk_info.as_base())
+                    .set_ready_and_clear_pending(chunk_info.as_ref())
                     .unwrap_or_else(|e| {
                         error!(
                             "Failed change caching state for chunk of offset {}, {:?}",
@@ -806,7 +815,7 @@ impl FileCacheEntry {
                         chunk_info.compressed_offset(),
                         e
                     );
-                    delayed_chunk_map.clear_pending(chunk_info.as_base())
+                    delayed_chunk_map.clear_pending(chunk_info.as_ref())
                 }
             }
         });
@@ -842,14 +851,14 @@ impl FileCacheEntry {
 
     fn read_single_chunk(
         &self,
-        chunk: &BlobIoChunk,
+        chunk: Arc<dyn BlobChunkInfo>,
         user_offset: u32,
         size: u32,
         mem_cursor: &mut MemSliceCursor,
     ) -> Result<usize> {
         debug!("single bio, blob offset {}", chunk.compressed_offset());
 
-        let is_ready = self.chunk_map.is_ready(chunk.as_base())?;
+        let is_ready = self.chunk_map.is_ready(chunk.as_ref())?;
         let buffer_holder;
         let d_size = chunk.uncompressed_size() as usize;
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
@@ -859,10 +868,9 @@ impl FileCacheEntry {
         // - chunk data validation is enabled.
         // - digested or dummy chunk map is used.
         let try_cache = is_ready || (!self.is_stargz && !self.is_direct_chunkmap);
-        let buffer = if try_cache && self.read_file_cache(chunk, d.mut_slice()).is_ok() {
+        let buffer = if try_cache && self.read_file_cache(chunk.as_ref(), d.mut_slice()).is_ok() {
             self.metrics.whole_hits.inc();
-            self.chunk_map
-                .set_ready_and_clear_pending(chunk.as_base())?;
+            self.chunk_map.set_ready_and_clear_pending(chunk.as_ref())?;
             trace!(
                 "recover blob cache {} {} offset {} size {}",
                 chunk.id(),
@@ -872,7 +880,7 @@ impl FileCacheEntry {
             );
             &d
         } else if !self.is_compressed {
-            self.read_raw_chunk(chunk, d.mut_slice(), false, None)?;
+            self.read_raw_chunk(chunk.as_ref(), d.mut_slice(), false, None)?;
             buffer_holder = Arc::new(d.convert_to_owned_buffer());
             self.delay_persist(chunk.clone(), buffer_holder.clone());
             buffer_holder.as_ref()
@@ -884,15 +892,20 @@ impl FileCacheEntry {
             ) {
                 Ok(_) => {
                     self.chunk_map
-                        .set_ready_and_clear_pending(chunk.as_base())
+                        .set_ready_and_clear_pending(chunk.as_ref())
                         .unwrap_or_else(|e| error!("set ready failed, {}", e));
                 }
                 Err(e) => {
                     error!("Failed in writing compressed blob cache index, {}", e);
-                    self.chunk_map.clear_pending(chunk.as_base())
+                    self.chunk_map.clear_pending(chunk.as_ref())
                 }
             };
-            self.read_raw_chunk(chunk, d.mut_slice(), false, Some(&persist_compressed))?;
+            self.read_raw_chunk(
+                chunk.as_ref(),
+                d.mut_slice(),
+                false,
+                Some(&persist_compressed),
+            )?;
             &d
         };
 
@@ -915,7 +928,7 @@ impl FileCacheEntry {
         Ok(read_size)
     }
 
-    fn read_file_cache(&self, chunk: &BlobIoChunk, buffer: &mut [u8]) -> Result<()> {
+    fn read_file_cache(&self, chunk: &dyn BlobChunkInfo, buffer: &mut [u8]) -> Result<()> {
         let offset = if self.is_compressed {
             chunk.compressed_offset()
         } else {
@@ -1068,7 +1081,7 @@ struct Region {
     // For debug and trace purpose implying how many chunks are concatenated
     count: u32,
 
-    chunks: Vec<BlobIoChunk>,
+    chunks: Vec<Arc<dyn BlobChunkInfo>>,
     tags: Vec<bool>,
 
     // The range [blob_address, blob_address + blob_len) specifies data to be read from backend.
@@ -1097,7 +1110,7 @@ impl Region {
         start: u64,
         len: u32,
         tag: BlobIoTag,
-        chunk: Option<BlobIoChunk>,
+        chunk: Option<Arc<dyn BlobChunkInfo>>,
     ) -> StorageResult<()> {
         debug_assert!(self.status != RegionStatus::Committed);
 
@@ -1160,7 +1173,7 @@ impl FileIoMergeState {
         start: u64,
         len: u32,
         tag: BlobIoTag,
-        chunk: Option<BlobIoChunk>,
+        chunk: Option<Arc<dyn BlobChunkInfo>>,
     ) -> Result<()> {
         if self.regions.is_empty() || !self.joinable(region_type) {
             self.regions.push(Region::new(region_type));

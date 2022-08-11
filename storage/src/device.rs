@@ -411,11 +411,8 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 #[derive(Clone)]
 pub enum BlobIoChunk {
     // For rafs v6 to pass chunk info to storage module.
-    // (blob_index, chunk_index)
+    // (blob_index, chunk_index) since it can't load chunks info from bootstrap
     Address(u32, u32),
-    // TODO: `Address` is is always converted to `Base` for v6, it is a little confusing.
-    // Try to avoid the value conversion? Maybe, we can just use trait object `BlobChunkInfo`
-    // in the storage module rather than `BlobIoChunk`, it makes data conversion complicated.
     Base(Arc<dyn BlobChunkInfo>),
 }
 
@@ -423,9 +420,16 @@ impl BlobIoChunk {
     /// Convert a [BlobIoChunk] to a reference to [BlobChunkInfo] trait object.
     pub fn as_base(&self) -> &(dyn BlobChunkInfo) {
         match self {
-            BlobIoChunk::Base(v) => &**v,
-            // BlobIoChunk::V5(v) => v.as_base(),
-            _ => panic!(),
+            BlobIoChunk::Base(v) => v.as_ref(),
+            _ => panic!("Chunk is not fully loaded"),
+        }
+    }
+
+    pub fn inner(&self) -> Arc<dyn BlobChunkInfo> {
+        match self {
+            BlobIoChunk::Base(v) => v.clone(),
+            // TODO: Don't panic?
+            _ => panic!("Chunk is not fully loaded"),
         }
     }
 }
@@ -729,7 +733,7 @@ pub struct BlobIoRange {
     pub blob_info: Arc<BlobInfo>,
     pub blob_offset: u64,
     pub blob_size: u64,
-    pub chunks: Vec<BlobIoChunk>,
+    pub chunks: Vec<Arc<dyn BlobChunkInfo>>,
     pub tags: Vec<BlobIoTag>,
 }
 
@@ -754,7 +758,7 @@ impl BlobIoRange {
         let mut chunks = Vec::with_capacity(capacity);
         let mut tags = Vec::with_capacity(capacity);
         tags.push(Self::tag_from_desc(bio));
-        chunks.push(bio.chunkinfo.clone());
+        chunks.push(bio.chunkinfo.inner());
 
         BlobIoRange {
             blob_info: bio.blob.clone(),
@@ -768,7 +772,7 @@ impl BlobIoRange {
     /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
     pub fn merge(&mut self, bio: &BlobIoDesc) {
         self.tags.push(Self::tag_from_desc(bio));
-        self.chunks.push(bio.chunkinfo.clone());
+        self.chunks.push(bio.chunkinfo.inner());
         debug_assert!(
             self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compressed_offset())
         );
