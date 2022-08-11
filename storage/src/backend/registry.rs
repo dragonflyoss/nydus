@@ -196,7 +196,7 @@ impl RegistryState {
                 auth.realm.as_str(),
                 Some(&query),
                 Some(ReqBody::Form(form)),
-                headers,
+                &mut headers,
                 true,
             )
             .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
@@ -336,14 +336,14 @@ impl RegistryReader {
         if let Some(data) = data {
             return self
                 .connection
-                .call(method, url, None, Some(data), headers, catch_status)
+                .call(method, url, None, Some(data), &mut headers, catch_status)
                 .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
         let resp = self
             .connection
-            .call::<&[u8]>(method.clone(), url, None, None, headers.clone(), false)
+            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
             .map_err(RegistryError::Request)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
@@ -361,7 +361,7 @@ impl RegistryReader {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .connection
-                        .call(method, url, None, data, headers, catch_status)
+                        .call(method, url, None, data, &mut headers, catch_status)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -415,7 +415,7 @@ impl RegistryReader {
                     cached_redirect.as_str(),
                     None,
                     None,
-                    headers,
+                    &mut headers,
                     false,
                 )
                 .map_err(RegistryError::Request)?;
@@ -466,7 +466,14 @@ impl RegistryReader {
                     }
                     let resp_ret = self
                         .connection
-                        .call::<&[u8]>(Method::GET, location.as_str(), None, None, headers, true)
+                        .call::<&[u8]>(
+                            Method::GET,
+                            location.as_str(),
+                            None,
+                            None,
+                            &mut headers,
+                            true,
+                        )
                         .map_err(RegistryError::Request);
                     match resp_ret {
                         Ok(_resp) => {
