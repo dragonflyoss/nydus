@@ -58,11 +58,8 @@ jobs:
                  --fs-version 5
 
             sudo rm -rf ./tmp
-            echo "{\"host\": \"localhost:5000\", \"repo\": \"${I}\", \"scheme\": \"http\"}" > backend.json
-            cat backend.json
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
-                --target localhost:5000/$I:nydus-nightly-v5 \
-                --backend-config-file ./backend.json --backend-type registry
+                --target localhost:5000/$I:nydus-nightly-v5
           done
       - name: Convert and check RAFS v6 images
         run: |
@@ -81,11 +78,8 @@ jobs:
                  --fs-version 6
 
             sudo rm -rf ./tmp
-            echo "{\"host\": \"localhost:5000\", \"repo\": \"${I}\", \"scheme\": \"http\"}" > backend.json
-            cat backend.json
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
-                --target localhost:5000/$I:nydus-nightly-v6 \
-                --backend-config-file ./backend.json --backend-type registry
+                --target localhost:5000/$I:nydus-nightly-v6
 
             sudo fsck.erofs -d1 output/nydus_bootstrap
             sudo rm -rf ./output

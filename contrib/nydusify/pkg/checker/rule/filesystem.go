@@ -5,16 +5,20 @@
 package rule
 
 import (
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"syscall"
 
+	dockerconfig "github.com/docker/cli/cli/config"
+	"github.com/docker/distribution/reference"
+
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
-
 	"github.com/pkg/errors"
 	"github.com/pkg/xattr"
 	"github.com/sirupsen/logrus"
@@ -27,6 +31,8 @@ type FilesystemRule struct {
 	NydusdConfig    tool.NydusdConfig
 	Source          string
 	SourceMountPath string
+	Target          string
+	TargetInsecure  bool
 }
 
 // Node records file metadata and file data hash.
@@ -41,6 +47,13 @@ type Node struct {
 	Mtime   syscall.Timespec
 	Xattrs  map[string][]byte
 	Hash    []byte
+}
+
+type RegistryBackendConfig struct {
+	Scheme string `json:"scheme"`
+	Host   string `json:"host"`
+	Repo   string `json:"repo"`
+	Auth   string `json:"auth,omitempty"`
 }
 
 func (node *Node) String() string {
@@ -177,6 +190,42 @@ func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 
 	if err := os.MkdirAll(rule.NydusdConfig.MountPath, 0755); err != nil {
 		return nil, errors.Wrap(err, "create mountpoint directory of Nydus image")
+	}
+
+	parsed, err := reference.ParseNormalizedNamed(rule.Target)
+	if err != nil {
+		return nil, err
+	}
+
+	host := reference.Domain(parsed)
+	repo := reference.Path(parsed)
+	if rule.NydusdConfig.BackendType == "" {
+		rule.NydusdConfig.BackendType = "registry"
+
+		if rule.NydusdConfig.BackendConfig == "" {
+			config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
+			authConfig, err := config.GetAuthConfig(host)
+			if err != nil {
+				return nil, errors.Wrap(err, "get docker registry auth config")
+			}
+
+			var auth, scheme string
+			if authConfig.Username != "" && authConfig.Password != "" {
+				auth = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", authConfig.Username, authConfig.Password)))
+			}
+			if rule.TargetInsecure {
+				scheme = "http"
+			} else {
+				scheme = "https"
+			}
+
+			backendConfig := RegistryBackendConfig{scheme, host, repo, auth}
+			bytes, err := json.Marshal(backendConfig)
+			if err != nil {
+				return nil, errors.Wrap(err, "parse registry backend config")
+			}
+			rule.NydusdConfig.BackendConfig = string(bytes)
+		}
 	}
 
 	nydusd, err := tool.NewNydusd(rule.NydusdConfig)

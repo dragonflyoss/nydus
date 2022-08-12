@@ -22,6 +22,15 @@ func testBasicConvert(t *testing.T, fsVersion string) {
 	nydusify.Check(t)
 }
 
+func testBasicAuth(t *testing.T, fsVersion string) {
+	registry := NewAuthRegistry(t)
+	defer registry.Destroy(t)
+	registry.AuthBuild(t, "image-basic")
+	nydusify := NewNydusify(registry, "image-basic", "image-basic-nydus", "", "", fsVersion)
+	nydusify.Convert(t)
+	nydusify.Check(t)
+}
+
 func testReproducableBuild(t *testing.T, fsVersion string) {
 	registry := NewRegistry(t)
 	registry.Build(t, "image-basic")
@@ -104,6 +113,7 @@ func testConvertWithChunkDict(t *testing.T, fsVersion string) {
 func TestSmoke(t *testing.T) {
 	fsVersions := [2]string{"5", "6"}
 	for _, v := range fsVersions {
+		testBasicAuth(t, v)
 		testBasicConvert(t, v)
 		testReproducableBuild(t, v)
 		testConvertWithCache(t, v)
