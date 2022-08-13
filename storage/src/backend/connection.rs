@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use log::{max_level, Level};
+
 use reqwest::{
     self,
     blocking::{Body, Client, Response},
@@ -228,10 +230,11 @@ impl Connection {
                                 let success = is_success_status(resp.status());
                                 if last_success && !success {
                                     warn!(
-                                    "Detected proxy unhealthy when pinging proxy, response status {}",
-                                    resp.status());
+                                        "Detected proxy unhealthy when pinging proxy, response status {}",
+                                        resp.status()
+                                    );
                                 } else if !last_success && success {
-                                    info!("Proxy recovered!")
+                                    info!("Backend proxy recovered")
                                 }
                                 last_success = success;
                                 proxy.health.set(success);
@@ -271,7 +274,7 @@ impl Connection {
         url: &str,
         query: Option<&[(&str, &str)]>,
         data: Option<ReqBody<R>>,
-        headers: HeaderMap,
+        headers: &mut HeaderMap,
         catch_status: bool,
     ) -> ConnectionResult<Response> {
         if self.shutdown.load(Ordering::Acquire) {
@@ -291,7 +294,7 @@ impl Connection {
                     url,
                     &query,
                     data_cloned,
-                    headers.clone(),
+                    headers,
                     catch_status,
                     true,
                 );
@@ -372,19 +375,22 @@ impl Connection {
         url: &str,
         query: &Option<&[(&str, &str)]>,
         data: Option<ReqBody<R>>,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         catch_status: bool,
         proxy: bool,
     ) -> ConnectionResult<Response> {
-        let display_headers = {
+        // Only clone header when debugging to reduce potential overhead.
+        let display_headers = if max_level() >= Level::Debug {
             let mut display_headers = headers.clone();
             display_headers.remove(HEADER_AUTHORIZATION);
-            display_headers
+            Some(display_headers)
+        } else {
+            None
         };
         let has_data = data.is_some();
         let start = Instant::now();
 
-        let mut rb = client.request(method.clone(), url).headers(headers);
+        let mut rb = client.request(method.clone(), url).headers(headers.clone());
         if let Some(q) = query.as_ref() {
             rb = rb.query(q);
         }
