@@ -605,7 +605,6 @@ impl StargzBuilder {
         let mut header = BlobMetaHeaderOndisk::default();
         header.set_4k_aligned(true);
 
-        blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
         blob_ctx.blob_meta_header = header;
@@ -714,16 +713,11 @@ impl Builder for StargzBuilder {
         )?;
 
         // Generate node chunks and digest
-        let mut blob_ctx = BlobContext::new(
-            ctx.blob_id.clone(),
-            ctx.blob_storage.clone(),
-            0,
-            ctx.inline_bootstrap,
-        )?;
+        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0);
         self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
 
         // Dump blob meta
-        Blob::dump_meta_data(ctx, &mut blob_ctx)?;
+        Blob::dump_meta_data(ctx, &mut blob_ctx, &mut None)?;
         if blob_ctx.uncompressed_blob_size > 0 {
             blob_mgr.add(blob_ctx);
         }

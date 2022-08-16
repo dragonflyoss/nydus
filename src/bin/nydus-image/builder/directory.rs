@@ -12,7 +12,7 @@ use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
-    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
@@ -144,44 +144,27 @@ impl Builder for DirectoryBuilder {
             "build_bootstrap"
         )?;
 
-        // Dump blob file
-        let mut blob_ctx = BlobContext::new(
-            ctx.blob_id.clone(),
-            ctx.blob_storage.clone(),
-            ctx.blob_offset,
-            ctx.inline_bootstrap,
-        )?;
-        blob_ctx.set_chunk_dict(blob_mgr.get_chunk_dict());
-        blob_ctx.set_chunk_size(ctx.chunk_size);
-        blob_ctx.set_meta_info_enabled(ctx.fs_version.is_v6());
-        blob_mgr.extend_blob_table_from_chunk_dict(ctx)?;
+        let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
+            Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?)
+        } else {
+            None
+        };
 
-        let blob_index = blob_mgr.alloc_index()?;
+        // Dump blob file
         let mut blob = Blob::new();
-        let blob_exists = timing_tracer!(
-            {
-                blob.dump(
-                    ctx,
-                    &mut blob_ctx,
-                    blob_index,
-                    &mut bootstrap_ctx.nodes,
-                    &mut blob_mgr.layered_chunk_dict,
-                )
-            },
+        timing_tracer!(
+            { blob.dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
             "dump_blob"
         )?;
 
-        // Safe to unwrap because we ensured the writer exists.
-        let mut blob_writer = blob_ctx.writer.take().unwrap();
-        let blob_id = blob_ctx.blob_id();
-        if blob_exists {
-            if ctx.inline_bootstrap {
-                blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
-            } else {
-                blob_writer.finalize(blob_id.clone())?;
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            if let Some(blob_writer) = &mut blob_writer {
+                if ctx.inline_bootstrap {
+                    blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
+                } else {
+                    blob_writer.finalize(blob_ctx.blob_id())?;
+                }
             }
-            // Add new blob to blob table.
-            blob_mgr.add(blob_ctx);
         }
 
         // Dump bootstrap file
@@ -189,10 +172,12 @@ impl Builder for DirectoryBuilder {
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
 
         if ctx.inline_bootstrap {
-            let bootstrap_data = bootstrap_ctx.writer.data();
-            blob_writer.write_all(bootstrap_data)?;
-            blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, bootstrap_data.len() as u64)?;
-            blob_writer.finalize(blob_id)?;
+            if let Some(blob_writer) = &mut blob_writer {
+                let bootstrap_data = bootstrap_ctx.writer.data();
+                blob_writer.write_all(bootstrap_data)?;
+                blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, bootstrap_data.len() as u64)?;
+                blob_writer.finalize(Some(ctx.blob_id.clone()))?;
+            }
         }
 
         BuildOutput::new(blob_mgr, bootstrap_mgr)

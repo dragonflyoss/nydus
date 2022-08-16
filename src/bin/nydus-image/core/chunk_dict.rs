@@ -25,7 +25,7 @@ pub trait ChunkDict: Sync + Send + 'static {
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
     fn get_blobs_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo>;
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
-    fn get_real_blob_idx(&self, inner_idx: u32) -> u32;
+    fn get_real_blob_idx(&self, inner_idx: u32) -> Option<u32>;
 }
 
 impl ChunkDict for () {
@@ -47,8 +47,8 @@ impl ChunkDict for () {
         panic!("()::set_real_blob_idx() should not be invoked");
     }
 
-    fn get_real_blob_idx(&self, inner_idx: u32) -> u32 {
-        inner_idx
+    fn get_real_blob_idx(&self, inner_idx: u32) -> Option<u32> {
+        Some(inner_idx)
     }
 }
 
@@ -85,13 +85,8 @@ impl ChunkDict for HashChunkDict {
         self.blob_idx_m.lock().unwrap().insert(inner_idx, out_idx);
     }
 
-    fn get_real_blob_idx(&self, inner_idx: u32) -> u32 {
-        *self
-            .blob_idx_m
-            .lock()
-            .unwrap()
-            .get(&inner_idx)
-            .unwrap_or(&inner_idx)
+    fn get_real_blob_idx(&self, inner_idx: u32) -> Option<u32> {
+        self.blob_idx_m.lock().unwrap().get(&inner_idx).copied()
     }
 }
 
@@ -189,7 +184,7 @@ mod tests {
         dict.add_chunk(chunk.clone());
         assert!(dict.get_chunk(chunk.id()).is_none());
         assert_eq!(dict.get_blobs().len(), 0);
-        assert_eq!(dict.get_real_blob_idx(5), 5);
+        assert_eq!(dict.get_real_blob_idx(5).unwrap(), 5);
     }
 
     #[test]
@@ -203,7 +198,7 @@ mod tests {
         assert!(dict.get_chunk(&RafsDigest::default()).is_none());
         assert_eq!(dict.get_blobs().len(), 18);
         dict.set_real_blob_idx(0, 10);
-        assert_eq!(dict.get_real_blob_idx(0), 10);
-        assert_eq!(dict.get_real_blob_idx(1), 1);
+        assert_eq!(dict.get_real_blob_idx(0), Some(10));
+        assert_eq!(dict.get_real_blob_idx(1), None);
     }
 }

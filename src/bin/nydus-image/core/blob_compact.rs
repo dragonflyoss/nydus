@@ -21,8 +21,8 @@ use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
 use crate::core::context::{
-    ArtifactStorage, BlobContext, BlobManager, BootstrapManager, BuildContext, BuildOutput,
-    RafsVersion, SourceType,
+    ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
+    BuildOutput, RafsVersion, SourceType,
 };
 use crate::core::node::{ChunkWrapper, Node, WhiteoutSpec};
 use crate::core::tree::Tree;
@@ -118,15 +118,22 @@ impl ChunkSet {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dump(
         &self,
         build_ctx: &BuildContext,
+        blob_storage: ArtifactStorage,
         ori_blob_ids: &[String],
         new_blob_ctx: &mut BlobContext,
         new_blob_idx: u32,
         aligned_chunk: bool,
         backend: &Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<Vec<(ChunkWrapper, ChunkWrapper)>> {
+        let mut blob_writer = Some(ArtifactWriter::new(
+            blob_storage,
+            build_ctx.inline_bootstrap,
+        )?);
+
         // sort chunks first, don't break order in original blobs
         let mut chunks = self.chunks.values().collect::<Vec<&ChunkWrapper>>();
         chunks.sort_by(|a, b| {
@@ -148,7 +155,7 @@ impl ChunkSet {
             reader
                 .read(&mut buf, chunk.compressed_offset())
                 .expect("read blob data err");
-            if let Some(w) = new_blob_ctx.writer.as_mut() {
+            if let Some(w) = blob_writer.as_mut() {
                 w.write_all(&buf)?;
             }
 
@@ -177,9 +184,9 @@ impl ChunkSet {
         }
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
-        Blob::dump_meta_data(build_ctx, new_blob_ctx)?;
+        Blob::dump_meta_data(build_ctx, new_blob_ctx, &mut blob_writer)?;
         let blob_id = new_blob_ctx.blob_id();
-        if let Some(writer) = &mut new_blob_ctx.writer {
+        if let Some(writer) = &mut blob_writer {
             writer.finalize(blob_id)?;
         }
         Ok(chunks_change)
@@ -357,8 +364,9 @@ impl BlobCompactor {
         let chunk_dict = self.get_chunk_dict();
         let blobs = chunk_dict.get_blobs();
         for i in 0..blobs.len() {
-            let real_blob_idx = chunk_dict.get_real_blob_idx(i as u32) as usize;
-            self.states[real_blob_idx].replace(State::ChunkDict);
+            if let Some(real_blob_idx) = chunk_dict.get_real_blob_idx(i as u32) {
+                self.states[real_blob_idx as usize].replace(State::ChunkDict);
+            }
         }
     }
 
@@ -530,12 +538,12 @@ impl BlobCompactor {
                 }
                 State::Rebuild(cs) => {
                     let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
-                    let mut blob_ctx =
-                        BlobContext::new(String::from(""), Some(blob_storage), 0, false)?;
+                    let mut blob_ctx = BlobContext::new(String::from(""), 0);
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
                     let new_chunks = cs.dump(
                         build_ctx,
+                        blob_storage,
                         &ori_blob_ids,
                         &mut blob_ctx,
                         blob_idx,
