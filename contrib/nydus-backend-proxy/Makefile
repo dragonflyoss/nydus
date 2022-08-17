@@ -1,10 +1,10 @@
 all:.format build
 
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
-ARCH := $(shell uname -p)
+rust_arch := $(shell uname -p)
 
 .musl_target:
-	$(eval CARGO_BUILD_FLAGS += --target ${ARCH}-unknown-linux-musl)
+	$(eval CARGO_BUILD_FLAGS += --target ${rust_arch}-unknown-linux-musl)
 
 .release_version:
 	$(eval CARGO_BUILD_FLAGS += --release)
