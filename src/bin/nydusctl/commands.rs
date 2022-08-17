@@ -211,14 +211,23 @@ Read Errors:        {read_errors}
 
             println!(
                 r#"
-Block Sizes/millis:
-{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
-                sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], sizes[5], sizes[6], sizes[7]
+{:<25}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
+                "Block Sizes:",
+                sizes[0],
+                sizes[1],
+                sizes[2],
+                sizes[3],
+                sizes[4],
+                sizes[5],
+                sizes[6],
+                sizes[7],
             );
 
             let latency_cumulative_dist =
                 m["read_cumulative_latency_millis_dist"].as_array().unwrap();
             let latency_block_hits = m["read_count_block_size_dist"].as_array().unwrap();
+
+            print!("{:<25}", "Average Latency(millis):");
 
             for (i, _) in sizes.iter().enumerate() {
                 print!(
@@ -235,10 +244,19 @@ Block Sizes/millis:
 
             println!(
                 r#"
-Block Sizes:
-{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
-                sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], sizes[5], sizes[6], sizes[7]
+{:<25}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
+                "Block Sizes:",
+                sizes[0],
+                sizes[1],
+                sizes[2],
+                sizes[3],
+                sizes[4],
+                sizes[5],
+                sizes[6],
+                sizes[7]
             );
+
+            print!("{:<25}", "Request Count:");
 
             for (i, _) in sizes.iter().enumerate() {
                 print!("{:<8}", latency_block_hits[i].as_u64().unwrap());
