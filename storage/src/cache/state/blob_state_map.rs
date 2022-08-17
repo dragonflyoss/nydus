@@ -117,12 +117,6 @@ where
             drop(guard);
             let result = i.wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT));
             if let Err(StorageError::Timeout) = result {
-                /*
-                // Notice that lock of tracer is already dropped.
-                let mut t = self.inflight_tracer.lock().unwrap();
-                t.remove(&index);
-                i.notify();
-                 */
                 warn!(
                     "Waiting for backend IO expires. chunk index {}, compressed offset {}",
                     index,
@@ -131,6 +125,8 @@ where
 
                 Err(StorageError::Timeout)
             } else {
+                // Check if the chunk is ready in local cache again. It should be READY
+                // since wait_for_inflight must return OK in this branch by one more check.
                 self.check_ready_and_mark_pending(chunk)
             }
         } else {
@@ -246,13 +242,10 @@ impl RangeMap for BlobStateMap<IndexedChunkMap, u32> {
                 let result =
                     i.wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT));
                 if let Err(StorageError::Timeout) = result {
-                    /*
-                    // Notice that lock of tracer is already dropped.
-                    let mut t = self.inflight_tracer.lock().unwrap();
-                    t.remove(&index);
-                    i.notify();
-                     */
-                    warn!("Waiting for backend IO expires. chunk index {}", index,);
+                    warn!(
+                        "Waiting for range backend IO expires. chunk index {}. range[{}, {}]",
+                        index, start, count
+                    );
                     break;
                 };
                 if !self.c.is_range_ready(index, 1)? {
@@ -347,13 +340,10 @@ impl RangeMap for BlobStateMap<BlobRangeMap, u64> {
                 let result =
                     i.wait_for_inflight(Duration::from_millis(SINGLE_INFLIGHT_WAIT_TIMEOUT));
                 if let Err(StorageError::Timeout) = result {
-                    /*
-                    // Notice that lock of tracer is already dropped.
-                    let mut t = self.inflight_tracer.lock().unwrap();
-                    t.remove(&index);
-                    i.notify();
-                     */
-                    warn!("Waiting for backend IO expires. chunk index {}", index,);
+                    warn!(
+                        "Waiting for range backend IO expires. chunk index {}. range[{}, {}]",
+                        index, start, count
+                    );
                     break;
                 };
                 if !self.c.is_range_ready(idx, 1)? {
