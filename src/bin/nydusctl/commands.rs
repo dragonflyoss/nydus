@@ -284,6 +284,31 @@ impl CommandFsStats {
         if raw {
             println!("{}", metrics);
         } else {
+            let periods = vec![
+                "<1ms", "~20ms", "~50ms", "~100ms", "~500ms", "~1s", "~2s", "2s~",
+            ];
+            let latency_dist = m["read_latency_dist"].as_array().unwrap();
+            println!(
+                r#"
+{:<16}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}"#,
+                "Read Latency:",
+                periods[0],
+                periods[1],
+                periods[2],
+                periods[3],
+                periods[4],
+                periods[5],
+                periods[6],
+                periods[7],
+            );
+
+            print!("{:<16}", "Reads Count:");
+            for d in latency_dist {
+                print!("{:<8}", d.as_u64().unwrap());
+            }
+
+            println!();
+
             print!(
                 r#"
 FOP Counters:
