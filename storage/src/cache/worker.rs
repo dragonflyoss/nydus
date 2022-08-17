@@ -241,14 +241,13 @@ impl AsyncWorkerMgr {
                         .await
                         .unwrap();
                     if blob_cache.is_prefetch_active() {
-                        rt.spawn(async move {
+                        rt.spawn_blocking(move || {
                             let _ = Self::handle_blob_prefetch_request(
                                 mgr2.clone(),
                                 blob_cache,
                                 offset,
                                 size,
-                            )
-                            .await;
+                            );
                             drop(token);
                         });
                     }
@@ -259,9 +258,8 @@ impl AsyncWorkerMgr {
                         .unwrap();
 
                     if blob_cache.is_prefetch_active() {
-                        rt.spawn(async move {
-                            let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req)
-                                .await;
+                        rt.spawn_blocking(move || {
+                            let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req);
                             drop(token)
                         });
                     }
@@ -314,7 +312,7 @@ impl AsyncWorkerMgr {
         }
     }
 
-    async fn handle_blob_prefetch_request(
+    fn handle_blob_prefetch_request(
         mgr: Arc<AsyncWorkerMgr>,
         cache: Arc<dyn BlobCache>,
         offset: u64,
@@ -354,7 +352,12 @@ impl AsyncWorkerMgr {
         Ok(())
     }
 
-    async fn handle_fs_prefetch_request(
+    // TODO: Nydus plans to switch backend storage IO stack to full asynchronous mode.
+    // But we can't make `handle_fs_prefetch_request` as async due to the fact that
+    // tokio doesn't allow dropping runtime in a non-blocking context. Otherwise, prefetch
+    // threads always panic in debug program profile. We can achieve the goal when
+    // backend/registry also switches to async IO.
+    fn handle_fs_prefetch_request(
         mgr: Arc<AsyncWorkerMgr>,
         cache: Arc<dyn BlobCache>,
         req: BlobIoRange,
