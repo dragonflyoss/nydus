@@ -18,6 +18,7 @@
 /// rule is to call validate() after creating any data structure from the on-disk bootstrap.
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -638,6 +639,39 @@ impl OndiskInodeWrapper {
 
         Ok(chunks)
     }
+
+    fn find_target_block(&self, name: &OsStr) -> Result<usize> {
+        let inode = self.disk_inode();
+        if inode.size() == 0 {
+            return Err(enoent!());
+        }
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+        // find target block
+        let mut first = 0usize;
+        let mut last = (blocks_count - 1) as usize;
+        let mut target_block = 0usize;
+        while first <= last {
+            let pivot = first + ((last - first) >> 1);
+            let head_entry = self.get_entry(pivot, 0).map_err(err_invalidate_data)?;
+            let head_name_offset = head_entry.e_nameoff as usize;
+            let entries_count = head_name_offset / size_of::<RafsV6Dirent>();
+            let h_name = self
+                .entry_name(pivot, 0, entries_count)
+                .map_err(err_invalidate_data)?;
+            let t_name = self
+                .entry_name(pivot, entries_count - 1, entries_count)
+                .map_err(err_invalidate_data)?;
+            if h_name <= name && t_name >= name {
+                target_block = pivot;
+                break;
+            } else if h_name > name {
+                last = pivot - 1;
+            } else {
+                first = pivot + 1;
+            }
+        }
+        Ok(target_block)
+    }
 }
 
 // TODO(chge): Still work on this trait implementation. Remove below `allow` attribute.
@@ -747,47 +781,35 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
-        let inode = self.disk_inode();
-
-        if inode.size() == 0 {
-            return Err(enoent!());
-        }
-
-        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         let mut target: Option<u64> = None;
-
-        let nid = 'outer: for i in 0..blocks_count {
-            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
-            // `e_nameoff` is offset from each single block?
-            let head_name_offset = head_entry.e_nameoff;
-            let entries_count = head_name_offset / size_of::<RafsV6Dirent>() as u16;
-
-            let d_name = self
-                .entry_name(i as usize, 0, entries_count as usize)
+        // find target dirent
+        if let Ok(target_block) = self.find_target_block(name) {
+            let head_entry = self
+                .get_entry(target_block, 0)
                 .map_err(err_invalidate_data)?;
+            let head_name_offset = head_entry.e_nameoff as usize;
+            let entries_count = head_name_offset / size_of::<RafsV6Dirent>();
 
-            if d_name == name {
-                target = Some(head_entry.e_nid);
-                break 'outer;
-            }
-
-            // TODO: Let binary search optimize this in the future.
-            // So this logic might look similar to `walk_children_inodes`
-            for j in 1..entries_count {
+            let mut first = 0;
+            let mut last = entries_count - 1;
+            while first <= last {
+                let pivot = first + ((last - first) >> 1);
                 let de = self
-                    .get_entry(i as usize, j as usize)
+                    .get_entry(target_block, pivot)
                     .map_err(err_invalidate_data)?;
                 let d_name = self
-                    .entry_name(i as usize, j as usize, entries_count as usize)
+                    .entry_name(target_block, pivot, entries_count)
                     .map_err(err_invalidate_data)?;
-
-                if d_name == name {
-                    target = Some(de.e_nid);
-                    break 'outer;
+                match d_name.cmp(name) {
+                    Ordering::Equal => {
+                        target = Some(de.e_nid);
+                        break;
+                    }
+                    Ordering::Less => first = pivot + 1,
+                    Ordering::Greater => last = pivot - 1,
                 }
             }
-        };
-
+        }
         if let Some(nid) = target {
             Ok(Arc::new(self.mapping.inode_wrapper_with_info(
                 nid,
