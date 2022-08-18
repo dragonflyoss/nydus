@@ -47,7 +47,9 @@ use nydus_utils::{
 };
 
 use super::chunk_dict::{ChunkDict, DigestWithBlobIndex};
-use super::context::{BlobContext, BootstrapContext, BuildContext, RafsVersion};
+use super::context::{
+    ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BuildContext, RafsVersion,
+};
 use super::tree::Tree;
 
 // Filesystem may have different algorithms to calculate `i_size` for directory entries,
@@ -334,12 +336,12 @@ impl Node {
         }
     }
 
-    pub fn dump_blob<T: ChunkDict>(
+    pub fn dump_blob(
         self: &mut Node,
         ctx: &BuildContext,
-        blob_ctx: &mut BlobContext,
-        blob_index: u32,
-        chunk_dict: &mut T,
+        blob_mgr: &mut BlobManager,
+        blob_writer: &mut Option<ArtifactWriter>,
+        chunk_data_buf: &mut [u8],
     ) -> Result<u64> {
         if self.is_dir() {
             return Ok(0);
@@ -364,7 +366,7 @@ impl Node {
 
         // `child_count` of regular file is reused as `chunk_count`.
         for i in 0..self.inode.child_count() {
-            let chunk_size = blob_ctx.chunk_size;
+            let chunk_size = ctx.chunk_size;
             let file_offset = i as u64 * chunk_size as u64;
             let uncompressed_size = if i == self.inode.child_count() - 1 {
                 (self.inode.size() as u64)
@@ -376,7 +378,7 @@ impl Node {
                 chunk_size
             };
 
-            let chunk_data = &mut blob_ctx.chunk_data_buf[0..uncompressed_size as usize];
+            let chunk_data = &mut chunk_data_buf[0..uncompressed_size as usize];
             file.read_exact(chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
@@ -387,9 +389,12 @@ impl Node {
             chunk.set_id(chunk_id);
 
             // Check whether we already have the same chunk data by matching chunk digest.
-            let exist_chunk = match blob_ctx.chunk_dict.get_chunk(&chunk_id) {
+            let exist_chunk = match blob_mgr.global_chunk_dict.get_chunk(&chunk_id) {
                 Some(v) => Some((v, true)),
-                None => chunk_dict.get_chunk(&chunk_id).map(|v| (v, false)),
+                None => blob_mgr
+                    .layered_chunk_dict
+                    .get_chunk(&chunk_id)
+                    .map(|v| (v, false)),
             };
             // TODO: we should also compare the actual data to avoid chunk digest conflicts.
             if let Some((cached_chunk, from_dict)) = exist_chunk {
@@ -405,9 +410,30 @@ impl Node {
 
                     chunk.copy_from(cached_chunk);
                     chunk.set_file_offset(file_offset);
+                    // During the build process, if a blob in the chunk dict is never used
+                    // for de-duplication, the blob should not be referenced in the blob table
+                    // of final bootstrap, this logic ensure it.
                     if from_dict {
-                        let idx = blob_ctx.chunk_dict.get_real_blob_idx(chunk.blob_index());
-                        chunk.set_blob_index(idx);
+                        let blob_index = if let Some(blob_idx) = blob_mgr
+                            .global_chunk_dict
+                            .get_real_blob_idx(chunk.blob_index())
+                        {
+                            blob_idx
+                        } else {
+                            let blob_idx = blob_mgr.alloc_index()?;
+                            blob_mgr
+                                .global_chunk_dict
+                                .set_real_blob_idx(chunk.blob_index(), blob_idx);
+                            if let Some(blob) = blob_mgr
+                                .global_chunk_dict
+                                .clone()
+                                .get_blobs_by_inner_idx(chunk.blob_index())
+                            {
+                                blob_mgr.add(BlobContext::from(ctx, blob, ChunkSource::Dict))
+                            }
+                            blob_idx
+                        };
+                        chunk.set_blob_index(blob_index);
                     }
                     trace!(
                         "\t\tbuilding duplicated chunk: {} compressor {}",
@@ -440,9 +466,10 @@ impl Node {
                 uncompressed_size
             };
 
-            // Move cursor to offset of next chunk
-            let compressed_offset = blob_ctx.compressed_offset;
-            let uncompressed_offset = blob_ctx.uncompressed_offset;
+            let (blob_index, mut blob_ctx) = blob_mgr.set_current_blob(ctx)?;
+
+            let pre_compressed_offset = blob_ctx.compressed_offset;
+            let pre_uncompressed_offset = blob_ctx.uncompressed_offset;
             blob_ctx.compressed_offset += compressed_size as u64;
             blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
 
@@ -454,7 +481,7 @@ impl Node {
             // Dump compressed chunk data to blob
             event_tracer!("blob_uncompressed_size", +uncompressed_size);
             event_tracer!("blob_compressed_size", +compressed_size);
-            if let Some(writer) = &mut blob_ctx.writer {
+            if let Some(writer) = blob_writer {
                 writer
                     .write_all(&compressed)
                     .context("failed to write blob")?;
@@ -465,15 +492,15 @@ impl Node {
                 blob_index,
                 chunk_index,
                 file_offset,
-                uncompressed_offset,
+                pre_uncompressed_offset,
                 uncompressed_size,
-                compressed_offset,
+                pre_compressed_offset,
                 compressed_size,
                 is_compressed,
             )?;
 
             blob_ctx.add_chunk_meta_info(&chunk)?;
-            chunk_dict.add_chunk(chunk.clone());
+            blob_mgr.layered_chunk_dict.add_chunk(chunk.clone());
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
                 inner: chunk,

@@ -11,15 +11,7 @@ use crate::core::prefetch::Prefetch;
 pub struct BlobLayout {}
 
 impl BlobLayout {
-    pub fn new() -> Self {
-        BlobLayout {}
-    }
-
-    pub fn layout_blob_simple(
-        &mut self,
-        prefetch: &Prefetch,
-        nodes: &[Node],
-    ) -> Result<(Vec<usize>, usize)> {
+    pub fn layout_blob_simple(prefetch: &Prefetch, nodes: &[Node]) -> Result<(Vec<usize>, usize)> {
         let mut inodes = Vec::with_capacity(nodes.len());
 
         // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files

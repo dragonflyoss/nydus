@@ -24,13 +24,12 @@ use rafs::metadata::layout::v5::RafsV5BlobTable;
 use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use rafs::metadata::layout::{RafsBlobTable, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use rafs::metadata::RafsSuperFlags;
-use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
+use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use rafs::{RafsIoReader, RafsIoWrite};
 use storage::device::{BlobFeatures, BlobInfo};
 use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
-use super::layout::BlobLayout;
 use super::node::{ChunkSource, ChunkWrapper, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
@@ -296,8 +295,6 @@ pub struct BlobContext {
     pub blob_id: String,
     pub blob_hash: Sha256,
     pub blob_readahead_size: u64,
-    /// Blob data layout manager
-    pub blob_layout: BlobLayout,
     /// Data chunks stored in the data blob, for v6.
     pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
     /// Whether to generate blob metadata information.
@@ -318,15 +315,8 @@ pub struct BlobContext {
     pub chunk_count: u32,
     /// Chunk slice size.
     pub chunk_size: u32,
-    /// Scratch data buffer for reading from/writing to disk files.
-    pub chunk_data_buf: Vec<u8>,
-    /// ChunkDict which would be loaded when builder start
-    pub chunk_dict: Arc<dyn ChunkDict>,
     /// Whether the blob is from chunk dict.
     pub chunk_source: ChunkSource,
-
-    // Blob writer for writing to disk file.
-    pub writer: Option<ArtifactWriter>,
 }
 
 impl Clone for BlobContext {
@@ -335,7 +325,6 @@ impl Clone for BlobContext {
             blob_id: self.blob_id.clone(),
             blob_hash: self.blob_hash.clone(),
             blob_readahead_size: self.blob_readahead_size,
-            blob_layout: self.blob_layout.clone(),
             blob_meta_info: self.blob_meta_info.clone(),
             blob_meta_info_enabled: self.blob_meta_info_enabled,
             blob_meta_header: self.blob_meta_header,
@@ -348,32 +337,35 @@ impl Clone for BlobContext {
 
             chunk_count: self.chunk_count,
             chunk_size: self.chunk_size,
-            chunk_data_buf: self.chunk_data_buf.clone(),
-            chunk_dict: self.chunk_dict.clone(),
             chunk_source: self.chunk_source.clone(),
-            writer: None,
         }
     }
 }
 
 impl BlobContext {
-    pub fn new(
-        blob_id: String,
-        blob_stor: Option<ArtifactStorage>,
-        blob_offset: u64,
-        fifo: bool,
-    ) -> Result<Self> {
-        let writer = if let Some(blob_stor) = blob_stor {
-            Some(ArtifactWriter::new(blob_stor, fifo)?)
-        } else {
-            None
-        };
+    pub fn new(blob_id: String, blob_offset: u64) -> Self {
+        Self {
+            blob_id,
+            blob_hash: Sha256::new(),
+            blob_readahead_size: 0,
+            blob_meta_info_enabled: false,
+            blob_meta_info: Vec::new(),
+            blob_meta_header: BlobMetaHeaderOndisk::default(),
 
-        Ok(Self::new_with_writer(blob_id, writer, blob_offset))
+            compressed_blob_size: 0,
+            uncompressed_blob_size: 0,
+
+            compressed_offset: blob_offset,
+            uncompressed_offset: 0,
+
+            chunk_count: 0,
+            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
+            chunk_source: ChunkSource::Build,
+        }
     }
 
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut blob_ctx = Self::new_with_writer(blob.blob_id().to_owned(), None, 0);
+        let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0);
 
         blob_ctx.blob_readahead_size = blob.readahead_size();
         blob_ctx.chunk_count = blob.chunk_count();
@@ -402,46 +394,6 @@ impl BlobContext {
         }
 
         blob_ctx
-    }
-
-    pub fn new_with_writer(
-        blob_id: String,
-        writer: Option<ArtifactWriter>,
-        blob_offset: u64,
-    ) -> Self {
-        let size = if writer.is_some() {
-            RAFS_MAX_CHUNK_SIZE as usize
-        } else {
-            0
-        };
-
-        Self {
-            blob_id,
-            blob_hash: Sha256::new(),
-            blob_readahead_size: 0,
-            blob_layout: BlobLayout::new(),
-            blob_meta_info_enabled: false,
-            blob_meta_info: Vec::new(),
-            blob_meta_header: BlobMetaHeaderOndisk::default(),
-
-            compressed_blob_size: 0,
-            uncompressed_blob_size: 0,
-
-            compressed_offset: blob_offset,
-            uncompressed_offset: 0,
-
-            chunk_count: 0,
-            chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
-            chunk_data_buf: vec![0u8; size],
-            chunk_dict: Arc::new(()),
-            chunk_source: ChunkSource::Build,
-
-            writer,
-        }
-    }
-
-    pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
-        self.chunk_dict = dict;
     }
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
@@ -514,27 +466,58 @@ pub struct BlobManager {
     /// We can get blob index for a layer by using:
     /// `self.blobs.iter().flatten().collect()[layer_index];`
     blobs: Vec<BlobContext>,
-    /// Chunk dictionary from reference image or base layer.
-    pub chunk_dict_ref: Arc<dyn ChunkDict>,
-    /// Chunk dictionary to hold new chunks from the upper layer.
-    pub chunk_dict_cache: HashChunkDict,
+    current_blob_index: Option<u32>,
+    /// Chunk dictionary to hold chunks from an extra chunk dict file.
+    /// Used for chunk data de-duplication within the whole image.
+    pub global_chunk_dict: Arc<dyn ChunkDict>,
+    /// Chunk dictionary to hold chunks from all layers.
+    /// Used for chunk data de-duplication between layers (with `--parent-bootstrap`)
+    /// or within layer (with `--inline-bootstrap`).
+    pub layered_chunk_dict: HashChunkDict,
 }
 
 impl BlobManager {
     pub fn new() -> Self {
         Self {
             blobs: Vec::new(),
-            chunk_dict_ref: Arc::new(()),
-            chunk_dict_cache: HashChunkDict::default(),
+            current_blob_index: None,
+            global_chunk_dict: Arc::new(()),
+            layered_chunk_dict: HashChunkDict::default(),
+        }
+    }
+
+    fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
+        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_offset);
+        blob_ctx.set_chunk_size(ctx.chunk_size);
+        blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
+
+        Ok(blob_ctx)
+    }
+
+    pub fn set_current_blob(&mut self, ctx: &BuildContext) -> Result<(u32, &mut BlobContext)> {
+        if self.current_blob_index.is_none() {
+            let blob_ctx = Self::new_blob_ctx(ctx)?;
+            self.current_blob_index = Some(self.alloc_index()?);
+            self.add(blob_ctx);
+        }
+        // Safe to unwrap because the blob context has been added.
+        Ok(self.get_current_blob().unwrap())
+    }
+
+    pub fn get_current_blob(&mut self) -> Option<(u32, &mut BlobContext)> {
+        if let Some(idx) = self.current_blob_index {
+            Some((idx, &mut self.blobs[idx as usize]))
+        } else {
+            None
         }
     }
 
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
-        self.chunk_dict_ref = dict
+        self.global_chunk_dict = dict
     }
 
     pub fn get_chunk_dict(&self) -> Arc<dyn ChunkDict> {
-        self.chunk_dict_ref.clone()
+        self.global_chunk_dict.clone()
     }
 
     /// Allocate a blob index sequentially.
@@ -600,16 +583,16 @@ impl BlobManager {
     /// should call this function after import parent bootstrap
     /// otherwise will break blobs order
     pub fn extend_blob_table_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
-        let blobs = self.chunk_dict_ref.get_blobs();
+        let blobs = self.global_chunk_dict.get_blobs();
 
         for blob in blobs.iter() {
             if let Some(real_idx) = self.get_blob_idx_by_id(blob.blob_id()) {
-                self.chunk_dict_ref
+                self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
                 let idx = self.alloc_index()?;
                 self.add(BlobContext::from(ctx, blob.as_ref(), ChunkSource::Dict));
-                self.chunk_dict_ref
+                self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
         }
