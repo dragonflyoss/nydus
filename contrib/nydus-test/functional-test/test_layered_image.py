@@ -44,7 +44,7 @@ def test_basic_read(
     rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
 
     wg = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -73,7 +73,7 @@ def test_read_stress(
     rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.thread_num(4).mount()
 
     wg = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -102,7 +102,7 @@ def test_read_cache(
     rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
 
     wg = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -150,7 +150,7 @@ def test_blobcache(
     rafs_conf.enable_fs_prefetch()
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.thread_num(4).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
@@ -220,7 +220,7 @@ def test_layered_rebuild(
         readahead_files="/".encode(),
     )
 
-    rafs = RafsMount(nydus_anchor, nydus_scratch_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
     rafs.mount()
 
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -248,7 +248,7 @@ def test_layered_localfs(
 
     rafs_conf = RafsConf(nydus_anchor).set_rafs_backend(Backend.LOCALFS)
 
-    rafs = RafsMount(nydus_anchor, nydus_scratch_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
     rafs.mount()
 
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -308,7 +308,7 @@ def test_whiteout(nydus_anchor, rafs_conf, whiteout_spec):
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
 
     nydus_anchor.mount_overlayfs([layered_image.rootfs(), parent_image.rootfs()])
-    rafs = RafsMount(nydus_anchor, layered_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, layered_image, rafs_conf)
     rafs.mount()
 
     wg = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -379,7 +379,7 @@ def test_prefetch_with_cache(
         [nydus_scratch_image.rootfs(), nydus_scratch_parent_image.rootfs()]
     )
 
-    rafs = RafsMount(nydus_anchor, nydus_scratch_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
     rafs.thread_num(5).mount()
 
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
@@ -426,7 +426,7 @@ def test_different_partitions(nydus_anchor: NydusAnchor, rafs_conf):
     image.set_backend(Backend.BACKEND_PROXY).create_image(parent_image=parent_image)
 
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
-    rafs = RafsMount(nydus_anchor, image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, image, rafs_conf)
     rafs.mount()
 
     nydus_anchor.mount_overlayfs([image.rootfs(), parent_image.rootfs()])

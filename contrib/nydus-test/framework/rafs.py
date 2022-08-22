@@ -563,7 +563,7 @@ class RafsMountParam(LinuxCommand):
         return self.set_param("mountpoint", path)
 
 
-class RafsMount(utils.ArtifactProcess):
+class NydusDaemon(utils.ArtifactProcess):
     def __init__(
         self,
         anchor: NydusAnchor,
@@ -582,23 +582,23 @@ class RafsMount(utils.ArtifactProcess):
         self.conf: RafsConf = conf
         self.mount_point = anchor.mount_point  # To which point nydus will mount
         self.param_value_prefix = " "
-        self.mount_params = RafsMountParam(anchor.nydusd_bin if bin is None else bin)
+        self.params = RafsMountParam(anchor.nydusd_bin if bin is None else bin)
         if with_defaults:
             self._set_default_mount_param()
 
     def __str__(self):
-        return str(self.mount_params)
+        return str(self.params)
 
     def __call__(self):
-        return self.mount_params
+        return self.params
 
     def _set_default_mount_param(self):
         # Set default part
         self.apisock("api_sock").log_level(self.anchor.log_level)
-        self.mount_params.mountpoint(self.mount_point).config(self.conf.path())
+        self.params.mountpoint(self.mount_point).config(self.conf.path())
 
         if self.rafs_image is not None:
-            self.mount_params.bootstrap(self.rafs_image.bootstrap_path)
+            self.params.bootstrap(self.rafs_image.bootstrap_path)
 
     def _wait_for_mount(self, test_fn=os.path.ismount):
         elapsed = 0
@@ -612,44 +612,44 @@ class RafsMount(utils.ArtifactProcess):
         pytest.fail("mountpoint failed to come up")
 
     def thread_num(self, num):
-        self.mount_params.set_param("thread-num", str(num))
+        self.params.set_param("thread-num", str(num))
         return self
 
     def log_level(self, level):
-        self.mount_params.log_level(level)
+        self.params.log_level(level)
         return self
 
     def prefetch_files(self, dirs_list: str):
-        self.mount_params.set_param("prefetch-files", dirs_list)
+        self.params.set_param("prefetch-files", dirs_list)
         return self
 
     def shared_dir(self, shared_dir):
-        self.mount_params.set_param("shared-dir", shared_dir)
+        self.params.set_param("shared-dir", shared_dir)
         return self
 
     def set_mountpoint(self, mp):
-        self.mount_params.set_param("mountpoint", mp)
+        self.params.set_param("mountpoint", mp)
         self.mount_point = mp
         return self
 
     def supervisor(self, path):
-        self.mount_params.set_param("supervisor", path)
+        self.params.set_param("supervisor", path)
         return self
 
     def id(self, daemon_id):
-        self.mount_params.set_param("id", daemon_id)
+        self.params.set_param("id", daemon_id)
         return self
 
     def upgrade(self):
-        self.mount_params.set_flags("upgrade")
+        self.params.set_flags("upgrade")
         return self
 
     def failover_policy(self, p):
-        self.mount_params.set_param("failover-policy", p)
+        self.params.set_param("failover-policy", p)
         return self
 
     def apisock(self, apisock):
-        self.mount_params.set_param("apisock", apisock)
+        self.params.set_param("apisock", apisock)
         self.__apisock = apisock
         self.anchor.put_dustbin(apisock)
         return self
@@ -658,7 +658,7 @@ class RafsMount(utils.ArtifactProcess):
         return self.__apisock
 
     def bootstrap(self, b):
-        self.mount_params.set_param("bootstrap", b)
+        self.params.set_param("bootstrap", b)
         return self
 
     def mount(self, limited_mem=False, wait_mount=True, dump_config=True):

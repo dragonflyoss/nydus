@@ -2,7 +2,7 @@ from time import sleep
 from conftest import ANCHOR
 import pytest
 from nydus_anchor import NydusAnchor
-from rafs import RafsConf, RafsImage, RafsMount, Backend
+from rafs import RafsConf, RafsImage, NydusDaemon, Backend
 import os
 from fio import Fio
 from utils import Size, Unit, clean_pagecache
@@ -66,13 +66,17 @@ def test_file_read_with_cache(nydus_anchor, rafs_conf: RafsConf):
         merging_size=Size(128, Unit.KB).B,
     ).set_rafs_backend(Backend.OSS)
 
-    rafs = RafsMount(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    rafs = (
+        NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    )
 
     sleep(8)
 
     rafs.umount()
 
-    rafs = RafsMount(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    rafs = (
+        NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    )
 
     wg = WorkloadGen(rafs.mount_point, None)
     total_files = 0
@@ -122,7 +126,7 @@ def test_stress_fio(
         bandwidth_rate=Size(10, Unit.MB).B,
     ).set_rafs_backend(Backend.OSS)
 
-    RafsMount(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
     fio = Fio()
 
     fio.create_command(blk_size, readwrite).block_size(blk_size).direct(direct).numjobs(
@@ -157,7 +161,7 @@ def test_stress_fio_higher_limit(
         bandwidth_rate=Size(50, Unit.MB).B,
     ).set_rafs_backend(Backend.OSS)
 
-    RafsMount(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
 
     fio = Fio()
 
@@ -191,7 +195,7 @@ def test_stress_fio_no_prefetch(
         128 * 1024
     )
 
-    RafsMount(nydus_anchor, SCRATCH_IMAGE, rafs_conf).mount()
+    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).mount()
 
     fio = Fio()
 

@@ -5,7 +5,7 @@ import platform
 
 from nydus_anchor import NydusAnchor
 from oss import OssHelper
-from rafs import RafsConf, Backend, RafsMount
+from rafs import RafsConf, Backend, NydusDaemon
 from nydusify import Nydusify
 from workload_gen import WorkloadGen
 import tempfile
@@ -62,7 +62,7 @@ def test_basic_conversion(
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, None, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
 
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
 
@@ -142,7 +142,7 @@ def test_build_cache(
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, None, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
 
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
 
@@ -223,7 +223,7 @@ def test_upload_oss(
     layers, base = converter.extract_source_layers_names_and_download()
     nydus_anchor.mount_overlayfs(layers, base)
 
-    rafs = RafsMount(nydus_anchor, None, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
 
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
@@ -345,7 +345,7 @@ def test_cross_platform_multiplatform(
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
-    rafs = RafsMount(nydus_anchor, None, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
 
     assert workload_gen.verify_entire_fs()

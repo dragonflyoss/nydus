@@ -1,5 +1,5 @@
 import pytest
-from rafs import RafsMount, RafsConf, RafsImage, Backend, Compressor
+from rafs import NydusDaemon, RafsConf, RafsImage, Backend, Compressor
 from nydus_anchor import NydusAnchor
 from workload_gen import WorkloadGen
 from distributor import Distributor
@@ -66,7 +66,7 @@ def test_stargz(
     rafs_conf.set_rafs_backend(Backend.OSS)
     rafs_conf.enable_rafs_blobcache(is_compressed=True)
 
-    rafs = RafsMount(nydus_anchor, image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, image, rafs_conf)
     rafs.mount()
 
     wg = WorkloadGen(nydus_anchor.mount_point, "origin")

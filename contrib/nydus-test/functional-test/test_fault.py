@@ -4,7 +4,7 @@ from utils import Size, Unit
 import pytest
 from workload_gen import WorkloadGen
 from nydus_anchor import NydusAnchor
-from rafs import RafsConf, RafsImage, RafsMount, Compressor
+from rafs import RafsConf, RafsImage, NydusDaemon, Compressor
 
 
 @pytest.mark.skip(reason="Constantly failed for no reason.")
@@ -40,7 +40,7 @@ def test_blobcache(
     cache_file = os.listdir(blobdir)
     assert len(cache_file) == 1
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
     assert rafs.is_mounted()
 
@@ -66,6 +66,7 @@ def test_blobcache(
 
     os.unlink(blob_backend)
 
+
 @pytest.mark.skip(reason="Constantly failed for no reason.")
 def test_limited_mem(nydus_anchor, rafs_conf, nydus_image):
     """
@@ -78,7 +79,7 @@ def test_limited_mem(nydus_anchor, rafs_conf, nydus_image):
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount(limited_mem=Size(3, Unit.GB))
 
     wg = WorkloadGen(nydus_anchor.mount_point, nydus_image.rootfs())
