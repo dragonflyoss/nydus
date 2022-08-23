@@ -72,7 +72,7 @@ def test_prefetch_with_cache(
     rafs.thread_num(6).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_scratch_image.rootfs())
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_scratch_image.rootfs())
     time.sleep(0.5)
     m = nc.get_blobcache_metrics()
     assert m["prefetch_data_amount"] != 0

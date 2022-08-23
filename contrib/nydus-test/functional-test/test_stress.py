@@ -37,7 +37,7 @@ def setup_module(module):
     dist.generate_tree()
     dist.put_multiple_files(FILE_CNT, Size(16, Unit.KB))
 
-    target_files = [os.path.join(ANCHOR.mount_point, f) for f in dist.files[-FILE_CNT:]]
+    target_files = [os.path.join(ANCHOR.mountpoint, f) for f in dist.files[-FILE_CNT:]]
     target_files = ":".join(target_files)
     global TARGET_FILES
     TARGET_FILES = target_files
@@ -78,7 +78,7 @@ def test_file_read_with_cache(nydus_anchor, rafs_conf: RafsConf):
         NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
     )
 
-    wg = WorkloadGen(rafs.mount_point, None)
+    wg = WorkloadGen(rafs.mountpoint, None)
     total_files = 0
 
     def read_file(t):

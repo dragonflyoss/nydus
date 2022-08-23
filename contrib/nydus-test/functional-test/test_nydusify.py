@@ -66,7 +66,7 @@ def test_basic_conversion(
 
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
 
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
 
@@ -146,7 +146,7 @@ def test_build_cache(
 
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
 
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
 
@@ -225,7 +225,7 @@ def test_upload_oss(
 
     rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
 
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
 
     assert workload_gen.verify_entire_fs()
@@ -343,7 +343,7 @@ def test_cross_platform_multiplatform(
         assert r in cached_layers
 
     # Use `nydus-image inspect` to compare blob table in bootstrap and manifest
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
     rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
     rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()

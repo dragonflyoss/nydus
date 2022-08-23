@@ -44,7 +44,7 @@ def test_blobcache(
     rafs.mount()
     assert rafs.is_mounted()
 
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.source_dir)
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.source_dir)
 
     workload_gen.setup_workload_generator()
     workload_gen.torture_read(4, 15)
@@ -82,7 +82,7 @@ def test_limited_mem(nydus_anchor, rafs_conf, nydus_image):
     rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount(limited_mem=Size(3, Unit.GB))
 
-    wg = WorkloadGen(nydus_anchor.mount_point, nydus_image.rootfs())
+    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_image.rootfs())
 
     wg.setup_workload_generator()
     wg.torture_read(8, 10)

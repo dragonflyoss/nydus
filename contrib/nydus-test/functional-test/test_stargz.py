@@ -69,7 +69,7 @@ def test_stargz(
     rafs = NydusDaemon(nydus_anchor, image, rafs_conf)
     rafs.mount()
 
-    wg = WorkloadGen(nydus_anchor.mount_point, "origin")
+    wg = WorkloadGen(nydus_anchor.mountpoint, "origin")
 
     wg.verify_entire_fs()
 
