@@ -571,6 +571,7 @@ class NydusDaemon(utils.ArtifactProcess):
         conf: RafsConf,
         with_defaults=True,
         bin=None,
+        mode="fuse",
     ):
         """Start up nydusd and mount rafs.
         :image: If image is `None`, then no `--metadata` will be passed to nydusd.
@@ -580,9 +581,11 @@ class NydusDaemon(utils.ArtifactProcess):
         self.anchor = anchor
         self.rafs_image = image  # Associate with a rafs image to boot up.
         self.conf: RafsConf = conf
-        self.mount_point = anchor.mount_point  # To which point nydus will mount
+        self.mountpoint = anchor.mountpoint  # To which point nydus will mount
         self.param_value_prefix = " "
         self.params = RafsMountParam(anchor.nydusd_bin if bin is None else bin)
+        self.params.set_subcommand(mode)
+        self.is_daemon_mode = True if mode == "daemon" else False
         if with_defaults:
             self._set_default_mount_param()
 
@@ -595,7 +598,8 @@ class NydusDaemon(utils.ArtifactProcess):
     def _set_default_mount_param(self):
         # Set default part
         self.apisock("api_sock").log_level(self.anchor.log_level)
-        self.params.mountpoint(self.mount_point).config(self.conf.path())
+        if self.conf is not None:
+            self.params.mountpoint(self.mountpoint).config(self.conf.path())
 
         if self.rafs_image is not None:
             self.params.bootstrap(self.rafs_image.bootstrap_path)
@@ -603,7 +607,7 @@ class NydusDaemon(utils.ArtifactProcess):
     def _wait_for_mount(self, test_fn=os.path.ismount):
         elapsed = 0
         while elapsed < 300:
-            if test_fn(self.mount_point):
+            if test_fn(self.mountpoint):
                 return True
             if self.p.poll() is not None:
                 pytest.fail("file system process terminated prematurely")
@@ -613,6 +617,14 @@ class NydusDaemon(utils.ArtifactProcess):
 
     def thread_num(self, num):
         self.params.set_param("thread-num", str(num))
+        return self
+
+    def fscache_thread_num(self, num):
+        self.params.set_param("fscache-threads", str(num))
+        return self
+
+    def set_fscache(self):
+        self.params.set_param("fscache", self.anchor.fscache_dir)
         return self
 
     def log_level(self, level):
@@ -629,7 +641,7 @@ class NydusDaemon(utils.ArtifactProcess):
 
     def set_mountpoint(self, mp):
         self.params.set_param("mountpoint", mp)
-        self.mount_point = mp
+        self.mountpoint = mp
         return self
 
     def supervisor(self, path):
@@ -669,7 +681,7 @@ class NydusDaemon(utils.ArtifactProcess):
         cmd = str(self).split()
         self.anchor.checker_sock = self.get_apisock()
 
-        if dump_config:
+        if dump_config and self.conf is not None:
             self.conf.dump_rafs_conf()
 
         if isinstance(limited_mem, Size):
@@ -690,6 +702,18 @@ class NydusDaemon(utils.ArtifactProcess):
 
         return self
 
+    def start(self):
+        cmd = str(self).split()
+        _, p = utils.run(
+            cmd,
+            False,
+            shell=False,
+            stdout=self.anchor.logging_file,
+            stderr=self.anchor.logging_file,
+        )
+        self.p = p
+        return self
+
     def wait_mount(self):
         self._wait_for_mount()
 
@@ -700,12 +724,14 @@ class NydusDaemon(utils.ArtifactProcess):
         self.umount()
 
     def umount(self):
+        """
+        Umount is sometimes invoked during teardown. So it can't assert.
+        """
         self._catcher_dead = True
-        ret, _ = utils.execute(["umount", self.mount_point], print_output=True)
+        ret, _ = utils.execute(["umount", self.mountpoint], print_output=True)
         assert ret
-
-        self.p.wait()
-        assert self.p.returncode == 0
+        # self.p.wait()
+        # assert self.p.returncode == 0
 
     def is_mounted(self):
         def _costum(self):
@@ -715,17 +741,90 @@ class NydusDaemon(utils.ArtifactProcess):
             mounts = output.split("\n")
 
             for m in mounts:
-                if self.mount_point in m:
+                if self.mountpoint in m:
                     return True
 
             return False
 
         check_fn = os.path.ismount
-        return check_fn(self.mount_point)
+        return check_fn(self.mountpoint)
 
     def shutdown(self):
         if self.is_mounted():
             self.umount()
 
-        self.p.kill()
+        logging.error("shutting down nydusd")
+
+        self.p.terminate()
         self.p.wait()
+        assert self.p.returncode == 0
+
+
+BLOB_CONF_TEMPLATE = """
+{
+  "type": "bootstrap",
+  "id": "5a74e7f26a2970c36ffd8963a278ea11e1fd752705a13c2ec0cb20b40e2a6699",
+  "domain_id": "5a74e7f26a2970c36ffd8963a278ea11e1fd752705a13c2ec0cb20b40e2a6699",
+  "config": {
+    "id": "5a74e7f26a2970c36ffd8963a278ea11e1fd752705a13c2ec0cb20b40e2a6699",
+    "backend_type": "registry",
+    "backend_config": {
+      "readahead": false,
+      "host": "hub.byted.org",
+      "repo": "gechangwei/java",
+      "auth": "",
+      "scheme": "http",
+      "proxy": {
+        "fallback": false
+      }
+    },
+    "cache_type": "fscache",
+    "cache_config": {
+      "work_dir": "/var/lib/containerd-nydus-grpc/snapshots/3754/fs"
+    },
+    "metadata_path": "/var/lib/containerd-nydus-grpc/snapshots/3754/fs/image/image.boot"
+  },
+  "fs_prefetch": {
+    "enable": false,
+    "prefetch_all": false,
+    "threads_count": 0,
+    "merging_size": 0,
+    "bandwidth_rate": 0
+  }
+}
+"""
+
+
+class BlobEntryConf:
+    def __init__(self, anchor) -> None:
+        self.conf_base = json.loads(
+            BLOB_CONF_TEMPLATE, object_hook=lambda x: Namespace(**x)
+        )
+        self.anchor = anchor
+        self.conf_base.config.cache_config.work_dir = self.anchor.blobcache_dir
+
+    def set_type(self, t):
+        self.conf_base.type = t
+        return self
+
+    def set_repo(self, repo):
+        self.conf_base.config.repo = repo
+        return self
+
+    def set_metadata_path(self, path):
+        self.conf_base.config.metadata_path = path
+        return self
+
+    def set_fsid(self, fsid):
+        self.conf_base.id = fsid
+        self.conf_base.domain_id = fsid
+        self.conf_base.config.id = fsid
+        return self
+
+    def set_backend(self):
+        self.conf_base.config.backend_config.host = self.anchor.backend_proxy_url
+        self.conf_base.config.backend_config.repo = "nydus"
+        return self
+
+    def dumps(self):
+        return json.dumps(self.conf_base, default=vars)
