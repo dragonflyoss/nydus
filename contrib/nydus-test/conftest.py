@@ -19,15 +19,9 @@ os.environ["RUST_BACKTRACE"] = "1"
 
 from tools import artifact
 
-# Fetch dependant artifacts.
-# for stuff in ["containerd-nydus-grpc"]:
-# artifact.ArtifactManager().fetch(stuff)
-# os.chmod(stuff, 0o755)
-
 
 @pytest.fixture()
 def nydus_anchor(request):
-    pass
     # TODO: check if nydusd executable exists and have a proper version
     # TODO: check if bootstrap exists
     # TODO: check if blob cache file exists and try to clear it if it does
@@ -47,9 +41,7 @@ def nydus_anchor(request):
         shutil.rmtree(nyta.scratch_dir)
 
     if hasattr(nyta, "nydusd"):
-        # anchor will associate with a RafsMount if it is mounted.
-        if os.path.ismount(nyta.mount_point):
-            nyta.nydusd.umount()
+        nyta.nydusd.shutdown()
 
     if hasattr(nyta, "overlayfs") and os.path.ismount(nyta.overlayfs):
         nyta.umount_overlayfs()

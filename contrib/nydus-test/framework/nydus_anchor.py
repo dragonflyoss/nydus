@@ -101,12 +101,15 @@ class NydusAnchor:
         self.localfs_workdir = os.path.join(self.workspace, "localfs_workdir")
         self.nydusify_work_dir = os.path.join(self.workspace, "nydusify_work_dir")
         # Where to mount this rafs
-        self.mount_point = os.path.join(self.workspace, "rafs_mnt")
+        self.mountpoint = os.path.join(self.workspace, "rafs_mnt")
         # From which directory to build rafs image
         self.blobcache_dir = os.path.join(self.workspace, "blobcache_dir")
         self.overlayfs = os.path.join(self.workspace, "overlayfs_mnt")
         self.source_dir = os.path.join(self.workspace, "gen_rootfs")
         self.parent_rootfs = os.path.join(self.workspace, "parent_rootfs")
+        self.fscache_dir = os.path.join(self.workspace, "fscache")
+
+        os.makedirs(self.fscache_dir, exist_ok=True)
 
         link_target = kwargs.pop("target")
         if link_target == "gnu":
@@ -156,7 +159,7 @@ class NydusAnchor:
             pass
 
         os.makedirs(self.blobcache_dir)
-        os.makedirs(self.mount_point, exist_ok=True)
+        os.makedirs(self.mountpoint, exist_ok=True)
         os.makedirs(self.overlayfs, exist_ok=True)
 
     def put_dustbin(self, path):
@@ -175,7 +178,7 @@ class NydusAnchor:
         assert (
             len(os.listdir(self.blobcache_dir)) == 0
         ), "Blobcache directory not empty!"
-        assert not os.path.ismount(self.mount_point), "Mount point was already mounted"
+        assert not os.path.ismount(self.mountpoint), "Mount point was already mounted"
 
     def clear_blobcache(self):
         try:
