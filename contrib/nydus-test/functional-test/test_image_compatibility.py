@@ -1,7 +1,7 @@
 import os
 
 import pytest
-from rafs import RafsMount, RafsConf, RafsImage, Backend, Compressor
+from rafs import NydusDaemon, RafsConf, RafsImage, Backend, Compressor
 from nydus_anchor import NydusAnchor
 from workload_gen import WorkloadGen
 from distributor import Distributor
@@ -68,11 +68,11 @@ def test_prefetch_with_cache(
             item = RafsConf.__dict__[i]
             item(rafs_conf)
 
-    rafs = RafsMount(nydus_anchor, nydus_scratch_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
     rafs.thread_num(6).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
-    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_scratch_image.rootfs())
+    workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_scratch_image.rootfs())
     time.sleep(0.5)
     m = nc.get_blobcache_metrics()
     assert m["prefetch_data_amount"] != 0

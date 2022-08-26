@@ -1,7 +1,7 @@
 import pytest
 import tempfile
 from distributor import Distributor
-from rafs import Backend, RafsMount, RafsConf, RafsImage
+from rafs import Backend, NydusDaemon, RafsConf, RafsImage
 from workload_gen import WorkloadGen
 from nydus_anchor import NydusAnchor
 from utils import logging_setup, Size, Unit
@@ -19,7 +19,7 @@ logging_setup()
 def test_daemon_info(nydus_anchor, nydus_image, rafs_conf: RafsConf):
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
     nc = NydusAPIClient(rafs.get_apisock())
     nc.get_wait_daemon()
@@ -33,7 +33,7 @@ def test_iostats(
         Backend.BACKEND_PROXY
     )
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
 
     rafs.mount()
     assert rafs.is_mounted()
@@ -42,7 +42,7 @@ def test_iostats(
 
     duration = 5
 
-    wg = WorkloadGen(nydus_anchor.mount_point, nydus_image.rootfs())
+    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_image.rootfs())
     wg.setup_workload_generator()
     wg.torture_read(4, duration)
 
@@ -74,13 +74,15 @@ def test_iostats(
     rafs.umount()
 
 
-def test_global_metrics(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsConf):
+def test_global_metrics(
+    nydus_anchor: NydusAnchor, nydus_image: RafsImage, rafs_conf: RafsConf
+):
     rafs_id = "/"
 
     rafs_conf.enable_files_iostats().set_rafs_backend(Backend.BACKEND_PROXY)
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
@@ -94,7 +96,7 @@ def test_global_metrics(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsCon
 
     logging.info("There are %d file counters created.", len(file_counters))
 
-    wg = WorkloadGen(nydus_anchor.mount_point, nydus_image.rootfs())
+    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_image.rootfs())
     wg.setup_workload_generator()
 
     wg.io_read(4)
@@ -142,15 +144,15 @@ def test_backend_swap(
     )
     rafs_conf.dump_rafs_conf()
 
-    rafs = RafsMount(nydus_anchor, None, rafs_conf, with_defaults=False)
-    rafs.thread_num(4).set_mountpoint(nydus_anchor.mount_point).apisock(
+    rafs = NydusDaemon(nydus_anchor, None, rafs_conf, with_defaults=False)
+    rafs.thread_num(4).set_mountpoint(nydus_anchor.mountpoint).apisock(
         "api_sock"
     ).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
     nc.pseudo_fs_mount(nydus_scratch_image.bootstrap_path, "/", rafs_conf.path(), None)
     nc.umount_rafs("/")
-    assert len(os.listdir(nydus_anchor.mount_point)) == 0
+    assert len(os.listdir(nydus_anchor.mountpoint)) == 0
 
     mp = "/pseudo1"
     nc.pseudo_fs_mount(nydus_scratch_image.bootstrap_path, mp, rafs_conf.path(), None)
@@ -171,7 +173,7 @@ def test_backend_swap(
 
     # TODO: Once upon a time, more than one fd are open. Check why this happens.
     wg = WorkloadGen(
-        os.path.join(nydus_anchor.mount_point, mp.strip("/")),
+        os.path.join(nydus_anchor.mountpoint, mp.strip("/")),
         nydus_scratch_image.rootfs(),
     )
 
@@ -203,12 +205,12 @@ def test_access_pattern(
 
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
 
-    wg = WorkloadGen(nydus_anchor.mount_point, nydus_image.rootfs())
+    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_image.rootfs())
     wg.setup_workload_generator()
     wg.torture_read(4, 8)
     duration = 4
@@ -233,14 +235,14 @@ def test_api_mount_with_prefetch(
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     hint_files = ["/"]
-    rafs = RafsMount(nydus_anchor, None, None, with_defaults=False)
+    rafs = NydusDaemon(nydus_anchor, None, None, with_defaults=False)
 
     # Prefetch must enable blobcache
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.enable_fs_prefetch(threads_count=4)
     rafs_conf.dump_rafs_conf()
-    rafs.set_mountpoint(nydus_anchor.mount_point).apisock("api_sock").mount(
+    rafs.set_mountpoint(nydus_anchor.mountpoint).apisock("api_sock").mount(
         dump_config=False,
     )
 
@@ -259,7 +261,7 @@ def test_api_mount_with_prefetch(
     assert m["prefetch_data_amount"] != 0
 
     wg = WorkloadGen(
-        os.path.join(nydus_anchor.mount_point, "pseudo_fs_1"), nydus_image.rootfs()
+        os.path.join(nydus_anchor.mountpoint, "pseudo_fs_1"), nydus_image.rootfs()
     )
     wg.setup_workload_generator()
     wg.torture_read(4, 8)
@@ -274,10 +276,10 @@ def test_detect_io_hang(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsCon
 
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
-    rafs = RafsMount(nydus_anchor, nydus_image, rafs_conf)
+    rafs = NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
     rafs.thread_num(5).mount()
 
-    wg = WorkloadGen(nydus_anchor.mount_point, nydus_image.rootfs())
+    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_image.rootfs())
     wg.setup_workload_generator()
     wg.torture_read(4, 8)
 

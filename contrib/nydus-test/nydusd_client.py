@@ -7,11 +7,15 @@ import enum
 import sys
 import os
 
+
 sys.path.append(os.path.realpath("framework"))
 import requests_unixsocket
 
+from rafs import BlobEntryConf
+
 try:
     from utils import logging_setup
+
     logging_setup()
 except:
     print("not setup logging")
@@ -120,10 +124,10 @@ def retry_request(interval, **kargs):
 class NydusAPIClient:
     def __init__(self, path_to_socket):
         encoded_path = path_to_socket.replace("/", "%2F").rstrip("/")
-        self.root_url = f"http+unix://{encoded_path}/{API_ROOT}/"
+        self.root_url = f"http+unix://{encoded_path}/api"
 
-    def build_path(self, path):
-        return self.root_url + path
+    def build_path(self, path, ver="v1"):
+        return f"{self.root_url}/{ver}/{path}"
 
     @convert_to_dict
     @check_resp
@@ -310,6 +314,9 @@ class NydusAPIClient:
     def takeover_nocheck(self):
         resp = requests.put(self.build_path("daemon/fuse/takeover"))
         # assert resp.status_code == 400
+
+    def bind_fscache_blob(self, conf: BlobEntryConf):
+        resp = requests.put(self.build_path("blobs", ver="v2"), data=conf.dumps())
 
     @check_resp
     @retry_request(0.2, total=2)
