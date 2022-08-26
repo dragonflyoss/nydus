@@ -28,7 +28,7 @@
 //!                 .author(crate_authors!())
 //!                 .get_matches();
 //!
-//!     setup_logging(None, level)?;
+//!     setup_logging(None, level, 0)?;
 //!     print!("{}", build_info);
 //!
 //!     Ok(())
@@ -46,7 +46,7 @@ use std::env::current_dir;
 use std::io::Result;
 use std::path::PathBuf;
 
-use flexi_logger::{self, colored_opt_format, opt_format, Logger};
+use flexi_logger::{self, colored_opt_format, opt_format, Cleanup, Criterion, Logger, Naming};
 use log::LevelFilter;
 
 pub mod signal;
@@ -115,7 +115,11 @@ impl BuildTimeInfo {
 /// Flexi logger always appends a suffix to file name whose default value is ".log"
 /// unless we set it intentionally. I don't like this passion. When the basename of `log_file_path`
 /// is "bar", the newly created log file will be "bar.log"
-pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Result<()> {
+pub fn setup_logging(
+    log_file_path: Option<PathBuf>,
+    level: LevelFilter,
+    rotation_size: u64,
+) -> Result<()> {
     if let Some(ref path) = log_file_path {
         // Do not try to canonicalize the path since the file may not exist yet.
 
@@ -165,6 +169,16 @@ pub fn setup_logging(log_file_path: Option<PathBuf>, level: LevelFilter) -> Resu
             logger = logger.directory(dir);
         }
 
+        // Set log rotation
+        if rotation_size > 0 {
+            let log_rotation_size_byte: u64 = rotation_size * 1024 * 1024;
+            logger = logger.rotate(
+                Criterion::Size(log_rotation_size_byte),
+                Naming::Timestamps,
+                Cleanup::KeepCompressedFiles(10),
+            );
+        }
+
         logger.start().map_err(|e| {
             eprintln!("{:?}", e);
             eother!(e)
@@ -198,5 +212,14 @@ mod tests {
         assert_eq!(log_level_to_verbosity(log::LevelFilter::Off), 0);
         assert_eq!(log_level_to_verbosity(log::LevelFilter::Error), 0);
         assert_eq!(log_level_to_verbosity(log::LevelFilter::Warn), 1);
+    }
+
+    #[test]
+    fn test_log_rotation() {
+        let log_file = Some(PathBuf::from("test_log_rotation"));
+        let level = LevelFilter::Info;
+        let rotation_size = 1; // 1MB
+
+        assert!(setup_logging(log_file, level, rotation_size).is_ok());
     }
 }

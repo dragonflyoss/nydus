@@ -330,7 +330,7 @@ mod tests {
     // #[test]
     // #[cfg(feature = "virtiofs")]
     // fn test_blobfs_new() {
-    //     setup_logging(None, log::LevelFilter::Trace).unwrap();
+    //     setup_logging(None, log::LevelFilter::Trace, 0).unwrap();
     //     let config = r#"
     //     {
     //         "device": {
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_blobfs_setupmapping() {
-        setup_logging(None, log::LevelFilter::Trace).unwrap();
+        setup_logging(None, log::LevelFilter::Trace, 0).unwrap();
         let config = r#"
 {
         "rafs_conf": {
