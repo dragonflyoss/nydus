@@ -438,6 +438,7 @@ checksum = "33ab94b6ac8eb69f1496a6993f26f785b5fd6d99b7416023eb2a6175c0b242b1"
 dependencies = [
  "atty",
  "chrono",
+ "flate2",
  "glob",
  "lazy_static",
  "log",

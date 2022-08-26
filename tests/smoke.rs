@@ -172,7 +172,7 @@ fn test(
 
 #[test]
 fn integration_test_init() {
-    setup_logging(None, log::LevelFilter::Trace).unwrap()
+    setup_logging(None, log::LevelFilter::Trace, 0).unwrap()
 }
 
 #[test]

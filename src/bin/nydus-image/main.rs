@@ -545,7 +545,7 @@ fn init_log(matches: &ArgMatches) -> Result<()> {
     // Safe to unwrap because it has a default value and possible values are defined.
     let level = matches.value_of("log-level").unwrap().parse().unwrap();
 
-    setup_logging(log_file, level).context("failed to setup logging")
+    setup_logging(log_file, level, 0).context("failed to setup logging")
 }
 
 fn main() -> Result<()> {

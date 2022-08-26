@@ -405,6 +405,15 @@ fn prepare_commandline_options() -> App<'static, 'static> {
                 .global(true),
         )
         .arg(
+            Arg::with_name("log-rotation-size")
+                .long("log-rotation-size")
+                .help("Specify log rotation size(MB), 0 to disable")
+                .default_value("0")
+                .takes_value(true)
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::with_name("rlimit-nofile")
                 .long("rlimit-nofile")
                 .short("R")
@@ -715,8 +724,13 @@ fn main() -> Result<()> {
     // Safe to unwrap because it has default value and possible values are defined
     let level = args.value_of("log-level").unwrap().parse().unwrap();
     let apisock = args.value_of("apisock");
+    let rotation_size = args
+        .value_of("log-rotation-size")
+        .unwrap()
+        .parse::<u64>()
+        .map_err(|e| einval!(format!("Invalid log rotation size: {}", e)))?;
 
-    setup_logging(logging_file, level)?;
+    setup_logging(logging_file, level, rotation_size)?;
 
     dump_program_info(crate_version!());
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
