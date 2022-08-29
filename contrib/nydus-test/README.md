@@ -47,6 +47,9 @@ Nydus-test is controlled and configured by `anchor_conf.json`. Nydus-test will t
             "busybox:latest"
         ]
     },
+    "artifacts": {
+        "containerd": "/usr/bin/containerd"
+    },
     "logging_file": "stderr",
     "target": "gnu"
 }
