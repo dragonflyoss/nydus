@@ -20,7 +20,7 @@ hmac = { version = "0.12.1", optional = true }
 lazy_static = "1.4.0"
 libc = "0.2"
 log = "0.4"
-lz4-sys = "1.9.2"
+lz4-sys = "1.9.4"
 nix = "0.24"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
