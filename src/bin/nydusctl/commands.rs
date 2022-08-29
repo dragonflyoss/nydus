@@ -366,8 +366,6 @@ impl CommandDaemon {
             let info = client.get("daemon").await?;
             let i = info.as_object().unwrap();
 
-            let backend_list = i["backend_collection"].as_object().unwrap();
-
             if raw {
                 println!("{}", info);
             } else {
@@ -385,31 +383,36 @@ Commit:                 {git_commit}
                     git_commit = version_info["git_commit"],
                 );
 
-                if !backend_list.is_empty() {
-                    println!("Backend list:")
-                }
+                if let Some(b) = i.get("backend_collection") {
+                    if let Some(fs_backends) = b.as_object() {
+                        if !fs_backends.is_empty() {
+                            println!("Backend list:")
+                        }
 
-                for (mount_point, backend_obj) in backend_list {
-                    let backend: FsBackendDesc =
-                        serde_json::from_value(backend_obj.clone()).unwrap();
-                    println!("  {}", mount_point);
-                    println!("    type:                   {}", backend.backend_type);
-                    println!("    mountpoint:             {}", backend.mountpoint);
-                    println!("    mounted_time:           {}", backend.mounted_time);
-                    match backend.backend_type {
-                        FsBackendType::PassthroughFs => {}
-                        FsBackendType::Rafs => {
-                            let fs: RafsConfig =
-                                serde_json::from_value(backend.config.unwrap().clone()).unwrap();
-                            print!(
-                                r#"    Mode:                   {meta_mode}
-    Prefetch:               {enabled}
-    Prefetch Merging Size:  {merging_size}
-"#,
-                                meta_mode = fs.mode,
-                                enabled = fs.fs_prefetch.enable,
-                                merging_size = fs.fs_prefetch.merging_size,
-                            );
+                        for (mount_point, backend_obj) in fs_backends {
+                            let backend: FsBackendDesc =
+                                serde_json::from_value(backend_obj.clone()).unwrap();
+                            println!("  {}", mount_point);
+                            println!("    type:                   {}", backend.backend_type);
+                            println!("    mountpoint:             {}", backend.mountpoint);
+                            println!("    mounted_time:           {}", backend.mounted_time);
+                            match backend.backend_type {
+                                FsBackendType::PassthroughFs => {}
+                                FsBackendType::Rafs => {
+                                    let fs: RafsConfig =
+                                        serde_json::from_value(backend.config.unwrap().clone())
+                                            .unwrap();
+                                    print!(
+                                        r#"    Mode:                   {meta_mode}
+            Prefetch:               {enabled}
+            Prefetch Merging Size:  {merging_size}
+        "#,
+                                        meta_mode = fs.mode,
+                                        enabled = fs.fs_prefetch.enable,
+                                        merging_size = fs.fs_prefetch.merging_size,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
