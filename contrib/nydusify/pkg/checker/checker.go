@@ -157,6 +157,7 @@ func (checker *Checker) check(ctx context.Context) error {
 			SourceMountPath: filepath.Join(checker.WorkDir, "fs/source_mounted"),
 			Target:          checker.Target,
 			TargetInsecure:  checker.TargetInsecure,
+			PlainHTTP:       checker.targetParser.Remote.IsWithHTTP(),
 			NydusdConfig: tool.NydusdConfig{
 				NydusdPath:     checker.NydusdPath,
 				BackendType:    checker.BackendType,
