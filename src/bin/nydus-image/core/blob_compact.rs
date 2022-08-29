@@ -625,9 +625,6 @@ impl BlobCompactor {
         // blobs have already been dumped, dump bootstrap only
         let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
         bootstrap.dump(&mut build_ctx, &mut bootstrap_ctx, &blob_table)?;
-        Ok(Some(BuildOutput::new(
-            &compactor.new_blob_mgr,
-            &bootstrap_mgr,
-        )?))
+        Ok(Some(BuildOutput::new(&compactor.new_blob_mgr)?))
     }
 }
