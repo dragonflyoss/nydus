@@ -40,7 +40,7 @@ def nydus_anchor(request):
         logging.info("Clean up scratch dir")
         shutil.rmtree(nyta.scratch_dir)
 
-    if hasattr(nyta, "nydusd"):
+    if hasattr(nyta, "nydusd") and nyta.nydusd is not None:
         nyta.nydusd.shutdown()
 
     if hasattr(nyta, "overlayfs") and os.path.ismount(nyta.overlayfs):

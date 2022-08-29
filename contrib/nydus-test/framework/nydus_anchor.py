@@ -96,7 +96,6 @@ class NydusAnchor:
 
         self.dustbin = []
         self.tmp_dirs = []
-        self.nydusd = None
 
         self.localfs_workdir = os.path.join(self.workspace, "localfs_workdir")
         self.nydusify_work_dir = os.path.join(self.workspace, "nydusify_work_dir")
