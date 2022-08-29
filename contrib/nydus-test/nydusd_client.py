@@ -203,7 +203,7 @@ class NydusAPIClient:
         total = 40
         while total:
             try:
-                resp = requests.get(self.root_url + "daemon")
+                resp = requests.get(self.build_path("daemon"))
                 r = resp.json()
                 logging.info(r)
 
