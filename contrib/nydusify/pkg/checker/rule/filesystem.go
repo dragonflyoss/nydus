@@ -33,6 +33,7 @@ type FilesystemRule struct {
 	SourceMountPath string
 	Target          string
 	TargetInsecure  bool
+	PlainHTTP       bool
 }
 
 // Node records file metadata and file data hash.
@@ -50,10 +51,11 @@ type Node struct {
 }
 
 type RegistryBackendConfig struct {
-	Scheme string `json:"scheme"`
-	Host   string `json:"host"`
-	Repo   string `json:"repo"`
-	Auth   string `json:"auth,omitempty"`
+	Scheme     string `json:"scheme"`
+	Host       string `json:"host"`
+	Repo       string `json:"repo"`
+	Auth       string `json:"auth,omitempty"`
+	SkipVerify bool   `json:"skip_verify,omitempty"`
 }
 
 func (node *Node) String() string {
@@ -209,17 +211,20 @@ func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 				return nil, errors.Wrap(err, "get docker registry auth config")
 			}
 
-			var auth, scheme string
+			var auth string
 			if authConfig.Username != "" && authConfig.Password != "" {
 				auth = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", authConfig.Username, authConfig.Password)))
 			}
+			skipVerify := false
 			if rule.TargetInsecure {
+				skipVerify = true
+			}
+			scheme := "https"
+			if rule.PlainHTTP {
 				scheme = "http"
-			} else {
-				scheme = "https"
 			}
 
-			backendConfig := RegistryBackendConfig{scheme, host, repo, auth}
+			backendConfig := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
 			bytes, err := json.Marshal(backendConfig)
 			if err != nil {
 				return nil, errors.Wrap(err, "parse registry backend config")

@@ -60,6 +60,10 @@ func (remote *Remote) MaybeWithHTTP(err error) {
 	}
 }
 
+func (remote *Remote) IsWithHTTP() bool {
+	return remote.retryWithHTTP
+}
+
 // Push pushes blob to registry
 func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDigest bool, reader io.Reader) error {
 	// Concurrently push blob with same digest using containerd
