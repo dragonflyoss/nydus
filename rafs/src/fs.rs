@@ -910,7 +910,7 @@ impl FileSystem for Rafs {
         _flags: u32,
     ) -> Result<(Option<Self::Handle>, OpenOptions)> {
         // Cache dir since we are readonly
-        Ok((None, OpenOptions::CACHE_DIR))
+        Ok((None, OpenOptions::CACHE_DIR | OpenOptions::KEEP_CACHE))
     }
 
     fn releasedir(&self, _ctx: &Context, _inode: u64, _flags: u32, _handle: u64) -> Result<()> {
