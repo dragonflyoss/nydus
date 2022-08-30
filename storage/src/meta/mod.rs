@@ -489,6 +489,9 @@ impl BlobMetaInfo {
                 }
             }
 
+            if last_end > end {
+                return Ok(vec);
+            }
             Err(einval!(format!(
                 "entry not found index {} infos.len {}",
                 index,
