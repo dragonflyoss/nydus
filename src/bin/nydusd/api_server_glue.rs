@@ -443,5 +443,8 @@ impl ApiServerController {
                 );
             }
         }
+        if let Some(apisock) = self.sock.as_ref() {
+            std::fs::remove_file(apisock).unwrap_or_default();
+        }
     }
 }
