@@ -149,6 +149,11 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         .required(false)
         .default_value("none")
         .possible_values(&["fs", "blob", "none"]);
+    let arg_output_json = Arg::with_name("output-json")
+        .long("output-json")
+        .short("J")
+        .help("JSON file output path for result")
+        .takes_value(true);
 
     // TODO: Try to use yaml to define below options
     App::new("")
@@ -282,11 +287,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .possible_values(&["oci", "overlayfs", "none"])
                 )
                 .arg(
-                    Arg::with_name("output-json")
-                        .long("output-json")
-                        .short("J")
-                        .help("JSON output path for build result")
-                        .takes_value(true)
+                    arg_output_json.clone(),
                 )
                 .arg(
                     Arg::with_name("aligned-chunk")
@@ -345,6 +346,9 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                     arg_prefetch_policy,
                 )
                 .arg(
+                    arg_output_json.clone(),
+                )
+                .arg(
                     Arg::with_name("SOURCE")
                         .help("bootstrap paths (allow one or more)")
                         .required(true)
@@ -370,11 +374,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .required(false),
                 )
                 .arg(
-                    Arg::with_name("output-json")
-                        .long("output-json")
-                        .short("J")
-                        .help("path to JSON output file")
-                        .takes_value(true)
+                    arg_output_json.clone(),
                 )
         )
         .subcommand(
@@ -425,11 +425,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true),
                 )
                 .arg(
-                    Arg::with_name("output-json")
-                        .long("output-json")
-                        .short("J")
-                        .help("path to JSON output file")
-                        .takes_value(true)
+                    arg_output_json.clone(),
                 )
         )
         .subcommand(
@@ -480,11 +476,8 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true),
                 )
                 .arg(
-                    Arg::with_name("output-json")
-                        .long("output-json")
-                        .short("J")
-                        .help("path to JSON output file")
-                        .takes_value(true))
+                    arg_output_json,
+                )
         )
         .subcommand(
             SubCommand::with_name("unpack")
@@ -561,7 +554,7 @@ fn main() -> Result<()> {
     if let Some(matches) = cmd.subcommand_matches("create") {
         Command::create(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("merge") {
-        Command::merge(matches)
+        Command::merge(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
         Command::check(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
@@ -696,7 +689,7 @@ impl Command {
         Ok(())
     }
 
-    fn merge(matches: &clap::ArgMatches) -> Result<()> {
+    fn merge(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let source_bootstrap_paths: Vec<PathBuf> = matches
             .values_of("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
@@ -711,12 +704,13 @@ impl Command {
             prefetch: Self::get_prefetch(matches)?,
             ..Default::default()
         };
-        Merger::merge(
+        let output = Merger::merge(
             &mut ctx,
             source_bootstrap_paths,
             target_bootstrap_path.to_path_buf(),
             chunk_dict_path,
-        )
+        )?;
+        OutputSerializer::dump(matches, output, build_info)
     }
 
     fn compact(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {

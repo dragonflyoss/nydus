@@ -14,8 +14,10 @@ use rafs::metadata::{RafsInode, RafsMode, RafsSuper, RafsSuperMeta};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
-use crate::core::context::{ArtifactStorage, RafsVersion};
-use crate::core::context::{BlobContext, BlobManager, BootstrapContext, BuildContext};
+use crate::core::context::{
+    ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BuildContext, BuildOutput,
+    RafsVersion,
+};
 use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
 use crate::core::tree::{MetadataTreeBuilder, Tree};
 
@@ -62,7 +64,7 @@ impl Merger {
         sources: Vec<PathBuf>,
         target: PathBuf,
         chunk_dict: Option<PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<BuildOutput> {
         if sources.is_empty() {
             bail!("please provide at least one source bootstrap path");
         }
@@ -199,7 +201,8 @@ impl Merger {
         bootstrap
             .dump(ctx, &mut bootstrap_ctx, &blob_table)
             .context(format!("dump bootstrap to {:?}", target))?;
+        let build_output = BuildOutput::new(&blob_mgr)?;
 
-        Ok(())
+        Ok(build_output)
     }
 }

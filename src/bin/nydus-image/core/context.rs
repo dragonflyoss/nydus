@@ -884,7 +884,7 @@ pub struct BuildOutput {
 }
 
 impl BuildOutput {
-    pub fn new(blob_mgr: &BlobManager, _bootstrap_mgr: &BootstrapManager) -> Result<BuildOutput> {
+    pub fn new(blob_mgr: &BlobManager) -> Result<BuildOutput> {
         let blobs = blob_mgr.get_blob_ids();
         let blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
 

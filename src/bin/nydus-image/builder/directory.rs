@@ -180,6 +180,6 @@ impl Builder for DirectoryBuilder {
             }
         }
 
-        BuildOutput::new(blob_mgr, bootstrap_mgr)
+        BuildOutput::new(blob_mgr)
     }
 }
