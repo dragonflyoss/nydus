@@ -3,8 +3,7 @@ all: build
 TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
-ARCH ?= $(shell uname -m)
-OS ?= linux
+RUST_TARGET ?= $(shell uname -m)-unknown-linux-musl
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
@@ -57,7 +56,7 @@ endef
 	${CARGO} fmt -- --check
 
 .musl_target:
-	$(eval CARGO_BUILD_FLAGS += --target ${ARCH}-unknown-${OS}-musl)
+	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET})
 
 # Targets that are exposed to developers and users.
 build: .format fusedev virtiofs
@@ -97,7 +96,7 @@ ut:
 	RUST_BACKTRACE=1 ${CARGO} test $(VIRIOFS_COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 macos-fusedev:
-	${CARGO} build --target ${ARCH}-apple-darwin --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image
+	${CARGO} build --target ${RUST_TARGET} --target-dir ${current_dir}/target-fusedev --features=fusedev --release --bin nydusctl --bin nydusd --bin nydus-image
 
 macos-ut:
 	${CARGO} clippy --target-dir ${current_dir}/target-fusedev --features=fusedev --bin nydusd --release --workspace -- -Dwarnings
@@ -106,8 +105,8 @@ macos-ut:
 	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test $(FUSEDEV_COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 docker-static:
-	docker build -t nydus-rs-static --build-arg ARCH=${ARCH} misc/musl-static
-	docker run --rm ${CARGO_BUILD_GEARS} -e ARCH=${ARCH} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
+	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET} misc/musl-static
+	docker run --rm ${CARGO_BUILD_GEARS} -e RUST_TARGET=${RUST_TARGET} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
 
 # Run smoke test including general integration tests and unit tests in container.
 # Nydus binaries should already be prepared.
@@ -117,7 +116,7 @@ smoke: ut
 	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(FUSEDEV_COMMON) -- --nocapture --test-threads=8
 
 docker-nydus-smoke:
-	docker build -t nydus-smoke --build-arg ARCH=${ARCH} misc/nydus-smoke
+	docker build -t nydus-smoke --build-arg RUST_TARGET=${RUST_TARGET} misc/nydus-smoke
 	docker run --rm --privileged ${CARGO_BUILD_GEARS} \
 		-e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) \
 		-v ~/.cargo:/root/.cargo \
@@ -197,8 +196,8 @@ all-contrib-test: nydusify-test ctr-remote-test \
 				nydus-overlayfs-test docker-nydus-graphdriver-test
 
 docker-example: all-static-release
-	cp ${current_dir}/target-fusedev/${ARCH}-unknown-linux-musl/release/nydusd misc/example
-	cp ${current_dir}/target-fusedev/${ARCH}-unknown-linux-musl/release/nydus-image misc/example
+	cp ${current_dir}/target-fusedev/${RUST_TARGET}/release/nydusd misc/example
+	cp ${current_dir}/target-fusedev/${RUST_TARGET}/release/nydus-image misc/example
 	cp contrib/nydusify/cmd/nydusify misc/example
 	docker build -t nydus-rs-example misc/example
 	@cid=$(shell docker run --rm -t -d --privileged $(dind_cache_mount) nydus-rs-example)

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64, arm64, ppc64le, riscv64]
     steps:
     - uses: actions/checkout@v2
     - name: Cache cargo
@@ -30,15 +30,15 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: Build nydus-rs
       run: |
-        declare -A rust_arch_map=( ["amd64"]="x86_64" ["arm64"]="aarch64")
-        arch=${rust_arch_map[${{ matrix.arch }}]}
-        cargo install --version 0.2.1 cross
+        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
+        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
+        cargo install --version 0.2.4 cross
         rustup component add rustfmt clippy
-        make -e ARCH=$arch -e CARGO=cross static-release
-        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
-        sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusctl .
-        sudo mv target-virtiofs/$arch-unknown-linux-musl/release/nydusd nydusd-virtiofs
+        make -e RUST_TARGET=$RUST_TARGET -e CARGO=cross static-release
+        sudo mv target-fusedev/$RUST_TARGET/release/nydusd nydusd-fusedev
+        sudo mv target-fusedev/$RUST_TARGET/release/nydus-image .
+        sudo mv target-fusedev/$RUST_TARGET/release/nydusctl .
+        sudo mv target-virtiofs/$RUST_TARGET/release/nydusd nydusd-virtiofs
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
@@ -69,13 +69,13 @@ jobs:
     - name: build
       run: |
         # MacOS bash is too old to support declare -A
-        arch=$(test ${{ matrix.arch }} == "amd64" && echo "x86_64" || echo "aarch64")
+        RUST_TARGET=$(test ${{ matrix.arch }} == "amd64" && echo "x86_64-apple-darwin" || echo "aarch64-apple-darwin")
         rustup component add rustfmt clippy
-        rustup target install $arch-apple-darwin
-        make -e ARCH=$arch macos-fusedev
-        sudo mv target-fusedev/$arch-apple-darwin/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/$arch-apple-darwin/release/nydus-image .
-        sudo mv target-fusedev/$arch-apple-darwin/release/nydusctl .
+        rustup target install $RUST_TARGET
+        make -e RUST_TARGET=$RUST_TARGET macos-fusedev
+        sudo mv target-fusedev/$RUST_TARGET/release/nydusd nydusd-fusedev
+        sudo mv target-fusedev/$RUST_TARGET/release/nydus-image .
+        sudo mv target-fusedev/$RUST_TARGET/release/nydusctl .
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64, arm64, ppc64le, riscv64]
     env:
       DOCKER: false
     steps:
@@ -128,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64, arm64, ppc64le, riscv64]
         os: [linux]
     needs: [nydus-linux, contrib-linux]
     steps:

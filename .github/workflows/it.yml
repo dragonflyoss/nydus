@@ -48,20 +48,20 @@ jobs:
 
       - name: Build nydus-rs
         run: |
-          declare -A rust_arch_map=( ["amd64"]="x86_64" ["arm64"]="aarch64")
-          arch=${rust_arch_map[${{ matrix.arch }}]}
+          declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl")
+          RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
           cargo install --version 0.2.1 cross
           rustup component add rustfmt clippy
-          make -e ARCH=$arch -e CARGO=cross static-release
+          make -e RUST_TARGET=$RUST_TARGET -e CARGO=cross static-release
           make release  -C contrib/nydus-backend-proxy/
-          #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusd nydusd-fusedev
-          #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydus-image .
-          #sudo mv target-fusedev/$arch-unknown-linux-musl/release/nydusctl .
-          #sudo mv target-virtiofs/$arch-unknown-linux-musl/release/nydusd nydusd-virtiofs
+          #sudo mv target-fusedev/$RUST_TARGET/release/nydusd nydusd-fusedev
+          #sudo mv target-fusedev/$RUST_TARGET/release/nydus-image .
+          #sudo mv target-fusedev/$RUST_TARGET/release/nydusctl .
+          #sudo mv target-virtiofs/$RUST_TARGET/release/nydusd nydusd-virtiofs
           sudo cp -r misc/configs .
           sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
           pwd
-          ls -lh target-virtiofs/$arch-unknown-linux-musl/release
+          ls -lh target-virtiofs/$RUST_TARGET/release
       - name: Set up anchor file
         env:
           OSS_AK_ID: ${{ secrets.OSS_TEST_AK_ID }}
