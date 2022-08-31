@@ -38,7 +38,7 @@ nix = "0.24.0"
 anyhow = "1.0.35"
 base64 = "0.13.0"
 rust-fsm = "0.6.0"
-vm-memory = { version = "0.8.0", features = ["backend-mmap"], optional = true }
+vm-memory = { version = "0.9.0", features = ["backend-mmap"], optional = true }
 chrono = "0.4.19"
 openssl = { version = "0.10.40", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
@@ -51,7 +51,7 @@ rand_core = "0.6.2"
 tar = "0.4.38"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 
-fuse-backend-rs = { version = "0.9.5" }
+fuse-backend-rs = { version = "0.9" }
 vhost = { version = "0.4.0", features = ["vhost-user-slave"], optional = true }
 vhost-user-backend = { version = "0.5.1", optional = true }
 virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = true }

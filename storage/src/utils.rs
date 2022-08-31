@@ -18,7 +18,7 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
-use vm_memory::Bytes;
+use vm_memory::bytes::Bytes;
 
 use crate::{StorageError, StorageResult};
 
