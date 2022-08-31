@@ -281,9 +281,6 @@ pub struct BlobCacheEntry {
     /// Domain id for the blob, which is used to group cached blobs into management domains.
     #[serde(default)]
     pub domain_id: String,
-    /// Deprecated: data prefetch configuration: BlobPrefetchConfig.
-    #[serde(default)]
-    pub fs_prefetch: Option<BlobPrefetchConfig>,
 }
 
 /// Configuration information for a list of cached blob objects.
@@ -1012,13 +1009,7 @@ mod tests {
                 },
                 "metadata_path": "/tmp/metadata1"
             },
-            "domain_id": "domain1",
-            "fs_prefetch": {
-                "enable": true,
-                "threads_count": 2,
-                "merging_size": 4,
-                "bandwidth_rate": 5
-            }
+            "domain_id": "domain1"
         }"#;
         let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
         assert_eq!(&config.blob_type, BLOB_CACHE_TYPE_BOOTSTRAP);
@@ -1035,7 +1026,6 @@ mod tests {
             config.blob_config.metadata_path.as_ref().unwrap().as_str(),
             "/tmp/metadata1"
         );
-        assert!(config.fs_prefetch.is_some());
 
         let content = r#"{
             "type": "bootstrap",
@@ -1054,7 +1044,6 @@ mod tests {
         assert!(!config.blob_config.prefetch_config.enable);
         assert_eq!(config.blob_config.prefetch_config.threads_count, 0);
         assert_eq!(config.blob_config.prefetch_config.merging_size, 0);
-        assert!(config.fs_prefetch.is_none());
     }
 
     #[test]

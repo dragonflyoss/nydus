@@ -340,11 +340,8 @@ impl BlobCacheMgr {
             ));
         }
 
-        let prefetch_config = if entry.fs_prefetch.is_some() {
-            entry.fs_prefetch.clone().unwrap()
-        } else {
-            entry.blob_config.prefetch_config.clone()
-        };
+        let prefetch_config = entry.blob_config.prefetch_config.clone();
+
         let factory_config = Arc::new(FactoryConfig {
             id: entry.blob_config.id.clone(),
             backend: BackendConfig {
@@ -576,7 +573,6 @@ mod tests {
             blob_id: "image_v2".to_string(),
             blob_config,
             domain_id: "domain2".to_string(),
-            fs_prefetch: Default::default(),
         };
 
         let mgr = BlobCacheMgr::new();
