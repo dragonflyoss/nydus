@@ -474,8 +474,7 @@ impl Node {
             blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
 
             blob_ctx.compressed_blob_size += compressed_size as u64;
-            blob_ctx.uncompressed_blob_size =
-                blob_ctx.uncompressed_offset + aligned_chunk_size as u64;
+            blob_ctx.uncompressed_blob_size = pre_uncompressed_offset + aligned_chunk_size as u64;
             blob_ctx.blob_hash.update(&compressed);
 
             // Dump compressed chunk data to blob
