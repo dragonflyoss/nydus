@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	splitPartsCount = 4
-	// Blob size bigger than 100MB, apply multiparts upload.
-	multipartsUploadThreshold = 100 * 1024 * 1024
+	// We always use multipart upload for OSS, and limit the
+	// multipart chunk size to 500MB.
+	multipartChunkSize = 500 * 1024 * 1024
 )
 
 type OSSBackend struct {
@@ -106,24 +106,11 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 
 	if !forcePush {
 		if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "check object existence")
 		} else if exist {
-			logrus.Infof("Skip upload because blob exists: %s", blobID)
+			logrus.Infof("skip upload because blob exists: %s", blobID)
 			return &desc, nil
 		}
-	}
-
-	var stat os.FileInfo
-	stat, err := os.Stat(blobPath)
-	if err != nil {
-		return nil, err
-	}
-	blobSize := stat.Size()
-
-	var needMultiparts = false
-	// Blob size bigger than 100MB, apply multiparts upload.
-	if blobSize >= multipartsUploadThreshold {
-		needMultiparts = true
 	}
 
 	start := time.Now()
@@ -137,61 +124,48 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 
 	defer close(crc64ErrChan)
 
-	if needMultiparts {
-		logrus.Debugf("Upload %s using multiparts method", blobObjectKey)
-		chunks, err := oss.SplitFileByPartNum(blobPath, splitPartsCount)
-		if err != nil {
-			return nil, err
-		}
+	logrus.Debugf("upload %s using multipart method", blobObjectKey)
+	chunks, err := oss.SplitFileByPartSize(blobPath, multipartChunkSize)
+	if err != nil {
+		return nil, errors.Wrap(err, "split file by part size")
+	}
 
-		imur, err := b.bucket.InitiateMultipartUpload(blobObjectKey)
-		if err != nil {
-			return nil, err
-		}
+	imur, err := b.bucket.InitiateMultipartUpload(blobObjectKey)
+	if err != nil {
+		return nil, errors.Wrap(err, "initiate multipart upload")
+	}
 
-		// It always splits the blob into splitPartsCount=4 parts
-		partsChan := make(chan oss.UploadPart, splitPartsCount)
+	eg := new(errgroup.Group)
+	partsChan := make(chan oss.UploadPart, len(chunks))
+	for _, chunk := range chunks {
+		ck := chunk
+		eg.Go(func() error {
+			p, err := b.bucket.UploadPartFromFile(imur, blobPath, ck.Offset, ck.Size, ck.Number)
+			if err != nil {
+				return errors.Wrap(err, "upload part from file")
+			}
+			partsChan <- p
+			return nil
+		})
+	}
 
-		g := new(errgroup.Group)
-		for _, chunk := range chunks {
-			ck := chunk
-			g.Go(func() error {
-				p, err := b.bucket.UploadPartFromFile(imur, blobPath, ck.Offset, ck.Size, ck.Number)
-				if err != nil {
-					return err
-				}
-				partsChan <- p
-				return nil
-			})
-		}
-
-		if err := g.Wait(); err != nil {
-			b.bucket.AbortMultipartUpload(imur)
-			close(partsChan)
-			return nil, errors.Wrap(err, "Uploading parts failed")
-		}
-
+	if err := eg.Wait(); err != nil {
 		close(partsChan)
+		if err := b.bucket.AbortMultipartUpload(imur); err != nil {
+			return nil, errors.Wrap(err, "abort multipart upload")
+		}
+		return nil, errors.Wrap(err, "upload parts")
+	}
+	close(partsChan)
 
-		var parts []oss.UploadPart
-		for p := range partsChan {
-			parts = append(parts, p)
-		}
+	var parts []oss.UploadPart
+	for p := range partsChan {
+		parts = append(parts, p)
+	}
 
-		_, err = b.bucket.CompleteMultipartUpload(imur, parts)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		reader, err := os.Open(blobPath)
-		if err != nil {
-			return nil, err
-		}
-		defer reader.Close()
-		err = b.bucket.PutObject(blobObjectKey, reader)
-		if err != nil {
-			return nil, err
-		}
+	_, err = b.bucket.CompleteMultipartUpload(imur, parts)
+	if err != nil {
+		return nil, errors.Wrap(err, "complete multipart upload")
 	}
 
 	props, err := b.bucket.GetObjectDetailedMeta(blobObjectKey)
@@ -213,21 +187,17 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 			}
 
 			if uploadedCrc != crc64 {
-				return nil, errors.Errorf("CRC64 mismatch. Uploaded=%d, expected=%d", uploadedCrc, crc64)
+				return nil, errors.Errorf("crc64 mismatch, uploaded=%d, expected=%d", uploadedCrc, crc64)
 			}
 
 		} else {
-			logrus.Warnf("Too many values, skip crc64 integrity check.")
+			logrus.Warnf("too many values, skip crc64 integrity check.")
 		}
 	} else {
-		logrus.Warnf("No CRC64 in header, skip crc64 integrity check.")
+		logrus.Warnf("no crc64 in header, skip crc64 integrity check.")
 	}
 
-	// With OSS backend, no blob has to be pushed to registry, but have to push to build cache.
-
-	end := time.Now()
-	elapsed := end.Sub(start)
-	logrus.Debugf("Uploading blob %s costs %s", blobObjectKey, elapsed)
+	logrus.Debugf("uploaded blob %s, costs %s", blobObjectKey, time.Since(start))
 
 	return &desc, nil
 }
