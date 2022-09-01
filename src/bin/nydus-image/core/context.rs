@@ -610,7 +610,7 @@ impl BlobManager {
             let blob_id = ctx.blob_id.clone();
             let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
             let chunk_count = ctx.chunk_count;
-            let decompressed_blob_size = ctx.uncompressed_blob_size;
+            let uncompressed_blob_size = ctx.uncompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
             let blob_features = BlobFeatures::empty();
             let mut flags = RafsSuperFlags::empty();
@@ -624,7 +624,7 @@ impl BlobManager {
                         blob_readahead_size,
                         ctx.chunk_size,
                         chunk_count,
-                        decompressed_blob_size,
+                        uncompressed_blob_size,
                         compressed_blob_size,
                         blob_features,
                         flags,
@@ -639,7 +639,7 @@ impl BlobManager {
                         blob_readahead_size,
                         ctx.chunk_size,
                         chunk_count,
-                        decompressed_blob_size,
+                        uncompressed_blob_size,
                         compressed_blob_size,
                         blob_features,
                         flags,
