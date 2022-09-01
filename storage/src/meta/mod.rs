@@ -415,6 +415,7 @@ impl BlobMetaInfo {
 
     /// Get blob chunks covering uncompressed data range [start, start + size).
     ///
+    /// `size` also includes chunks alignment. It is a range on blob with chunks and alignments between them.
     /// The method returns error if any of following condition is true:
     /// - range [start, start + size) is invalid.
     /// - `start` is bigger than blob size.
@@ -489,9 +490,6 @@ impl BlobMetaInfo {
                 }
             }
 
-            if last_end > end {
-                return Ok(vec);
-            }
             Err(einval!(format!(
                 "entry not found index {} infos.len {}",
                 index,
