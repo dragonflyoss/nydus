@@ -402,7 +402,7 @@ impl BlobMetaInfo {
         let state = Arc::new(BlobMetaState {
             blob_index: blob_info.blob_index(),
             compressed_size: blob_info.compressed_size(),
-            uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
+            uncompressed_size: blob_info.uncompressed_size(),
             chunk_count,
             chunks: chunk_infos,
             base: base as *const u8,
