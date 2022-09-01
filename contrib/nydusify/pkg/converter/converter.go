@@ -181,6 +181,9 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 
 	defer func() {
 		if retErr != nil {
+			if err := cvt.storageBackend.Finalize(true); err != nil {
+				logrus.WithError(err).Warnf("Cancel backend upload")
+			}
 			if repo != "" {
 				metrics.ConversionFailureCount(repo, "unknown")
 			}
@@ -345,6 +348,10 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 			Reference: cvt.SourceRemote.Ref,
 			Digest:    sourceManifest.Digest.String(),
 		})
+	}
+
+	if err := cvt.storageBackend.Finalize(false); err != nil {
+		return errors.Wrap(err, "Finalize backend upload")
 	}
 
 	// Push OCI manifest, Nydus manifest and manifest index

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -23,16 +24,26 @@ import (
 )
 
 const (
-	// We always use multipart upload for OSS, and limit the
-	// multipart chunk size to 500MB.
-	multipartChunkSize = 500 * 1024 * 1024
+	// For multipart uploads, OSS has a maximum number of 10000 chunks,
+	// so we can only upload blob size of about 10000 * multipartChunkSize.
+	multipartChunkSize = 200 * 1024 * 1024 /// 200MB
 )
+
+type multipartStatus struct {
+	imur          *oss.InitiateMultipartUploadResult
+	parts         []oss.UploadPart
+	blobObjectKey string
+	crc64         uint64
+	crc64ErrChan  chan error
+}
 
 type OSSBackend struct {
 	// OSS storage does not support directory. Therefore add a prefix to each object
 	// to make it a path-like object.
 	objectPrefix string
 	bucket       *oss.Bucket
+	ms           []multipartStatus
+	msMutex      sync.Mutex
 }
 
 func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
@@ -96,9 +107,8 @@ func calcCrc64ECMA(path string) (uint64, error) {
 	return blobCrc64, nil
 }
 
-// Upload blob as image layer to oss backend.
-// Depending on blob's size, upload it by multiparts method or the normal method.
-// Verify integrity by calculate  CRC64.
+// Upload blob as image layer to oss backend and verify
+// integrity by calculate CRC64.
 func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64, forcePush bool) (*ocispec.Descriptor, error) {
 	blobObjectKey := b.objectPrefix + blobID
 
@@ -121,7 +131,6 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 		crc64, e = calcCrc64ECMA(blobPath)
 		crc64ErrChan <- e
 	}()
-
 	defer close(crc64ErrChan)
 
 	logrus.Debugf("upload %s using multipart method", blobObjectKey)
@@ -163,43 +172,78 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 		parts = append(parts, p)
 	}
 
-	_, err = b.bucket.CompleteMultipartUpload(imur, parts)
-	if err != nil {
-		return nil, errors.Wrap(err, "complete multipart upload")
+	ms := multipartStatus{
+		imur:          &imur,
+		parts:         parts,
+		blobObjectKey: blobObjectKey,
+		crc64:         crc64,
+		crc64ErrChan:  crc64ErrChan,
 	}
-
-	props, err := b.bucket.GetObjectDetailedMeta(blobObjectKey)
-	if err != nil {
-		return nil, errors.Wrapf(err, "get object meta")
-	}
-
-	// Try to validate blob object integrity if any crc64 value is returned.
-	if value, ok := props[http.CanonicalHeaderKey("x-oss-hash-crc64ecma")]; ok {
-		if len(value) == 1 {
-			uploadedCrc, err := strconv.ParseUint(value[0], 10, 64)
-			if err != nil {
-				return nil, errors.Wrapf(err, "parse uploaded crc64")
-			}
-
-			err = <-crc64ErrChan
-			if err != nil {
-				return nil, errors.Wrapf(err, "calculate crc64")
-			}
-
-			if uploadedCrc != crc64 {
-				return nil, errors.Errorf("crc64 mismatch, uploaded=%d, expected=%d", uploadedCrc, crc64)
-			}
-
-		} else {
-			logrus.Warnf("too many values, skip crc64 integrity check.")
-		}
-	} else {
-		logrus.Warnf("no crc64 in header, skip crc64 integrity check.")
-	}
+	b.msMutex.Lock()
+	defer b.msMutex.Unlock()
+	b.ms = append(b.ms, ms)
 
 	logrus.Debugf("uploaded blob %s, costs %s", blobObjectKey, time.Since(start))
 
 	return &desc, nil
+}
+
+func (b *OSSBackend) Finalize(cancel bool) error {
+	b.msMutex.Lock()
+	defer b.msMutex.Unlock()
+
+	for _, ms := range b.ms {
+		if cancel {
+			// If there is any failure during conversion process, it will
+			// cause the uploaded blob to be left on oss, and these blobs
+			// are hard to be GC-ed, so we need always to use the multipart
+			// upload, and should call the `AbortMultipartUpload` method to
+			// prevent blob residue as much as possible once any error happens
+			// during conversion process.
+			if err := b.bucket.AbortMultipartUpload(*ms.imur); err != nil {
+				logrus.WithError(err).Warn("abort multipart upload")
+			} else {
+				logrus.Warnf("blob upload has been aborted: %s", ms.blobObjectKey)
+			}
+			continue
+		}
+
+		_, err := b.bucket.CompleteMultipartUpload(*ms.imur, ms.parts)
+		if err != nil {
+			return errors.Wrap(err, "complete multipart upload")
+		}
+
+		props, err := b.bucket.GetObjectDetailedMeta(ms.blobObjectKey)
+		if err != nil {
+			return errors.Wrapf(err, "get object meta")
+		}
+
+		// Try to validate blob object integrity if any crc64 value is returned.
+		if value, ok := props[http.CanonicalHeaderKey("x-oss-hash-crc64ecma")]; ok {
+			if len(value) == 1 {
+				uploadedCrc, err := strconv.ParseUint(value[0], 10, 64)
+				if err != nil {
+					return errors.Wrapf(err, "parse uploaded crc64")
+				}
+
+				err = <-ms.crc64ErrChan
+				if err != nil {
+					return errors.Wrapf(err, "calculate crc64")
+				}
+
+				if uploadedCrc != ms.crc64 {
+					return errors.Errorf("crc64 mismatch, uploaded=%d, expected=%d", uploadedCrc, ms.crc64)
+				}
+
+			} else {
+				logrus.Warnf("too many values, skip crc64 integrity check.")
+			}
+		} else {
+			logrus.Warnf("no crc64 in header, skip crc64 integrity check.")
+		}
+	}
+
+	return nil
 }
 
 func (b *OSSBackend) Check(blobID string) (bool, error) {

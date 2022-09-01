@@ -23,6 +23,10 @@ func (m *mockBackend) Upload(ctx context.Context, blobID, blobPath string, blobS
 	return nil, args.Error(0)
 }
 
+func (m *mockBackend) Finalize(cancel bool) error {
+	return nil
+}
+
 func (m *mockBackend) Check(_ string) (bool, error) {
 	return false, nil
 }
