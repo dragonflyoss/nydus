@@ -414,7 +414,8 @@ impl BlobMetaInfo {
     }
 
     /// Get blob chunks covering uncompressed data range [start, start + size).
-    ///
+    /// `size` should be the real chunk size eliminate alignment. The being fetched chunks also carry alignment.
+    /// `batch_size` can be lesser than `size`, it should be handled.
     /// The method returns error if any of following condition is true:
     /// - range [start, start + size) is invalid.
     /// - `start` is bigger than blob size.
@@ -426,22 +427,20 @@ impl BlobMetaInfo {
         size: u64,
         batch_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
-        let end = start.checked_add(size).ok_or_else(|| einval!())?;
+        // Consider that chunks have alignment hole, so the below check is not very accurate.
+        // But keep it, it does no harm anyways.
+        let end = start.checked_add(size as u64).ok_or_else(|| einval!())?;
         if end > self.state.uncompressed_size {
             return Err(einval!(format!(
                 "get_chunks_uncompressed: end {} uncompressed_size {}",
                 end, self.state.uncompressed_size
             )));
         }
-        let batch_end = if batch_size <= size {
-            end
-        } else {
-            std::cmp::min(
-                start.checked_add(batch_size).unwrap_or(end),
-                self.state.uncompressed_size,
-            )
-        };
 
+        // Use `batch_size` as the termination condition since uncompressed chunks
+        // are not continuous.
+        // All chunks' total size should not take chunk alignment size into account.
+        let mut total_size = 0u64;
         let infos = &*self.state.chunks;
         let mut index = self.state.get_chunk_index_nocheck(start, false)?;
         debug_assert!(index < infos.len());
@@ -457,9 +456,9 @@ impl BlobMetaInfo {
 
         let mut vec = Vec::with_capacity(512);
         vec.push(BlobMetaChunk::new(index, &self.state));
+        total_size += entry.uncompressed_size() as u64;
 
-        let mut last_end = entry.aligned_uncompressed_end();
-        if last_end >= batch_end {
+        if total_size >= batch_size && total_size >= size {
             Ok(vec)
         } else {
             while index + 1 < infos.len() {
@@ -467,31 +466,23 @@ impl BlobMetaInfo {
                 let entry = &infos[index];
                 self.validate_chunk(entry)?;
 
-                // For stargz chunks, disable this check.
-                if !self.state.is_stargz && entry.uncompressed_offset() != last_end {
-                    return Err(einval!(format!(
-                        "mismatch uncompressed {} size {} last_end {}",
-                        entry.uncompressed_offset(),
-                        entry.uncompressed_size(),
-                        last_end
-                    )));
-                }
-
                 // Avoid read amplify if next chunk is too big.
-                if last_end >= end && entry.aligned_uncompressed_end() > batch_end {
+                // We don't strongly assume the each chunk is strictly aligned.
+                // At least, requested `size` should be met to fetch enough chunks
+                if total_size + entry.uncompressed_size() as u64 > batch_size && total_size >= size
+                {
                     return Ok(vec);
                 }
 
                 vec.push(BlobMetaChunk::new(index, &self.state));
-                last_end = entry.aligned_uncompressed_end();
-                if last_end >= batch_end {
+                total_size += entry.uncompressed_size() as u64;
+
+                // The batch size is too large. All left chunks still can't meet its size.
+                if (total_size >= batch_size && total_size >= size) || index == infos.len() - 1 {
                     return Ok(vec);
                 }
             }
 
-            if last_end > end {
-                return Ok(vec);
-            }
             Err(einval!(format!(
                 "entry not found index {} infos.len {}",
                 index,
@@ -972,8 +963,11 @@ mod tests {
         assert!(vec[0].is_compressed());
         assert!(!vec[0].is_hole());
 
+        // request_size 16384 batch_size 0 total_size 4097  this_chunk size 4097
+        // request_size 16384 batch_size 0 total_size 12289 this_chunk size 8192
+        // request_size 16384 batch_size 0 total_size 20481 this_chunk size 8192
         let vec = info.get_chunks_uncompressed(0x0, 0x4000, 0).unwrap();
-        assert_eq!(vec.len(), 2);
+        assert_eq!(vec.len(), 3);
         assert_eq!(vec[1].blob_index(), 1);
         assert_eq!(vec[1].id(), 1);
         assert_eq!(vec[1].compressed_offset(), 0x1000);
@@ -989,7 +983,13 @@ mod tests {
         let vec = info.get_chunks_uncompressed(0x100000, 0x2000, 0).unwrap();
         assert_eq!(vec.len(), 1);
 
-        assert!(info.get_chunks_uncompressed(0x0, 0x6001, 0).is_err());
+        // It can't fail since requested size 0x6001 must be fulfilled
+        // request_size 24577 batch_size 0 total_size 4097 this  chunk_size 4097
+        // request_size 24577 batch_size 0 total_size 12289 this chunk_size 8192
+        // request_size 24577 batch_size 0 total_size 20481 this chunk_size 8192
+        // request_size 24577 batch_size 0 total_size 28673 this chunk_size 8192
+        // assert!(info.get_chunks_uncompressed(0x0, 0x6001, 0).is_err());
+
         assert!(info.get_chunks_uncompressed(0x0, 0xfffff, 0).is_err());
         assert!(info.get_chunks_uncompressed(0x0, 0x100000, 0).is_err());
         assert!(info.get_chunks_uncompressed(0x0, 0x104000, 0).is_err());
