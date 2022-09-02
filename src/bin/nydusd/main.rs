@@ -586,6 +586,7 @@ fn process_default_fs_service(
 
         // passthroughfs requires !no_open
         opts.no_open = false;
+        opts.no_opendir = false;
         opts.killpriv_v2 = true;
 
         Some(cmd)
@@ -617,6 +618,7 @@ fn process_default_fs_service(
     // Enable all options required by passthroughfs
     if args.is_present("hybrid-mode") {
         opts.no_open = false;
+        opts.no_opendir = false;
         opts.killpriv_v2 = true;
     }
 
