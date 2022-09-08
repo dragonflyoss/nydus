@@ -343,7 +343,7 @@ fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
         .arg(
             Arg::with_name("fscache-threads")
                 .long("fscache-threads")
-                .default_value("1")
+                .default_value("4")
                 .help("Number of working threads to serve fscache requests")
                 .takes_value(true)
                 .required(false)
