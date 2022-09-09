@@ -826,5 +826,11 @@ class BlobEntryConf:
         self.conf_base.config.backend_config.repo = "nydus"
         return self
 
+    def set_prefetch(self, threads_cnt=4):
+        self.conf_base.fs_prefetch.enable = True
+        self.conf_base.fs_prefetch.prefetch_all = True
+        self.conf_base.fs_prefetch.threads_count = threads_cnt
+        return self
+
     def dumps(self):
         return json.dumps(self.conf_base, default=vars)

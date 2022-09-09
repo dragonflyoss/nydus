@@ -204,8 +204,7 @@ class WorkloadGen:
                     elif stat.S_ISSOCK(os.stat(cur_path).st_mode):
                         pass
                 except AssertionError as exp:
-                    logging.warning("current %s, source %s", cur_path, source_path
-                    )
+                    logging.warning("current %s, source %s", cur_path, source_path)
                     raise exp
 
                 cnt += 1
@@ -373,9 +372,10 @@ class WorkloadGen:
             if os.path.islink(one_path):
                 # Don't expect anything broken happen.
                 os.readlink(one_path)
-                # Symlink might be broken, then skip to read from it.
-                if not os.path.exists(one_path):
-                    continue
+                relpath = os.path.relpath(one_path, start=self.target_dir)
+                sym_path = os.path.join(self.verify_dir, relpath)
+                assert os.readlink(one_path) == os.readlink(sym_path)
+                continue
 
             if not os.path.isfile(one_path):
                 continue
@@ -409,7 +409,9 @@ class WorkloadGen:
 
                     try:
                         buf = f.read(io_size)
-                        assert io_size == len(buf) or file_size - pos == len(buf)
+                        assert io_size == len(buf) or file_size - pos == len(
+                            buf
+                        ), f"file path {one_path}: io_size {io_size} buf len {len(buf)} file_size {file_size} pos {pos}"
                     except IOError as exc:
                         logging.error(
                             "file %s, offset %u, io size %u", one_path, pos, io_size
