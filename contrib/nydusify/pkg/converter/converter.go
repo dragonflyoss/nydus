@@ -61,62 +61,55 @@ func (job *mountJob) Umount() error {
 // This is the main entrypoint for whom want to leverage the ability to convert a OCI image
 // Usually by importing this package and construct `Opt`
 type Opt struct {
-	Logger provider.ProgressLogger
+	Logger          provider.ProgressLogger
+	NydusImagePath  string
+	NydusifyVersion string
+	WorkDir         string
 
-	TargetPlatform string
-	SourceRemote   *remote.Remote
-	TargetRemote   *remote.Remote
+	SourceRemote *remote.Remote
+	TargetRemote *remote.Remote
 
 	CacheRemote     *remote.Remote
 	CacheMaxRecords uint
 	CacheVersion    string
+	ChunkDict       ChunkDictOpt
 
-	NydusImagePath   string
-	WorkDir          string
+	BackendType      string
+	BackendConfig    string
+	BackendForcePush bool
+
+	TargetPlatform   string
+	MultiPlatform    bool
+	DockerV2Format   bool
+	FsVersion        string
+	FsAlignChunk     bool
 	PrefetchPatterns string
-
-	MultiPlatform  bool
-	DockerV2Format bool
-
-	BackendType         string
-	BackendConfig       string
-	BackendForcePush    bool
-	BackendAlignedChunk bool
-
-	NydusifyVersion string
-
-	ChunkDict ChunkDictOpt
-	FsVersion string
 }
 
 type Converter struct {
-	Logger provider.ProgressLogger
+	Logger          provider.ProgressLogger
+	NydusImagePath  string
+	NydusifyVersion string
+	SourceDir       string
+	WorkDir         string
 
-	TargetPlatform string
-	SourceDir      string
-	SourceRemote   *remote.Remote
-	TargetRemote   *remote.Remote
+	SourceRemote *remote.Remote
+	TargetRemote *remote.Remote
+
+	BackendForcePush bool
+	storageBackend   backend.Backend
 
 	CacheRemote     *remote.Remote
 	CacheMaxRecords uint
 	CacheVersion    string
+	chunkDict       ChunkDictOpt
 
-	NydusImagePath   string
-	WorkDir          string
+	TargetPlatform   string
+	MultiPlatform    bool
+	DockerV2Format   bool
+	FsVersion        string
+	FsAlignChunk     bool
 	PrefetchPatterns string
-
-	MultiPlatform  bool
-	DockerV2Format bool
-
-	BackendForcePush    bool
-	BackendAlignedChunk bool
-
-	NydusifyVersion string
-
-	storageBackend backend.Backend
-
-	chunkDict ChunkDictOpt
-	FsVersion string
 }
 
 func imageRepository(ref string) (string, error) {
@@ -145,22 +138,22 @@ func New(opt Opt) (*Converter, error) {
 	}
 
 	return &Converter{
-		Logger:              opt.Logger,
-		TargetPlatform:      opt.TargetPlatform,
-		SourceDir:           sourceDir,
-		SourceRemote:        opt.SourceRemote,
-		TargetRemote:        opt.TargetRemote,
-		CacheRemote:         opt.CacheRemote,
-		CacheMaxRecords:     opt.CacheMaxRecords,
-		CacheVersion:        opt.CacheVersion,
-		NydusImagePath:      opt.NydusImagePath,
-		WorkDir:             opt.WorkDir,
-		PrefetchPatterns:    opt.PrefetchPatterns,
-		MultiPlatform:       opt.MultiPlatform,
-		DockerV2Format:      opt.DockerV2Format,
-		BackendForcePush:    opt.BackendForcePush,
-		BackendAlignedChunk: opt.BackendAlignedChunk,
-		NydusifyVersion:     opt.NydusifyVersion,
+		Logger:           opt.Logger,
+		TargetPlatform:   opt.TargetPlatform,
+		SourceDir:        sourceDir,
+		SourceRemote:     opt.SourceRemote,
+		TargetRemote:     opt.TargetRemote,
+		CacheRemote:      opt.CacheRemote,
+		CacheMaxRecords:  opt.CacheMaxRecords,
+		CacheVersion:     opt.CacheVersion,
+		NydusImagePath:   opt.NydusImagePath,
+		WorkDir:          opt.WorkDir,
+		PrefetchPatterns: opt.PrefetchPatterns,
+		MultiPlatform:    opt.MultiPlatform,
+		DockerV2Format:   opt.DockerV2Format,
+		BackendForcePush: opt.BackendForcePush,
+		FsAlignChunk:     opt.FsAlignChunk,
+		NydusifyVersion:  opt.NydusifyVersion,
 
 		storageBackend: backend,
 
@@ -265,7 +258,7 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 			dockerV2Format: cvt.DockerV2Format,
 			backend:        cvt.storageBackend,
 			forcePush:      cvt.BackendForcePush,
-			alignedChunk:   cvt.BackendAlignedChunk,
+			alignedChunk:   cvt.FsAlignChunk,
 			referenceBlobs: blobLayers,
 			fsVersion:      cvt.FsVersion,
 		}
