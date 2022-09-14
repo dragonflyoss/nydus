@@ -14,7 +14,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-// Backend transers artifacts generated during image conversion to a backend storage such as:
+// Backend transfers artifacts generated during image conversion to a backend storage such as:
 //		1. registry: complying to OCI distribution specification, push blob file
 //		   to registry and use the registry as a storage.
 //		2. oss: A object storage backend, which uses its SDK to transer blob file.

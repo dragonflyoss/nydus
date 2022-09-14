@@ -64,11 +64,11 @@ type Cache struct {
 	opt Opt
 	// Remote is responsible for pulling & pushing cache image
 	remote *remote.Remote
-	// reference blob records
+	// Records referenced
 	referenceRecords map[digest.Digest]*Record
-	// Store the pulled records from registry
+	// Records pulled from registry
 	pulledRecords map[digest.Digest]*Record
-	// Store the records prepared to push to registry
+	// Records to be push to registry
 	pushedRecords []*Record
 }
 
@@ -112,6 +112,7 @@ func (cache *Cache) SetReference(layer *ocispec.Descriptor) {
 }
 
 func (cache *Cache) recordToLayer(record *Record) (*ocispec.Descriptor, *ocispec.Descriptor) {
+	// Handle referenced nydus data blob
 	if record.SourceChainID == "" {
 		if record.NydusBlobDesc != nil {
 			if cache.opt.Backend.Type() == backend.RegistryBackend {
@@ -127,11 +128,11 @@ func (cache *Cache) recordToLayer(record *Record) (*ocispec.Descriptor, *ocispec
 		}
 		return nil, nil
 	}
+
 	bootstrapCacheMediaType := ocispec.MediaTypeImageLayerGzip
 	if cache.opt.DockerV2Format {
 		bootstrapCacheMediaType = images.MediaTypeDockerSchema2LayerGzip
 	}
-
 	bootstrapCacheDesc := &ocispec.Descriptor{
 		MediaType: bootstrapCacheMediaType,
 		Digest:    record.NydusBootstrapDesc.Digest,
@@ -325,15 +326,15 @@ func (cache *Cache) importRecordsFromLayers(layers []ocispec.Descriptor) {
 			if record.SourceChainID == "" {
 				referenceRecords[record.NydusBlobDesc.Digest] = record
 				logrus.Infof("Found reference blob layer %s", record.NydusBlobDesc.Digest)
-				continue
+			} else {
+				// Merge bootstrap and related blob layer to record
+				newRecord := mergeRecord(
+					pulledRecords[record.SourceChainID],
+					record,
+				)
+				pulledRecords[record.SourceChainID] = newRecord
+				pushedRecords = append(pushedRecords, newRecord)
 			}
-			// Merge bootstrap and related blob layer to record
-			newRecord := mergeRecord(
-				pulledRecords[record.SourceChainID],
-				record,
-			)
-			pulledRecords[record.SourceChainID] = newRecord
-			pushedRecords = append(pushedRecords, newRecord)
 		} else {
 			logrus.Warnf("Strange! Build cache layer can't produce a valid record. %s", layer.Digest)
 		}
@@ -491,27 +492,34 @@ func (cache *Cache) Check(ctx context.Context, layerChainID digest.Digest) (*Rec
 	if err != nil {
 		return nil, nil, nil, errors.Wrap(err, "Check bootstrap layer")
 	}
+	defer func() {
+		if err != nil {
+			bootstrapReader.Close()
+		}
+	}()
+
+	var exist bool
+	var blobReader io.ReadCloser
 
 	// Check blob layer on cache
 	if record.NydusBlobDesc != nil {
 		if cache.opt.Backend.Type() == backend.RegistryBackend {
-			blobReader, err := cache.remote.Pull(ctx, *record.NydusBlobDesc, true)
+			blobReader, err = cache.remote.Pull(ctx, *record.NydusBlobDesc, true)
 			if err != nil {
 				return nil, nil, nil, errors.Wrap(err, "Check blob layer")
 			}
-			return record, bootstrapReader, blobReader, nil
+		} else {
+			exist, err = cache.opt.Backend.Check(record.NydusBlobDesc.Digest.Hex())
+			if err != nil {
+				return nil, nil, nil, errors.Wrap(err, "Check blob on backend")
+			} else if !exist {
+				err = errors.New("Not found blob on backend")
+				return nil, nil, nil, err
+			}
 		}
-		exist, err := cache.opt.Backend.Check(record.NydusBlobDesc.Digest.Hex())
-		if err != nil {
-			return nil, nil, nil, errors.Wrap(err, "Check blob on backend")
-		}
-		if !exist {
-			return nil, nil, nil, errors.New("Not found blob on backend")
-		}
-		return record, bootstrapReader, nil, nil
 	}
 
-	return record, bootstrapReader, nil, nil
+	return record, bootstrapReader, blobReader, nil
 }
 
 // Record puts new bootstrap & blob layer to cache record, it's a limited queue.
