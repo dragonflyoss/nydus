@@ -388,20 +388,68 @@ func main() {
 			},
 		},
 		{
-			Name:    "view",
-			Aliases: []string{"mount"},
-			Usage:   "View/Mount the file system in nydus image",
+			Name:    "mount",
+			Aliases: []string{"view"},
+			Usage:   "Mount the nydus image as a filesystem",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: true,
+					Usage:    "Target (Nydus) image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Allow http/insecure network communication",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
 
-				&cli.StringFlag{Name: "mount-path", Value: "./image-fs", Usage: "The Path for the file system to mount on", EnvVars: []string{"MOUNT_PATH"}},
-				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
-				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image view, will be cleaned up after viewing", EnvVars: []string{"WORK_DIR"}},
-				&cli.StringFlag{Name: "nydusd", Value: "nydusd", Usage: "The nydusd binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUSD"}},
-				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will view file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
-				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
-				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+				&cli.StringFlag{
+					Name:     "backend-type",
+					Value:    "",
+					Required: true,
+					Usage:    "Type of storage backend, possible values: 'registry', 'oss'",
+					EnvVars:  []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "mount-path",
+					Value:   "./image-fs",
+					Usage:   "Path to mount the image",
+					EnvVars: []string{"MOUNT_PATH"},
+				},
+				&cli.StringFlag{
+					Name:  "platform",
+					Value: "linux/" + runtime.GOARCH,
+					Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./tmp",
+					Usage:   "Working directory for image view, will be cleaned up after viewing",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydusd",
+					Value:   "nydusd",
+					Usage:   "The nydusd binary path, if unset, search in PATH environment",
+					EnvVars: []string{"NYDUSD"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -484,10 +532,10 @@ func main() {
 				&cli.StringFlag{
 					Name:    "backend-config",
 					Value:   "",
-					Usage:   "Json string for storage backend configuration",
+					Usage:   "Json configuration string for storage backend",
 					EnvVars: []string{"BACKEND_CONFIG"},
 				},
-				&cli.StringFlag{
+				&cli.PathFlag{
 					Name:      "backend-config-file",
 					TakesFile: true,
 					Usage:     "Json configuration file for storage backend",
@@ -509,8 +557,9 @@ func main() {
 					Usage:   "Compact parent bootstrap before building the image when needed",
 					EnvVars: []string{"COMPACT"},
 				},
-				&cli.StringFlag{
-					Name: "compact-config-file",
+				&cli.PathFlag{
+					Name:      "compact-config-file",
+					TakesFile: true,
 					Usage: "Compact configuration file, default configuration is " +
 						"{\"min_used_ratio\": 5, \"compact_blob_size\": 10485760, \"max_compact_size\": 104857600, " +
 						"\"layers_to_compact\": 32}",

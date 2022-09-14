@@ -93,11 +93,11 @@ func New(opt Opt) (*FsViewer, error) {
 // Pull Bootstrap, includes nydus_manifest.json and nydus_config.json
 func (fsViewer *FsViewer) PullBootstrap(ctx context.Context, targetParsed *parser.Parsed) error {
 	if err := os.RemoveAll(fsViewer.WorkDir); err != nil {
-		return errors.Wrap(err, "clean up work directory error")
+		return errors.Wrap(err, "failed to clean up working directory")
 	}
 
 	if err := os.MkdirAll(filepath.Join(fsViewer.WorkDir, "fs"), 0750); err != nil {
-		return errors.Wrap(err, "create work directory error")
+		return errors.Wrap(err, "can't create working directory")
 	}
 
 	if targetParsed.NydusImage != nil {
@@ -118,12 +118,12 @@ func (fsViewer *FsViewer) PullBootstrap(ctx context.Context, targetParsed *parse
 		logrus.Infof("Pulling Nydus bootstrap to %s", target)
 		bootstrapReader, err := fsViewer.Parser.PullNydusBootstrap(ctx, targetParsed.NydusImage)
 		if err != nil {
-			return errors.Wrap(err, "pull Nydus bootstrap layer error")
+			return errors.Wrap(err, "failed to pull Nydus bootstrap layer")
 		}
 		defer bootstrapReader.Close()
 
 		if err := utils.UnpackFile(bootstrapReader, utils.BootstrapFileNameInLayer, target); err != nil {
-			return errors.Wrap(err, "unpack Nydus bootstrap layer")
+			return errors.Wrap(err, "failed to unpack Nydus bootstrap layer")
 		}
 	}
 
@@ -135,20 +135,20 @@ func (fsViewer *FsViewer) MountImage() error {
 	logrus.Infof("Mounting Nydus image to %s", fsViewer.NydusdConfig.MountPath)
 
 	if err := os.MkdirAll(fsViewer.NydusdConfig.BlobCacheDir, 0750); err != nil {
-		return errors.Wrap(err, "create blob cache directory for Nydusd error")
+		return errors.Wrap(err, "can't create blob cache directory for Nydusd")
 	}
 
 	if err := os.MkdirAll(fsViewer.NydusdConfig.MountPath, 0750); err != nil {
-		return errors.Wrap(err, "create mountpoint directory of Nydus image error")
+		return errors.Wrap(err, "can't create mountpoint directory of Nydus image")
 	}
 
 	nydusd, err := tool.NewNydusd(fsViewer.NydusdConfig)
 	if err != nil {
-		return errors.Wrap(err, "create Nydusd daemon error")
+		return errors.Wrap(err, "can't create Nydusd daemon")
 	}
 
 	if err := nydusd.Mount(); err != nil {
-		return errors.Wrap(err, "mount Nydus image error")
+		return errors.Wrap(err, "failed to mount Nydus image")
 	}
 
 	return nil
@@ -161,11 +161,11 @@ func (fsViewer *FsViewer) View(ctx context.Context) error {
 	// Pull bootstrap
 	targetParsed, err := fsViewer.Parser.Parse(ctx)
 	if err != nil {
-		return errors.Wrap(err, "parse Nydus image error")
+		return errors.Wrap(err, "failed to parse image reference")
 	}
 	err = fsViewer.PullBootstrap(ctx, targetParsed)
 	if err != nil {
-		return errors.Wrap(err, "fsViewer pull bootstrap error")
+		return errors.Wrap(err, "failed to pull Nydus image bootstrap")
 	}
 
 	err = fsViewer.MountImage()
@@ -187,7 +187,7 @@ func (fsViewer *FsViewer) View(ctx context.Context) error {
 	logrus.Infof("Please send signal SIGINT/SIGTERM to umount the file system")
 	<-done
 	if err := os.RemoveAll(fsViewer.WorkDir); err != nil {
-		return errors.Wrap(err, "clean up work directory error")
+		return errors.Wrap(err, "failed to clean up working directory")
 	}
 
 	return nil
