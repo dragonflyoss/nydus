@@ -44,6 +44,26 @@ func Test_parseBackendConfig(t *testing.T) {
 	}, cfg)
 }
 
+func Test_parseBackendConfigString(t *testing.T) {
+	cfg, err := ParseBackendConfigString(`{
+  "endpoint": "mock.aliyuncs.com",
+  "access_key_id": "testid",
+  "access_key_secret": "testkey",
+  "bucket_name": "testbucket",
+  "meta_prefix": "test/",
+  "blob_prefix": ""
+}`)
+	assert.Nil(t, err)
+	assert.Equal(t, BackendConfig{
+		Endpoint:        "mock.aliyuncs.com",
+		AccessKeyID:     "testid",
+		AccessKeySecret: "testkey",
+		BucketName:      "testbucket",
+		MetaPrefix:      "test",
+		BlobPrefix:      "",
+	}, cfg)
+}
+
 func TestPusher_Push(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()

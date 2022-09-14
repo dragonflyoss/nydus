@@ -22,11 +22,6 @@ func (m *mockBuilder) Run(option build.BuilderOption) error {
 	return args.Error(0)
 }
 
-func Test_blobFileName(t *testing.T) {
-	blob := blobFileName("system.meta")
-	assert.Equal(t, "system.blob", blob)
-}
-
 func TestNew(t *testing.T) {
 	tmpDir, tearDown := setUpTmpDir(t)
 	defer tearDown()
@@ -66,9 +61,9 @@ func TestPacker_Pack(t *testing.T) {
 	p.builder = builder
 	builder.On("Run", mock.Anything).Return(nil)
 	res, err := p.Pack(context.Background(), PackRequest{
-		TargetDir: tmpDir,
-		Meta:      "test.meta",
-		PushBlob:  false,
+		SourceDir:    tmpDir,
+		ImageName:    "test.meta",
+		PushToRemote: false,
 	})
 	assert.Nil(t, err)
 	assert.Equal(t, PackResult{

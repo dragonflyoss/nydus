@@ -50,11 +50,11 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 
 	metaBackend, err := backend.NewBackend("oss", opt.BackendConfig.rawMetaBackendCfg(), nil)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to init meta backend")
+		return nil, errors.Wrapf(err, "failed to init backend for bootstrap blob")
 	}
 	blobBackend, err := backend.NewBackend("oss", opt.BackendConfig.rawBlobBackendCfg(), nil)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to init blob backend")
+		return nil, errors.Wrapf(err, "failed to init backend for data blob")
 	}
 
 	return &Pusher{
@@ -77,14 +77,14 @@ func (p *Pusher) Push(req PushRequest) (PushResult, error) {
 
 	for _, blob := range req.ParentBlobs {
 		// try push parent blobs
-		if _, err := p.blobBackend.Upload(ctx, blob, p.blobFilePath(blob), 0, false); err != nil {
+		if _, err := p.blobBackend.Upload(ctx, blob, p.blobFilePath(blob, true), 0, false); err != nil {
 			return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")
 		}
 	}
 
 	p.logger.Infof("push blob %s", req.Blob)
 	if req.Blob != "" {
-		if _, err := p.blobBackend.Upload(ctx, req.Blob, p.blobFilePath(req.Blob), 0, false); err != nil {
+		if _, err := p.blobBackend.Upload(ctx, req.Blob, p.blobFilePath(req.Blob, true), 0, false); err != nil {
 			return PushResult{}, errors.Wrap(err, "failed to put blobfile to remote")
 		}
 	}
@@ -107,6 +107,16 @@ func ParseBackendConfig(backendConfigFile string) (BackendConfig, error) {
 	defer cfgFile.Close()
 	if err = json.NewDecoder(cfgFile).Decode(&cfg); err != nil {
 		return BackendConfig{}, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigFile)
+	}
+	cfg.MetaPrefix = strings.TrimSuffix(cfg.MetaPrefix, "/")
+	cfg.BlobPrefix = strings.TrimSuffix(cfg.BlobPrefix, "/")
+	return cfg, nil
+}
+
+func ParseBackendConfigString(backendConfigContent string) (BackendConfig, error) {
+	var cfg BackendConfig
+	if err := json.Unmarshal([]byte(backendConfigContent), &cfg); err != nil {
+		return BackendConfig{}, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigContent)
 	}
 	cfg.MetaPrefix = strings.TrimSuffix(cfg.MetaPrefix, "/")
 	cfg.BlobPrefix = strings.TrimSuffix(cfg.BlobPrefix, "/")

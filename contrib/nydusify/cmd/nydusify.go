@@ -441,99 +441,111 @@ func main() {
 			},
 		},
 		{
-			Name:  "pack",
-			Usage: "Pack a directory to nydus bootstrap and blob",
+			Name:    "build",
+			Aliases: []string{"pack"},
+			Usage:   "Build a Nydus image from a source directory",
 			Flags: []cli.Flag{
 				&cli.StringFlag{
 					Name:     "source-dir",
 					Aliases:  []string{"target-dir"}, // for compatibility
 					Required: true,
-					Usage:    "The source directory of build target",
+					Usage:    "Source directory to build image from",
 					EnvVars:  []string{"SOURCE_DIR"},
 				},
 				&cli.StringFlag{
 					Name:     "output-dir",
 					Aliases:  []string{"o"},
 					Required: false,
-					Usage:    "Output dir of build artifact",
+					Usage:    "Output directory for built artifacts",
 					EnvVars:  []string{"OUTPUT_DIR"},
 				},
+				&cli.StringFlag{
+					Name:     "name",
+					Aliases:  []string{"meta", "bootstrap"}, // for compatibility
+					Required: true,
+					Usage:    "Image name, which will be used as suffix for the generated Nydus image bootstrap/data blobs",
+					EnvVars:  []string{"BOOTSTRAP", "IMAGE_NAME"},
+				},
+
 				&cli.BoolFlag{
 					Name:    "backend-push",
 					Value:   false,
-					Usage:   "Push Nydus blob to storage backend",
+					Usage:   "Push generated Nydus image to storage backend",
 					EnvVars: []string{"BACKEND_PUSH"},
 				},
 				&cli.StringFlag{
 					Name:        "backend-type",
 					Value:       "oss",
 					DefaultText: "oss",
-					Usage:       "Specify Nydus blob storage backend type",
+					Usage:       "Type of storage backend, possible values: 'registry', 'oss'",
 					EnvVars:     []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
-					Name:     "bootstrap",
-					Aliases:  []string{"meta"}, // for compatibility
-					Required: true,
-					Usage:    "Specify Nydus meta file name",
-					EnvVars:  []string{"BOOTSTRAP"},
-				},
-				&cli.StringFlag{
-					Name:    "parent-bootstrap",
-					Usage:   "Specify parent bootstrap to pack dictionary",
-					EnvVars: []string{"PARENT_BOOTSTRAP"},
-				},
-				&cli.StringFlag{
-					Name: "chunk-dict",
-					Usage: "Specify a chunk dict expression for chunk deduplication, " +
-						"for example: bootstrap=/path/to/dict.boot",
-					EnvVars: []string{"CHUNK_DICT"},
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json string for storage backend configuration",
+					EnvVars: []string{"BACKEND_CONFIG"},
 				},
 				&cli.StringFlag{
 					Name:      "backend-config-file",
 					TakesFile: true,
-					Usage:     "Specify Nydus blob storage backend config from path",
+					Usage:     "Json configuration file for storage backend",
 					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
 				},
+
 				&cli.StringFlag{
-					Name:    "nydus-image",
-					Value:   "nydus-image",
-					Usage:   "The nydus-image binary path, if unset, search in PATH environment",
-					EnvVars: []string{"NYDUS_IMAGE"},
+					Name:    "chunk-dict",
+					Usage:   "Specify a chunk dict expression for chunk deduplication, for example: bootstrap=/path/to/dict.boot",
+					EnvVars: []string{"CHUNK_DICT"},
+				},
+				&cli.StringFlag{
+					Name:    "parent-bootstrap",
+					Usage:   "Specify a parent metadata to reference data chunks",
+					EnvVars: []string{"PARENT_BOOTSTRAP"},
 				},
 				&cli.BoolFlag{
 					Name:    "compact",
-					Usage:   "Compact parent bootstrap if necessary before do pack",
+					Usage:   "Compact parent bootstrap before building the image when needed",
 					EnvVars: []string{"COMPACT"},
 				},
 				&cli.StringFlag{
 					Name: "compact-config-file",
-					Usage: "Compact config file, default config is " +
+					Usage: "Compact configuration file, default configuration is " +
 						"{\"min_used_ratio\": 5, \"compact_blob_size\": 10485760, \"max_compact_size\": 104857600, " +
 						"\"layers_to_compact\": 32}",
 					EnvVars: []string{"COMPACT_CONFIG_FILE"},
 				},
+
 				&cli.StringFlag{
 					Name:        "fs-version",
 					Required:    false,
-					Usage:       "Version number of nydus image format, possible values: 5, 6",
+					Usage:       "Nydus image format version number, possible values: 5, 6",
 					EnvVars:     []string{"FS_VERSION"},
 					Value:       "5",
 					DefaultText: "V5 format",
 				},
+
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
 			},
 			Before: func(ctx *cli.Context) error {
-				targetPath := ctx.String("target-dir")
-				fi, err := os.Stat(targetPath)
+				sourcePath := ctx.String("source-dir")
+				fi, err := os.Stat(sourcePath)
 				if err != nil {
-					return errors.Wrapf(err, "failed to stat target path %s", targetPath)
+					return errors.Wrapf(err, "failed to check source directory")
 				}
 				if !fi.IsDir() {
-					return errors.Errorf("%s is not a directory", targetPath)
+					return errors.Errorf("source path '%s' is not a directory", sourcePath)
 				}
 				return nil
 			},
 			Action: func(c *cli.Context) error {
+				setupLogLevel(c)
+
 				var (
 					p             *packer.Packer
 					res           packer.PackResult
@@ -542,22 +554,21 @@ func main() {
 				)
 
 				// if backend-push is specified, we should make sure backend-config-file exists
-				if c.Bool("backend-push") {
-					backendConfigFile := c.String("backend-config-file")
-					if strings.TrimSpace(backendConfigFile) == "" {
-						return errors.New("backend-config-file is required when specify --backend-push")
-					}
-					if _, err = os.Stat(backendConfigFile); err != nil {
-						return errors.Errorf("can not find backend-config-file %s", backendConfigFile)
-					}
-					cfg, err := packer.ParseBackendConfig(backendConfigFile)
+				if c.Bool("backend-push") || c.Bool("compact") {
+					_backendConfig, err := parseBackendConfig(
+						c.String("backend-config"), c.String("backend-config-file"),
+					)
 					if err != nil {
-						return errors.Errorf("failed to parse backend-config-file %s, err = %v", backendConfigFile, err)
+						return err
+					} else if len(_backendConfig) == 0 {
+						return errors.Errorf("missing backend configuration information")
+					}
+					cfg, err := packer.ParseBackendConfigString(_backendConfig)
+					if err != nil {
+						return errors.Errorf("failed to parse backend-config '%s', err = %v", _backendConfig, err)
 					}
 					backendConfig = &cfg
 				}
-
-				setupLogLevel(c)
 
 				if p, err = packer.New(packer.Opt{
 					LogLevel:       logrus.GetLevel(),
@@ -569,27 +580,27 @@ func main() {
 				}
 
 				if res, err = p.Pack(context.Background(), packer.PackRequest{
-					Parent:    c.String("parent-bootstrap"),
-					ChunkDict: c.String("chunk-dict"),
-					TargetDir: c.String("target-dir"),
-					Meta:      c.String("bootstrap"),
-					PushBlob:  c.Bool("backend-push"),
+					SourceDir:    c.String("source-dir"),
+					ImageName:    c.String("name"),
+					PushToRemote: c.Bool("backend-push"),
+					FsVersion:    c.String("fs-version"),
 
+					ChunkDict:         c.String("chunk-dict"),
+					Parent:            c.String("parent-bootstrap"),
 					TryCompact:        c.Bool("compact"),
 					CompactConfigPath: c.String("compact-config-file"),
-					FsVersion:         c.String("fs-version"),
 				}); err != nil {
 					return err
 				}
-				logrus.Infof("successfully pack meta %s, blob %s", res.Meta, res.Blob)
+				logrus.Infof("successfully built Nydus image (bootstrap:'%s', blob:'%s')", res.Meta, res.Blob)
 				return nil
 			},
 		},
 	}
 
-	// Under platform linux/arm64, containerd/compression prioritizes using `unpigz`
-	// to decompress tar.giz, which will be corrupted somehow. By disabling it,
-	// keep nydusify behavior the same with x86_64 platform.
+	// With linux/arm64 platform, containerd/compression prioritizes `unpigz`
+	// to decompress tar.gz file, which may generate corrupted data somehow.
+	// Keep the same behavior with x86_64 platform by disabling pigz.
 	os.Setenv("CONTAINERD_DISABLE_PIGZ", "1")
 
 	if !utils.IsSupportedArch(runtime.GOARCH) {

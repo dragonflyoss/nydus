@@ -153,7 +153,9 @@ func (cg *cacheGlue) PullBootstrap(
 	}
 
 	cacheRecord, bootstrapReader, blobReader, _ := cg.cache.Check(ctx, chainID)
-	defer bootstrapReader.Close()
+	if bootstrapReader != nil {
+		defer bootstrapReader.Close()
+	}
 	if blobReader != nil {
 		defer blobReader.Close()
 	}

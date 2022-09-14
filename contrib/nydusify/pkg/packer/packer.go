@@ -3,7 +3,6 @@ package packer
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -26,7 +25,7 @@ const (
 var (
 	ErrNydusImageBinaryNotFound = errors.New("failed to find nydus-image binary")
 	ErrInvalidChunkDictArgs     = errors.New("invalid chunk-dict args")
-	ErrNoSupport                = errors.New("no support")
+	ErrNoSupport                = errors.New("invalid chunk-dict type")
 )
 
 type Opt struct {
@@ -87,16 +86,15 @@ func (cfg *BackendConfig) rawBlobBackendCfg() []byte {
 }
 
 type PackRequest struct {
-	TargetDir string
-	Meta      string
-	Parent    string
-	ChunkDict string
-	// PushBlob whether to push blob and meta to remote backend
-	PushBlob bool
+	SourceDir    string
+	ImageName    string
+	FsVersion    string
+	PushToRemote bool
 
+	ChunkDict         string
+	Parent            string
 	TryCompact        bool
 	CompactConfigPath string
-	FsVersion         string
 }
 
 type PackResult struct {
@@ -114,10 +112,10 @@ func New(opt Opt) (*Packer, error) {
 		return nil, errors.Wrap(err, "failed to init artifact")
 	}
 	p := &Packer{
-		logger:         logger,
-		nydusImagePath: opt.NydusImagePath,
 		Artifact:       artifact,
 		BackendConfig:  opt.BackendConfig,
+		logger:         logger,
+		nydusImagePath: opt.NydusImagePath,
 	}
 	if err = p.ensureNydusImagePath(); err != nil {
 		return nil, err
@@ -130,7 +128,7 @@ func New(opt Opt) (*Packer, error) {
 			Logger:        p.logger,
 		})
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to initialize pusher")
+			return nil, err
 		}
 	}
 	return p, nil
@@ -139,23 +137,21 @@ func New(opt Opt) (*Packer, error) {
 // get blobs from bootstrap
 func (p *Packer) getBlobsFromBootstrap(bootstrap string) ([]string, error) {
 	var blobs []string
-	if bootstrap == "" {
-		return []string{}, nil
+	if bootstrap != "" {
+		inspector := tool.NewInspector(p.nydusImagePath)
+		item, err := inspector.Inspect(tool.InspectOption{
+			Operation: tool.GetBlobs,
+			Bootstrap: bootstrap,
+		})
+		if err != nil {
+			return []string{}, err
+		}
+		blobsInfo, _ := item.(tool.BlobInfoList)
+		p.logger.Infof("get blob list from bootstrap '%s': %v", bootstrap, blobsInfo)
+		for _, blobInfo := range blobsInfo {
+			blobs = append(blobs, blobInfo.BlobID)
+		}
 	}
-	inspector := tool.NewInspector(p.nydusImagePath)
-	item, err := inspector.Inspect(tool.InspectOption{
-		Operation: tool.GetBlobs,
-		Bootstrap: bootstrap,
-	})
-	if err != nil {
-		return []string{}, err
-	}
-	blobsInfo, _ := item.(tool.BlobInfoList)
-	p.logger.Infof("get blobs %v", blobsInfo)
-	for _, blobInfo := range blobsInfo {
-		blobs = append(blobs, blobInfo.BlobID)
-	}
-
 	return blobs, nil
 }
 
@@ -216,7 +212,7 @@ func (p *Packer) dumpBlobBackendConfig(filePath string) (func(), error) {
 		zeros := make([]byte, n)
 		file, err = os.OpenFile(filePath, os.O_WRONLY, 0644)
 		if err != nil {
-			logrus.Errorf("open config file %s failed err = %v", filePath, err)
+			logrus.Errorf("failed to open config file %s, err = %v", filePath, err)
 			return
 		}
 		file.Write(zeros)
@@ -226,34 +222,38 @@ func (p *Packer) dumpBlobBackendConfig(filePath string) (func(), error) {
 }
 
 func (p *Packer) tryCompactParent(req *PackRequest) error {
-	if !req.TryCompact || req.Parent == "" || p.BackendConfig == nil {
+	if !req.TryCompact || req.Parent == "" {
 		return nil
 	}
+	if p.BackendConfig == nil {
+		return errors.Errorf("backend configuration is needed to compact parent bootstrap")
+	}
+
 	// dumps backend config file
 	backendConfigPath := filepath.Join(p.OutputDir, "backend-config.json")
 	destroy, err := p.dumpBlobBackendConfig(backendConfigPath)
 	if err != nil {
-		return errors.Wrap(err, "dump backend config file failed")
+		return errors.Wrap(err, "failed to dump backend config file")
 	}
 	// destroy backend config file, because there are secrets
 	defer destroy()
 	c, err := compactor.NewCompactor(p.nydusImagePath, p.OutputDir, req.CompactConfigPath)
 	if err != nil {
-		return errors.Wrap(err, "new compactor failed")
+		return errors.Wrap(err, "failed to new compactor")
 	}
 	// only support oss now
 	outputBootstrap, err := c.Compact(req.Parent, req.ChunkDict, "oss", backendConfigPath)
 	if err != nil {
-		return errors.Wrap(err, "compact parent failed")
+		return errors.Wrap(err, "failed to compact parent")
 	}
 	// check output bootstrap
 	_, err = os.Stat(outputBootstrap)
 	if err != nil && !os.IsNotExist(err) {
-		return errors.Wrapf(err, "stat target bootstrap failed")
+		return errors.Wrapf(err, "failed to stat target bootstrap")
 	}
 	if err == nil {
 		// parent --> output bootstrap
-		p.logger.Infof("compact bootstrap %s successfully, use parent %s", req.Parent, outputBootstrap)
+		p.logger.Infof("successfully compacted bootstrap %s, use new parent %s", req.Parent, outputBootstrap)
 		req.Parent = outputBootstrap
 	}
 
@@ -261,63 +261,63 @@ func (p *Packer) tryCompactParent(req *PackRequest) error {
 }
 
 func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
-	p.logger.Infof("start to pack source directory %q", req.TargetDir)
+	p.logger.Infof("start to build image from source directory %q", req.SourceDir)
 	if err := p.tryCompactParent(&req); err != nil {
-		p.logger.Errorf("try compact parent bootstrap err %v", err)
 		return PackResult{}, err
 	}
-	blobPath := p.blobFilePath(blobFileName(req.Meta))
 	parentBlobs, err := p.getBlobsFromBootstrap(req.Parent)
 	if err != nil {
-		return PackResult{}, errors.Wrap(err, "get blobs from parent bootstrap failed")
+		return PackResult{}, errors.Wrap(err, "failed to get blobs from parent bootstrap")
 	}
 	chunkDictBlobs, err := p.getChunkDictBlobs(req.ChunkDict)
 	if err != nil {
-		return PackResult{}, errors.Wrap(err, "get blobs from chunk-dict failed")
+		return PackResult{}, errors.Wrap(err, "failed to get blobs from chunk-dict")
 	}
+	blobPath := p.blobFilePath(req.ImageName, false)
+	bootstrapPath := p.bootstrapPath(req.ImageName)
 	if err = p.builder.Run(build.BuilderOption{
 		ParentBootstrapPath: req.Parent,
 		ChunkDict:           req.ChunkDict,
-		BootstrapPath:       p.bootstrapPath(req.Meta),
-		RootfsPath:          req.TargetDir,
-		WhiteoutSpec:        "oci",
-		OutputJSONPath:      p.outputJSONPath(),
+		BootstrapPath:       bootstrapPath,
 		BlobPath:            blobPath,
+		OutputJSONPath:      p.outputJSONPath(),
+		RootfsPath:          req.SourceDir,
+		WhiteoutSpec:        "oci",
 		FsVersion:           req.FsVersion,
 	}); err != nil {
-		return PackResult{}, errors.Wrapf(err, "failed to Pack targetDir %s", req.TargetDir)
+		return PackResult{}, errors.Wrapf(err, "failed to build image from directory %s", req.SourceDir)
 	}
 	newBlobHash, err := p.getNewBlobsHash(append(parentBlobs, chunkDictBlobs...))
 	if err != nil {
-		return PackResult{}, errors.Wrap(err, "failed to get blobs hash")
+		return PackResult{}, errors.Wrap(err, "failed to get hash value of Nydus blob")
 	}
 	if newBlobHash == "" {
 		blobPath = ""
 	} else {
-		if req.Parent != "" || req.PushBlob {
+		if req.Parent != "" || req.PushToRemote {
 			p.logger.Infof("rename blob file into sha256 csum")
-			if err = os.Rename(blobPath, p.blobFilePath(newBlobHash)); err != nil {
+			newBlobName := p.blobFilePath(newBlobHash, true)
+			if err = os.Rename(blobPath, newBlobName); err != nil {
 				return PackResult{}, errors.Wrap(err, "failed to rename blob file")
 			}
-			blobPath = p.blobFilePath(newBlobHash)
+			blobPath = newBlobName
 		}
 	}
-	if !req.PushBlob {
+	if !req.PushToRemote {
 		// if we don't need to push meta and blob to remote, just return the local build artifact
 		return PackResult{
-			Meta: p.bootstrapPath(req.Meta),
+			Meta: bootstrapPath,
 			Blob: blobPath,
 		}, nil
 	}
 
 	// if pusher is empty, that means backend config is not provided
 	if p.pusher == nil {
-		return PackResult{}, errors.New("failed to push blob to remote as missing BackendConfig")
+		return PackResult{}, errors.New("can not push image to remote due to lack of backend configuration")
 	}
 	pushResult, err := p.pusher.Push(PushRequest{
-		Meta: req.Meta,
-		Blob: newBlobHash,
-
+		Meta:        bootstrapPath,
+		Blob:        newBlobHash,
 		ParentBlobs: parentBlobs,
 	})
 	if err != nil {
@@ -338,23 +338,17 @@ func (p *Packer) ensureNydusImagePath() error {
 	if strings.TrimSpace(p.nydusImagePath) != "" {
 		// if we found nydus Image Path from
 		if _, err := os.Stat(p.nydusImagePath); err == nil {
-			p.logger.Infof("found nydus-image from %s", p.nydusImagePath)
+			p.logger.Infof("found 'nydus-image' binary at %s", p.nydusImagePath)
 			return nil
 		}
 		// if NydusImagePath not exists, check if nydus-image can be found in PATH
 		if nydusBinaryPath, err := exec.LookPath(nydusBinaryName); err == nil {
-			p.logger.Infof("found nydus-image from %s", nydusBinaryPath)
+			p.logger.Infof("found 'nydus-image' binary at %s", nydusBinaryPath)
 			p.nydusImagePath = nydusBinaryPath
 			return nil
 		}
 	}
 	return ErrNydusImageBinaryNotFound
-}
-
-// blobFileName build blobfile name from meta filename
-// eg: meta=system.meta, then blobFileName is system.blob
-func blobFileName(meta string) string {
-	return fmt.Sprintf("%s.blob", strings.TrimSuffix(meta, filepath.Ext(meta)))
 }
 
 func initLogger(logLevel logrus.Level) (*logrus.Logger, error) {
