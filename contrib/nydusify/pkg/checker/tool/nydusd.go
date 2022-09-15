@@ -78,10 +78,13 @@ func makeConfig(conf NydusdConfig) error {
 		conf.BackendConfig = `{"dir": "/fake"}`
 		conf.EnablePrefetch = false
 	} else {
+		if conf.BackendConfig == "" {
+			return errors.Errorf("empty backend configuration string")
+		}
 		conf.EnablePrefetch = true
 	}
 	if err := tpl.Execute(&ret, conf); err != nil {
-		return errors.New("prepare config template for Nydusd")
+		return errors.New("failed to prepare configuration file for Nydusd")
 	}
 
 	if err := ioutil.WriteFile(conf.ConfigPath, ret.Bytes(), 0644); err != nil {
@@ -149,7 +152,7 @@ func checkReady(ctx context.Context, sock string) (<-chan bool, error) {
 
 func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 	if err := makeConfig(conf); err != nil {
-		return nil, errors.New("create config file for Nydusd")
+		return nil, errors.Wrapf(err, "failed to create configuration file for Nydusd")
 	}
 	return &Nydusd{
 		NydusdConfig: conf,

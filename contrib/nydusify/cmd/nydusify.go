@@ -443,13 +443,13 @@ func main() {
 		{
 			Name:    "build",
 			Aliases: []string{"pack"},
-			Usage:   "Build a Nydus image from a source directory",
+			Usage:   "Build a Nydus filesystem from a source directory",
 			Flags: []cli.Flag{
 				&cli.StringFlag{
 					Name:     "source-dir",
 					Aliases:  []string{"target-dir"}, // for compatibility
 					Required: true,
-					Usage:    "Source directory to build image from",
+					Usage:    "Source directory to build Nydus filesystem from",
 					EnvVars:  []string{"SOURCE_DIR"},
 				},
 				&cli.StringFlag{
@@ -470,7 +470,7 @@ func main() {
 				&cli.BoolFlag{
 					Name:    "backend-push",
 					Value:   false,
-					Usage:   "Push generated Nydus image to storage backend",
+					Usage:   "Push generated Nydus filesystem to storage backend",
 					EnvVars: []string{"BACKEND_PUSH"},
 				},
 				&cli.StringFlag{
