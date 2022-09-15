@@ -63,6 +63,27 @@ func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, er
 	return backendConfigJSON, nil
 }
 
+func getBackendConfig(c *cli.Context, required bool) (string, string, error) {
+	backendType := c.String("backend-type")
+	if backendType == "" {
+		if required {
+			return "", "", errors.Errorf("backend type is empty, please specify option '--backend-type'")
+		}
+		return "", "", nil
+	}
+
+	backendConfig, err := parseBackendConfig(
+		c.String("backend-config"), c.String("backend-config-file"),
+	)
+	if err != nil {
+		return "", "", err
+	} else if backendConfig == "" && backendType == "oss" {
+		return "", "", errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
+	}
+
+	return backendType, backendConfig, nil
+}
+
 // Add suffix to source image reference as the target
 // image reference, like this:
 // Source: localhost:5000/nginx:latest
@@ -330,36 +351,90 @@ func main() {
 		},
 		{
 			Name:  "check",
-			Usage: "Check nydus image",
+			Usage: "Verify nydus image format and content",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "source", Required: false, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
-				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
+				&cli.StringFlag{
+					Name:     "source",
+					Required: false,
+					Usage:    "Source image reference",
+					EnvVars:  []string{"SOURCE"},
+				},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: true,
+					Usage:    "Target (Nydus) image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "source-insecure",
+					Required: false,
+					Usage:    "Allow http/insecure network communication",
+					EnvVars:  []string{"SOURCE_INSECURE"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Allow http/insecure network communication",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
 
-				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS source registry", EnvVars: []string{"SOURCE_INSECURE"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS target registry", EnvVars: []string{"TARGET_INSECURE"}},
+				&cli.StringFlag{
+					Name:    "backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json string for storage backend configuration",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
 
-				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Ensure the target image represents a manifest list, and it should consist of OCI and Nydus manifest", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
-				&cli.StringFlag{Name: "work-dir", Value: "./output", Usage: "Work directory path for image check, will be cleaned before checking", EnvVars: []string{"WORK_DIR"}},
-				&cli.StringFlag{Name: "nydus-image", Value: "nydus-image", Usage: "The nydus-image binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUS_IMAGE"}},
-				&cli.StringFlag{Name: "nydusd", Value: "nydusd", Usage: "The nydusd binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUSD"}},
-				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will check file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
-				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
-				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+				&cli.BoolFlag{
+					Name:    "multi-platform",
+					Value:   false,
+					Usage:   "Verify that the image contains an image index with both OCI and Nydus manifests",
+					EnvVars: []string{"MULTI_PLATFORM"},
+				},
+				&cli.StringFlag{
+					Name:  "platform",
+					Value: "linux/" + runtime.GOARCH,
+					Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./output",
+					Usage:   "Working directory for image verification",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
+				&cli.StringFlag{
+					Name:    "nydusd",
+					Value:   "nydusd",
+					Usage:   "Path to the nydusd binary, default to search in PATH",
+					EnvVars: []string{"NYDUSD"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType := c.String("backend-type")
-				backendConfig := ""
-				if backendType != "" {
-					_backendConfig, err := parseBackendConfig(
-						c.String("backend-config"), c.String("backend-config-file"),
-					)
-					if err != nil {
-						return err
-					}
-					backendConfig = _backendConfig
+				backendType, backendConfig, err := getBackendConfig(c, false)
+				if err != nil {
+					return err
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
@@ -454,16 +529,11 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType := c.String("backend-type")
-				if backendType == "" {
-					return errors.Errorf("backend type is empty, please specify option '--backend-type'")
-				}
-				backendConfig, err := parseBackendConfig(
-					c.String("backend-config"), c.String("backend-config-file"),
-				)
+				backendType, backendConfig, err := getBackendConfig(c, true)
 				if err != nil {
 					return err
 				} else if backendConfig == "" {
+					// TODO get auth from docker configuration file
 					return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
 				}
 
@@ -605,13 +675,11 @@ func main() {
 
 				// if backend-push is specified, we should make sure backend-config-file exists
 				if c.Bool("backend-push") || c.Bool("compact") {
-					_backendConfig, err := parseBackendConfig(
-						c.String("backend-config"), c.String("backend-config-file"),
-					)
+					_backendType, _backendConfig, err := getBackendConfig(c, true)
 					if err != nil {
 						return err
-					} else if len(_backendConfig) == 0 {
-						return errors.Errorf("missing backend configuration information")
+					} else if _backendType != "oss" {
+						return errors.Errorf("only --backend-type=oss is supported")
 					}
 					cfg, err := packer.ParseBackendConfigString(_backendConfig)
 					if err != nil {
