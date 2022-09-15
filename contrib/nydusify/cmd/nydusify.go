@@ -407,15 +407,16 @@ func main() {
 				setupLogLevel(c)
 
 				backendType := c.String("backend-type")
-				backendConfig := ""
-				if backendType != "" {
-					_backendConfig, err := parseBackendConfig(
-						c.String("backend-config"), c.String("backend-config-file"),
-					)
-					if err != nil {
-						return err
-					}
-					backendConfig = _backendConfig
+				if backendType == "" {
+					return errors.Errorf("backend type is empty, please specify option '--backend-type'")
+				}
+				backendConfig, err := parseBackendConfig(
+					c.String("backend-config"), c.String("backend-config-file"),
+				)
+				if err != nil {
+					return err
+				} else if backendConfig == "" {
+					return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
