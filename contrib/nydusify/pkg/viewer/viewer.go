@@ -49,16 +49,16 @@ type FsViewer struct {
 
 // New creates fsViewer instance, Target is the Nydus image reference
 func New(opt Opt) (*FsViewer, error) {
-	var targetParser *parser.Parser
-	if opt.Target != "" {
-		targetRemote, err := provider.DefaultRemote(opt.Target, opt.TargetInsecure)
-		if err != nil {
-			return nil, errors.Wrap(err, "init image error")
-		}
-		targetParser, err = parser.New(targetRemote, opt.ExpectedArch)
-		if targetParser == nil {
-			return nil, errors.Wrap(err, "failed to create parser")
-		}
+	if opt.Target == "" {
+		return nil, errors.Errorf("missing target image reference, please add option '--target reference'")
+	}
+	targetRemote, err := provider.DefaultRemote(opt.Target, opt.TargetInsecure)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create image provider")
+	}
+	targetParser, err := parser.New(targetRemote, opt.ExpectedArch)
+	if targetParser == nil {
+		return nil, errors.Wrap(err, "failed to create image reference parser")
 	}
 
 	mode := "cached"
