@@ -481,26 +481,26 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         )
         .subcommand(
             SubCommand::with_name("unpack")
-            .about("Unpack nydus image layer to a tar file")
+            .about("Unpack a RAFS filesystem to a tar file")
             .arg(
                 Arg::with_name("bootstrap")
                 .long("bootstrap")
                 .short("B")
-                .help("path to bootstrap file")
+                .help("path to RAFS bootstrap file")
                 .required(true)
                 .takes_value(true))
             .arg(
                 Arg::with_name("blob")
                 .long("blob")
                 .short("b")
-                .help("path to blob file")
+                .help("path to RAFS data blob file")
                 .required(false)
                 .takes_value(true)
                 )
             .arg(
                 Arg::with_name("output")
                 .long("output")
-                .help("path to output tar file")
+                .help("path for output tar file")
                 .required(true)
                 .takes_value(true)
                 )
@@ -763,8 +763,15 @@ impl Command {
 
     fn unpack(args: &clap::ArgMatches) -> Result<()> {
         let bootstrap = args.value_of("bootstrap").expect("pass in bootstrap");
-        let blob = args.value_of("blob");
+        if bootstrap.is_empty() {
+            return Err(anyhow!("invalid empty --bootstrap option"));
+        }
         let output = args.value_of("output").expect("pass in output");
+        if output.is_empty() {
+            return Err(anyhow!("invalid empty --output option"));
+        }
+
+        let blob = args.value_of("blob");
 
         let unpacker =
             OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?;
