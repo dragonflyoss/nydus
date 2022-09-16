@@ -292,8 +292,6 @@ impl OCITarBuilderFactory {
     fn create_blob_reader(&self, blob_path: &Path) -> Result<Arc<dyn BlobReader>> {
         let config = LocalFsConfig {
             blob_file: blob_path.to_str().unwrap().to_owned(),
-            readahead: false,
-            readahead_sec: Default::default(),
             dir: Default::default(),
             alt_dirs: Default::default(),
         };
