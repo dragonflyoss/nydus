@@ -324,8 +324,8 @@ fn append_virtiofs_subcmd_options(app: App<'static, 'static>) -> App<'static, 's
 }
 
 fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
-    let subcmd = SubCommand::with_name("daemon")
-        .about("Run as a global daemon hosting multiple blobcache/fscache/virtiofs services.")
+    let subcmd = SubCommand::with_name("singleton")
+        .about("Run as a global daemon instance to service multiple blobcache/fscache/virtiofs services.")
         .arg(
             Arg::with_name("fscache")
                 .long("fscache")
