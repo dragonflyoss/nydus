@@ -78,6 +78,12 @@ func (cg *cacheGlue) Pull(
 	// Using ChainID to ensure we can find corresponding overlayed
 	// Nydus blob/bootstrap layer in cache records.
 	_cacheRecord, bootstrapReader, blobReader, err := cg.cache.Check(ctx, sourceLayerChainID)
+	if bootstrapReader != nil {
+		defer bootstrapReader.Close()
+	}
+	if blobReader != nil {
+		defer blobReader.Close()
+	}
 	if err == nil && _cacheRecord != nil {
 		pullDone := logger.Log(ctx, "[CACH] Check layer", provider.LoggerFields{
 			"ChainID": sourceLayerChainID,
@@ -86,12 +92,10 @@ func (cg *cacheGlue) Pull(
 		// because the blob data is not shared between different namespaces in registry,
 		// this operation ensures that Nydus image owns these layers.
 		cacheRecord = _cacheRecord
-		defer bootstrapReader.Close()
 		if err := cg.remote.Push(ctx, *cacheRecord.NydusBootstrapDesc, true, bootstrapReader); err != nil {
 			return nil, pullDone(errors.Wrapf(err, "Push cached bootstrap layer"))
 		}
 		if blobReader != nil && cacheRecord.NydusBlobDesc != nil {
-			defer blobReader.Close()
 			if err := cg.remote.Push(ctx, *cacheRecord.NydusBlobDesc, true, blobReader); err != nil {
 				return nil, pullDone(errors.Wrapf(err, "Push cached blob layer"))
 			}
@@ -149,11 +153,13 @@ func (cg *cacheGlue) PullBootstrap(
 	}
 
 	cacheRecord, bootstrapReader, blobReader, _ := cg.cache.Check(ctx, chainID)
-	if cacheRecord != nil {
+	if bootstrapReader != nil {
 		defer bootstrapReader.Close()
-		if blobReader != nil {
-			defer blobReader.Close()
-		}
+	}
+	if blobReader != nil {
+		defer blobReader.Close()
+	}
+	if cacheRecord != nil {
 		bootstrapDesc := cacheRecord.NydusBootstrapDesc
 		pullDone := logger.Log(ctx, "[CACH] Pull bootstrap", provider.LoggerFields{
 			"ChainID": chainID,

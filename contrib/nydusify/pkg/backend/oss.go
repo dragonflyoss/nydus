@@ -41,16 +41,16 @@ func newOSSBackend(rawConfig []byte) (*OSSBackend, error) {
 		return nil, errors.Wrap(err, "Parse OSS storage backend configuration")
 	}
 
-	endpoint, ok1 := configMap["endpoint"]
-	bucketName, ok2 := configMap["bucket_name"]
+	endpoint := configMap["endpoint"]
+	bucketName := configMap["bucket_name"]
 
 	// Below items are not mandatory
 	accessKeyID := configMap["access_key_id"]
 	accessKeySecret := configMap["access_key_secret"]
 	objectPrefix := configMap["object_prefix"]
 
-	if !ok1 || !ok2 {
-		return nil, fmt.Errorf("no endpoint or bucket is specified")
+	if endpoint == "" || bucketName == "" {
+		return nil, fmt.Errorf("invalid OSS configuration: missing 'endpoint' or 'bucket'")
 	}
 
 	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)

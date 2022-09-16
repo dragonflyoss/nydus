@@ -27,11 +27,11 @@ type CompactConfig struct {
 func (cfg *CompactConfig) Dumps(filePath string) error {
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		return errors.Wrap(err, "open file failed")
+		return errors.Wrap(err, "failed to open file")
 	}
 	defer file.Close()
 	if err = json.NewEncoder(file).Encode(cfg); err != nil {
-		return errors.Wrap(err, "encode json failed")
+		return errors.Wrap(err, "failed to encode json")
 	}
 	return nil
 }
@@ -39,12 +39,12 @@ func (cfg *CompactConfig) Dumps(filePath string) error {
 func loadCompactConfig(filePath string) (CompactConfig, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return CompactConfig{}, errors.Wrap(err, "load compact config file failed")
+		return CompactConfig{}, errors.Wrap(err, "failed to load compact configuration file")
 	}
 	defer file.Close()
 	var cfg CompactConfig
 	if err = json.NewDecoder(file).Decode(&cfg); err != nil {
-		return CompactConfig{}, errors.Wrap(err, "decode compact config file failed")
+		return CompactConfig{}, errors.Wrap(err, "failed to decode compact configuration file")
 	}
 	return cfg, nil
 }
@@ -79,7 +79,7 @@ func NewCompactor(nydusImagePath, workdir, configPath string) (*Compactor, error
 func (compactor *Compactor) Compact(bootstrapPath, chunkDict, backendType, backendConfigFile string) (string, error) {
 	targetBootstrap := bootstrapPath + ".compact"
 	if err := os.Remove(targetBootstrap); err != nil && !os.IsNotExist(err) {
-		return "", errors.Wrap(err, "delete old target bootstrap failed")
+		return "", errors.Wrap(err, "failed to delete old bootstrap file")
 	}
 	// prepare config file
 	configFilePath := filepath.Join(compactor.workdir, "compact.json")
@@ -88,7 +88,7 @@ func (compactor *Compactor) Compact(bootstrapPath, chunkDict, backendType, backe
 	}
 	outputJSONPath := filepath.Join(compactor.workdir, "compact-result.json")
 	if err := os.Remove(outputJSONPath); err != nil && !os.IsNotExist(err) {
-		return "", errors.Wrap(err, "delete old output-json file failed")
+		return "", errors.Wrap(err, "failed to delete old output-json file")
 	}
 	err := compactor.builder.Compact(build.CompactOption{
 		ChunkDict:           chunkDict,
@@ -100,7 +100,7 @@ func (compactor *Compactor) Compact(bootstrapPath, chunkDict, backendType, backe
 		CompactConfigPath:   configFilePath,
 	})
 	if err != nil {
-		return "", errors.Wrap(err, "run compact command failed")
+		return "", errors.Wrap(err, "failed to run compact command")
 	}
 
 	return targetBootstrap, nil
