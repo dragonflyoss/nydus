@@ -155,6 +155,8 @@ func (checker *Checker) check(ctx context.Context) error {
 		&rule.FilesystemRule{
 			Source:          checker.Source,
 			SourceMountPath: filepath.Join(checker.WorkDir, "fs/source_mounted"),
+			SourceParsed:    sourceParsed,
+			SourceRemote:    checker.sourceParser.Remote,
 			Target:          checker.Target,
 			TargetInsecure:  checker.TargetInsecure,
 			PlainHTTP:       checker.targetParser.Remote.IsWithHTTP(),

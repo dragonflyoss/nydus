@@ -131,7 +131,7 @@ func PackTargzInfo(src, name string, compress bool) (digest.Digest, int64, error
 }
 
 // UnpackTargz unpacks .tar(.gz) stream, and write to dst path
-func UnpackTargz(ctx context.Context, dst string, r io.Reader) error {
+func UnpackTargz(ctx context.Context, dst string, r io.Reader, withConvertWhiteout bool) error {
 	ds, err := compression.DecompressStream(r)
 	if err != nil {
 		return err
@@ -146,14 +146,19 @@ func UnpackTargz(ctx context.Context, dst string, r io.Reader) error {
 		return err
 	}
 
-	if _, err := archive.Apply(
-		ctx,
-		dst,
-		ds,
-		archive.WithConvertWhiteout(func(hdr *tar.Header, file string) (bool, error) {
-			return true, nil
-		}),
-	); err != nil {
+	if withConvertWhiteout {
+		_, err = archive.Apply(ctx, dst, ds)
+	} else {
+		_, err = archive.Apply(
+			ctx,
+			dst,
+			ds,
+			archive.WithConvertWhiteout(func(hdr *tar.Header, file string) (bool, error) {
+				return true, nil
+			}),
+		)
+	}
+	if err != nil {
 		return err
 	}
 

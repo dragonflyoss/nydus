@@ -5,6 +5,7 @@
 package rule
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,8 @@ import (
 	"github.com/docker/distribution/reference"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
 	"github.com/pkg/xattr"
@@ -31,6 +34,8 @@ type FilesystemRule struct {
 	NydusdConfig    tool.NydusdConfig
 	Source          string
 	SourceMountPath string
+	SourceParsed    *parser.Parsed
+	SourceRemote    *remote.Remote
 	Target          string
 	TargetInsecure  bool
 	PlainHTTP       bool
@@ -162,25 +167,26 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 	return nodes, nil
 }
 
-func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
+func (rule *FilesystemRule) mountSourceImage() error {
 	logrus.Infof("Mounting source image to %s", rule.SourceMountPath)
 
 	if err := os.MkdirAll(rule.SourceMountPath, 0755); err != nil {
-		return nil, errors.Wrap(err, "create mountpoint directory of source image")
+		return errors.Wrap(err, "create mountpoint directory of source image")
 	}
 
-	image := &tool.Image{
-		Source: rule.Source,
-		Rootfs: rule.SourceMountPath,
-	}
-	if err := image.Pull(); err != nil {
-		return nil, errors.Wrap(err, "pull source image")
-	}
-	if err := image.Mount(); err != nil {
-		return nil, errors.Wrap(err, "mount source image")
+	layers := rule.SourceParsed.OCIImage.Manifest.Layers
+	for _, l := range layers {
+		reader, err := rule.SourceRemote.Pull(context.Background(), l, true)
+		if err != nil {
+			return errors.Wrap(err, "pull image layers from the remote registry")
+		}
+
+		if err = utils.UnpackTargz(context.Background(), rule.SourceMountPath, reader, true); err != nil {
+			return errors.Wrap(err, "unpack image layers")
+		}
 	}
 
-	return image, nil
+	return nil
 }
 
 func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
@@ -301,11 +307,9 @@ func (rule *FilesystemRule) Validate() error {
 		return nil
 	}
 
-	image, err := rule.mountSourceImage()
-	if err != nil {
+	if err := rule.mountSourceImage(); err != nil {
 		return err
 	}
-	defer image.Umount()
 
 	nydusd, err := rule.mountNydusImage()
 	if err != nil {
