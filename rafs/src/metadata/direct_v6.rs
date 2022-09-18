@@ -1,6 +1,7 @@
 // Copyright (C) 2021 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
+
 /// A bootstrap driver to directly use on disk bootstrap as runtime in-memory bootstrap.
 ///
 /// To reduce memory footprint and speed up filesystem initialization, the V5 on disk bootstrap
@@ -49,7 +50,7 @@ use crate::metadata::{
         XattrName, XattrValue,
     },
     {
-        Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlock,
+        Attr, Entry, Inode, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock,
         RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
     },
 };
@@ -152,7 +153,7 @@ impl Drop for DirectMappingState {
     }
 }
 
-/// Directly mmapped Rafs v6 super block.
+/// Direct-mapped Rafs v6 super block.
 pub struct DirectSuperBlockV6 {
     state: ArcSwap<DirectMappingState>,
 }
@@ -396,6 +397,7 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
     }
 }
 
+/// Direct-mapped RAFS v6 inode object.
 pub struct OndiskInodeWrapper {
     pub mapping: DirectSuperBlockV6,
     pub offset: usize,
@@ -722,6 +724,123 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(())
     }
 
+    fn get_digest(&self) -> RafsDigest {
+        RafsDigest::default()
+    }
+
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+        let chunk_size = self.chunk_size();
+        let head_chunk_index = offset / chunk_size as u64;
+
+        // TODO: Validate chunk format by checking its `i_u`
+        let mut vec: Vec<BlobIoVec> = Vec::new();
+        let chunks = self
+            .chunk_addresses(head_chunk_index as u32)
+            .map_err(err_invalidate_data)?;
+
+        if chunks.is_empty() {
+            return Ok(vec);
+        }
+
+        let content_offset = (offset % chunk_size as u64) as u32;
+        let mut left = std::cmp::min(self.size(), size as u64) as u32;
+        let mut content_len = std::cmp::min(chunk_size - content_offset, left);
+
+        // Safe to unwrap because chunks is not empty to reach here.
+        let first_chunk_addr = chunks.first().unwrap();
+        let desc = self.make_chunk_io(first_chunk_addr, content_offset, content_len, user_io);
+
+        let mut descs = BlobIoVec::new();
+        descs.bi_vec.push(desc);
+        descs.bi_size += content_len;
+        left -= content_len;
+
+        if left != 0 {
+            // Handle the rest of chunks since they shares the same content length = 0.
+            for c in chunks.iter().skip(1) {
+                content_len = std::cmp::min(chunk_size, left);
+                let desc = self.make_chunk_io(c, 0, content_len, user_io);
+
+                if desc.blob.blob_index() != descs.bi_vec[0].blob.blob_index() {
+                    trace!(
+                        "Continuous storage IO has {} bios offset {} io size {} {:?}",
+                        descs.bi_vec.len(),
+                        offset,
+                        size,
+                        descs.bi_vec
+                    );
+                    vec.push(descs);
+                    descs = BlobIoVec::new();
+                }
+
+                descs.bi_vec.push(desc);
+                descs.bi_size += content_len;
+                left -= content_len;
+                if left == 0 {
+                    break;
+                }
+            }
+        }
+
+        if !descs.bi_vec.is_empty() {
+            trace!(
+                "Continuous storage IO has {} bios offset {} io size {} {:?}",
+                descs.bi_vec.len(),
+                offset,
+                size,
+                descs.bi_vec
+            );
+            vec.push(descs)
+        }
+
+        assert_eq!(left, 0);
+
+        Ok(vec)
+    }
+
+    fn collect_descendants_inodes(
+        &self,
+        descendants: &mut Vec<Arc<dyn RafsInode>>,
+    ) -> Result<usize> {
+        if !self.is_dir() {
+            return Err(enotdir!());
+        }
+
+        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
+
+        self.walk_children_inodes(0, &mut |inode: Option<Arc<dyn RafsInode>>,
+                                           name: OsString,
+                                           ino,
+                                           offset| {
+            if let Some(child_inode) = inode {
+                if child_inode.is_dir() {
+                    child_dirs.push(child_inode);
+                } else if !child_inode.is_empty_size() && child_inode.is_reg() {
+                    descendants.push(child_inode);
+                }
+                Ok(RafsInodeWalkAction::Continue)
+            } else {
+                Ok(RafsInodeWalkAction::Continue)
+            }
+        })
+        .unwrap();
+
+        for d in child_dirs {
+            // EROFS packs dot and dotdot, so skip them two.
+            if d.name() == "." || d.name() == ".." {
+                continue;
+            }
+            d.collect_descendants_inodes(descendants)?;
+        }
+
+        Ok(0)
+    }
+
+    // RafsV5 flags, not used by v6, return 0
+    fn flags(&self) -> u64 {
+        0
+    }
+
     fn get_entry(&self) -> Entry {
         let state = self.mapping.state.load();
         let inode = self.disk_inode();
@@ -757,9 +876,177 @@ impl RafsInode for OndiskInodeWrapper {
         }
     }
 
+    fn ino(&self) -> u64 {
+        let meta_blkaddr = self.mapping.state.load().meta.meta_blkaddr as u64;
+        (self.offset as u64 - meta_blkaddr * EROFS_BLOCK_SIZE) / EROFS_INODE_SLOT_SIZE as u64
+    }
+
+    /// Get inode number of the parent directory.
+    fn parent(&self) -> u64 {
+        match self.parent_inode.get() {
+            Some(parent) => parent,
+            None => {
+                debug_assert!(self.is_dir());
+                let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
+                self.parent_inode.set(Some(ino));
+                ino
+            }
+        }
+    }
+
+    /// Get real device number of the inode.
+    fn rdev(&self) -> u32 {
+        self.disk_inode().union()
+    }
+
+    /// Get project id associated with the inode.
+    fn projid(&self) -> u32 {
+        0
+    }
+
+    /// Get name of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn name(&self) -> OsString {
+        let mut curr_name = OsString::from("");
+        match self.name.borrow().as_ref() {
+            Some(name) => return name.clone(),
+            None => {
+                debug_assert!(self.is_dir());
+                let cur_ino = self.ino();
+                if cur_ino == self.mapping.root_ino() {
+                    return OsString::from("");
+                }
+                let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
+                parent_inode
+                    .walk_children_inodes(
+                        0,
+                        &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
+                            if cur_ino == ino {
+                                curr_name = name;
+                                return Ok(RafsInodeWalkAction::Break);
+                            }
+                            Ok(RafsInodeWalkAction::Continue)
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        *self.name.borrow_mut() = Some(curr_name.clone());
+        curr_name
+    }
+    /// Get file name size of the inode.
+    fn get_name_size(&self) -> u16 {
+        self.name().len() as u16
+    }
+
+    fn is_dir(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFDIR as u32
+    }
+
+    /// Check whether the inode is a symlink.
+    fn is_symlink(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFLNK as u32
+    }
+
+    /// Check whether the inode is a regular file.
+    fn is_reg(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFREG as u32
+    }
+    /// Check whether the inode is a hardlink.
+    fn is_hardlink(&self) -> bool {
+        let inode = self.disk_inode();
+        inode.nlink() > 1 && self.is_reg()
+    }
+
     /// Check whether the inode has extended attributes.
     fn has_xattr(&self) -> bool {
         self.disk_inode().xattr_inline_count() > 0
+    }
+
+    // TODO(tianqian.zyf): Use get_xattrs implement it
+    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
+        let inode = self.disk_inode();
+        let total = inode.xattr_inline_count();
+        if total == 0 {
+            return Ok(None);
+        }
+        // xattr body size
+        let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>()
+            + size_of::<RafsV6XattrIbodyHeader>();
+        let m = self.mapping.state.load();
+        let mut cur = unsafe {
+            m.base
+                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
+        };
+
+        remaining -= size_of::<RafsV6XattrIbodyHeader>();
+
+        while remaining > 0 {
+            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
+            let mut xa_name = recover_namespace(e.name_index())?;
+            let suffix = OsStr::from_bytes(unsafe {
+                slice::from_raw_parts(
+                    cur.add(size_of::<RafsV6XattrEntry>()),
+                    e.name_len() as usize,
+                )
+            });
+            xa_name.push(suffix);
+            if xa_name == name {
+                let value = unsafe {
+                    slice::from_raw_parts(
+                        cur.add(size_of::<RafsV6XattrEntry>() + e.name_len() as usize),
+                        e.value_size() as usize,
+                    )
+                }
+                .to_vec();
+                return Ok(Some(value));
+            }
+            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
+            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
+            remaining -= s as usize;
+            cur = unsafe { cur.add(s as usize) };
+        }
+        Ok(None)
+    }
+
+    fn get_xattrs(&self) -> Result<Vec<XattrName>> {
+        let inode = self.disk_inode();
+        let mut xattrs = Vec::new();
+        let total = inode.xattr_inline_count();
+        if total == 0 {
+            return Ok(xattrs);
+        }
+        // xattr body size
+        let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>()
+            + size_of::<RafsV6XattrIbodyHeader>();
+        let m = self.mapping.state.load();
+        let mut cur = unsafe {
+            m.base
+                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
+        };
+        remaining -= size_of::<RafsV6XattrIbodyHeader>();
+
+        while remaining > 0 {
+            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
+
+            let ns = recover_namespace(e.name_index())?;
+            let mut xa = ns.into_vec();
+            xa.extend_from_slice(unsafe {
+                slice::from_raw_parts(
+                    cur.add(size_of::<RafsV6XattrEntry>()),
+                    e.name_len() as usize,
+                )
+            });
+            xattrs.push(xa);
+            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
+            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
+            remaining -= s as usize;
+            cur = unsafe { cur.add(s as usize) };
+        }
+
+        Ok(xattrs)
     }
 
     /// Get symlink target of the inode.
@@ -774,6 +1061,73 @@ impl RafsInode for OndiskInodeWrapper {
             bytes_to_os_str(std::slice::from_raw_parts(data, inode.size() as usize)).to_os_string()
         };
         Ok(s)
+    }
+
+    fn get_symlink_size(&self) -> u16 {
+        let inode = self.disk_inode();
+        inode.size() as u16
+    }
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()> {
+        let inode = self.disk_inode();
+
+        if inode.size() == 0 {
+            return Err(enoent!());
+        }
+
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+
+        let mut cur_offset = entry_offset;
+        let mut skipped = entry_offset;
+
+        trace!(
+            "Total blocks count {} skipped {} current offset {} nid {} inode {:?}",
+            blocks_count,
+            skipped,
+            cur_offset,
+            self.ino(),
+            inode,
+        );
+
+        for i in 0..blocks_count {
+            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
+            let name_offset = head_entry.e_nameoff;
+            let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
+
+            for j in 0..entries_count {
+                let de = self
+                    .get_entry(i as usize, j as usize)
+                    .map_err(err_invalidate_data)?;
+                let name = self
+                    .entry_name(i as usize, j as usize, entries_count as usize)
+                    .map_err(err_invalidate_data)?;
+
+                // Skip specified offset
+                if skipped != 0 {
+                    skipped -= 1;
+                    continue;
+                }
+
+                let nid = de.e_nid;
+                let inode = Arc::new(self.mapping.inode_wrapper_with_info(
+                    nid,
+                    self.ino(),
+                    OsString::from(name),
+                )?) as Arc<dyn RafsInode>;
+                trace!("found file {:?}, nid {}", name, nid);
+                cur_offset += 1;
+                match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
+                    // Break returned by handler indicates that there is not enough buffer of readdir for entries inreaddir,
+                    // such that it has to return. because this is a nested loop,
+                    // using break can only jump out of the internal loop, there is no way to jump out of the whole loop.
+                    Ok(RafsInodeWalkAction::Break) => return Ok(()),
+                    Ok(RafsInodeWalkAction::Continue) => continue,
+                    Err(e) => return Err(e),
+                };
+            }
+        }
+
+        Ok(())
     }
 
     /// Get the child with the specified name.
@@ -899,66 +1253,10 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(0)
     }
 
-    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
-        let inode = self.disk_inode();
-
-        if inode.size() == 0 {
-            return Err(enoent!());
-        }
-
-        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
-
-        let mut cur_offset = entry_offset;
-        let mut skipped = entry_offset;
-
-        trace!(
-            "Total blocks count {} skipped {} current offset {} nid {} inode {:?}",
-            blocks_count,
-            skipped,
-            cur_offset,
-            self.ino(),
-            inode,
-        );
-
-        for i in 0..blocks_count {
-            let head_entry = self.get_entry(i as usize, 0).map_err(err_invalidate_data)?;
-            let name_offset = head_entry.e_nameoff;
-            let entries_count = name_offset / size_of::<RafsV6Dirent>() as u16;
-
-            for j in 0..entries_count {
-                let de = self
-                    .get_entry(i as usize, j as usize)
-                    .map_err(err_invalidate_data)?;
-                let name = self
-                    .entry_name(i as usize, j as usize, entries_count as usize)
-                    .map_err(err_invalidate_data)?;
-
-                // Skip specified offset
-                if skipped != 0 {
-                    skipped -= 1;
-                    continue;
-                }
-
-                let nid = de.e_nid;
-                let inode = Arc::new(self.mapping.inode_wrapper_with_info(
-                    nid,
-                    self.ino(),
-                    OsString::from(name),
-                )?) as Arc<dyn RafsInode>;
-                trace!("found file {:?}, nid {}", name, nid);
-                cur_offset += 1;
-                match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
-                    // Break returned by handler indicates that there is not enough buffer of readdir for entries inreaddir,
-                    // such that it has to return. because this is a nested loop,
-                    // using break can only jump out of the internal loop, there is no way to jump out of the whole loop.
-                    Ok(PostWalkAction::Break) => return Ok(()),
-                    Ok(PostWalkAction::Continue) => continue,
-                    Err(e) => return Err(e),
-                };
-            }
-        }
-
-        Ok(())
+    /// Get data size of the inode.
+    fn size(&self) -> u64 {
+        let i = self.disk_inode();
+        i.size()
     }
 
     #[inline]
@@ -1003,302 +1301,6 @@ impl RafsInode for OndiskInodeWrapper {
         });
 
         find.ok_or_else(|| enoent!(format!("can't find chunk info {}", chunk_addr.block_addr())))
-    }
-    // TODO(tianqian.zyf): Use get_xattrs implement it
-    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
-        let inode = self.disk_inode();
-        let total = inode.xattr_inline_count();
-        if total == 0 {
-            return Ok(None);
-        }
-        // xattr body size
-        let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>()
-            + size_of::<RafsV6XattrIbodyHeader>();
-        let m = self.mapping.state.load();
-        let mut cur = unsafe {
-            m.base
-                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
-        };
-
-        remaining -= size_of::<RafsV6XattrIbodyHeader>();
-
-        while remaining > 0 {
-            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
-            let mut xa_name = recover_namespace(e.name_index())?;
-            let suffix = OsStr::from_bytes(unsafe {
-                slice::from_raw_parts(
-                    cur.add(size_of::<RafsV6XattrEntry>()),
-                    e.name_len() as usize,
-                )
-            });
-            xa_name.push(suffix);
-            if xa_name == name {
-                let value = unsafe {
-                    slice::from_raw_parts(
-                        cur.add(size_of::<RafsV6XattrEntry>() + e.name_len() as usize),
-                        e.value_size() as usize,
-                    )
-                }
-                .to_vec();
-                return Ok(Some(value));
-            }
-            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
-            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
-            remaining -= s as usize;
-            cur = unsafe { cur.add(s as usize) };
-        }
-        Ok(None)
-    }
-
-    fn get_xattrs(&self) -> Result<Vec<XattrName>> {
-        let inode = self.disk_inode();
-        let mut xattrs = Vec::new();
-        let total = inode.xattr_inline_count();
-        if total == 0 {
-            return Ok(xattrs);
-        }
-        // xattr body size
-        let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>()
-            + size_of::<RafsV6XattrIbodyHeader>();
-        let m = self.mapping.state.load();
-        let mut cur = unsafe {
-            m.base
-                .add(self.offset + self.this_inode_size() + size_of::<RafsV6XattrIbodyHeader>())
-        };
-        remaining -= size_of::<RafsV6XattrIbodyHeader>();
-
-        while remaining > 0 {
-            let e = unsafe { &*(cur as *const RafsV6XattrEntry) };
-
-            let ns = recover_namespace(e.name_index())?;
-            let mut xa = ns.into_vec();
-            xa.extend_from_slice(unsafe {
-                slice::from_raw_parts(
-                    cur.add(size_of::<RafsV6XattrEntry>()),
-                    e.name_len() as usize,
-                )
-            });
-            xattrs.push(xa);
-            let mut s = e.name_len() + e.value_size() + size_of::<RafsV6XattrEntry>() as u32;
-            s = round_up(s as u64, size_of::<RafsV6XattrEntry>() as u64) as u32;
-            remaining -= s as usize;
-            cur = unsafe { cur.add(s as usize) };
-        }
-
-        Ok(xattrs)
-    }
-
-    fn ino(&self) -> u64 {
-        let meta_blkaddr = self.mapping.state.load().meta.meta_blkaddr as u64;
-        (self.offset as u64 - meta_blkaddr * EROFS_BLOCK_SIZE) / EROFS_INODE_SLOT_SIZE as u64
-    }
-
-    /// Get name of the inode.
-    ///
-    /// # Safety
-    /// It depends on Self::validate() to ensure valid memory layout.
-    fn name(&self) -> OsString {
-        let mut cur_name = OsString::from("");
-        match self.name.borrow().as_ref() {
-            Some(name) => return name.clone(),
-            None => {
-                debug_assert!(self.is_dir());
-                let cur_ino = self.ino();
-                if cur_ino == self.mapping.root_ino() {
-                    return OsString::from("");
-                }
-                let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
-                parent_inode
-                    .walk_children_inodes(
-                        0,
-                        &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
-                            if cur_ino == ino {
-                                cur_name = name;
-                                return Ok(PostWalkAction::Break);
-                            }
-                            Ok(PostWalkAction::Continue)
-                        },
-                    )
-                    .unwrap();
-            }
-        }
-        *self.name.borrow_mut() = Some(cur_name.clone());
-        cur_name
-    }
-    // RafsV5 flags, not used by v6, return 0
-    fn flags(&self) -> u64 {
-        0
-    }
-
-    fn get_digest(&self) -> RafsDigest {
-        RafsDigest::default()
-    }
-
-    fn is_dir(&self) -> bool {
-        self.mode_format_bits() == libc::S_IFDIR as u32
-    }
-
-    /// Check whether the inode is a symlink.
-    fn is_symlink(&self) -> bool {
-        self.mode_format_bits() == libc::S_IFLNK as u32
-    }
-
-    /// Check whether the inode is a regular file.
-    fn is_reg(&self) -> bool {
-        self.mode_format_bits() == libc::S_IFREG as u32
-    }
-
-    /// Check whether the inode is a hardlink.
-    fn is_hardlink(&self) -> bool {
-        let inode = self.disk_inode();
-        inode.nlink() > 1 && self.is_reg()
-    }
-
-    /// Get inode number of the parent directory.
-    fn parent(&self) -> u64 {
-        match self.parent_inode.get() {
-            Some(parent) => parent,
-            None => {
-                debug_assert!(self.is_dir());
-                let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
-                self.parent_inode.set(Some(ino));
-                ino
-            }
-        }
-    }
-
-    /// Get real device number of the inode.
-    fn rdev(&self) -> u32 {
-        self.disk_inode().union()
-    }
-
-    /// Get project id associated with the inode.
-    fn projid(&self) -> u32 {
-        0
-    }
-
-    /// Get data size of the inode.
-    fn size(&self) -> u64 {
-        let i = self.disk_inode();
-        i.size()
-    }
-
-    /// Get file name size of the inode.
-    fn get_name_size(&self) -> u16 {
-        self.name().len() as u16
-    }
-
-    fn get_symlink_size(&self) -> u16 {
-        let inode = self.disk_inode();
-        inode.size() as u16
-    }
-
-    fn collect_descendants_inodes(
-        &self,
-        descendants: &mut Vec<Arc<dyn RafsInode>>,
-    ) -> Result<usize> {
-        if !self.is_dir() {
-            return Err(enotdir!());
-        }
-
-        let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
-
-        self.walk_children_inodes(0, &mut |inode: Option<Arc<dyn RafsInode>>,
-                                           name: OsString,
-                                           ino,
-                                           offset| {
-            if let Some(child_inode) = inode {
-                if child_inode.is_dir() {
-                    child_dirs.push(child_inode);
-                } else if !child_inode.is_empty_size() && child_inode.is_reg() {
-                    descendants.push(child_inode);
-                }
-                Ok(PostWalkAction::Continue)
-            } else {
-                Ok(PostWalkAction::Continue)
-            }
-        })
-        .unwrap();
-
-        for d in child_dirs {
-            // EROFS packs dot and dotdot, so skip them two.
-            if d.name() == "." || d.name() == ".." {
-                continue;
-            }
-            d.collect_descendants_inodes(descendants)?;
-        }
-
-        Ok(0)
-    }
-
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
-        let chunk_size = self.chunk_size();
-        let head_chunk_index = offset / chunk_size as u64;
-
-        // TODO: Validate chunk format by checking its `i_u`
-        let mut vec: Vec<BlobIoVec> = Vec::new();
-        let chunks = self
-            .chunk_addresses(head_chunk_index as u32)
-            .map_err(err_invalidate_data)?;
-
-        if chunks.is_empty() {
-            return Ok(vec);
-        }
-
-        let content_offset = (offset % chunk_size as u64) as u32;
-        let mut left = std::cmp::min(self.size(), size as u64) as u32;
-        let mut content_len = std::cmp::min(chunk_size - content_offset, left);
-
-        // Safe to unwrap because chunks is not empty to reach here.
-        let first_chunk_addr = chunks.first().unwrap();
-        let desc = self.make_chunk_io(first_chunk_addr, content_offset, content_len, user_io);
-
-        let mut descs = BlobIoVec::new();
-        descs.bi_vec.push(desc);
-        descs.bi_size += content_len;
-        left -= content_len;
-
-        if left != 0 {
-            // Handle the rest of chunks since they shares the same content length = 0.
-            for c in chunks.iter().skip(1) {
-                content_len = std::cmp::min(chunk_size, left);
-                let desc = self.make_chunk_io(c, 0, content_len, user_io);
-
-                if desc.blob.blob_index() != descs.bi_vec[0].blob.blob_index() {
-                    trace!(
-                        "Continues storge IO has {} bios offset {} io size {} {:?}",
-                        descs.bi_vec.len(),
-                        offset,
-                        size,
-                        descs.bi_vec
-                    );
-                    vec.push(descs);
-                    descs = BlobIoVec::new();
-                }
-
-                descs.bi_vec.push(desc);
-                descs.bi_size += content_len;
-                left -= content_len;
-                if left == 0 {
-                    break;
-                }
-            }
-        }
-
-        if !descs.bi_vec.is_empty() {
-            trace!(
-                "Continues storge IO has {} bios offset {} io size {} {:?}",
-                descs.bi_vec.len(),
-                offset,
-                size,
-                descs.bi_vec
-            );
-            vec.push(descs)
-        }
-
-        assert_eq!(left, 0);
-
-        Ok(vec)
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -36,11 +36,12 @@ use serde::Deserialize;
 
 use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
 use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
+use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
-use storage::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::metadata::{
-    Inode, PostWalkAction, RafsInode, RafsSuper, RafsSuperMeta, DOT, DOTDOT, RAFS_MAX_CHUNK_SIZE,
+    Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
+    RAFS_MAX_CHUNK_SIZE,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -389,11 +390,11 @@ impl Rafs {
             }) {
                 Ok(0) => {
                     self.ios.new_file_counter(ino);
-                    Ok(PostWalkAction::Break)
+                    Ok(RafsInodeWalkAction::Break)
                 }
                 Ok(_) => {
                     self.ios.new_file_counter(ino);
-                    Ok(PostWalkAction::Continue)
+                    Ok(RafsInodeWalkAction::Continue)
                 } // TODO: should we check `size` here?
                 Err(e) => Err(e),
             }

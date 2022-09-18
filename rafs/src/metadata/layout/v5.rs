@@ -44,7 +44,14 @@ use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{compress, ByteSize};
-use storage::device::{BlobChunkInfo, BlobFeatures, BlobIoChunk, BlobIoDesc, BlobIoVec};
+use vm_memory::VolatileMemory;
+// With Rafs v5, the storage manager needs to access file system metadata to decompress the
+// compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures
+// have been moved into the storage manager.
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{
+    BlobChunkFlags, BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec,
+};
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER_VERSION_V5};
 use crate::metadata::md_v5::V5IoChunk;
@@ -52,13 +59,6 @@ use crate::metadata::{
     Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
-
-// With Rafs v5, the storage manager needs to access file system metadata to decompress the
-// compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures
-// have been moved into the storage manager.
-use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobInfo};
-use vm_memory::VolatileMemory;
 
 pub(crate) const RAFSV5_ALIGNMENT: usize = 8;
 pub(crate) const RAFSV5_SUPERBLOCK_SIZE: usize = 8192;

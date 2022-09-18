@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Structs and Traits for RAFS file system meta data management.
+//! Enums, Structs and Traits to access and manage Rafs filesystem metadata.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::bail;
-
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::compress;
@@ -33,41 +32,44 @@ use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::{RafsError, RafsIoReader, RafsIoWrite, RafsResult};
 
-pub mod cached_v5;
-pub mod direct_v5;
-pub mod direct_v6;
-pub mod layout;
 mod md_v5;
 mod md_v6;
 mod noop;
 
-pub use storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
+pub mod cached_v5;
+pub mod direct_v5;
+pub mod direct_v6;
+pub mod layout;
 
-/// Maximum size of blob id string.
+// Reexport from nydus_storage crate.
+pub use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
+
+/// Maximum size of blob identifier string.
 pub const RAFS_BLOB_ID_MAX_LENGTH: usize = 64;
-/// Block size reported to fuse by get_attr().
+/// Block size reported by get_attr().
 pub const RAFS_ATTR_BLOCK_SIZE: u32 = 4096;
-/// Maximum size of file name supported by rafs.
+/// Maximum size of file name supported by RAFS.
 pub const RAFS_MAX_NAME: usize = 255;
-/// Maximum size of the rafs metadata blob.
+/// Maximum size of RAFS filesystem metadata blobs.
 pub const RAFS_MAX_METADATA_SIZE: usize = 0x8000_0000;
 /// File name for Unix current directory.
 pub const DOT: &str = ".";
 /// File name for Unix parent directory.
 pub const DOTDOT: &str = "..";
 
-/// Type of RAFS inode number.
+/// Type for RAFS filesystem inode number.
 pub type Inode = u64;
 
-/// Trait to get information about inodes supported by the filesystem instance.
+/// Trait to access filesystem inodes managed by a RAFS filesystem.
 pub trait RafsSuperInodes {
-    /// Get the maximum inode number supported by the filesystem instance.
+    /// Get the maximum inode number managed by the RAFS filesystem.
     fn get_max_ino(&self) -> Inode;
 
-    /// Get a `RafsInode` trait object for an inode, validating the inode content if requested.
-    fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>>;
+    /// Get the `RafsInode` trait object corresponding to the inode number `ino`,
+    /// also validates the inode content if requested.
+    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>>;
 
-    /// Validate the content of inode itself, optionally recursively validate into children.
+    /// Validate the content of inode itself, optionally recursively validate its children.
     fn validate_digest(
         &self,
         inode: Arc<dyn RafsInode>,
@@ -76,145 +78,153 @@ pub trait RafsSuperInodes {
     ) -> Result<bool>;
 }
 
-/// Trait to access Rafs filesystem superblock and inodes.
+/// Trait to access RAFS filesystem metadata, including the RAFS super block and inodes.
 pub trait RafsSuperBlock: RafsSuperInodes + Send + Sync {
-    /// Load the super block from a reader.
+    /// Load and validate the RAFS filesystem super block from the specified reader.
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 
-    /// Update Rafs filesystem metadata and storage backend.
+    /// Update/reload the RAFS filesystem super block from the specified reader.
     fn update(&self, r: &mut RafsIoReader) -> RafsResult<()>;
 
-    /// Destroy a Rafs filesystem super block.
+    /// Destroy the RAFS filesystem super block object.
     fn destroy(&mut self);
 
-    /// Get all blob information objects used by the filesystem.
+    /// Get all blob objects referenced by the RAFS filesystem.
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
 
+    /// Get the inode number of the RAFS filesystem root.
     fn root_ino(&self) -> u64;
 
-    /// Get a chunk info.
+    /// Get the `BlobChunkInfo` object by a chunk index, used by RAFS v6.
     fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
         unimplemented!()
     }
 }
 
-pub enum PostWalkAction {
-    // Indicates the need to continue iterating
+/// Result codes for `RafsInodeWalkHandler`.
+pub enum RafsInodeWalkAction {
+    /// Indicates the need to continue iterating
     Continue,
-    // Indicates that it is necessary to stop continuing to iterate
+    /// Indicates that it is necessary to stop continuing to iterate
     Break,
 }
 
-pub type ChildInodeHandler<'a> =
-    &'a mut dyn FnMut(Option<Arc<dyn RafsInode>>, OsString, u64, u64) -> Result<PostWalkAction>;
+/// Callback handler for RafsInode::walk_children_inodes().
+pub type RafsInodeWalkHandler<'a> = &'a mut dyn FnMut(
+    Option<Arc<dyn RafsInode>>,
+    OsString,
+    u64,
+    u64,
+) -> Result<RafsInodeWalkAction>;
 
-/// Trait to access metadata and data for an inode.
+/// Trait to provide readonly accessors for RAFS filesystem inode.
 ///
-/// The RAFS filesystem is a readonly filesystem, so does its inodes. The `RafsInode` trait acts
-/// as field accessors for those readonly inodes, to hide implementation details.
+/// The RAFS filesystem is a readonly filesystem, so does its inodes. The `RafsInode` trait provides
+/// readonly accessors for RAFS filesystem inode. The `nydus-image` crate provides its own
+/// InodeWrapper to generate RAFS filesystem inodes.
 pub trait RafsInode: Any {
-    /// Validate the node for data integrity.
+    /// RAFS: validate format and integrity of the RAFS filesystem inode.
     ///
-    /// The inode object may be transmuted from a raw buffer, read from an external file, so the
-    /// caller must validate it before accessing any fields.
+    /// Inodes objects may be transmuted from raw buffers or loaded from untrusted source.
+    /// It must be validated for integrity before accessing any of its data fields .
     fn validate(&self, max_inode: Inode, chunk_size: u64) -> Result<()>;
 
-    /// Get `Entry` of the inode.
-    fn get_entry(&self) -> Entry;
-
-    /// Get `Attr` of the inode.
-    fn get_attr(&self) -> Attr;
-
-    /// Get file name size of the inode.
-    fn get_name_size(&self) -> u16;
-
-    /// Get symlink target of the inode if it's a symlink.
-    fn get_symlink(&self) -> Result<OsString>;
-
-    /// Get size of symlink.
-    fn get_symlink_size(&self) -> u16;
-
-    /// Get child inode of a directory by name.
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;
-
-    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()>;
-
-    /// Get child inode of a directory by child index, child index starting at 0.
-    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>>;
-
-    /// Get number of directory's child inode.
-    fn get_child_count(&self) -> u32;
-
-    /// Get the index into the inode table of the directory's first child.
-    fn get_child_index(&self) -> Result<u32>;
-
-    /// Get number of data chunk of a normal file.
-    fn get_chunk_count(&self) -> u32;
-
-    /// Get chunk info object for a chunk.
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>>;
-
-    /// Check whether the inode has extended attributes.
-    fn has_xattr(&self) -> bool;
-
-    /// Get the value of xattr with key `name`.
-    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;
-
-    /// Get all xattr keys.
-    fn get_xattrs(&self) -> Result<Vec<XattrName>>;
-
-    /// Check whether the inode is a directory.
-    fn is_dir(&self) -> bool;
-
-    /// Check whether the inode is a symlink.
-    fn is_symlink(&self) -> bool;
-
-    /// Check whether the inode is a regular file.
-    fn is_reg(&self) -> bool;
-
-    /// Check whether the inode is a hardlink.
-    fn is_hardlink(&self) -> bool;
-
-    /// Get the inode number of the inode.
-    fn ino(&self) -> u64;
-
-    /// Get file name of the inode.
-    fn name(&self) -> OsString;
-
-    /// Get inode number of the parent directory.
-    fn parent(&self) -> u64;
-
-    /// Get real device number of the inode.
-    fn rdev(&self) -> u32;
-
-    /// Get flags of the inode.
-    fn flags(&self) -> u64;
-
-    /// Get project id associated with the inode.
-    fn projid(&self) -> u32;
-
-    /// Get data size of the inode.
-    fn size(&self) -> u64;
-
-    /// Check whether the inode has no content.
-    fn is_empty_size(&self) -> bool {
-        self.size() == 0
-    }
-
-    /// Get digest value of the inode metadata.
+    /// RAFS: get digest value of the inode metadata.
     fn get_digest(&self) -> RafsDigest;
 
-    /// Collect all descendants of the inode for image building.
+    /// RAFS: allocate blob io vectors to read file data in range [offset, offset + size).
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
+
+    /// RAFS: collect all descendants of the inode for image building.
     fn collect_descendants_inodes(
         &self,
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
 
-    /// Allocate blob io vectors to read file data in range [offset, offset + size).
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
+    /// RAFS V5: get RAFS v5 specific inode flags.
+    fn flags(&self) -> u64;
 
-    fn as_any(&self) -> &dyn Any;
+    /// Posix: generate a `Entry` object required by libc/fuse from the inode.
+    fn get_entry(&self) -> Entry;
 
+    /// Posix: generate a posix `Attr` object required by libc/fuse from the inode.
+    fn get_attr(&self) -> Attr;
+
+    /// Posix: get the inode number.
+    fn ino(&self) -> u64;
+
+    /// Posix: get inode number of the parent inode.
+    fn parent(&self) -> u64;
+
+    /// Posix: get real device number.
+    fn rdev(&self) -> u32;
+
+    /// Posix: get project id associated with the inode.
+    fn projid(&self) -> u32;
+
+    /// Posix: get file name.
+    fn name(&self) -> OsString;
+
+    /// Posix: get file name size.
+    fn get_name_size(&self) -> u16;
+
+    /// Mode: check whether the inode is a directory.
+    fn is_dir(&self) -> bool;
+
+    /// Mode: check whether the inode is a symlink.
+    fn is_symlink(&self) -> bool;
+
+    /// Mode: check whether the inode is a regular file.
+    fn is_reg(&self) -> bool;
+
+    /// Mode: check whether the inode is a hardlink.
+    fn is_hardlink(&self) -> bool;
+
+    /// Xattr: check whether the inode has extended attributes.
+    fn has_xattr(&self) -> bool;
+
+    /// Xattr: get the value of xattr with key `name`.
+    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>>;
+
+    /// Xattr: get all xattr keys.
+    fn get_xattrs(&self) -> Result<Vec<XattrName>>;
+
+    /// Symlink: get the symlink target.
+    fn get_symlink(&self) -> Result<OsString>;
+
+    /// Symlink: get size of the symlink target path.
+    fn get_symlink_size(&self) -> u16;
+
+    /// Directory: walk/enumerate child inodes.
+    fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()>;
+
+    /// Directory: get child inode by name.
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;
+
+    /// Directory: get child inode by child index, child index starts from 0.
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>>;
+
+    /// Directory: get number of child inodes.
+    fn get_child_count(&self) -> u32;
+
+    /// Directory: get the inode number corresponding to the first child inode.
+    fn get_child_index(&self) -> Result<u32>;
+
+    /// Regular: get size of file content
+    fn size(&self) -> u64;
+
+    /// Regular: check whether the inode has no content.
+    fn is_empty_size(&self) -> bool {
+        self.size() == 0
+    }
+
+    /// Regular: get number of data chunks.
+    fn get_chunk_count(&self) -> u32;
+
+    /// Regular: get chunk info object by chunk index, chunk index starts from 0.
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>>;
+
+    /// Regular: walk/enumerate all data chunks.
     fn walk_chunks(
         &self,
         cb: &mut dyn FnMut(&dyn BlobChunkInfo) -> anyhow::Result<()>,
@@ -225,11 +235,13 @@ pub trait RafsInode: Any {
         }
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn Any;
 }
 
-/// Trait to store Rafs meta block and validate alignment.
+/// Trait to write out RAFS filesystem meta objects into the metadata blob.
 pub trait RafsStore {
-    /// Write the Rafs filesystem metadata to a writer.
+    /// Write out the Rafs filesystem meta object to the writer.
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize>;
 }
 
@@ -249,7 +261,7 @@ bitflags! {
         ///
         /// If unset, use nydusd process euid/egid for all inodes at runtime.
         const EXPLICIT_UID_GID = 0x0000_0010;
-        /// Inode has extended attributes.
+        /// Inode may have associated extended attributes.
         const HAS_XATTR = 0x0000_0020;
         // V5: Data chunks are compressed with gzip
         const COMPRESS_GZIP = 0x0000_0040;
@@ -312,12 +324,15 @@ pub struct RafsSuperMeta {
     pub attr_timeout: Duration,
     /// Default inode timeout value.
     pub entry_timeout: Duration,
-    pub meta_blkaddr: u32,
-    pub root_nid: u16,
+    /// Whether the RAFS instance is a chunk dictionary.
     pub is_chunk_dict: bool,
-    /// Offset of the chunk table
+    /// Metadata block address for RAFS v6.
+    pub meta_blkaddr: u32,
+    /// Root nid for RAFS v6.
+    pub root_nid: u16,
+    /// Offset of the chunk table for RAFS v6.
     pub chunk_table_offset: u64,
-    /// Size  of the chunk table
+    /// Size  of the chunk table for RAFS v6.
     pub chunk_table_size: u64,
 }
 

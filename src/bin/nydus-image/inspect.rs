@@ -12,7 +12,7 @@ use std::{
 };
 
 use nydus_rafs::{
-    metadata::{PostWalkAction, RafsInode, RafsSuper},
+    metadata::{RafsInode, RafsInodeWalkAction, RafsSuper},
     RafsIoRead, RafsIoReader,
 };
 use serde_json::Value;
@@ -89,7 +89,7 @@ impl RafsInspector {
             trace!("inode {:?}, name: {:?}", ino, f);
 
             if f == "." || f == ".." {
-                return Ok(PostWalkAction::Continue);
+                return Ok(RafsInodeWalkAction::Continue);
             }
 
             let child_inode = self.rafs_meta.get_inode(ino, false)?;
@@ -110,7 +110,7 @@ impl RafsInspector {
                 inode_number = ino,
             );
 
-            Ok(PostWalkAction::Continue)
+            Ok(RafsInodeWalkAction::Continue)
         })?;
 
         Ok(None)
@@ -139,14 +139,14 @@ impl RafsInspector {
         dir_inodes.walk_children_inodes(0, &mut |_inode, child_name, child_ino, _offset| {
             let child_inode = self.rafs_meta.get_inode(child_ino, false)?;
             if child_name != dir_name {
-                Ok(PostWalkAction::Continue)
+                Ok(RafsInodeWalkAction::Continue)
             } else {
                 if child_inode.is_dir() {
                     new_dir_ino = Some(child_ino);
                 } else {
                     err = "not a directory";
                 }
-                Ok(PostWalkAction::Break)
+                Ok(RafsInodeWalkAction::Break)
             }
         })?;
 
@@ -182,7 +182,7 @@ impl RafsInspector {
 
                 // only reg_file can get and print chunk info
                 if !child_inode.is_reg() {
-                    return Ok(PostWalkAction::Break);
+                    return Ok(RafsInodeWalkAction::Break);
                 }
 
                 let chunk_count = child_inode.get_chunk_count();
@@ -200,7 +200,7 @@ impl RafsInspector {
                             "Blob index is {}. But no blob entry associate with it",
                             c.blob_index()
                         );
-                        return Ok(PostWalkAction::Break);
+                        return Ok(RafsInodeWalkAction::Break);
                     };
 
                     // file_offset = chunk_index * chunk_size
@@ -226,9 +226,9 @@ impl RafsInspector {
                     );
                 }
 
-                Ok(PostWalkAction::Break)
+                Ok(RafsInodeWalkAction::Break)
             } else {
-                Ok(PostWalkAction::Continue)
+                Ok(RafsInodeWalkAction::Continue)
             }
         })?;
 
