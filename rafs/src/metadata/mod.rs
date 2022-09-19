@@ -224,18 +224,6 @@ pub trait RafsInode: Any {
     /// Regular: get chunk info object by chunk index, chunk index starts from 0.
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>>;
 
-    /// Regular: walk/enumerate all data chunks.
-    fn walk_chunks(
-        &self,
-        cb: &mut dyn FnMut(&dyn BlobChunkInfo) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let chunk_count = self.get_chunk_count();
-        for i in 0..chunk_count {
-            cb(self.get_chunk_info(i)?.as_ref())?;
-        }
-        Ok(())
-    }
-
     fn as_any(&self) -> &dyn Any;
 }
 
