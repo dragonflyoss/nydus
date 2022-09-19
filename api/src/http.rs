@@ -114,12 +114,6 @@ impl BackendConfig {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LocalFsConfig {
-    /// Enable fadvise based readahead.
-    #[serde(default)]
-    pub readahead: bool,
-    /// Trace based readahead record duration.
-    #[serde(default = "default_readahead_sec")]
-    pub readahead_sec: u32,
     /// Blob file to access.
     #[serde(default)]
     pub blob_file: String,
@@ -936,10 +930,6 @@ fn default_http_timeout() -> u32 {
     5
 }
 
-fn default_readahead_sec() -> u32 {
-    10
-}
-
 fn default_work_dir() -> String {
     ".".to_string()
 }
@@ -1203,15 +1193,11 @@ mod tests {
     #[test]
     fn test_localfs_config() {
         let content = r#"{
-            "readahead": true,
-            "readahead_sec": 100,
             "blob_file": "blob_file",
             "dir": "blob_dir",
             "alt_dirs": ["dir1", "dir2"]
         }"#;
         let config: LocalFsConfig = serde_json::from_str(content).unwrap();
-        assert!(config.readahead);
-        assert_eq!(config.readahead_sec, 100);
         assert_eq!(config.blob_file, "blob_file");
         assert_eq!(config.dir, "blob_dir");
         assert_eq!(config.alt_dirs, vec!["dir1", "dir2"]);

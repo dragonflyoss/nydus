@@ -207,8 +207,6 @@ mod tests {
     #[test]
     fn test_invalid_localfs_new() {
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "".to_string(),
             dir: "".to_string(),
             alt_dirs: Vec::new(),
@@ -217,8 +215,6 @@ mod tests {
         assert!(LocalFs::new(json, Some("test")).is_err());
 
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "/a/b/c".to_string(),
             dir: "/a/b".to_string(),
             alt_dirs: Vec::new(),
@@ -230,8 +226,6 @@ mod tests {
     #[test]
     fn test_localfs_get_blob_path() {
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "/a/b/cxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
             dir: "/a/b".to_string(),
             alt_dirs: Vec::new(),
@@ -245,8 +239,6 @@ mod tests {
         let filename = path.file_name().unwrap().to_str().unwrap();
 
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: path.to_str().unwrap().to_owned(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
@@ -256,8 +248,6 @@ mod tests {
         assert_eq!(fs.get_blob_path("test").unwrap().to_str(), path.to_str());
 
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
@@ -267,8 +257,6 @@ mod tests {
         assert_eq!(fs.get_blob_path(filename).unwrap().to_str(), path.to_str());
 
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "".to_string(),
             dir: "/a/b".to_string(),
             alt_dirs: vec![
@@ -287,8 +275,6 @@ mod tests {
         let path = tempfile.as_path();
         let filename = path.file_name().unwrap().to_str().unwrap();
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
@@ -314,8 +300,6 @@ mod tests {
         }
 
         let config = LocalFsConfig {
-            readahead: true,
-            readahead_sec: 20,
             blob_file: "".to_string(),
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
