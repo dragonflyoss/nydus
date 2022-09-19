@@ -1,18 +1,19 @@
-use std::{
-    fs::{File, OpenOptions},
-    io::Read,
-    iter::from_fn,
-    path::{Path, PathBuf},
-    rc::Rc,
-    str,
-    sync::Arc,
-};
+// Copyright 2022 Ant Group. All rights reserved.
+// Copyright (C) 2022 Alibaba Cloud. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::str;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nydus_api::http::LocalFsConfig;
 use nydus_rafs::{
     metadata::{RafsInode, RafsMode, RafsSuper},
-    RafsIoReader,
+    RafsIoReader, RafsIterator,
 };
 use storage::{
     backend::{localfs::LocalFs, BlobBackend, BlobReader},
@@ -75,85 +76,6 @@ impl OCIUnpacker {
 
         Ok(rs)
     }
-
-    /// A lazy iterator of RafsInode in DFS, which travels in preorder.
-    fn iterator<'a>(
-        &'a self,
-        rs: &'a RafsSuper,
-    ) -> Box<impl Iterator<Item = (Arc<dyn RafsInode>, PathBuf)> + 'a> {
-        // A cursor means the next node to be visited at same height in the tree.
-        // It always starts with the first one of level.
-        // A cursor stack is of cursors from root to leaf.
-        let mut cursor_stack = Vec::with_capacity(32);
-
-        cursor_stack.push(self.cursor_of_root(rs));
-
-        let dfs = move || {
-            while !cursor_stack.is_empty() {
-                let mut cursor = cursor_stack.pop().unwrap();
-
-                let (node, path) = match cursor.next() {
-                    None => continue,
-                    Some(point) => {
-                        cursor_stack.push(cursor);
-                        point
-                    }
-                };
-
-                if node.is_dir() {
-                    cursor_stack.push(self.cursor_of_children(node.clone(), &*path))
-                }
-
-                return Some((node, path));
-            }
-
-            None
-        };
-
-        Box::new(from_fn(dfs))
-    }
-
-    fn cursor_of_children(
-        &self,
-        node: Arc<dyn RafsInode>,
-        path: &Path,
-    ) -> Box<dyn Iterator<Item = (Arc<dyn RafsInode>, PathBuf)>> {
-        let base = path.to_path_buf();
-        let mut next_idx = 0..node.get_child_count();
-
-        let visitor = move || {
-            if next_idx.is_empty() {
-                return None;
-            }
-
-            let child = node.get_child_by_index(next_idx.next().unwrap()).unwrap();
-            let child_path = base.join(child.name());
-
-            Some((child, child_path))
-        };
-
-        Box::new(from_fn(visitor))
-    }
-
-    fn cursor_of_root<'a>(
-        &self,
-        rs: &'a RafsSuper,
-    ) -> Box<dyn Iterator<Item = (Arc<dyn RafsInode>, PathBuf)> + 'a> {
-        let mut has_more = true;
-        let visitor = from_fn(move || {
-            if !has_more {
-                return None;
-            }
-            has_more = false;
-
-            let node = rs.get_inode(rs.superblock.root_ino(), false).unwrap();
-            let path = PathBuf::from("/").join(node.name());
-
-            Some((node, path))
-        });
-
-        Box::new(visitor)
-    }
 }
 
 impl Unpacker for OCIUnpacker {
@@ -169,7 +91,7 @@ impl Unpacker for OCIUnpacker {
             .builder_factory
             .create(&rafs, self.blob.as_deref(), &self.output)?;
 
-        for (node, path) in self.iterator(&rafs) {
+        for (node, path) in RafsIterator::new(&rafs) {
             builder.append(&*node, &path)?;
         }
 

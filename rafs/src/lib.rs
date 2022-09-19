@@ -42,7 +42,10 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::File;
 use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::metadata::{RafsInode, RafsSuper};
 
 pub mod fs;
 pub mod metadata;
@@ -224,9 +227,63 @@ impl dyn RafsIoRead {
     }
 }
 
+///  Iterator to walk all inodes of a Rafs filesystem.
+pub struct RafsIterator<'a> {
+    _rs: &'a RafsSuper,
+    cursor_stack: Vec<(Arc<dyn RafsInode>, PathBuf)>,
+}
+
+impl<'a> RafsIterator<'a> {
+    /// Create a new iterator to visit a Rafs filesystem.
+    pub fn new(rs: &'a RafsSuper) -> Self {
+        let cursor_stack = match rs.get_inode(rs.superblock.root_ino(), false) {
+            Ok(node) => {
+                let path = PathBuf::from("/");
+                vec![(node, path)]
+            }
+            Err(e) => {
+                error!(
+                    "failed to get root inode from the bootstrap {}, damaged or malicious file?",
+                    e
+                );
+                vec![]
+            }
+        };
+
+        RafsIterator {
+            _rs: rs,
+            cursor_stack,
+        }
+    }
+}
+
+impl<'a> Iterator for RafsIterator<'a> {
+    type Item = (Arc<dyn RafsInode>, PathBuf);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (node, path) = self.cursor_stack.pop()?;
+        if node.is_dir() {
+            let children = 0..node.get_child_count();
+            for idx in children.rev() {
+                if let Ok(child) = node.get_child_by_index(idx) {
+                    let child_path = path.join(child.name());
+                    self.cursor_stack.push((child, child_path));
+                } else {
+                    error!(
+                        "failed to get child inode from the bootstrap, damaged or malicious file?"
+                    );
+                }
+            }
+        }
+        Some((node, path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::RafsMode;
+    use std::fs::OpenOptions;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
@@ -253,5 +310,42 @@ mod tests {
         assert_eq!(obj.seek_plus_offset(7).unwrap(), 7);
         assert_eq!(obj.seek_to_next_aligned(7, 8).unwrap(), 8);
         assert_eq!(obj.seek_plus_offset(7).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_rafs_iterator() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/bootstrap/image_v2.boot");
+        let bootstrap = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&path)
+            .unwrap();
+        let mut rs = RafsSuper {
+            mode: RafsMode::Direct,
+            validate_digest: false,
+            ..Default::default()
+        };
+        rs.load(&mut (Box::new(bootstrap) as RafsIoReader)).unwrap();
+        let iter = RafsIterator::new(&rs);
+
+        let mut last = false;
+        for (idx, (_node, path)) in iter.enumerate() {
+            assert!(!last);
+            if idx == 1 {
+                assert_eq!(path, PathBuf::from("/bin"));
+            } else if idx == 2 {
+                assert_eq!(path, PathBuf::from("/boot"));
+            } else if idx == 3 {
+                assert_eq!(path, PathBuf::from("/dev"));
+            } else if idx == 10 {
+                assert_eq!(path, PathBuf::from("/etc/DIR_COLORS.256color"));
+            } else if idx == 11 {
+                assert_eq!(path, PathBuf::from("/etc/DIR_COLORS.lightbgcolor"));
+            } else if path == PathBuf::from("/var/yp") {
+                last = true;
+            }
+        }
+        assert!(last);
     }
 }
