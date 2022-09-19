@@ -4,13 +4,14 @@
 
 use std::collections::HashSet;
 use std::convert::TryFrom;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use nydus_utils::compress;
 use nydus_utils::digest::{self};
-use rafs::metadata::{RafsInode, RafsMode, RafsSuper, RafsSuperMeta};
+use rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsSuperMeta};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
@@ -141,12 +142,12 @@ impl Merger {
 
             if let Some(tree) = &mut tree {
                 let mut nodes = Vec::new();
-                rs.walk_dir(
+                rs.walk_directory::<PathBuf>(
                     rs.superblock.root_ino(),
                     None,
-                    &mut |inode: &dyn RafsInode, path: &Path| -> Result<()> {
+                    &mut |inode: &dyn RafsInodeExt, path: &Path| -> Result<()> {
                         let mut node =
-                            MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
+                            MetadataTreeBuilder::parse_node(&rs, inode.deref(), path.to_path_buf())
                                 .context(format!(
                                     "parse node from bootstrap {:?}",
                                     bootstrap_path

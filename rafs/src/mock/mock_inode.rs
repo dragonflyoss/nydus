@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 use nydus_utils::{digest::RafsDigest, ByteSize};
-
-use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
 
 use super::mock_chunk::MockChunkInfo;
 use super::mock_super::CHUNK_SIZE;
@@ -26,7 +26,7 @@ use crate::metadata::{
     layout::{XattrName, XattrValue},
     Inode, RafsInode, RafsInodeWalkHandler, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
 };
-use storage::device::v5::BlobV5ChunkInfo;
+use crate::RafsInodeExt;
 
 #[derive(Default, Clone, Debug)]
 #[allow(unused)]
@@ -116,10 +116,6 @@ impl RafsInode for MockInode {
         todo!()
     }
 
-    fn get_name_size(&self) -> u16 {
-        self.i_name.byte_size() as u16
-    }
-
     fn get_symlink(&self) -> Result<OsString> {
         if !self.is_symlink() {
             Err(einval!("inode is not a symlink"))
@@ -136,7 +132,7 @@ impl RafsInode for MockInode {
         }
     }
 
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInodeExt>> {
         let idx = self
             .i_child
             .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
@@ -145,7 +141,7 @@ impl RafsInode for MockInode {
     }
 
     #[inline]
-    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInodeExt>> {
         Ok(self.i_child[index as usize].clone())
     }
 
@@ -160,11 +156,6 @@ impl RafsInode for MockInode {
 
     fn get_chunk_count(&self) -> u32 {
         self.get_child_count()
-    }
-
-    #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
-        Ok(self.i_data[idx as usize].clone())
     }
 
     fn has_xattr(&self) -> bool {
@@ -198,18 +189,6 @@ impl RafsInode for MockInode {
 
     fn is_hardlink(&self) -> bool {
         !self.is_dir() && self.i_nlink > 1
-    }
-
-    fn name(&self) -> OsString {
-        self.i_name.clone()
-    }
-
-    fn flags(&self) -> u64 {
-        self.i_flags.bits()
-    }
-
-    fn get_digest(&self) -> RafsDigest {
-        self.i_digest
     }
 
     fn collect_descendants_inodes(
@@ -250,10 +229,38 @@ impl RafsInode for MockInode {
     }
 
     impl_getter!(ino, i_ino, u64);
-    impl_getter!(parent, i_parent, u64);
     impl_getter!(size, i_size, u64);
     impl_getter!(rdev, i_rdev, u32);
     impl_getter!(projid, i_projid, u32);
+}
+
+impl RafsInodeExt for MockInode {
+    fn name(&self) -> OsString {
+        self.i_name.clone()
+    }
+
+    fn flags(&self) -> u64 {
+        self.i_flags.bits()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        self.i_digest
+    }
+
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
+    #[inline]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
+        Ok(self.i_data[idx as usize].clone())
+    }
+
+    fn as_inode(&self) -> &dyn RafsInode {
+        self
+    }
+
+    impl_getter!(parent, i_parent, u64);
 }
 
 impl RafsV5InodeChunkOps for MockInode {

@@ -13,8 +13,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::RafsInode;
 use nydus_utils::compress::{self, Algorithm};
+use rafs::metadata::RafsInodeExt;
 use storage::{backend::BlobReader, device::BlobChunkInfo, utils::alloc_buf};
 use tar::{EntryType, Header};
 
@@ -36,11 +36,11 @@ impl OCISocketBuilder {
 }
 
 impl SectionBuilder for OCISocketBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         InodeWrapper::from_inode_info(node).is_sock()
     }
 
-    fn build(&self, _: &dyn RafsInode, _: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, _: &dyn RafsInodeExt, _: &Path) -> Result<Vec<TarSection>> {
         Ok(Vec::new())
     }
 }
@@ -60,7 +60,7 @@ impl OCILinkBuilder {
 }
 
 impl SectionBuilder for OCILinkBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, path: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, path: &Path) -> bool {
         if !node.is_hardlink() || node.is_dir() {
             return false;
         }
@@ -73,7 +73,7 @@ impl SectionBuilder for OCILinkBuilder {
         is_appeared
     }
 
-    fn build(&self, node: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, node: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         let link = self.links.get(&node.ino()).unwrap();
 
         self.pax_link_builder
@@ -95,7 +95,7 @@ impl OCIDirBuilder {
     }
 }
 
-fn set_header_by_inode(inode: &dyn RafsInode, header: &mut Header) -> Result<()> {
+fn set_header_by_inode(inode: &dyn RafsInodeExt, header: &mut Header) -> Result<()> {
     let inode = InodeWrapper::from_inode_info(inode);
     header.set_size(inode.size());
     header.set_mtime(inode.mtime());
@@ -123,11 +123,11 @@ fn set_header_by_inode(inode: &dyn RafsInode, header: &mut Header) -> Result<()>
 }
 
 impl SectionBuilder for OCIDirBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         node.is_dir()
     }
 
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         if self.is_root(path) {
             return Ok(Vec::new());
         }
@@ -184,7 +184,7 @@ impl OCIRegBuilder {
         }
     }
 
-    fn build_data(&self, inode: &dyn RafsInode) -> Box<dyn Read> {
+    fn build_data(&self, inode: &dyn RafsInodeExt) -> Box<dyn Read> {
         if self.reader.is_none() {
             return Box::new(io::empty());
         }
@@ -204,11 +204,11 @@ impl OCIRegBuilder {
 }
 
 impl SectionBuilder for OCIRegBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         node.is_reg()
     }
 
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         let mut header = Header::new_ustar();
         header.set_entry_type(EntryType::file());
         header.set_device_major(0).unwrap();
@@ -251,11 +251,11 @@ impl OCISymlinkBuilder {
 }
 
 impl SectionBuilder for OCISymlinkBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         node.is_symlink()
     }
 
-    fn build(&self, node: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, node: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         let link = node.get_symlink().unwrap();
 
         self.pax_link_builder
@@ -276,11 +276,11 @@ impl OCIFifoBuilder {
 }
 
 impl SectionBuilder for OCIFifoBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         InodeWrapper::from_inode_info(node).is_fifo()
     }
 
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         self.pax_special_builder
             .build(EntryType::fifo(), inode, path)
     }
@@ -299,11 +299,11 @@ impl OCICharBuilder {
 }
 
 impl SectionBuilder for OCICharBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         InodeWrapper::from_inode_info(node).is_chrdev()
     }
 
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         self.pax_special_builder
             .build(EntryType::character_special(), inode, path)
     }
@@ -322,11 +322,11 @@ impl OCIBlockBuilder {
 }
 
 impl SectionBuilder for OCIBlockBuilder {
-    fn can_handle(&mut self, node: &dyn RafsInode, _: &Path) -> bool {
+    fn can_handle(&mut self, node: &dyn RafsInodeExt, _: &Path) -> bool {
         InodeWrapper::from_inode_info(node).is_blkdev()
     }
 
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>> {
+    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>> {
         self.pax_special_builder
             .build(EntryType::block_special(), inode, path)
     }
@@ -344,7 +344,7 @@ impl PAXSpecialSectionBuilder {
     fn build(
         &self,
         entry_type: EntryType,
-        inode: &dyn RafsInode,
+        inode: &dyn RafsInodeExt,
         path: &Path,
     ) -> Result<Vec<TarSection>> {
         let mut header = Header::new_ustar();
@@ -493,7 +493,7 @@ impl PAXLinkBuilder {
     fn build(
         &self,
         entry_type: EntryType,
-        inode: &dyn RafsInode,
+        inode: &dyn RafsInodeExt,
         path: &Path,
         link: &Path,
     ) -> Result<Vec<TarSection>> {
@@ -535,7 +535,7 @@ impl PAXLinkBuilder {
 struct PAXUtil {}
 
 impl PAXUtil {
-    fn get_xattr_as_extensions(inode: &dyn RafsInode) -> Option<Vec<PAXRecord>> {
+    fn get_xattr_as_extensions(inode: &dyn RafsInodeExt) -> Option<Vec<PAXRecord>> {
         if !inode.has_xattr() {
             return None;
         }

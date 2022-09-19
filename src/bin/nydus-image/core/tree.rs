@@ -17,11 +17,12 @@
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
+use std::ops::Deref;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
-use rafs::metadata::{Inode, RafsInode, RafsSuper};
+use rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
 
 use super::chunk_dict::ChunkDict;
 use super::node::{
@@ -49,9 +50,9 @@ impl Tree {
     /// Load a `Tree` from a bootstrap file, and optionally caches chunk information.
     pub fn from_bootstrap<T: ChunkDict>(rs: &RafsSuper, chunk_dict: &mut T) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(rs);
-        let root_inode = rs.get_inode(rs.superblock.root_ino(), true)?;
+        let root_inode = rs.get_extended_inode(rs.superblock.root_ino(), true)?;
         let root_node =
-            MetadataTreeBuilder::parse_node(rs, root_inode.as_ref(), PathBuf::from("/"))?;
+            MetadataTreeBuilder::parse_node(rs, root_inode.deref(), PathBuf::from("/"))?;
         let mut tree = Tree::new(root_node);
 
         tree.children = timing_tracer!(
@@ -257,7 +258,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         chunk_dict: &mut T,
         validate_digest: bool,
     ) -> Result<Vec<Tree>> {
-        let inode = self.rs.get_inode(ino, validate_digest)?;
+        let inode = self.rs.get_extended_inode(ino, validate_digest)?;
         if !inode.is_dir() {
             return Ok(Vec::new());
         }
@@ -277,7 +278,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
             let child_path = parent_path.join(child.name());
-            let child = Self::parse_node(self.rs, child.as_ref(), child_path)?;
+            let child = Self::parse_node(self.rs, child.deref(), child_path)?;
 
             if child.is_reg() {
                 for chunk in &child.chunks {
@@ -297,7 +298,7 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 
     /// Convert a `RafsInode` object to an in-memory `Node` object.
-    pub fn parse_node(rs: &RafsSuper, inode: &dyn RafsInode, path: PathBuf) -> Result<Node> {
+    pub fn parse_node(rs: &RafsSuper, inode: &dyn RafsInodeExt, path: PathBuf) -> Result<Node> {
         let chunks = if inode.is_reg() {
             let chunk_count = inode.get_chunk_count();
             let mut chunks = Vec::with_capacity(chunk_count as usize);

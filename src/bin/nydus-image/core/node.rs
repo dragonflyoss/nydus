@@ -36,7 +36,7 @@ use nydus_rafs::metadata::layout::v6::{
     EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
 };
 use nydus_rafs::metadata::layout::RafsXAttrs;
-use nydus_rafs::metadata::{Inode, RafsInode, RafsStore};
+use nydus_rafs::metadata::{Inode, RafsInodeExt, RafsStore};
 use nydus_rafs::RafsIoWrite;
 use nydus_storage::device::v5::BlobV5ChunkInfo;
 use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo};
@@ -1383,7 +1383,7 @@ impl InodeWrapper {
         }
     }
 
-    pub fn from_inode_info(inode: &dyn RafsInode) -> Self {
+    pub fn from_inode_info(inode: &dyn RafsInodeExt) -> Self {
         if let Some(inode) = inode.as_any().downcast_ref::<CachedInodeV5>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
         } else if let Some(inode) = inode.as_any().downcast_ref::<OndiskInodeWrapperV5>() {
@@ -1940,7 +1940,7 @@ impl Display for ChunkWrapper {
 }
 
 /// Construct a `RafsV5Inode` object from a `Arc<dyn RafsInode>` object.
-fn to_rafsv5_inode(inode: &dyn RafsInode) -> RafsV5Inode {
+fn to_rafsv5_inode(inode: &dyn RafsInodeExt) -> RafsV5Inode {
     let attr = inode.get_attr();
 
     RafsV5Inode {

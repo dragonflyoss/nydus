@@ -39,6 +39,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::{Read, Result};
 use std::mem::size_of;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
@@ -58,7 +59,9 @@ use crate::metadata::md_v5::V5IoChunk;
 use crate::metadata::{
     Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
-use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
+use crate::{
+    impl_bootstrap_converter, impl_pub_getter_setter, RafsInodeExt, RafsIoReader, RafsIoWrite,
+};
 
 pub(crate) const RAFSV5_ALIGNMENT: usize = 8;
 pub(crate) const RAFSV5_SUPERBLOCK_SIZE: usize = 8192;
@@ -1373,8 +1376,8 @@ pub(crate) fn rafsv5_align(size: usize) -> usize {
 ///
 /// The default implementation is for rafs v5. The chunk data is not validated here, which will
 /// be validate on fs read.
-pub(crate) fn rafsv5_validate_digest(
-    inode: Arc<dyn RafsInode>,
+pub(crate) fn rafsv5_validate_inode(
+    inode: &dyn RafsInodeExt,
     recursive: bool,
     digester: digest::Algorithm,
 ) -> Result<bool> {
@@ -1395,7 +1398,7 @@ pub(crate) fn rafsv5_validate_digest(
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
             if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
-                && !rafsv5_validate_digest(child.clone(), recursive, digester)?
+                && !rafsv5_validate_inode(child.deref(), recursive, digester)?
             {
                 return Ok(false);
             }

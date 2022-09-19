@@ -2,15 +2,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use nix::sys::stat::{dev_t, mknod, Mode, SFlag};
-use nydus_utils::compact::makedev;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
-use tar::Header;
 
+use nix::sys::stat::{dev_t, mknod, Mode, SFlag};
+use nydus_utils::compact::makedev;
 use nydus_utils::exec;
+use tar::Header;
 
 pub struct Builder<'a> {
     builder: String,

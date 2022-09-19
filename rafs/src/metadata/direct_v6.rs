@@ -34,6 +34,12 @@ use std::slice;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
+use nydus_utils::{digest::RafsDigest, div_round_up, round_up};
+use storage::device::{
+    v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc,
+    BlobIoVec,
+};
+use storage::utils::readahead;
 
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
@@ -54,16 +60,7 @@ use crate::metadata::{
         RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
     },
 };
-use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
-use nydus_utils::{
-    digest::{Algorithm, RafsDigest},
-    div_round_up, round_up,
-};
-use storage::device::{
-    v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc,
-    BlobIoVec,
-};
-use storage::utils::readahead;
+use crate::{MetaType, RafsError, RafsInodeExt, RafsIoReader, RafsResult};
 
 // Use to store chunk info pre inode, Our build is actually single-threaded,
 // so there's no lazy_static + mutex approach here, thread_local plus Refcell is enough.
@@ -340,17 +337,26 @@ impl RafsSuperInodes for DirectSuperBlockV6 {
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
     fn get_inode(&self, ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
-        Ok(Arc::new(self.inode_wrapper(ino)?) as Arc<dyn RafsInode>)
+        Ok(Arc::new(self.inode_wrapper(ino)?))
     }
 
-    /// Always return Ok(true) for RAFS v6
-    fn validate_digest(
+    fn get_extended_inode(
         &self,
-        _inode: Arc<dyn RafsInode>,
-        _recursive: bool,
-        _digester: Algorithm,
-    ) -> Result<bool> {
-        Ok(true)
+        ino: Inode,
+        _validate_digest: bool,
+    ) -> Result<Arc<dyn RafsInodeExt>> {
+        let state = self.state.load();
+        if ino == state.meta.root_nid as u64 {
+            let inode = self.inode_wrapper_with_info(ino, ino, OsString::from("/"))?;
+            return Ok(Arc::new(inode));
+        }
+        let inode = self.inode_wrapper(ino)?;
+        if inode.is_dir() {
+            inode.parent();
+            inode.name();
+            return Ok(Arc::new(inode));
+        }
+        Err(enoent!(format!("can't get extended inode for {}", ino)))
     }
 }
 
@@ -724,10 +730,6 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(())
     }
 
-    fn get_digest(&self) -> RafsDigest {
-        RafsDigest::default()
-    }
-
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         let chunk_size = self.chunk_size();
         let head_chunk_index = offset / chunk_size as u64;
@@ -814,7 +816,10 @@ impl RafsInode for OndiskInodeWrapper {
                                            offset| {
             if let Some(child_inode) = inode {
                 if child_inode.is_dir() {
-                    child_dirs.push(child_inode);
+                    // EROFS packs dot and dotdot, so skip them two.
+                    if name != "." && name != ".." {
+                        child_dirs.push(child_inode);
+                    }
                 } else if !child_inode.is_empty_size() && child_inode.is_reg() {
                     descendants.push(child_inode);
                 }
@@ -826,19 +831,10 @@ impl RafsInode for OndiskInodeWrapper {
         .unwrap();
 
         for d in child_dirs {
-            // EROFS packs dot and dotdot, so skip them two.
-            if d.name() == "." || d.name() == ".." {
-                continue;
-            }
             d.collect_descendants_inodes(descendants)?;
         }
 
         Ok(0)
-    }
-
-    // RafsV5 flags, not used by v6, return 0
-    fn flags(&self) -> u64 {
-        0
     }
 
     fn get_entry(&self) -> Entry {
@@ -881,19 +877,6 @@ impl RafsInode for OndiskInodeWrapper {
         (self.offset as u64 - meta_blkaddr * EROFS_BLOCK_SIZE) / EROFS_INODE_SLOT_SIZE as u64
     }
 
-    /// Get inode number of the parent directory.
-    fn parent(&self) -> u64 {
-        match self.parent_inode.get() {
-            Some(parent) => parent,
-            None => {
-                debug_assert!(self.is_dir());
-                let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
-                self.parent_inode.set(Some(ino));
-                ino
-            }
-        }
-    }
-
     /// Get real device number of the inode.
     fn rdev(&self) -> u32 {
         self.disk_inode().union()
@@ -902,43 +885,6 @@ impl RafsInode for OndiskInodeWrapper {
     /// Get project id associated with the inode.
     fn projid(&self) -> u32 {
         0
-    }
-
-    /// Get name of the inode.
-    ///
-    /// # Safety
-    /// It depends on Self::validate() to ensure valid memory layout.
-    fn name(&self) -> OsString {
-        let mut curr_name = OsString::from("");
-        match self.name.borrow().as_ref() {
-            Some(name) => return name.clone(),
-            None => {
-                debug_assert!(self.is_dir());
-                let cur_ino = self.ino();
-                if cur_ino == self.mapping.root_ino() {
-                    return OsString::from("");
-                }
-                let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
-                parent_inode
-                    .walk_children_inodes(
-                        0,
-                        &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
-                            if cur_ino == ino {
-                                curr_name = name;
-                                return Ok(RafsInodeWalkAction::Break);
-                            }
-                            Ok(RafsInodeWalkAction::Continue)
-                        },
-                    )
-                    .unwrap();
-            }
-        }
-        *self.name.borrow_mut() = Some(curr_name.clone());
-        curr_name
-    }
-    /// Get file name size of the inode.
-    fn get_name_size(&self) -> u16 {
-        self.name().len() as u16
     }
 
     fn is_dir(&self) -> bool {
@@ -1134,9 +1080,7 @@ impl RafsInode for OndiskInodeWrapper {
     ///
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
-        let mut target: Option<u64> = None;
-        // find target dirent
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInodeExt>> {
         if let Ok(target_block) = self.find_target_block(name) {
             let head_entry = self
                 .get_entry(target_block, 0)
@@ -1156,23 +1100,19 @@ impl RafsInode for OndiskInodeWrapper {
                     .map_err(err_invalidate_data)?;
                 match d_name.cmp(name) {
                     Ordering::Equal => {
-                        target = Some(de.e_nid);
-                        break;
+                        let inode = self.mapping.inode_wrapper_with_info(
+                            de.e_nid,
+                            self.ino(),
+                            OsString::from(name),
+                        )?;
+                        return Ok(Arc::new(inode));
                     }
                     Ordering::Less => first = pivot + 1,
                     Ordering::Greater => last = pivot - 1,
                 }
             }
         }
-        if let Some(nid) = target {
-            Ok(Arc::new(self.mapping.inode_wrapper_with_info(
-                nid,
-                self.ino(),
-                OsString::from(name),
-            )?) as Arc<dyn RafsInode>)
-        } else {
-            Err(enoent!())
-        }
+        Err(enoent!())
     }
 
     /// Get the child with the specified index.
@@ -1181,7 +1121,7 @@ impl RafsInode for OndiskInodeWrapper {
     /// It depends on Self::validate() to ensure valid memory layout.
     /// `idx` is the number of child files in line. So we can keep the term `idx`
     /// in super crate and keep it consistent with layout v5.
-    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInodeExt>> {
         let inode = self.disk_inode();
         let child_count = self.get_child_count();
 
@@ -1210,12 +1150,12 @@ impl RafsInode for OndiskInodeWrapper {
                     continue;
                 }
                 if cur_idx == idx {
-                    let nid = de.e_nid;
-                    return Ok(Arc::new(self.mapping.inode_wrapper_with_info(
-                        nid,
+                    let inode = self.mapping.inode_wrapper_with_info(
+                        de.e_nid,
                         self.ino(),
                         OsString::from(name),
-                    )?) as Arc<dyn RafsInode>);
+                    )?;
+                    return Ok(Arc::new(inode));
                 }
                 cur_idx += 1;
             }
@@ -1264,6 +1204,76 @@ impl RafsInode for OndiskInodeWrapper {
         self.get_child_count()
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl RafsInodeExt for OndiskInodeWrapper {
+    fn as_inode(&self) -> &dyn RafsInode {
+        self
+    }
+
+    /// Get inode number of the parent directory.
+    fn parent(&self) -> u64 {
+        match self.parent_inode.get() {
+            Some(parent) => parent,
+            None => {
+                assert!(self.is_dir());
+                let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
+                self.parent_inode.set(Some(ino));
+                ino
+            }
+        }
+    }
+
+    /// Get name of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn name(&self) -> OsString {
+        let mut curr_name = OsString::from("");
+        match self.name.borrow().as_ref() {
+            Some(name) => return name.clone(),
+            None => {
+                assert!(self.is_dir());
+                let cur_ino = self.ino();
+                if cur_ino == self.mapping.root_ino() {
+                    return OsString::from("");
+                }
+                let parent_inode = self.mapping.inode_wrapper(self.parent()).unwrap();
+                parent_inode
+                    .walk_children_inodes(
+                        0,
+                        &mut |_inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, _offset| {
+                            if cur_ino == ino {
+                                curr_name = name;
+                                return Ok(RafsInodeWalkAction::Break);
+                            }
+                            Ok(RafsInodeWalkAction::Continue)
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        *self.name.borrow_mut() = Some(curr_name.clone());
+        curr_name
+    }
+
+    /// Get file name size of the inode.
+    fn get_name_size(&self) -> u16 {
+        self.name().len() as u16
+    }
+
+    // RafsV5 flags, not used by v6, return 0
+    fn flags(&self) -> u64 {
+        0
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        RafsDigest::default()
+    }
+
     /// Get chunk information with index `idx`
     ///
     /// # Safety
@@ -1271,7 +1281,6 @@ impl RafsInode for OndiskInodeWrapper {
     #[allow(clippy::cast_ptr_alignment)]
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
         let state = self.mapping.state.load();
-        let inode = self.disk_inode();
         if !self.is_reg() || idx >= self.get_chunk_count() {
             return Err(enoent!("invalid chunk info"));
         }
@@ -1301,10 +1310,6 @@ impl RafsInode for OndiskInodeWrapper {
         });
 
         find.ok_or_else(|| enoent!(format!("can't find chunk info {}", chunk_addr.block_addr())))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
