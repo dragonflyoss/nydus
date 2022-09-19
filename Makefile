@@ -3,7 +3,6 @@ all: build
 TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
-RUST_TARGET_MUSL = $(shell uname -m)-unknown-linux-musl
 RUST_TARGET ?= $(shell uname -m)-unknown-linux-musl
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
@@ -57,7 +56,7 @@ endef
 	${CARGO} fmt -- --check
 
 .musl_target:
-	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET_MUSL})
+	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET})
 
 # Targets that are exposed to developers and users.
 build: .format fusedev virtiofs
