@@ -102,7 +102,7 @@ impl DaemonController {
         self.waker.clone()
     }
 
-    /// Enable/disable singleton mode, which will shutdown the process when any working thread exits.
+    /// Enable/disable singleton mode.
     pub fn set_singleton_mode(&self, enabled: bool) {
         self.singleton_mode.store(enabled, Ordering::Release);
     }
@@ -183,7 +183,7 @@ impl DaemonController {
                 if event.is_readable() && event.token() == Token(1) {
                     if self.active.load(Ordering::Acquire) {
                         return;
-                    } else if self.singleton_mode.load(Ordering::Acquire) {
+                    } else if !self.singleton_mode.load(Ordering::Acquire) {
                         self.active.store(false, Ordering::Relaxed);
                         return;
                     }
@@ -714,6 +714,7 @@ fn process_daemon_arguments(
         error!("Failed to start daemon: {}", e);
         e
     })?;
+    DAEMON_CONTROLLER.set_singleton_mode(true);
     DAEMON_CONTROLLER.set_daemon(daemon);
     Ok(())
 }
@@ -738,9 +739,9 @@ fn main() -> Result<()> {
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
     match args.subcommand_name() {
-        Some("daemon") => {
-            // Safe to unwrap because the subcommand is `daemon`.
-            let subargs = args.subcommand_matches("daemon").unwrap();
+        Some("singleton") => {
+            // Safe to unwrap because the subcommand is `singleton`.
+            let subargs = args.subcommand_matches("singleton").unwrap();
             let subargs = SubCmdArgs::new(&args, subargs);
             process_daemon_arguments(&subargs, apisock, bti)?;
         }
