@@ -14,7 +14,10 @@ use nydus_utils::exec;
 use vmm_sys_util::tempdir::TempDir;
 
 mod builder;
+mod inspect;
 mod nydusd;
+
+use crate::inspect::test_image_inspect_cmd;
 
 const COMPAT_BOOTSTRAPS: [&str; 2] = [
     "blake3-lz4_block-non_repeatable",
@@ -395,4 +398,12 @@ fn test_unpack(work_dir: &Path, version: &str) {
     texture.read_to_string(&mut expected).unwrap();
 
     assert_eq!(ret.trim(), expected.trim());
+}
+
+#[test]
+fn test_image_inspect() {
+    let bootstrap_path = "./tests/texture/bootstrap/image_v2.boot";
+    test_image_inspect_cmd("stats", bootstrap_path);
+    test_image_inspect_cmd("prefetch", bootstrap_path);
+    test_image_inspect_cmd("blobs", bootstrap_path);
 }

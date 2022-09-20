@@ -27,6 +27,8 @@ use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use storage::device::{BlobChunkInfo, BlobInfo, BlobIoMerge, BlobIoVec};
 
+use self::layout::v5::RafsV5PrefetchTable;
+use self::layout::v6::RafsV6PrefetchTable;
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use self::noop::NoopSuperBlock;
 use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
@@ -740,6 +742,27 @@ impl RafsSuper {
         }
 
         Ok(())
+    }
+
+    /// Get prefetched inos
+    pub fn get_prefetched_inos(&self, bootstrap: &mut RafsIoReader) -> Result<Vec<u32>> {
+        if self.meta.is_v5() {
+            let mut pt = RafsV5PrefetchTable::new();
+            pt.load_prefetch_table_from(
+                bootstrap,
+                self.meta.prefetch_table_offset,
+                self.meta.prefetch_table_entries as usize,
+            )?;
+            Ok(pt.inodes)
+        } else {
+            let mut pt = RafsV6PrefetchTable::new();
+            pt.load_prefetch_table_from(
+                bootstrap,
+                self.meta.prefetch_table_offset,
+                self.meta.prefetch_table_entries as usize,
+            )?;
+            Ok(pt.inodes)
+        }
     }
 
     /// Walkthrough the file tree rooted at ino, calling cb for each file or directory
