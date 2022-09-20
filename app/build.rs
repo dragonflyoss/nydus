@@ -28,7 +28,17 @@ fn get_git_commit_hash() -> String {
             return commit.to_string();
         }
     }
-    "Unknown".to_string()
+    "unknown".to_string()
+}
+
+fn get_git_commit_version() -> String {
+    let tag = Command::new("git").args(&["describe", "--tags"]).output();
+    if let Ok(tag) = tag {
+        if let Some(tag) = String::from_utf8_lossy(&tag.stdout).lines().next() {
+            return tag.to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 fn main() {
@@ -43,10 +53,12 @@ fn main() {
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap();
     let git_commit_hash = get_git_commit_hash();
+    let git_commit_version = get_git_commit_version();
 
     println!("cargo:rerun-if-changed=../git/HEAD");
     println!("cargo:rustc-env=RUSTC_VERSION={}", rustc_ver);
     println!("cargo:rustc-env=PROFILE={}", profile);
     println!("cargo:rustc-env=BUILT_TIME_UTC={}", build_time);
     println!("cargo:rustc-env=GIT_COMMIT_HASH={}", git_commit_hash);
+    println!("cargo:rustc-env=GIT_COMMIT_VERSION={}", git_commit_version);
 }

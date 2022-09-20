@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 #![deny(warnings)]
 #![allow(dead_code)]
-#[macro_use(crate_version)]
 extern crate clap;
 #[macro_use]
 extern crate log;
@@ -707,7 +706,7 @@ fn process_singleton_arguments(
 }
 
 fn main() -> Result<()> {
-    let (bti_string, bti) = BuildTimeInfo::dump(crate_version!());
+    let (bti_string, bti) = BuildTimeInfo::dump();
     let cmd_options = prepare_commandline_options().version(bti_string.as_str());
     let args = cmd_options.clone().get_matches();
     let logging_file = args.value_of("log-file").map(|l| l.into());
@@ -722,7 +721,7 @@ fn main() -> Result<()> {
 
     setup_logging(logging_file, level, rotation_size)?;
 
-    dump_program_info(crate_version!());
+    dump_program_info();
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
     match args.subcommand_name() {
