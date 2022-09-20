@@ -12,6 +12,7 @@ jobs:
     strategy:
       matrix:
         arch: [amd64]
+        fs_version: [5, 6]
     steps:
       - name: Set up Go
         uses: actions/setup-go@v3
@@ -66,6 +67,7 @@ jobs:
         env:
           OSS_AK_ID: ${{ secrets.OSS_TEST_AK_ID }}
           OSS_AK_SEC: ${{ secrets.OSS_TEST_AK_SECRET }}
+          FS_VERSION: ${{ matrix.fs_version }}
         run: |
           sudo mkdir -p /home/runner/nydus-test-workspace
           sudo mkdir -p /home/runner/nydus-test-workspace/proxy_blobs
@@ -99,6 +101,7 @@ jobs:
                   "containerd": "/usr/bin/containerd",
                   "ossutil_bin": "/usr/bin/ossutil64"
               },
+              "fs_version": "$FS_VERSION",
               "logging_file": "stderr",
               "target": "musl"
           }
