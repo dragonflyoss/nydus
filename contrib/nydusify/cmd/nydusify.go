@@ -47,6 +47,7 @@ func isPossibleValue(excepted []string, value string) bool {
 	return false
 }
 
+// This only works for OSS backend rightnow
 func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, error) {
 	if backendConfigJSON != "" && backendConfigFile != "" {
 		return "", fmt.Errorf("--backend-config conflicts with --backend-config-file")
@@ -61,6 +62,31 @@ func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, er
 	}
 
 	return backendConfigJSON, nil
+}
+
+func getBackendConfig(c *cli.Context, required bool) (string, string, error) {
+	backendType := c.String("backend-type")
+	if backendType == "" {
+		if required {
+			return "", "", errors.Errorf("backend type is empty, please specify option '--backend-type'")
+		}
+		return "", "", nil
+	}
+	possibleBackendTypes := []string{"registry", "oss"}
+	if !isPossibleValue(possibleBackendTypes, backendType) {
+		return "", "", fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
+	}
+
+	backendConfig, err := parseBackendConfig(
+		c.String("backend-config"), c.String("backend-config-file"),
+	)
+	if err != nil {
+		return "", "", err
+	} else if backendType == "oss" && strings.TrimSpace(backendConfig) == "" {
+		return "", "", errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
+	}
+
+	return backendType, backendConfig, nil
 }
 
 // Add suffix to source image reference as the target
@@ -153,12 +179,19 @@ func main() {
 
 	app := &cli.App{
 		Name:    "Nydusify",
-		Usage:   "Nydus image converter tool",
+		Usage:   "Nydus utility tool to build, convert, verify and view container images",
 		Version: version,
 	}
 
 	// global options
 	app.Flags = []cli.Flag{
+		&cli.BoolFlag{
+			Name:     "debug",
+			Aliases:  []string{"D"},
+			Required: false,
+			Value:    false,
+			Usage:    "Enable debug log level, overwrites the 'log-level' option",
+			EnvVars:  []string{"DEBUG_LOG_LEVEL"}},
 		&cli.StringFlag{
 			Name:    "log-level",
 			Aliases: []string{"l"},
@@ -166,52 +199,180 @@ func main() {
 			Usage:   "Set log level (panic, fatal, error, warn, info, debug, trace)",
 			EnvVars: []string{"LOG_LEVEL"},
 		},
-		&cli.BoolFlag{
-			Name:     "debug",
-			Aliases:  []string{"D"},
-			Required: false,
-			Value:    false,
-			Usage:    "Enable debug log level(will overwrite `log-level` option)",
-			EnvVars:  []string{"DEBUG_LOG_LEVEL"}},
 	}
-
-	logrus.Infof("Version: %s\n", version)
 
 	app.Commands = []*cli.Command{
 		{
 			Name:  "convert",
-			Usage: "Convert source image to nydus image",
+			Usage: "Generate a Nydus image from an OCI image",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "source", Required: true, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
-				&cli.StringFlag{Name: "target", Required: false, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
-				&cli.StringFlag{Name: "target-suffix", Required: false, Usage: "Add suffix to source image reference as target image reference, conflict with --target", EnvVars: []string{"TARGET_SUFFIX"}},
-				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS source registry", EnvVars: []string{"SOURCE_INSECURE"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS target registry", EnvVars: []string{"TARGET_INSECURE"}},
-				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image conversion", EnvVars: []string{"WORK_DIR"}},
-				&cli.StringFlag{Name: "prefetch-dir", Value: "", Usage: "Prefetched directory for nydus image, use absolute path of rootfs", EnvVars: []string{"PREFETCH_DIR"}},
-				&cli.BoolFlag{Name: "prefetch-patterns", Value: false, Usage: "Prefetched file path patterns from STDIN, specify absolute/relative path of rootfs line by line", EnvVars: []string{"PREFETCH_PATTERNS"}},
-				&cli.StringFlag{Name: "nydus-image", Value: "nydus-image", Usage: "The nydus-image binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUS_IMAGE"}},
-				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Merge OCI & Nydus manifest to manifest index for target image, please ensure that OCI manifest already exists in target image", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `linux/amd64` or `linux/arm64`"},
-				&cli.BoolFlag{Name: "docker-v2-format", Value: false, Usage: "Use docker image manifest v2, schema 2 format", EnvVars: []string{"DOCKER_V2_FORMAT"}},
-				&cli.StringFlag{Name: "backend-type", Value: "registry", Usage: "Specify Nydus blob storage backend type", EnvVars: []string{"BACKEND_TYPE"}},
-				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
-				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
-				&cli.BoolFlag{Name: "backend-force-push", Value: false, Usage: "Force to push Nydus blob to storage backend, even if the blob already exists in storage backend", EnvVars: []string{"BACKEND_FORCE_PUSH"}},
-				&cli.BoolFlag{Name: "backend-aligned-chunk", Value: false, Usage: "Produce 4096 aligned decompressed_offset in Nydus bootstrap", EnvVars: []string{"BACKEND_ALIGNED_CHUNK"}},
-				&cli.StringFlag{Name: "build-cache", Value: "", Usage: "An remote image reference for accelerating nydus image build", EnvVars: []string{"BUILD_CACHE"}},
-				&cli.StringFlag{Name: "build-cache-tag", Value: "", Usage: "Use $target:$build-cache-tag as cache image reference, conflict with --build-cache", EnvVars: []string{"BUILD_CACHE_TAG"}},
-				&cli.StringFlag{Name: "build-cache-version", Value: "v1", Usage: "Specify the version of cache image, if the existed remote cache image does not match the version, cache records will be dropped", EnvVars: []string{"BUILD_CACHE_VERSION"}},
-				&cli.BoolFlag{Name: "build-cache-insecure", Required: false, Usage: "Allow http/insecure registry communication of cache image", EnvVars: []string{"BUILD_CACHE_INSECURE"}},
-				&cli.StringFlag{Name: "chunk-dict", Required: false, Usage: "Specify a chunk dict expression for image chunk deduplication, " +
-					"for examples: bootstrap:registry:localhost:5000/namespace/app:chunk_dict, bootstrap:local:/path/to/chunk_dict.boot", EnvVars: []string{"CHUNK_DICT"}},
-				&cli.BoolFlag{Name: "chunk-dict-insecure", Required: false, Value: false, Usage: "Allow http/insecure registry communication of chunk dict", EnvVars: []string{"CHUNK_DICT_INSECURE"}},
+				&cli.StringFlag{
+					Name:     "source",
+					Required: true,
+					Usage:    "Source OCI image reference",
+					EnvVars:  []string{"SOURCE"},
+				},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: false,
+					Usage:    "Target (Nydus) image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.StringFlag{
+					Name:     "target-suffix",
+					Required: false,
+					Usage:    "Generate the target image reference by adding a suffix to the source image reference, conflicts with --target",
+					EnvVars:  []string{"TARGET_SUFFIX"},
+				},
+				&cli.BoolFlag{
+					Name:     "source-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS source registry",
+					EnvVars:  []string{"SOURCE_INSECURE"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS target registry",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "backend-type",
+					Value:   "registry",
+					Usage:   "Type of storage backend, possible values: 'registry', 'oss'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+				&cli.BoolFlag{
+					Name:  "backend-force-push",
+					Value: false, Usage: "Force to push Nydus blobs even if they already exist in storage backend",
+					EnvVars: []string{"BACKEND_FORCE_PUSH"},
+				},
+
+				&cli.StringFlag{
+					Name:    "build-cache",
+					Value:   "",
+					Usage:   "Specify a cache image to accelerate nydus image conversion",
+					EnvVars: []string{"BUILD_CACHE"},
+				},
+				&cli.StringFlag{
+					Name:    "build-cache-tag",
+					Value:   "",
+					Usage:   "Use $target:$build-cache-tag as cache image, conflict with --build-cache",
+					EnvVars: []string{"BUILD_CACHE_TAG"},
+				},
+				&cli.StringFlag{
+					Name:    "build-cache-version",
+					Value:   "v1",
+					Usage:   "Version number to filter cache images",
+					EnvVars: []string{"BUILD_CACHE_VERSION"},
+				},
+				&cli.BoolFlag{
+					Name:     "build-cache-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS cache registry",
+					EnvVars:  []string{"BUILD_CACHE_INSECURE"},
+				},
 				// The --build-cache-max-records flag represents the maximum number
 				// of layers in cache image. 50 (bootstrap + blob in one record) was
 				// chosen to make it compatible with the 127 max in graph driver of
 				// docker so that we can pull cache image using docker.
-				&cli.UintFlag{Name: "build-cache-max-records", Value: maxCacheMaxRecords, Usage: "Maximum cache records in cache image", EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"}},
-				&cli.StringFlag{Name: "fs-version", Required: false, Usage: "Version number of nydus image format, possible values: 5, 6", EnvVars: []string{"FS_VERSION"}, Value: "5", DefaultText: "V5 format"},
+				&cli.UintFlag{
+					Name:    "build-cache-max-records",
+					Value:   maxCacheMaxRecords,
+					Usage:   "Maximum cache records in a cache image",
+					EnvVars: []string{"BUILD_CACHE_MAX_RECORDS"},
+				},
+				&cli.StringFlag{
+					Name:     "chunk-dict",
+					Required: false,
+					Usage: "Specify a chunk dict expression for chunk deduplication, " +
+						"for examples: bootstrap:registry:localhost:5000/namespace/app:chunk_dict, bootstrap:local:/path/to/chunk_dict.boot",
+					EnvVars: []string{"CHUNK_DICT"},
+				},
+				&cli.BoolFlag{
+					Name:     "chunk-dict-insecure",
+					Required: false,
+					Value:    false,
+					Usage:    "Skip verifying server certs for HTTPS dict registry",
+					EnvVars:  []string{"CHUNK_DICT_INSECURE"},
+				},
+
+				&cli.BoolFlag{
+					Name:    "multi-platform",
+					Value:   false,
+					Usage:   "Generate an OCI image index with both OCI and Nydus manifests for the image, please ensure that the OCI image exists in the target repository",
+					EnvVars: []string{"MULTI_PLATFORM"},
+				},
+				&cli.StringFlag{
+					Name:  "platform",
+					Value: "linux/" + runtime.GOARCH,
+					Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+				},
+				&cli.BoolFlag{
+					Name:    "docker-v2-format",
+					Value:   false,
+					Usage:   "Enable support of docker image manifest v2, schema 2 format",
+					EnvVars: []string{"DOCKER_V2_FORMAT"},
+				},
+				&cli.StringFlag{
+					Name:        "fs-version",
+					Required:    false,
+					Value:       "5",
+					DefaultText: "V5 format",
+					Usage:       "Nydus image format version number, possible values: 5, 6",
+					EnvVars:     []string{"FS_VERSION"},
+				},
+				&cli.BoolFlag{
+					Name:    "fs-align-chunk",
+					Value:   false,
+					Usage:   "Enable chunk data alignment(4K) for Nydus image",
+					EnvVars: []string{"FS_ALIGN_CHUNK"},
+				},
+				&cli.BoolFlag{
+					Name:    "backend-aligned-chunk",
+					Value:   false,
+					Usage:   "[Deprecated] Enable chunk data alignment(4K) for Nydus image",
+					EnvVars: []string{"BACKEND_ALIGNED_CHUNK"},
+				},
+				&cli.StringFlag{
+					Name:    "prefetch-dir",
+					Value:   "",
+					Usage:   "Specify an ansolute path within the image for prefetch",
+					EnvVars: []string{"PREFETCH_DIR"},
+				},
+				&cli.BoolFlag{
+					Name:    "prefetch-patterns",
+					Value:   false,
+					Usage:   "Read prefetch list from STDIN, please input absolute paths line by line",
+					EnvVars: []string{"PREFETCH_PATTERNS"},
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./tmp",
+					Usage:   "Working directory for image conversion",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -221,25 +382,9 @@ func main() {
 					return err
 				}
 
-				backendType := c.String("backend-type")
-				possibleBackendTypes := []string{"registry", "oss"}
-				if !isPossibleValue(possibleBackendTypes, backendType) {
-					return fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
-				}
-
-				fsVersion := c.String("fs-version")
-				possibleFsVersions := []string{"5", "6"}
-				if !isPossibleValue(possibleFsVersions, fsVersion) {
-					return fmt.Errorf("--fs-version should be one of %v", possibleFsVersions)
-				}
-
-				// This only works for OSS backend rightnow
-				backendConfig, err := parseBackendConfig(c.String("backend-config"), c.String("backend-config-file"))
+				backendType, backendConfig, err := getBackendConfig(c, true)
 				if err != nil {
 					return err
-				}
-				if backendType != "registry" && strings.TrimSpace(backendConfig) == "" {
-					return fmt.Errorf("--backend-config or --backend-config-file required")
 				}
 
 				var cacheRemote *remote.Remote
@@ -253,7 +398,6 @@ func main() {
 						return err
 					}
 				}
-
 				cacheMaxRecords := c.Uint("build-cache-max-records")
 				if cacheMaxRecords < 1 {
 					return fmt.Errorf("--build-cache-max-records should be greater than 0")
@@ -262,6 +406,12 @@ func main() {
 					return fmt.Errorf("--build-cache-max-records should not be greater than %d", maxCacheMaxRecords)
 				}
 				cacheVersion := c.String("build-cache-version")
+
+				fsVersion := c.String("fs-version")
+				possibleFsVersions := []string{"5", "6"}
+				if !isPossibleValue(possibleFsVersions, fsVersion) {
+					return fmt.Errorf("--fs-version should be one of %v", possibleFsVersions)
+				}
 
 				logger, err := provider.DefaultLogger()
 				if err != nil {
@@ -272,8 +422,8 @@ func main() {
 				if err != nil {
 					return errors.Wrap(err, "Parse source reference")
 				}
-				targetPlatform := c.String("platform")
 
+				targetPlatform := c.String("platform")
 				targetRemote, err := provider.DefaultRemote(target, c.Bool("target-insecure"))
 				if err != nil {
 					return err
@@ -305,13 +455,13 @@ func main() {
 					MultiPlatform:    c.Bool("multi-platform"),
 					DockerV2Format:   c.Bool("docker-v2-format"),
 
-					BackendType:         backendType,
-					BackendConfig:       backendConfig,
-					BackendForcePush:    c.Bool("backend-force-push"),
-					BackendAlignedChunk: c.Bool("backend-aligned-chunk"),
+					BackendType:      backendType,
+					BackendConfig:    backendConfig,
+					BackendForcePush: c.Bool("backend-force-push"),
 
 					NydusifyVersion: version,
 					FsVersion:       fsVersion,
+					FsAlignChunk:    c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 
 					ChunkDict: converter.ChunkDictOpt{
 						Args:     c.String("chunk-dict"),
@@ -330,36 +480,90 @@ func main() {
 		},
 		{
 			Name:  "check",
-			Usage: "Check nydus image",
+			Usage: "Verify nydus image format and content",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "source", Required: false, Usage: "Source image reference", EnvVars: []string{"SOURCE"}},
-				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
+				&cli.StringFlag{
+					Name:     "source",
+					Required: false,
+					Usage:    "Source OCI image reference",
+					EnvVars:  []string{"SOURCE"},
+				},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: true,
+					Usage:    "Target (Nydus) image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "source-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS source registry",
+					EnvVars:  []string{"SOURCE_INSECURE"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS target registry",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
 
-				&cli.BoolFlag{Name: "source-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS source registry", EnvVars: []string{"SOURCE_INSECURE"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Skip verifying server certs for HTTPS target registry", EnvVars: []string{"TARGET_INSECURE"}},
+				&cli.StringFlag{
+					Name:    "backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json string for storage backend configuration",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
 
-				&cli.BoolFlag{Name: "multi-platform", Value: false, Usage: "Ensure the target image represents a manifest list, and it should consist of OCI and Nydus manifest", EnvVars: []string{"MULTI_PLATFORM"}},
-				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
-				&cli.StringFlag{Name: "work-dir", Value: "./output", Usage: "Work directory path for image check, will be cleaned before checking", EnvVars: []string{"WORK_DIR"}},
-				&cli.StringFlag{Name: "nydus-image", Value: "nydus-image", Usage: "The nydus-image binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUS_IMAGE"}},
-				&cli.StringFlag{Name: "nydusd", Value: "nydusd", Usage: "The nydusd binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUSD"}},
-				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will check file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
-				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
-				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+				&cli.BoolFlag{
+					Name:    "multi-platform",
+					Value:   false,
+					Usage:   "Verify that the image contains an image index with both OCI and Nydus manifests",
+					EnvVars: []string{"MULTI_PLATFORM"},
+				},
+				&cli.StringFlag{
+					Name:  "platform",
+					Value: "linux/" + runtime.GOARCH,
+					Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./output",
+					Usage:   "Working directory for image verification",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
+				&cli.StringFlag{
+					Name:    "nydusd",
+					Value:   "nydusd",
+					Usage:   "Path to the nydusd binary, default to search in PATH",
+					EnvVars: []string{"NYDUSD"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType := c.String("backend-type")
-				backendConfig := ""
-				if backendType != "" {
-					_backendConfig, err := parseBackendConfig(
-						c.String("backend-config"), c.String("backend-config-file"),
-					)
-					if err != nil {
-						return err
-					}
-					backendConfig = _backendConfig
+				backendType, backendConfig, err := getBackendConfig(c, false)
+				if err != nil {
+					return err
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
@@ -388,34 +592,78 @@ func main() {
 			},
 		},
 		{
-			Name:    "view",
-			Aliases: []string{"mount"},
-			Usage:   "View/Mount the file system in nydus image",
+			Name:    "mount",
+			Aliases: []string{"view"},
+			Usage:   "Mount the nydus image as a filesystem",
 			Flags: []cli.Flag{
-				&cli.StringFlag{Name: "target", Required: true, Usage: "Target (Nydus) image reference", EnvVars: []string{"TARGET"}},
-				&cli.BoolFlag{Name: "target-insecure", Required: false, Usage: "Allow http/insecure target registry communication", EnvVars: []string{"TARGET_INSECURE"}},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: true,
+					Usage:    "Target (Nydus) image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS target registry",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
 
-				&cli.StringFlag{Name: "mount-path", Value: "./image-fs", Usage: "The Path for the file system to mount on", EnvVars: []string{"MOUNT_PATH"}},
-				&cli.StringFlag{Name: "platform", Value: "linux/" + runtime.GOARCH, Usage: "Let nydusify choose image of specified platform from manifest index. Possible value is `amd64` or `arm64`"},
-				&cli.StringFlag{Name: "work-dir", Value: "./tmp", Usage: "Work directory path for image view, will be cleaned up after viewing", EnvVars: []string{"WORK_DIR"}},
-				&cli.StringFlag{Name: "nydusd", Value: "nydusd", Usage: "The nydusd binary path, if unset, search in PATH environment", EnvVars: []string{"NYDUSD"}},
-				&cli.StringFlag{Name: "backend-type", Value: "", Usage: "Specify Nydus blob storage backend type, will view file data in Nydus image if specified", EnvVars: []string{"BACKEND_TYPE"}},
-				&cli.StringFlag{Name: "backend-config", Value: "", Usage: "Specify Nydus blob storage backend in JSON config string", EnvVars: []string{"BACKEND_CONFIG"}},
-				&cli.StringFlag{Name: "backend-config-file", Value: "", TakesFile: true, Usage: "Specify Nydus blob storage backend config from path", EnvVars: []string{"BACKEND_CONFIG_FILE"}},
+				&cli.StringFlag{
+					Name:     "backend-type",
+					Value:    "",
+					Required: true,
+					Usage:    "Type of storage backend, possible values: 'registry', 'oss'",
+					EnvVars:  []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "mount-path",
+					Value:   "./image-fs",
+					Usage:   "Path to mount the image",
+					EnvVars: []string{"MOUNT_PATH"},
+				},
+				&cli.StringFlag{
+					Name:  "platform",
+					Value: "linux/" + runtime.GOARCH,
+					Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./tmp",
+					Usage:   "Working directory for image view, will be cleaned up after viewing",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydusd",
+					Value:   "nydusd",
+					Usage:   "The nydusd binary path, if unset, search in PATH environment",
+					EnvVars: []string{"NYDUSD"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType := c.String("backend-type")
-				backendConfig := ""
-				if backendType != "" {
-					_backendConfig, err := parseBackendConfig(
-						c.String("backend-config"), c.String("backend-config-file"),
-					)
-					if err != nil {
-						return err
-					}
-					backendConfig = _backendConfig
+				backendType, backendConfig, err := getBackendConfig(c, true)
+				if err != nil {
+					return err
+				} else if backendConfig == "" {
+					// TODO get auth from docker configuration file
+					return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
@@ -443,13 +691,13 @@ func main() {
 		{
 			Name:    "build",
 			Aliases: []string{"pack"},
-			Usage:   "Build a Nydus image from a source directory",
+			Usage:   "Build a Nydus filesystem from a source directory",
 			Flags: []cli.Flag{
 				&cli.StringFlag{
 					Name:     "source-dir",
 					Aliases:  []string{"target-dir"}, // for compatibility
 					Required: true,
-					Usage:    "Source directory to build image from",
+					Usage:    "Source directory to build Nydus filesystem from",
 					EnvVars:  []string{"SOURCE_DIR"},
 				},
 				&cli.StringFlag{
@@ -470,7 +718,7 @@ func main() {
 				&cli.BoolFlag{
 					Name:    "backend-push",
 					Value:   false,
-					Usage:   "Push generated Nydus image to storage backend",
+					Usage:   "Push generated Nydus filesystem to storage backend",
 					EnvVars: []string{"BACKEND_PUSH"},
 				},
 				&cli.StringFlag{
@@ -483,10 +731,10 @@ func main() {
 				&cli.StringFlag{
 					Name:    "backend-config",
 					Value:   "",
-					Usage:   "Json string for storage backend configuration",
+					Usage:   "Json configuration string for storage backend",
 					EnvVars: []string{"BACKEND_CONFIG"},
 				},
-				&cli.StringFlag{
+				&cli.PathFlag{
 					Name:      "backend-config-file",
 					TakesFile: true,
 					Usage:     "Json configuration file for storage backend",
@@ -508,8 +756,9 @@ func main() {
 					Usage:   "Compact parent bootstrap before building the image when needed",
 					EnvVars: []string{"COMPACT"},
 				},
-				&cli.StringFlag{
-					Name: "compact-config-file",
+				&cli.PathFlag{
+					Name:      "compact-config-file",
+					TakesFile: true,
 					Usage: "Compact configuration file, default configuration is " +
 						"{\"min_used_ratio\": 5, \"compact_blob_size\": 10485760, \"max_compact_size\": 104857600, " +
 						"\"layers_to_compact\": 32}",
@@ -555,13 +804,11 @@ func main() {
 
 				// if backend-push is specified, we should make sure backend-config-file exists
 				if c.Bool("backend-push") || c.Bool("compact") {
-					_backendConfig, err := parseBackendConfig(
-						c.String("backend-config"), c.String("backend-config-file"),
-					)
+					_backendType, _backendConfig, err := getBackendConfig(c, true)
 					if err != nil {
 						return err
-					} else if len(_backendConfig) == 0 {
-						return errors.Errorf("missing backend configuration information")
+					} else if _backendType != "oss" {
+						return errors.Errorf("only --backend-type=oss is supported")
 					}
 					cfg, err := packer.ParseBackendConfigString(_backendConfig)
 					if err != nil {
