@@ -32,11 +32,13 @@ func (r *Registry) Upload(
 	}
 
 	return &desc, nil
+}
 
+func (r *Registry) Finalize(cancel bool) error {
+	return nil
 }
 
 func (r *Registry) Check(blobID string) (bool, error) {
-
 	return true, nil
 }
 
