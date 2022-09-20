@@ -142,6 +142,7 @@ impl DaemonController {
     fn shutdown(&self) {
         // Marking exiting state.
         self.active.store(false, Ordering::Release);
+        DAEMON_CONTROLLER.set_singleton_mode(false);
         // Signal the `run_loop()` working thread to exit.
         let _ = self.waker.wake();
 
