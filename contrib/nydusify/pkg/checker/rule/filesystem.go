@@ -27,6 +27,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// WorkerCount specifies source layer pull concurrency
+var WorkerCount uint = 8
+
 // FilesystemRule compares file metadata and data in the two mountpoints:
 // Mounted by Nydusd for Nydus image,
 // Mounted by Overlayfs for OCI image.
@@ -35,6 +38,7 @@ type FilesystemRule struct {
 	Source          string
 	SourceMountPath string
 	SourceParsed    *parser.Parsed
+	SourcePath      string
 	SourceRemote    *remote.Remote
 	Target          string
 	TargetInsecure  bool
@@ -167,26 +171,53 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 	return nodes, nil
 }
 
-func (rule *FilesystemRule) mountSourceImage() error {
+func (rule *FilesystemRule) pullSourceImage() (*tool.Image, error) {
+	layers := rule.SourceParsed.OCIImage.Manifest.Layers
+	worker := utils.NewWorkerPool(WorkerCount, uint(len(layers)))
+
+	for _, l := range layers {
+		layer := l
+		worker.Put(func() error {
+			reader, err := rule.SourceRemote.Pull(context.Background(), layer, true)
+			if err != nil {
+				return errors.Wrap(err, "pull source image layers from the remote registry")
+			}
+
+			if err = utils.UnpackTargz(context.Background(), filepath.Join(rule.SourcePath, layer.Digest.Encoded()), reader, true); err != nil {
+				return errors.Wrap(err, "unpack source image layers")
+			}
+			return nil
+		})
+	}
+
+	if err := <-worker.Waiter(); err != nil {
+		return nil, errors.Wrap(err, "pull source image layers in wait")
+	}
+
+	return &tool.Image{
+		Layers:     layers,
+		Source:     rule.Source,
+		SourcePath: rule.SourcePath,
+		Rootfs:     rule.SourceMountPath,
+	}, nil
+}
+
+func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
 	logrus.Infof("Mounting source image to %s", rule.SourceMountPath)
 
 	if err := os.MkdirAll(rule.SourceMountPath, 0755); err != nil {
-		return errors.Wrap(err, "create mountpoint directory of source image")
+		return nil, errors.Wrap(err, "create mountpoint directory of source image")
 	}
 
-	layers := rule.SourceParsed.OCIImage.Manifest.Layers
-	for _, l := range layers {
-		reader, err := rule.SourceRemote.Pull(context.Background(), l, true)
-		if err != nil {
-			return errors.Wrap(err, "pull image layers from the remote registry")
-		}
-
-		if err = utils.UnpackTargz(context.Background(), rule.SourceMountPath, reader, true); err != nil {
-			return errors.Wrap(err, "unpack image layers")
-		}
+	image, err := rule.pullSourceImage()
+	if err != nil {
+		return nil, errors.Wrap(err, "pull source image")
+	}
+	if err := image.Mount(); err != nil {
+		return nil, errors.Wrap(err, "mount source image")
 	}
 
-	return nil
+	return image, nil
 }
 
 func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
@@ -307,9 +338,11 @@ func (rule *FilesystemRule) Validate() error {
 		return nil
 	}
 
-	if err := rule.mountSourceImage(); err != nil {
+	image, err := rule.mountSourceImage()
+	if err != nil {
 		return err
 	}
+	defer image.Umount()
 
 	nydusd, err := rule.mountNydusImage()
 	if err != nil {
