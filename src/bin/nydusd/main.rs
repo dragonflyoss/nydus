@@ -705,14 +705,14 @@ fn process_default_fs_service(
     ));
 }
 
-fn process_daemon_arguments(
+fn process_singleton_arguments(
     subargs: &SubCmdArgs,
     _apisock: Option<&str>,
     bti: BuildTimeInfo,
 ) -> Result<()> {
-    info!("Start Nydus in daemon mode!");
+    info!("Start Nydus in singleton mode!");
     let daemon = create_daemon(subargs, bti).map_err(|e| {
-        error!("Failed to start daemon: {}", e);
+        error!("Failed to start singleton daemon: {}", e);
         e
     })?;
     DAEMON_CONTROLLER.set_singleton_mode(true);
@@ -744,7 +744,7 @@ fn main() -> Result<()> {
             // Safe to unwrap because the subcommand is `singleton`.
             let subargs = args.subcommand_matches("singleton").unwrap();
             let subargs = SubCmdArgs::new(&args, subargs);
-            process_daemon_arguments(&subargs, apisock, bti)?;
+            process_singleton_arguments(&subargs, apisock, bti)?;
         }
         Some("fuse") => {
             // Safe to unwrap because the subcommand is `fuse`.
