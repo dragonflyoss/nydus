@@ -60,7 +60,10 @@ pub fn log_level_to_verbosity(level: log::LevelFilter) -> usize {
 }
 
 pub mod built_info {
-    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+    pub const PROFILE: &str = env!("PROFILE");
+    pub const RUSTC_VERSION: &str = env!("RUSTC_VERSION");
+    pub const BUILT_TIME_UTC: &str = env!("BUILT_TIME_UTC");
+    pub const GIT_COMMIT_HASH: &str = env!("GIT_COMMIT_HASH");
 }
 
 /// Dump program build and version information.
@@ -68,7 +71,7 @@ pub fn dump_program_info(prog_version: &str) {
     info!(
         "Program Version: {}, Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
         prog_version,
-        built_info::GIT_COMMIT_HASH.unwrap_or_default(),
+        built_info::GIT_COMMIT_HASH,
         built_info::BUILT_TIME_UTC,
         built_info::PROFILE,
         built_info::RUSTC_VERSION,
@@ -90,7 +93,7 @@ impl BuildTimeInfo {
         let info_string = format!(
             "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}\nProfile: \t{}\nRustc: \t\t{}\n",
             package_ver,
-            built_info::GIT_COMMIT_HASH.unwrap_or_default(),
+            built_info::GIT_COMMIT_HASH,
             built_info::BUILT_TIME_UTC,
             built_info::PROFILE,
             built_info::RUSTC_VERSION,
@@ -98,7 +101,7 @@ impl BuildTimeInfo {
 
         let info = Self {
             package_ver: package_ver.to_string(),
-            git_commit: built_info::GIT_COMMIT_HASH.unwrap_or_default().to_string(),
+            git_commit: built_info::GIT_COMMIT_HASH.to_string(),
             build_time: built_info::BUILT_TIME_UTC.to_string(),
             profile: built_info::PROFILE.to_string(),
             rustc: built_info::RUSTC_VERSION.to_string(),
