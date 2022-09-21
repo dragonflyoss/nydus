@@ -7,9 +7,8 @@ extern crate serde_json;
 use std::fmt::{self, Display};
 use std::str::FromStr;
 
-use chrono::{self, DateTime, Local};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 
 /// Error code related to Nydus library.
 #[derive(Debug)]
@@ -58,8 +57,7 @@ impl Display for FsBackendType {
 pub struct FsBackendDesc {
     pub backend_type: FsBackendType,
     pub mountpoint: String,
-    #[serde_as(as = "DisplayFromStr")]
-    pub mounted_time: DateTime<Local>,
+    pub mounted_time: time::OffsetDateTime,
     pub config: Option<serde_json::Value>,
 }
 
