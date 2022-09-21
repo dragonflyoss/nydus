@@ -46,7 +46,9 @@ use std::env::current_dir;
 use std::io::Result;
 use std::path::PathBuf;
 
-use flexi_logger::{self, colored_opt_format, opt_format, Cleanup, Criterion, Logger, Naming};
+use flexi_logger::{
+    self, colored_opt_format, opt_format, Cleanup, Criterion, FileSpec, Logger, Naming,
+};
 use log::LevelFilter;
 
 pub mod signal;
@@ -125,15 +127,7 @@ pub fn setup_logging(
 ) -> Result<()> {
     if let Some(ref path) = log_file_path {
         // Do not try to canonicalize the path since the file may not exist yet.
-
-        // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
-        // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
-        // can't change log level to a higher level than what is passed to `flexi_logger`.
-        let mut logger = Logger::with_env_or_str("trace")
-            .log_to_file()
-            .suppress_timestamp()
-            .append()
-            .format(opt_format);
+        let mut spec = FileSpec::default().suppress_timestamp();
 
         // Parse log file to get the `basename` and `suffix`(extension) because `flexi_logger`
         // will automatically add `.log` suffix if we don't set explicitly, see:
@@ -149,7 +143,7 @@ pub fn setup_logging(
                 eprintln!("invalid file name input {:?}", path);
                 einval!()
             })?;
-        logger = logger.basename(basename);
+        spec = spec.basename(basename);
 
         // `flexi_logger` automatically add `.log` suffix if the file name has not extension.
         if let Some(suffix) = path.extension() {
@@ -157,7 +151,7 @@ pub fn setup_logging(
                 eprintln!("invalid file extension {:?}", suffix);
                 einval!()
             })?;
-            logger = logger.suffix(suffix);
+            spec = spec.suffix(suffix);
         }
 
         // Set log directory
@@ -169,8 +163,17 @@ pub fn setup_logging(
             } else {
                 p.to_path_buf()
             };
-            logger = logger.directory(dir);
+            spec = spec.directory(dir);
         }
+
+        // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
+        // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
+        // can't change log level to a higher level than what is passed to `flexi_logger`.
+        let mut logger = Logger::try_with_env_or_str("trace")
+            .map_err(|_e| enosys!())?
+            .log_to_file(spec)
+            .append()
+            .format(opt_format);
 
         // Set log rotation
         if rotation_size > 0 {
@@ -190,7 +193,8 @@ pub fn setup_logging(
         // We rely on rust `log` macro to limit current log level rather than `flexi_logger`
         // So we set `flexi_logger` log level to "trace" which is High enough. Otherwise, we
         // can't change log level to a higher level than what is passed to `flexi_logger`.
-        Logger::with_env_or_str("trace")
+        Logger::try_with_env_or_str("trace")
+            .map_err(|_e| enosys!())?
             .format(colored_opt_format)
             .start()
             .map_err(|e| eother!(e))?;

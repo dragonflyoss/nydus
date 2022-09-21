@@ -25,7 +25,6 @@ log = "0.4.8"
 libc = "0.2"
 vmm-sys-util = "0.10.0"
 clap = "2.33"
-flexi_logger = { version = "0.17" }
 # pin regex to fix RUSTSEC-2022-0013
 regex = "1.5.5"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
