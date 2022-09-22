@@ -42,7 +42,7 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, MetaRange, XattrName, XattrValue,
-    RAFS_ROOT_INODE,
+    RAFS_V5_ROOT_INODE,
 };
 use crate::metadata::{
     Attr, Entry, Inode, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock,
@@ -408,7 +408,7 @@ impl RafsSuperBlock for DirectSuperBlockV5 {
     }
 
     fn root_ino(&self) -> u64 {
-        RAFS_ROOT_INODE
+        RAFS_V5_ROOT_INODE
     }
 }
 

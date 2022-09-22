@@ -1,11 +1,11 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2020 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2020-2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! A manager to cache all file system metadata into memory.
+//! A RAFS metadata manager to cache all file system metadata into memory.
 //!
-//! All file system metadata will be loaded, validated and cached into memory when loading the
+//! All filesystem metadata will be loaded, validated and cached into memory when loading the
 //! file system. And currently the cache layer only supports readonly file systems.
 
 use std::any::Any;
@@ -21,16 +21,16 @@ use std::sync::Arc;
 
 use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::ByteSize;
-use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
 
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_vecs, rafsv5_validate_inode, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode,
     RafsV5InodeChunkOps, RafsV5InodeFlags, RafsV5InodeOps, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
-use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
+use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_V5_ROOT_INODE};
 use crate::metadata::{
     BlobIoVec, Inode, RafsError, RafsInode, RafsInodeExt, RafsInodeWalkAction,
     RafsInodeWalkHandler, RafsResult, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName,
@@ -54,7 +54,7 @@ impl CachedSuperBlockV5 {
             s_blob: Arc::new(RafsV5BlobTable::new()),
             s_meta: Arc::new(meta),
             s_inodes: BTreeMap::new(),
-            max_inode: RAFS_ROOT_INODE,
+            max_inode: RAFS_V5_ROOT_INODE,
             validate_inode,
         }
     }
@@ -144,7 +144,7 @@ impl RafsSuperInodes for CachedSuperBlockV5 {
         self.max_inode
     }
 
-    fn get_inode(&self, ino: Inode, _digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
+    fn get_inode(&self, ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
         self.s_inodes
             .get(&ino)
             .map_or(Err(enoent!()), |i| Ok(i.clone()))
@@ -192,7 +192,7 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
 
         // Validate inode digest tree
         let digester = self.s_meta.get_digester();
-        let inode = self.get_extended_inode(RAFS_ROOT_INODE, false)?;
+        let inode = self.get_extended_inode(RAFS_V5_ROOT_INODE, false)?;
         if self.validate_inode && !rafsv5_validate_inode(inode.deref(), true, digester)? {
             return Err(einval!("invalid inode digest"));
         }
@@ -213,11 +213,11 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
     }
 
     fn root_ino(&self) -> u64 {
-        RAFS_ROOT_INODE
+        RAFS_V5_ROOT_INODE
     }
 }
 
-/// Cached Rafs v5 inode metadata.
+/// Cached RAFS v5 inode object.
 #[derive(Default, Clone, Debug)]
 pub struct CachedInodeV5 {
     i_ino: Inode,
@@ -493,8 +493,8 @@ impl RafsInode for CachedInodeV5 {
     }
 
     fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()> {
-        let mut cur_offset = entry_offset;
         // offset 0 and 1 is for "." and ".." respectively.
+        let mut cur_offset = entry_offset;
 
         if cur_offset == 0 {
             cur_offset += 1;
@@ -755,7 +755,7 @@ mod cached_tests {
     use crate::metadata::layout::v5::{
         rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper,
     };
-    use crate::metadata::layout::{RafsXAttrs, RAFS_ROOT_INODE};
+    use crate::metadata::layout::{RafsXAttrs, RAFS_V5_ROOT_INODE};
     use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
     use crate::{BufWriter, RafsInodeExt, RafsIoReader};
 
@@ -962,7 +962,7 @@ mod cached_tests {
         let md = RafsSuperMeta::default();
         let mut sb = CachedSuperBlockV5::new(md, true);
 
-        assert_eq!(sb.max_inode, RAFS_ROOT_INODE);
+        assert_eq!(sb.max_inode, RAFS_V5_ROOT_INODE);
         assert_eq!(sb.s_inodes.len(), 0);
         assert!(sb.validate_inode);
 

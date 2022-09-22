@@ -20,7 +20,7 @@ use rafs::metadata::layout::v6::{
 };
 use rafs::metadata::layout::RafsBlobTable;
 
-use rafs::metadata::layout::RAFS_ROOT_INODE;
+use rafs::metadata::layout::RAFS_V5_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
 use super::context::{BlobManager, BootstrapContext, BootstrapManager, BuildContext, SourceType};
@@ -60,10 +60,10 @@ impl Bootstrap {
         bootstrap_ctx: &mut BootstrapContext,
         tree: &mut Tree,
     ) -> Result<()> {
-        tree.node.index = RAFS_ROOT_INODE;
+        tree.node.index = RAFS_V5_ROOT_INODE;
         // Rafs v6 root inode number can't be decided until the end of dumping.
         if ctx.fs_version.is_v5() {
-            tree.node.inode.set_ino(RAFS_ROOT_INODE);
+            tree.node.inode.set_ino(RAFS_V5_ROOT_INODE);
         }
         // Filesystem walking skips root inode within subsequent while loop, however, we allow
         // user to pass the source root as prefetch hint. Check it here.

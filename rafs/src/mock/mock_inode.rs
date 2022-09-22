@@ -19,8 +19,7 @@ use nydus_utils::{digest::RafsDigest, ByteSize};
 use super::mock_chunk::MockChunkInfo;
 use super::mock_super::CHUNK_SIZE;
 use crate::metadata::layout::v5::{
-    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5InodeChunkOps, RafsV5InodeFlags,
-    RafsV5InodeOps,
+    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5InodeChunkOps, RafsV5InodeFlags, RafsV5InodeOps,
 };
 use crate::metadata::{
     layout::{XattrName, XattrValue},
