@@ -54,10 +54,6 @@ impl BlobChunkInfo for MockChunkInfo {
         self.c_flags.contains(BlobChunkFlags::COMPRESSED)
     }
 
-    fn is_hole(&self) -> bool {
-        self.c_flags.contains(BlobChunkFlags::HOLECHUNK)
-    }
-
     fn chunk_id(&self) -> &RafsDigest {
         &self.c_block_id
     }

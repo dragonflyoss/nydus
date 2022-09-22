@@ -55,36 +55,6 @@ impl RafsSuper {
         Ok(true)
     }
 
-    pub(crate) fn store_v5(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        let mut sb = RafsV5SuperBlock::new();
-
-        sb.set_magic(self.meta.magic);
-        sb.set_version(self.meta.version);
-        sb.set_sb_size(self.meta.sb_size);
-        sb.set_block_size(self.meta.chunk_size);
-        sb.set_flags(self.meta.flags.bits());
-
-        sb.set_inodes_count(self.meta.inodes_count);
-        sb.set_inode_table_entries(self.meta.inode_table_entries);
-        sb.set_inode_table_offset(self.meta.inode_table_offset);
-        sb.set_blob_table_offset(self.meta.blob_table_offset);
-        sb.set_blob_table_size(self.meta.blob_table_size);
-        sb.set_extended_blob_table_offset(self.meta.extended_blob_table_offset);
-        sb.set_extended_blob_table_entries(self.meta.extended_blob_table_entries);
-        sb.set_prefetch_table_offset(self.meta.prefetch_table_offset);
-        sb.set_prefetch_table_entries(self.meta.prefetch_table_entries);
-
-        w.write_all(sb.as_ref())?;
-        let meta_size = w.seek_to_end()?;
-        if meta_size > RAFS_MAX_METADATA_SIZE as u64 {
-            return Err(einval!("metadata blob is too big"));
-        }
-        sb.validate(meta_size)?;
-        trace!("written superblock: {}", &sb);
-
-        Ok(meta_size as usize)
-    }
-
     pub(crate) fn prefetch_data_v5<F>(
         &self,
         r: &mut RafsIoReader,
@@ -267,10 +237,6 @@ impl BlobChunkInfo for V5IoChunk {
 
     fn is_compressed(&self) -> bool {
         self.flags.contains(BlobChunkFlags::COMPRESSED)
-    }
-
-    fn is_hole(&self) -> bool {
-        self.flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
     fn as_any(&self) -> &dyn Any {

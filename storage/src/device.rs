@@ -346,7 +346,7 @@ bitflags! {
         /// Chunk data is compressed.
         const COMPRESSED = 0x0000_0001;
         /// Chunk is a hole, with all data as zero.
-        const HOLECHUNK = 0x0000_0002;
+        const _HOLECHUNK = 0x0000_0002;
     }
 }
 
@@ -397,9 +397,6 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     /// Some chunk may become bigger after compression, so plain data instead of compressed
     /// data may be stored in the compressed data blob for those chunks.
     fn is_compressed(&self) -> bool;
-
-    /// Check whether the chunk is a hole, containing all zeros.
-    fn is_hole(&self) -> bool;
 
     fn as_any(&self) -> &dyn Any;
 }
@@ -483,10 +480,6 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn is_compressed(&self) -> bool {
         self.as_base().is_compressed()
-    }
-
-    fn is_hole(&self) -> bool {
-        self.as_base().is_hole()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1219,7 +1212,6 @@ mod tests {
         assert_eq!(iochunk.uncompressed_offset(), 0x2000);
         assert_eq!(iochunk.uncompressed_size(), 0x200);
         assert!(!iochunk.is_compressed());
-        assert!(!iochunk.is_hole());
     }
 
     #[test]

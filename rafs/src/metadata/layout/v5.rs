@@ -81,9 +81,6 @@ pub(crate) trait RafsV5InodeOps {
 
     /// Check whether the inode has hole chunk.
     fn has_hole(&self) -> bool;
-
-    /// Convert to the on disk data format.
-    fn cast_ondisk(&self) -> Result<RafsV5Inode>;
 }
 
 pub(crate) trait RafsV5InodeChunkOps {
@@ -1574,10 +1571,6 @@ pub mod tests {
 
         fn is_compressed(&self) -> bool {
             self.flags.contains(BlobChunkFlags::COMPRESSED)
-        }
-
-        fn is_hole(&self) -> bool {
-            self.flags.contains(BlobChunkFlags::HOLECHUNK)
         }
 
         fn as_any(&self) -> &dyn Any {

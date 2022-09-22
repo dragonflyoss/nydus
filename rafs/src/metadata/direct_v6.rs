@@ -1379,12 +1379,6 @@ impl BlobChunkInfo for DirectChunkInfoV6 {
             .contains(BlobChunkFlags::COMPRESSED)
     }
 
-    fn is_hole(&self) -> bool {
-        self.chunk(self.state().deref())
-            .flags
-            .contains(BlobChunkFlags::HOLECHUNK)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

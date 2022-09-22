@@ -19,7 +19,7 @@ use nydus_utils::{digest::RafsDigest, ByteSize};
 use super::mock_chunk::MockChunkInfo;
 use super::mock_super::CHUNK_SIZE;
 use crate::metadata::layout::v5::{
-    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5Inode, RafsV5InodeChunkOps, RafsV5InodeFlags,
+    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5InodeChunkOps, RafsV5InodeFlags,
     RafsV5InodeOps,
 };
 use crate::metadata::{
@@ -280,9 +280,5 @@ impl RafsV5InodeOps for MockInode {
 
     fn has_hole(&self) -> bool {
         false
-    }
-
-    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
-        unimplemented!()
     }
 }

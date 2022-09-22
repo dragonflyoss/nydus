@@ -344,10 +344,6 @@ pub struct RafsSuperMeta {
     pub extended_blob_table_offset: u64,
     /// Offset of the extended blob information table into the metadata blob.
     pub extended_blob_table_entries: u32,
-    /// Start of data prefetch range.
-    pub blob_readahead_offset: u32,
-    /// Size of data prefetch range.
-    pub blob_readahead_size: u32,
     /// Offset of the inode prefetch table into the metadata blob.
     pub prefetch_table_offset: u64,
     /// Size of the inode prefetch table.
@@ -429,8 +425,6 @@ impl Default for RafsSuperMeta {
             blob_table_offset: 0,
             extended_blob_table_offset: 0,
             extended_blob_table_entries: 0,
-            blob_readahead_offset: 0,
-            blob_readahead_size: 0,
             prefetch_table_offset: 0,
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
@@ -849,15 +843,6 @@ impl RafsSuper {
             }
         }
         Ok(())
-    }
-
-    /// Store RAFS metadata to backend storage.
-    pub fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        if self.meta.is_v5() {
-            return self.store_v5(w);
-        }
-
-        Err(einval!("invalid superblock version number"))
     }
 }
 

@@ -829,10 +829,6 @@ impl BlobChunkInfo for BlobMetaChunk {
         self.meta.chunks[self.chunk_index].is_compressed()
     }
 
-    fn is_hole(&self) -> bool {
-        false
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -973,7 +969,6 @@ mod tests {
         assert_eq!(vec[0].uncompressed_offset(), 0);
         assert_eq!(vec[0].uncompressed_size(), 0x1001);
         assert!(vec[0].is_compressed());
-        assert!(!vec[0].is_hole());
 
         let vec = info.get_chunks_uncompressed(0x0, 0x4000, 0).unwrap();
         assert_eq!(vec.len(), 2);
@@ -984,7 +979,6 @@ mod tests {
         assert_eq!(vec[1].uncompressed_offset(), 0x2000);
         assert_eq!(vec[1].uncompressed_size(), 0x2000);
         assert!(!vec[1].is_compressed());
-        assert!(!vec[1].is_hole());
 
         let vec = info.get_chunks_uncompressed(0x0, 0x4001, 0).unwrap();
         assert_eq!(vec.len(), 3);

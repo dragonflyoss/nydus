@@ -643,35 +643,6 @@ impl RafsV5InodeOps for CachedInodeV5 {
     fn has_hole(&self) -> bool {
         self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
     }
-
-    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
-        let i_symlink_size = if self.is_symlink() {
-            self.get_symlink()?.byte_size() as u16
-        } else {
-            0
-        };
-        Ok(RafsV5Inode {
-            i_digest: self.i_digest,
-            i_parent: self.i_parent,
-            i_ino: self.i_ino,
-            i_projid: self.i_projid,
-            i_uid: self.i_uid,
-            i_gid: self.i_gid,
-            i_mode: self.i_mode,
-            i_size: self.i_size,
-            i_nlink: self.i_nlink,
-            i_blocks: self.i_blocks,
-            i_flags: self.i_flags,
-            i_child_index: self.i_child_idx,
-            i_child_count: self.i_child_cnt,
-            i_name_size: self.i_name.len() as u16,
-            i_symlink_size,
-            i_rdev: self.i_rdev,
-            i_mtime: self.i_mtime,
-            i_mtime_nsec: self.i_mtime_nsec,
-            i_reserved: [0; 8],
-        })
-    }
 }
 
 /// Cached information about an Rafs Data Chunk.
@@ -736,10 +707,6 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
 
     fn is_compressed(&self) -> bool {
         self.flags.contains(BlobChunkFlags::COMPRESSED)
-    }
-
-    fn is_hole(&self) -> bool {
-        self.flags.contains(BlobChunkFlags::HOLECHUNK)
     }
 
     fn as_any(&self) -> &dyn Any {

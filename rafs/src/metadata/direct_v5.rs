@@ -878,12 +878,6 @@ impl RafsV5InodeOps for OndiskInodeWrapper {
         self.mapping.state.load().meta.chunk_size
     }
 
-    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
-        let state = self.state();
-
-        Ok(*self.inode(state.deref()))
-    }
-
     impl_inode_wrapper!(has_hole, bool);
 }
 
@@ -940,12 +934,6 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
         self.chunk(self.state().deref())
             .flags
             .contains(BlobChunkFlags::COMPRESSED)
-    }
-
-    fn is_hole(&self) -> bool {
-        self.chunk(self.state().deref())
-            .flags
-            .contains(BlobChunkFlags::HOLECHUNK)
     }
 
     fn as_any(&self) -> &dyn Any {
