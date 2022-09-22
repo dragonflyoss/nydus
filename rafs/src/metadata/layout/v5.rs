@@ -91,48 +91,6 @@ pub(crate) trait RafsV5InodeChunkOps {
     fn get_chunk_info_v5(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>>;
 }
 
-impl From<RafsSuperFlags> for digest::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
-            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
-            _ => digest::Algorithm::Blake3,
-        }
-    }
-}
-
-impl From<digest::Algorithm> for RafsSuperFlags {
-    fn from(d: digest::Algorithm) -> RafsSuperFlags {
-        match d {
-            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
-            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
-        }
-    }
-}
-
-impl From<RafsSuperFlags> for compress::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
-            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
-            x if x.contains(RafsSuperFlags::COMPRESS_ZSTD) => compress::Algorithm::Zstd,
-            _ => compress::Algorithm::Lz4Block,
-        }
-    }
-}
-
-impl From<compress::Algorithm> for RafsSuperFlags {
-    fn from(c: compress::Algorithm) -> RafsSuperFlags {
-        match c {
-            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
-            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
-            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
-            compress::Algorithm::Zstd => RafsSuperFlags::COMPRESS_ZSTD,
-        }
-    }
-}
-
 /// Rafs v5 superblock on disk metadata, 8192 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]

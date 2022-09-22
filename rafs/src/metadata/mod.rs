@@ -273,6 +273,48 @@ impl Display for RafsSuperFlags {
     }
 }
 
+impl From<RafsSuperFlags> for digest::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
+            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
+            _ => digest::Algorithm::Blake3,
+        }
+    }
+}
+
+impl From<digest::Algorithm> for RafsSuperFlags {
+    fn from(d: digest::Algorithm) -> RafsSuperFlags {
+        match d {
+            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
+            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
+        }
+    }
+}
+
+impl From<RafsSuperFlags> for compress::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
+            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
+            x if x.contains(RafsSuperFlags::COMPRESS_ZSTD) => compress::Algorithm::Zstd,
+            _ => compress::Algorithm::Lz4Block,
+        }
+    }
+}
+
+impl From<compress::Algorithm> for RafsSuperFlags {
+    fn from(c: compress::Algorithm) -> RafsSuperFlags {
+        match c {
+            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
+            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
+            compress::Algorithm::Zstd => RafsSuperFlags::COMPRESS_ZSTD,
+        }
+    }
+}
+
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
@@ -833,5 +875,57 @@ mod tests {
         assert_eq!(RafsMode::from_str("cached").unwrap(), RafsMode::Cached);
         assert_eq!(&format!("{}", RafsMode::Direct), "direct");
         assert_eq!(&format!("{}", RafsMode::Cached), "cached");
+    }
+
+    #[test]
+    fn test_rafs_compressor() {
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_NONE),
+            compress::Algorithm::None
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_GZIP),
+            compress::Algorithm::GZip
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_LZ4_BLOCK),
+            compress::Algorithm::Lz4Block
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_ZSTD),
+            compress::Algorithm::Zstd
+        );
+        assert_eq!(
+            compress::Algorithm::from(
+                RafsSuperFlags::COMPRESS_ZSTD | RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            ),
+            compress::Algorithm::Lz4Block
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::empty()),
+            compress::Algorithm::Lz4Block
+        );
+    }
+
+    #[test]
+    fn test_rafs_digestor() {
+        assert_eq!(
+            digest::Algorithm::from(RafsSuperFlags::DIGESTER_BLAKE3),
+            digest::Algorithm::Blake3
+        );
+        assert_eq!(
+            digest::Algorithm::from(RafsSuperFlags::DIGESTER_SHA256),
+            digest::Algorithm::Sha256
+        );
+        assert_eq!(
+            digest::Algorithm::from(
+                RafsSuperFlags::DIGESTER_SHA256 | RafsSuperFlags::DIGESTER_BLAKE3,
+            ),
+            digest::Algorithm::Blake3
+        );
+        assert_eq!(
+            digest::Algorithm::from(RafsSuperFlags::empty()),
+            digest::Algorithm::Blake3
+        );
     }
 }
