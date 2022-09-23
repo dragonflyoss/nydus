@@ -19,6 +19,10 @@ from nydusd_client import NydusAPIClient
 from whiteout import Whiteout
 import platform
 
+ANCHOR = NydusAnchor()
+
+FS_VERSION = ANCHOR.fs_version
+
 logging_setup()
 
 # Specify nydusd and its tools build target directory.
@@ -63,7 +67,7 @@ def test_build_image(nydus_anchor, nydus_scratch_image: RafsImage, rafs_conf: Ra
 
 
 @pytest.mark.parametrize("io_duration", [5])
-@pytest.mark.parametrize("fs_version", ["5", "6"])
+@pytest.mark.parametrize("fs_version", [FS_VERSION])
 @pytest.mark.parametrize("backend", [Backend.BACKEND_PROXY, Backend.LOCALFS])
 def test_basic(
     nydus_anchor,
