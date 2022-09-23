@@ -8,7 +8,6 @@ use std::fmt::{self, Display};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 /// Error code related to Nydus library.
 #[derive(Debug)]
@@ -52,7 +51,6 @@ impl Display for FsBackendType {
     }
 }
 
-#[serde_as]
 #[derive(Serialize, Clone, Deserialize)]
 pub struct FsBackendDesc {
     pub backend_type: FsBackendType,
