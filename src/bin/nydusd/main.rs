@@ -40,6 +40,7 @@ use crate::service_controller::create_daemon;
 use nydus::ensure_threads;
 
 mod fusedev;
+#[cfg(feature = "virtiofs")]
 mod virtiofs;
 
 mod api_server_glue;
@@ -252,7 +253,6 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
     .arg(
         Arg::with_name("failover-policy")
             .long("failover-policy")
-            .short("F")
             .default_value("resend")
             .help("FUSE server failover policy")
             .possible_values(&["resend", "flush"])
@@ -285,6 +285,7 @@ fn append_fuse_subcmd_options(app: App<'static, 'static>) -> App<'static, 'stati
     app.subcommand(subcmd)
 }
 
+#[cfg(feature = "virtiofs")]
 fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> {
     app.arg(
         Arg::with_name("hybrid-mode")
@@ -304,6 +305,7 @@ fn append_virtiofs_options(app: App<'static, 'static>) -> App<'static, 'static> 
     )
 }
 
+#[cfg(feature = "virtiofs")]
 fn append_virtiofs_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
     let subcmd = SubCommand::with_name("virtiofs").about("Run as a dedicated virtiofs server");
     let subcmd = append_virtiofs_options(subcmd);
@@ -332,29 +334,30 @@ fn append_fscache_options(app: App<'static, 'static>) -> App<'static, 'static> {
 
 fn append_services_subcmd_options(app: App<'static, 'static>) -> App<'static, 'static> {
     let subcmd = SubCommand::with_name("singleton")
-        .about("Run as a global daemon instance to service multiple blobcache/fscache/virtiofs services.")
+        .about(
+            "Run as a global daemon instance to service multiple blobcache/fscache/fuse services.",
+        )
         .arg(
             Arg::with_name("fscache")
                 .long("fscache")
+                .short("F")
                 .help("Working directory for Linux fscache driver to store cached files")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("fuse")
-                .long("fuse")
-                .help("Run as a dedicated FUSE server")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("virtiofs")
-                .long("virtiofs")
-                .help("Run as a dedicated virtiofs server")
                 .takes_value(true),
         );
     let subcmd = append_fscache_options(subcmd);
-    let subcmd = append_virtiofs_options(subcmd);
+
+    // TODO: enable support of fuse service
+    /*
+    let subcmd = subcmd.arg(
+        Arg::with_name("fuse")
+            .long("fuse")
+            .short("f")
+            .help("Run as a shared FUSE server"),
+    );
     let subcmd = append_fuse_options(subcmd);
     let subcmd = append_fs_options(subcmd);
+    */
+
     app.subcommand(subcmd)
 }
 
@@ -447,14 +450,12 @@ fn prepare_commandline_options() -> App<'static, 'static> {
                 .required(false)
                 .global(true),
         );
-
-    let cmdline = append_fuse_subcmd_options(cmdline);
-    let cmdline = append_virtiofs_subcmd_options(cmdline);
-
     let cmdline = append_fuse_options(cmdline);
-    let cmdline = append_virtiofs_options(cmdline);
     let cmdline = append_fs_options(cmdline);
 
+    let cmdline = append_fuse_subcmd_options(cmdline);
+    #[cfg(feature = "virtiofs")]
+    let cmdline = append_virtiofs_subcmd_options(cmdline);
     append_services_subcmd_options(cmdline)
 }
 
@@ -560,7 +561,7 @@ impl<'a> SubCmdArgs<'a> {
     }
 }
 
-fn process_default_fs_service(
+fn process_fs_service(
     args: SubCmdArgs,
     bti: BuildTimeInfo,
     apisock: Option<&str>,
@@ -674,29 +675,20 @@ fn process_default_fs_service(
             })?
         };
         DAEMON_CONTROLLER.set_daemon(daemon);
-    } else if !is_fuse {
-        let vu_sock = args.value_of("sock").ok_or_else(|| {
-            DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
-        })?;
-        let _ = apisock.as_ref();
-        DAEMON_CONTROLLER.set_daemon(virtiofs::create_virtiofs_daemon(
-            daemon_id, supervisor, vu_sock, vfs, mount_cmd, bti,
-        )?);
+    } else {
+        #[cfg(feature = "virtiofs")]
+        if !is_fuse {
+            let vu_sock = args.value_of("sock").ok_or_else(|| {
+                DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
+            })?;
+            let _ = apisock.as_ref();
+            DAEMON_CONTROLLER.set_daemon(virtiofs::create_virtiofs_daemon(
+                daemon_id, supervisor, vu_sock, vfs, mount_cmd, bti,
+            )?);
+        }
     }
 
     Ok(())
-}
-
-#[cfg(not(any(feature = "fusedev", feature = "virtiofs")))]
-fn process_default_fs_service(
-    _args: SubCmdArgs,
-    _bti: BuildTimeInfo,
-    _apisock: Option<&str>,
-    _is_fuse: bool,
-) -> Result<()> {
-    return Err(einval!(
-        "Neither fusedev nor virtiofs is enabled, please recompile nydusd with required features!"
-    ));
 }
 
 fn process_singleton_arguments(
@@ -744,24 +736,17 @@ fn main() -> Result<()> {
             // Safe to unwrap because the subcommand is `fuse`.
             let subargs = args.subcommand_matches("fuse").unwrap();
             let subargs = SubCmdArgs::new(&args, subargs);
-            process_default_fs_service(subargs, bti, apisock, true)?;
+            process_fs_service(subargs, bti, apisock, true)?;
         }
         Some("virtiofs") => {
             // Safe to unwrap because the subcommand is `virtiofs`.
             let subargs = args.subcommand_matches("virtiofs").unwrap();
             let subargs = SubCmdArgs::new(&args, subargs);
-            process_default_fs_service(subargs, bti, apisock, false)?;
+            process_fs_service(subargs, bti, apisock, false)?;
         }
         _ => {
-            // let subargs = SubCmdArgs::new(&args, &args);
-            // let run_mode = subargs.value_of("run-mode").unwrap();
-            // let mut is_fuse = false;
-            // if run_mode == "fusedev" {
-            //     is_fuse = true;
-            // }
-            // process_default_fs_service(subargs, bti, apisock, is_fuse)?;
-            info!("Please specify a run mode");
-            return Ok(());
+            let subargs = SubCmdArgs::new(&args, &args);
+            process_fs_service(subargs, bti, apisock, true)?;
         }
     }
 
