@@ -40,8 +40,6 @@
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate serde;
-#[macro_use]
 extern crate bitflags;
 #[macro_use]
 extern crate nydus_error;
