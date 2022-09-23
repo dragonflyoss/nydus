@@ -20,7 +20,7 @@ import utils
         "docker.io/busybox:latest",
     ],
 )
-@pytest.mark.parametrize("fs_version", [6])
+@pytest.mark.parametrize("fs_version", [5, 6])
 def test_basic_conversion(
     nydus_anchor: NydusAnchor,
     rafs_conf: RafsConf,
