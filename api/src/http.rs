@@ -131,6 +131,8 @@ pub struct LocalFsConfig {
 pub struct OssConfig {
     /// Enable HTTP proxy for the read request.
     pub proxy: ProxyConfig,
+    /// Enable mirrors for the read request.
+    pub mirrors: Vec<MirrorConfig>,
     /// Skip SSL certificate validation for HTTPS scheme.
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.
@@ -181,6 +183,8 @@ pub struct RegistryConfig {
     pub scheme: String,
     /// Registry url host
     pub host: String,
+    /// Mirrors' configuration
+    pub mirrors: Vec<MirrorConfig>,
     /// Registry image name, like 'library/ubuntu'
     pub repo: String,
     /// Base64_encoded(username:password), the field should be
@@ -411,6 +415,15 @@ impl Default for ProxyConfig {
             check_interval: 5,
         }
     }
+}
+
+/// Configuration for mirror.
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub struct MirrorConfig {
+    /// Mirror url host.
+    pub host: String,
+    /// Request headers for mirror server.
+    pub headers: HashMap<String, String>,
 }
 
 #[derive(Debug)]

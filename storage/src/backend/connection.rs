@@ -7,13 +7,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Result};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwapOption;
 use log::{max_level, Level};
 
+use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::{
     self,
     blocking::{Body, Client, Response},
@@ -22,7 +24,8 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use nydus_api::http::{OssConfig, ProxyConfig, RegistryConfig};
+use nydus_api::http::{MirrorConfig, OssConfig, ProxyConfig, RegistryConfig};
+use url::ParseError;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
@@ -39,6 +42,10 @@ pub enum ConnectionError {
     ErrorWithMsg(String),
     Common(reqwest::Error),
     Format(reqwest::Error),
+    Url(ParseError),
+    Scheme,
+    Host,
+    Port,
 }
 
 /// Specialized `Result` for network communication.
@@ -48,6 +55,7 @@ type ConnectionResult<T> = std::result::Result<T, ConnectionError>;
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectionConfig {
     pub proxy: ProxyConfig,
+    pub mirrors: Vec<MirrorConfig>,
     pub skip_verify: bool,
     pub timeout: u32,
     pub connect_timeout: u32,
@@ -58,6 +66,7 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             proxy: ProxyConfig::default(),
+            mirrors: Vec::<MirrorConfig>::new(),
             skip_verify: false,
             timeout: 5,
             connect_timeout: 5,
@@ -70,6 +79,7 @@ impl From<OssConfig> for ConnectionConfig {
     fn from(c: OssConfig) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
+            mirrors: c.mirrors,
             skip_verify: c.skip_verify,
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
@@ -82,6 +92,7 @@ impl From<RegistryConfig> for ConnectionConfig {
     fn from(c: RegistryConfig) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
+            mirrors: c.mirrors,
             skip_verify: c.skip_verify,
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
@@ -181,7 +192,28 @@ pub(crate) fn respond(resp: Response, catch_status: bool) -> ConnectionResult<Re
 pub(crate) struct Connection {
     client: Client,
     proxy: Option<Proxy>,
+    mirror_state: MirrorState,
     shutdown: AtomicBool,
+}
+
+#[derive(Debug)]
+pub(crate) struct MirrorState {
+    mirrors: Vec<Arc<Mirror>>,
+    /// Current mirror, None if there is no mirror available.
+    current: ArcSwapOption<Mirror>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Mirror {
+    client: Client,
+    /// Information for mirror from configuration file.
+    config: MirrorConfig,
+    /// Mirror status, it will be set to false by atomic operation when mirror is not work.
+    status: AtomicBool,
+    /// Falied times for mirror, the status will be marked as false when fail_times = fail_limit.
+    fail_times: AtomicU8,
+    /// Failed limit for mirror.
+    fail_limit: u8,
 }
 
 impl Connection {
@@ -189,6 +221,7 @@ impl Connection {
     pub fn new(config: &ConnectionConfig) -> Result<Arc<Connection>> {
         info!("backend config: {:?}", config);
         let client = Self::build_connection("", config)?;
+
         let proxy = if !config.proxy.url.is_empty() {
             let ping_url = if !config.proxy.ping_url.is_empty() {
                 Some(Url::from_str(&config.proxy.ping_url).map_err(|e| einval!(e))?)
@@ -203,9 +236,32 @@ impl Connection {
         } else {
             None
         };
+
+        let mut mirrors = Vec::new();
+        for mirror_config in config.mirrors.iter() {
+            if !mirror_config.host.is_empty() {
+                mirrors.push(Arc::new(Mirror {
+                    // TODO: build mirror connection from MirrorConfig, now is from registry config
+                    client: Self::build_connection("", config)?,
+                    config: mirror_config.clone(),
+                    status: AtomicBool::from(true),
+                    // Maybe read from configuration file
+                    fail_limit: 5,
+                    fail_times: AtomicU8::from(0),
+                }));
+            }
+        }
+
+        let current = if let Some(first_mirror) = mirrors.first() {
+            ArcSwapOption::from(Some(first_mirror.clone()))
+        } else {
+            ArcSwapOption::from(None)
+        };
+
         let connection = Arc::new(Connection {
             client,
             proxy,
+            mirror_state: MirrorState { mirrors, current },
             shutdown: AtomicBool::new(false),
         });
 
@@ -258,6 +314,7 @@ impl Connection {
                 });
             }
         }
+        // TODO: check mirrors' health
 
         Ok(connection)
     }
@@ -324,6 +381,86 @@ impl Connection {
                         f.replace(current);
                     }
                 })
+            }
+        }
+
+        let current_mirror = self.mirror_state.current.load();
+
+        if let Some(mirror) = current_mirror.as_ref() {
+            let data_cloned: Option<ReqBody<R>> = match data.as_ref() {
+                Some(ReqBody::Form(form)) => Some(ReqBody::Form(form.clone())),
+                Some(ReqBody::Buf(buf)) => Some(ReqBody::Buf(buf.clone())),
+                _ => None,
+            };
+
+            let mirror_host = Url::parse(&mirror.config.host).map_err(ConnectionError::Url)?;
+
+            let mut current_url = Url::parse(url).map_err(ConnectionError::Url)?;
+
+            current_url
+                .set_scheme(mirror_host.scheme())
+                .map_err(|_| ConnectionError::Scheme)?;
+            current_url
+                .set_host(mirror_host.host_str())
+                .map_err(|_| ConnectionError::Host)?;
+            current_url
+                .set_port(mirror_host.port())
+                .map_err(|_| ConnectionError::Port)?;
+
+            for (key, value) in mirror.config.headers.iter() {
+                headers.insert(
+                    HeaderName::from_str(key).unwrap(),
+                    HeaderValue::from_str(value).unwrap(),
+                );
+            }
+
+            let result = self.call_inner(
+                &mirror.client,
+                method.clone(),
+                current_url.to_string().as_str(),
+                &query,
+                data_cloned,
+                headers,
+                catch_status,
+                false,
+            );
+
+            match result {
+                Ok(resp) => {
+                    if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
+                        return Ok(resp);
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "request mirror failed, mirror: {:?},  error: {:?}",
+                        mirror, err
+                    );
+                    mirror.fail_times.fetch_add(1, Ordering::Relaxed);
+
+                    if mirror.fail_times.load(Ordering::Relaxed) >= mirror.fail_limit {
+                        error!(
+                            "reach to fail limit {}, disable mirror: {:?}",
+                            mirror.fail_limit, mirror
+                        );
+                        mirror.status.store(false, Ordering::Relaxed);
+
+                        let mut idx = 0;
+                        loop {
+                            if idx == self.mirror_state.mirrors.len() {
+                                break None;
+                            }
+                            let m = &self.mirror_state.mirrors[idx];
+                            if m.status.load(Ordering::Relaxed) {
+                                break Some(m);
+                            }
+
+                            idx += 1;
+                        }
+                        .map(|m| self.mirror_state.current.store(Some(m.clone())))
+                        .unwrap_or_else(|| self.mirror_state.current.store(None));
+                    }
+                }
             }
         }
 
@@ -487,5 +624,6 @@ mod tests {
         assert!(config.proxy.fallback);
         assert_eq!(config.proxy.ping_url, "");
         assert_eq!(config.proxy.url, "");
+        assert!(config.mirrors.is_empty());
     }
 }

@@ -545,6 +545,13 @@ impl Registry {
         let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
         let config: RegistryConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
         let con_config: ConnectionConfig = config.clone().into();
+
+        if !config.proxy.url.is_empty() && !config.mirrors.is_empty() {
+            return Err(einval!(
+                "connection: proxy and mirrors cannot be configured at the same time."
+            ));
+        }
+
         let retry_limit = con_config.retry_limit;
         let connection = Connection::new(&con_config)?;
         let auth = trim(config.auth);
