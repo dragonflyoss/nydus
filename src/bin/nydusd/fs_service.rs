@@ -71,7 +71,7 @@ impl FsBackendCollection {
         let desc = FsBackendDesc {
             backend_type: cmd.fs_type.clone(),
             mountpoint: cmd.mountpoint.clone(),
-            mounted_time: chrono::Local::now(),
+            mounted_time: time::OffsetDateTime::now_utc(),
             config: fs_config,
         };
 
