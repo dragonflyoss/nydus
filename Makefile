@@ -3,16 +3,26 @@ all: build
 TEST_WORKDIR_PREFIX ?= "/tmp"
 DOCKER ?= "true"
 
-RUST_TARGET_STATIC ?= $(shell uname -m)-unknown-linux-musl
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
-
 CARGO_COMMON ?= 
+
+EXCLUDE_PACKAGES =
+STATIC_TARGET = $(UNAME_M)-unknown-linux-musl
+UNAME_M := $(shell uname -m)
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	CARGO_COMMON += --features=virtiofs
 endif
+ifeq ($(UNAME_S),Darwin)
+	EXCLUDE_PACKAGES += --exclude nydus-blobfs
+ifeq ($(UNAME_M),arm64)
+	UNAME_M = aarch64
+	STATIC_TARGET = aarch64-apple-darwin
+endif
+endif
+RUST_TARGET_STATIC ?= $(STATIC_TARGET)
 
 current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 env_go_path := $(shell go env GOPATH 2> /dev/null)
@@ -54,7 +64,7 @@ endef
 build: .format
 	${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
 	# Cargo will skip checking if it is already checked
-	${CARGO} clippy $(CARGO_COMMON) --workspace --bins --tests -- -Dwarnings
+	${CARGO} clippy $(CARGO_COMMON) --workspace $(EXCLUDE_PACKAGES) --bins --tests -- -Dwarnings
 
 release: .format .release_version build
 
@@ -69,20 +79,11 @@ install: release
 	@sudo install -D -m 755 target/release/nydusctl /usr/local/bin/nydusctl
 
 ut:
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(CARGO_COMMON) -- --skip integration --nocapture --test-threads=8
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) -- --skip integration --nocapture --test-threads=8
 
 smoke: ut
 	# TODO: Put each test function into separated rs file.
 	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(CARGO_COMMON) -- --nocapture --test-threads=8
-
-macos-fusedev:
-	${CARGO} build --target ${RUST_TARGET_STATIC} --release --bin nydusctl --bin nydusd --bin nydus-image
-
-macos-ut:
-	${CARGO} clippy --bin nydusd --release --workspace -- -Dwarnings
-	echo "Testing packages: ${PACKAGES}"
-	$(foreach var,$(PACKAGES),${CARGO} test $(CARGO_COMMON) -p $(var);)
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test $(CARGO_COMMON) --bin nydusd -- --nocapture --test-threads=8
 
 docker-static:
 	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/musl-static
