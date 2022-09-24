@@ -4,7 +4,7 @@ use std::{fs::File, io::Read};
 
 pub fn test_image_inspect_cmd(cmd: &str, bootstrap_path: &str) {
     let nydus_image = std::env::var("NYDUS_IMAGE")
-        .unwrap_or_else(|_| String::from("./target-fusedev/release/nydus-image"));
+        .unwrap_or_else(|_| String::from("./target/release/nydus-image"));
 
     let output = exec(
         format!("{} inspect -B {} -R {}", nydus_image, bootstrap_path, cmd).as_str(),

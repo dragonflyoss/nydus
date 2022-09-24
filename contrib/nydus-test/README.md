@@ -63,7 +63,7 @@ Before running nydus-test, please compile nydus components.
 
 ```bash
 cd /path/to/image-service/repo
-make fusedev-release
+make release
 ```
 
 `nydus-backend-proxy`
