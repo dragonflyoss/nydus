@@ -293,7 +293,7 @@ impl Default for RafsV6SuperBlock {
     }
 }
 
-/// Extended superblock, 256 bytes
+/// Extended superblock for RAFS v6, 256 bytes
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RafsV6SuperBlockExt {
@@ -371,6 +371,7 @@ impl RafsV6SuperBlockExt {
                 self.blob_table_offset()
             )));
         }
+
         Ok(())
     }
 
@@ -385,6 +386,7 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= c.bits();
     }
 
+    /// Set the `has_xattr` flag for the RAFS filesystem.
     pub fn set_has_xattr(&mut self) {
         self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
     }
@@ -403,6 +405,7 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= c.bits();
     }
 
+    /// Set offset and size of chunk information table.
     pub fn set_chunk_table(&mut self, offset: u64, size: u64) {
         self.set_chunk_table_offset(offset);
         self.set_chunk_table_size(size);
@@ -494,8 +497,12 @@ enum EROFS_FILE_TYPE {
     EROFS_FT_MAX,
 }
 
+/// Trait to manipulate data fields of on-disk RAFS v6 inodes.
+///
+/// There are two types of on disk inode formats defined by EROFS:
+/// - compact inode with 32-byte data
+/// - extended inode with 64-byte data
 pub trait RafsV6OndiskInode: RafsStore {
-    fn set_xattr_inline_count(&mut self, count: u16);
     fn set_size(&mut self, size: u64);
     fn set_ino(&mut self, ino: u32);
     fn set_nlink(&mut self, nlinks: u32);
@@ -503,7 +510,10 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn set_u(&mut self, u: u32);
     fn set_uidgid(&mut self, uid: u32, gid: u32);
     fn set_mtime(&mut self, _sec: u64, _nsec: u32);
+    fn set_rdev(&mut self, rdev: u32);
+    fn set_xattr_inline_count(&mut self, count: u16);
     fn set_data_layout(&mut self, data_layout: u16);
+
     /// Set inode data layout format to be PLAIN.
     #[inline]
     fn set_inline_plain_layout(&mut self) {
@@ -522,10 +532,6 @@ pub trait RafsV6OndiskInode: RafsStore {
         self.set_data_layout(EROFS_INODE_CHUNK_BASED);
     }
 
-    fn set_rdev(&mut self, rdev: u32);
-
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
-
     fn format(&self) -> u16;
     fn mode(&self) -> u16;
     fn size(&self) -> u64;
@@ -536,6 +542,8 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn nlink(&self) -> u32;
     fn rdev(&self) -> u32;
     fn xattr_inline_count(&self) -> u16;
+
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 }
 
 impl Debug for &dyn RafsV6OndiskInode {
@@ -592,11 +600,6 @@ impl RafsV6InodeCompact {
 }
 
 impl RafsV6OndiskInode for RafsV6InodeCompact {
-    /// Set xattr inline count.
-    fn set_xattr_inline_count(&mut self, count: u16) {
-        self.i_xattr_icount = count.to_le();
-    }
-
     /// Set file size for inode.
     fn set_size(&mut self, size: u64) {
         self.i_size = u32::to_le(size as u32);
@@ -631,17 +634,17 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     /// Set last modification time for the inode.
     fn set_mtime(&mut self, _sec: u64, _nsec: u32) {}
 
-    /// Set inode data layout format.
-    fn set_data_layout(&mut self, data_layout: u16) {
-        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (data_layout << 1));
-    }
-
     /// Set real device id.
     fn set_rdev(&mut self, _rdev: u32) {}
 
-    /// Load a `RafsV6InodeCompact` from a reader.
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        r.read_exact(self.as_mut())
+    /// Set xattr inline count.
+    fn set_xattr_inline_count(&mut self, count: u16) {
+        self.i_xattr_icount = count.to_le();
+    }
+
+    /// Set inode data layout format.
+    fn set_data_layout(&mut self, data_layout: u16) {
+        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (data_layout << 1));
     }
 
     fn format(&self) -> u16 {
@@ -685,6 +688,11 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
 
     fn xattr_inline_count(&self) -> u16 {
         u16::from_le(self.i_xattr_icount)
+    }
+
+    /// Load a `RafsV6InodeCompact` from a reader.
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
     }
 }
 
@@ -753,11 +761,6 @@ impl RafsV6InodeExtended {
 }
 
 impl RafsV6OndiskInode for RafsV6InodeExtended {
-    /// Set xattr inline count.
-    fn set_xattr_inline_count(&mut self, count: u16) {
-        self.i_xattr_icount = count.to_le();
-    }
-
     /// Set file size for inode.
     fn set_size(&mut self, size: u64) {
         self.i_size = size.to_le();
@@ -795,18 +798,18 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
         self.i_mtime_nsec = u32::to_le(nsec);
     }
 
-    /// Set inode data layout format.
-    fn set_data_layout(&mut self, data_layout: u16) {
-        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (data_layout << 1));
-    }
-
     fn set_rdev(&mut self, rdev: u32) {
         self.i_u = rdev.to_le()
     }
 
-    /// Load a `RafsV6InodeExtended` from a reader.
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        r.read_exact(self.as_mut())
+    /// Set xattr inline count.
+    fn set_xattr_inline_count(&mut self, count: u16) {
+        self.i_xattr_icount = count.to_le();
+    }
+
+    /// Set inode data layout format.
+    fn set_data_layout(&mut self, data_layout: u16) {
+        self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (data_layout << 1));
     }
 
     fn format(&self) -> u16 {
@@ -847,6 +850,11 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
 
     fn xattr_inline_count(&self) -> u16 {
         u16::from_le(self.i_xattr_icount)
+    }
+
+    /// Load a `RafsV6InodeExtended` from a reader.
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
     }
 }
 
@@ -889,28 +897,14 @@ impl RafsV6Dirent {
 
     /// Get file type from file mode.
     pub fn file_type(mode: u32) -> u8 {
-        let val = match mode {
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFREG as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_REG_FILE
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_DIR
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_CHRDEV
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_BLKDEV
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_FIFO
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_SOCK
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_SYMLINK
-            }
+        let val = match mode as libc::mode_t & libc::S_IFMT {
+            libc::S_IFREG => EROFS_FILE_TYPE::EROFS_FT_REG_FILE,
+            libc::S_IFDIR => EROFS_FILE_TYPE::EROFS_FT_DIR,
+            libc::S_IFCHR => EROFS_FILE_TYPE::EROFS_FT_CHRDEV,
+            libc::S_IFBLK => EROFS_FILE_TYPE::EROFS_FT_BLKDEV,
+            libc::S_IFIFO => EROFS_FILE_TYPE::EROFS_FT_FIFO,
+            libc::S_IFSOCK => EROFS_FILE_TYPE::EROFS_FT_SOCK,
+            libc::S_IFLNK => EROFS_FILE_TYPE::EROFS_FT_SYMLINK,
             _ => EROFS_FILE_TYPE::EROFS_FT_UNKNOWN,
         };
 
@@ -1729,9 +1723,10 @@ impl RafsXAttrs {
     }
 
     fn match_prefix(key: &OsStr) -> Result<(u8, usize)> {
+        let key_str = key.to_string_lossy();
         let pos = RAFSV6_XATTR_TYPES
             .iter()
-            .position(|x| key.to_string_lossy().starts_with(x.prefix))
+            .position(|x| key_str.starts_with(x.prefix))
             .ok_or_else(|| einval!(format!("xattr prefix {:?} is not valid", key)))?;
         Ok((
             RAFSV6_XATTR_TYPES[pos].index,
