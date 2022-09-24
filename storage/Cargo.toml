@@ -15,12 +15,11 @@ base64 = { version = "0.13.0", optional = true }
 bitflags = "1.2.1"
 dbs-uhttp = { version = "0.3.0" }
 futures = "0.3"
-# pin governor to avoid multi versions of hashbrown
-governor = "=0.4.1"
 hmac = { version = "0.12.1", optional = true }
 httpdate = { version = "1.0", optional = true }
 lazy_static = "1.4.0"
 libc = "0.2"
+leaky-bucket = "0.12.1"
 log = "0.4.8"
 nix = "0.24"
 reqwest = { version = "0.11.11", features = ["blocking", "json"], optional = true }
