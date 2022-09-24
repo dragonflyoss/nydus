@@ -36,10 +36,14 @@ const BLOB_METADATA_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const BLOB_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
-const BLOB_CHUNK_SIZE_LOW_MASK: u64 = 0xf_ffff;
+const BLOB_CHUNK_SIZE_MASK: u64 = 0xff_ffff;
+const BLOB_CHUNK_SIZE_LOW_MASK: u64 = 0x0f_ffff;
+const BLOB_CHUNK_SIZE_HIGH_MASK: u64 = 0xf0_0000;
 const BLOB_CHUNK_SIZE_LOW_SHIFT: u64 = 44;
-const BLOB_CHUNK_SIZE_LOW_SHIFT_LEFT: u64 = 12;
+const BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT: u64 = 20;
+const BLOB_CHUNK_SIZE_HIGH_UNCOMP_SHIFT: u64 = 12;
 const FILE_SUFFIX: &str = "blob.meta";
+
 pub const BLOB_FEATURE_4K_ALIGNED: u32 = 0x1;
 
 /// Blob metadata on disk format.
@@ -197,7 +201,7 @@ impl BlobChunkInfoOndisk {
     #[inline]
     pub fn compressed_size(&self) -> u32 {
         let bit20 = self.comp_info >> BLOB_CHUNK_SIZE_LOW_SHIFT;
-        let bit4 = (self.comp_info & 0xf0000000000) >> 20;
+        let bit4 = (self.comp_info & 0xf0000000000) >> BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT;
         (bit4 | bit20) as u32 + 1
     }
 
@@ -205,10 +209,10 @@ impl BlobChunkInfoOndisk {
     #[inline]
     pub fn set_compressed_size(&mut self, size: u32) {
         let size = size as u64;
-        debug_assert!(size > 0 && size <= BLOB_CHUNK_SIZE_LOW_MASK + 1);
+        debug_assert!(size > 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
 
         let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
-        let size_high = ((size - 1) & 0xf0_0000) << 20;
+        let size_high = ((size - 1) & BLOB_CHUNK_SIZE_HIGH_MASK) << BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT;
         let offset = self.comp_info & BLOB_CHUNK_COMP_OFFSET_MASK;
 
         self.comp_info = size_low | size_high | offset;
@@ -237,7 +241,7 @@ impl BlobChunkInfoOndisk {
     /// Get uncompressed end of the chunk.
     #[inline]
     pub fn uncompressed_size(&self) -> u32 {
-        let size_high = (self.uncomp_info & 0xf00) << BLOB_CHUNK_SIZE_LOW_SHIFT_LEFT;
+        let size_high = (self.uncomp_info & 0xf00) << BLOB_CHUNK_SIZE_HIGH_UNCOMP_SHIFT;
         let size_low = self.uncomp_info >> BLOB_CHUNK_SIZE_LOW_SHIFT;
         (size_high | size_low) as u32 + 1
     }
@@ -246,13 +250,14 @@ impl BlobChunkInfoOndisk {
     #[inline]
     pub fn set_uncompressed_size(&mut self, size: u32) {
         let size = size as u64;
-        debug_assert!(size != 0 && size <= BLOB_CHUNK_SIZE_LOW_MASK + 1);
+        debug_assert!(size != 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
 
         let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
+        let size_high =
+            ((size - 1) & BLOB_CHUNK_SIZE_HIGH_MASK) >> BLOB_CHUNK_SIZE_HIGH_UNCOMP_SHIFT;
         let offset = self.uncomp_info & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-        let bit12 = ((size - 1) & 0xf0_0000) >> BLOB_CHUNK_SIZE_LOW_SHIFT_LEFT;
 
-        self.uncomp_info = size_low | offset | bit12;
+        self.uncomp_info = size_low | offset | size_high;
     }
 
     /// Get uncompressed size of the chunk.
@@ -901,14 +906,14 @@ mod tests {
         assert_eq!(chunk.uncompressed_offset(), 0x1000);
         assert_eq!(chunk.uncompressed_size(), 0x100);
 
-        chunk.set_compressed_offset(0x1000000);
+        chunk.set_compressed_offset(0xffffffffff);
         chunk.set_compressed_size(0x1000000);
-        assert_eq!(chunk.compressed_offset(), 0x1000000);
+        assert_eq!(chunk.compressed_offset(), 0xffffffffff);
         assert_eq!(chunk.compressed_size(), 0x1000000);
 
-        chunk.set_uncompressed_offset(0x1000000);
+        chunk.set_uncompressed_offset(0xffffffff000);
         chunk.set_uncompressed_size(0x1000000);
-        assert_eq!(chunk.uncompressed_offset(), 0x1000000);
+        assert_eq!(chunk.uncompressed_offset(), 0xffffffff000);
         assert_eq!(chunk.uncompressed_size(), 0x1000000);
 
         // For testing old format compatibility.

@@ -99,7 +99,7 @@ impl HashCache {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct TokenResponse {
     token: String,
 }

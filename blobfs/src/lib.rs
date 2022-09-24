@@ -299,8 +299,7 @@ impl BackendFileSystem for BlobFs {
     }
 }
 
-#[cfg(test)]
-#[cfg(feature = "virtiofs")]
+#[cfg(test2)]
 mod tests {
     use super::*;
     use fuse_backend_rs::abi::virtio_fs;
@@ -430,36 +429,36 @@ mod tests {
     fn test_blobfs_setupmapping() {
         setup_logging(None, log::LevelFilter::Trace, 0).unwrap();
         let config = r#"
-{
-        "rafs_conf": {
-            "device": {
-              "backend": {
-                "type": "localfs",
-                "config": {
-                  "blob_file": "/home/b.liu/1_source/3_ali/virtiofs/qemu-my/build-kangaroo/share_dir1/nydus-rs/myblob1/v6/blob-btrfs"
+    {
+            "rafs_conf": {
+                "device": {
+                  "backend": {
+                    "type": "localfs",
+                    "config": {
+                      "blob_file": "/home/b.liu/1_source/3_ali/virtiofs/qemu-my/build-kangaroo/share_dir1/nydus-rs/myblob1/v6/blob-btrfs"
+                    }
+                  },
+                  "cache": {
+                    "type": "blobcache",
+                    "compressed": false,
+                    "config": {
+                      "work_dir": "/home/b.liu/1_source/3_ali/virtiofs/qemu-my/build-kangaroo/share_dir1/blobcache"
+                    }
+                  }
+                },
+                "mode": "direct",
+                "digest_validate": false,
+                "enable_xattr": false,
+                "fs_prefetch": {
+                  "enable": false,
+                  "threads_count": 10,
+                  "merging_size": 131072,
+                  "bandwidth_rate": 10485760
                 }
               },
-              "cache": {
-                "type": "blobcache",
-                "compressed": false,
-                "config": {
-                  "work_dir": "/home/b.liu/1_source/3_ali/virtiofs/qemu-my/build-kangaroo/share_dir1/blobcache"
-                }
-              }
-            },
-            "mode": "direct",
-            "digest_validate": false,
-            "enable_xattr": false,
-            "fs_prefetch": {
-              "enable": false,
-              "threads_count": 10,
-              "merging_size": 131072,
-              "bandwidth_rate": 10485760
-            }
-          },
-     "bootstrap_path": "nydus-rs/myblob1/v6/bootstrap-btrfs",
-     "blob_cache_dir": "/home/b.liu/1_source/3_ali/virtiofs/qemu-my/build-kangaroo/share_dir1/blobcache"
-}"#;
+         "bootstrap_path": "nydus-rs/myblob1/v6/bootstrap-btrfs",
+         "blob_cache_dir": "/home/b.liu/1_source/3_ali/virtiofs/qemu-my/build-kangaroo/share_dir1/blobcache"
+    }"#;
         //        let rafs_conf = RafsConfig::from_str(config).unwrap();
 
         let ps_config = PassthroughConfig {

@@ -1,5 +1,4 @@
 use std::convert::TryFrom;
-#[cfg(feature = "fusedev")]
 use std::path::PathBuf;
 
 use crate::daemon::DaemonResult;
@@ -10,7 +9,6 @@ use crate::FsBackendMountCmd;
 pub enum UpgradeMgrError {}
 pub struct UpgradeManager {}
 
-#[cfg(feature = "fusedev")]
 impl UpgradeManager {
     pub fn new(_: PathBuf) -> Self {
         UpgradeManager {}
@@ -54,7 +52,6 @@ pub fn remove_mounts_state(
     Ok(())
 }
 
-#[cfg(feature = "fusedev")]
 pub mod fusedev_upgrade {
     use crate::daemon::DaemonResult;
     use crate::fusedev::FusedevDaemon;
