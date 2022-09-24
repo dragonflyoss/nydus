@@ -155,7 +155,7 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if u32::from_le(self.s_checksum) != 0 {
+        if self.s_checksum != 0 {
             return Err(einval!(format!(
                 "invalid checksum {} in Rafsv6 superblock",
                 u32::from_le(self.s_checksum)
@@ -169,7 +169,7 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if u64::from_le(self.s_inos) == 0 {
+        if self.s_inos == 0 {
             return Err(einval!("invalid inode number in Rafsv6 superblock"));
         }
 
@@ -181,7 +181,7 @@ impl RafsV6SuperBlock {
             return Err(einval!("invalid blocks in Rafsv6 superblock"));
         }
 
-        if u16::from_le(self.s_u) != 0 {
+        if self.s_u != 0 {
             return Err(einval!("invalid union field in Rafsv6 superblock"));
         }
 
@@ -631,12 +631,13 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     /// Set last modification time for the inode.
     fn set_mtime(&mut self, _sec: u64, _nsec: u32) {}
 
-    fn set_rdev(&mut self, _rdev: u32) {}
-
     /// Set inode data layout format.
     fn set_data_layout(&mut self, data_layout: u16) {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (data_layout << 1));
     }
+
+    /// Set real device id.
+    fn set_rdev(&mut self, _rdev: u32) {}
 
     /// Load a `RafsV6InodeCompact` from a reader.
     fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
@@ -644,27 +645,30 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     }
 
     fn format(&self) -> u16 {
-        self.i_format
+        u16::from_le(self.i_format)
     }
 
     fn mode(&self) -> u16 {
-        self.i_mode
+        u16::from_le(self.i_mode)
     }
 
     fn size(&self) -> u64 {
-        self.i_size as u64
+        u32::from_le(self.i_size) as u64
     }
 
     fn union(&self) -> u32 {
-        self.i_u
+        u32::from_le(self.i_u)
     }
 
     fn ino(&self) -> u32 {
-        self.i_ino
+        u32::from_le(self.i_ino)
     }
 
     fn ugid(&self) -> (u32, u32) {
-        (self.i_uid as u32, self.i_gid as u32)
+        (
+            u16::from_le(self.i_uid) as u32,
+            u16::from_le(self.i_gid) as u32,
+        )
     }
 
     fn mtime_s_ns(&self) -> (u64, u32) {
@@ -672,7 +676,7 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     }
 
     fn nlink(&self) -> u32 {
-        self.i_nlink as u32
+        u16::from_le(self.i_nlink) as u32
     }
 
     fn rdev(&self) -> u32 {
@@ -680,7 +684,7 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     }
 
     fn xattr_inline_count(&self) -> u16 {
-        self.i_xattr_icount
+        u16::from_le(self.i_xattr_icount)
     }
 }
 
@@ -711,7 +715,6 @@ pub struct RafsV6InodeExtended {
     /// Size of the file content.
     pub i_size: u64,
     /// A `u32` union: raw_blkaddr or `rdev` or `rafs_v6_inode_chunk_info`
-    /// TODO: Use this field like C union style.
     pub i_u: u32,
     /// Inode number.
     pub i_ino: u32,
@@ -792,13 +795,13 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
         self.i_mtime_nsec = u32::to_le(nsec);
     }
 
-    fn set_rdev(&mut self, rdev: u32) {
-        self.i_u = rdev
-    }
-
     /// Set inode data layout format.
     fn set_data_layout(&mut self, data_layout: u16) {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (data_layout << 1));
+    }
+
+    fn set_rdev(&mut self, rdev: u32) {
+        self.i_u = rdev.to_le()
     }
 
     /// Load a `RafsV6InodeExtended` from a reader.
@@ -807,43 +810,43 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
     }
 
     fn format(&self) -> u16 {
-        self.i_format
+        u16::from_le(self.i_format)
     }
 
     fn mode(&self) -> u16 {
-        self.i_mode
+        u16::from_le(self.i_mode)
     }
 
     fn size(&self) -> u64 {
-        self.i_size
+        u64::from_le(self.i_size)
     }
 
     fn union(&self) -> u32 {
-        self.i_u
+        u32::from_le(self.i_u)
     }
 
     fn ino(&self) -> u32 {
-        self.i_ino
+        u32::from_le(self.i_ino)
     }
 
     fn ugid(&self) -> (u32, u32) {
-        (self.i_uid, self.i_gid)
+        (u32::from_le(self.i_uid), u32::from_le(self.i_gid))
     }
 
     fn mtime_s_ns(&self) -> (u64, u32) {
-        (self.i_mtime, self.i_mtime_nsec)
+        (u64::from_le(self.i_mtime), u32::from_le(self.i_mtime_nsec))
     }
 
     fn nlink(&self) -> u32 {
-        self.i_nlink
+        u32::from_le(self.i_nlink)
     }
 
     fn rdev(&self) -> u32 {
-        self.i_u
+        u32::from_le(self.i_u)
     }
 
     fn xattr_inline_count(&self) -> u16 {
-        self.i_xattr_icount
+        u16::from_le(self.i_xattr_icount)
     }
 }
 
@@ -1639,7 +1642,7 @@ impl RafsV6XattrEntry {
     }
 
     pub fn value_size(&self) -> u32 {
-        u32::from_le(self.e_value_size as u32)
+        u16::from_le(self.e_value_size) as u32
     }
 
     fn set_name_len(&mut self, v: u8) {
