@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Debug;
 use std::io::{Read, Result};
@@ -1393,10 +1393,7 @@ impl RafsV6Blob {
             error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} wraps around", blob_index, ci_compr_size, ci_offset);
             return false;
         }
-        // Stargz blobs have no compression information array.
-        let skip_size_check =
-            self.compression_algo == compress::Algorithm::GZip && ci_offset == compressed_blob_size;
-        if !skip_size_check && ci_offset + ci_compr_size > compressed_blob_size {
+        if ci_offset != compressed_blob_size && ci_offset + ci_compr_size > compressed_blob_size {
             error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} is bigger than blob size {}", blob_index, ci_compr_size, ci_offset, compressed_blob_size);
             return false;
         }
@@ -1683,8 +1680,8 @@ pub fn recover_namespace(index: u8) -> Result<OsString> {
         .iter()
         .position(|x| x.index == index)
         .ok_or_else(|| einval!(format!("invalid xattr name index {}", index)))?;
-    // Safe to unwrap since it is encoded in Nydus
-    Ok(OsString::from_str(RAFSV6_XATTR_TYPES[pos].prefix).unwrap())
+    OsString::from_str(RAFSV6_XATTR_TYPES[pos].prefix)
+        .map_err(|_e| einval!("invalid xattr name prefix"))
 }
 
 impl RafsXAttrs {
@@ -1705,6 +1702,7 @@ impl RafsXAttrs {
         } else {
             let mut size: usize = size_of::<RafsV6XattrIbodyHeader>();
             for (key, value) in self.pairs.iter() {
+                // Safe to unwrap() because RafsXAttrs.add()/adds() has validated the prefix.
                 let (_, prefix_len) = Self::match_prefix(key).expect("xattr is not valid");
 
                 size += size_of::<RafsV6XattrEntry>();
@@ -1723,13 +1721,19 @@ impl RafsXAttrs {
 
         if !self.pairs.is_empty() {
             for (key, value) in self.pairs.iter() {
-                // TODO: fix error handling on unknown xattr.
-                let (index, prefix_len) = Self::match_prefix(key).expect("xattr is not valid");
+                let (index, prefix_len) = Self::match_prefix(key)
+                    .map_err(|_| einval!(format!("invalid xattr key {:?}", key)))?;
+                if key.len() <= prefix_len {
+                    return Err(einval!(format!("invalid xattr key {:?}", key)));
+                }
+                if value.len() > u16::MAX as usize {
+                    return Err(einval!("xattr value size is too big"));
+                }
 
                 let mut entry = RafsV6XattrEntry::new();
                 entry.set_name_len((key.byte_size() - prefix_len) as u8);
                 entry.set_name_index(index);
-                entry.set_value_size(value.len().try_into().unwrap());
+                entry.set_value_size(value.len() as u16);
 
                 w.write_all(entry.as_ref())?;
                 w.write_all(&key.as_bytes()[prefix_len..])?;
@@ -1999,8 +2003,8 @@ mod tests {
     #[test]
     fn test_rafs_xattr_count_v6() {
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.a"), vec![1u8]);
-        xattrs.add(OsString::from("trusted.b"), vec![2u8]);
+        xattrs.add2("user.a", vec![1u8]).unwrap();
+        xattrs.add2("trusted.b", vec![2u8]).unwrap();
 
         assert_eq!(xattrs.count_v6(), 5);
 
@@ -2011,8 +2015,8 @@ mod tests {
     #[test]
     fn test_rafs_xattr_size_v6() {
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.a"), vec![1u8]);
-        xattrs.add(OsString::from("trusted.b"), vec![2u8]);
+        xattrs.add2("user.a", vec![1u8]).unwrap();
+        xattrs.add2("trusted.b", vec![2u8]).unwrap();
 
         let size = 12 + 8 + 8;
         assert_eq!(xattrs.aligned_size_v6(), size);
@@ -2020,11 +2024,9 @@ mod tests {
         let xattrs2 = RafsXAttrs::new();
         assert_eq!(xattrs2.aligned_size_v6(), 0);
 
-        // let mut xattrs2 = RafsXAttrs::new();
-        // xattrs2.add(OsString::from("user.a"), vec![1u8]);
-        // xattrs2.add(OsString::from("unknown.b"), vec![2u8]);
-
-        // assert_eq!(xattrs2.aligned_size_v6().is_error(), true);
+        let mut xattrs2 = RafsXAttrs::new();
+        xattrs2.add2("user.a", vec![1u8]).unwrap();
+        xattrs2.add2("unknown.b", vec![2u8]).unwrap_err();
     }
 
     #[test]
@@ -2044,8 +2046,8 @@ mod tests {
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.nydus"), vec![1u8]);
-        xattrs.add(OsString::from("security.rafs"), vec![2u8, 3u8]);
+        xattrs.add2("user.nydus", vec![1u8]).unwrap();
+        xattrs.add2("security.rafs", vec![2u8, 3u8]).unwrap();
         xattrs.store_v6(&mut writer).unwrap();
         writer.flush().unwrap();
 

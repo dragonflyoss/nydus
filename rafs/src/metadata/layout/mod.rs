@@ -208,6 +208,17 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
     Ok(value)
 }
 
+/// Valid prefixes of extended attributes
+///
+/// Please keep in consistence with `RAFSV6_XATTR_TYPES`.
+pub const RAFS_XATTR_PREFIXES: [&str; 5] = [
+    "user.",
+    "security.",
+    "trusted.",
+    "system.posix_acl_access",
+    "system.posix_acl_default",
+];
+
 /// Rafs inode extended attributes.
 ///
 /// An extended attribute is a (String, String) pair associated with a inode.
@@ -242,8 +253,27 @@ impl RafsXAttrs {
     }
 
     /// Add or update an extended attribute.
-    pub fn add(&mut self, name: OsString, value: XattrValue) {
-        self.pairs.insert(name, value);
+    pub fn add(&mut self, name: OsString, value: XattrValue) -> Result<()> {
+        for p in RAFS_XATTR_PREFIXES {
+            if let Some(key) = name.to_str() {
+                if key.starts_with(p) {
+                    self.pairs.insert(name, value);
+                    return Ok(());
+                }
+            }
+        }
+        Err(einval!("invalid xattr key"))
+    }
+
+    /// Add or update an extended attribute.
+    pub fn add2(&mut self, name: &str, value: XattrValue) -> Result<()> {
+        for p in RAFS_XATTR_PREFIXES {
+            if name.starts_with(p) {
+                self.pairs.insert(name.into(), value);
+                return Ok(());
+            }
+        }
+        Err(einval!("invalid xattr key"))
     }
 
     /// Remove an extended attribute

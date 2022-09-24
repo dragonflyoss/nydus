@@ -323,7 +323,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         for name in inode.get_xattrs()? {
             let name = bytes_to_os_str(&name);
             let value = inode.get_xattr(name)?;
-            xattrs.add(name.to_os_string(), value.unwrap_or_default());
+            xattrs.add(name.to_os_string(), value.unwrap_or_default())?;
         }
 
         // Nodes loaded from bootstrap will only be used as `Overlay::Lower`, so make `dev` invalid
