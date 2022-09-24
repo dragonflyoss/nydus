@@ -15,18 +15,16 @@ base64 = { version = "0.13.0", optional = true }
 bitflags = "1.2.1"
 dbs-uhttp = { version = "0.3.0" }
 futures = "0.3"
-hmac = { version = "0.12.1", optional = true }
+hmac-sha1-compact = { version = "1.1.1", optional = true }
 httpdate = { version = "1.0", optional = true }
 lazy_static = "1.4.0"
-libc = "0.2"
 leaky-bucket = "0.12.1"
+libc = "0.2"
 log = "0.4.8"
 nix = "0.24"
 reqwest = { version = "0.11.11", features = ["blocking", "json"], optional = true }
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
-sha2 = { version = "0.10.2", optional = true }
-sha-1 = { version = "0.10.0", optional = true }
 tokio = { version = "1.19.0", features = ["rt", "rt-multi-thread", "sync", "time"] }
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.9"
@@ -40,9 +38,9 @@ nydus-error = { version = "0.2", path = "../error" }
 [dev-dependencies]
 
 [features]
-backend-localfs = ["sha2"]
-backend-oss = ["base64", "httpdate", "reqwest", "sha-1", "sha2", "hmac", "url"]
-backend-registry = ["base64", "reqwest", "sha2", "url"]
+backend-localfs = []
+backend-oss = ["base64", "httpdate", "hmac-sha1-compact", "reqwest", "url"]
+backend-registry = ["base64", "reqwest", "url"]
 
 [package.metadata.docs.rs]
 all-features = true

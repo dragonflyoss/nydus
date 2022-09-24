@@ -8,10 +8,9 @@ use std::io::{Error, Result};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use hmac::{Hmac, Mac};
+use hmac_sha1_compact::HMAC;
 use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
-use sha1::Sha1;
 
 use nydus_api::http::OssConfig;
 use nydus_utils::metrics::BackendMetrics;
@@ -21,8 +20,6 @@ use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
-
-type HmacSha1 = Hmac<Sha1>;
 
 /// Error codes related to OSS storage backend.
 #[derive(Debug)]
@@ -108,10 +105,8 @@ impl OssState {
             data.insert(4, canonicalized_oss_headers.as_str());
         }
         let data = data.join("\n");
-        let mut mac =
-            HmacSha1::new_from_slice(self.access_key_secret.as_bytes()).map_err(|e| einval!(e))?;
-        mac.update(data.as_bytes());
-        let signature = base64::encode(&mac.finalize().into_bytes());
+        let digest = HMAC::mac(data.as_bytes(), self.access_key_secret.as_bytes());
+        let signature = base64::encode(&digest);
 
         let authorization = format!("OSS {}:{}", self.access_key_id, signature);
 
