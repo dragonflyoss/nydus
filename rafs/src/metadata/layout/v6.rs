@@ -72,7 +72,9 @@ const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 /// Size of SHA256 digest string.
 const BLOB_SHA256_LEN: usize = 64;
-const BLOB_MAX_SIZE: u64 = 1u64 << 44;
+const BLOB_MAX_SIZE_UNCOMPRESSED: u64 = 1u64 << 44;
+const BLOB_MAX_SIZE_COMPRESSED: u64 = 1u64 << 40;
+const BLOB_MAX_CI_SIZE_UNCOMPRESSED: u64 = 16u64 * (1 << 24);
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
@@ -1292,7 +1294,6 @@ impl RafsV6Blob {
     }
 
     fn validate(&self, blob_index: u32, chunk_size: u32, _flags: RafsSuperFlags) -> bool {
-        /* TODO: check fields: compressed_size, meta_features, ci_offset, ci_compressed_size, ci_uncompressed_size */
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
@@ -1347,12 +1348,20 @@ impl RafsV6Blob {
         }
 
         let uncompressed_blob_size = u64::from_le(self.uncompressed_size);
+        let compressed_blob_size = u64::from_le(self.compressed_size);
         // TODO: Make blobs of 4k size aligned.
 
-        if uncompressed_blob_size > BLOB_MAX_SIZE {
+        if uncompressed_blob_size > BLOB_MAX_SIZE_UNCOMPRESSED {
             error!(
                 "RafsV6Blob: idx {} invalid uncompressed_size {}",
                 blob_index, uncompressed_blob_size
+            );
+            return false;
+        }
+        if compressed_blob_size > BLOB_MAX_SIZE_COMPRESSED {
+            error!(
+                "RafsV6Blob: idx {} invalid compressed_size {}",
+                blob_index, compressed_blob_size
             );
             return false;
         }
@@ -1379,8 +1388,27 @@ impl RafsV6Blob {
             return false;
         }
 
+        let ci_offset = u64::from_le(self.ci_offset);
         let ci_compr_size = u64::from_le(self.ci_compressed_size);
         let ci_uncompr_size = u64::from_le(self.ci_uncompressed_size);
+        if ci_offset.checked_add(ci_compr_size).is_none() {
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} wraps around", blob_index, ci_compr_size, ci_offset);
+            return false;
+        }
+        // Stargz blobs have no compression information array.
+        let skip_size_check =
+            self.compression_algo == compress::Algorithm::GZip && ci_offset == compressed_blob_size;
+        if !skip_size_check && ci_offset + ci_compr_size > compressed_blob_size {
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} is bigger than blob size {}", blob_index, ci_compr_size, ci_offset, compressed_blob_size);
+            return false;
+        }
+        if ci_uncompr_size > BLOB_MAX_CI_SIZE_UNCOMPRESSED {
+            error!(
+                "RafsV6Blob: idx {} invalid fields, ci_uncompressed_size {}",
+                blob_index, ci_uncompr_size
+            );
+            return false;
+        }
         if ci_compr_size > ci_uncompr_size {
             error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} is greater than ci_uncompressed_size {}", blob_index, ci_compr_size, ci_uncompr_size);
             return false;
@@ -1685,7 +1713,6 @@ impl RafsXAttrs {
                 size += key.byte_size() - prefix_len + value.len();
                 size = round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64) as usize;
             }
-
             size
         }
     }
