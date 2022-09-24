@@ -552,7 +552,7 @@ mod tests {
         let tmpdir = TempDir::new().unwrap();
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
-        source_path.push("tests/texture/bootstrap/image_v2.boot");
+        source_path.push("tests/texture/bootstrap/rafs-v5.boot");
         let path = source_path.to_str().unwrap();
 
         let config = create_factory_config();
@@ -570,7 +570,7 @@ mod tests {
         };
         let mut entry = BlobCacheEntry {
             blob_type: BLOB_CACHE_TYPE_BOOTSTRAP.to_string(),
-            blob_id: "image_v2".to_string(),
+            blob_id: "rafs-v5".to_string(),
             blob_config,
             domain_id: "domain2".to_string(),
         };
@@ -589,7 +589,7 @@ mod tests {
 
         assert_eq!(mgr.get_state().id_to_config_map.len(), 19);
 
-        entry.blob_id = "image_v2_cloned".to_string();
+        entry.blob_id = "rafs-v5-cloned".to_string();
         let blob_id_cloned = generate_blob_key(&entry.domain_id, &entry.blob_id);
         mgr.add_blob_entry(&entry).unwrap();
         assert_eq!(mgr.get_state().id_to_config_map.len(), 20);
@@ -598,7 +598,7 @@ mod tests {
 
         mgr.remove_blob_entry(&BlobCacheObjectId {
             domain_id: entry.domain_id.clone(),
-            blob_id: "image_v2".to_string(),
+            blob_id: "rafs-v5".to_string(),
         })
         .unwrap();
         assert_eq!(mgr.get_state().id_to_config_map.len(), 19);
@@ -607,7 +607,7 @@ mod tests {
 
         mgr.remove_blob_entry(&BlobCacheObjectId {
             domain_id: entry.domain_id,
-            blob_id: "image_v2_cloned".to_string(),
+            blob_id: "rafs-v5-cloned".to_string(),
         })
         .unwrap();
         assert_eq!(mgr.get_state().id_to_config_map.len(), 0);

@@ -965,8 +965,10 @@ impl FileSystem for Rafs {
 pub(crate) mod tests {
     use super::*;
     use crate::metadata::RAFS_DEFAULT_CHUNK_SIZE;
+    #[cfg(feature = "backend-oss")]
     use crate::RafsIoRead;
 
+    #[cfg(feature = "backend-oss")]
     pub fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
         {
@@ -996,7 +998,7 @@ pub(crate) mod tests {
           }"#;
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
-        source_path.push("../tests/texture/bootstrap/image_v2.boot");
+        source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
         let mountpoint = "/mnt";
         let rafs_config = RafsConfig::from_str(config).unwrap();
         let bootstrapfile = source_path.to_str().unwrap();
@@ -1007,6 +1009,7 @@ pub(crate) mod tests {
         Box::new(rafs)
     }
 
+    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_create_new_rafs_fs() {
         let rafs = new_rafs_backend();
@@ -1018,6 +1021,7 @@ pub(crate) mod tests {
         assert_eq!(attr.mode & 0o777, 0o755);
     }
 
+    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_access() {
         let rafs = new_rafs_backend();
@@ -1031,6 +1035,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_listxattr() {
         let rafs = new_rafs_backend();
@@ -1048,6 +1053,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_get_statfs() {
         let rafs = new_rafs_backend();
@@ -1068,12 +1074,15 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_enable_xattr() {
         let rafs = new_rafs_backend();
+        assert!(rafs.xattr_enabled);
         assert!(rafs.xattr_supported());
     }
 
+    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_lookup_entry() {
         let rafs = new_rafs_backend();

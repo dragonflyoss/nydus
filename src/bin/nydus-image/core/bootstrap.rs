@@ -548,7 +548,11 @@ impl Bootstrap {
                 ));
             }
             devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
-            devslot.set_blocks(entry.uncompressed_size());
+            devslot.set_blocks(
+                (entry.uncompressed_size() / EROFS_BLOCK_SIZE)
+                    .try_into()
+                    .unwrap(),
+            );
             devslot.set_mapped_blkaddr(0);
             devtable.push(devslot);
         }

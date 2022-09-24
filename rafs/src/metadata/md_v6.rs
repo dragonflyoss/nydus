@@ -167,7 +167,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_v6_load_invalid_superblock() {
         let t_file = TempFile::new().unwrap();
 
@@ -201,9 +200,13 @@ mod tests {
     fn test_try_load_v6() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
-        source_path.push("../tests/texture/bootstrap/rafs_v6.boot");
+        source_path.push("../tests/texture/bootstrap/rafs-v6.boot");
 
-        let file = OpenOptions::new().read(true).write(false).open(path).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(source_path)
+            .unwrap();
         let mut reader = Box::new(file) as RafsIoReader;
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,

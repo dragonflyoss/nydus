@@ -1099,9 +1099,7 @@ impl RafsV6Device {
     }
 
     /// Set number of blocks.
-    pub fn set_blocks(&mut self, size: u64) {
-        debug_assert!(size % EROFS_BLOCK_SIZE == 0);
-        let blocks: u32 = (size >> EROFS_BLOCK_BITS) as u32;
+    pub fn set_blocks(&mut self, blocks: u32) {
         self.blocks = blocks.to_le();
     }
 
@@ -1835,13 +1833,11 @@ impl RafsV6PrefetchTable {
 mod tests {
     use super::*;
     use crate::{BufWriter, RafsIoRead};
-    use std::ffi::OsString;
     use std::fs::OpenOptions;
     use std::io::Write;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
-    #[ignore]
     fn test_super_block_load_store() {
         let mut sb = RafsV6SuperBlock::new();
         let temp = TempFile::new().unwrap();
@@ -1878,7 +1874,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_v6_inode_extended() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1945,7 +1940,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_v6_chunk_addr() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1975,7 +1969,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_v6_device() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1999,7 +1992,7 @@ mod tests {
         writer.flush().unwrap();
         let mut device2 = RafsV6Device::new();
         device2.load(&mut reader).unwrap();
-        assert_eq!(device2.blocks(), 0x1);
+        assert_eq!(device2.blocks(), 0x1234);
         assert_eq!(device.blob_id(), &id);
     }
 
@@ -2035,7 +2028,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_xattr_store_v6() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
