@@ -43,7 +43,6 @@ extern crate log;
 extern crate bitflags;
 #[macro_use]
 extern crate nydus_error;
-extern crate dbs_uhttp;
 
 use std::fmt::{Display, Formatter};
 
@@ -52,7 +51,7 @@ pub mod cache;
 pub mod device;
 pub mod factory;
 pub mod meta;
-pub mod remote;
+//pub mod remote;
 #[cfg(test)]
 pub(crate) mod test;
 pub mod utils;
