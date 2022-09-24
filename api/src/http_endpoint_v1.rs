@@ -7,9 +7,10 @@
 
 use dbs_uhttp::{Method, Request, Response};
 
-use crate::http::{
+use crate::http::{ApiError, ApiRequest, ApiResponse, ApiResponsePayload, HttpError};
+use crate::http_handler::{
     error_response, extract_query_part, parse_body, success_response, translate_status_code,
-    ApiError, ApiRequest, ApiResponse, ApiResponsePayload, EndpointHandler, HttpError, HttpResult,
+    EndpointHandler, HttpResult,
 };
 
 /// HTTP URI prefix for API v1.

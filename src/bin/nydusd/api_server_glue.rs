@@ -15,7 +15,7 @@ use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
 use nydus::{FsBackendType, NydusError};
-use nydus_api::http::{
+use nydus_api::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
     ApiResult, BlobCacheEntry, BlobCacheObjectId, DaemonConf, DaemonErrorKind, MetricsErrorKind,
 };

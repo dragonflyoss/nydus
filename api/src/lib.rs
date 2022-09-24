@@ -10,13 +10,26 @@
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;
+#[cfg(feature = "handler")]
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate nydus_error;
 
 pub mod http;
+pub use self::http::*;
+
+#[cfg(feature = "handler")]
 pub(crate) mod http_endpoint_common;
+#[cfg(feature = "handler")]
 pub(crate) mod http_endpoint_v1;
+#[cfg(feature = "handler")]
 pub(crate) mod http_endpoint_v2;
+#[cfg(feature = "handler")]
+pub(crate) mod http_handler;
+
+#[cfg(feature = "handler")]
+pub use http_handler::{
+    extract_query_part, start_http_thread, EndpointHandler, HttpResult, HttpRoutes, HTTP_ROUTES,
+};
