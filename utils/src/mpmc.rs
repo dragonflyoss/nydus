@@ -1,7 +1,6 @@
 // Copyright (C) 2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
-// Async implementation of Multi-Producer-Multi-Consumer channel.
 
 //! Asynchronous Multi-Producer Multi-Consumer channel.
 //!
