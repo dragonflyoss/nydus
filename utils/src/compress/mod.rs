@@ -19,6 +19,9 @@ use self::lz4_standard::*;
 mod zstd_standard;
 use self::zstd_standard::*;
 
+//#[cfg(feature = "zran")]
+pub mod zlib_random;
+
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
