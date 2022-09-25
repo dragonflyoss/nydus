@@ -728,7 +728,7 @@ class NydusDaemon(utils.ArtifactProcess):
         Umount is sometimes invoked during teardown. So it can't assert.
         """
         self._catcher_dead = True
-        ret, _ = utils.execute(["umount", self.mountpoint], print_output=True)
+        ret, _ = utils.execute(["umount", "-l", self.mountpoint], print_output=True)
         assert ret
         # self.p.wait()
         # assert self.p.returncode == 0
