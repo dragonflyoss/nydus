@@ -36,7 +36,7 @@ jobs:
       - name: test contrib UT
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.43.0
-          make all-contrib-test
+          make contrib-test
 
   smoke:
     runs-on: ubuntu-latest
