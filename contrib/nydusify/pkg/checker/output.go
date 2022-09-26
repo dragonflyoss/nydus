@@ -32,12 +32,21 @@ func (checker *Checker) Output(
 ) error {
 	logrus.Infof("Dumping OCI and Nydus manifests to %s", outputPath)
 
+	if sourceParsed.Index != nil {
+		if err := prettyDump(
+			sourceParsed.Index,
+			filepath.Join(outputPath, "oci_index.json"),
+		); err != nil {
+			return errors.Wrap(err, "output oci index file")
+		}
+	}
+
 	if targetParsed.Index != nil {
 		if err := prettyDump(
 			targetParsed.Index,
-			filepath.Join(outputPath, "index.json"),
+			filepath.Join(outputPath, "nydus_index.json"),
 		); err != nil {
-			return errors.Wrap(err, "output index file")
+			return errors.Wrap(err, "output nydus index file")
 		}
 	}
 
