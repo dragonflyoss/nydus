@@ -108,7 +108,7 @@ func (sl *defaultSourceLayer) Mount(ctx context.Context) ([]mount.Mount, func() 
 		defer reader.Close()
 
 		// Decompress layer from source stream
-		if err := utils.UnpackTargz(ctx, sl.mountDir, reader); err != nil {
+		if err := utils.UnpackTargz(ctx, sl.mountDir, reader, false); err != nil {
 			return errors.Wrap(err, fmt.Sprintf("Decompress source layer %s", digestStr))
 		}
 

@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
-	"github.com/pkg/errors"
-	"github.com/tidwall/gjson"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func run(cmd string, args ...string) error {
@@ -21,50 +21,25 @@ func run(cmd string, args ...string) error {
 	return _cmd.Run()
 }
 
-func runWithOutput(cmd string, args ...string) ([]byte, error) {
-	_cmd := exec.Command("sh", "-c", cmd)
-	_cmd.Stderr = os.Stderr
-	return _cmd.Output()
-}
-
 type Image struct {
-	Source string
-	Rootfs string
+	Layers     []ocispec.Descriptor
+	Source     string
+	SourcePath string
+	Rootfs     string
 }
 
-// FIXME: better to use `archive.Apply` in containerd package to
-// unpack image layer to overlayfs lowerdir.
-func (image *Image) Pull() error {
-	return run(fmt.Sprintf("docker pull %s", image.Source))
-}
-
-// Mount parses lowerdir and upperdir options of overlayfs from
-// `docker inspect` command output, and mounts rootfs of OCI image.
+// Mount mounts rootfs of OCI image.
 func (image *Image) Mount() error {
 	image.Umount()
 
-	output, err := runWithOutput(fmt.Sprintf("docker inspect %s", image.Source))
-	if err != nil {
-		return err
-	}
-
-	dirs := []string{}
-	upperDir := gjson.Get(string(output), "0.GraphDriver.Data.UpperDir")
-	if !upperDir.Exists() {
-		return errors.New("Not found upper dir in image info")
-	}
-	dirs = append(dirs, strings.Split(upperDir.String(), ":")...)
-
-	lowerDir := gjson.Get(string(output), "0.GraphDriver.Data.LowerDir")
-	if lowerDir.Exists() {
-		dirs = append(dirs, strings.Split(lowerDir.String(), ":")...)
-	}
-	if len(dirs) == 1 {
-		dirs = append(dirs, image.Rootfs)
+	var dirs []string
+	layerLen := len(image.Layers)
+	for i := range image.Layers {
+		layerDir := filepath.Join(image.SourcePath, image.Layers[layerLen-i-1].Digest.Encoded())
+		dirs = append(dirs, strings.ReplaceAll(layerDir, ":", "\\:"))
 	}
 
 	lowerOption := strings.Join(dirs, ":")
-
 	// Handle long options string overed 4096 chars, split them to
 	// two overlay mounts.
 	if len(lowerOption) >= 4096 {
@@ -76,7 +51,7 @@ func (image *Image) Mount() error {
 			return err
 		}
 		if err := run(fmt.Sprintf(
-			"mount -t overlay overlay -o lowerdir=%s %s",
+			"mount -t overlay overlay -o lowerdir='%s' %s",
 			strings.Join(upperDirs, ":"), lowerOverlay,
 		)); err != nil {
 			return err
@@ -86,7 +61,7 @@ func (image *Image) Mount() error {
 	}
 
 	if err := run(fmt.Sprintf(
-		"mount -t overlay overlay -o lowerdir=%s %s",
+		"mount -t overlay overlay -o lowerdir='%s' %s",
 		lowerOption, image.Rootfs,
 	)); err != nil {
 		return err
@@ -108,6 +83,10 @@ func (image *Image) Umount() error {
 		if err := run(fmt.Sprintf("umount %s", image.Rootfs)); err != nil {
 			return err
 		}
+	}
+
+	if err := os.RemoveAll(image.SourcePath); err != nil {
+		return err
 	}
 
 	return nil
