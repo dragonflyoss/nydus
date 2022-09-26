@@ -12,7 +12,7 @@ mongo
 mysql
 memcached
 mariadb
-openjdk
+amazoncorretto
 docker
 rabbitmq
 centos
@@ -39,7 +39,6 @@ chronograf
 gradle
 adminer
 ghost
-java
 kong
 solr
 sentry
