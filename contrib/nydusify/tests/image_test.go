@@ -21,7 +21,10 @@ var list = []string{
 	"wordpress",
 	"mongo",
 	"debian",
-	"java",
+	// An alternative for open jdk image, see:
+	// https://hub.docker.com/_/openjdk
+	// https://github.com/docker-library/openjdk/issues/505
+	"amazoncorretto",
 	"ruby",
 	"php",
 	"tomcat",
