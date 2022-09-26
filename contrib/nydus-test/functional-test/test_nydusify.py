@@ -11,6 +11,9 @@ from workload_gen import WorkloadGen
 import tempfile
 import utils
 
+ANCHOR = NydusAnchor()
+
+FS_VERSION = ANCHOR.fs_version
 
 @pytest.mark.parametrize(
     "source",
@@ -20,7 +23,7 @@ import utils
         "docker.io/busybox:latest",
     ],
 )
-@pytest.mark.parametrize("fs_version", [5, 6])
+@pytest.mark.parametrize("fs_version", [FS_VERSION])
 def test_basic_conversion(
     nydus_anchor: NydusAnchor,
     rafs_conf: RafsConf,

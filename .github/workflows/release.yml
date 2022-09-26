@@ -24,8 +24,7 @@ jobs:
       uses: Swatinem/rust-cache@v1
       with:
         target-dir: |
-          ./target-fusedev
-          ./target-virtiofs
+          ./target
         cache-on-failure: true
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: Build nydus-rs
@@ -35,10 +34,9 @@ jobs:
         cargo install --version 0.2.4 cross
         rustup component add rustfmt clippy
         make -e RUST_TARGET=$RUST_TARGET -e CARGO=cross static-release
-        sudo mv target-fusedev/$RUST_TARGET/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/$RUST_TARGET/release/nydus-image .
-        sudo mv target-fusedev/$RUST_TARGET/release/nydusctl .
-        sudo mv target-virtiofs/$RUST_TARGET/release/nydusd nydusd-virtiofs
+        sudo mv target/$RUST_TARGET/release/nydusd nydusd
+        sudo mv target/$RUST_TARGET/release/nydus-image .
+        sudo mv target/$RUST_TARGET/release/nydusctl .
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
@@ -46,8 +44,7 @@ jobs:
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
-          nydusd-fusedev
-          nydusd-virtiofs
+          nydusd
           nydus-image
           nydusctl
           configs
@@ -63,7 +60,7 @@ jobs:
       uses: Swatinem/rust-cache@v1
       with:
         target-dir: |
-          ./target-fusedev
+          ./target
         cache-on-failure: true
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: build
@@ -72,10 +69,10 @@ jobs:
         RUST_TARGET=$(test ${{ matrix.arch }} == "amd64" && echo "x86_64-apple-darwin" || echo "aarch64-apple-darwin")
         rustup component add rustfmt clippy
         rustup target install $RUST_TARGET
-        make -e RUST_TARGET=$RUST_TARGET macos-fusedev
-        sudo mv target-fusedev/$RUST_TARGET/release/nydusd nydusd-fusedev
-        sudo mv target-fusedev/$RUST_TARGET/release/nydus-image .
-        sudo mv target-fusedev/$RUST_TARGET/release/nydusctl .
+        make -e RUST_TARGET=$RUST_TARGET macos
+        sudo mv target/$RUST_TARGET/release/nydusd nydusd
+        sudo mv target/$RUST_TARGET/release/nydus-image .
+        sudo mv target/$RUST_TARGET/release/nydusctl .
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
@@ -83,7 +80,7 @@ jobs:
       with:
         name: nydus-artifacts-darwin-${{ matrix.arch }}
         path: |
-          nydusd-fusedev
+          nydusd
           nydusctl
           configs
 
