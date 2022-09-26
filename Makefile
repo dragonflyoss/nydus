@@ -99,9 +99,10 @@ clean:
 	${CARGO} clean
 
 install: release
-	@sudo install -D -m 755 target/release/nydusd $(INSTALL_DIR_PREFIX)/nydusd
-	@sudo install -D -m 755 target/release/nydus-image $(INSTALL_DIR_PREFIX)/nydus-image
-	@sudo install -D -m 755 target/release/nydusctl $(INSTALL_DIR_PREFIX)/nydusctl
+	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIC)
+	@sudo install -m 755 target/release/nydusd $(INSTALL_DIR_PREFIX)/nydusd
+	@sudo install -m 755 target/release/nydus-image $(INSTALL_DIR_PREFIX)/nydus-image
+	@sudo install -m 755 target/release/nydusctl $(INSTALL_DIR_PREFIX)/nydusctl
 
 ut:
 	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) -- --skip integration --nocapture --test-threads=8
@@ -153,10 +154,11 @@ contrib-clean: nydusify-clean ctr-remote-clean \
 				nydus-overlayfs-clean docker-nydus-graphdriver-clean
 
 contrib-install:
-	@sudo install -D -m 755 contrib/ctr-remote/bin/ctr-remote $(INSTALL_DIR_PREFIX)/ctr-remote
-	@sudo install -D -m 755 contrib/docker-nydus-graphdriver/bin/nydus-graphdriver $(INSTALL_DIR_PREFIX)/nydus-overlayfs
-	@sudo install -D -m 755 contrib/nydus-overlayfs/bin/nydus-overlayfs $(INSTALL_DIR_PREFIX)/nydus-overlayfs
-	@sudo install -D -m 755 contrib/nydusify/cmd/nydusify $(INSTALL_DIR_PREFIX)/nydusify
+	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIC)
+	@sudo install -m 755 contrib/ctr-remote/bin/ctr-remote $(INSTALL_DIR_PREFIX)/ctr-remote
+	@sudo install -m 755 contrib/docker-nydus-graphdriver/bin/nydus-graphdriver $(INSTALL_DIR_PREFIX)/nydus-overlayfs
+	@sudo install -m 755 contrib/nydus-overlayfs/bin/nydus-overlayfs $(INSTALL_DIR_PREFIX)/nydus-overlayfs
+	@sudo install -m 755 contrib/nydusify/cmd/nydusify $(INSTALL_DIR_PREFIX)/nydusify
 
 nydusify:
 	$(call build_golang,${NYDUSIFY_PATH},make)
