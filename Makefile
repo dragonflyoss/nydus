@@ -99,7 +99,7 @@ clean:
 	${CARGO} clean
 
 install: release
-	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIC)
+	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIX)
 	@sudo install -m 755 target/release/nydusd $(INSTALL_DIR_PREFIX)/nydusd
 	@sudo install -m 755 target/release/nydus-image $(INSTALL_DIR_PREFIX)/nydus-image
 	@sudo install -m 755 target/release/nydusctl $(INSTALL_DIR_PREFIX)/nydusctl
@@ -154,7 +154,7 @@ contrib-clean: nydusify-clean ctr-remote-clean \
 				nydus-overlayfs-clean docker-nydus-graphdriver-clean
 
 contrib-install:
-	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIC)
+	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIX)
 	@sudo install -m 755 contrib/ctr-remote/bin/ctr-remote $(INSTALL_DIR_PREFIX)/ctr-remote
 	@sudo install -m 755 contrib/docker-nydus-graphdriver/bin/nydus-graphdriver $(INSTALL_DIR_PREFIX)/nydus-overlayfs
 	@sudo install -m 755 contrib/nydus-overlayfs/bin/nydus-overlayfs $(INSTALL_DIR_PREFIX)/nydus-overlayfs
