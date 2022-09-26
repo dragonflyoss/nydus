@@ -113,18 +113,18 @@ class NydusAnchor:
         link_target = kwargs.pop("target")
         if link_target == "gnu":
             self.binary_release_dir = os.path.join(
-                self.nydus_project, "target-fusedev/release"
+                self.nydus_project, "target/release"
             )
         elif link_target == "musl":
             arch = platform.machine()
             self.binary_release_dir = os.path.join(
                 self.nydus_project,
-                f"target-fusedev/{arch}-unknown-linux-musl",
+                f"target/{arch}-unknown-linux-musl",
                 "release",
             )
 
-        self.build_dir = os.path.join(self.nydus_project, "target-fusedev/debug")
-        self.binary_debug_dir = os.path.join(self.nydus_project, "target-fusedev/debug")
+        self.build_dir = os.path.join(self.nydus_project, "target/debug")
+        self.binary_debug_dir = os.path.join(self.nydus_project, "target/debug")
 
         if profile == "release":
             self.binary_dir = self.binary_release_dir

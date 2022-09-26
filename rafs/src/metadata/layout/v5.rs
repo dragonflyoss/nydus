@@ -1919,10 +1919,10 @@ pub mod tests {
         inode2.load(&mut reader).unwrap();
         assert_eq!(inode2.i_name_size, 4);
         assert_eq!(inode2.i_symlink_size, 6);
-        assert_eq!(inode.i_size, 0x1000);
-        assert_eq!(inode.i_blocks, 1);
-        assert_eq!(inode.i_child_count, 10);
-        assert_eq!(inode.i_child_index, 20);
+        assert_eq!(inode2.i_size, 0x1000);
+        assert_eq!(inode2.i_blocks, 1);
+        assert_eq!(inode2.i_child_count, 10);
+        assert_eq!(inode2.i_child_index, 20);
 
         let filename = inode2.load_file_name(&mut reader).unwrap();
         assert_eq!(filename, OsString::from_str("test").unwrap());

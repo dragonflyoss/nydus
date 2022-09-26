@@ -17,5 +17,10 @@ Only `fusedev` works on macos, by the way passthrough file system not work(passt
 
 ## Build instruction
 ```shell
-cargo build --features=fusedev --release --target-dir target-fusedev --bin=nydusd
+cargo build --release --bin=nydusd
+```
+or
+```
+make release
+make install
 ```

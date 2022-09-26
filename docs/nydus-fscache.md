@@ -45,7 +45,7 @@ make release
 ```
 
 4. Copy the "nydus-image" binary file compiled in Step 3 into _$PATH_ e.g. /usr/local/bin with \
-``cp target-fusedev/release/nydus-image /usr/local/bin``
+``cp target/release/nydus-image /usr/local/bin``
 
 5. Build ctr-remote with
 

@@ -20,7 +20,7 @@ pub struct Builder<'a> {
 
 pub fn new<'a>(work_dir: &'a Path, whiteout_spec: &'a str) -> Builder<'a> {
     let builder = std::env::var("NYDUS_IMAGE")
-        .unwrap_or_else(|_| String::from("./target-fusedev/release/nydus-image"));
+        .unwrap_or_else(|_| String::from("./target/release/nydus-image"));
     Builder {
         builder,
         work_dir,

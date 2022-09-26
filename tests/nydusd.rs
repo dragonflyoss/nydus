@@ -74,7 +74,7 @@ pub fn new(
         .unwrap();
 
     let nydusd =
-        std::env::var("NYDUSD").unwrap_or_else(|_| String::from("./target-fusedev/release/nydusd"));
+        std::env::var("NYDUSD").unwrap_or_else(|_| String::from("./target/release/nydusd"));
 
     Nydusd {
         nydusd,

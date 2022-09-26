@@ -3,8 +3,9 @@ use serde_json::Value::{self, Null};
 use std::{fs::File, io::Read};
 
 pub fn test_image_inspect_cmd(cmd: &str, bootstrap_path: &str) {
-    let nydus_image = std::env::var("NYDUS_IMAGE")
-        .unwrap_or_else(|_| String::from("./target-fusedev/release/nydus-image"));
+    let default_nydus_image = env!("CARGO_BIN_EXE_nydus-image");
+    let nydus_image =
+        std::env::var("NYDUS_IMAGE").unwrap_or_else(|_| String::from(default_nydus_image));
 
     let output = exec(
         format!("{} inspect -B {} -R {}", nydus_image, bootstrap_path, cmd).as_str(),

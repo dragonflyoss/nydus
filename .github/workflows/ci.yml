@@ -72,7 +72,8 @@ jobs:
       - name: build and check
         run: |
           rustup component add rustfmt && rustup component add clippy
-          make macos-ut
+          make
+          make ut
 
   deny:
     name: Cargo Deny
