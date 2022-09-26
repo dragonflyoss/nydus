@@ -167,7 +167,7 @@ def nydusify_converter():
 
     nydusify_source_dir = os.path.join(ANCHOR.nydus_project, "contrib/nydusify")
     with utils.pushd(nydusify_source_dir):
-        ret, _ = utils.execute(["make", "static-release"])
+        ret, _ = utils.execute(["make", "release"])
         assert ret
 
 

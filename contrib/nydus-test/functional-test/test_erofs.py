@@ -17,7 +17,7 @@ logging_setup()
 def test_basic(nydus_anchor: NydusAnchor, nydus_image: RafsImage):
 
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
-    daemon = NydusDaemon(nydus_anchor, None, None, mode="daemon")
+    daemon = NydusDaemon(nydus_anchor, None, None, mode="singleton")
     daemon.set_fscache().start()
 
     nc = NydusAPIClient(daemon.get_apisock())
@@ -54,7 +54,7 @@ def test_prefetch(nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage):
 
     nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
-    daemon = NydusDaemon(nydus_anchor, None, None, mode="daemon")
+    daemon = NydusDaemon(nydus_anchor, None, None, mode="singleton")
     daemon.set_fscache().start()
 
     time.sleep(1)

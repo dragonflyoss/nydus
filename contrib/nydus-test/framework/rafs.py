@@ -585,7 +585,6 @@ class NydusDaemon(utils.ArtifactProcess):
         self.param_value_prefix = " "
         self.params = RafsMountParam(anchor.nydusd_bin if bin is None else bin)
         self.params.set_subcommand(mode)
-        self.is_daemon_mode = True if mode == "daemon" else False
         if with_defaults:
             self._set_default_mount_param()
 
