@@ -42,8 +42,7 @@ jobs:
         uses: Swatinem/rust-cache@v1
         with:
           target-dir: |
-            ./target-fusedev
-            ./target-virtiofs
+            ./target
           cache-on-failure: true
           key: ${{ runner.os }}-cargo-${{ matrix.arch }}
 
@@ -55,14 +54,10 @@ jobs:
           rustup component add rustfmt clippy
           make -e RUST_TARGET=$RUST_TARGET -e CARGO=cross static-release
           make release  -C contrib/nydus-backend-proxy/
-          #sudo mv target-fusedev/$RUST_TARGET/release/nydusd nydusd-fusedev
-          #sudo mv target-fusedev/$RUST_TARGET/release/nydus-image .
-          #sudo mv target-fusedev/$RUST_TARGET/release/nydusctl .
-          #sudo mv target-virtiofs/$RUST_TARGET/release/nydusd nydusd-virtiofs
           sudo cp -r misc/configs .
           sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
           pwd
-          ls -lh target-virtiofs/$RUST_TARGET/release
+          ls -lh target/$RUST_TARGET/release
       - name: Set up anchor file
         env:
           OSS_AK_ID: ${{ secrets.OSS_TEST_AK_ID }}

@@ -27,7 +27,7 @@ jobs:
           wget https://github.com/dragonflyoss/image-service/releases/download/$NYDUS_VERSION/nydus-static-$NYDUS_VERSION-linux-amd64.tgz
           tar xzf nydus-static-$NYDUS_VERSION-linux-amd64.tgz
           sudo cp nydus-static/nydusify nydus-static/nydus-image /usr/local/bin/
-          sudo cp nydus-static/nydusd-fusedev /usr/local/bin/nydusd
+          sudo cp nydus-static/nydusd /usr/local/bin/nydusd
       - name: Log in to the container registry
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:

@@ -46,8 +46,7 @@ jobs:
         uses: Swatinem/rust-cache@v1
         with:
           target-dir: |
-            ./target-fusedev
-            ./target-virtiofs
+            ./target
           cache-on-failure: true
           key: ${{ runner.os }}-cargo-amd64
       - name: Cache Docker Layers
