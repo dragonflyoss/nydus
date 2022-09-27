@@ -58,7 +58,7 @@ type Opt struct {
 // Here is the build cache workflow:
 // 1. Import cache records from registry;
 // 2. Check cache record using source layer ChainID before layer build,
-//    skip layer build if the cache hit;
+// skip layer build if the cache hit;
 // 3. Export new cache records to registry;
 type Cache struct {
 	opt Opt
