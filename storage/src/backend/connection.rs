@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Result};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -165,11 +165,42 @@ impl ProxyHealth {
     }
 }
 
+const SCHEME_REVERSION_CACHE_UNSET: i16 = 0;
+const SCHEME_REVERSION_CACHE_REPLACE: i16 = 1;
+const SCHEME_REVERSION_CACHE_RETAIN: i16 = 2;
+
 #[derive(Debug)]
 struct Proxy {
     client: Client,
     health: ProxyHealth,
     fallback: bool,
+    use_http: bool,
+    // Cache whether should try to replace scheme for proxy url.
+    replace_scheme: AtomicI16,
+}
+
+impl Proxy {
+    fn try_use_http(&self, url: &str) -> Option<String> {
+        if self.replace_scheme.load(Ordering::Relaxed) == SCHEME_REVERSION_CACHE_REPLACE {
+            Some(url.replacen("https", "http", 1))
+        } else if self.replace_scheme.load(Ordering::Relaxed) == SCHEME_REVERSION_CACHE_UNSET {
+            if url.starts_with("https:") {
+                self.replace_scheme
+                    .store(SCHEME_REVERSION_CACHE_REPLACE, Ordering::Relaxed);
+                info!("Will replace backend's URL's scheme with http");
+                Some(url.replacen("https", "http", 1))
+            } else if url.starts_with("http:") {
+                self.replace_scheme
+                    .store(SCHEME_REVERSION_CACHE_RETAIN, Ordering::Relaxed);
+                None
+            } else {
+                warn!("Can't replace http scheme, url {}", url);
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 /// Check whether the HTTP status code is a success result.
@@ -232,6 +263,8 @@ impl Connection {
                 client: Self::build_connection(&config.proxy.url, config)?,
                 health: ProxyHealth::new(config.proxy.check_interval, ping_url),
                 fallback: config.proxy.fallback,
+                use_http: config.proxy.use_http,
+                replace_scheme: AtomicI16::new(SCHEME_REVERSION_CACHE_UNSET),
             })
         } else {
             None
@@ -345,10 +378,21 @@ impl Connection {
                     Some(ReqBody::Buf(buf)) => Some(ReqBody::Buf(buf.clone())),
                     _ => None,
                 };
+
+                let http_url: Option<String>;
+                let mut replaced_url = url;
+
+                if proxy.use_http {
+                    http_url = proxy.try_use_http(url);
+                    if let Some(ref r) = http_url {
+                        replaced_url = r.as_str();
+                    }
+                }
+
                 let result = self.call_inner(
                     &proxy.client,
                     method.clone(),
-                    url,
+                    replaced_url,
                     &query,
                     data_cloned,
                     headers,

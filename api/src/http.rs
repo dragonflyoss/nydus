@@ -404,6 +404,9 @@ pub struct ProxyConfig {
     pub fallback: bool,
     /// Interval of P2P proxy health checking, in seconds.
     pub check_interval: u64,
+    /// Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
+    #[serde(default)]
+    pub use_http: bool,
 }
 
 impl Default for ProxyConfig {
@@ -413,6 +416,7 @@ impl Default for ProxyConfig {
             ping_url: String::new(),
             fallback: true,
             check_interval: 5,
+            use_http: false,
         }
     }
 }
