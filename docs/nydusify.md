@@ -123,3 +123,19 @@ See `nydusify convert/check --help`
 ``` golang
 See `contrib/nydusify/examples/converter/main.go`
 ```
+
+## Hook Plugin (Experimental)
+
+Nydusify supports the hook function execution as [go-plugin](https://github.com/hashicorp/go-plugin) at key stages of image conversion.
+
+Write a hook plugin go file like [plugin/main.go](../contrib/nydusify/plugin/main.go), then build with the below command line:
+
+```
+go build -o nydus-hook-plugin ./plugin
+```
+
+And run `nydusify` with environment variable `NYDUS_HOOK_PLUGIN_PATH` (optional):
+
+```
+NYDUS_HOOK_PLUGIN_PATH=./nydus-hook-plugin nydusify convert --source ... --target ...
+```
