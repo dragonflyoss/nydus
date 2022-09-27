@@ -17,14 +17,13 @@ DOCKER ?= "true"
 CARGO ?= $(shell which cargo)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
-CARGO_COMMON ?= 
 
 EXCLUDE_PACKAGES =
 UNAME_M := $(shell uname -m)
 UNAME_S := $(shell uname -s)
 STATIC_TARGET = $(UNAME_M)-unknown-linux-musl
 ifeq ($(UNAME_S),Linux)
-	CARGO_COMMON += --features=virtiofs
+	CARGO_COMMON = 
 ifeq ($(UNAME_M),ppc64le)
 	STATIC_TARGET = powerpc64le-unknown-linux-gnu
 endif
