@@ -1,6 +1,6 @@
 module github.com/dragonflyoss/image-service/contrib/ctr-remote
 
-go 1.17
+go 1.18
 
 require (
 	github.com/containerd/containerd v1.6.6

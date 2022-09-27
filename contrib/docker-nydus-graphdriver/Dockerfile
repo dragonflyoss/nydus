@@ -1,4 +1,4 @@
-FROM golang:1.17
+FROM golang:1.18
 ARG GOPROXY="https://goproxy.cn,direct"
 RUN mkdir -p /app
 WORKDIR /app

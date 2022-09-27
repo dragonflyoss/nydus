@@ -1,6 +1,6 @@
 module github.com/dragonflyoss/image-service/contrib/nydus-overlayfs
 
-go 1.17
+go 1.18
 
 require (
 	github.com/pkg/errors v0.9.1
