@@ -4,9 +4,9 @@
 
 // Package provider abstracts interface to adapt to different build environments,
 // the provider includes these components:
-// 	logger: output build progress for nydusify or buildkitd/buildctl;
-// 	remote: create a remote resolver, it communicates with remote registry;
-// 	source: responsible for getting image manifest, config, and mounting layer;
+// - logger: output build progress for nydusify or buildkitd/buildctl;
+// - remote: create a remote resolver, it communicates with remote registry;
+// - source: responsible for getting image manifest, config, and mounting layer;
 // Provider provides a default implementation, so we can use it in Nydusify
 // directly, but we need to implement it in buildkit or other any projects
 // which want to import nydusify package.

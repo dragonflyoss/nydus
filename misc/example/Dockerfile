@@ -6,7 +6,7 @@ RUN mkdir -p /opt/containerd-cri && tar xzf cri-containerd-cni-1.4.3-linux-amd64
 # upstream containerd is not statically linked. Let's use the dind one instead.
 RUN rm -f /opt/containerd-cri/usr/local/bin/containerd
 
-FROM golang:1.17 AS go
+FROM golang:1.18 AS go
 RUN go get github.com/containerd/containerd
 RUN cd $GOPATH/src/github.com/containerd/containerd && git checkout v1.4.3
 RUN cd $GOPATH/src/github.com/containerd/containerd && make EXTRA_FLAGS="-buildmode pie" EXTRA_LDFLAGS='-linkmode external -extldflags "-fno-PIC -static"' BUILDTAGS="no_btrfs netgo osusergo static_build"

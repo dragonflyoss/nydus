@@ -22,8 +22,8 @@ var (
 )
 
 /*
-   containerd run fuse.mount format: nydus-overlayfs overlay /tmp/ctd-volume107067851
-   -o lowerdir=/foo/lower2:/foo/lower1,upperdir=/foo/upper,workdir=/foo/work,extraoption={...},dev,suid]
+containerd run fuse.mount format: nydus-overlayfs overlay /tmp/ctd-volume107067851
+-o lowerdir=/foo/lower2:/foo/lower1,upperdir=/foo/upper,workdir=/foo/work,extraoption={...},dev,suid]
 */
 type mountArgs struct {
 	fsType  string

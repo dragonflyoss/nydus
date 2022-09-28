@@ -1,6 +1,6 @@
 module github.com/dragonflyoss/image-service/contrib/nydus_graphdriver
 
-go 1.17
+go 1.18
 
 require (
 	github.com/docker/docker v20.10.3-0.20211206061157-934f955e3d62+incompatible
