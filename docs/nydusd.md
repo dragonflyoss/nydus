@@ -239,6 +239,47 @@ Once the configuration is loaded successfully on nydusd starting, we will see th
 INFO [storage/src/backend/connection.rs:136] backend config: CommonConfig { proxy: ProxyConfig { url: "http://p2p-proxy:65001", ping_url: "http://p2p-proxy:40901/server/ping", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, retry_limit: 0 }
 ```
 
+##### Enable Mirrors for Storage Backend
+
+Add `device.backend.config.mirrors` field to enable mirrors for storage backend. The mirror can be a P2P distribution server (such as [Dragonfly](https://d7y.io/)) or registry. If the request to mirror server failed, it will fall back to the original registry.
+Currently, the mirror mode is only tested in the registry backend, and in theory, the OSS backend also supports it.
+
+<font color='red'>!!</font> The `mirrors` field is conflicts with `proxy` field.
+
+```
+{
+  "device": {
+    "backend": {
+      "type": "registry",
+      "config": {
+        "mirrors": [
+          {
+            // Mirror server URL (include scheme), e.g. Dragonfly dfdaemon server URL
+            "host": "http://dragonfly1.io:65001",
+            // Headers for mirror server
+            "headers": {
+              // For Dragonfly dfdaemon server URL, we need to specify "X-Dragonfly-Registry" (include scheme). 
+              // When Dragonfly does not cache data, it will pull them from "X-Dragonfly-Registry". 
+              // If not set "X-Dragonfly-Registry", Dragonfly will pull data from proxy.registryMirror.url.
+              "X-Dragonfly-Registry": "https://index.docker.io"
+            }
+          },
+          {
+            "host": "http://dragonfly2.io:65001",
+            "headers": {
+              "X-Dragonfly-Registry": "https://index.docker.io"
+            }
+          }
+        ],
+        ...
+      }
+    },
+    ...
+  },
+  ...
+}
+```
+
 ### Mount Bootstrap Via API
 
 To mount a bootstrap via api, first launch nydusd without a bootstrap:

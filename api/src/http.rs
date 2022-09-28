@@ -183,7 +183,7 @@ pub struct RegistryConfig {
     pub scheme: String,
     /// Registry url host
     pub host: String,
-    /// Mirrors' configuration
+    /// Enable mirrors for the read request.
     pub mirrors: Vec<MirrorConfig>,
     /// Registry image name, like 'library/ubuntu'
     pub repo: String,
@@ -420,10 +420,10 @@ impl Default for ProxyConfig {
 /// Configuration for mirror.
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct MirrorConfig {
-    /// Mirror url host.
+    /// Mirror server URL, for example http://127.0.0.1:65001
     pub host: String,
-    /// Request headers for mirror server.
-    pub headers: HashMap<String, String>,
+    /// HTTP request headers to be passed to mirror server
+    pub headers: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug)]
