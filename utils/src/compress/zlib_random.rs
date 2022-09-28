@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
 
 use libz_sys::{
-    inflate, inflateEnd, inflateInit2_, inflateReset, uInt, z_stream, Z_BLOCK, Z_BUF_ERROR, Z_OK,
-    Z_STREAM_END,
+    inflate, inflateEnd, inflateInit2_, inflatePrime, inflateReset, inflateSetDictionary, uInt,
+    z_stream, Z_BLOCK, Z_BUF_ERROR, Z_OK, Z_STREAM_END,
 };
 
 /// Size of inflate dictionary to support random access.
@@ -66,6 +66,65 @@ impl ZranContext {
             ctx_byte: info.previous_byte,
             ctx_bits: info.pending_bits,
             dict,
+        }
+    }
+}
+
+/// Gzip/zlib decoder to randomly uncompress Gzip/zlib stream.
+pub struct ZranDecoder {
+    stream: ZranStream,
+}
+
+impl ZranDecoder {
+    /// Create a new instance of `ZranDecoder`.
+    pub fn new() -> Result<Self> {
+        let stream = ZranStream::new(true)?;
+        Ok(Self { stream })
+    }
+
+    /// Uncompress gzip/zlib compressed data chunk.
+    ///
+    /// # Arguments
+    /// - ctx: context to random access compressed stream.
+    /// - dict: use this dictionary instead of `ctx.dict` to decode data
+    /// - input: input compressed data stream
+    /// - output: buffer to receive uncompressed data
+    pub fn uncompress(
+        &mut self,
+        ctx: &ZranContext,
+        dict: Option<&[u8]>,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize> {
+        if input.len() != ctx.in_len as usize {
+            return Err(einval!("size of input buffer doesn't match"));
+        } else if ctx.out_len as usize > output.len() {
+            return Err(einval!("buffer to receive decompressed data is too small"));
+        }
+
+        self.stream.reset()?;
+        if ctx.ctx_bits != 0 {
+            let bits = ctx.ctx_bits & 0x7;
+            self.stream.set_prime(bits, ctx.ctx_byte)?;
+        }
+        let dict = dict.unwrap_or(ctx.dict.as_slice());
+        self.stream.set_dict(dict)?;
+
+        self.stream.set_next_in(&input);
+        self.stream.set_avail_in(ctx.in_len as uInt);
+        self.stream.set_next_out(output);
+        self.stream.set_avail_out(ctx.out_len as uInt);
+        let ret = self.stream.inflate(true);
+        match ret {
+            Z_OK => {
+                let count = self.stream.next_out() as usize - output.as_ptr() as usize;
+                if count != ctx.out_len as usize {
+                    Err(eio!("failed to decode data from stream, size mismatch"))
+                } else {
+                    Ok(count)
+                }
+            }
+            _ => Err(eio!("failed to decode data from compressed data stream")),
         }
     }
 }
@@ -286,7 +345,7 @@ struct ZranReaderState<R> {
 
 impl<R> ZranReaderState<R> {
     fn new(reader: R) -> Result<Self> {
-        let mut stream = ZranStream::new()?;
+        let mut stream = ZranStream::new(false)?;
         let mut input = vec![0u8; ZRAN_READER_BUF_SIZE];
         stream.set_next_in(&mut input);
         stream.set_avail_in(0);
@@ -332,7 +391,7 @@ impl<R: Read> Read for ZranReaderState<R> {
                 self.stream.set_avail_in(sz as u32);
             }
 
-            match self.stream.inflate() {
+            match self.stream.inflate(false) {
                 Z_STREAM_END => {
                     self.stream.reset()?;
                     self.stream_switched = 1;
@@ -375,7 +434,7 @@ struct ZranStream {
 }
 
 impl ZranStream {
-    fn new() -> Result<Self> {
+    fn new(decode: bool) -> Result<Self> {
         let mut stream = Box::new(z_stream {
             next_in: ptr::null_mut(),
             avail_in: 0,
@@ -392,13 +451,15 @@ impl ZranStream {
             zalloc,
             zfree,
         });
+        // windowBits can also be greater than 15 for optional gzip decoding.
+        // Add 32 to windowBits to enable zlib and gzip decoding with automatic header detection,
+        // or add 16 to decode only the gzip format (the zlib format will return a Z_DATA_ERROR).
+        // -15 means raw mode.
+        let mode = if decode { -15 } else { 31 };
         let ret = unsafe {
-            // windowBits can also be greater than 15 for optional gzip decoding.
-            // Add 32 to windowBits to enable zlib and gzip decoding with automatic header detection,
-            // or add 16 to decode only the gzip format (the zlib format will return a Z_DATA_ERROR).
             inflateInit2_(
                 stream.deref_mut() as *mut z_stream,
-                31,
+                mode,
                 ZLIB_VERSION.as_ptr() as *const c_char,
                 mem::size_of::<z_stream>() as c_int,
             )
@@ -414,15 +475,16 @@ impl ZranStream {
         })
     }
 
-    fn inflate(&mut self) -> i32 {
+    fn inflate(&mut self, decode: bool) -> i32 {
         // Z_BLOCK requests that inflate() stop if and when it gets to the next deflate block
         // boundary.  When decoding the zlib or gzip format, this will cause inflate() to return
         // immediately after the header and before the first block.  When doing a raw inflate,
         // inflate() will go ahead and process the first block, and will return when it gets to
         // the end of that block, or when it runs out of data.
+        let mode = if decode { 0 } else { Z_BLOCK };
         self.total_in += self.stream.avail_in as u64;
         self.total_out += self.stream.avail_out as u64;
-        let ret = unsafe { inflate(self.stream.deref_mut() as *mut z_stream, Z_BLOCK) };
+        let ret = unsafe { inflate(self.stream.deref_mut() as *mut z_stream, mode) };
         self.total_in -= self.stream.avail_in as u64;
         self.total_out -= self.stream.avail_out as u64;
         ret
@@ -468,6 +530,30 @@ impl ZranStream {
         } else {
             Ok(len as usize)
         }
+    }
+
+    fn set_dict(&mut self, dict: &[u8]) -> Result<()> {
+        let ret = unsafe {
+            inflateSetDictionary(self.stream.deref_mut(), dict.as_ptr(), dict.len() as uInt)
+        };
+        if ret != Z_OK {
+            return Err(einval!("failed to reset zlib inflate context"));
+        }
+        Ok(())
+    }
+
+    fn set_prime(&mut self, bits: u8, prime: u8) -> Result<()> {
+        let ret = unsafe {
+            inflatePrime(
+                self.stream.deref_mut(),
+                bits as c_int,
+                prime as c_int >> (8 - bits),
+            )
+        };
+        if ret != Z_OK {
+            return Err(einval!("failed to reset zlib inflate context"));
+        }
+        Ok(())
     }
 
     fn set_next_in(&mut self, buf: &[u8]) {
@@ -565,6 +651,7 @@ extern "system" {
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom};
     use std::path::PathBuf;
     use tar::{Archive, EntryType};
 
@@ -701,5 +788,50 @@ mod tests {
 
         let ctx = generator.get_compression_ctx_array();
         assert_eq!(ctx.len(), 3);
+    }
+
+    #[test]
+    fn test_zran_decoder() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+
+        let reader = ZranReader::new(file).unwrap();
+        let mut tar = Archive::new(reader.clone());
+        tar.set_ignore_zeros(true);
+        let mut generator = ZranGenerator::new(reader.clone());
+        generator.set_min_compressed_size(1024);
+        generator.set_max_compressed_size(2048);
+        generator.set_max_uncompressed_size(4096);
+
+        let entries = tar.entries().unwrap();
+        for entry in entries {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type() == EntryType::Regular {
+                loop {
+                    let _start = generator.begin_read(512).unwrap();
+                    let mut buf = vec![0u8; 512];
+                    let sz = entry.read(&mut buf).unwrap();
+                    let _info = generator.end_read().unwrap();
+                    if sz == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let ctx_array = generator.get_compression_ctx_array();
+        assert_eq!(ctx_array.len(), 3);
+        for i in 0..3 {
+            let ctx = &ctx_array[i];
+            let mut c_buf = vec![0u8; ctx.in_len as usize];
+            let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(ctx.in_offset)).unwrap();
+            file.read_exact(&mut c_buf).unwrap();
+
+            let mut d_buf = vec![0u8; ctx.out_len as usize];
+            let mut decoder = ZranDecoder::new().unwrap();
+            decoder.uncompress(ctx, None, &c_buf, &mut d_buf).unwrap();
+        }
     }
 }
