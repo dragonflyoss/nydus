@@ -236,15 +236,14 @@ pub(crate) struct MirrorState {
 
 #[derive(Debug)]
 pub(crate) struct Mirror {
-    client: Client,
     /// Information for mirror from configuration file.
     config: MirrorConfig,
     /// Mirror status, it will be set to false by atomic operation when mirror is not work.
     status: AtomicBool,
-    /// Falied times for mirror, the status will be marked as false when fail_times = fail_limit.
-    fail_times: AtomicU8,
+    /// Falied times for mirror, the status will be marked as false when failed_times = failure_limit.
+    failed_times: AtomicU8,
     /// Failed limit for mirror.
-    fail_limit: u8,
+    failure_limit: u8,
 }
 
 impl Connection {
@@ -274,13 +273,11 @@ impl Connection {
         for mirror_config in config.mirrors.iter() {
             if !mirror_config.host.is_empty() {
                 mirrors.push(Arc::new(Mirror {
-                    // TODO: build mirror connection from MirrorConfig, now is from registry config
-                    client: Self::build_connection("", config)?,
                     config: mirror_config.clone(),
                     status: AtomicBool::from(true),
                     // Maybe read from configuration file
-                    fail_limit: 5,
-                    fail_times: AtomicU8::from(0),
+                    failure_limit: 5,
+                    failed_times: AtomicU8::from(0),
                 }));
             }
         }
@@ -451,15 +448,17 @@ impl Connection {
                 .set_port(mirror_host.port())
                 .map_err(|_| ConnectionError::Port)?;
 
-            for (key, value) in mirror.config.headers.iter() {
-                headers.insert(
-                    HeaderName::from_str(key).unwrap(),
-                    HeaderValue::from_str(value).unwrap(),
-                );
+            if let Some(working_headers) = &mirror.config.headers {
+                for (key, value) in working_headers.iter() {
+                    headers.insert(
+                        HeaderName::from_str(key).unwrap(),
+                        HeaderValue::from_str(value).unwrap(),
+                    );
+                }
             }
 
             let result = self.call_inner(
-                &mirror.client,
+                &self.client,
                 method.clone(),
                 current_url.to_string().as_str(),
                 &query,
@@ -477,15 +476,17 @@ impl Connection {
                 }
                 Err(err) => {
                     warn!(
-                        "request mirror failed, mirror: {:?},  error: {:?}",
-                        mirror, err
+                        "request mirror server failed, mirror: {},  error: {:?}",
+                        format!("{:?}", mirror).to_lowercase(),
+                        err
                     );
-                    mirror.fail_times.fetch_add(1, Ordering::Relaxed);
+                    mirror.failed_times.fetch_add(1, Ordering::Relaxed);
 
-                    if mirror.fail_times.load(Ordering::Relaxed) >= mirror.fail_limit {
-                        error!(
-                            "reach to fail limit {}, disable mirror: {:?}",
-                            mirror.fail_limit, mirror
+                    if mirror.failed_times.load(Ordering::Relaxed) >= mirror.failure_limit {
+                        warn!(
+                            "reach to fail limit {}, disable mirror: {}",
+                            mirror.failure_limit,
+                            format!("{:?}", mirror).to_lowercase()
                         );
                         mirror.status.store(false, Ordering::Relaxed);
 
@@ -496,6 +497,10 @@ impl Connection {
                             }
                             let m = &self.mirror_state.mirrors[idx];
                             if m.status.load(Ordering::Relaxed) {
+                                warn!(
+                                    "mirror server has been changed to {}",
+                                    format!("{:?}", m).to_lowercase()
+                                );
                                 break Some(m);
                             }
 
@@ -506,6 +511,7 @@ impl Connection {
                     }
                 }
             }
+            warn!("Failed to request mirror server, fallback to original server.");
         }
 
         self.call_inner(
