@@ -18,6 +18,7 @@ use libz_sys::{
 const ZLIB_ALIGN: usize = std::mem::align_of::<usize>();
 const ZLIB_VERSION: &'static str = "1.2.8\0";
 const ZRAN_READER_BUF_SIZE: usize = 256 * 1024;
+const ZRAN_DICT_WIN_SIZE: usize = 1 << 15;
 
 /// A specialized gzip reader for OCI image tarballs.
 ///
@@ -33,6 +34,22 @@ impl<R> ZranReader<R> {
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
         })
+    }
+
+    /// Get inflate context information for current inflate position.
+    fn get_current_ctx_info(&self) -> ZranCompInfo {
+        self.inner.lock().unwrap().get_compression_info()
+    }
+
+    /// Get inflate context information for current inflate block.
+    fn get_block_ctx_info(&self) -> ZranCompInfo {
+        self.inner.lock().unwrap().block_ctx_info
+    }
+
+    /// Get inflate dictionary for current inflate block.
+    fn get_block_ctx_dict(&self) -> Vec<u8> {
+        let state = self.inner.lock().unwrap();
+        state.block_ctx_dict[..state.block_ctx_dict_size].to_vec()
     }
 }
 
@@ -50,10 +67,23 @@ impl<R> Clone for ZranReader<R> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ZranCompInfo {
+    in_pos: u64,
+    out_pos: u64,
+    flags: u32,
+    previous_byte: u8,
+    pending_bits: u8,
+    stream_switched: u8,
+}
+
 struct ZranReaderState<R> {
     stream: ZranStream,
     input: Vec<u8>,
     reader: R,
+    block_ctx_info: ZranCompInfo,
+    block_ctx_dict: Vec<u8>,
+    block_ctx_dict_size: usize,
     stream_switched: u8,
 }
 
@@ -68,8 +98,23 @@ impl<R> ZranReaderState<R> {
             stream,
             input,
             reader,
+            block_ctx_info: ZranCompInfo::default(),
+            block_ctx_dict: vec![0u8; ZRAN_DICT_WIN_SIZE],
+            block_ctx_dict_size: 0,
             stream_switched: 0,
         })
+    }
+
+    /// Get decompression information about the stream.
+    fn get_compression_info(&mut self) -> ZranCompInfo {
+        let stream_switched = self.stream_switched;
+        self.stream_switched = 0;
+        self.stream.get_compression_info(&self.input, stream_switched)
+    }
+
+    fn get_compression_dict(&mut self) -> Result<()> {
+        self.block_ctx_dict_size = self.stream.get_compression_dict(&mut self.block_ctx_dict)?;
+        Ok(())
     }
 }
 
@@ -97,6 +142,11 @@ impl<R: Read> Read for ZranReaderState<R> {
                 }
                 Z_OK => {
                     let count = self.stream.next_out() as usize - buf.as_ptr() as usize;
+                    let info = self.get_compression_info();
+                    if info.flags & 0x80 != 0 {
+                        self.get_compression_dict()?;
+                        self.block_ctx_info = info;
+                    }
                     if count == 0 {
                         // zlib/gzip compression header, continue for next data block.
                         continue;
@@ -188,6 +238,40 @@ impl ZranStream {
         Ok(())
     }
 
+    fn get_compression_info(&mut self, buf: &[u8], stream_switched: u8) -> ZranCompInfo {
+        let previous_byte = if self.stream.data_type & 0x3f != 0 {
+            assert!(self.stream.next_in as usize > buf.as_ptr() as usize);
+            unsafe { *self.stream.next_in.sub(1) }
+        } else {
+            0
+        };
+        ZranCompInfo {
+            in_pos: self.total_in,
+            out_pos: self.total_out,
+            flags: self.stream.data_type as u32,
+            previous_byte,
+            pending_bits: self.stream.data_type as u8 & 0x3f,
+            stream_switched,
+        }
+    }
+
+    fn get_compression_dict(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let mut len: uInt = 0;
+        assert_eq!(buf.len(), ZRAN_DICT_WIN_SIZE);
+        let ret = unsafe {
+            inflateGetDictionary(
+                self.stream.deref_mut() as *mut z_stream,
+                buf.as_mut_ptr(),
+                &mut len as *mut uInt,
+            )
+        };
+        if ret != Z_OK {
+            Err(einval!("failed to get inflate dictionary"))
+        } else {
+            Ok(len as usize)
+        }
+    }
+
     fn set_next_in(&mut self, buf: &[u8]) {
         self.stream.next_in = buf.as_ptr() as *mut u8;
     }
@@ -271,6 +355,14 @@ extern "C" fn zfree(_ptr: *mut c_void, address: *mut c_void) {
     }
 }
 
+extern "system" {
+    pub fn inflateGetDictionary(
+        strm: *mut z_stream,
+        dictionary: *mut u8,
+        dictLength: *mut uInt,
+    ) -> c_int;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +440,34 @@ mod tests {
 
         assert_eq!(objects, 10);
         assert_eq!(files, 5);
+    }
+
+    #[test]
+    fn test_parse_gzip_with_big_zero() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-zero-file.tar.gz");
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let reader = ZranReader::new(file).unwrap();
+        let mut tar = Archive::new(reader.clone());
+        let entries = tar.entries().unwrap();
+
+        let mut last: Option<ZranCompInfo> = None;
+        for entry in entries {
+            let mut entry = entry.unwrap();
+            assert_eq!(entry.header().entry_type(), EntryType::Regular);
+            loop {
+                let mut buf = vec![0u8; 512];
+                let sz = entry.read(&mut buf).unwrap();
+                if sz == 0 {
+                    break;
+                }
+
+                let info = reader.get_current_ctx_info();
+                if let Some(prev) = last {
+                    assert_ne!(prev, info);
+                }
+                last = Some(info);
+            }
+        }
     }
 }
