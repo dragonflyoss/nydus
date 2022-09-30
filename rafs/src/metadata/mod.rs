@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::bail;
 
 use fuse_backend_rs::abi::fuse_abi::Attr;
-use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
+use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
@@ -550,7 +550,7 @@ impl RafsSuper {
 
     /// Convert an inode number to a file path.
     pub fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
-        if ino == ROOT_ID {
+        if ino == self.superblock.root_ino() {
             return Ok(self.get_inode(ino, false)?.name().into());
         }
 
@@ -563,7 +563,7 @@ impl RafsSuper {
             let e: PathBuf = inode.name().into();
             path = e.join(path);
 
-            if inode.ino() == ROOT_ID {
+            if inode.ino() == self.superblock.root_ino() {
                 break;
             } else {
                 cur_ino = inode.parent();
