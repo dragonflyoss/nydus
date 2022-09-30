@@ -61,7 +61,10 @@ impl Bootstrap {
         tree: &mut Tree,
     ) -> Result<()> {
         tree.node.index = RAFS_ROOT_INODE;
-        tree.node.inode.set_ino(RAFS_ROOT_INODE);
+        // Rafs v6 root inode number can't be decided until the end of dumping.
+        if ctx.fs_version.is_v5() {
+            tree.node.inode.set_ino(RAFS_ROOT_INODE);
+        }
         // Filesystem walking skips root inode within subsequent while loop, however, we allow
         // user to pass the source root as prefetch hint. Check it here.
         ctx.prefetch.insert_if_need(&tree.node);
