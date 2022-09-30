@@ -206,7 +206,6 @@ impl DirectSuperBlockV5 {
         let wrapper = OndiskInodeWrapper::new(state, self.clone(), offset)?;
 
         if let Err(e) = wrapper.validate(state.meta.inodes_count, state.meta.chunk_size as u64) {
-            // TODO: check why to ignore EOPNOTSUPP
             if e.raw_os_error().unwrap_or(0) != libc::EOPNOTSUPP {
                 return Err(e);
             }
@@ -439,22 +438,6 @@ impl OndiskInodeWrapper {
         bytes_to_os_str(name)
     }
 
-    fn get_xattr_size(&self) -> Result<usize> {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-
-        if inode.has_xattr() {
-            let offset = self.offset + inode.size();
-            state.validate_range(offset, size_of::<RafsV5XAttrsTable>())?;
-            unsafe {
-                let xattrs = state.base.add(offset) as *const RafsV5XAttrsTable;
-                Ok(size_of::<RafsV5XAttrsTable>() + (*xattrs).aligned_size())
-            }
-        } else {
-            Ok(0)
-        }
-    }
-
     fn get_xattr_data(&self) -> Result<(&[u8], usize)> {
         let state = self.state();
         let inode = self.inode(state.deref());
@@ -502,12 +485,10 @@ impl OndiskInodeWrapper {
 }
 
 impl RafsInode for OndiskInodeWrapper {
-    #[allow(clippy::collapsible_if)]
+    // Somehow we got invalid `inode_count` from superblock.
     fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
-        // TODO: please help to review/enhance this and all other validate(), otherwise there's
-        // always security risks because the image bootstrap may be provided by untrusted parties.
         let state = self.state();
-        let inode = self.inode(state.deref());
+        let inode = state.cast_to_ref::<RafsV5Inode>(state.base, self.offset)?;
         let max_inode = state.inode_table.len() as u64;
 
         // * - parent inode number must be less than child inode number unless child is a hardlink.
@@ -515,22 +496,24 @@ impl RafsInode for OndiskInodeWrapper {
         // * - name_size must be less than 255. Due to alignment, the check is not so strict.
         // * - name_size and symlink_size must be correctly aligned.
         // Should we store raw size instead of aligned size for name and symlink?
-        if inode.i_ino > max_inode
+        if inode.i_ino == 0
+            || inode.i_ino > max_inode
+            // || inode.i_ino > _inode_count
+            || (inode.i_ino != RAFS_V5_ROOT_INODE && inode.i_parent == 0)
             || inode.i_nlink == 0
             || inode.i_name_size as usize > (RAFS_MAX_NAME + 1)
+            || inode.i_name_size == 0
         {
             return Err(ebadf!(format!(
                 "inode validation failure, inode {:?}",
                 inode
             )));
         }
+        if !inode.is_hardlink() && inode.i_parent >= inode.i_ino {
+            return Err(einval!("invalid parent inode"));
+        }
 
-        let xattr_size = if inode.has_xattr() {
-            self.get_xattr_size()?
-        } else {
-            0
-        };
-
+        let mut chunk_count = 0;
         if inode.is_reg() {
             if self.state().meta.is_chunk_dict() {
                 // chunk-dict doesn't support chunk_count check
@@ -543,26 +526,34 @@ impl RafsInode for OndiskInodeWrapper {
                     inode.i_ino, chunks, inode.i_child_count,
                 )));
             }
-            let size = inode.size()
-                + xattr_size
-                + inode.i_child_count as usize * size_of::<RafsV5ChunkInfo>();
-            state.validate_range(self.offset, size)?;
+            let blocks = (inode.i_size + 511u64) / 512u64;
+            // Old stargz builder generates inode with 0 blocks
+            if blocks != inode.i_blocks && inode.i_blocks != 0 {
+                return Err(einval!("invalid block count"));
+            }
+            chunk_count = inode.i_child_count as usize;
         } else if inode.is_dir() {
-            if (inode.i_child_index as Inode) < inode.i_ino
-                || inode.i_child_count as u64 >= max_inode
+            // Only valid i_child_index, i_child_count when we have children.
+            if inode.i_child_count > 0
+                && ((inode.i_child_index as Inode) <= inode.i_ino
+                    || inode.i_child_count as u64 >= max_inode
+                    || inode.i_child_count as u64 + inode.i_child_index as u64 - 1 > max_inode)
             {
                 return Err(einval!("invalid directory"));
             }
-            let size = inode.size() + xattr_size;
-            state.validate_range(self.offset, size)?;
-        } else if inode.is_symlink() {
-            if inode.i_symlink_size == 0 {
-                return Err(einval!("invalid symlink target"));
-            }
+        } else if inode.is_symlink() && inode.i_symlink_size == 0 {
+            return Err(einval!("invalid symlink target"));
         }
-        if !inode.is_hardlink() && inode.i_parent >= inode.i_ino {
-            return Err(einval!("invalid parent inode"));
-        }
+
+        let xattr_size = if inode.has_xattr() {
+            let offset = self.offset + inode.size();
+            let xattrs = state.cast_to_ref::<RafsV5XAttrsTable>(state.base, offset)?;
+            size_of::<RafsV5XAttrsTable>() + xattrs.aligned_size()
+        } else {
+            0
+        };
+        let size = inode.size() + xattr_size + chunk_count * size_of::<RafsV5ChunkInfo>();
+        state.validate_range(self.offset, size)?;
 
         Ok(())
     }
