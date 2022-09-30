@@ -975,9 +975,12 @@ impl BlobDevice {
 
         for io_vec in io_vecs.iter() {
             if let Some(blob) = self.get_blob_by_iovec(io_vec) {
+                // Prefetch errors are ignored.
                 let _ = blob
                     .prefetch(blob.clone(), &[], &io_vec.bi_vec)
-                    .map_err(|_e| eio!("failed to prefetch blob data"));
+                    .map_err(|e| {
+                        error!("failed to prefetch blob data, {}", e);
+                    });
             }
         }
 
