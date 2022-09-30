@@ -196,14 +196,13 @@ class RafsConf:
         threads_count=8,
         merging_size=128 * 1024,
         bandwidth_rate=0,
-        prefetch_all=None,
+        prefetch_all=False,
     ):
         self._configure_rafs("fs_prefetch.enable", True)
         self._configure_rafs("fs_prefetch.threads_count", threads_count)
         self._configure_rafs("fs_prefetch.merging_size", merging_size)
         self._configure_rafs("fs_prefetch.bandwidth_rate", bandwidth_rate)
-        if prefetch_all is not None:
-            self._configure_rafs("fs_prefetch.prefetch_all", prefetch_all)
+        self._configure_rafs("fs_prefetch.prefetch_all", prefetch_all)
 
         return self
 

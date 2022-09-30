@@ -65,12 +65,14 @@ impl RafsInspector {
                 r#"
     Version:            {version}
     Inodes Count:       {inodes_count}
-    Chunk Size:         {chunk_size}
+    Chunk Size:         {chunk_size}KB
+    Root Inode:         {root_inode}
     Flags:              {flags}"#,
-                version = self.rafs_meta.meta.version,
+                version = self.rafs_meta.meta.version >> 8,
                 inodes_count = self.rafs_meta.meta.inodes_count,
-                chunk_size = self.rafs_meta.meta.chunk_size,
+                chunk_size = self.rafs_meta.meta.chunk_size / 1024,
                 flags = self.rafs_meta.meta.flags,
+                root_inode = self.rafs_meta.superblock.root_ino(),
             );
             None
         };
@@ -288,7 +290,7 @@ Compressed Size:    {compressed_size}
             Some(value)
         } else {
             println!(
-                "Prefetched Files: {}",
+                "Total Prefetching Files: {}",
                 self.rafs_meta.meta.prefetch_table_entries
             );
             for ino in prefetch_inos {

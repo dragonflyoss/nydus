@@ -1098,7 +1098,7 @@ impl RafsInode for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn name(&self) -> OsString {
-        let mut curr_name = OsString::from("");
+        let mut cur_name = OsString::from("");
         match self.name.borrow().as_ref() {
             Some(name) => return name.clone(),
             None => {
@@ -1113,7 +1113,7 @@ impl RafsInode for OndiskInodeWrapper {
                         0,
                         &mut |inode: Option<Arc<dyn RafsInode>>, name: OsString, ino, offset| {
                             if cur_ino == ino {
-                                curr_name = name;
+                                cur_name = name;
                                 return Ok(PostWalkAction::Break);
                             }
                             Ok(PostWalkAction::Continue)
@@ -1122,8 +1122,8 @@ impl RafsInode for OndiskInodeWrapper {
                     .unwrap();
             }
         }
-        *self.name.borrow_mut() = Some(curr_name.clone());
-        curr_name
+        *self.name.borrow_mut() = Some(cur_name.clone());
+        cur_name
     }
     // RafsV5 flags, not used by v6, return 0
     fn flags(&self) -> u64 {

@@ -119,11 +119,14 @@ impl Prefetch {
 
     pub fn insert_if_need(&mut self, node: &Node) {
         let path = node.target();
-        let inode = node.inode.ino();
         let index = node.index;
         let mut remove_node = false;
 
-        if self.policy == PrefetchPolicy::None || self.disabled || node.inode.size() == 0 {
+        // Newly created root inode of this rafs has zero size
+        if self.policy == PrefetchPolicy::None
+            || self.disabled
+            || (node.inode.is_reg() && node.inode.size() == 0)
+        {
             return;
         }
 
@@ -131,11 +134,13 @@ impl Prefetch {
             // As path is canonicalized, it should be reliable.
             if path == f {
                 if self.policy == PrefetchPolicy::Fs {
-                    *v = Some(inode);
+                    *v = Some(index);
                 }
                 self.readahead_files.insert(path.clone(), index);
             } else if path.starts_with(f) {
+                // FIXME: path may not exist in prefetch pattern, no need to remove it from readahead_patterns
                 remove_node = true;
+                debug!("remove path {:?}", path);
                 self.readahead_files.insert(path.clone(), index);
             }
         }
@@ -164,6 +169,7 @@ impl Prefetch {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self.readahead_patterns.values().filter_map(|v| *v) {
+                // Rafs v5 has inode number equal to index.
                 prefetch_table.add_entry(i as u32);
             }
             Some(prefetch_table)
