@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//! Generate context information to randomly access gzip/zlib stream.
+
 use std::alloc::{self, Layout};
 use std::convert::TryFrom;
 use std::io::{Read, Result};

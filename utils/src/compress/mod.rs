@@ -19,11 +19,12 @@ use self::lz4_standard::*;
 mod zstd_standard;
 use self::zstd_standard::*;
 
-//#[cfg(feature = "zran")]
+#[cfg(feature = "zran")]
 pub mod zlib_random;
 
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
+/// Supported compression algorithms.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Algorithm {
     None,
@@ -95,18 +96,13 @@ impl TryFrom<u64> for Algorithm {
 }
 
 impl Algorithm {
+    /// Check whether the compression algorithm is none.
     pub fn is_none(self) -> bool {
         self == Self::None
     }
 }
 
-// Algorithm::LZ4Block:
-// 1. Default ratio
-// 2. No prepend size
-
-// For compatibility reason, we use liblz4 version to compress/decompress directly
-// with data blocks so that we don't really care about lz4 header magic numbers like
-// as being done with all these rust lz4 implementations
+/// Compress data with the specified compression algorithm.
 pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
     let src_size = src.len();
     if src_size == 0 {
