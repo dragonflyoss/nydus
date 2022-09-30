@@ -123,7 +123,11 @@ impl Prefetch {
         let index = node.index;
         let mut remove_node = false;
 
-        if self.policy == PrefetchPolicy::None || self.disabled || node.inode.size() == 0 {
+        // Newly created root inode of this rafs has zero size
+        if self.policy == PrefetchPolicy::None
+            || self.disabled
+            || (node.inode.is_reg() && node.inode.size() == 0)
+        {
             return;
         }
 
