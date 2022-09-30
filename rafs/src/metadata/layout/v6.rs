@@ -219,6 +219,11 @@ impl RafsV6SuperBlock {
         self.s_inos = inos.to_le();
     }
 
+    /// Get total inodes count of this Rafs
+    pub fn inodes_count(&self) -> u64 {
+        self.s_inos
+    }
+
     /// Set number of logical blocks.
     pub fn set_blocks(&mut self, blocks: u32) {
         self.s_blocks = blocks.to_le();
