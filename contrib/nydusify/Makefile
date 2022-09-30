@@ -8,7 +8,7 @@ ifdef GOPROXY
 PROXY := GOPROXY=${GOPROXY}
 endif
 
-.PHONY: all build release test clean build-smoke
+.PHONY: all build release plugin test clean build-smoke
 
 all: build
 
@@ -17,6 +17,9 @@ build:
 
 release:
 	@CGO_ENABLED=0 ${PROXY} GOOS=linux GOARCH=${GOARCH} go build -ldflags '-X main.versionGitCommit=${GIT_COMMIT} -X main.versionBuildTime=${BUILD_TIME} -s -w -extldflags "-static"' -o ./cmd ./cmd/nydusify.go
+
+plugin:
+	@CGO_ENABLED=0 ${PROXY} GOOS=linux GOARCH=${GOARCH} go build -ldflags '-s -w -extldflags "-static"' -o nydus-hook-plugin ./plugin
 
 test: build build-smoke
 	@go vet $(PACKAGES)

@@ -19,6 +19,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/hook"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
@@ -343,8 +344,18 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 		})
 	}
 
+	// Ensure all blobs can be uploaded to storage backend.
 	if err := cvt.storageBackend.Finalize(false); err != nil {
 		return errors.Wrap(err, "Finalize backend upload")
+	}
+
+	// Call hook function before pushing manifest to registry.
+	info, err := cvt.newHookInfo(ctx, buildLayers)
+	if err != nil {
+		return errors.Wrap(err, "Get hook info")
+	}
+	if err := cvt.hookBeforePushManifest(ctx, info); err != nil {
+		return errors.Wrap(err, "Failed to call hook 'BeforePushManifest'")
 	}
 
 	// Push OCI manifest, Nydus manifest and manifest index
@@ -370,6 +381,11 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 	}
 	pushDone(nil)
 
+	// Call hook function after pushing manifest to registry.
+	if err := cvt.hookAfterPushManifest(ctx, info); err != nil {
+		return errors.Wrap(err, "Failed to call hook 'AfterPushManifest'")
+	}
+
 	if repo != "" {
 		metrics.ConversionDuration(repo, len(sourceLayers), start)
 	}
@@ -392,6 +408,9 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 
 // Convert converts source image to target (Nydus) image
 func (cvt *Converter) Convert(ctx context.Context) error {
+	hook.Init()
+	defer hook.Close()
+
 	if err := cvt.convert(ctx); err != nil {
 		if errors.Is(err, errInvalidCache) {
 			// Retry to convert without cache if the cache is invalid. we can't ensure the
