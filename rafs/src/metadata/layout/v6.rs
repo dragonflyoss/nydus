@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Debug;
 use std::io::{Read, Result};
@@ -72,7 +72,9 @@ const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 /// Size of SHA256 digest string.
 const BLOB_SHA256_LEN: usize = 64;
-const BLOB_MAX_SIZE: u64 = 1u64 << 44;
+const BLOB_MAX_SIZE_UNCOMPRESSED: u64 = 1u64 << 44;
+const BLOB_MAX_SIZE_COMPRESSED: u64 = 1u64 << 40;
+const BLOB_MAX_CI_SIZE_UNCOMPRESSED: u64 = 16u64 * (1 << 24);
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
@@ -155,7 +157,7 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if u32::from_le(self.s_checksum) != 0 {
+        if self.s_checksum != 0 {
             return Err(einval!(format!(
                 "invalid checksum {} in Rafsv6 superblock",
                 u32::from_le(self.s_checksum)
@@ -169,7 +171,7 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if u64::from_le(self.s_inos) == 0 {
+        if self.s_inos == 0 {
             return Err(einval!("invalid inode number in Rafsv6 superblock"));
         }
 
@@ -181,7 +183,7 @@ impl RafsV6SuperBlock {
             return Err(einval!("invalid blocks in Rafsv6 superblock"));
         }
 
-        if u16::from_le(self.s_u) != 0 {
+        if self.s_u != 0 {
             return Err(einval!("invalid union field in Rafsv6 superblock"));
         }
 
@@ -293,7 +295,7 @@ impl Default for RafsV6SuperBlock {
     }
 }
 
-/// Extended superblock, 256 bytes
+/// Extended superblock for RAFS v6, 256 bytes
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RafsV6SuperBlockExt {
@@ -371,6 +373,7 @@ impl RafsV6SuperBlockExt {
                 self.blob_table_offset()
             )));
         }
+
         Ok(())
     }
 
@@ -385,6 +388,7 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= c.bits();
     }
 
+    /// Set the `has_xattr` flag for the RAFS filesystem.
     pub fn set_has_xattr(&mut self) {
         self.s_flags |= RafsSuperFlags::HAS_XATTR.bits();
     }
@@ -403,6 +407,7 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= c.bits();
     }
 
+    /// Set offset and size of chunk information table.
     pub fn set_chunk_table(&mut self, offset: u64, size: u64) {
         self.set_chunk_table_offset(offset);
         self.set_chunk_table_size(size);
@@ -494,8 +499,12 @@ enum EROFS_FILE_TYPE {
     EROFS_FT_MAX,
 }
 
+/// Trait to manipulate data fields of on-disk RAFS v6 inodes.
+///
+/// There are two types of on disk inode formats defined by EROFS:
+/// - compact inode with 32-byte data
+/// - extended inode with 64-byte data
 pub trait RafsV6OndiskInode: RafsStore {
-    fn set_xattr_inline_count(&mut self, count: u16);
     fn set_size(&mut self, size: u64);
     fn set_ino(&mut self, ino: u32);
     fn set_nlink(&mut self, nlinks: u32);
@@ -503,7 +512,10 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn set_u(&mut self, u: u32);
     fn set_uidgid(&mut self, uid: u32, gid: u32);
     fn set_mtime(&mut self, _sec: u64, _nsec: u32);
+    fn set_rdev(&mut self, rdev: u32);
+    fn set_xattr_inline_count(&mut self, count: u16);
     fn set_data_layout(&mut self, data_layout: u16);
+
     /// Set inode data layout format to be PLAIN.
     #[inline]
     fn set_inline_plain_layout(&mut self) {
@@ -522,10 +534,6 @@ pub trait RafsV6OndiskInode: RafsStore {
         self.set_data_layout(EROFS_INODE_CHUNK_BASED);
     }
 
-    fn set_rdev(&mut self, rdev: u32);
-
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
-
     fn format(&self) -> u16;
     fn mode(&self) -> u16;
     fn size(&self) -> u64;
@@ -536,6 +544,8 @@ pub trait RafsV6OndiskInode: RafsStore {
     fn nlink(&self) -> u32;
     fn rdev(&self) -> u32;
     fn xattr_inline_count(&self) -> u16;
+
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()>;
 }
 
 impl Debug for &dyn RafsV6OndiskInode {
@@ -592,11 +602,6 @@ impl RafsV6InodeCompact {
 }
 
 impl RafsV6OndiskInode for RafsV6InodeCompact {
-    /// Set xattr inline count.
-    fn set_xattr_inline_count(&mut self, count: u16) {
-        self.i_xattr_icount = count.to_le();
-    }
-
     /// Set file size for inode.
     fn set_size(&mut self, size: u64) {
         self.i_size = u32::to_le(size as u32);
@@ -631,40 +636,44 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     /// Set last modification time for the inode.
     fn set_mtime(&mut self, _sec: u64, _nsec: u32) {}
 
+    /// Set real device id.
     fn set_rdev(&mut self, _rdev: u32) {}
+
+    /// Set xattr inline count.
+    fn set_xattr_inline_count(&mut self, count: u16) {
+        self.i_xattr_icount = count.to_le();
+    }
 
     /// Set inode data layout format.
     fn set_data_layout(&mut self, data_layout: u16) {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (data_layout << 1));
     }
 
-    /// Load a `RafsV6InodeCompact` from a reader.
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        r.read_exact(self.as_mut())
-    }
-
     fn format(&self) -> u16 {
-        self.i_format
+        u16::from_le(self.i_format)
     }
 
     fn mode(&self) -> u16 {
-        self.i_mode
+        u16::from_le(self.i_mode)
     }
 
     fn size(&self) -> u64 {
-        self.i_size as u64
+        u32::from_le(self.i_size) as u64
     }
 
     fn union(&self) -> u32 {
-        self.i_u
+        u32::from_le(self.i_u)
     }
 
     fn ino(&self) -> u32 {
-        self.i_ino
+        u32::from_le(self.i_ino)
     }
 
     fn ugid(&self) -> (u32, u32) {
-        (self.i_uid as u32, self.i_gid as u32)
+        (
+            u16::from_le(self.i_uid) as u32,
+            u16::from_le(self.i_gid) as u32,
+        )
     }
 
     fn mtime_s_ns(&self) -> (u64, u32) {
@@ -672,7 +681,7 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     }
 
     fn nlink(&self) -> u32 {
-        self.i_nlink as u32
+        u16::from_le(self.i_nlink) as u32
     }
 
     fn rdev(&self) -> u32 {
@@ -680,7 +689,12 @@ impl RafsV6OndiskInode for RafsV6InodeCompact {
     }
 
     fn xattr_inline_count(&self) -> u16 {
-        self.i_xattr_icount
+        u16::from_le(self.i_xattr_icount)
+    }
+
+    /// Load a `RafsV6InodeCompact` from a reader.
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
     }
 }
 
@@ -711,7 +725,6 @@ pub struct RafsV6InodeExtended {
     /// Size of the file content.
     pub i_size: u64,
     /// A `u32` union: raw_blkaddr or `rdev` or `rafs_v6_inode_chunk_info`
-    /// TODO: Use this field like C union style.
     pub i_u: u32,
     /// Inode number.
     pub i_ino: u32,
@@ -750,11 +763,6 @@ impl RafsV6InodeExtended {
 }
 
 impl RafsV6OndiskInode for RafsV6InodeExtended {
-    /// Set xattr inline count.
-    fn set_xattr_inline_count(&mut self, count: u16) {
-        self.i_xattr_icount = count.to_le();
-    }
-
     /// Set file size for inode.
     fn set_size(&mut self, size: u64) {
         self.i_size = size.to_le();
@@ -793,7 +801,12 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
     }
 
     fn set_rdev(&mut self, rdev: u32) {
-        self.i_u = rdev
+        self.i_u = rdev.to_le()
+    }
+
+    /// Set xattr inline count.
+    fn set_xattr_inline_count(&mut self, count: u16) {
+        self.i_xattr_icount = count.to_le();
     }
 
     /// Set inode data layout format.
@@ -801,49 +814,49 @@ impl RafsV6OndiskInode for RafsV6InodeExtended {
         self.i_format = u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (data_layout << 1));
     }
 
-    /// Load a `RafsV6InodeExtended` from a reader.
-    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
-        r.read_exact(self.as_mut())
-    }
-
     fn format(&self) -> u16 {
-        self.i_format
+        u16::from_le(self.i_format)
     }
 
     fn mode(&self) -> u16 {
-        self.i_mode
+        u16::from_le(self.i_mode)
     }
 
     fn size(&self) -> u64 {
-        self.i_size
+        u64::from_le(self.i_size)
     }
 
     fn union(&self) -> u32 {
-        self.i_u
+        u32::from_le(self.i_u)
     }
 
     fn ino(&self) -> u32 {
-        self.i_ino
+        u32::from_le(self.i_ino)
     }
 
     fn ugid(&self) -> (u32, u32) {
-        (self.i_uid, self.i_gid)
+        (u32::from_le(self.i_uid), u32::from_le(self.i_gid))
     }
 
     fn mtime_s_ns(&self) -> (u64, u32) {
-        (self.i_mtime, self.i_mtime_nsec)
+        (u64::from_le(self.i_mtime), u32::from_le(self.i_mtime_nsec))
     }
 
     fn nlink(&self) -> u32 {
-        self.i_nlink
+        u32::from_le(self.i_nlink)
     }
 
     fn rdev(&self) -> u32 {
-        self.i_u
+        u32::from_le(self.i_u)
     }
 
     fn xattr_inline_count(&self) -> u16 {
-        self.i_xattr_icount
+        u16::from_le(self.i_xattr_icount)
+    }
+
+    /// Load a `RafsV6InodeExtended` from a reader.
+    fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+        r.read_exact(self.as_mut())
     }
 }
 
@@ -886,28 +899,14 @@ impl RafsV6Dirent {
 
     /// Get file type from file mode.
     pub fn file_type(mode: u32) -> u8 {
-        let val = match mode {
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFREG as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_REG_FILE
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_DIR
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_CHRDEV
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_BLKDEV
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_FIFO
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_SOCK
-            }
-            mode if mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32 => {
-                EROFS_FILE_TYPE::EROFS_FT_SYMLINK
-            }
+        let val = match mode as libc::mode_t & libc::S_IFMT {
+            libc::S_IFREG => EROFS_FILE_TYPE::EROFS_FT_REG_FILE,
+            libc::S_IFDIR => EROFS_FILE_TYPE::EROFS_FT_DIR,
+            libc::S_IFCHR => EROFS_FILE_TYPE::EROFS_FT_CHRDEV,
+            libc::S_IFBLK => EROFS_FILE_TYPE::EROFS_FT_BLKDEV,
+            libc::S_IFIFO => EROFS_FILE_TYPE::EROFS_FT_FIFO,
+            libc::S_IFSOCK => EROFS_FILE_TYPE::EROFS_FT_SOCK,
+            libc::S_IFLNK => EROFS_FILE_TYPE::EROFS_FT_SYMLINK,
             _ => EROFS_FILE_TYPE::EROFS_FT_UNKNOWN,
         };
 
@@ -1100,9 +1099,7 @@ impl RafsV6Device {
     }
 
     /// Set number of blocks.
-    pub fn set_blocks(&mut self, size: u64) {
-        debug_assert!(size % EROFS_BLOCK_SIZE == 0);
-        let blocks: u32 = (size >> EROFS_BLOCK_BITS) as u32;
+    pub fn set_blocks(&mut self, blocks: u32) {
         self.blocks = blocks.to_le();
     }
 
@@ -1295,7 +1292,6 @@ impl RafsV6Blob {
     }
 
     fn validate(&self, blob_index: u32, chunk_size: u32, _flags: RafsSuperFlags) -> bool {
-        /* TODO: check fields: compressed_size, meta_features, ci_offset, ci_compressed_size, ci_uncompressed_size */
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
@@ -1350,12 +1346,20 @@ impl RafsV6Blob {
         }
 
         let uncompressed_blob_size = u64::from_le(self.uncompressed_size);
+        let compressed_blob_size = u64::from_le(self.compressed_size);
         // TODO: Make blobs of 4k size aligned.
 
-        if uncompressed_blob_size > BLOB_MAX_SIZE {
+        if uncompressed_blob_size > BLOB_MAX_SIZE_UNCOMPRESSED {
             error!(
                 "RafsV6Blob: idx {} invalid uncompressed_size {}",
                 blob_index, uncompressed_blob_size
+            );
+            return false;
+        }
+        if compressed_blob_size > BLOB_MAX_SIZE_COMPRESSED {
+            error!(
+                "RafsV6Blob: idx {} invalid compressed_size {}",
+                blob_index, compressed_blob_size
             );
             return false;
         }
@@ -1382,8 +1386,24 @@ impl RafsV6Blob {
             return false;
         }
 
+        let ci_offset = u64::from_le(self.ci_offset);
         let ci_compr_size = u64::from_le(self.ci_compressed_size);
         let ci_uncompr_size = u64::from_le(self.ci_uncompressed_size);
+        if ci_offset.checked_add(ci_compr_size).is_none() {
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} wraps around", blob_index, ci_compr_size, ci_offset);
+            return false;
+        }
+        if ci_offset != compressed_blob_size && ci_offset + ci_compr_size > compressed_blob_size {
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} is bigger than blob size {}", blob_index, ci_compr_size, ci_offset, compressed_blob_size);
+            return false;
+        }
+        if ci_uncompr_size > BLOB_MAX_CI_SIZE_UNCOMPRESSED {
+            error!(
+                "RafsV6Blob: idx {} invalid fields, ci_uncompressed_size {}",
+                blob_index, ci_uncompr_size
+            );
+            return false;
+        }
         if ci_compr_size > ci_uncompr_size {
             error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} is greater than ci_uncompressed_size {}", blob_index, ci_compr_size, ci_uncompr_size);
             return false;
@@ -1639,7 +1659,7 @@ impl RafsV6XattrEntry {
     }
 
     pub fn value_size(&self) -> u32 {
-        u32::from_le(self.e_value_size as u32)
+        u16::from_le(self.e_value_size) as u32
     }
 
     fn set_name_len(&mut self, v: u8) {
@@ -1660,8 +1680,8 @@ pub fn recover_namespace(index: u8) -> Result<OsString> {
         .iter()
         .position(|x| x.index == index)
         .ok_or_else(|| einval!(format!("invalid xattr name index {}", index)))?;
-    // Safe to unwrap since it is encoded in Nydus
-    Ok(OsString::from_str(RAFSV6_XATTR_TYPES[pos].prefix).unwrap())
+    OsString::from_str(RAFSV6_XATTR_TYPES[pos].prefix)
+        .map_err(|_e| einval!("invalid xattr name prefix"))
 }
 
 impl RafsXAttrs {
@@ -1682,13 +1702,13 @@ impl RafsXAttrs {
         } else {
             let mut size: usize = size_of::<RafsV6XattrIbodyHeader>();
             for (key, value) in self.pairs.iter() {
+                // Safe to unwrap() because RafsXAttrs.add()/adds() has validated the prefix.
                 let (_, prefix_len) = Self::match_prefix(key).expect("xattr is not valid");
 
                 size += size_of::<RafsV6XattrEntry>();
                 size += key.byte_size() - prefix_len + value.len();
                 size = round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64) as usize;
             }
-
             size
         }
     }
@@ -1701,13 +1721,19 @@ impl RafsXAttrs {
 
         if !self.pairs.is_empty() {
             for (key, value) in self.pairs.iter() {
-                // TODO: fix error handling on unknown xattr.
-                let (index, prefix_len) = Self::match_prefix(key).expect("xattr is not valid");
+                let (index, prefix_len) = Self::match_prefix(key)
+                    .map_err(|_| einval!(format!("invalid xattr key {:?}", key)))?;
+                if key.len() <= prefix_len {
+                    return Err(einval!(format!("invalid xattr key {:?}", key)));
+                }
+                if value.len() > u16::MAX as usize {
+                    return Err(einval!("xattr value size is too big"));
+                }
 
                 let mut entry = RafsV6XattrEntry::new();
                 entry.set_name_len((key.byte_size() - prefix_len) as u8);
                 entry.set_name_index(index);
-                entry.set_value_size(value.len().try_into().unwrap());
+                entry.set_value_size(value.len() as u16);
 
                 w.write_all(entry.as_ref())?;
                 w.write_all(&key.as_bytes()[prefix_len..])?;
@@ -1726,9 +1752,10 @@ impl RafsXAttrs {
     }
 
     fn match_prefix(key: &OsStr) -> Result<(u8, usize)> {
+        let key_str = key.to_string_lossy();
         let pos = RAFSV6_XATTR_TYPES
             .iter()
-            .position(|x| key.to_string_lossy().starts_with(x.prefix))
+            .position(|x| key_str.starts_with(x.prefix))
             .ok_or_else(|| einval!(format!("xattr prefix {:?} is not valid", key)))?;
         Ok((
             RAFSV6_XATTR_TYPES[pos].index,
@@ -1810,13 +1837,11 @@ impl RafsV6PrefetchTable {
 mod tests {
     use super::*;
     use crate::{BufWriter, RafsIoRead};
-    use std::ffi::OsString;
     use std::fs::OpenOptions;
     use std::io::Write;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
-    #[ignore]
     fn test_super_block_load_store() {
         let mut sb = RafsV6SuperBlock::new();
         let temp = TempFile::new().unwrap();
@@ -1853,7 +1878,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_v6_inode_extended() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1920,7 +1944,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_v6_chunk_addr() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1950,7 +1973,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_v6_device() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -1974,15 +1996,15 @@ mod tests {
         writer.flush().unwrap();
         let mut device2 = RafsV6Device::new();
         device2.load(&mut reader).unwrap();
-        assert_eq!(device2.blocks(), 0x1);
+        assert_eq!(device2.blocks(), 0x1234);
         assert_eq!(device.blob_id(), &id);
     }
 
     #[test]
     fn test_rafs_xattr_count_v6() {
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.a"), vec![1u8]);
-        xattrs.add(OsString::from("trusted.b"), vec![2u8]);
+        xattrs.add2("user.a", vec![1u8]).unwrap();
+        xattrs.add2("trusted.b", vec![2u8]).unwrap();
 
         assert_eq!(xattrs.count_v6(), 5);
 
@@ -1993,8 +2015,8 @@ mod tests {
     #[test]
     fn test_rafs_xattr_size_v6() {
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.a"), vec![1u8]);
-        xattrs.add(OsString::from("trusted.b"), vec![2u8]);
+        xattrs.add2("user.a", vec![1u8]).unwrap();
+        xattrs.add2("trusted.b", vec![2u8]).unwrap();
 
         let size = 12 + 8 + 8;
         assert_eq!(xattrs.aligned_size_v6(), size);
@@ -2002,15 +2024,12 @@ mod tests {
         let xattrs2 = RafsXAttrs::new();
         assert_eq!(xattrs2.aligned_size_v6(), 0);
 
-        // let mut xattrs2 = RafsXAttrs::new();
-        // xattrs2.add(OsString::from("user.a"), vec![1u8]);
-        // xattrs2.add(OsString::from("unknown.b"), vec![2u8]);
-
-        // assert_eq!(xattrs2.aligned_size_v6().is_error(), true);
+        let mut xattrs2 = RafsXAttrs::new();
+        xattrs2.add2("user.a", vec![1u8]).unwrap();
+        xattrs2.add2("unknown.b", vec![2u8]).unwrap_err();
     }
 
     #[test]
-    #[ignore]
     fn test_rafs_xattr_store_v6() {
         let temp = TempFile::new().unwrap();
         let w = OpenOptions::new()
@@ -2027,8 +2046,8 @@ mod tests {
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.nydus"), vec![1u8]);
-        xattrs.add(OsString::from("security.rafs"), vec![2u8, 3u8]);
+        xattrs.add2("user.nydus", vec![1u8]).unwrap();
+        xattrs.add2("security.rafs", vec![2u8, 3u8]).unwrap();
         xattrs.store_v6(&mut writer).unwrap();
         writer.flush().unwrap();
 

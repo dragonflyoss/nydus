@@ -844,7 +844,7 @@ impl Node {
         for key in file_xattrs {
             let value = xattr::get(&self.path, &key)
                 .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
-            self.xattrs.add(key, value.unwrap_or_default());
+            self.xattrs.add(key, value.unwrap_or_default())?;
         }
 
         if !self.xattrs.is_empty() {

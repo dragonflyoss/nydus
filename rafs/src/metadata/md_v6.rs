@@ -29,8 +29,10 @@ impl RafsSuper {
             return Ok(false);
         }
         sb.validate(end)?;
-        self.meta.magic = sb.magic();
         self.meta.version = RAFS_SUPER_VERSION_V6;
+        self.meta.magic = sb.magic();
+        self.meta.meta_blkaddr = sb.s_meta_blkaddr;
+        self.meta.root_nid = sb.s_root_nid;
 
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.load(r)?;
@@ -45,12 +47,9 @@ impl RafsSuper {
         self.meta.flags = RafsSuperFlags::from_bits(ext_sb.flags())
             .ok_or_else(|| einval!(format!("invalid super flags {:x}", ext_sb.flags())))?;
         info!("rafs superblock features: {}", self.meta.flags);
-        self.meta.meta_blkaddr = sb.s_meta_blkaddr;
-        self.meta.root_nid = sb.s_root_nid;
 
         self.meta.prefetch_table_entries = ext_sb.prefetch_table_size() / size_of::<u32>() as u32;
         self.meta.prefetch_table_offset = ext_sb.prefetch_table_offset();
-
         trace!(
             "prefetch table offset {} entries {} ",
             self.meta.prefetch_table_offset,
@@ -168,7 +167,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_v6_load_invalid_superblock() {
         let t_file = TempFile::new().unwrap();
 
@@ -202,9 +200,13 @@ mod tests {
     fn test_try_load_v6() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
-        source_path.push("../tests/texture/bootstrap/rafs_v6.boot");
+        source_path.push("../tests/texture/bootstrap/rafs-v6.boot");
 
-        let file = OpenOptions::new().read(true).write(false).open(path).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(source_path)
+            .unwrap();
         let mut reader = Box::new(file) as RafsIoReader;
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,

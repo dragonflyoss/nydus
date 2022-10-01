@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn test_rafs_iterator() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
-        let path = PathBuf::from(root_dir).join("../tests/texture/bootstrap/image_v2.boot");
+        let path = PathBuf::from(root_dir).join("../tests/texture/bootstrap/rafs-v5.boot");
         let bootstrap = OpenOptions::new()
             .read(true)
             .write(false)

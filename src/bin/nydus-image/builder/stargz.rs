@@ -502,7 +502,7 @@ impl StargzIndexTreeBuilder {
                         entry_path, name,
                     )
                 })?;
-                xattrs.add(name.into(), value);
+                xattrs.add2(name, value)?;
             }
         }
 

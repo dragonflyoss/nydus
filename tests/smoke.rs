@@ -402,7 +402,7 @@ fn test_unpack(work_dir: &Path, version: &str) {
 
 #[test]
 fn test_image_inspect() {
-    let bootstrap_path = "./tests/texture/bootstrap/image_v2.boot";
+    let bootstrap_path = "./tests/texture/bootstrap/rafs-v5.boot";
     test_image_inspect_cmd("stats", bootstrap_path);
     test_image_inspect_cmd("prefetch", bootstrap_path);
     test_image_inspect_cmd("blobs", bootstrap_path);

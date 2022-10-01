@@ -1933,11 +1933,15 @@ pub mod tests {
         let mut xattrs = RafsXAttrs::new();
         assert_eq!(xattrs.size(), 0);
 
-        xattrs.add(OsString::from("key1"), vec![0x1u8, 0x2, 0x3, 0x4]);
-        assert_eq!(xattrs.size(), 13);
-        xattrs.add(OsString::from("key21"), vec![0x1u8, 0x2, 0x3, 0x4]);
-        assert_eq!(xattrs.size(), 27);
-        xattrs.remove(&OsString::from("key1"));
-        assert_eq!(xattrs.size(), 14);
+        xattrs
+            .add2("user.key1", vec![0x1u8, 0x2, 0x3, 0x4])
+            .unwrap();
+        assert_eq!(xattrs.size(), 18);
+        xattrs
+            .add2("user.key21", vec![0x1u8, 0x2, 0x3, 0x4])
+            .unwrap();
+        assert_eq!(xattrs.size(), 37);
+        xattrs.remove(&OsString::from("user.key1"));
+        assert_eq!(xattrs.size(), 19);
     }
 }
