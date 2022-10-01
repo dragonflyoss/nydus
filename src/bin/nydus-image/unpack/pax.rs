@@ -13,12 +13,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use nydus_rafs::metadata::inode::InodeWrapper;
+use nydus_rafs::metadata::RafsInodeExt;
+use nydus_storage::{backend::BlobReader, device::BlobChunkInfo, utils::alloc_buf};
 use nydus_utils::compress::{self, Algorithm};
-use rafs::metadata::RafsInodeExt;
-use storage::{backend::BlobReader, device::BlobChunkInfo, utils::alloc_buf};
 use tar::{EntryType, Header};
-
-use crate::core::node::InodeWrapper;
 
 use super::{SectionBuilder, TarSection};
 

@@ -19,58 +19,24 @@ use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
+use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
+use nydus_rafs::metadata::layout::RafsBlobTable;
+use nydus_rafs::metadata::RafsSuperFlags;
+use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
+use nydus_rafs::{RafsIoReader, RafsIoWrite};
+use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
-use rafs::metadata::layout::v5::RafsV5BlobTable;
-use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
-use rafs::metadata::layout::{RafsBlobTable, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
-use rafs::metadata::RafsSuperFlags;
-use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
-use rafs::{RafsIoReader, RafsIoWrite};
-use storage::device::{BlobFeatures, BlobInfo};
-use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
+use rafs::metadata::RafsVersion;
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
-use super::node::{ChunkSource, ChunkWrapper, Node, WhiteoutSpec};
+use super::node::{ChunkSource, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RafsVersion {
-    V5,
-    V6,
-}
-
-impl Default for RafsVersion {
-    fn default() -> Self {
-        RafsVersion::V5
-    }
-}
-
-impl TryFrom<u32> for RafsVersion {
-    type Error = Error;
-    fn try_from(version: u32) -> Result<Self, Self::Error> {
-        if version == RAFS_SUPER_VERSION_V5 {
-            return Ok(RafsVersion::V5);
-        } else if version == RAFS_SUPER_VERSION_V6 {
-            return Ok(RafsVersion::V6);
-        }
-        Err(anyhow!("invalid version {}", version))
-    }
-}
-
-impl RafsVersion {
-    #[allow(dead_code)]
-    pub fn is_v5(&self) -> bool {
-        self == &Self::V5
-    }
-
-    pub fn is_v6(&self) -> bool {
-        self == &Self::V6
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SourceType {

@@ -13,7 +13,8 @@ use sha2::Digest;
 
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::try_round_up_4k;
-use rafs::metadata::{RafsMode, RafsSuper};
+use rafs::metadata::chunk::ChunkWrapper;
+use rafs::metadata::{RafsMode, RafsSuper, RafsVersion};
 use storage::backend::BlobBackend;
 use storage::utils::alloc_buf;
 
@@ -22,9 +23,9 @@ use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
 use crate::core::context::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
-    BuildOutput, RafsVersion, SourceType,
+    BuildOutput, SourceType,
 };
-use crate::core::node::{ChunkWrapper, Node, WhiteoutSpec};
+use crate::core::node::{Node, WhiteoutSpec};
 use crate::core::tree::Tree;
 
 const DEFAULT_COMPACT_BLOB_SIZE: usize = 10 * 1024 * 1024;

@@ -14,25 +14,25 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use serde::{Deserialize, Serialize};
-
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::inode::InodeWrapper;
+use nydus_rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
+use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::{Inode, RafsVersion};
+use nydus_storage::device::BlobChunkFlags;
+use nydus_storage::meta::BlobMetaHeaderOndisk;
 use nydus_utils::compact::makedev;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::{try_round_up_4k, ByteSize};
-use rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
-use rafs::metadata::layout::RafsXAttrs;
-use rafs::metadata::Inode;
-use storage::device::BlobChunkFlags;
-use storage::meta::BlobMetaHeaderOndisk;
+use serde::{Deserialize, Serialize};
 
 use crate::builder::Builder;
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
     BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
-    RafsVersion,
 };
-use crate::core::node::{ChunkSource, ChunkWrapper, InodeWrapper, Node, NodeChunk, Overlay};
+use crate::core::node::{ChunkSource, Node, NodeChunk, Overlay};
 use crate::core::tree::Tree;
 
 type RcTocEntry = Rc<RefCell<TocEntry>>;

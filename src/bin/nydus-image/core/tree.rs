@@ -21,13 +21,13 @@ use std::ops::Deref;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use rafs::metadata::chunk::ChunkWrapper;
+use rafs::metadata::inode::InodeWrapper;
 use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
 use rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
 
 use super::chunk_dict::ChunkDict;
-use super::node::{
-    ChunkSource, ChunkWrapper, InodeWrapper, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType,
-};
+use super::node::{ChunkSource, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType};
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]

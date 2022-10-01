@@ -9,15 +9,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use nydus_rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsSuperMeta, RafsVersion};
 use nydus_utils::compress;
 use nydus_utils::digest::{self};
-use rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsSuperMeta};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
 use crate::core::context::{
     ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BuildContext, BuildOutput,
-    RafsVersion,
 };
 use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
 use crate::core::tree::{MetadataTreeBuilder, Tree};
