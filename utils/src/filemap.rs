@@ -122,6 +122,23 @@ impl FileMapState {
         Ok(unsafe { &mut *(start as *const T as *mut T) })
     }
 
+    /// Get an immutable slice of 'T' at 'offset' with 'count' entries.
+    pub fn get_slice<T>(&self, offset: usize, count: usize) -> Result<&[T]> {
+        let start = self.base.wrapping_add(offset);
+        if count.checked_mul(size_of::<T>()).is_none() {
+            return Err(einval!("count to validate_slice() is too big"));
+        }
+        let size = count * size_of::<T>();
+        if size.checked_add(start as usize).is_none() {
+            return Err(einval!("invalid parameter to validate_slice()"));
+        }
+        let end = start.wrapping_add(size);
+        if start > end || start < self.base || end < self.base || end > self.end {
+            return Err(einval!("invalid range"));
+        }
+        Ok(unsafe { std::slice::from_raw_parts(start as *const T, count) })
+    }
+
     /// Check whether the range [offset, offset + size) is valid and return the start address.
     pub fn validate_range(&self, offset: usize, size: usize) -> Result<*const u8> {
         let start = self.base.wrapping_add(offset);
@@ -148,6 +165,17 @@ impl FileMapState {
         let result = file.sync_data();
         std::mem::forget(file);
         result
+    }
+}
+
+/// Duplicate a file object by `libc::dup()`.
+pub fn clone_file(fd: RawFd) -> Result<File> {
+    unsafe {
+        let fd = libc::dup(fd);
+        if fd < 0 {
+            return Err(last_error!("failed to dup bootstrap file fd"));
+        }
+        Ok(File::from_raw_fd(fd))
     }
 }
 
