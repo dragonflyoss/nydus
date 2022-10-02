@@ -4,23 +4,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Result;
-use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tokio::time::interval;
 
-use governor::clock::QuantaClock;
-use governor::state::{InMemoryState, NotKeyed};
-use governor::{Quota, RateLimiter};
-use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use tokio::runtime::Runtime;
-use tokio::sync::Semaphore;
-
+use leaky_bucket::RateLimiter;
 use nydus_api::http::BlobPrefetchConfig;
 use nydus_utils::async_helper::with_runtime;
+use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::mpmc::Channel;
+use tokio::runtime::Runtime;
+use tokio::sync::Semaphore;
+use tokio::time::interval;
 
 use crate::cache::{BlobCache, BlobIoRange};
 use crate::factory::ASYNC_RUNTIME;
@@ -86,7 +82,8 @@ pub(crate) struct AsyncWorkerMgr {
     prefetch_config: Arc<AsyncPrefetchConfig>,
     prefetch_delayed: AtomicU64,
     prefetch_inflight: AtomicU32,
-    prefetch_limiter: Option<Arc<RateLimiter<NotKeyed, InMemoryState, QuantaClock>>>,
+    prefetch_consumed: AtomicUsize,
+    prefetch_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl AsyncWorkerMgr {
@@ -95,21 +92,21 @@ impl AsyncWorkerMgr {
         metrics: Arc<BlobcacheMetrics>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
     ) -> Result<Self> {
-        // If the given value is less than maximum blob chunk size, it exceeds burst size of the
-        // limiter ending up with throttling all throughput, so ensure bandwidth is bigger than
-        // the maximum chunk size.
-        let tweaked_bw_limit = if prefetch_config.bandwidth_rate != 0 {
-            std::cmp::max(RAFS_MAX_CHUNK_SIZE as u32, prefetch_config.bandwidth_rate)
-        } else {
-            0
+        let prefetch_limiter = match prefetch_config.bandwidth_rate {
+            0 => None,
+            v => {
+                // If the given value is less than maximum blob chunk size, it exceeds burst size of the
+                // limiter ending up with throttling all throughput, so ensure bandwidth is bigger than
+                // the maximum chunk size.
+                let limit = std::cmp::max(RAFS_MAX_CHUNK_SIZE as usize, v as usize);
+                let limiter = RateLimiter::builder()
+                    .initial(limit)
+                    .refill(limit / 10)
+                    .interval(Duration::from_millis(100))
+                    .build();
+                Some(Arc::new(limiter))
+            }
         };
-        let prefetch_limiter = NonZeroU32::new(tweaked_bw_limit).map(|v| {
-            info!(
-                "storage: prefetch bandwidth will be limited at {}Bytes/S",
-                v
-            );
-            Arc::new(RateLimiter::direct(Quota::per_second(v)))
-        });
 
         Ok(AsyncWorkerMgr {
             metrics,
@@ -122,6 +119,7 @@ impl AsyncWorkerMgr {
             prefetch_config,
             prefetch_delayed: AtomicU64::new(0),
             prefetch_inflight: AtomicU32::new(0),
+            prefetch_consumed: AtomicUsize::new(0),
             prefetch_limiter,
         })
     }
@@ -182,12 +180,8 @@ impl AsyncWorkerMgr {
     /// Consume network bandwidth budget for prefetching.
     pub fn consume_prefetch_budget(&self, size: u32) {
         if self.prefetch_inflight.load(Ordering::Relaxed) > 0 {
-            if let Some(v) = NonZeroU32::new(size) {
-                // Try to consume budget but ignore result.
-                if let Some(limiter) = self.prefetch_limiter.as_ref() {
-                    let _ = limiter.check_n(v);
-                }
-            }
+            self.prefetch_consumed
+                .fetch_add(size as usize, Ordering::AcqRel);
         }
     }
 
@@ -297,17 +291,15 @@ impl AsyncWorkerMgr {
             };
 
             if size > 0 {
-                let size = std::cmp::min(size, u32::MAX as u64) as u32;
-                // Safe to unwrap because we have checked that size is not zero.
-                let cells = NonZeroU32::new(size).unwrap();
-                if limiter.check_n(cells).is_err() {
+                let size = (self.prefetch_consumed.swap(0, Ordering::AcqRel))
+                    .saturating_add(size as usize);
+                let max = limiter.max();
+                let size = std::cmp::min(size, max.saturating_add(max));
+                let cap = limiter.balance();
+                if cap < size {
                     self.prefetch_delayed.fetch_add(1, Ordering::Relaxed);
-                    if let Err(e) = limiter.until_n_ready(cells).await {
-                        // `InsufficientCapacity` is the only possible error
-                        // Have to give up to avoid dead-loop
-                        error!("{}: give up rate-limiting", e);
-                    }
                 }
+                limiter.acquire(size).await;
             }
         }
     }
@@ -471,14 +463,20 @@ mod tests {
         assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
 
         assert!(mgr
-            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(0x1000001))
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(0x1000000))
+            .is_ok());
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(0x1000000))
             .is_ok());
         assert!(mgr
             .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(u64::MAX))
             .is_ok());
-        thread::sleep(Duration::from_secs(4));
-        assert_eq!(mgr.prefetch_delayed.load(Ordering::Acquire), 2);
-        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 3);
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 2);
+        thread::sleep(Duration::from_secs(3));
+        assert!(mgr.prefetch_inflight.load(Ordering::Acquire) >= 1);
+        assert!(mgr.prefetch_delayed.load(Ordering::Acquire) >= 1);
 
         mgr.stop();
         assert_eq!(mgr.workers.load(Ordering::Acquire), 0);
