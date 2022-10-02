@@ -22,6 +22,7 @@ pub mod compact;
 pub mod compress;
 pub mod digest;
 pub mod exec;
+pub mod filemap;
 pub mod inode_bitmap;
 pub mod metrics;
 pub mod mpmc;
