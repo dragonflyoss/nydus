@@ -24,7 +24,7 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::{
     layout::{XattrName, XattrValue},
-    ChildInodeHandler, Inode, RafsInode, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
+    Inode, RafsInode, RafsInodeWalkHandler, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
 };
 use storage::device::v5::BlobV5ChunkInfo;
 
@@ -108,7 +108,11 @@ impl RafsInode for MockInode {
         }
     }
 
-    fn walk_children_inodes(&self, _entry_offset: u64, _handler: ChildInodeHandler) -> Result<()> {
+    fn walk_children_inodes(
+        &self,
+        _entry_offset: u64,
+        _handler: RafsInodeWalkHandler,
+    ) -> Result<()> {
         todo!()
     }
 

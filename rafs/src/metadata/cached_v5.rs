@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
-use nydus_utils::digest::Algorithm;
-use nydus_utils::{digest::RafsDigest, ByteSize};
+use nydus_utils::digest::{Algorithm, RafsDigest};
+use nydus_utils::ByteSize;
 use storage::device::v5::BlobV5ChunkInfo;
 use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
 
@@ -31,7 +31,7 @@ use crate::metadata::layout::v5::{
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
 use crate::metadata::{
-    BlobIoVec, ChildInodeHandler, Inode, PostWalkAction, RafsError, RafsInode, RafsResult,
+    BlobIoVec, Inode, RafsError, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsResult,
     RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT, DOTDOT,
     RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
 };
@@ -309,7 +309,7 @@ impl CachedInodeV5 {
 
     /// Load an inode metadata from a reader.
     pub fn load(&mut self, sb: &RafsSuperMeta, r: &mut RafsIoReader) -> Result<()> {
-        // RafsV5Inode...name...symbol link...chunks
+        // RafsV5Inode...name...symbol link...xattrs...chunks
         let mut inode = RafsV5Inode::new();
 
         // parse ondisk inode: RafsV5Inode|name|symbol|xattr|chunks
@@ -381,196 +381,12 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_entry(&self) -> Entry {
-        Entry {
-            attr: self.get_attr().into(),
-            inode: self.i_ino,
-            generation: 0,
-            attr_flags: 0,
-            attr_timeout: self.i_meta.attr_timeout,
-            entry_timeout: self.i_meta.entry_timeout,
-        }
-    }
-
-    #[inline]
-    fn get_attr(&self) -> fuse_abi::Attr {
-        fuse_abi::Attr {
-            ino: self.i_ino,
-            size: self.i_size,
-            blocks: self.i_blocks,
-            mode: self.i_mode,
-            nlink: self.i_nlink as u32,
-            blksize: RAFS_ATTR_BLOCK_SIZE,
-            rdev: self.i_rdev,
-            ..Default::default()
-        }
-    }
-
-    #[inline]
-    fn get_name_size(&self) -> u16 {
-        self.i_name.byte_size() as u16
-    }
-
-    #[inline]
-    fn get_symlink(&self) -> Result<OsString> {
-        if !self.is_symlink() {
-            Err(einval!("inode is not a symlink"))
-        } else {
-            Ok(self.i_target.clone())
-        }
-    }
-
-    #[inline]
-    fn get_symlink_size(&self) -> u16 {
-        if self.is_symlink() {
-            self.i_target.byte_size() as u16
-        } else {
-            0
-        }
-    }
-
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
-        let idx = self
-            .i_child
-            .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
-            .map_err(|_| enoent!())?;
-        Ok(self.i_child[idx].clone())
-    }
-
-    #[inline]
-    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInode>> {
-        if (index as usize) < self.i_child.len() {
-            Ok(self.i_child[index as usize].clone())
-        } else {
-            Err(einval!("invalid child index"))
-        }
-    }
-
-    fn walk_children_inodes(&self, entry_offset: u64, handler: ChildInodeHandler) -> Result<()> {
-        let mut cur_offset = entry_offset;
-        // offset 0 and 1 is for "." and ".." respectively.
-
-        if cur_offset == 0 {
-            cur_offset += 1;
-            // Safe to unwrap since conversion from DOT to os string can't fail.
-            match handler(
-                None,
-                OsString::from_str(DOT).unwrap(),
-                self.ino(),
-                cur_offset,
-            ) {
-                Ok(PostWalkAction::Continue) => {}
-                Ok(PostWalkAction::Break) => return Ok(()),
-                Err(e) => return Err(e),
-            }
-        }
-
-        if cur_offset == 1 {
-            let parent = if self.ino() == 1 { 1 } else { self.parent() };
-            cur_offset += 1;
-            // Safe to unwrap since conversion from DOTDOT to os string can't fail.
-            match handler(
-                None,
-                OsString::from_str(DOTDOT).unwrap(),
-                parent,
-                cur_offset,
-            ) {
-                Ok(PostWalkAction::Continue) => {}
-                Ok(PostWalkAction::Break) => return Ok(()),
-                Err(e) => return Err(e),
-            };
-        }
-
-        let mut idx = cur_offset - 2;
-        while idx < self.get_child_count() as u64 {
-            assert!(idx <= u32::MAX as u64);
-            let child = self.get_child_by_index(idx as u32)?;
-            cur_offset += 1;
-            match handler(None, child.name(), child.ino(), cur_offset) {
-                Ok(PostWalkAction::Continue) => idx += 1,
-                Ok(PostWalkAction::Break) => break,
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    fn get_child_count(&self) -> u32 {
-        self.i_child_cnt
-    }
-
-    #[inline]
-    fn get_child_index(&self) -> Result<u32> {
-        Ok(self.i_child_idx)
-    }
-
-    #[inline]
-    fn get_chunk_count(&self) -> u32 {
-        self.get_child_count()
-    }
-
-    #[inline]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
-        if (idx as usize) < self.i_data.len() {
-            Ok(self.i_data[idx as usize].clone())
-        } else {
-            Err(einval!("invalid chunk index"))
-        }
-    }
-
-    #[inline]
-    fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::XATTR)
-    }
-
-    #[inline]
-    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
-        Ok(self.i_xattr.get(name).cloned())
-    }
-
-    fn get_xattrs(&self) -> Result<Vec<XattrName>> {
-        Ok(self
-            .i_xattr
-            .keys()
-            .map(|k| k.as_bytes().to_vec())
-            .collect::<Vec<XattrName>>())
-    }
-
-    #[inline]
-    fn is_dir(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
-    }
-
-    #[inline]
-    fn is_symlink(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
-    }
-
-    #[inline]
-    fn is_reg(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
-    }
-
-    #[inline]
-    fn is_hardlink(&self) -> bool {
-        !self.is_dir() && self.i_nlink > 1
-    }
-
-    #[inline]
-    fn name(&self) -> OsString {
-        self.i_name.clone()
-    }
-
-    #[inline]
-    fn flags(&self) -> u64 {
-        self.i_flags.bits()
-    }
-
-    #[inline]
     fn get_digest(&self) -> RafsDigest {
         self.i_digest
+    }
+
+    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+        rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
     fn collect_descendants_inodes(
@@ -598,8 +414,192 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
-        rafsv5_alloc_bio_vecs(self, offset, size, user_io)
+    #[inline]
+    fn flags(&self) -> u64 {
+        self.i_flags.bits()
+    }
+
+    #[inline]
+    fn get_entry(&self) -> Entry {
+        Entry {
+            attr: self.get_attr().into(),
+            inode: self.i_ino,
+            generation: 0,
+            attr_flags: 0,
+            attr_timeout: self.i_meta.attr_timeout,
+            entry_timeout: self.i_meta.entry_timeout,
+        }
+    }
+
+    #[inline]
+    fn get_attr(&self) -> fuse_abi::Attr {
+        fuse_abi::Attr {
+            ino: self.i_ino,
+            size: self.i_size,
+            blocks: self.i_blocks,
+            mode: self.i_mode,
+            nlink: self.i_nlink as u32,
+            blksize: RAFS_ATTR_BLOCK_SIZE,
+            rdev: self.i_rdev,
+            ..Default::default()
+        }
+    }
+
+    #[inline]
+    fn name(&self) -> OsString {
+        self.i_name.clone()
+    }
+
+    #[inline]
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
+    #[inline]
+    fn is_dir(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+    }
+
+    #[inline]
+    fn is_symlink(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
+    }
+
+    #[inline]
+    fn is_reg(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+    }
+
+    #[inline]
+    fn is_hardlink(&self) -> bool {
+        !self.is_dir() && self.i_nlink > 1
+    }
+
+    #[inline]
+    fn has_xattr(&self) -> bool {
+        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+    }
+
+    #[inline]
+    fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
+        Ok(self.i_xattr.get(name).cloned())
+    }
+
+    fn get_xattrs(&self) -> Result<Vec<XattrName>> {
+        Ok(self
+            .i_xattr
+            .keys()
+            .map(|k| k.as_bytes().to_vec())
+            .collect::<Vec<XattrName>>())
+    }
+
+    #[inline]
+    fn get_symlink(&self) -> Result<OsString> {
+        if !self.is_symlink() {
+            Err(einval!("inode is not a symlink"))
+        } else {
+            Ok(self.i_target.clone())
+        }
+    }
+
+    #[inline]
+    fn get_symlink_size(&self) -> u16 {
+        if self.is_symlink() {
+            self.i_target.byte_size() as u16
+        } else {
+            0
+        }
+    }
+
+    fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()> {
+        let mut cur_offset = entry_offset;
+        // offset 0 and 1 is for "." and ".." respectively.
+
+        if cur_offset == 0 {
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOT).unwrap(),
+                self.ino(),
+                cur_offset,
+            ) {
+                Ok(RafsInodeWalkAction::Continue) => {}
+                Ok(RafsInodeWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+
+        if cur_offset == 1 {
+            let parent = if self.ino() == 1 { 1 } else { self.parent() };
+            cur_offset += 1;
+            // Safe to unwrap since conversion from DOTDOT to os string can't fail.
+            match handler(
+                None,
+                OsString::from_str(DOTDOT).unwrap(),
+                parent,
+                cur_offset,
+            ) {
+                Ok(RafsInodeWalkAction::Continue) => {}
+                Ok(RafsInodeWalkAction::Break) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+        }
+
+        let mut idx = cur_offset - 2;
+        while idx < self.get_child_count() as u64 {
+            assert!(idx <= u32::MAX as u64);
+            let child = self.get_child_by_index(idx as u32)?;
+            cur_offset += 1;
+            match handler(None, child.name(), child.ino(), cur_offset) {
+                Ok(RafsInodeWalkAction::Continue) => idx += 1,
+                Ok(RafsInodeWalkAction::Break) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+        let idx = self
+            .i_child
+            .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
+            .map_err(|_| enoent!())?;
+        Ok(self.i_child[idx].clone())
+    }
+
+    #[inline]
+    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInode>> {
+        if (index as usize) < self.i_child.len() {
+            Ok(self.i_child[index as usize].clone())
+        } else {
+            Err(einval!("invalid child index"))
+        }
+    }
+
+    #[inline]
+    fn get_child_count(&self) -> u32 {
+        self.i_child_cnt
+    }
+
+    #[inline]
+    fn get_child_index(&self) -> Result<u32> {
+        Ok(self.i_child_idx)
+    }
+
+    #[inline]
+    fn get_chunk_count(&self) -> u32 {
+        self.get_child_count()
+    }
+
+    #[inline]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
+        if (idx as usize) < self.i_data.len() {
+            Ok(self.i_data[idx as usize].clone())
+        } else {
+            Err(einval!("invalid chunk index"))
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
