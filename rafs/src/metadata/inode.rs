@@ -3,6 +3,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::mem::size_of;
+
 use nydus_utils::digest::RafsDigest;
 
 use crate::metadata::cached_v5::CachedInodeV5;
@@ -10,17 +12,22 @@ use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::direct_v5::OndiskInodeWrapper as OndiskInodeWrapperV5;
 use crate::metadata::direct_v6::OndiskInodeWrapper as OndiskInodeWrapperV6;
 use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
+use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended};
+use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 use crate::RafsInodeExt;
 
+/// An inode object wrapper for different RAFS versions.
 #[derive(Clone, Debug)]
 pub enum InodeWrapper {
+    /// Inode info structure for RAFS v5.
     V5(RafsV5Inode),
-    // Reuse `RafsV5Inode` for v6 with a different wrapper to reduce duplicated code.
+    /// Inode info structure for RAFS v6, reuse `RafsV5Inode` as IR for v6.
     V6(RafsV5Inode),
 }
 
 impl InodeWrapper {
+    /// Create a new instance of `InodeWrapper` with default value.
     pub fn new(version: RafsVersion) -> Self {
         match version {
             RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode::new()),
@@ -28,6 +35,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Create an `InodeWrapper` object from a `RafsInodeExt` trait object.
     pub fn from_inode_info(inode: &dyn RafsInodeExt) -> Self {
         if let Some(inode) = inode.as_any().downcast_ref::<CachedInodeV5>() {
             InodeWrapper::V5(to_rafsv5_inode(inode))
@@ -40,6 +48,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get file content size of the inode.
     pub fn inode_size(&self) -> usize {
         match self {
             InodeWrapper::V5(i) => i.size(),
@@ -47,6 +56,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get access permission/mode for the inode.
     pub fn mode(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.mode(),
@@ -54,6 +64,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set access permission/mode for the inode.
     pub fn set_mode(&mut self, mode: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_mode = mode,
@@ -61,6 +72,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a directory.
     pub fn is_dir(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_dir(),
@@ -68,6 +80,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a regular file.
     pub fn is_reg(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_reg(),
@@ -75,6 +88,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a hardlink.
     pub fn is_hardlink(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_hardlink(),
@@ -82,6 +96,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a symlink.
     pub fn is_symlink(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.is_symlink(),
@@ -89,6 +104,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a char device node.
     pub fn is_chrdev(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32,
@@ -96,6 +112,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a block device node.
     pub fn is_blkdev(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32,
@@ -103,6 +120,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a FIFO.
     pub fn is_fifo(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32,
@@ -110,6 +128,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a socket.
     pub fn is_sock(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32,
@@ -117,10 +136,12 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether the inode is a special file, such chardev, blkdev, FIFO and socket.
     pub fn is_special(&self) -> bool {
         self.is_chrdev() || self.is_blkdev() || self.is_fifo() || self.is_sock()
     }
 
+    /// Check whether the inode has associated xattrs.
     pub fn has_xattr(&self) -> bool {
         match self {
             InodeWrapper::V5(i) => i.has_xattr(),
@@ -128,6 +149,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set whether the inode has associated xattrs.
     pub fn set_has_xattr(&mut self, enable: bool) {
         match self {
             InodeWrapper::V5(i) => {
@@ -147,6 +169,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get inode number.
     pub fn ino(&self) -> Inode {
         match self {
             InodeWrapper::V5(i) => i.i_ino,
@@ -154,6 +177,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set inode number.
     pub fn set_ino(&mut self, ino: Inode) {
         match self {
             InodeWrapper::V5(i) => i.i_ino = ino,
@@ -161,6 +185,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get parent inode number.
     pub fn parent(&self) -> Inode {
         match self {
             InodeWrapper::V5(i) => i.i_parent,
@@ -168,6 +193,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set parent inode number.
     pub fn set_parent(&mut self, parent: Inode) {
         match self {
             InodeWrapper::V5(i) => i.i_parent = parent,
@@ -175,6 +201,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set inode content size of regular file, directory and symlink.
     pub fn size(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_size,
@@ -182,6 +209,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get inode content size.
     pub fn set_size(&mut self, size: u64) {
         match self {
             InodeWrapper::V5(i) => i.i_size = size,
@@ -189,6 +217,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get user id associated with the inode.
     pub fn uid(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_uid,
@@ -196,6 +225,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set user id associated with the inode.
     pub fn set_uid(&mut self, uid: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_uid = uid,
@@ -203,6 +233,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get group id associated with the inode.
     pub fn gid(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_gid,
@@ -210,6 +241,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set group id associated with the inode.
     pub fn set_gid(&mut self, gid: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_gid = gid,
@@ -217,6 +249,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get modified time.
     pub fn mtime(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_mtime,
@@ -224,6 +257,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set modified time.
     pub fn set_mtime(&mut self, mtime: u64) {
         match self {
             InodeWrapper::V5(i) => i.i_mtime = mtime,
@@ -231,6 +265,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get nsec part of modified time.
     pub fn mtime_nsec(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_mtime_nsec,
@@ -238,6 +273,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set nsec part of modified time.
     pub fn set_mtime_nsec(&mut self, mtime_nsec: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_mtime_nsec = mtime_nsec,
@@ -245,6 +281,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get data blocks of file content, in unit of 512 bytes.
     pub fn blocks(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_blocks,
@@ -252,6 +289,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set data blocks of file content, in unit of 512 bytes.
     pub fn set_blocks(&mut self, blocks: u64) {
         match self {
             InodeWrapper::V5(i) => i.i_blocks = blocks,
@@ -259,6 +297,15 @@ impl InodeWrapper {
         }
     }
 
+    /// Get real device id associated with the inode.
+    pub fn rdev(&self) -> u32 {
+        match self {
+            InodeWrapper::V5(i) => i.i_rdev,
+            InodeWrapper::V6(i) => i.i_rdev,
+        }
+    }
+
+    /// Set real device id associated with the inode.
     pub fn set_rdev(&mut self, rdev: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_rdev = rdev,
@@ -266,6 +313,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set project ID associated with the inode.
     pub fn set_projid(&mut self, projid: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_projid = projid,
@@ -273,6 +321,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get number of hardlinks.
     pub fn nlink(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_nlink,
@@ -280,6 +329,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set number of hardlinks.
     pub fn set_nlink(&mut self, nlink: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_nlink = nlink,
@@ -287,6 +337,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get digest of inode metadata, RAFS v5 only.
     pub fn digest(&self) -> &RafsDigest {
         match self {
             InodeWrapper::V5(i) => &i.i_digest,
@@ -294,6 +345,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set digest of inode metadata, RAFS v5 only.
     pub fn set_digest(&mut self, digest: RafsDigest) {
         match self {
             InodeWrapper::V5(i) => i.i_digest = digest,
@@ -301,6 +353,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get size of inode name.
     pub fn name_size(&self) -> u16 {
         match self {
             InodeWrapper::V5(i) => i.i_name_size,
@@ -308,6 +361,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set size of inode name.
     pub fn set_name_size(&mut self, size: usize) {
         debug_assert!(size < u16::MAX as usize);
         match self {
@@ -316,6 +370,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get size of symlink.
     pub fn symlink_size(&self) -> u16 {
         match self {
             InodeWrapper::V5(i) => i.i_symlink_size,
@@ -323,6 +378,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set size of symlink.
     pub fn set_symlink_size(&mut self, size: usize) {
         debug_assert!(size <= u16::MAX as usize);
         match self {
@@ -337,6 +393,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set child inode index.
     pub fn child_index(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_child_index,
@@ -344,6 +401,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get child inode index.
     pub fn set_child_index(&mut self, index: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_child_index = index,
@@ -351,6 +409,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Get child/chunk count.
     pub fn child_count(&self) -> u32 {
         match self {
             InodeWrapper::V5(i) => i.i_child_count,
@@ -358,6 +417,7 @@ impl InodeWrapper {
         }
     }
 
+    /// Set child/chunk count.
     pub fn set_child_count(&mut self, count: u32) {
         match self {
             InodeWrapper::V5(i) => i.i_child_count = count,
@@ -365,10 +425,26 @@ impl InodeWrapper {
         }
     }
 
+    /// Create a `ChunkWrapper` object to be associated with the inode.
     pub fn create_chunk(&self) -> ChunkWrapper {
         match self {
             InodeWrapper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
             InodeWrapper::V6(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
+        }
+    }
+
+    /// Get memory/disk space occupied by the inode structure, including xattrs.
+    pub fn get_inode_size_with_xattr(&self, xattrs: &RafsXAttrs, v6_compact: bool) -> usize {
+        match self {
+            InodeWrapper::V5(_i) => size_of::<RafsV5Inode>() + xattrs.aligned_size_v5(),
+            InodeWrapper::V6(_i) => {
+                let inode_size = if v6_compact {
+                    size_of::<RafsV6InodeCompact>()
+                } else {
+                    size_of::<RafsV6InodeExtended>()
+                };
+                inode_size + xattrs.aligned_size_v6()
+            }
         }
     }
 }
