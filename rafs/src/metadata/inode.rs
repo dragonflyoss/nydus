@@ -107,32 +107,32 @@ impl InodeWrapper {
     /// Check whether the inode is a char device node.
     pub fn is_chrdev(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32,
+            InodeWrapper::V5(i) => i.is_chrdev(),
+            InodeWrapper::V6(i) => i.is_chrdev(),
         }
     }
 
     /// Check whether the inode is a block device node.
     pub fn is_blkdev(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32,
+            InodeWrapper::V5(i) => i.is_blkdev(),
+            InodeWrapper::V6(i) => i.is_blkdev(),
         }
     }
 
     /// Check whether the inode is a FIFO.
     pub fn is_fifo(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32,
+            InodeWrapper::V5(i) => i.is_fifo(),
+            InodeWrapper::V6(i) => i.is_fifo(),
         }
     }
 
     /// Check whether the inode is a socket.
     pub fn is_sock(&self) -> bool {
         match self {
-            InodeWrapper::V5(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32,
-            InodeWrapper::V6(i) => i.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32,
+            InodeWrapper::V5(i) => i.is_sock(),
+            InodeWrapper::V6(i) => i.is_sock(),
         }
     }
 

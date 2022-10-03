@@ -962,6 +962,26 @@ impl RafsV5Inode {
         self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
     }
 
+    /// Check whether the inode is a char device node.
+    pub fn is_chrdev(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+    }
+
+    /// Check whether the inode is a block device node.
+    pub fn is_blkdev(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
+    }
+
+    /// Check whether the inode is a FIFO.
+    pub fn is_fifo(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32
+    }
+
+    /// Check whether the inode is a socket.
+    pub fn is_sock(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32
+    }
+
     /// Check whether the inode is a hardlink.
     #[inline]
     pub fn is_hardlink(&self) -> bool {
