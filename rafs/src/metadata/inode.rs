@@ -12,7 +12,7 @@ use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::direct_v5::OndiskInodeWrapper as OndiskInodeWrapperV5;
 use crate::metadata::direct_v6::OndiskInodeWrapper as OndiskInodeWrapperV6;
 use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
-use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended};
+use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode};
 use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 use crate::RafsInodeExt;
@@ -474,4 +474,32 @@ fn to_rafsv5_inode(inode: &dyn RafsInodeExt) -> RafsV5Inode {
         i_mtime: attr.mtime,
         i_reserved: [0u8; 8],
     }
+}
+
+/// Create RAFS v6 on-disk inode object.
+pub fn new_v6_inode(
+    inode: &InodeWrapper,
+    datalayout: u16,
+    xattr_inline_count: u16,
+    compact: bool,
+) -> Box<dyn RafsV6OndiskInode> {
+    let mut i: Box<dyn RafsV6OndiskInode> = match compact {
+        true => Box::new(RafsV6InodeCompact::new()),
+        false => Box::new(RafsV6InodeExtended::new()),
+    };
+
+    assert!(inode.ino() <= i32::MAX as Inode);
+    i.set_ino(inode.ino() as u32);
+    i.set_size(inode.size());
+    i.set_uidgid(inode.uid(), inode.gid());
+    i.set_mtime(inode.mtime(), inode.mtime_nsec());
+    i.set_nlink(inode.nlink());
+    i.set_mode(inode.mode() as u16);
+    i.set_data_layout(datalayout);
+    i.set_xattr_inline_count(xattr_inline_count);
+    if inode.is_special() {
+        i.set_rdev(inode.rdev() as u32);
+    }
+
+    i
 }
