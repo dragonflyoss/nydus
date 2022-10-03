@@ -3,13 +3,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt;
-use std::fmt::{Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 
 use anyhow::{Context, Result};
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo};
 use nydus_utils::digest::RafsDigest;
-use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobChunkInfo};
 
 use crate::metadata::cached_v5::CachedChunkInfoV5;
 use crate::metadata::direct_v5::DirectChunkInfoV5;
@@ -18,14 +17,17 @@ use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::{RafsStore, RafsVersion};
 use crate::RafsIoWrite;
 
+/// A ChunkInfo object wrapper for different RAFS versions.
 #[derive(Clone, Debug)]
 pub enum ChunkWrapper {
+    /// Chunk info structure for RAFS v5.
     V5(RafsV5ChunkInfo),
-    // Reuse `RafsV5ChunkInfo` for v6 with a different wrapper to reduce duplicated code.
+    /// Chunk info structure for RAFS v6, reuse `RafsV5ChunkInfo` as IR for v6.
     V6(RafsV5ChunkInfo),
 }
 
 impl ChunkWrapper {
+    /// Create a new `ChunkWrapper` object with default value.
     pub fn new(version: RafsVersion) -> Self {
         match version {
             RafsVersion::V5 => ChunkWrapper::V5(RafsV5ChunkInfo::default()),
@@ -33,6 +35,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Create a `ChunkWrapper` object from a `BlobChunkInfo` trait object.
     pub fn from_chunk_info(cki: &dyn BlobChunkInfo) -> Self {
         if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
             ChunkWrapper::V5(to_rafsv5_chunk_info(cki_v5))
@@ -45,6 +48,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Get digest of chunk data, which is also used as chunk ID.
     pub fn id(&self) -> &RafsDigest {
         match self {
             ChunkWrapper::V5(c) => &c.block_id,
@@ -52,6 +56,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set digest of chunk data, which is also used as chunk ID.
     pub fn set_id(&mut self, id: RafsDigest) {
         match self {
             ChunkWrapper::V5(c) => c.block_id = id,
@@ -59,20 +64,7 @@ impl ChunkWrapper {
         }
     }
 
-    pub fn index(&self) -> u32 {
-        match self {
-            ChunkWrapper::V5(c) => c.index,
-            ChunkWrapper::V6(c) => c.index,
-        }
-    }
-
-    pub fn set_index(&mut self, index: u32) {
-        match self {
-            ChunkWrapper::V5(c) => c.index = index,
-            ChunkWrapper::V6(c) => c.index = index,
-        }
-    }
-
+    /// Get index of the data blob associated with the chunk.
     pub fn blob_index(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.blob_index,
@@ -80,6 +72,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set index of the data blob associated with the chunk.
     pub fn set_blob_index(&mut self, index: u32) {
         match self {
             ChunkWrapper::V5(c) => c.blob_index = index,
@@ -87,6 +80,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Get offset into the compressed data blob to fetch chunk data.
     pub fn compressed_offset(&self) -> u64 {
         match self {
             ChunkWrapper::V5(c) => c.compressed_offset,
@@ -94,6 +88,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set offset into the compressed data blob to fetch chunk data.
     pub fn set_compressed_offset(&mut self, offset: u64) {
         match self {
             ChunkWrapper::V5(c) => c.compressed_offset = offset,
@@ -101,6 +96,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Get size of compressed chunk data.
     pub fn compressed_size(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.compressed_size,
@@ -108,6 +104,15 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set size of compressed chunk data.
+    pub fn set_compressed_size(&mut self, size: u32) {
+        match self {
+            ChunkWrapper::V5(c) => c.compressed_size = size,
+            ChunkWrapper::V6(c) => c.compressed_size = size,
+        }
+    }
+
+    /// Get offset into the uncompressed data blob file to get chunk data.
     pub fn uncompressed_offset(&self) -> u64 {
         match self {
             ChunkWrapper::V5(c) => c.uncompressed_offset,
@@ -115,6 +120,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set offset into the uncompressed data blob file to get chunk data.
     pub fn set_uncompressed_offset(&mut self, offset: u64) {
         match self {
             ChunkWrapper::V5(c) => c.uncompressed_offset = offset,
@@ -122,6 +128,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Get size of uncompressed chunk data.
     pub fn uncompressed_size(&self) -> u32 {
         match self {
             ChunkWrapper::V5(c) => c.uncompressed_size,
@@ -129,6 +136,31 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set size of uncompressed chunk data.
+    pub fn set_uncompressed_size(&mut self, size: u32) {
+        match self {
+            ChunkWrapper::V5(c) => c.uncompressed_size = size,
+            ChunkWrapper::V6(c) => c.uncompressed_size = size,
+        }
+    }
+
+    /// Get chunk index into the RAFS chunk information array, used by RAFS v5.
+    pub fn index(&self) -> u32 {
+        match self {
+            ChunkWrapper::V5(c) => c.index,
+            ChunkWrapper::V6(c) => c.index,
+        }
+    }
+
+    /// Set chunk index into the RAFS chunk information array, used by RAFS v5.
+    pub fn set_index(&mut self, index: u32) {
+        match self {
+            ChunkWrapper::V5(c) => c.index = index,
+            ChunkWrapper::V6(c) => c.index = index,
+        }
+    }
+
+    /// Get chunk offset in the file it belongs to, RAFS v5.
     pub fn file_offset(&self) -> u64 {
         match self {
             ChunkWrapper::V5(c) => c.file_offset,
@@ -136,6 +168,7 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set chunk offset in the file it belongs to, RAFS v5.
     pub fn set_file_offset(&mut self, offset: u64) {
         match self {
             ChunkWrapper::V5(c) => c.file_offset = offset,
@@ -144,7 +177,7 @@ impl ChunkWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[inline]
+    /// Set a group of chunk information fields.
     pub fn set_chunk_info(
         &mut self,
         blob_index: u32,
@@ -186,23 +219,17 @@ impl ChunkWrapper {
         Ok(())
     }
 
+    /// Copy chunk information from another `ChunkWrapper` object.
     pub fn copy_from(&mut self, other: &Self) {
         match (self, other) {
-            (ChunkWrapper::V5(s), ChunkWrapper::V5(o)) => {
-                s.clone_from(o);
-            }
-            (ChunkWrapper::V6(s), ChunkWrapper::V6(o)) => {
-                s.clone_from(o);
-            }
-            (ChunkWrapper::V5(s), ChunkWrapper::V6(o)) => {
-                s.clone_from(o);
-            }
-            (ChunkWrapper::V6(s), ChunkWrapper::V5(o)) => {
-                s.clone_from(o);
-            }
+            (ChunkWrapper::V5(s), ChunkWrapper::V5(o)) => s.clone_from(o),
+            (ChunkWrapper::V6(s), ChunkWrapper::V6(o)) => s.clone_from(o),
+            (ChunkWrapper::V5(s), ChunkWrapper::V6(o)) => s.clone_from(o),
+            (ChunkWrapper::V6(s), ChunkWrapper::V5(o)) => s.clone_from(o),
         }
     }
 
+    /// Store the chunk information object into RAFS metadata blob.
     pub fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         match self {
             ChunkWrapper::V5(c) => c.store(w).context("failed to store rafs v5 chunk"),
