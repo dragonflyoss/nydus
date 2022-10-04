@@ -68,6 +68,7 @@ pub enum RafsError {
     Configure(String),
     Incompatible(u16),
     IllegalMetaStruct(MetaType, String),
+    InvalidImageData,
 }
 
 impl std::error::Error for RafsError {
