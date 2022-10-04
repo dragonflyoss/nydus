@@ -85,9 +85,9 @@ pub struct BlobInfo {
     /// Message digest algorithm to process the blob.
     digester: digest::Algorithm,
     /// Starting offset of the data to prefetch.
-    readahead_offset: u32,
+    prefetch_offset: u32,
     /// Size of blob data to prefetch.
-    readahead_size: u32,
+    prefetch_size: u32,
     /// Whether to validate blob data.
     validate_data: bool,
     /// The blob is for an stargz image.
@@ -129,8 +129,8 @@ impl BlobInfo {
 
             compressor: compress::Algorithm::None,
             digester: digest::Algorithm::Blake3,
-            readahead_offset: 0,
-            readahead_size: 0,
+            prefetch_offset: 0,
+            prefetch_size: 0,
             validate_data: false,
             stargz: false,
             meta_ci_compressor: 0,
@@ -234,22 +234,22 @@ impl BlobInfo {
     }
 
     /// Get blob data prefetching offset.
-    pub fn readahead_offset(&self) -> u64 {
-        self.readahead_offset as u64
+    pub fn prefetch_offset(&self) -> u64 {
+        self.prefetch_offset as u64
     }
 
     /// Get blob data prefetching offset.
-    pub fn readahead_size(&self) -> u64 {
-        self.readahead_size as u64
+    pub fn prefetch_size(&self) -> u64 {
+        self.prefetch_size as u64
     }
 
     /// Set a range for blob data prefetching.
     ///
-    /// Only one range could be configured per blob, and zero readahead_size means disabling blob
+    /// Only one range could be configured per blob, and zero prefetch_size means disabling blob
     /// data prefetching.
-    pub fn set_readahead(&mut self, offset: u64, size: u64) {
-        self.readahead_offset = offset as u32;
-        self.readahead_size = size as u32;
+    pub fn set_prefetch_info(&mut self, offset: u64, size: u64) {
+        self.prefetch_offset = offset as u32;
+        self.prefetch_size = size as u32;
     }
 
     /// Check blob data validation configuration.

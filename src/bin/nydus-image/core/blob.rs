@@ -39,7 +39,7 @@ impl Blob {
                     .context("failed to dump blob chunks")?;
                 if idx < prefetch_entries {
                     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-                        blob_ctx.blob_readahead_size += size;
+                        blob_ctx.blob_prefetch_size += size;
                     }
                 }
             }
@@ -53,7 +53,7 @@ impl Blob {
             if blob_ctx.blob_id.is_empty() {
                 blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
             }
-            blob_ctx.set_blob_readahead_size(ctx);
+            blob_ctx.set_blob_prefetch_size(ctx);
         }
 
         Ok(())

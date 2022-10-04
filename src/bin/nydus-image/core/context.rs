@@ -260,11 +260,12 @@ pub struct BlobContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,
     pub blob_hash: Sha256,
-    pub blob_readahead_size: u64,
-    /// Data chunks stored in the data blob, for v6.
-    pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
+    pub blob_prefetch_size: u64,
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
+    /// Data chunks stored in the data blob, for v6.
+    /// TODO: zran
+    pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
     /// Blob metadata header stored in the data blob, for v6
     pub blob_meta_header: BlobMetaHeaderOndisk,
 
@@ -290,9 +291,9 @@ impl Clone for BlobContext {
         Self {
             blob_id: self.blob_id.clone(),
             blob_hash: self.blob_hash.clone(),
-            blob_readahead_size: self.blob_readahead_size,
-            blob_meta_info: self.blob_meta_info.clone(),
+            blob_prefetch_size: self.blob_prefetch_size,
             blob_meta_info_enabled: self.blob_meta_info_enabled,
+            blob_meta_info: self.blob_meta_info.clone(),
             blob_meta_header: self.blob_meta_header,
 
             compressed_blob_size: self.compressed_blob_size,
@@ -313,7 +314,7 @@ impl BlobContext {
         Self {
             blob_id,
             blob_hash: Sha256::new(),
-            blob_readahead_size: 0,
+            blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
             blob_meta_info: Vec::new(),
             blob_meta_header: BlobMetaHeaderOndisk::default(),
@@ -333,7 +334,7 @@ impl BlobContext {
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
         let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0);
 
-        blob_ctx.blob_readahead_size = blob.readahead_size();
+        blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
         blob_ctx.uncompressed_blob_size = blob.uncompressed_size();
         blob_ctx.compressed_blob_size = blob.compressed_size();
@@ -366,12 +367,13 @@ impl BlobContext {
         self.chunk_size = chunk_size;
     }
 
-    pub fn set_blob_readahead_size(&mut self, ctx: &BuildContext) {
+    // TODO: check the logic to reset prefetch size
+    pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
         if (self.compressed_blob_size > 0
             || (ctx.source_type == SourceType::StargzIndex && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
         {
-            self.blob_readahead_size = 0;
+            self.blob_prefetch_size = 0;
         }
     }
 
@@ -574,7 +576,7 @@ impl BlobManager {
 
         for ctx in &self.blobs {
             let blob_id = ctx.blob_id.clone();
-            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
+            let blob_prefetch_size = u32::try_from(ctx.blob_prefetch_size)?;
             let chunk_count = ctx.chunk_count;
             let decompressed_blob_size = ctx.uncompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
@@ -587,7 +589,7 @@ impl BlobManager {
                     table.add(
                         blob_id,
                         0,
-                        blob_readahead_size,
+                        blob_prefetch_size,
                         ctx.chunk_size,
                         chunk_count,
                         decompressed_blob_size,
@@ -602,7 +604,7 @@ impl BlobManager {
                     table.add(
                         blob_id,
                         0,
-                        blob_readahead_size,
+                        blob_prefetch_size,
                         ctx.chunk_size,
                         chunk_count,
                         decompressed_blob_size,

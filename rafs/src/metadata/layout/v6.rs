@@ -1453,8 +1453,8 @@ impl RafsV6BlobTable {
     pub fn add(
         &mut self,
         blob_id: String,
-        readahead_offset: u32,
-        readahead_size: u32,
+        prefetch_offset: u32,
+        prefetch_size: u32,
         chunk_size: u32,
         chunk_count: u32,
         uncompressed_size: u64,
@@ -1476,7 +1476,7 @@ impl RafsV6BlobTable {
 
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
-        blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+        blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
         blob_info.set_blob_meta_info(
             header.meta_flags(),
             header.ci_compressed_offset(),
