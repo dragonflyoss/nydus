@@ -3,11 +3,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::http::{
-    error_response, extract_query_part, parse_body, success_response, translate_status_code,
-    ApiError, ApiRequest, ApiResponse, ApiResponsePayload, EndpointHandler, HttpError, HttpResult,
-};
 use dbs_uhttp::{Method, Request, Response};
+
+use crate::http::{ApiError, ApiRequest, ApiResponse, ApiResponsePayload, HttpError};
+use crate::http_handler::{
+    error_response, extract_query_part, parse_body, success_response, translate_status_code,
+    EndpointHandler, HttpResult,
+};
 
 // Convert an ApiResponse to a HTTP response.
 //

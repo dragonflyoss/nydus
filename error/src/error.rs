@@ -6,6 +6,7 @@ use std::env;
 use std::fmt::Debug;
 
 use backtrace::Backtrace;
+use serde_json::Error as SerdeError;
 
 /// Display error messages with line number, file path and optional backtrace.
 pub fn make_error(err: std::io::Error, raw: impl Debug, file: &str, line: u32) -> std::io::Error {
@@ -64,6 +65,15 @@ define_libc_error_macro!(eio, EIO);
 // Add more custom error macro here if necessary
 define_error_macro!(last_error, std::io::Error::last_os_error());
 define_error_macro!(eother, std::io::Error::new(std::io::ErrorKind::Other, ""));
+
+/// Errors related to Metrics.
+#[derive(Debug)]
+pub enum MetricsError {
+    /// Non-exist counter.
+    NoCounter,
+    /// Failed to serialize message.
+    Serialize(SerdeError),
+}
 
 #[cfg(test)]
 mod tests {

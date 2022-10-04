@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-use serde_json::Error as SerdeError;
-
+use nydus_error::error::MetricsError;
 use nydus_error::logger::ErrorHolder;
 
 use crate::InodeBitmap;
@@ -46,16 +45,7 @@ pub enum StatsFop {
     Max,
 }
 
-/// Errors related to IoStats.
-#[derive(Debug)]
-pub enum IoStatsError {
-    /// Non-exist counter.
-    NoCounter,
-    /// Failed to serialize message.
-    Serialize(SerdeError),
-}
-
-type IoStatsResult<T> = Result<T, IoStatsError>;
+type IoStatsResult<T> = Result<T, MetricsError>;
 
 // Block size separated counters.
 // [0-3]: <1K;1K~;4K~;16K~;
@@ -382,21 +372,21 @@ impl FsIoStats {
         }
     }
 
-    fn export_files_stats(&self) -> Result<String, IoStatsError> {
+    fn export_files_stats(&self) -> Result<String, MetricsError> {
         serde_json::to_string(
             self.file_counters
                 .read()
                 .expect("Not expect poisoned lock")
                 .deref(),
         )
-        .map_err(IoStatsError::Serialize)
+        .map_err(MetricsError::Serialize)
     }
 
     fn export_latest_read_files(&self) -> String {
         serde_json::json!(self.recent_read_files.bitmap_to_array_and_clear()).to_string()
     }
 
-    fn export_files_access_patterns(&self) -> Result<String, IoStatsError> {
+    fn export_files_access_patterns(&self) -> Result<String, MetricsError> {
         serde_json::to_string(
             &self
                 .access_patterns
@@ -407,11 +397,11 @@ impl FsIoStats {
                 .filter(|r| r.nr_read.count() != 0)
                 .collect::<Vec<&Arc<AccessPattern>>>(),
         )
-        .map_err(IoStatsError::Serialize)
+        .map_err(MetricsError::Serialize)
     }
 
-    fn export_fs_stats(&self) -> Result<String, IoStatsError> {
-        serde_json::to_string(self).map_err(IoStatsError::Serialize)
+    fn export_fs_stats(&self) -> Result<String, MetricsError> {
+        serde_json::to_string(self).map_err(MetricsError::Serialize)
     }
 }
 
@@ -463,11 +453,11 @@ impl<'a> FopRecorder<'a> {
 pub fn export_files_stats(
     name: &Option<String>,
     latest_read_files: bool,
-) -> Result<String, IoStatsError> {
+) -> Result<String, MetricsError> {
     let fs_metrics = FS_METRICS.read().unwrap();
 
     match name {
-        Some(k) => fs_metrics.get(k).ok_or(IoStatsError::NoCounter).map(|v| {
+        Some(k) => fs_metrics.get(k).ok_or(MetricsError::NoCounter).map(|v| {
             if !latest_read_files {
                 v.export_files_stats()
             } else {
@@ -484,18 +474,18 @@ pub fn export_files_stats(
                     };
                 }
             }
-            Err(IoStatsError::NoCounter)
+            Err(MetricsError::NoCounter)
         }
     }
 }
 
 /// Export file access pattern of a filesystem.
-pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoStatsError> {
+pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, MetricsError> {
     let fs_metrics = FS_METRICS.read().unwrap();
     match name {
         Some(k) => fs_metrics
             .get(k)
-            .ok_or(IoStatsError::NoCounter)
+            .ok_or(MetricsError::NoCounter)
             .map(|v| v.export_files_access_patterns())?,
         None => {
             if fs_metrics.len() == 1 {
@@ -503,20 +493,20 @@ pub fn export_files_access_pattern(name: &Option<String>) -> Result<String, IoSt
                     return ios.export_files_access_patterns();
                 }
             }
-            Err(IoStatsError::NoCounter)
+            Err(MetricsError::NoCounter)
         }
     }
 }
 
 /// Export filesystem metrics.
-pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError> {
+pub fn export_global_stats(name: &Option<String>) -> Result<String, MetricsError> {
     // With only one rafs instance, we allow caller to ask for an unknown ios name.
     let fs_metrics = FS_METRICS.read().unwrap();
 
     match name {
         Some(k) => fs_metrics
             .get(k)
-            .ok_or(IoStatsError::NoCounter)
+            .ok_or(MetricsError::NoCounter)
             .map(|v| v.export_fs_stats())?,
         None => {
             if fs_metrics.len() == 1 {
@@ -524,7 +514,7 @@ pub fn export_global_stats(name: &Option<String>) -> Result<String, IoStatsError
                     return ios.export_fs_stats();
                 }
             }
-            Err(IoStatsError::NoCounter)
+            Err(MetricsError::NoCounter)
         }
     }
 }
@@ -536,7 +526,7 @@ pub fn export_backend_metrics(name: &Option<String>) -> IoStatsResult<String> {
     match name {
         Some(k) => metrics
             .get(k)
-            .ok_or(IoStatsError::NoCounter)
+            .ok_or(MetricsError::NoCounter)
             .map(|v| v.export_metrics())?,
         None => {
             if metrics.len() == 1 {
@@ -544,7 +534,7 @@ pub fn export_backend_metrics(name: &Option<String>) -> IoStatsResult<String> {
                     return m.export_metrics();
                 }
             }
-            Err(IoStatsError::NoCounter)
+            Err(MetricsError::NoCounter)
         }
     }
 }
@@ -556,7 +546,7 @@ pub fn export_blobcache_metrics(id: &Option<String>) -> IoStatsResult<String> {
     match id {
         Some(k) => metrics
             .get(k)
-            .ok_or(IoStatsError::NoCounter)
+            .ok_or(MetricsError::NoCounter)
             .map(|v| v.export_metrics())?,
         None => {
             if metrics.len() == 1 {
@@ -564,14 +554,14 @@ pub fn export_blobcache_metrics(id: &Option<String>) -> IoStatsResult<String> {
                     return m.export_metrics();
                 }
             }
-            Err(IoStatsError::NoCounter)
+            Err(MetricsError::NoCounter)
         }
     }
 }
 
 /// Export global error events.
 pub fn export_events() -> IoStatsResult<String> {
-    serde_json::to_string(ERROR_HOLDER.lock().unwrap().deref()).map_err(IoStatsError::Serialize)
+    serde_json::to_string(ERROR_HOLDER.lock().unwrap().deref()).map_err(MetricsError::Serialize)
 }
 
 /// Trait to manipulate metric counters.
@@ -656,7 +646,7 @@ impl BackendMetrics {
             .unwrap()
             .remove(&self.id)
             .map(|_| ())
-            .ok_or(IoStatsError::NoCounter)
+            .ok_or(MetricsError::NoCounter)
     }
 
     /// Mark starting of an IO operations.
@@ -685,7 +675,7 @@ impl BackendMetrics {
     }
 
     fn export_metrics(&self) -> IoStatsResult<String> {
-        serde_json::to_string(self).map_err(IoStatsError::Serialize)
+        serde_json::to_string(self).map_err(MetricsError::Serialize)
     }
 }
 
@@ -767,12 +757,12 @@ impl BlobcacheMetrics {
             .unwrap()
             .remove(&self.id)
             .map(|_| ())
-            .ok_or(IoStatsError::NoCounter)
+            .ok_or(MetricsError::NoCounter)
     }
 
     /// Export blobcache metric information.
     pub fn export_metrics(&self) -> IoStatsResult<String> {
-        serde_json::to_string(self).map_err(IoStatsError::Serialize)
+        serde_json::to_string(self).map_err(MetricsError::Serialize)
     }
 }
 

@@ -26,8 +26,6 @@ log = "0.4.8"
 libc = "0.2"
 vmm-sys-util = "0.10.0"
 clap = "2.33"
-# pin regex to fix RUSTSEC-2022-0013
-regex = "1.5.5"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
 sha2 = "0.10.2"
@@ -56,7 +54,7 @@ vhost-user-backend = { version = "0.5.1", optional = true }
 virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = true }
 virtio-queue = { version = "0.4.0", optional = true }
 
-nydus-api = { version = "0.1.0", path = "api" }
+nydus-api = { version = "0.1.0", path = "api", features = ["handler"] }
 nydus-app = { version = "0.3.0", path = "app" }
 nydus-error = { version = "0.2.1", path = "error" }
 nydus-rafs = { version = "0.1.0", path = "rafs", features = ["backend-registry", "backend-oss"] }
