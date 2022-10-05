@@ -23,8 +23,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{App, Arg, ArgMatches, SubCommand};
 use nix::unistd::{getegid, geteuid};
-use serde::{Deserialize, Serialize};
-
 use nydus_api::http::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::metadata::RafsVersion;
@@ -32,6 +30,7 @@ use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
+use serde::{Deserialize, Serialize};
 
 use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
@@ -87,8 +86,7 @@ impl OutputSerializer {
                 .create(true)
                 .write(true)
                 .open(f)
-                .with_context(|| format!("Output file {:?} can't be opened", f))?;
-
+                .with_context(|| format!("can not open output file {}", f.display()))?;
             let trace = root_tracer!().dump_summary_map().unwrap_or_default();
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
@@ -97,7 +95,7 @@ impl OutputSerializer {
                 trace,
             };
 
-            serde_json::to_writer(w, &output).context("Write output file failed")?;
+            serde_json::to_writer(w, &output).context("failed to write result to output file")?;
         }
 
         Ok(())
@@ -118,8 +116,7 @@ impl OutputSerializer {
                 .create(true)
                 .write(true)
                 .open(f)
-                .with_context(|| format!("Output file {:?} can't be opened", f))?;
-
+                .with_context(|| format!("can not open output file {}", f.display()))?;
             let trace = root_tracer!().dump_summary_map().unwrap_or_default();
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
@@ -128,7 +125,7 @@ impl OutputSerializer {
                 trace,
             };
 
-            serde_json::to_writer(w, &output).context("Write output file failed")?;
+            serde_json::to_writer(w, &output).context("failed to write result to output file")?;
         }
 
         Ok(())
@@ -139,12 +136,12 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
     let arg_chunk_dict = Arg::with_name("chunk-dict")
         .long("chunk-dict")
         .short("M")
-        .help("Specify a chunk dictionary for chunk deduplication")
+        .help("specify a chunk dictionary for chunk deduplication")
         .takes_value(true);
     let arg_prefetch_policy = Arg::with_name("prefetch-policy")
         .long("prefetch-policy")
         .short("P")
-        .help("blob data prefetch policy")
+        .help("specify policy for blob data prefetch")
         .takes_value(true)
         .required(false)
         .default_value("none")
@@ -152,7 +149,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
     let arg_output_json = Arg::with_name("output-json")
         .long("output-json")
         .short("J")
-        .help("JSON file output path for result")
+        .help("output file to store result in JSON format")
         .takes_value(true);
 
     // TODO: Try to use yaml to define below options
@@ -357,19 +354,19 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         )
         .subcommand(
             SubCommand::with_name("check")
-                .about("Validates nydus image's filesystem metadata")
+                .about("Validate RAFS filesystem metadata")
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .short("B")
-                        .help("path to nydus image's metadata blob (required)")
+                        .help("path to RAFS metadata blob (required)")
                         .required(true)
                         .takes_value(true),
                 )
                 .arg(
                     Arg::with_name("verbose")
                         .long("verbose")
-                        .short("V")
+                        .short("v")
                         .help("verbose output")
                         .required(false),
                 )
@@ -399,12 +396,12 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         )
         .subcommand(
             SubCommand::with_name("stat")
-                .about("Generate statistics information for a synthesised base image from a group of nydus images")
+                .about("Generate statistics information from a group of RAFS bootstraps")
                 .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .short("B")
-                        .help("generate stats information for base image from the specified metadata blob")
+                        .help("generate statistics information from the RAFS bootstrap")
                         .required(false)
                         .takes_value(true),
                 )
@@ -412,7 +409,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                     Arg::with_name("blob-dir")
                         .long("blob-dir")
                         .short("D")
-                        .help("Generate stats information for base image from the all metadata blobs in the directory")
+                        .help("generate statistics information from all RAFS bootstraps in the directory")
                         .required(false)
                         .takes_value(true)
                 )
@@ -420,7 +417,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                     Arg::with_name("target")
                         .long("target")
                         .short("T")
-                        .help("generate stats information for target image from the specified metadata blob, deduplicating all chunks existing in the base image")
+                        .help("generate statistics information for the target RAFS bootstrap after deduplicating data chunks available in other bootstraps")
                         .required(false)
                         .takes_value(true),
                 )
@@ -509,7 +506,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
             Arg::with_name("log-file")
                 .long("log-file")
                 .short("o")
-                .help("Specify log file name")
+                .help("specify log file")
                 .takes_value(true)
                 .required(false)
                 .global(true),
@@ -518,7 +515,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
             Arg::with_name("log-level")
                 .long("log-level")
                 .short("l")
-                .help("Specify log level:")
+                .help("specify log level:")
                 .default_value("info")
                 .possible_values(&["trace", "debug", "info", "warn", "error"])
                 .takes_value(true)
@@ -759,11 +756,23 @@ impl Command {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let verbose = matches.is_present("verbose");
         let mut validator = Validator::new(bootstrap_path)?;
-        let blob_ids = validator
+        let blobs = validator
             .check(verbose)
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
-        info!("bootstrap is valid, blobs: {:?}", blob_ids);
+        println!("RAFS metadata is valid, data blobs: ");
+        let mut blob_ids = Vec::new();
+        for (idx, blob) in blobs.iter().enumerate() {
+            println!(
+                "\t {}: {}, compressed size 0x{:x}, uncompressed size 0x{:x}",
+                idx,
+                blob.blob_id(),
+                blob.compressed_size(),
+                blob.uncompressed_size()
+            );
+            blob_ids.push(blob.blob_id().to_string());
+        }
+
         OutputSerializer::dump_with_check(matches, build_info, blob_ids)?;
 
         Ok(())
@@ -774,14 +783,14 @@ impl Command {
         let cmd = matches.value_of("request");
         let mut inspector =
             inspect::RafsInspector::new(bootstrap_path, cmd.is_some()).map_err(|e| {
-                error!("Failed to instantiate inspector, {:?}", e);
+                error!("failed to create inspector, {:?}", e);
                 e
             })?;
 
         if let Some(c) = cmd {
             let o = inspect::Executor::execute(&mut inspector, c.to_string()).unwrap();
             serde_json::to_writer(std::io::stdout(), &o)
-                .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
+                .unwrap_or_else(|e| error!("Failed to serialize result, {:?}", e));
         } else {
             inspect::Prompt::run(inspector);
         }
@@ -791,13 +800,15 @@ impl Command {
 
     fn stat(matches: &clap::ArgMatches) -> Result<()> {
         let mut stat = stat::ImageStat::new();
+        let target = matches
+            .value_of("target")
+            .map(Path::new)
+            .unwrap_or_else(|| Path::new(""));
 
         if let Some(blob) = matches.value_of("bootstrap").map(PathBuf::from) {
             stat.stat(&blob, true)?;
         } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
-            if !d.exists() {
-                bail!("Directory holding blobs does not exist")
-            }
+            Self::ensure_directory(d.clone())?;
 
             stat.dedup_enabled = true;
 
@@ -806,7 +817,7 @@ impl Command {
             let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
             for child in children {
                 let path = child.path();
-                if path.is_file() {
+                if path.is_file() && path != target {
                     if let Err(e) = stat.stat(&path, true) {
                         error!(
                             "failed to process {}, {}",
@@ -933,7 +944,6 @@ impl Command {
         Ok(blob_id)
     }
 
-    #[allow(dead_code)]
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(bootstrap_path)?;
@@ -1002,8 +1012,8 @@ impl Command {
     }
 
     fn ensure_file<P: AsRef<Path>>(path: P) -> Result<()> {
-        let file =
-            metadata(path.as_ref()).context(format!("failed to get path {:?}", path.as_ref()))?;
+        let file = metadata(path.as_ref())
+            .context(format!("failed to access path {:?}", path.as_ref()))?;
         ensure!(
             file.is_file(),
             "specified path must be a regular file: {:?}",
@@ -1013,8 +1023,8 @@ impl Command {
     }
 
     fn ensure_directory<P: AsRef<Path>>(path: P) -> Result<()> {
-        let dir =
-            metadata(path.as_ref()).context(format!("failed to get path {:?}", path.as_ref()))?;
+        let dir = metadata(path.as_ref())
+            .context(format!("failed to access path {:?}", path.as_ref()))?;
         ensure!(
             dir.is_dir(),
             "specified path must be a directory: {:?}",
