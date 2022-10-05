@@ -24,7 +24,7 @@ use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
 use crate::core::context::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
-    BuildOutput, SourceType,
+    BuildOutput, ConversionType,
 };
 use crate::core::node::{Node, WhiteoutSpec};
 use crate::core::tree::Tree;
@@ -584,7 +584,7 @@ impl BlobCompactor {
             rs.meta.explicit_uidgid(),
             // useless args
             WhiteoutSpec::Oci,
-            SourceType::Directory,
+            ConversionType::DirectoryToRafs,
             PathBuf::from(""),
             Default::default(),
             None,

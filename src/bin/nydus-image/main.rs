@@ -36,7 +36,7 @@ use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
 use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, SourceType,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
@@ -152,25 +152,25 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         .help("output file to store result in JSON format")
         .takes_value(true);
 
-    // TODO: Try to use yaml to define below options
     App::new("")
         .version(bti_string.as_str())
         .author(crate_authors!())
-        .about("Build or inspect RAFS filesystems for nydus accelerated container images.")
+        .about("Build or inspect RAFS filesystems for Nydus accelerated container images.")
         .subcommand(
             SubCommand::with_name("create")
-                .about("Creates a nydus image from source")
+                .about("Create a RAFS filesystem from a directory, a tarball or an stargz ToC")
                 .arg(
                     Arg::with_name("SOURCE")
-                        .help("source path to build the nydus image from")
+                        .help("source to build the RAFS filesystem from")
                         .required(true)
                         .multiple(true),
                 )
                 .arg(
-                    Arg::with_name("source-type")
-                        .long("source-type")
+                    Arg::with_name("type")
+                        .long("type")
                         .short("t")
-                        .help("type of the source:")
+                        .alias("source-type")
+                        .help("image conversion type:")
                         .takes_value(true)
                         .default_value("directory")
                         .possible_values(&["directory", "stargz_index"])
@@ -179,41 +179,58 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .short("B")
-                        .help("path to store the nydus image's metadata blob")
-                        .required_unless("inline-bootstrap")
+                        .help("path to store generated RAFS filesystem metadata blob")
+                        .required_unless_one(&["blob-dir", "inline-bootstrap"])
                         .conflicts_with("inline-bootstrap")
                         .takes_value(true),
-                ).arg(
+                )
+                .arg(
+                    Arg::with_name("inline-bootstrap")
+                        .long("inline-bootstrap")
+                        .help("append RAFS metadata to the data blob")
+                        .takes_value(false)
+                        .required(false),
+                )
+                .arg(
+                    Arg::with_name("blob-dir")
+                        .long("blob-dir")
+                        .short("D")
+                        .help("directory to store RAFS filesystem metadata and data blobs")
+                        .takes_value(true)
+                )
+                .arg(
                     Arg::with_name("blob")
                         .long("blob")
                         .short("b")
-                        .help("path to store nydus image's data blob")
-                        .required_unless("backend-type")
-                        .required_unless("source-type")
-                        .required_unless("blob-dir")
+                        .help("path to store generated RAFS filesystem data blob")
+                        .required_unless_one(&["backend-type", "type", "blob-dir"])
                         .takes_value(true)
-                ).arg(
-                    Arg::with_name("blob-meta")
-                        .long("blob-meta")
-                        .help("path to store nydus blob metadata")
-                        .takes_value(true)
-                ).arg(
-                    Arg::with_name("inline-bootstrap")
-                        .long("inline-bootstrap")
-                        .help("append bootstrap data to blob")
-                        .takes_value(false)
-                        .required(false),
-                ).arg(
+                )
+                .arg(
                     Arg::with_name("blob-id")
                         .long("blob-id")
-                        .help("blob id (as object id in backend/oss)")
+                        .help("specify blob id (as object id in backend/oss)")
                         .takes_value(true),
+                )
+                .arg(
+                    Arg::with_name("blob-meta")
+                        .long("blob-meta")
+                        .help("path to store generated data blob compression information")
+                        .conflicts_with("inline-bootstrap")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("blob-offset")
+                        .long("blob-offset")
+                        .help("add an offset for compressed blob (used to put the blob in the tarball)")
+                        .default_value("0")
+                        .takes_value(true)
                 )
                 .arg(
                     Arg::with_name("chunk-size")
                         .long("chunk-size")
                         .short("S")
-                        .help("size of nydus image data chunk, must be power of two and between 0x1000-0x100000:")
+                        .help("size of data chunk, must be power of two and between 0x1000-0x1000000:")
                         .default_value("0x100000")
                         .required(false)
                         .takes_value(true),
@@ -242,27 +259,34 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                     Arg::with_name("fs-version")
                         .long("fs-version")
                         .short("v")
-                        .help("version number of nydus image format:")
+                        .help("RAFS filesystem format version number:")
                         .required(true)
                         .default_value("5")
                         .possible_values(&["5", "6"]),
                 )
                 .arg(
+                    arg_chunk_dict.clone(),
+                )
+                .arg(
                     Arg::with_name("parent-bootstrap")
                         .long("parent-bootstrap")
                         .short("p")
-                        .help("path to parent/referenced image's metadata blob (optional)")
+                        .help("path to parent/referenced RAFS filesystem metadata blob (optional)")
                         .takes_value(true)
                         .required(false),
                 )
                 .arg(
-                    arg_prefetch_policy.clone(),
+                    Arg::with_name("aligned-chunk")
+                        .long("aligned-chunk")
+                        .short("A")
+                        .help("Align uncompressed data chunk to 4K")
+                        .takes_value(false)
                 )
                 .arg(
                     Arg::with_name("repeatable")
                         .long("repeatable")
                         .short("R")
-                        .help("generate reproducible nydus image")
+                        .help("generate reproducible RAFS filesystem")
                         .takes_value(false)
                         .required(false),
                 )
@@ -284,31 +308,10 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .possible_values(&["oci", "overlayfs", "none"])
                 )
                 .arg(
+                    arg_prefetch_policy.clone(),
+                )
+                .arg(
                     arg_output_json.clone(),
-                )
-                .arg(
-                    Arg::with_name("aligned-chunk")
-                        .long("aligned-chunk")
-                        .short("A")
-                        .help("Align data chunks to 4K")
-                        .takes_value(false)
-                )
-                .arg(
-                    Arg::with_name("blob-offset")
-                        .long("blob-offset")
-                        .help("add an offset for compressed blob (is only used to put the blob in the tarball)")
-                        .default_value("0")
-                        .takes_value(true)
-                )
-                .arg(
-                    Arg::with_name("blob-dir")
-                        .long("blob-dir")
-                        .short("D")
-                        .help("directory to store nydus image's metadata and data blob")
-                        .takes_value(true)
-                )
-                .arg(
-                    arg_chunk_dict.clone(),
                 )
                 .arg(
                     Arg::with_name("backend-type")
@@ -576,10 +579,12 @@ impl Command {
         let chunk_size = Self::get_chunk_size(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(matches)?;
+        let prefetch = Self::get_prefetch(matches)?;
         let source_path = PathBuf::from(matches.value_of("SOURCE").unwrap());
-        let source_type: SourceType = matches.value_of("source-type").unwrap().parse()?;
-        let blob_stor = Self::get_blob_storage(matches, source_type)?;
+        let conversion_type: ConversionType = matches.value_of("type").unwrap().parse()?;
+        let blob_stor = Self::get_blob_storage(matches, conversion_type)?;
         let blob_meta_stor = Self::get_blob_meta_storage(matches)?;
+        let inline_bootstrap = matches.is_present("inline-bootstrap");
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(matches)?;
         let aligned_chunk = if version.is_v6() {
@@ -593,14 +598,21 @@ impl Command {
             .value_of("whiteout-spec")
             .unwrap_or_default()
             .parse()?;
-
         let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
-        match source_type {
-            SourceType::Directory => {
+
+        match conversion_type {
+            ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
+                if blob_stor.is_none() {
+                    bail!("both --blob and --blob-dir are not provided");
+                }
             }
-            SourceType::StargzIndex => {
+            ConversionType::DirectoryToTargz => unimplemented!(),
+            ConversionType::DirectoryToStargz => unimplemented!(),
+            ConversionType::StargzToRafs => unimplemented!(),
+            ConversionType::StargzToRef => unimplemented!(),
+            ConversionType::StargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
                 if blob_id.trim() == "" {
                     bail!("blob-id can't be empty");
@@ -614,10 +626,12 @@ impl Command {
                 }
                 digester = digest::Algorithm::Sha256;
             }
+            ConversionType::TargzToRafs => unimplemented!(),
+            ConversionType::TargzToStargz => unimplemented!(),
+            ConversionType::TarToRafs => unimplemented!(),
+            ConversionType::TarToStargz => unimplemented!(),
+            ConversionType::TargzToRef => unimplemented!(),
         }
-
-        let prefetch = Self::get_prefetch(matches)?;
-        let inline_bootstrap = matches.is_present("inline-bootstrap");
 
         let mut build_ctx = BuildContext::new(
             blob_id,
@@ -627,7 +641,7 @@ impl Command {
             digester,
             !repeatable,
             whiteout_spec,
-            source_type,
+            conversion_type,
             source_path,
             prefetch,
             blob_stor,
@@ -648,16 +662,22 @@ impl Command {
         let mut bootstrap_mgr = if inline_bootstrap {
             BootstrapManager::new(None, parent_bootstrap)
         } else {
-            let bootstrap_path = Self::get_bootstrap(matches)?;
-            BootstrapManager::new(
-                Some(ArtifactStorage::SingleFile(PathBuf::from(bootstrap_path))),
-                parent_bootstrap,
-            )
+            let bootstrap_path = Self::get_bootstrap_storage(matches)?;
+            BootstrapManager::new(Some(bootstrap_path), parent_bootstrap)
         };
 
-        let mut builder: Box<dyn Builder> = match source_type {
-            SourceType::Directory => Box::new(DirectoryBuilder::new()),
-            SourceType::StargzIndex => Box::new(StargzBuilder::new()),
+        let mut builder: Box<dyn Builder> = match conversion_type {
+            ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
+            ConversionType::DirectoryToTargz => unimplemented!(),
+            ConversionType::DirectoryToStargz => unimplemented!(),
+            ConversionType::StargzToRafs => unimplemented!(),
+            ConversionType::StargzToRef => unimplemented!(),
+            ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new()),
+            ConversionType::TargzToRafs => unimplemented!(),
+            ConversionType::TargzToRef => unimplemented!(),
+            ConversionType::TargzToStargz => unimplemented!(),
+            ConversionType::TarToRafs => unimplemented!(),
+            ConversionType::TarToStargz => unimplemented!(),
         };
         let build_output = timing_tracer!(
             {
@@ -674,16 +694,16 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
+        /*
         if !inline_bootstrap {
             let bootstrap_path = Self::get_bootstrap(matches)?;
             Self::validate_image(matches, bootstrap_path)
                 .context("failed to validate bootstrap")?;
         }
+         */
+
         info!("build successfully: {:?}", build_output,);
-
-        OutputSerializer::dump(matches, build_output, build_info)?;
-
-        Ok(())
+        OutputSerializer::dump(matches, build_output, build_info)
     }
 
     fn merge(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
@@ -691,7 +711,7 @@ impl Command {
             .values_of("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
-        let target_bootstrap_path = Self::get_bootstrap(matches)?;
+        let target_bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let chunk_dict_path = if let Some(arg) = matches.value_of("chunk-dict") {
             Some(parse_chunk_dict_arg(arg)?)
         } else {
@@ -704,7 +724,7 @@ impl Command {
         let output = Merger::merge(
             &mut ctx,
             source_bootstrap_paths,
-            target_bootstrap_path.to_path_buf(),
+            target_bootstrap_path,
             chunk_dict_path,
         )?;
         OutputSerializer::dump(matches, output, build_info)
@@ -854,17 +874,30 @@ impl Command {
         }
     }
 
+    fn get_bootstrap_storage(matches: &clap::ArgMatches) -> Result<ArtifactStorage> {
+        if let Some(s) = matches.value_of("bootstrap") {
+            Ok(ArtifactStorage::SingleFile(s.into()))
+        } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
+            if !d.exists() {
+                bail!("Directory to store blobs does not exist")
+            }
+            Ok(ArtifactStorage::FileDir(d))
+        } else {
+            bail!("both --bootstrap and --blob-dir are missing, please specify one to store the generated metadata blob file");
+        }
+    }
+
     // Must specify a path to blob file.
     // For cli/binary interface compatibility sake, keep option `backend-config`, but
     // it only receives "localfs" backend type and it will be REMOVED in the future
     fn get_blob_storage(
         matches: &clap::ArgMatches,
-        source_type: SourceType,
+        conversion_type: ConversionType,
     ) -> Result<Option<ArtifactStorage>> {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
-        let blob_stor = if source_type == SourceType::Directory {
+        let blob_stor = if conversion_type == ConversionType::DirectoryToRafs {
             if let Some(p) = matches
                 .value_of("blob")
                 .map(|b| ArtifactStorage::SingleFile(b.into()))
@@ -872,26 +905,26 @@ impl Command {
                 Some(p)
             } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
                 if !d.exists() {
-                    bail!("Directory holding blobs does not exist")
+                    bail!("Directory to store blobs does not exist")
                 }
                 Some(ArtifactStorage::FileDir(d))
-            } else {
-                // Safe because `backend-type` must be specified if `blob` is not with `Directory` source
-                // and `backend-config` must be provided as per clap restriction.
-                // This branch is majorly for compatibility. Hopefully, we can remove this branch.
-                let config_json = matches
-                    .value_of("backend-config")
-                    .ok_or_else(|| anyhow!("backend-config is not provided"))?;
+            } else if let Some(config_json) = matches.value_of("backend-config") {
                 let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
                 warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
                 if let Some(bf) = config.get("blob_file") {
                     // Even unwrap, it is caused by invalid json. Image creation just can't start.
-                    let b: PathBuf = bf.as_str().unwrap().to_string().into();
+                    let b: PathBuf = bf
+                        .as_str()
+                        .ok_or_else(|| anyhow!("backend-config is invalid"))?
+                        .to_string()
+                        .into();
                     Some(ArtifactStorage::SingleFile(b))
                 } else {
                     error!("Wrong backend config input!");
                     return Err(anyhow!("invalid backend config"));
                 }
+            } else {
+                bail!("both --blob and --blob-dir are missing, please specify one to store the generated data blob file");
             }
         } else {
             None
@@ -914,18 +947,17 @@ impl Command {
         }
 
         if parent_bootstrap_path != Path::new("") {
-            Ok(Some(Box::new(
-                OpenOptions::new()
-                    .read(true)
-                    .write(false)
-                    .open(parent_bootstrap_path)
-                    .with_context(|| {
-                        format!(
-                            "failed to open parent bootstrap file {:?}",
-                            parent_bootstrap_path
-                        )
-                    })?,
-            )))
+            let file = OpenOptions::new()
+                .read(true)
+                .write(false)
+                .open(parent_bootstrap_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open parent bootstrap file {:?}",
+                        parent_bootstrap_path
+                    )
+                })?;
+            Ok(Some(Box::new(file)))
         } else {
             Ok(None)
         }
@@ -944,6 +976,7 @@ impl Command {
         Ok(blob_id)
     }
 
+    /*
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(bootstrap_path)?;
@@ -959,6 +992,7 @@ impl Command {
 
         Ok(())
     }
+     */
 
     fn get_chunk_size(matches: &clap::ArgMatches) -> Result<u32> {
         match matches.value_of("chunk-size") {

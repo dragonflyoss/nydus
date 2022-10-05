@@ -9,8 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Seek, Write};
-use std::path::Path;
 use std::path::PathBuf;
+use std::path::{Display, Path};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -37,25 +37,46 @@ use super::prefetch::{Prefetch, PrefetchPolicy};
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SourceType {
-    Directory,
-    StargzIndex,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConversionType {
+    DirectoryToRafs,
+    DirectoryToStargz,
+    DirectoryToTargz,
+    StargzToRafs,
+    StargzToRef,
+    StargzIndexToRef,
+    TargzToRafs,
+    TargzToStargz,
+    TargzToRef,
+    TarToStargz,
+    TarToRafs,
 }
 
-impl Default for SourceType {
+impl Default for ConversionType {
     fn default() -> Self {
-        Self::Directory
+        Self::DirectoryToRafs
     }
 }
 
-impl FromStr for SourceType {
+impl FromStr for ConversionType {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "directory" => Ok(Self::Directory),
-            "stargz_index" => Ok(Self::StargzIndex),
-            _ => Err(anyhow!("invalid source type")),
+            "dir-rafs" => Ok(Self::DirectoryToRafs),
+            "dir-stargz" => Ok(Self::DirectoryToStargz),
+            "dir-targz" => Ok(Self::DirectoryToTargz),
+            "stargz-rafs" => Ok(Self::StargzToRafs),
+            "stargz-ref" => Ok(Self::StargzToRef),
+            "stargztoc-ref" => Ok(Self::StargzIndexToRef),
+            "targz-rafs" => Ok(Self::TargzToRafs),
+            "targz-stargz" => Ok(Self::TargzToStargz),
+            "targz-ref" => Ok(Self::TargzToRef),
+            "tar-rafs" => Ok(Self::TarToRafs),
+            "tar-stargz" => Ok(Self::TarToStargz),
+            // kept for backward compatibility
+            "directory" => Ok(Self::DirectoryToRafs),
+            "stargz_index" => Ok(Self::StargzIndexToRef),
+            _ => Err(anyhow!("invalid conversion type")),
         }
     }
 }
@@ -66,6 +87,15 @@ pub enum ArtifactStorage {
     SingleFile(PathBuf),
     // Will rename it from tmp file as user didn't specify a name.
     FileDir(PathBuf),
+}
+
+impl ArtifactStorage {
+    pub fn display(&self) -> Display {
+        match self {
+            ArtifactStorage::SingleFile(p) => p.display(),
+            ArtifactStorage::FileDir(p) => p.display(),
+        }
+    }
 }
 
 impl Default for ArtifactStorage {
@@ -367,7 +397,7 @@ impl BlobContext {
     // TODO: check the logic to reset prefetch size
     pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
         if (self.compressed_blob_size > 0
-            || (ctx.source_type == SourceType::StargzIndex && !self.blob_id.is_empty()))
+            || (ctx.source_type == ConversionType::StargzIndexToRef && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
         {
             self.blob_prefetch_size = 0;
@@ -750,7 +780,7 @@ pub struct BuildContext {
     pub fs_version: RafsVersion,
 
     /// Type of source to build the image from.
-    pub source_type: SourceType,
+    pub source_type: ConversionType,
     /// Path of source to build the image from:
     /// - Directory: `source_path` should be a directory path
     /// - StargzIndex: `source_path` should be a stargz index json file path
@@ -776,7 +806,7 @@ impl BuildContext {
         digester: digest::Algorithm,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
-        source_type: SourceType,
+        source_type: ConversionType,
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
@@ -829,7 +859,7 @@ impl Default for BuildContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             fs_version: RafsVersion::default(),
 
-            source_type: SourceType::default(),
+            source_type: ConversionType::default(),
             source_path: PathBuf::new(),
 
             prefetch: Prefetch::default(),

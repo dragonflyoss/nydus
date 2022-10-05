@@ -23,7 +23,9 @@ use rafs::metadata::layout::RafsBlobTable;
 use rafs::metadata::layout::RAFS_V5_ROOT_INODE;
 use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 
-use super::context::{BlobManager, BootstrapContext, BootstrapManager, BuildContext, SourceType};
+use super::context::{
+    BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
+};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::tree::Tree;
 
@@ -438,7 +440,7 @@ impl Bootstrap {
         if ctx.explicit_uidgid {
             super_block.set_explicit_uidgid();
         }
-        if ctx.source_type == SourceType::StargzIndex {
+        if ctx.source_type == ConversionType::StargzIndexToRef {
             super_block.set_block_size(STARGZ_DEFAULT_BLOCK_SIZE);
         }
 

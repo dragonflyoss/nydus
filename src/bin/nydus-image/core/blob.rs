@@ -10,7 +10,7 @@ use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, try_round_up_4k};
 use sha2::Digest;
 
-use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, SourceType};
+use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
 use super::layout::BlobLayout;
 use super::node::Node;
 
@@ -29,7 +29,7 @@ impl Blob {
         blob_mgr: &mut BlobManager,
         blob_writer: &mut Option<ArtifactWriter>,
     ) -> Result<()> {
-        if ctx.source_type == SourceType::Directory {
+        if ctx.source_type == ConversionType::DirectoryToRafs {
             let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch, nodes)?;
             let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
             for (idx, inode) in inodes.iter().enumerate() {

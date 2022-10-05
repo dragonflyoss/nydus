@@ -70,7 +70,7 @@ impl Merger {
     pub fn merge(
         ctx: &mut BuildContext,
         sources: Vec<PathBuf>,
-        target: PathBuf,
+        target: ArtifactStorage,
         chunk_dict: Option<PathBuf>,
     ) -> Result<BuildOutput> {
         if sources.is_empty() {
@@ -218,14 +218,13 @@ impl Merger {
             ctx.chunk_size = chunk_size;
         }
 
-        let storage = ArtifactStorage::SingleFile(target.clone());
-        let mut bootstrap_ctx = BootstrapContext::new(Some(storage), false, false)?;
+        let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false, false)?;
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         bootstrap
             .dump(ctx, &mut bootstrap_ctx, &blob_table)
-            .context(format!("dump bootstrap to {:?}", target))?;
+            .context(format!("dump bootstrap to {:?}", target.display()))?;
         BuildOutput::new(&blob_mgr)
     }
 }
