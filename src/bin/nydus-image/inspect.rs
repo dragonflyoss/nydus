@@ -14,8 +14,8 @@ use std::{
 
 use nydus_rafs::metadata::{RafsInodeExt, RafsInodeWalkAction, RafsSuper};
 use nydus_rafs::{RafsIoRead, RafsIoReader};
+use nydus_storage::device::BlobChunkInfo;
 use serde_json::Value;
-use storage::device::BlobChunkInfo;
 
 pub(crate) struct RafsInspector {
     request_mode: bool,

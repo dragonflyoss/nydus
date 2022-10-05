@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Cursor, Write};
+use std::io::{BufWriter, Cursor, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -23,13 +23,12 @@ use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
 use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use nydus_rafs::metadata::layout::RafsBlobTable;
-use nydus_rafs::metadata::RafsSuperFlags;
 use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
+use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
-use rafs::metadata::RafsVersion;
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::node::{ChunkSource, Node, WhiteoutSpec};
@@ -89,13 +88,13 @@ impl RafsIoWrite for ArtifactMemoryWriter {
     }
 }
 
-impl std::io::Seek for ArtifactMemoryWriter {
+impl Seek for ArtifactMemoryWriter {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.0.seek(pos)
     }
 }
 
-impl std::io::Write for ArtifactMemoryWriter {
+impl Write for ArtifactMemoryWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.write(bytes)
     }
@@ -117,13 +116,13 @@ impl RafsIoWrite for ArtifactFileWriter {
     }
 }
 
-impl std::io::Seek for ArtifactFileWriter {
+impl Seek for ArtifactFileWriter {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.0.file.seek(pos)
     }
 }
 
-impl std::io::Write for ArtifactFileWriter {
+impl Write for ArtifactFileWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.write(bytes)
     }
@@ -144,7 +143,7 @@ pub struct ArtifactWriter {
     tmp_file: Option<TempFile>,
 }
 
-impl std::io::Write for ArtifactWriter {
+impl Write for ArtifactWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let n = self.file.write(bytes)?;
         self.pos += n;
@@ -196,12 +195,14 @@ impl ArtifactWriter {
         }
     }
 
+    pub fn pos(&self) -> Result<u64> {
+        Ok(self.pos as u64)
+    }
+
     // The `inline-bootstrap` option merges the blob and bootstrap into one
     // file. We need some header to index the location of the blob and bootstrap,
     // write_tar_header uses tar header that arranges the data as follows:
-
-    // blob_data | blob_tar_header | bootstrap_data | bootstrap_tar_header
-
+    //      blob_data | blob_tar_header | bootstrap_data | bootstrap_tar_header
     // This is a tar-like structure, except that we put the tar header after the
     // data. The advantage is that we do not need to determine the size of the data
     // first, so that we can write the blob data by stream without seek to improve
@@ -218,10 +219,6 @@ impl ArtifactWriter {
         header.set_cksum();
         self.write_all(header.as_bytes())?;
         Ok(())
-    }
-
-    pub fn pos(&self) -> Result<u64> {
-        Ok(self.pos as u64)
     }
 
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
@@ -403,7 +400,7 @@ impl BlobContext {
     }
 
     /// Allocate a count index sequentially in a blob.
-    pub fn alloc_index(&mut self) -> Result<u32> {
+    pub fn alloc_chunk_index(&mut self) -> Result<u32> {
         let index = self.chunk_count;
 
         // Rafs v6 only supports 24 bit chunk id.
@@ -462,7 +459,10 @@ impl BlobManager {
         Ok(blob_ctx)
     }
 
-    pub fn set_current_blob(&mut self, ctx: &BuildContext) -> Result<(u32, &mut BlobContext)> {
+    pub fn get_or_create_current_blob(
+        &mut self,
+        ctx: &BuildContext,
+    ) -> Result<(u32, &mut BlobContext)> {
         if self.current_blob_index.is_none() {
             let blob_ctx = Self::new_blob_ctx(ctx)?;
             self.current_blob_index = Some(self.alloc_index()?);
@@ -631,9 +631,9 @@ pub struct BootstrapContext {
     pub nodes: Vec<Node>,
     /// Current position to write in f_bootstrap
     pub offset: u64,
-    /// Not fully used blocks
-    pub available_blocks: Vec<VecDeque<u64>>,
     pub writer: Box<dyn RafsIoWrite>,
+    /// Not fully used blocks
+    pub v6_available_blocks: Vec<VecDeque<u64>>,
 }
 
 impl BootstrapContext {
@@ -649,11 +649,11 @@ impl BootstrapContext {
             inode_map: HashMap::new(),
             nodes: Vec::new(),
             offset: EROFS_BLOCK_SIZE,
-            available_blocks: vec![
+            writer,
+            v6_available_blocks: vec![
                 VecDeque::new();
                 EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
             ],
-            writer,
         })
     }
 
@@ -676,7 +676,7 @@ impl BootstrapContext {
         let max_idx = div_round_up(EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE as u64) as usize;
 
         for idx in min_idx..max_idx {
-            let blocks = &mut self.available_blocks[idx];
+            let blocks = &mut self.v6_available_blocks[idx];
             if let Some(mut offset) = blocks.pop_front() {
                 offset += EROFS_BLOCK_SIZE - (idx * EROFS_INODE_SLOT_SIZE) as u64;
                 self.append_available_block(offset + (min_idx * EROFS_INODE_SLOT_SIZE) as u64);
@@ -689,12 +689,11 @@ impl BootstrapContext {
 
     // Append the block that `offset` belongs to corresponding deque.
     pub fn append_available_block(&mut self, offset: u64) {
-        if offset % EROFS_BLOCK_SIZE == 0 {
-            return;
+        if offset % EROFS_BLOCK_SIZE != 0 {
+            let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
+            let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
+            self.v6_available_blocks[idx].push_back(round_down_4k(offset));
         }
-        let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
-        let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
-        self.available_blocks[idx].push_back(round_down_4k(offset));
     }
 }
 

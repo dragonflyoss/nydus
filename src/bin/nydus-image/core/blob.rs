@@ -5,14 +5,14 @@
 use std::io::Write;
 
 use anyhow::{Context, Result};
+use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
+use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, try_round_up_4k};
 use sha2::Digest;
-use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, SourceType};
 use super::layout::BlobLayout;
 use super::node::Node;
-use rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 
 pub struct Blob {}
 
@@ -35,7 +35,7 @@ impl Blob {
             for (idx, inode) in inodes.iter().enumerate() {
                 let node = &mut nodes[*inode];
                 let size = node
-                    .dump_blob(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
+                    .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
                     .context("failed to dump blob chunks")?;
                 if idx < prefetch_entries {
                     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
@@ -59,7 +59,7 @@ impl Blob {
         Ok(())
     }
 
-    pub fn dump_meta_data_raw(
+    fn dump_meta_data_raw(
         pos: u64,
         blob_meta_info: &[BlobChunkInfoOndisk],
         compressor: compress::Algorithm,
@@ -72,8 +72,8 @@ impl Blob {
         };
         let (buf, compressed) = compress::compress(data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
-        let mut header = BlobMetaHeaderOndisk::default();
 
+        let mut header = BlobMetaHeaderOndisk::default();
         if compressed {
             header.set_ci_compressor(compressor);
         } else {
@@ -98,6 +98,7 @@ impl Blob {
             return Ok(());
         }
 
+        // Write blob metadata to the data blob itself.
         if let Some(writer) = blob_writer {
             let pos = writer.pos()?;
             let (data, header) = Self::dump_meta_data_raw(

@@ -48,6 +48,7 @@ use super::tree::Tree;
 // inode.
 const RAFS_V5_VIRTUAL_ENTRY_SIZE: u64 = 8;
 
+/// Filesystem root path for Unix OSs.
 pub const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
 /// Prefix for OCI whiteout file.
@@ -171,20 +172,20 @@ impl Display for NodeChunk {
 /// Where the chunk data is actually stored.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum ChunkSource {
-    /// A reference to chunk in parent image.
-    Parent,
     /// Chunk is stored in data blob owned by current image.
     Build,
-    /// A reference to chunk in chunk dictionary.
+    /// A reference to a chunk in chunk dictionary.
     Dict,
+    /// A reference to a chunk in parent image.
+    Parent,
 }
 
 impl Display for ChunkSource {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
-            Self::Parent => write!(f, "parent"),
             Self::Build => write!(f, "build"),
             Self::Dict => write!(f, "dict"),
+            Self::Parent => write!(f, "parent"),
         }
     }
 }
@@ -322,7 +323,7 @@ impl Node {
         }
     }
 
-    pub fn dump_blob(
+    pub fn dump_node_data(
         self: &mut Node,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
@@ -452,14 +453,13 @@ impl Node {
                 uncompressed_size
             };
 
-            let (blob_index, mut blob_ctx) = blob_mgr.set_current_blob(ctx)?;
-
+            let (blob_index, mut blob_ctx) = blob_mgr.get_or_create_current_blob(ctx)?;
             let pre_compressed_offset = blob_ctx.compressed_offset;
             let pre_uncompressed_offset = blob_ctx.uncompressed_offset;
             blob_ctx.compressed_offset += compressed_size as u64;
             blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
-
             blob_ctx.compressed_blob_size += compressed_size as u64;
+            // TODO: check the logic.
             blob_ctx.uncompressed_blob_size = pre_uncompressed_offset + aligned_chunk_size as u64;
             blob_ctx.blob_hash.update(&compressed);
 
@@ -472,7 +472,7 @@ impl Node {
                     .context("failed to write blob")?;
             }
 
-            let chunk_index = blob_ctx.alloc_index()?;
+            let chunk_index = blob_ctx.alloc_chunk_index()?;
             chunk.set_chunk_info(
                 blob_index,
                 chunk_index,
@@ -530,7 +530,6 @@ impl Node {
             if self.is_reg() && self.inode.child_count() as usize != self.chunks.len() {
                 bail!("invalid chunks count {}: {}", self.chunks.len(), self);
             }
-
             for chunk in &self.chunks {
                 chunk
                     .inner

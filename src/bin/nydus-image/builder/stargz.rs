@@ -629,7 +629,7 @@ impl StargzBuilder {
                 .cmp(&b.inner.uncompressed_offset())
         });
         for chunk in &mut blob_chunks {
-            let chunk_index = blob_ctx.alloc_index()?;
+            let chunk_index = blob_ctx.alloc_chunk_index()?;
             chunk.inner.set_index(chunk_index);
             chunk_map.insert(chunk.inner.id(), chunk_index);
             blob_ctx.add_chunk_meta_info(&chunk.inner)?;

@@ -121,7 +121,7 @@ impl Bootstrap {
         bootstrap_ctx.inode_map.clear();
         bootstrap_ctx.nodes.clear();
         bootstrap_ctx
-            .available_blocks
+            .v6_available_blocks
             .iter_mut()
             .for_each(|v| v.clear());
         ctx.prefetch.clear();

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,12 +12,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::{RafsMode, RafsSuper, RafsVersion};
+use nydus_storage::backend::BlobBackend;
+use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::try_round_up_4k;
-use rafs::metadata::chunk::ChunkWrapper;
-use rafs::metadata::{RafsMode, RafsSuper, RafsVersion};
-use storage::backend::BlobBackend;
-use storage::utils::alloc_buf;
 
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
@@ -66,19 +67,17 @@ pub struct Config {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 enum ChunkKey {
-    // for v5, v6 may support later
+    // Chunk digest for RAFS v5, may be extended to support RAFS v6 in future.
     Digest(RafsDigest),
-    // blob_idx, compress_offset, for v6 only
+    // (blob_idx, compress_offset) for RAFS v6 only
     Offset(u32, u64),
 }
 
 impl ChunkKey {
     fn from(c: &ChunkWrapper) -> Self {
-        let is_v5 = matches!(c, ChunkWrapper::V5(_));
-        if is_v5 {
-            Self::Digest(*c.id())
-        } else {
-            Self::Offset(c.blob_index(), c.compressed_offset())
+        match c {
+            ChunkWrapper::V5(_) => Self::Digest(*c.id()),
+            ChunkWrapper::V6(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
         }
     }
 }
@@ -102,10 +101,9 @@ impl ChunkSet {
 
     fn add_chunk(&mut self, chunk: &ChunkWrapper) {
         let key = ChunkKey::from(chunk);
-        let old = self.chunks.insert(key, chunk.clone());
-        self.total_size += chunk.compressed_size() as usize;
-        if let Some(c) = old {
-            self.total_size -= c.compressed_size() as usize;
+        if let Entry::Vacant(e) = self.chunks.entry(key) {
+            e.insert(chunk.clone());
+            self.total_size += chunk.compressed_size() as usize;
         }
     }
 
@@ -252,10 +250,12 @@ fn apply_chunk_change(from: &ChunkWrapper, to: &mut ChunkWrapper) -> Result<()> 
 }
 
 pub struct BlobCompactor {
-    /// original blobs
-    ori_blob_mgr: BlobManager,
+    /// v5 or v6
+    version: RafsVersion,
     /// states
     states: Vec<Option<State>>,
+    /// original blobs
+    ori_blob_mgr: BlobManager,
     /// new blobs
     new_blob_mgr: BlobManager,
     /// inode list
@@ -264,8 +264,6 @@ pub struct BlobCompactor {
     c2nodes: HashMap<ChunkKey, Vec<(usize, usize)>>,
     /// original blob index --> list<node_idx, chunk_idx in node>
     b2nodes: HashMap<u32, Vec<(usize, usize)>>,
-    /// v5 or v6
-    version: RafsVersion,
     /// blobs backend
     backend: Arc<dyn BlobBackend + Send + Sync>,
 }
@@ -279,13 +277,13 @@ impl BlobCompactor {
     ) -> Result<Self> {
         let ori_blobs_number = ori_blob_mgr.len();
         let mut compactor = Self {
+            version,
+            states: vec![None; ori_blobs_number],
             ori_blob_mgr,
             new_blob_mgr: BlobManager::new(),
-            states: vec![None; ori_blobs_number],
             nodes,
             c2nodes: HashMap::new(),
             b2nodes: HashMap::new(),
-            version,
             backend,
         };
         compactor.load_chunk_dict_blobs();
@@ -298,7 +296,6 @@ impl BlobCompactor {
     }
 
     fn load_and_dedup_chunks(&mut self) -> Result<()> {
-        // tmp ChunkSet, for dedup
         let mut all_chunks = ChunkSet::new(self.version);
         let chunk_dict = self.get_chunk_dict();
         for node_idx in 0..self.nodes.len() {
