@@ -217,9 +217,8 @@ impl Prefetch {
                 );
                 // 32bit nid can represent 128GB bootstrap, it is large enough, no need
                 // to worry about casting here
-                if nid < u32::MAX as u64 {
-                    prefetch_table.add_entry(nid as u32);
-                }
+                assert!(nid < u32::MAX as u64);
+                prefetch_table.add_entry(nid as u32);
             }
             Some(prefetch_table)
         } else {

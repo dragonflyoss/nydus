@@ -22,7 +22,7 @@ use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 
 use super::context::{
-    BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
+    ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
 };
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::tree::Tree;
@@ -372,12 +372,32 @@ impl Bootstrap {
     pub fn dump(
         &mut self,
         ctx: &mut BuildContext,
+        bootstrap_storage: &mut Option<ArtifactStorage>,
         bootstrap_ctx: &mut BootstrapContext,
         blob_table: &RafsBlobTable,
     ) -> Result<()> {
         match blob_table {
-            RafsBlobTable::V5(table) => self.rafsv5_dump(ctx, bootstrap_ctx, table),
-            RafsBlobTable::V6(table) => self.rafsv6_dump(ctx, bootstrap_ctx, table),
+            RafsBlobTable::V5(table) => self.rafsv5_dump(ctx, bootstrap_ctx, table)?,
+            RafsBlobTable::V6(table) => self.rafsv6_dump(ctx, bootstrap_ctx, table)?,
+        }
+
+        if let Some(ArtifactStorage::FileDir(p)) = bootstrap_storage {
+            let reader = bootstrap_ctx.writer.as_reader()?;
+            let mut digester = RafsDigest::hasher(ctx.digester);
+            let mut buf = vec![0u8; 16384];
+            loop {
+                let sz = reader.read(&mut buf)?;
+                if sz == 0 {
+                    break;
+                }
+                digester.digest_update(&buf[..sz]);
+            }
+            let name = digester.digest_finalize().to_string();
+            bootstrap_ctx.writer.finalize(Some(name.clone()))?;
+            *bootstrap_storage = Some(ArtifactStorage::SingleFile(p.join(name)));
+            Ok(())
+        } else {
+            bootstrap_ctx.writer.finalize(Some(String::default()))
         }
     }
 
@@ -505,8 +525,6 @@ impl Bootstrap {
             "dump_bootstrap",
             Result<()>
         )?;
-
-        bootstrap_ctx.writer.finalize(Some(String::default()))?;
 
         Ok(())
     }
@@ -737,8 +755,6 @@ impl Bootstrap {
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
-
-        bootstrap_ctx.writer.finalize(Some(String::default()))?;
 
         Ok(())
     }

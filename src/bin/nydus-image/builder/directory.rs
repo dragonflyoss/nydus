@@ -7,6 +7,7 @@ use std::fs::DirEntry;
 use std::io::Write;
 
 use anyhow::{Context, Result};
+use sha2::Digest;
 
 use crate::builder::Builder;
 use crate::core::blob::Blob;
@@ -153,6 +154,10 @@ impl Builder for DirectoryBuilder {
             ));
         };
 
+        if ctx.inline_bootstrap {
+            let (_, _) = blob_mgr.get_or_create_current_blob(ctx)?;
+        }
+
         // Dump blob file
         let mut blob = Blob::new();
         timing_tracer!(
@@ -160,26 +165,47 @@ impl Builder for DirectoryBuilder {
             "dump_blob"
         )?;
 
-        if let Some(blob_writer) = &mut blob_writer {
+        // Dump bootstrap file
+        let blob_table = blob_mgr.to_blob_table(ctx)?;
+        bootstrap.dump(
+            ctx,
+            &mut bootstrap_mgr.bootstrap_storage,
+            &mut bootstrap_ctx,
+            &blob_table,
+        )?;
+
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            // Safe to unwrap because we have ensure blob_writer is valid above.
+            let blob_writer = blob_writer.as_mut().unwrap();
             if ctx.inline_bootstrap {
-                blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
-            } else if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                let header = blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
+                blob_ctx.blob_hash.update(header.as_bytes());
+
+                let reader = bootstrap_ctx.writer.as_reader()?;
+                let mut size = 0;
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let sz = reader.read(&mut buf)?;
+                    if sz == 0 {
+                        break;
+                    }
+                    blob_writer.write_all(&buf[..sz])?;
+                    blob_ctx.blob_hash.update(&buf[..sz]);
+                    size += sz;
+                }
+
+                let header = blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, size as u64)?;
+                blob_ctx.blob_hash.update(header.as_bytes());
+
+                if ctx.blob_id.is_empty() {
+                    ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
+                }
+                blob_writer.finalize(Some(ctx.blob_id.clone()))?;
+            } else {
                 blob_writer.finalize(blob_ctx.blob_id())?;
             }
         }
 
-        // Dump bootstrap file
-        let blob_table = blob_mgr.to_blob_table(ctx)?;
-        bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
-        if ctx.inline_bootstrap {
-            if let Some(blob_writer) = &mut blob_writer {
-                let bootstrap_data = bootstrap_ctx.writer.data();
-                blob_writer.write_all(bootstrap_data)?;
-                blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, bootstrap_data.len() as u64)?;
-                blob_writer.finalize(Some(ctx.blob_id.clone()))?;
-            }
-        }
-
-        BuildOutput::new(blob_mgr)
+        BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }
 }

@@ -222,9 +222,10 @@ impl Merger {
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
+        let mut bootstrap_storage = Some(target.clone());
         bootstrap
-            .dump(ctx, &mut bootstrap_ctx, &blob_table)
+            .dump(ctx, &mut bootstrap_storage, &mut bootstrap_ctx, &blob_table)
             .context(format!("dump bootstrap to {:?}", target.display()))?;
-        BuildOutput::new(&blob_mgr)
+        BuildOutput::new(&blob_mgr, &bootstrap_storage)
     }
 }

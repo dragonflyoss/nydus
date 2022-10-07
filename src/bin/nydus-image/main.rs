@@ -606,6 +606,8 @@ impl Command {
                 Self::ensure_directory(&source_path)?;
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
+                } else if blob_meta_stor.is_some() {
+                    bail!("'--input-type directory' conflicts with '--blob-meta'");
                 }
             }
             ConversionType::DirectoryToTargz => unimplemented!(),
@@ -694,13 +696,11 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
-        /*
         if !inline_bootstrap {
-            let bootstrap_path = Self::get_bootstrap(matches)?;
-            Self::validate_image(matches, bootstrap_path)
-                .context("failed to validate bootstrap")?;
+            if let Some(ArtifactStorage::SingleFile(p)) = &bootstrap_mgr.bootstrap_storage {
+                Self::validate_image(matches, p).context("failed to validate bootstrap")?;
+            }
         }
-         */
 
         info!("build successfully: {:?}", build_output,);
         OutputSerializer::dump(matches, build_output, build_info)
@@ -976,7 +976,6 @@ impl Command {
         Ok(blob_id)
     }
 
-    /*
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(bootstrap_path)?;
@@ -992,7 +991,6 @@ impl Command {
 
         Ok(())
     }
-     */
 
     fn get_chunk_size(matches: &clap::ArgMatches) -> Result<u32> {
         match matches.value_of("chunk-size") {

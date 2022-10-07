@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Cursor, Seek, Write};
+use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::path::PathBuf;
 use std::path::{Display, Path};
 use std::str::FromStr;
@@ -113,8 +113,9 @@ impl RafsIoWrite for ArtifactMemoryWriter {
         &self.0
     }
 
-    fn data(&self) -> &[u8] {
-        self.0.get_ref()
+    fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+        self.0.set_position(0);
+        Ok(&mut self.0)
     }
 }
 
@@ -144,6 +145,11 @@ impl RafsIoWrite for ArtifactFileWriter {
     fn finalize(&mut self, name: Option<String>) -> Result<()> {
         self.0.finalize(name)
     }
+
+    fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+        self.0.reader.seek_offset(0)?;
+        Ok(&mut self.0.reader)
+    }
 }
 
 impl Seek for ArtifactFileWriter {
@@ -167,6 +173,7 @@ impl Write for ArtifactFileWriter {
 pub struct ArtifactWriter {
     pos: usize,
     file: BufWriter<File>,
+    reader: File,
     storage: ArtifactStorage,
     // Keep this because tmp file will be removed automatically when it is dropped.
     // But we will rename/link the tmp file before it is removed.
@@ -200,11 +207,16 @@ impl ArtifactWriter {
                     BUF_WRITER_CAPACITY,
                     opener
                         .open(p)
-                        .with_context(|| format!("failed to open file {:?}", p))?,
+                        .with_context(|| format!("failed to open file {}", p.display()))?,
                 );
+                let reader = OpenOptions::new()
+                    .read(true)
+                    .open(p)
+                    .with_context(|| format!("failed to open file {}", p.display()))?;
                 Ok(Self {
                     pos: 0,
                     file: b,
+                    reader,
                     storage,
                     tmp_file: None,
                 })
@@ -213,11 +225,16 @@ impl ArtifactWriter {
                 // Better we can use open(2) O_TMPFILE, but for compatibility sake, we delay this job.
                 // TODO: Blob dir existence?
                 let tmp = TempFile::new_in(p)
-                    .with_context(|| format!("failed to create temp file in {:?}", p))?;
+                    .with_context(|| format!("failed to create temp file in {}", p.display()))?;
                 let tmp2 = tmp.as_file().try_clone()?;
+                let reader = OpenOptions::new()
+                    .read(true)
+                    .open(tmp.as_path())
+                    .with_context(|| format!("failed to open file {}", tmp.as_path().display()))?;
                 Ok(Self {
                     pos: 0,
                     file: BufWriter::with_capacity(BUF_WRITER_CAPACITY, tmp2),
+                    reader,
                     storage,
                     tmp_file: Some(tmp),
                 })
@@ -239,7 +256,7 @@ impl ArtifactWriter {
     // the performance of the blob dump by using fifo, if we need to read the bootstrap
     // data quickly, first need to read the 512 bytes tar header from the end of blob
     // file first, and then seek offset to read bootstrap data.
-    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<()> {
+    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<Header> {
         let mut header = Header::new_gnu();
         header.set_path(Path::new(name))?;
         header.set_entry_type(EntryType::Regular);
@@ -248,7 +265,7 @@ impl ArtifactWriter {
         // in golang can correctly parse the header.
         header.set_cksum();
         self.write_all(header.as_bytes())?;
-        Ok(())
+        Ok(header)
     }
 
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
@@ -878,13 +895,27 @@ pub struct BuildOutput {
     pub blobs: Vec<String>,
     /// The size of output blob in this build.
     pub blob_size: Option<u64>,
+    /// File path for the metadata blob.
+    pub bootstrap_path: Option<String>,
 }
 
 impl BuildOutput {
-    pub fn new(blob_mgr: &BlobManager) -> Result<BuildOutput> {
+    pub fn new(
+        blob_mgr: &BlobManager,
+        bootstrap_storage: &Option<ArtifactStorage>,
+    ) -> Result<BuildOutput> {
         let blobs = blob_mgr.get_blob_ids();
         let blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
+        let bootstrap_path = if let Some(ArtifactStorage::SingleFile(p)) = bootstrap_storage {
+            Some(p.display().to_string())
+        } else {
+            None
+        };
 
-        Ok(Self { blobs, blob_size })
+        Ok(Self {
+            blobs,
+            blob_size,
+            bootstrap_path,
+        })
     }
 }
