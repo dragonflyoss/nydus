@@ -86,7 +86,7 @@ impl DirectoryBuilder {
     }
 
     /// Build node tree from a filesystem directory
-    fn build_tree_from_fs(
+    fn build_tree(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
@@ -123,20 +123,21 @@ impl Builder for DirectoryBuilder {
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
-        // Scan source directory to build upper layer tree.
-        let mut tree = self.build_tree_from_fs(ctx, &mut bootstrap_ctx, layer_idx)?;
-
-        let origin_bootstarp_offset = bootstrap_ctx.offset;
         let mut bootstrap = Bootstrap::new()?;
+
+        // Scan source directory to build upper layer tree.
+        let mut tree = self.build_tree(ctx, &mut bootstrap_ctx, layer_idx)?;
+
+        // Merge with lower layer if there's one.
         if bootstrap_ctx.layered {
-            // Merge with lower layer if there's one, do not prepare `prefetch` list during merging.
+            let origin_bootstarp_offset = bootstrap_ctx.offset;
+            // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
             ctx.prefetch.disable();
             bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
             tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
+            bootstrap_ctx.offset = origin_bootstarp_offset;
+            bootstrap_ctx.layered = false;
         }
-        // If layered, the bootstrap_ctx.offset will be set in first build, so we need restore it here
-        bootstrap_ctx.offset = origin_bootstarp_offset;
-        bootstrap_ctx.layered = false;
 
         // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
         timing_tracer!(
@@ -147,7 +148,9 @@ impl Builder for DirectoryBuilder {
         let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
             Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?)
         } else {
-            None
+            return Err(anyhow!(
+                "the target blob path should always be valid for directory builder"
+            ));
         };
 
         // Dump blob file
@@ -157,20 +160,17 @@ impl Builder for DirectoryBuilder {
             "dump_blob"
         )?;
 
-        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            if let Some(blob_writer) = &mut blob_writer {
-                if ctx.inline_bootstrap {
-                    blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
-                } else {
-                    blob_writer.finalize(blob_ctx.blob_id())?;
-                }
+        if let Some(blob_writer) = &mut blob_writer {
+            if ctx.inline_bootstrap {
+                blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
+            } else if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                blob_writer.finalize(blob_ctx.blob_id())?;
             }
         }
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
-
         if ctx.inline_bootstrap {
             if let Some(blob_writer) = &mut blob_writer {
                 let bootstrap_data = bootstrap_ctx.writer.data();
