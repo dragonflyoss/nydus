@@ -634,10 +634,12 @@ impl StargzBuilder {
 
         let mut chunk_map = HashMap::new();
         for chunk in &mut blob_chunks {
-            let chunk_index = blob_ctx.alloc_chunk_index()?;
-            chunk.inner.set_index(chunk_index);
-            chunk_map.insert(chunk.inner.id(), chunk_index);
-            blob_ctx.add_chunk_meta_info(&chunk.inner)?;
+            if !chunk_map.contains_key(chunk.inner.id()) {
+                let chunk_index = blob_ctx.alloc_chunk_index()?;
+                chunk.inner.set_index(chunk_index);
+                chunk_map.insert(chunk.inner.id(), chunk_index);
+                blob_ctx.add_chunk_meta_info(&chunk.inner)?;
+            }
         }
 
         // Set blob index and inode digest for upper nodes
