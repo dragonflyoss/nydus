@@ -30,26 +30,26 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
-use nydus_utils::digest::{Algorithm, RafsDigest};
-use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoVec};
-use storage::utils::readahead;
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoVec};
+use nydus_storage::utils::readahead;
+use nydus_utils::digest::RafsDigest;
 
 use crate::metadata::layout::v5::{
-    rafsv5_align, rafsv5_alloc_bio_vecs, rafsv5_validate_digest, RafsV5BlobTable, RafsV5ChunkInfo,
+    rafsv5_align, rafsv5_alloc_bio_vecs, rafsv5_validate_inode, RafsV5BlobTable, RafsV5ChunkInfo,
     RafsV5Inode, RafsV5InodeChunkOps, RafsV5InodeOps, RafsV5InodeTable, RafsV5XAttrsTable,
     RAFSV5_ALIGNMENT, RAFSV5_EXT_BLOB_ENTRY_SIZE, RAFSV5_SUPERBLOCK_SIZE,
 };
 use crate::metadata::layout::{
     bytes_to_os_str, parse_xattr_names, parse_xattr_value, MetaRange, XattrName, XattrValue,
-    RAFS_ROOT_INODE,
+    RAFS_V5_ROOT_INODE,
 };
 use crate::metadata::{
     Attr, Entry, Inode, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock,
     RafsSuperInodes, RafsSuperMeta, DOT, DOTDOT, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_METADATA_SIZE,
     RAFS_MAX_NAME,
 };
-use crate::{RafsError, RafsIoReader, RafsResult};
+use crate::{RafsError, RafsInodeExt, RafsIoReader, RafsResult};
 
 /// Impl get accessor for inode object.
 macro_rules! impl_inode_getter {
@@ -105,7 +105,7 @@ struct DirectMappingState {
     size: usize,
     fd: RawFd,
     mmapped_inode_table: bool,
-    validate_digest: bool,
+    validate_inode: bool,
 }
 
 // Safe to Send/Sync because the underlying data structures are readonly
@@ -114,7 +114,7 @@ unsafe impl Send for DirectMappingState {}
 unsafe impl Sync for DirectMappingState {}
 
 impl DirectMappingState {
-    fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
+    fn new(meta: &RafsSuperMeta, validate_inode: bool) -> Self {
         DirectMappingState {
             meta: *meta,
             inode_table: ManuallyDrop::new(RafsV5InodeTable::default()),
@@ -124,7 +124,7 @@ impl DirectMappingState {
             end: std::ptr::null(),
             size: 0,
             mmapped_inode_table: false,
-            validate_digest,
+            validate_inode,
         }
     }
 
@@ -180,25 +180,18 @@ impl Drop for DirectMappingState {
 }
 
 /// Direct-mapped Rafs v5 super block.
+#[derive(Clone)]
 pub struct DirectSuperBlockV5 {
-    state: ArcSwap<DirectMappingState>,
-}
-
-impl Clone for DirectSuperBlockV5 {
-    fn clone(&self) -> Self {
-        DirectSuperBlockV5 {
-            state: ArcSwap::new(self.state.load_full()),
-        }
-    }
+    state: Arc<ArcSwap<DirectMappingState>>,
 }
 
 impl DirectSuperBlockV5 {
     /// Create a new instance of `DirectSuperBlockV5`.
-    pub fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
-        let state = DirectMappingState::new(meta, validate_digest);
+    pub fn new(meta: &RafsSuperMeta, validate_inode: bool) -> Self {
+        let state = DirectMappingState::new(meta, validate_inode);
 
         Self {
-            state: ArcSwap::new(Arc::new(state)),
+            state: Arc::new(ArcSwap::new(Arc::new(state))),
         }
     }
 
@@ -207,28 +200,31 @@ impl DirectSuperBlockV5 {
         &self,
         ino: Inode,
         state: &DirectMappingState,
+        validate_inode: bool,
     ) -> Result<OndiskInodeWrapper> {
         let offset = state.inode_table.get(ino)? as usize;
-        let _inode = state.cast_to_ref::<RafsV5Inode>(state.base, offset)?;
-        let wrapper = OndiskInodeWrapper {
-            mapping: self.clone(),
-            offset,
-        };
+        let wrapper = OndiskInodeWrapper::new(state, self.clone(), offset)?;
 
-        // TODO: use bitmap to record validation result.
         if let Err(e) = wrapper.validate(state.meta.inodes_count, state.meta.chunk_size as u64) {
+            // TODO: check why to ignore EOPNOTSUPP
             if e.raw_os_error().unwrap_or(0) != libc::EOPNOTSUPP {
                 return Err(e);
             }
             // ignore unsupported err
         }
 
+        if validate_inode {
+            let digester = state.meta.get_digester();
+            if !rafsv5_validate_inode(&wrapper, false, digester)? {
+                return Err(einval!("invalid inode digest"));
+            }
+        }
+
         Ok(wrapper)
     }
 
-    #[allow(clippy::cast_ptr_alignment)]
     fn update_state(&self, r: &mut RafsIoReader) -> Result<()> {
-        let old_state = self.state.load();
+        let old_state = self.state();
 
         // Validate file size
         let fd = unsafe { libc::dup(r.as_raw_fd()) };
@@ -334,7 +330,7 @@ impl DirectSuperBlockV5 {
             }
         };
 
-        let validate_digest = old_state.validate_digest;
+        let validate_inode = old_state.validate_inode;
 
         let state = DirectMappingState {
             meta: old_state.meta,
@@ -345,7 +341,7 @@ impl DirectSuperBlockV5 {
             end,
             size,
             mmapped_inode_table: true,
-            validate_digest,
+            validate_inode,
         };
 
         // Swap new and old DirectMappingState object, the old object will be destroyed when the
@@ -354,38 +350,33 @@ impl DirectSuperBlockV5 {
 
         Ok(())
     }
+
+    #[inline]
+    fn state(&self) -> Guard<Arc<DirectMappingState>> {
+        self.state.load()
+    }
 }
 
 impl RafsSuperInodes for DirectSuperBlockV5 {
     fn get_max_ino(&self) -> Inode {
-        let state = self.state.load();
-
-        state.inode_table.len() as u64
+        self.state().inode_table.len() as u64
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
-    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
-        let state = self.state.load();
-        let wrapper = self.get_inode_wrapper(ino, state.deref())?;
-        let inode = Arc::new(wrapper) as Arc<dyn RafsInode>;
-
-        if validate_digest {
-            let digester = state.meta.get_digester();
-            if !self.validate_digest(inode.clone(), false, digester)? {
-                return Err(einval!("invalid inode digest"));
-            }
-        }
-
-        Ok(inode)
+    fn get_inode(&self, ino: Inode, validate_inode: bool) -> Result<Arc<dyn RafsInode>> {
+        let state = self.state();
+        let wrapper = self.get_inode_wrapper(ino, state.deref(), validate_inode)?;
+        Ok(Arc::new(wrapper))
     }
 
-    fn validate_digest(
+    fn get_extended_inode(
         &self,
-        inode: Arc<dyn RafsInode>,
-        recursive: bool,
-        digester: Algorithm,
-    ) -> Result<bool> {
-        rafsv5_validate_digest(inode, recursive, digester)
+        ino: Inode,
+        validate_inode: bool,
+    ) -> Result<Arc<dyn RafsInodeExt>> {
+        let state = self.state();
+        let wrapper = self.get_inode_wrapper(ino, state.deref(), validate_inode)?;
+        Ok(Arc::new(wrapper))
     }
 }
 
@@ -405,11 +396,11 @@ impl RafsSuperBlock for DirectSuperBlockV5 {
     }
 
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
-        self.state.load().blob_table.entries.clone()
+        self.state().blob_table.entries.clone()
     }
 
     fn root_ino(&self) -> u64 {
-        RAFS_ROOT_INODE
+        RAFS_V5_ROOT_INODE
     }
 }
 
@@ -420,31 +411,34 @@ pub struct OndiskInodeWrapper {
 }
 
 impl OndiskInodeWrapper {
+    fn new(state: &DirectMappingState, mapping: DirectSuperBlockV5, offset: usize) -> Result<Self> {
+        let _ = state.cast_to_ref::<RafsV5Inode>(state.base, offset)?;
+        Ok(OndiskInodeWrapper { mapping, offset })
+    }
+
     #[inline]
     fn state(&self) -> Guard<Arc<DirectMappingState>> {
-        self.mapping.state.load()
+        self.mapping.state()
     }
 
     #[allow(clippy::cast_ptr_alignment)]
     #[inline]
     fn inode<'a>(&self, state: &'a DirectMappingState) -> &'a RafsV5Inode {
-        unsafe {
-            let ptr = state.base.add(self.offset);
-            &*(ptr as *const RafsV5Inode)
-        }
+        // Safe to unwrap() because we have validated `self.offset`
+        state.cast_to_ref(state.base, self.offset).unwrap()
     }
 
     fn name_ref<'a>(&self, state: &'a DirectMappingState) -> &'a OsStr {
         let offset = self.offset + size_of::<RafsV5Inode>();
+        let len = self.inode(state).i_name_size as usize;
         let name = unsafe {
             let start = state.base.add(offset);
-            slice::from_raw_parts(start, self.inode(state).i_name_size as usize)
+            slice::from_raw_parts(start, len)
         };
 
         bytes_to_os_str(name)
     }
 
-    #[allow(clippy::cast_ptr_alignment)]
     fn get_xattr_size(&self) -> Result<usize> {
         let state = self.state();
         let inode = self.inode(state.deref());
@@ -461,7 +455,6 @@ impl OndiskInodeWrapper {
         }
     }
 
-    #[allow(clippy::cast_ptr_alignment)]
     fn get_xattr_data(&self) -> Result<(&[u8], usize)> {
         let state = self.state();
         let inode = self.inode(state.deref());
@@ -471,16 +464,14 @@ impl OndiskInodeWrapper {
         }
 
         let offset = self.offset + inode.size();
-        let start = unsafe { state.base.add(offset) };
-        let xattrs = start as *const RafsV5XAttrsTable;
-        let xattr_size = unsafe { (*xattrs).size() };
-        let xattrs_aligned_size = unsafe { (*xattrs).aligned_size() };
-
+        let xattrs = state.cast_to_ref::<RafsV5XAttrsTable>(state.base, offset)?;
+        let xattr_size = xattrs.size();
+        let xattrs_aligned_size = xattrs.aligned_size();
         state.validate_range(offset, size_of::<RafsV5XAttrsTable>() + xattrs_aligned_size)?;
 
         let xattr_data = unsafe {
             slice::from_raw_parts(
-                start.wrapping_add(size_of::<RafsV5XAttrsTable>()),
+                state.base.add(offset).add(size_of::<RafsV5XAttrsTable>()),
                 xattr_size,
             )
         };
@@ -498,15 +489,13 @@ impl OndiskInodeWrapper {
 
         let mut offset = self.offset + inode.size();
         if inode.has_xattr() {
-            unsafe {
-                let xattrs = state.base.add(offset) as *const RafsV5XAttrsTable;
-                offset += size_of::<RafsV5XAttrsTable>() + (*xattrs).aligned_size();
-            }
+            let xattrs = state.cast_to_ref::<RafsV5XAttrsTable>(state.base, offset)?;
+            offset += size_of::<RafsV5XAttrsTable>() + xattrs.aligned_size();
         }
         offset += size_of::<RafsV5ChunkInfo>() * idx as usize;
 
         let chunk = state.cast_to_ref::<RafsV5ChunkInfo>(state.base, offset)?;
-        let wrapper = DirectChunkInfoV5::new(chunk, self.mapping.clone(), offset);
+        let wrapper = DirectChunkInfoV5::new(state.deref(), chunk, self.mapping.clone(), offset)?;
 
         Ok(Arc::new(wrapper))
     }
@@ -578,12 +567,6 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(())
     }
 
-    fn get_digest(&self) -> RafsDigest {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-        inode.i_digest
-    }
-
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
@@ -603,7 +586,7 @@ impl RafsInode for OndiskInodeWrapper {
         let mut child_dirs: Vec<Arc<dyn RafsInode>> = Vec::new();
 
         for idx in child_index..(child_index + child_count) {
-            let child_inode = self.mapping.get_inode(idx, false).unwrap();
+            let child_inode = self.mapping.get_inode(idx, false)?;
             if child_inode.is_dir() {
                 child_dirs.push(child_inode);
             } else if !child_inode.is_empty_size() {
@@ -616,13 +599,6 @@ impl RafsInode for OndiskInodeWrapper {
         }
 
         Ok(0)
-    }
-
-    fn flags(&self) -> u64 {
-        let state = self.state();
-        let inode = self.inode(state.deref());
-
-        inode.i_flags.bits()
     }
 
     fn get_entry(&self) -> Entry {
@@ -659,15 +635,6 @@ impl RafsInode for OndiskInodeWrapper {
         }
     }
 
-    /// Get name of the inode.
-    ///
-    /// # Safety
-    /// It depends on Self::validate() to ensure valid memory layout.
-    fn name(&self) -> OsString {
-        let state = self.state();
-        self.name_ref(state.deref()).to_owned()
-    }
-
     fn get_xattr(&self, name: &OsStr) -> Result<Option<XattrValue>> {
         let (xattr_data, xattr_size) = self.get_xattr_data()?;
         parse_xattr_value(xattr_data, xattr_size, name)
@@ -696,8 +663,8 @@ impl RafsInode for OndiskInodeWrapper {
     }
 
     fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()> {
-        let mut cur_offset = entry_offset;
         // offset 0 and 1 is for "." and ".." respectively.
+        let mut cur_offset = entry_offset;
 
         if cur_offset == 0 {
             cur_offset += 1;
@@ -749,7 +716,7 @@ impl RafsInode for OndiskInodeWrapper {
     ///
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInodeExt>> {
         let state = self.state();
         let inode = self.inode(state.deref());
 
@@ -766,12 +733,14 @@ impl RafsInode for OndiskInodeWrapper {
         // This implementation is more convenient and slightly outperforms than slice::binary_search.
         while first <= last {
             let pivot = first + ((last - first) >> 1);
-            let wrapper = self
-                .mapping
-                .get_inode_wrapper((inode.i_child_index as i32 + pivot) as u64, state.deref())?;
+            let wrapper = self.mapping.get_inode_wrapper(
+                (inode.i_child_index as i32 + pivot) as u64,
+                state.deref(),
+                state.validate_inode,
+            )?;
             let target = wrapper.name_ref(state.deref());
             if target == name {
-                return Ok(Arc::new(wrapper) as Arc<dyn RafsInode>);
+                return Ok(Arc::new(wrapper));
             }
             if target > name {
                 last = pivot - 1;
@@ -787,7 +756,7 @@ impl RafsInode for OndiskInodeWrapper {
     ///
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
-    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInodeExt>> {
         let state = self.state();
         let inode = self.inode(state.deref());
         let child_count = inode.i_child_count;
@@ -799,7 +768,12 @@ impl RafsInode for OndiskInodeWrapper {
             return Err(enoent!("invalid child index"));
         }
 
-        self.mapping.get_inode((idx + child_index) as Inode, false)
+        let wrapper = self.mapping.get_inode_wrapper(
+            (idx + child_index) as Inode,
+            state.deref(),
+            state.validate_inode,
+        )?;
+        Ok(Arc::new(wrapper))
     }
 
     #[inline]
@@ -821,16 +795,6 @@ impl RafsInode for OndiskInodeWrapper {
         self.get_child_count()
     }
 
-    /// Get chunk information with index `idx`
-    ///
-    /// # Safety
-    /// It depends on Self::validate() to ensure valid memory layout.
-    //#[allow(clippy::cast_ptr_alignment)]
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
-        self._get_chunk_info(idx)
-            .map(|v| v as Arc<dyn BlobChunkInfo>)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -841,12 +805,51 @@ impl RafsInode for OndiskInodeWrapper {
     impl_inode_wrapper!(is_hardlink, bool);
     impl_inode_wrapper!(has_xattr, bool);
     impl_inode_getter!(ino, i_ino, u64);
-    impl_inode_getter!(parent, i_parent, u64);
     impl_inode_getter!(size, i_size, u64);
     impl_inode_getter!(rdev, i_rdev, u32);
     impl_inode_getter!(projid, i_projid, u32);
-    impl_inode_getter!(get_name_size, i_name_size, u16);
     impl_inode_getter!(get_symlink_size, i_symlink_size, u16);
+}
+
+impl RafsInodeExt for OndiskInodeWrapper {
+    fn as_inode(&self) -> &dyn RafsInode {
+        self
+    }
+
+    /// Get name of the inode.
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    fn name(&self) -> OsString {
+        let state = self.state();
+        self.name_ref(state.deref()).to_owned()
+    }
+
+    fn flags(&self) -> u64 {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+
+        inode.i_flags.bits()
+    }
+
+    fn get_digest(&self) -> RafsDigest {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+        inode.i_digest
+    }
+
+    /// Get chunk information with index `idx`
+    ///
+    /// # Safety
+    /// It depends on Self::validate() to ensure valid memory layout.
+    //#[allow(clippy::cast_ptr_alignment)]
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
+        self._get_chunk_info(idx)
+            .map(|v| v as Arc<dyn BlobChunkInfo>)
+    }
+
+    impl_inode_getter!(get_name_size, i_name_size, u16);
+    impl_inode_getter!(parent, i_parent, u64);
 }
 
 impl RafsV5InodeChunkOps for OndiskInodeWrapper {
@@ -862,13 +865,7 @@ impl RafsV5InodeOps for OndiskInodeWrapper {
     }
 
     fn get_chunk_size(&self) -> u32 {
-        self.mapping.state.load().meta.chunk_size
-    }
-
-    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
-        let state = self.state();
-
-        Ok(*self.inode(state.deref()))
+        self.mapping.state().meta.chunk_size
     }
 
     impl_inode_wrapper!(has_hole, bool);
@@ -887,17 +884,23 @@ unsafe impl Sync for DirectChunkInfoV5 {}
 // This is *direct* metadata mode in-memory chunk info object.
 impl DirectChunkInfoV5 {
     #[inline]
-    fn new(chunk: &RafsV5ChunkInfo, mapping: DirectSuperBlockV5, offset: usize) -> Self {
-        Self {
+    fn new(
+        state: &DirectMappingState,
+        chunk: &RafsV5ChunkInfo,
+        mapping: DirectSuperBlockV5,
+        offset: usize,
+    ) -> Result<Self> {
+        state.cast_to_ref::<RafsV5ChunkInfo>(state.base, offset)?;
+        Ok(Self {
             mapping,
             offset,
             digest: chunk.block_id,
-        }
+        })
     }
 
     #[inline]
     fn state(&self) -> Guard<Arc<DirectMappingState>> {
-        self.mapping.state.load()
+        self.mapping.state()
     }
 
     /// Dereference the underlying OndiskChunkInfo object.
@@ -907,10 +910,8 @@ impl DirectChunkInfoV5 {
     /// so it's safe to dereference the underlying OndiskChunkInfo object.
     #[allow(clippy::cast_ptr_alignment)]
     fn chunk<'a>(&self, state: &'a DirectMappingState) -> &'a RafsV5ChunkInfo {
-        unsafe {
-            let ptr = state.base.add(self.offset);
-            &*(ptr as *const RafsV5ChunkInfo)
-        }
+        // Safe to unwrap because we have validate the address range.
+        state.cast_to_ref(state.base, self.offset).unwrap()
     }
 }
 
@@ -927,12 +928,6 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
         self.chunk(self.state().deref())
             .flags
             .contains(BlobChunkFlags::COMPRESSED)
-    }
-
-    fn is_hole(&self) -> bool {
-        self.chunk(self.state().deref())
-            .flags
-            .contains(BlobChunkFlags::HOLECHUNK)
     }
 
     fn as_any(&self) -> &dyn Any {

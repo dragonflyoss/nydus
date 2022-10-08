@@ -113,10 +113,11 @@ impl FuseServer {
         let _ebadf = Error::from_raw_os_error(libc::EBADF);
 
         loop {
-            if let Some((reader, writer)) = self.ch.get_request().map_err(|e| {
-                warn!("get fuse request failed: {:?}", e);
-                Error::from_raw_os_error(libc::EINVAL)
-            })? {
+            if let Some((reader, writer)) = self
+                .ch
+                .get_request()
+                .map_err(|e| eother!(format!("failed to get fuse request from /dev/fuse, {}", e)))?
+            {
                 if let Err(e) =
                     self.server
                         .handle_message(reader, writer.into(), None, Some(metrics_hook))
@@ -255,8 +256,7 @@ impl FusedevDaemon {
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
             .spawn(move || {
-                if let Err(err) = s.svc_loop(&inflight_op) {
-                    warn!("fuse server exits with err: {:?}, exiting daemon", err);
+                if let Err(_err) = s.svc_loop(&inflight_op) {
                     if let Err(err) = waker.wake() {
                         error!("fail to exit daemon, error: {:?}", err);
                     }

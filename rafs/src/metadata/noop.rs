@@ -7,11 +7,10 @@
 use std::io::Result;
 use std::sync::Arc;
 
-use nydus_utils::digest;
 use storage::device::BlobInfo;
 
 use crate::metadata::{Inode, RafsInode, RafsSuperBlock, RafsSuperInodes};
-use crate::{RafsIoReader, RafsResult};
+use crate::{RafsInodeExt, RafsIoReader, RafsResult};
 
 #[derive(Default)]
 pub struct NoopSuperBlock {}
@@ -31,12 +30,11 @@ impl RafsSuperInodes for NoopSuperBlock {
         unimplemented!()
     }
 
-    fn validate_digest(
+    fn get_extended_inode(
         &self,
-        _inode: Arc<dyn RafsInode>,
-        _recursive: bool,
-        _digester: digest::Algorithm,
-    ) -> Result<bool> {
+        _ino: Inode,
+        _validate_digest: bool,
+    ) -> Result<Arc<dyn RafsInodeExt>> {
         unimplemented!()
     }
 }

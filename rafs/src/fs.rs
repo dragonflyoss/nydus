@@ -21,6 +21,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::Result;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -448,7 +449,7 @@ impl Rafs {
         Ok(attr)
     }
 
-    fn get_inode_entry(&self, inode: Arc<dyn RafsInode>) -> Entry {
+    fn get_inode_entry<I: Deref<Target = dyn RafsInode>>(&self, inode: I) -> Entry {
         let mut entry = inode.get_entry();
 
         // override uid/gid if there is no explicit inode uid/gid
@@ -632,6 +633,7 @@ impl FileSystem for Rafs {
             entry.inode = ino;
             Ok(entry)
         } else if target == DOTDOT {
+            let parent = self.sb.get_extended_inode(parent.ino(), false)?;
             Ok(self
                 .sb
                 .get_inode(parent.parent(), self.digest_validate)
@@ -642,7 +644,7 @@ impl FileSystem for Rafs {
                 .get_child_by_name(target)
                 .map(|i| {
                     self.ios.new_file_counter(i.ino());
-                    self.get_inode_entry(i)
+                    self.get_inode_entry(i.as_inode())
                 })
                 .unwrap_or_else(|_| self.negative_entry()))
         }

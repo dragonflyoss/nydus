@@ -1,5 +1,5 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2020 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2020-2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -11,6 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
 use std::io::{Error, Result};
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -20,10 +21,10 @@ use std::time::Duration;
 use anyhow::bail;
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::Entry;
+use nydus_storage::device::{BlobChunkInfo, BlobInfo, BlobIoMerge, BlobIoVec};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
-use storage::device::{BlobChunkInfo, BlobInfo, BlobIoMerge, BlobIoVec};
 
 use self::layout::v5::RafsV5PrefetchTable;
 use self::layout::v6::RafsV6PrefetchTable;
@@ -65,17 +66,12 @@ pub trait RafsSuperInodes {
     /// Get the maximum inode number managed by the RAFS filesystem.
     fn get_max_ino(&self) -> Inode;
 
-    /// Get the `RafsInode` trait object corresponding to the inode number `ino`,
-    /// also validates the inode content if requested.
-    fn get_inode(&self, ino: Inode, validate_digest: bool) -> Result<Arc<dyn RafsInode>>;
+    /// Get the `RafsInode` trait object corresponding to the inode number `ino`.
+    fn get_inode(&self, ino: Inode, validate_inode: bool) -> Result<Arc<dyn RafsInode>>;
 
-    /// Validate the content of inode itself, optionally recursively validate its children.
-    fn validate_digest(
-        &self,
-        inode: Arc<dyn RafsInode>,
-        recursive: bool,
-        digester: digest::Algorithm,
-    ) -> Result<bool>;
+    /// Get the `RafsInodeExt` trait object corresponding to the 'ino`.
+    fn get_extended_inode(&self, ino: Inode, validate_inode: bool)
+        -> Result<Arc<dyn RafsInodeExt>>;
 }
 
 /// Trait to access RAFS filesystem metadata, including the RAFS super block and inodes.
@@ -129,9 +125,6 @@ pub trait RafsInode: Any {
     /// It must be validated for integrity before accessing any of its data fields .
     fn validate(&self, max_inode: Inode, chunk_size: u64) -> Result<()>;
 
-    /// RAFS: get digest value of the inode metadata.
-    fn get_digest(&self) -> RafsDigest;
-
     /// RAFS: allocate blob io vectors to read file data in range [offset, offset + size).
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
 
@@ -140,9 +133,6 @@ pub trait RafsInode: Any {
         &self,
         descendants: &mut Vec<Arc<dyn RafsInode>>,
     ) -> Result<usize>;
-
-    /// RAFS V5: get RAFS v5 specific inode flags.
-    fn flags(&self) -> u64;
 
     /// Posix: generate a `Entry` object required by libc/fuse from the inode.
     fn get_entry(&self) -> Entry;
@@ -153,20 +143,11 @@ pub trait RafsInode: Any {
     /// Posix: get the inode number.
     fn ino(&self) -> u64;
 
-    /// Posix: get inode number of the parent inode.
-    fn parent(&self) -> u64;
-
     /// Posix: get real device number.
     fn rdev(&self) -> u32;
 
     /// Posix: get project id associated with the inode.
     fn projid(&self) -> u32;
-
-    /// Posix: get file name.
-    fn name(&self) -> OsString;
-
-    /// Posix: get file name size.
-    fn get_name_size(&self) -> u16;
 
     /// Mode: check whether the inode is a directory.
     fn is_dir(&self) -> bool;
@@ -199,10 +180,10 @@ pub trait RafsInode: Any {
     fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()>;
 
     /// Directory: get child inode by name.
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>>;
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInodeExt>>;
 
     /// Directory: get child inode by child index, child index starts from 0.
-    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInode>>;
+    fn get_child_by_index(&self, idx: u32) -> Result<Arc<dyn RafsInodeExt>>;
 
     /// Directory: get number of child inodes.
     fn get_child_count(&self) -> u32;
@@ -221,10 +202,31 @@ pub trait RafsInode: Any {
     /// Regular: get number of data chunks.
     fn get_chunk_count(&self) -> u32;
 
-    /// Regular: get chunk info object by chunk index, chunk index starts from 0.
-    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>>;
-
     fn as_any(&self) -> &dyn Any;
+}
+
+/// Extended inode information for builder and directory walker.
+pub trait RafsInodeExt: RafsInode {
+    /// Convert to the base type `RafsInode`.
+    fn as_inode(&self) -> &dyn RafsInode;
+
+    /// Posix: get inode number of the parent inode.
+    fn parent(&self) -> u64;
+
+    /// Posix: get file name.
+    fn name(&self) -> OsString;
+
+    /// Posix: get file name size.
+    fn get_name_size(&self) -> u16;
+
+    /// RAFS V5: get RAFS v5 specific inode flags.
+    fn flags(&self) -> u64;
+
+    /// RAFS v5: get digest value of the inode metadata.
+    fn get_digest(&self) -> RafsDigest;
+
+    /// RAFS v5: get chunk info object by chunk index, chunk index starts from 0.
+    fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>>;
 }
 
 /// Trait to write out RAFS filesystem meta objects into the metadata blob.
@@ -271,6 +273,48 @@ impl Display for RafsSuperFlags {
     }
 }
 
+impl From<RafsSuperFlags> for digest::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
+            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
+            _ => digest::Algorithm::Blake3,
+        }
+    }
+}
+
+impl From<digest::Algorithm> for RafsSuperFlags {
+    fn from(d: digest::Algorithm) -> RafsSuperFlags {
+        match d {
+            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
+            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
+        }
+    }
+}
+
+impl From<RafsSuperFlags> for compress::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
+            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
+            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
+            x if x.contains(RafsSuperFlags::COMPRESS_ZSTD) => compress::Algorithm::Zstd,
+            _ => compress::Algorithm::Lz4Block,
+        }
+    }
+}
+
+impl From<compress::Algorithm> for RafsSuperFlags {
+    fn from(c: compress::Algorithm) -> RafsSuperFlags {
+        match c {
+            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
+            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
+            compress::Algorithm::Zstd => RafsSuperFlags::COMPRESS_ZSTD,
+        }
+    }
+}
+
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
@@ -300,10 +344,6 @@ pub struct RafsSuperMeta {
     pub extended_blob_table_offset: u64,
     /// Offset of the extended blob information table into the metadata blob.
     pub extended_blob_table_entries: u32,
-    /// Start of data prefetch range.
-    pub blob_readahead_offset: u32,
-    /// Size of data prefetch range.
-    pub blob_readahead_size: u32,
     /// Offset of the inode prefetch table into the metadata blob.
     pub prefetch_table_offset: u64,
     /// Size of the inode prefetch table.
@@ -335,6 +375,7 @@ impl RafsSuperMeta {
         self.version == RAFS_SUPER_VERSION_V6
     }
 
+    /// Check whether the RAFS instance is a chunk dictionary.
     pub fn is_chunk_dict(&self) -> bool {
         self.is_chunk_dict
     }
@@ -384,8 +425,6 @@ impl Default for RafsSuperMeta {
             blob_table_offset: 0,
             extended_blob_table_offset: 0,
             extended_blob_table_entries: 0,
-            blob_readahead_offset: 0,
-            blob_readahead_size: 0,
             prefetch_table_offset: 0,
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
@@ -404,8 +443,14 @@ impl Default for RafsSuperMeta {
 pub enum RafsMode {
     /// Directly mapping and accessing metadata into process by mmap().
     Direct,
-    /// Read metadata into memory before using.
+    /// Read metadata into memory before using, for RAFS v5.
     Cached,
+}
+
+impl Default for RafsMode {
+    fn default() -> Self {
+        RafsMode::Direct
+    }
 }
 
 impl FromStr for RafsMode {
@@ -492,22 +537,6 @@ impl RafsSuper {
         Ok(rs)
     }
 
-    pub fn load_chunk_dict_from_metadata(path: &Path) -> Result<Self> {
-        // open bootstrap file
-        let file = OpenOptions::new().read(true).write(false).open(path)?;
-        let mut rs = RafsSuper {
-            mode: RafsMode::Direct,
-            validate_digest: true,
-            ..Default::default()
-        };
-        let mut reader = Box::new(file) as RafsIoReader;
-
-        rs.meta.is_chunk_dict = true;
-        rs.load(&mut reader)?;
-
-        Ok(rs)
-    }
-
     /// Load RAFS metadata and optionally cache inodes.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         // Try to load the filesystem as Rafs v5
@@ -532,62 +561,33 @@ impl RafsSuper {
         self.superblock.update(r)
     }
 
-    /// Store RAFS metadata to backend storage.
-    pub fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        if self.meta.is_v5() {
-            return self.store_v5(w);
-        }
-
-        Err(einval!("invalid superblock version number"))
-    }
-
-    /// Get an inode from an inode number, optionally validating the inode metadata.
-    pub fn get_inode(&self, ino: Inode, digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
-        self.superblock.get_inode(ino, digest_validate)
-    }
-
     /// Get the maximum inode number supported by the filesystem instance.
     pub fn get_max_ino(&self) -> Inode {
         self.superblock.get_max_ino()
     }
 
-    /// Convert an inode number to a file path.
-    pub fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
-        if ino == self.superblock.root_ino() {
-            return Ok(self.get_inode(ino, false)?.name().into());
-        }
+    /// Get the `RafsInode` object corresponding to `ino`.
+    pub fn get_inode(&self, ino: Inode, validate_inode: bool) -> Result<Arc<dyn RafsInode>> {
+        self.superblock.get_inode(ino, validate_inode)
+    }
 
-        let mut path = PathBuf::new();
-        let mut cur_ino = ino;
-        let mut inode;
-
-        loop {
-            inode = self.get_inode(cur_ino, false)?;
-            let e: PathBuf = inode.name().into();
-            path = e.join(path);
-
-            if inode.ino() == self.superblock.root_ino() {
-                break;
-            } else {
-                cur_ino = inode.parent();
-            }
-        }
-
-        Ok(path)
+    /// Get the `RafsInodeExt` object corresponding to `ino`.
+    pub fn get_extended_inode(
+        &self,
+        ino: Inode,
+        validate_inode: bool,
+    ) -> Result<Arc<dyn RafsInodeExt>> {
+        self.superblock.get_extended_inode(ino, validate_inode)
     }
 
     /// Convert a file path to an inode number.
-    pub fn ino_from_path(&self, f: &Path) -> Result<u64> {
+    pub fn ino_from_path(&self, f: &Path) -> Result<Inode> {
         let root_ino = self.superblock.root_ino();
         if f == Path::new("/") {
             return Ok(root_ino);
-        }
-
-        if !f.starts_with("/") {
+        } else if !f.starts_with("/") {
             return Err(einval!());
         }
-
-        let mut parent = self.get_inode(root_ino, self.validate_digest)?;
 
         let entries = f
             .components()
@@ -599,24 +599,23 @@ impl RafsSuper {
                 _ => None,
             })
             .collect::<Vec<_>>();
-
         if entries.is_empty() {
             warn!("Path can't be parsed {:?}", f);
             return Err(enoent!());
         }
 
+        let mut parent = self.get_extended_inode(root_ino, self.validate_digest)?;
         for p in entries {
-            if p.is_none() {
-                error!("Illegal specified path {:?}", f);
-                return Err(einval!());
-            }
-
-            // Safe because it already checks if p is None above.
-            match parent.get_child_by_name(p.unwrap()) {
-                Ok(p) => parent = p,
-                Err(_) => {
-                    warn!("File {:?} not in rafs", p.unwrap());
-                    return Err(enoent!());
+            match p {
+                None => {
+                    error!("Illegal specified path {:?}", f);
+                    return Err(einval!());
+                }
+                Some(name) => {
+                    parent = parent.get_child_by_name(name).map_err(|e| {
+                        warn!("File {:?} not in RAFS filesystem, {}", name, e);
+                        enoent!()
+                    })?;
                 }
             }
         }
@@ -743,6 +742,51 @@ impl RafsSuper {
 
         Ok(())
     }
+}
+
+// For nydus-image
+impl RafsSuper {
+    /// Load Rafs super block from a metadata file for a chunk dictionary.
+    pub fn load_chunk_dict_from_metadata(path: &Path) -> Result<Self> {
+        // open bootstrap file
+        let file = OpenOptions::new().read(true).write(false).open(path)?;
+        let mut rs = RafsSuper {
+            mode: RafsMode::Direct,
+            validate_digest: true,
+            ..Default::default()
+        };
+        let mut reader = Box::new(file) as RafsIoReader;
+
+        rs.meta.is_chunk_dict = true;
+        rs.load(&mut reader)?;
+
+        Ok(rs)
+    }
+
+    /// Convert an inode number to a file path.
+    pub fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
+        if ino == self.superblock.root_ino() {
+            return Ok(self.get_extended_inode(ino, false)?.name().into());
+        }
+
+        let mut path = PathBuf::new();
+        let mut cur_ino = ino;
+        let mut inode;
+
+        loop {
+            inode = self.get_extended_inode(cur_ino, false)?;
+            let e: PathBuf = inode.name().into();
+            path = e.join(path);
+
+            if inode.ino() == self.superblock.root_ino() {
+                break;
+            } else {
+                cur_ino = inode.parent();
+            }
+        }
+
+        Ok(path)
+    }
 
     /// Get prefetched inos
     pub fn get_prefetched_inos(&self, bootstrap: &mut RafsIoReader) -> Result<Vec<u32>> {
@@ -765,40 +809,38 @@ impl RafsSuper {
         }
     }
 
-    /// Walkthrough the file tree rooted at ino, calling cb for each file or directory
+    /// Walk through the file tree rooted at ino, calling cb for each file or directory
     /// in the tree by DFS order, including ino, please ensure ino is a directory.
-    pub fn walk_dir(
+    pub fn walk_directory<P: AsRef<Path>>(
         &self,
         ino: Inode,
-        parent: Option<&PathBuf>,
-        cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
+        parent: Option<P>,
+        cb: &mut dyn FnMut(&dyn RafsInodeExt, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let inode = self.get_inode(ino, false)?;
+        let inode = self.get_extended_inode(ino, false)?;
         if !inode.is_dir() {
             bail!("inode {} is not a directory", ino);
         }
-        self.walk_dir_inner(inode.as_ref(), parent, cb)
+        self.do_walk_directory(inode.deref(), parent, cb)
     }
 
-    fn walk_dir_inner(
+    fn do_walk_directory<P: AsRef<Path>>(
         &self,
-        inode: &dyn RafsInode,
-        parent: Option<&PathBuf>,
-        cb: &mut dyn FnMut(&dyn RafsInode, &Path) -> anyhow::Result<()>,
+        inode: &dyn RafsInodeExt,
+        parent: Option<P>,
+        cb: &mut dyn FnMut(&dyn RafsInodeExt, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let path = if let Some(parent) = parent {
-            parent.join(inode.name())
+            parent.as_ref().join(inode.name())
         } else {
             PathBuf::from("/")
         };
         cb(inode, &path)?;
-        if !inode.is_dir() {
-            return Ok(());
-        }
-        let child_count = inode.get_child_count();
-        for idx in 0..child_count {
-            let child = inode.get_child_by_index(idx)?;
-            self.walk_dir_inner(child.as_ref(), Some(&path), cb)?;
+        if inode.is_dir() {
+            for idx in 0..inode.get_child_count() {
+                let child = inode.get_child_by_index(idx)?;
+                self.do_walk_directory(child.deref(), Some(&path), cb)?;
+            }
         }
         Ok(())
     }
@@ -818,5 +860,57 @@ mod tests {
         assert_eq!(RafsMode::from_str("cached").unwrap(), RafsMode::Cached);
         assert_eq!(&format!("{}", RafsMode::Direct), "direct");
         assert_eq!(&format!("{}", RafsMode::Cached), "cached");
+    }
+
+    #[test]
+    fn test_rafs_compressor() {
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_NONE),
+            compress::Algorithm::None
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_GZIP),
+            compress::Algorithm::GZip
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_LZ4_BLOCK),
+            compress::Algorithm::Lz4Block
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::COMPRESS_ZSTD),
+            compress::Algorithm::Zstd
+        );
+        assert_eq!(
+            compress::Algorithm::from(
+                RafsSuperFlags::COMPRESS_ZSTD | RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+            ),
+            compress::Algorithm::Lz4Block
+        );
+        assert_eq!(
+            compress::Algorithm::from(RafsSuperFlags::empty()),
+            compress::Algorithm::Lz4Block
+        );
+    }
+
+    #[test]
+    fn test_rafs_digestor() {
+        assert_eq!(
+            digest::Algorithm::from(RafsSuperFlags::DIGESTER_BLAKE3),
+            digest::Algorithm::Blake3
+        );
+        assert_eq!(
+            digest::Algorithm::from(RafsSuperFlags::DIGESTER_SHA256),
+            digest::Algorithm::Sha256
+        );
+        assert_eq!(
+            digest::Algorithm::from(
+                RafsSuperFlags::DIGESTER_SHA256 | RafsSuperFlags::DIGESTER_BLAKE3,
+            ),
+            digest::Algorithm::Blake3
+        );
+        assert_eq!(
+            digest::Algorithm::from(RafsSuperFlags::empty()),
+            digest::Algorithm::Blake3
+        );
     }
 }

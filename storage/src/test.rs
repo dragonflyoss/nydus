@@ -86,9 +86,6 @@ impl BlobChunkInfo for MockChunkInfo {
     fn is_compressed(&self) -> bool {
         self.flags.contains(BlobChunkFlags::COMPRESSED)
     }
-    fn is_hole(&self) -> bool {
-        self.flags.contains(BlobChunkFlags::HOLECHUNK)
-    }
 
     fn as_any(&self) -> &dyn Any {
         self

@@ -45,7 +45,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::metadata::{RafsInode, RafsSuper};
+use crate::metadata::{RafsInodeExt, RafsSuper};
 
 pub mod fs;
 pub mod metadata;
@@ -230,13 +230,13 @@ impl dyn RafsIoRead {
 ///  Iterator to walk all inodes of a Rafs filesystem.
 pub struct RafsIterator<'a> {
     _rs: &'a RafsSuper,
-    cursor_stack: Vec<(Arc<dyn RafsInode>, PathBuf)>,
+    cursor_stack: Vec<(Arc<dyn RafsInodeExt>, PathBuf)>,
 }
 
 impl<'a> RafsIterator<'a> {
     /// Create a new iterator to visit a Rafs filesystem.
     pub fn new(rs: &'a RafsSuper) -> Self {
-        let cursor_stack = match rs.get_inode(rs.superblock.root_ino(), false) {
+        let cursor_stack = match rs.get_extended_inode(rs.superblock.root_ino(), false) {
             Ok(node) => {
                 let path = PathBuf::from("/");
                 vec![(node, path)]
@@ -258,7 +258,7 @@ impl<'a> RafsIterator<'a> {
 }
 
 impl<'a> Iterator for RafsIterator<'a> {
-    type Item = (Arc<dyn RafsInode>, PathBuf);
+    type Item = (Arc<dyn RafsInodeExt>, PathBuf);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (node, path) = self.cursor_stack.pop()?;

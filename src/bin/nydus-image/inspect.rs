@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::{
     fs::Permissions,
     io::{Error, ErrorKind, Write},
@@ -11,10 +12,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use nydus_rafs::{
-    metadata::{RafsInode, RafsInodeWalkAction, RafsSuper},
-    RafsIoRead, RafsIoReader,
-};
+use nydus_rafs::metadata::{RafsInodeExt, RafsInodeWalkAction, RafsSuper};
+use nydus_rafs::{RafsIoRead, RafsIoReader};
 use serde_json::Value;
 use storage::device::BlobChunkInfo;
 
@@ -178,7 +177,7 @@ impl RafsInspector {
                 }
 
                 let mut chunks = Vec::<Arc<dyn BlobChunkInfo>>::new();
-                let child_inode = self.rafs_meta.get_inode(child_ino, false)?;
+                let child_inode = self.rafs_meta.get_extended_inode(child_ino, false)?;
 
                 // only reg_file can get and print chunk info
                 if !child_inode.is_reg() {
@@ -309,10 +308,10 @@ Compressed Size:    {compressed_size}
 
     // Implement command "chunk"
     fn cmd_show_chunk(&self, offset_in_blob: u64) -> Result<Option<Value>, anyhow::Error> {
-        self.rafs_meta.walk_dir(
+        self.rafs_meta.walk_directory::<PathBuf>(
             self.rafs_meta.superblock.root_ino(),
             None,
-            &mut |inode: &dyn RafsInode, _path: &Path| -> anyhow::Result<()> {
+            &mut |inode: &dyn RafsInodeExt, _path: &Path| -> anyhow::Result<()> {
                 // only regular file has data chunks
                 if !inode.is_reg() {
                     return Ok(());
@@ -364,7 +363,7 @@ Blob ID: {}
 
     // Implement command "icheck"
     fn cmd_check_inode(&self, ino: u64) -> Result<Option<Value>, anyhow::Error> {
-        self.rafs_meta.walk_dir(
+        self.rafs_meta.walk_directory::<PathBuf>(
             self.rafs_meta.superblock.root_ino(),
             None,
             &mut |inode, path| {
@@ -383,7 +382,7 @@ impl RafsInspector {
     // print information of single file
     fn stat_single_file(&self, ino: u64) -> Result<Option<Value>, anyhow::Error> {
         // get RafsInode of current ino
-        let inode = self.rafs_meta.get_inode(ino, false)?;
+        let inode = self.rafs_meta.get_extended_inode(ino, false)?;
         let inode_attr = inode.get_attr();
 
         println!(

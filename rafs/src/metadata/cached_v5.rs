@@ -1,11 +1,11 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2020 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2020-2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! A manager to cache all file system metadata into memory.
+//! A RAFS metadata manager to cache all file system metadata into memory.
 //!
-//! All file system metadata will be loaded, validated and cached into memory when loading the
+//! All filesystem metadata will be loaded, validated and cached into memory when loading the
 //! file system. And currently the cache layer only supports readonly file systems.
 
 use std::any::Any;
@@ -14,26 +14,27 @@ use std::ffi::{OsStr, OsString};
 use std::io::SeekFrom;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::size_of;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
-use nydus_utils::digest::{Algorithm, RafsDigest};
+use nydus_storage::device::v5::BlobV5ChunkInfo;
+use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
+use nydus_utils::digest::RafsDigest;
 use nydus_utils::ByteSize;
-use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
 
 use crate::metadata::layout::v5::{
-    rafsv5_alloc_bio_vecs, rafsv5_validate_digest, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode,
+    rafsv5_alloc_bio_vecs, rafsv5_validate_inode, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode,
     RafsV5InodeChunkOps, RafsV5InodeFlags, RafsV5InodeOps, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
-use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_ROOT_INODE};
+use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_V5_ROOT_INODE};
 use crate::metadata::{
-    BlobIoVec, Inode, RafsError, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsResult,
-    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName, XattrValue, DOT, DOTDOT,
-    RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
+    BlobIoVec, Inode, RafsError, RafsInode, RafsInodeExt, RafsInodeWalkAction,
+    RafsInodeWalkHandler, RafsResult, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, XattrName,
+    XattrValue, DOT, DOTDOT, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
 };
 use crate::RafsIoReader;
 
@@ -43,18 +44,18 @@ pub struct CachedSuperBlockV5 {
     s_meta: Arc<RafsSuperMeta>,
     s_inodes: BTreeMap<Inode, Arc<CachedInodeV5>>,
     max_inode: Inode,
-    validate_digest: bool,
+    validate_inode: bool,
 }
 
 impl CachedSuperBlockV5 {
     /// Create a new instance of `CachedSuperBlockV5`.
-    pub fn new(meta: RafsSuperMeta, validate_digest: bool) -> Self {
+    pub fn new(meta: RafsSuperMeta, validate_inode: bool) -> Self {
         CachedSuperBlockV5 {
             s_blob: Arc::new(RafsV5BlobTable::new()),
             s_meta: Arc::new(meta),
             s_inodes: BTreeMap::new(),
-            max_inode: RAFS_ROOT_INODE,
-            validate_digest,
+            max_inode: RAFS_V5_ROOT_INODE,
+            validate_inode,
         }
     }
 
@@ -143,19 +144,20 @@ impl RafsSuperInodes for CachedSuperBlockV5 {
         self.max_inode
     }
 
-    fn get_inode(&self, ino: Inode, _digest_validate: bool) -> Result<Arc<dyn RafsInode>> {
+    fn get_inode(&self, ino: Inode, _validate_digest: bool) -> Result<Arc<dyn RafsInode>> {
         self.s_inodes
             .get(&ino)
             .map_or(Err(enoent!()), |i| Ok(i.clone()))
     }
 
-    fn validate_digest(
+    fn get_extended_inode(
         &self,
-        inode: Arc<dyn RafsInode>,
-        recursive: bool,
-        digester: Algorithm,
-    ) -> Result<bool> {
-        rafsv5_validate_digest(inode, recursive, digester)
+        ino: Inode,
+        _validate_digest: bool,
+    ) -> Result<Arc<dyn RafsInodeExt>> {
+        self.s_inodes
+            .get(&ino)
+            .map_or(Err(enoent!()), |i| Ok(i.clone()))
     }
 }
 
@@ -190,9 +192,8 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
 
         // Validate inode digest tree
         let digester = self.s_meta.get_digester();
-        if self.validate_digest
-            && !self.validate_digest(self.get_inode(RAFS_ROOT_INODE, false)?, true, digester)?
-        {
+        let inode = self.get_extended_inode(RAFS_V5_ROOT_INODE, false)?;
+        if self.validate_inode && !rafsv5_validate_inode(inode.deref(), true, digester)? {
             return Err(einval!("invalid inode digest"));
         }
 
@@ -212,11 +213,11 @@ impl RafsSuperBlock for CachedSuperBlockV5 {
     }
 
     fn root_ino(&self) -> u64 {
-        RAFS_ROOT_INODE
+        RAFS_V5_ROOT_INODE
     }
 }
 
-/// Cached Rafs v5 inode metadata.
+/// Cached RAFS v5 inode object.
 #[derive(Default, Clone, Debug)]
 pub struct CachedInodeV5 {
     i_ino: Inode,
@@ -380,11 +381,6 @@ impl RafsInode for CachedInodeV5 {
         Ok(())
     }
 
-    #[inline]
-    fn get_digest(&self) -> RafsDigest {
-        self.i_digest
-    }
-
     fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
@@ -415,11 +411,6 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn flags(&self) -> u64 {
-        self.i_flags.bits()
-    }
-
-    #[inline]
     fn get_entry(&self) -> Entry {
         Entry {
             attr: self.get_attr().into(),
@@ -443,16 +434,6 @@ impl RafsInode for CachedInodeV5 {
             rdev: self.i_rdev,
             ..Default::default()
         }
-    }
-
-    #[inline]
-    fn name(&self) -> OsString {
-        self.i_name.clone()
-    }
-
-    #[inline]
-    fn get_name_size(&self) -> u16 {
-        self.i_name.byte_size() as u16
     }
 
     #[inline]
@@ -512,8 +493,8 @@ impl RafsInode for CachedInodeV5 {
     }
 
     fn walk_children_inodes(&self, entry_offset: u64, handler: RafsInodeWalkHandler) -> Result<()> {
-        let mut cur_offset = entry_offset;
         // offset 0 and 1 is for "." and ".." respectively.
+        let mut cur_offset = entry_offset;
 
         if cur_offset == 0 {
             cur_offset += 1;
@@ -561,7 +542,7 @@ impl RafsInode for CachedInodeV5 {
         Ok(())
     }
 
-    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInodeExt>> {
         let idx = self
             .i_child
             .binary_search_by(|c| c.i_name.as_os_str().cmp(name))
@@ -570,7 +551,7 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
-    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInode>> {
+    fn get_child_by_index(&self, index: u32) -> Result<Arc<dyn RafsInodeExt>> {
         if (index as usize) < self.i_child.len() {
             Ok(self.i_child[index as usize].clone())
         } else {
@@ -593,6 +574,41 @@ impl RafsInode for CachedInodeV5 {
         self.get_child_count()
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    impl_getter!(ino, i_ino, u64);
+    impl_getter!(size, i_size, u64);
+    impl_getter!(rdev, i_rdev, u32);
+    impl_getter!(projid, i_projid, u32);
+}
+
+impl RafsInodeExt for CachedInodeV5 {
+    fn as_inode(&self) -> &dyn RafsInode {
+        self
+    }
+
+    #[inline]
+    fn name(&self) -> OsString {
+        self.i_name.clone()
+    }
+
+    #[inline]
+    fn get_name_size(&self) -> u16 {
+        self.i_name.byte_size() as u16
+    }
+
+    #[inline]
+    fn flags(&self) -> u64 {
+        self.i_flags.bits()
+    }
+
+    #[inline]
+    fn get_digest(&self) -> RafsDigest {
+        self.i_digest
+    }
+
     #[inline]
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
         if (idx as usize) < self.i_data.len() {
@@ -602,15 +618,7 @@ impl RafsInode for CachedInodeV5 {
         }
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    impl_getter!(ino, i_ino, u64);
     impl_getter!(parent, i_parent, u64);
-    impl_getter!(size, i_size, u64);
-    impl_getter!(rdev, i_rdev, u32);
-    impl_getter!(projid, i_projid, u32);
 }
 
 impl RafsV5InodeChunkOps for CachedInodeV5 {
@@ -634,35 +642,6 @@ impl RafsV5InodeOps for CachedInodeV5 {
 
     fn has_hole(&self) -> bool {
         self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
-    }
-
-    fn cast_ondisk(&self) -> Result<RafsV5Inode> {
-        let i_symlink_size = if self.is_symlink() {
-            self.get_symlink()?.byte_size() as u16
-        } else {
-            0
-        };
-        Ok(RafsV5Inode {
-            i_digest: self.i_digest,
-            i_parent: self.i_parent,
-            i_ino: self.i_ino,
-            i_projid: self.i_projid,
-            i_uid: self.i_uid,
-            i_gid: self.i_gid,
-            i_mode: self.i_mode,
-            i_size: self.i_size,
-            i_nlink: self.i_nlink,
-            i_blocks: self.i_blocks,
-            i_flags: self.i_flags,
-            i_child_index: self.i_child_idx,
-            i_child_count: self.i_child_cnt,
-            i_name_size: self.i_name.len() as u16,
-            i_symlink_size,
-            i_rdev: self.i_rdev,
-            i_mtime: self.i_mtime,
-            i_mtime_nsec: self.i_mtime_nsec,
-            i_reserved: [0; 8],
-        })
     }
 }
 
@@ -730,10 +709,6 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
         self.flags.contains(BlobChunkFlags::COMPRESSED)
     }
 
-    fn is_hole(&self) -> bool {
-        self.flags.contains(BlobChunkFlags::HOLECHUNK)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -773,16 +748,16 @@ mod cached_tests {
     use std::os::unix::ffi::OsStrExt;
     use std::sync::Arc;
 
+    use nydus_storage::device::BlobFeatures;
     use nydus_utils::ByteSize;
-    use storage::device::BlobFeatures;
 
     use crate::metadata::cached_v5::{CachedInodeV5, CachedSuperBlockV5};
     use crate::metadata::layout::v5::{
         rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper,
     };
-    use crate::metadata::layout::{RafsXAttrs, RAFS_ROOT_INODE};
+    use crate::metadata::layout::{RafsXAttrs, RAFS_V5_ROOT_INODE};
     use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
-    use crate::{BufWriter, RafsIoReader};
+    use crate::{BufWriter, RafsInodeExt, RafsIoReader};
 
     #[test]
     fn test_load_inode() {
@@ -987,9 +962,9 @@ mod cached_tests {
         let md = RafsSuperMeta::default();
         let mut sb = CachedSuperBlockV5::new(md, true);
 
-        assert_eq!(sb.max_inode, RAFS_ROOT_INODE);
+        assert_eq!(sb.max_inode, RAFS_V5_ROOT_INODE);
         assert_eq!(sb.s_inodes.len(), 0);
-        assert!(sb.validate_digest);
+        assert!(sb.validate_inode);
 
         let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode.i_ino = 1;

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use nydus_api::http::LocalFsConfig;
 use nydus_rafs::{
-    metadata::{RafsInode, RafsMode, RafsSuper},
+    metadata::{RafsInodeExt, RafsMode, RafsSuper},
     RafsIoReader, RafsIterator,
 };
 use storage::{
@@ -100,7 +100,7 @@ impl Unpacker for OCIUnpacker {
 }
 
 trait TarBuilder {
-    fn append(&mut self, node: &dyn RafsInode, path: &Path) -> Result<()>;
+    fn append(&mut self, node: &dyn RafsInodeExt, path: &Path) -> Result<()>;
 }
 
 struct TarSection {
@@ -109,8 +109,8 @@ struct TarSection {
 }
 
 trait SectionBuilder {
-    fn can_handle(&mut self, inode: &dyn RafsInode, path: &Path) -> bool;
-    fn build(&self, inode: &dyn RafsInode, path: &Path) -> Result<Vec<TarSection>>;
+    fn can_handle(&mut self, inode: &dyn RafsInodeExt, path: &Path) -> bool;
+    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>>;
 }
 
 struct OCITarBuilderFactory {}
@@ -243,7 +243,7 @@ impl OCITarBuilder {
 }
 
 impl TarBuilder for OCITarBuilder {
-    fn append(&mut self, inode: &dyn RafsInode, path: &Path) -> Result<()> {
+    fn append(&mut self, inode: &dyn RafsInodeExt, path: &Path) -> Result<()> {
         for builder in &mut self.builders {
             // Useless one, just go !!!!!
             if !builder.can_handle(inode, path) {

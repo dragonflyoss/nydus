@@ -25,8 +25,9 @@ pub const RAFS_SUPER_VERSION_V5: u32 = 0x500;
 pub const RAFS_SUPER_VERSION_V6: u32 = 0x600;
 /// Minimal version of Rafs supported.
 pub const RAFS_SUPER_MIN_VERSION: u32 = RAFS_SUPER_VERSION_V4;
+
 /// Inode number for Rafs root inode.
-pub const RAFS_ROOT_INODE: u64 = ROOT_ID;
+pub const RAFS_V5_ROOT_INODE: u64 = ROOT_ID;
 
 /// Type for filesystem xattr attribute key.
 pub type XattrName = Vec<u8>;

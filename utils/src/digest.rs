@@ -51,10 +51,24 @@ impl FromStr for Algorithm {
 impl TryFrom<u32> for Algorithm {
     type Error = ();
 
-    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
         if value == Algorithm::Sha256 as u32 {
             Ok(Algorithm::Sha256)
         } else if value == Algorithm::Blake3 as u32 {
+            Ok(Algorithm::Blake3)
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl TryFrom<u64> for Algorithm {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == Algorithm::Sha256 as u64 {
+            Ok(Algorithm::Sha256)
+        } else if value == Algorithm::Blake3 as u64 {
             Ok(Algorithm::Blake3)
         } else {
             Err(())

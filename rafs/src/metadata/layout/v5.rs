@@ -39,6 +39,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::{Read, Result};
 use std::mem::size_of;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
@@ -58,7 +59,9 @@ use crate::metadata::md_v5::V5IoChunk;
 use crate::metadata::{
     Inode, RafsInode, RafsStore, RafsSuperFlags, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE,
 };
-use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
+use crate::{
+    impl_bootstrap_converter, impl_pub_getter_setter, RafsInodeExt, RafsIoReader, RafsIoWrite,
+};
 
 pub(crate) const RAFSV5_ALIGNMENT: usize = 8;
 pub(crate) const RAFSV5_SUPERBLOCK_SIZE: usize = 8192;
@@ -78,56 +81,11 @@ pub(crate) trait RafsV5InodeOps {
 
     /// Check whether the inode has hole chunk.
     fn has_hole(&self) -> bool;
-
-    /// Convert to the on disk data format.
-    fn cast_ondisk(&self) -> Result<RafsV5Inode>;
 }
 
 pub(crate) trait RafsV5InodeChunkOps {
     /// Get chunk info object for a chunk.
     fn get_chunk_info_v5(&self, idx: u32) -> Result<Arc<dyn BlobV5ChunkInfo>>;
-}
-
-impl From<RafsSuperFlags> for digest::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
-            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
-            _ => digest::Algorithm::Blake3,
-        }
-    }
-}
-
-impl From<digest::Algorithm> for RafsSuperFlags {
-    fn from(d: digest::Algorithm) -> RafsSuperFlags {
-        match d {
-            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
-            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
-        }
-    }
-}
-
-impl From<RafsSuperFlags> for compress::Algorithm {
-    fn from(flags: RafsSuperFlags) -> Self {
-        match flags {
-            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
-            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
-            x if x.contains(RafsSuperFlags::COMPRESS_ZSTD) => compress::Algorithm::Zstd,
-            _ => compress::Algorithm::Lz4Block,
-        }
-    }
-}
-
-impl From<compress::Algorithm> for RafsSuperFlags {
-    fn from(c: compress::Algorithm) -> RafsSuperFlags {
-        match c {
-            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
-            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
-            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
-            compress::Algorithm::Zstd => RafsSuperFlags::COMPRESS_ZSTD,
-        }
-    }
 }
 
 /// Rafs v5 superblock on disk metadata, 8192 bytes.
@@ -1373,8 +1331,8 @@ pub(crate) fn rafsv5_align(size: usize) -> usize {
 ///
 /// The default implementation is for rafs v5. The chunk data is not validated here, which will
 /// be validate on fs read.
-pub(crate) fn rafsv5_validate_digest(
-    inode: Arc<dyn RafsInode>,
+pub(crate) fn rafsv5_validate_inode(
+    inode: &dyn RafsInodeExt,
     recursive: bool,
     digester: digest::Algorithm,
 ) -> Result<bool> {
@@ -1395,7 +1353,7 @@ pub(crate) fn rafsv5_validate_digest(
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
             if (child.is_reg() || child.is_symlink() || (recursive && child.is_dir()))
-                && !rafsv5_validate_digest(child.clone(), recursive, digester)?
+                && !rafsv5_validate_inode(child.deref(), recursive, digester)?
             {
                 return Ok(false);
             }
@@ -1613,10 +1571,6 @@ pub mod tests {
 
         fn is_compressed(&self) -> bool {
             self.flags.contains(BlobChunkFlags::COMPRESSED)
-        }
-
-        fn is_hole(&self) -> bool {
-            self.flags.contains(BlobChunkFlags::HOLECHUNK)
         }
 
         fn as_any(&self) -> &dyn Any {

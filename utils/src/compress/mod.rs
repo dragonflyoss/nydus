@@ -73,6 +73,24 @@ impl TryFrom<u32> for Algorithm {
     }
 }
 
+impl TryFrom<u64> for Algorithm {
+    type Error = ();
+
+    fn try_from(value: u64) -> std::result::Result<Self, Self::Error> {
+        if value == Algorithm::None as u64 {
+            Ok(Algorithm::None)
+        } else if value == Algorithm::Lz4Block as u64 {
+            Ok(Algorithm::Lz4Block)
+        } else if value == Algorithm::GZip as u64 {
+            Ok(Algorithm::GZip)
+        } else if value == Algorithm::Zstd as u64 {
+            Ok(Algorithm::Zstd)
+        } else {
+            Err(())
+        }
+    }
+}
+
 impl Algorithm {
     pub fn is_none(self) -> bool {
         self == Self::None

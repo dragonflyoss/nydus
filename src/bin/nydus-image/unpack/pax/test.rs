@@ -98,10 +98,6 @@ impl BlobChunkInfo for MockChunkInfo {
         todo!();
     }
 
-    fn is_hole(&self) -> bool {
-        todo!();
-    }
-
     fn blob_index(&self) -> u32 {
         todo!();
     }
