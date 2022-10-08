@@ -651,7 +651,11 @@ impl StargzBuilder {
                 continue;
             }
 
-            let mut inode_hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+            let mut inode_hasher = if ctx.fs_version == RafsVersion::V5 {
+                Some(RafsDigest::hasher(digest::Algorithm::Sha256))
+            } else {
+                None
+            };
 
             for chunk in node.chunks.iter_mut() {
                 // All chunks should exist in the map, we have just added them.
@@ -666,18 +670,22 @@ impl StargzBuilder {
                     uncompressed_blob_size,
                 );
                 compressed_blob_size += chunk.inner.compressed_size() as u64;
-                inode_hasher.digest_update(chunk.inner.id().as_ref());
+                if let Some(h) = inode_hasher.as_mut() {
+                    h.digest_update(chunk.inner.id().as_ref());
+                }
             }
 
-            let digest = if node.is_symlink() {
-                RafsDigest::from_buf(
-                    node.symlink.as_ref().unwrap().as_bytes(),
-                    digest::Algorithm::Sha256,
-                )
-            } else {
-                inode_hasher.digest_finalize()
-            };
-            node.inode.set_digest(digest);
+            if let Some(h) = inode_hasher {
+                let digest = if node.is_symlink() {
+                    RafsDigest::from_buf(
+                        node.symlink.as_ref().unwrap().as_bytes(),
+                        digest::Algorithm::Sha256,
+                    )
+                } else {
+                    h.digest_finalize()
+                };
+                node.inode.set_digest(digest);
+            }
         }
 
         blob_ctx.uncompressed_blob_size = uncompressed_blob_size;
