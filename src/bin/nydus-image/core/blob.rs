@@ -101,11 +101,8 @@ impl Blob {
         // Write blob metadata to the data blob itself.
         if let Some(writer) = blob_writer {
             let pos = writer.pos()?;
-            let (data, header) = Self::dump_meta_data_raw(
-                pos,
-                &blob_ctx.blob_meta_info,
-                compress::Algorithm::Lz4Block,
-            )?;
+            let (data, header) =
+                Self::dump_meta_data_raw(pos, &blob_ctx.blob_meta_info, ctx.compressor)?;
 
             writer.write_all(&data)?;
             writer.write_all(header.as_bytes())?;
