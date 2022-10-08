@@ -14,8 +14,6 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
-extern crate nydus_rafs as rafs;
-extern crate nydus_storage as storage;
 
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -616,15 +614,24 @@ impl Command {
             ConversionType::StargzToRef => unimplemented!(),
             ConversionType::StargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
+                if inline_bootstrap {
+                    bail!("'--type stargz_index' conflicts with '--inline-bootstrap'");
+                }
                 if blob_id.trim() == "" {
-                    bail!("blob-id can't be empty");
+                    bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
                 if compressor != compress::Algorithm::GZip {
-                    trace!("compressor set to {}", compress::Algorithm::GZip);
+                    trace!(
+                        "only gzip is supported for '--type stargz_index', compressor set to {}",
+                        compress::Algorithm::GZip
+                    );
                 }
                 compressor = compress::Algorithm::GZip;
                 if digester != digest::Algorithm::Sha256 {
-                    trace!("digester set to {}", digest::Algorithm::Sha256);
+                    trace!(
+                        "only sha256 is supported for '--type stargz_index', digester set to {}",
+                        digest::Algorithm::Sha256
+                    );
                 }
                 digester = digest::Algorithm::Sha256;
             }

@@ -1,9 +1,9 @@
-use nydus_utils::{
-    compress::{self, Algorithm},
-    metrics::BackendMetrics,
-};
 use std::{io::Read, sync::Arc};
-use storage::{backend::BlobReader, device::BlobChunkInfo};
+
+use nydus_storage::backend::{BackendResult, BlobReader};
+use nydus_storage::device::BlobChunkInfo;
+use nydus_utils::compress::{self, Algorithm};
+use nydus_utils::metrics::BackendMetrics;
 
 use super::ChunkReader;
 
@@ -22,7 +22,7 @@ impl MockBlobReader {
 }
 
 impl BlobReader for MockBlobReader {
-    fn try_read(&self, buf: &mut [u8], offset: u64) -> storage::backend::BackendResult<usize> {
+    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let offset = offset as usize;
         if offset >= self.data.len() {
             return Ok(0_usize);
@@ -38,7 +38,7 @@ impl BlobReader for MockBlobReader {
         self.metrics.as_ref()
     }
 
-    fn blob_size(&self) -> storage::backend::BackendResult<u64> {
+    fn blob_size(&self) -> BackendResult<u64> {
         todo!();
     }
 }

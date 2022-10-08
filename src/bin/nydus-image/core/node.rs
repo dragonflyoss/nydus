@@ -1291,8 +1291,8 @@ impl Node {
 mod tests {
     use super::*;
     use crate::core::context::{ArtifactStorage, BootstrapContext};
-    use rafs::metadata::layout::v6::{EROFS_INODE_CHUNK_BASED, EROFS_INODE_SLOT_SIZE};
-    use rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
+    use nydus_rafs::metadata::layout::v6::{EROFS_INODE_CHUNK_BASED, EROFS_INODE_SLOT_SIZE};
+    use nydus_rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     use std::fs::File;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 
