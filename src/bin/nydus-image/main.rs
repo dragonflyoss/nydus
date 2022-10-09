@@ -229,7 +229,6 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .long("chunk-size")
                         .short("S")
                         .help("size of data chunk, must be power of two and between 0x1000-0x1000000:")
-                        .default_value("0x100000")
                         .required(false)
                         .takes_value(true),
                 )
@@ -574,7 +573,6 @@ struct Command {}
 impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(matches)?;
-        let chunk_size = Self::get_chunk_size(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(matches)?;
         let prefetch = Self::get_prefetch(matches)?;
@@ -585,6 +583,7 @@ impl Command {
         let inline_bootstrap = matches.is_present("inline-bootstrap");
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(matches)?;
+        let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let aligned_chunk = if version.is_v6() {
             info!("v6 enforces to use \"aligned-chunk\".");
             true
@@ -1006,9 +1005,15 @@ impl Command {
         Ok(())
     }
 
-    fn get_chunk_size(matches: &clap::ArgMatches) -> Result<u32> {
+    fn get_chunk_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u32> {
         match matches.value_of("chunk-size") {
-            None => Ok(RAFS_DEFAULT_CHUNK_SIZE as u32),
+            None => {
+                if ty == ConversionType::StargzIndexToRef {
+                    Ok(0x400000u32)
+                } else {
+                    Ok(RAFS_DEFAULT_CHUNK_SIZE as u32)
+                }
+            }
             Some(v) => {
                 let param = v.trim_start_matches("0x").trim_end_matches("0X");
                 let chunk_size =
