@@ -316,7 +316,7 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 		return PackResult{}, errors.New("can not push image to remote due to lack of backend configuration")
 	}
 	pushResult, err := p.pusher.Push(PushRequest{
-		Meta:        bootstrapPath,
+		Meta:        req.ImageName,
 		Blob:        newBlobHash,
 		ParentBlobs: parentBlobs,
 	})
