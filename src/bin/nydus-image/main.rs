@@ -225,6 +225,12 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                 )
                 .arg(
+                    Arg::with_name("blob-data-size")
+                        .long("blob-data-size")
+                        .help("specify blob data size of stargz conversion")
+                        .takes_value(true),
+                )
+                .arg(
                     Arg::with_name("chunk-size")
                         .long("chunk-size")
                         .short("S")
@@ -597,6 +603,7 @@ impl Command {
             .parse()?;
         let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
+        let blob_data_size = Self::get_blob_size(matches, conversion_type)?;
 
         match conversion_type {
             ConversionType::DirectoryToRafs => {
@@ -680,7 +687,7 @@ impl Command {
             ConversionType::DirectoryToStargz => unimplemented!(),
             ConversionType::StargzToRafs => unimplemented!(),
             ConversionType::StargzToRef => unimplemented!(),
-            ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new()),
+            ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
             ConversionType::TargzToRafs => unimplemented!(),
             ConversionType::TargzToRef => unimplemented!(),
             ConversionType::TargzToStargz => unimplemented!(),
@@ -989,6 +996,22 @@ impl Command {
         Ok(blob_id)
     }
 
+    fn get_blob_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u64> {
+        if ty != ConversionType::StargzIndexToRef {
+            return Ok(0);
+        }
+
+        match matches.value_of("blob-data-size") {
+            None => bail!("no value specified for '--blob-data-size'"),
+            Some(v) => {
+                let param = v.trim_start_matches("0x").trim_start_matches("0X");
+                let size = u64::from_str_radix(param, 16)
+                    .context(format!("invalid blob data size {}", v))?;
+                Ok(size)
+            }
+        }
+    }
+
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(bootstrap_path)?;
@@ -1015,7 +1038,7 @@ impl Command {
                 }
             }
             Some(v) => {
-                let param = v.trim_start_matches("0x").trim_end_matches("0X");
+                let param = v.trim_start_matches("0x").trim_start_matches("0X");
                 let chunk_size =
                     u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
                 if chunk_size as u64 > RAFS_MAX_CHUNK_SIZE
