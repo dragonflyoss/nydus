@@ -113,6 +113,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	blobObjectKey := b.objectPrefix + blobID
 
 	desc := blobDesc(size, blobID)
+	desc.URLs = append(desc.URLs, b.remoteID(blobID))
 
 	if !forcePush {
 		if exist, err := b.bucket.IsObjectExist(blobObjectKey); err != nil {
@@ -253,4 +254,8 @@ func (b *OSSBackend) Check(blobID string) (bool, error) {
 
 func (b *OSSBackend) Type() Type {
 	return OssBackend
+}
+
+func (b *OSSBackend) remoteID(blobID string) string {
+	return fmt.Sprintf("oss://%s/%s%s", b.bucket.BucketName, b.objectPrefix, blobID)
 }
