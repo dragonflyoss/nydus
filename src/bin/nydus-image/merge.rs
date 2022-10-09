@@ -153,9 +153,18 @@ impl Merger {
                     }
                     parent_blob_added = true;
                 }
-                // TODO: this seems wrong, blobs from chunk dict will be added more than one time.
-                blob_idx_map.push(blob_mgr.len() as u32);
-                blob_mgr.add(blob_ctx);
+
+                let mut found = false;
+                for (idx, blob) in blob_mgr.get_blobs().iter().enumerate() {
+                    if blob.blob_id == blob_ctx.blob_id {
+                        blob_idx_map.push(idx as u32);
+                        found = true;
+                    }
+                }
+                if !found {
+                    blob_idx_map.push(blob_mgr.len() as u32);
+                    blob_mgr.add(blob_ctx);
+                }
             }
 
             if let Some(tree) = &mut tree {
