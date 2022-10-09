@@ -774,8 +774,12 @@ mod cached_tests {
         let mut ondisk_inode = RafsV5Inode::new();
         let file_name = OsString::from("c_inode_1");
         let mut xattr = RafsXAttrs::default();
-        xattr.add2("user.k1", vec![1u8, 2u8, 3u8, 4u8]).unwrap();
-        xattr.add2("user.k2", vec![10u8, 11u8, 12u8]).unwrap();
+        xattr
+            .add(OsString::from("user.k1"), vec![1u8, 2u8, 3u8, 4u8])
+            .unwrap();
+        xattr
+            .add(OsString::from("user.k2"), vec![10u8, 11u8, 12u8])
+            .unwrap();
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
         ondisk_inode.i_child_count = 1;
         ondisk_inode.i_ino = 3;

@@ -2003,8 +2003,8 @@ mod tests {
     #[test]
     fn test_rafs_xattr_count_v6() {
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add2("user.a", vec![1u8]).unwrap();
-        xattrs.add2("trusted.b", vec![2u8]).unwrap();
+        xattrs.add(OsString::from("user.a"), vec![1u8]).unwrap();
+        xattrs.add(OsString::from("trusted.b"), vec![2u8]).unwrap();
 
         assert_eq!(xattrs.count_v6(), 5);
 
@@ -2015,8 +2015,8 @@ mod tests {
     #[test]
     fn test_rafs_xattr_size_v6() {
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add2("user.a", vec![1u8]).unwrap();
-        xattrs.add2("trusted.b", vec![2u8]).unwrap();
+        xattrs.add(OsString::from("user.a"), vec![1u8]).unwrap();
+        xattrs.add(OsString::from("trusted.b"), vec![2u8]).unwrap();
 
         let size = 12 + 8 + 8;
         assert_eq!(xattrs.aligned_size_v6(), size);
@@ -2025,8 +2025,10 @@ mod tests {
         assert_eq!(xattrs2.aligned_size_v6(), 0);
 
         let mut xattrs2 = RafsXAttrs::new();
-        xattrs2.add2("user.a", vec![1u8]).unwrap();
-        xattrs2.add2("unknown.b", vec![2u8]).unwrap_err();
+        xattrs2.add(OsString::from("user.a"), vec![1u8]).unwrap();
+        xattrs2
+            .add(OsString::from("unknown.b"), vec![2u8])
+            .unwrap_err();
     }
 
     #[test]
@@ -2046,8 +2048,10 @@ mod tests {
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add2("user.nydus", vec![1u8]).unwrap();
-        xattrs.add2("security.rafs", vec![2u8, 3u8]).unwrap();
+        xattrs.add(OsString::from("user.nydus"), vec![1u8]).unwrap();
+        xattrs
+            .add(OsString::from("security.rafs"), vec![2u8, 3u8])
+            .unwrap();
         xattrs.store_v6(&mut writer).unwrap();
         writer.flush().unwrap();
 
