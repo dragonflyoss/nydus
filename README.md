@@ -124,6 +124,7 @@ Browse the documentation to learn more. Here are some topics you may be interest
 - Our talk on Open Infra Summit 2020: [Toward Next Generation Container Image](https://drive.google.com/file/d/1LRfLUkNxShxxWU7SKjc_50U0N9ZnGIdV/view)
 - [EROFS, What Are We Doing Now For Containers?](https://static.sched.com/hosted_files/kccncosschn21/fd/EROFS_What_Are_We_Doing_Now_For_Containers.pdf)
 - [The Evolution of the Nydus Image Acceleration](https://d7y.io/blog/2022/06/06/evolution-of-nydus/) \([Video](https://youtu.be/yr6CB1JN1xg)\)
+- [Introduction to Nydus Image Service on In-kernel EROFS](https://static.sched.com/hosted_files/osseu2022/59/Introduction%20to%20Nydus%20Image%20Service%20on%20In-kernel%20EROFS.pdf) \([Video](https://youtu.be/2Uog-y2Gcus)\)
 
 ## Run with macos
 
