@@ -67,7 +67,7 @@ func (cfg *BackendConfig) rawMetaBackendCfg() []byte {
 		"access_key_id":     cfg.AccessKeyID,
 		"access_key_secret": cfg.AccessKeySecret,
 		"bucket_name":       cfg.BucketName,
-		"object_prefix":     cfg.MetaPrefix + "/",
+		"object_prefix":     cfg.MetaPrefix,
 	}
 	b, _ := json.Marshal(configMap)
 	return b
@@ -79,7 +79,7 @@ func (cfg *BackendConfig) rawBlobBackendCfg() []byte {
 		"access_key_id":     cfg.AccessKeyID,
 		"access_key_secret": cfg.AccessKeySecret,
 		"bucket_name":       cfg.BucketName,
-		"object_prefix":     cfg.BlobPrefix + "/",
+		"object_prefix":     cfg.BlobPrefix,
 	}
 	b, _ := json.Marshal(configMap)
 	return b
