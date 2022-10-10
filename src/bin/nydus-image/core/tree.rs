@@ -18,16 +18,16 @@
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
-use rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::inode::InodeWrapper;
+use nydus_rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
+use nydus_rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
 
 use super::chunk_dict::ChunkDict;
-use super::node::{
-    ChunkSource, ChunkWrapper, InodeWrapper, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType,
-};
+use super::node::{ChunkSource, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType};
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
@@ -113,7 +113,7 @@ impl Tree {
         let depth = self.node.target_vec().len();
 
         // Handle root node modification
-        if target.path() == &PathBuf::from("/") {
+        if target.path() == Path::new("/") {
             let mut node = target.clone();
             node.overlay = Overlay::UpperModification;
             self.node = node;

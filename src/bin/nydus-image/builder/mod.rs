@@ -12,7 +12,7 @@ pub(crate) use self::stargz::StargzBuilder;
 mod directory;
 mod stargz;
 
-/// Trait to generate a Nydus image from the source.
+/// Trait to generate a RAFS filesystem from the source.
 pub(crate) trait Builder {
     fn build(
         &mut self,

@@ -8,7 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Cursor, Write};
+use std::io::{BufWriter, Cursor, Seek, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -19,58 +19,23 @@ use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
+use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
+use nydus_rafs::metadata::layout::RafsBlobTable;
+use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
+use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
+use nydus_rafs::{RafsIoReader, RafsIoWrite};
+use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
-use rafs::metadata::layout::v5::RafsV5BlobTable;
-use rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
-use rafs::metadata::layout::{RafsBlobTable, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
-use rafs::metadata::RafsSuperFlags;
-use rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
-use rafs::{RafsIoReader, RafsIoWrite};
-use storage::device::{BlobFeatures, BlobInfo};
-use storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
-use super::node::{ChunkSource, ChunkWrapper, Node, WhiteoutSpec};
+use super::node::{ChunkSource, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RafsVersion {
-    V5,
-    V6,
-}
-
-impl Default for RafsVersion {
-    fn default() -> Self {
-        RafsVersion::V5
-    }
-}
-
-impl TryFrom<u32> for RafsVersion {
-    type Error = Error;
-    fn try_from(version: u32) -> Result<Self, Self::Error> {
-        if version == RAFS_SUPER_VERSION_V5 {
-            return Ok(RafsVersion::V5);
-        } else if version == RAFS_SUPER_VERSION_V6 {
-            return Ok(RafsVersion::V6);
-        }
-        Err(anyhow!("invalid version {}", version))
-    }
-}
-
-impl RafsVersion {
-    #[allow(dead_code)]
-    pub fn is_v5(&self) -> bool {
-        self == &Self::V5
-    }
-
-    pub fn is_v6(&self) -> bool {
-        self == &Self::V6
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SourceType {
@@ -123,13 +88,13 @@ impl RafsIoWrite for ArtifactMemoryWriter {
     }
 }
 
-impl std::io::Seek for ArtifactMemoryWriter {
+impl Seek for ArtifactMemoryWriter {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.0.seek(pos)
     }
 }
 
-impl std::io::Write for ArtifactMemoryWriter {
+impl Write for ArtifactMemoryWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.write(bytes)
     }
@@ -151,13 +116,13 @@ impl RafsIoWrite for ArtifactFileWriter {
     }
 }
 
-impl std::io::Seek for ArtifactFileWriter {
+impl Seek for ArtifactFileWriter {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.0.file.seek(pos)
     }
 }
 
-impl std::io::Write for ArtifactFileWriter {
+impl Write for ArtifactFileWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.write(bytes)
     }
@@ -178,7 +143,7 @@ pub struct ArtifactWriter {
     tmp_file: Option<TempFile>,
 }
 
-impl std::io::Write for ArtifactWriter {
+impl Write for ArtifactWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let n = self.file.write(bytes)?;
         self.pos += n;
@@ -230,12 +195,14 @@ impl ArtifactWriter {
         }
     }
 
+    pub fn pos(&self) -> Result<u64> {
+        Ok(self.pos as u64)
+    }
+
     // The `inline-bootstrap` option merges the blob and bootstrap into one
     // file. We need some header to index the location of the blob and bootstrap,
     // write_tar_header uses tar header that arranges the data as follows:
-
-    // blob_data | blob_tar_header | bootstrap_data | bootstrap_tar_header
-
+    //      blob_data | blob_tar_header | bootstrap_data | bootstrap_tar_header
     // This is a tar-like structure, except that we put the tar header after the
     // data. The advantage is that we do not need to determine the size of the data
     // first, so that we can write the blob data by stream without seek to improve
@@ -252,10 +219,6 @@ impl ArtifactWriter {
         header.set_cksum();
         self.write_all(header.as_bytes())?;
         Ok(())
-    }
-
-    pub fn pos(&self) -> Result<u64> {
-        Ok(self.pos as u64)
     }
 
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
@@ -294,11 +257,12 @@ pub struct BlobContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,
     pub blob_hash: Sha256,
-    pub blob_readahead_size: u64,
-    /// Data chunks stored in the data blob, for v6.
-    pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
+    pub blob_prefetch_size: u64,
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
+    /// Data chunks stored in the data blob, for v6.
+    /// TODO: zran
+    pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
     /// Blob metadata header stored in the data blob, for v6
     pub blob_meta_header: BlobMetaHeaderOndisk,
 
@@ -324,9 +288,9 @@ impl Clone for BlobContext {
         Self {
             blob_id: self.blob_id.clone(),
             blob_hash: self.blob_hash.clone(),
-            blob_readahead_size: self.blob_readahead_size,
-            blob_meta_info: self.blob_meta_info.clone(),
+            blob_prefetch_size: self.blob_prefetch_size,
             blob_meta_info_enabled: self.blob_meta_info_enabled,
+            blob_meta_info: self.blob_meta_info.clone(),
             blob_meta_header: self.blob_meta_header,
 
             compressed_blob_size: self.compressed_blob_size,
@@ -347,7 +311,7 @@ impl BlobContext {
         Self {
             blob_id,
             blob_hash: Sha256::new(),
-            blob_readahead_size: 0,
+            blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
             blob_meta_info: Vec::new(),
             blob_meta_header: BlobMetaHeaderOndisk::default(),
@@ -367,7 +331,7 @@ impl BlobContext {
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
         let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0);
 
-        blob_ctx.blob_readahead_size = blob.readahead_size();
+        blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
         blob_ctx.uncompressed_blob_size = blob.uncompressed_size();
         blob_ctx.compressed_blob_size = blob.compressed_size();
@@ -400,12 +364,13 @@ impl BlobContext {
         self.chunk_size = chunk_size;
     }
 
-    pub fn set_blob_readahead_size(&mut self, ctx: &BuildContext) {
+    // TODO: check the logic to reset prefetch size
+    pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
         if (self.compressed_blob_size > 0
             || (ctx.source_type == SourceType::StargzIndex && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
         {
-            self.blob_readahead_size = 0;
+            self.blob_prefetch_size = 0;
         }
     }
 
@@ -435,7 +400,7 @@ impl BlobContext {
     }
 
     /// Allocate a count index sequentially in a blob.
-    pub fn alloc_index(&mut self) -> Result<u32> {
+    pub fn alloc_chunk_index(&mut self) -> Result<u32> {
         let index = self.chunk_count;
 
         // Rafs v6 only supports 24 bit chunk id.
@@ -494,7 +459,10 @@ impl BlobManager {
         Ok(blob_ctx)
     }
 
-    pub fn set_current_blob(&mut self, ctx: &BuildContext) -> Result<(u32, &mut BlobContext)> {
+    pub fn get_or_create_current_blob(
+        &mut self,
+        ctx: &BuildContext,
+    ) -> Result<(u32, &mut BlobContext)> {
         if self.current_blob_index.is_none() {
             let blob_ctx = Self::new_blob_ctx(ctx)?;
             self.current_blob_index = Some(self.alloc_index()?);
@@ -608,7 +576,7 @@ impl BlobManager {
 
         for ctx in &self.blobs {
             let blob_id = ctx.blob_id.clone();
-            let blob_readahead_size = u32::try_from(ctx.blob_readahead_size)?;
+            let blob_prefetch_size = u32::try_from(ctx.blob_prefetch_size)?;
             let chunk_count = ctx.chunk_count;
             let decompressed_blob_size = ctx.uncompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
@@ -621,7 +589,7 @@ impl BlobManager {
                     table.add(
                         blob_id,
                         0,
-                        blob_readahead_size,
+                        blob_prefetch_size,
                         ctx.chunk_size,
                         chunk_count,
                         decompressed_blob_size,
@@ -636,7 +604,7 @@ impl BlobManager {
                     table.add(
                         blob_id,
                         0,
-                        blob_readahead_size,
+                        blob_prefetch_size,
                         ctx.chunk_size,
                         chunk_count,
                         decompressed_blob_size,
@@ -663,9 +631,9 @@ pub struct BootstrapContext {
     pub nodes: Vec<Node>,
     /// Current position to write in f_bootstrap
     pub offset: u64,
-    /// Not fully used blocks
-    pub available_blocks: Vec<VecDeque<u64>>,
     pub writer: Box<dyn RafsIoWrite>,
+    /// Not fully used blocks
+    pub v6_available_blocks: Vec<VecDeque<u64>>,
 }
 
 impl BootstrapContext {
@@ -681,11 +649,11 @@ impl BootstrapContext {
             inode_map: HashMap::new(),
             nodes: Vec::new(),
             offset: EROFS_BLOCK_SIZE,
-            available_blocks: vec![
+            writer,
+            v6_available_blocks: vec![
                 VecDeque::new();
                 EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
             ],
-            writer,
         })
     }
 
@@ -708,7 +676,7 @@ impl BootstrapContext {
         let max_idx = div_round_up(EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE as u64) as usize;
 
         for idx in min_idx..max_idx {
-            let blocks = &mut self.available_blocks[idx];
+            let blocks = &mut self.v6_available_blocks[idx];
             if let Some(mut offset) = blocks.pop_front() {
                 offset += EROFS_BLOCK_SIZE - (idx * EROFS_INODE_SLOT_SIZE) as u64;
                 self.append_available_block(offset + (min_idx * EROFS_INODE_SLOT_SIZE) as u64);
@@ -721,12 +689,11 @@ impl BootstrapContext {
 
     // Append the block that `offset` belongs to corresponding deque.
     pub fn append_available_block(&mut self, offset: u64) {
-        if offset % EROFS_BLOCK_SIZE == 0 {
-            return;
+        if offset % EROFS_BLOCK_SIZE != 0 {
+            let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
+            let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
+            self.v6_available_blocks[idx].push_back(round_down_4k(offset));
         }
-        let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
-        let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
-        self.available_blocks[idx].push_back(round_down_4k(offset));
     }
 }
 

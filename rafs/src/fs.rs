@@ -511,7 +511,7 @@ impl Rafs {
             let mut prefetches = Vec::new();
 
             for blob in sb.superblock.get_blob_infos() {
-                let sz = blob.readahead_size();
+                let sz = blob.prefetch_size();
                 if sz > 0 {
                     let mut offset = 0;
                     while offset < sz {

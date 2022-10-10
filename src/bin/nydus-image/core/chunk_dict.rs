@@ -9,12 +9,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
+use nydus_rafs::metadata::RafsSuper;
+use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::RafsDigest;
-use rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use rafs::metadata::RafsSuper;
-use storage::device::BlobInfo;
 
-use crate::core::node::ChunkWrapper;
 use crate::core::tree::Tree;
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
@@ -173,7 +173,7 @@ pub(crate) fn import_chunk_dict(arg: &str) -> Result<Arc<dyn ChunkDict>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::RafsVersion;
+    use nydus_rafs::metadata::RafsVersion;
     use std::path::PathBuf;
 
     #[test]

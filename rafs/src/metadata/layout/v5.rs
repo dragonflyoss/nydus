@@ -551,8 +551,8 @@ impl RafsV5BlobTable {
     pub fn add(
         &mut self,
         blob_id: String,
-        readahead_offset: u32,
-        readahead_size: u32,
+        prefetch_offset: u32,
+        prefetch_size: u32,
         chunk_size: u32,
         chunk_count: u32,
         uncompressed_size: u64,
@@ -573,7 +573,7 @@ impl RafsV5BlobTable {
 
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
-        blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+        blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
 
         self.entries.push(Arc::new(blob_info));
         self.extended
@@ -657,7 +657,7 @@ impl RafsV5BlobTable {
 
             blob_info.set_compressor(flags.into());
             blob_info.set_digester(flags.into());
-            blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
+            blob_info.set_prefetch_info(readahead_offset as u64, readahead_size as u64);
 
             self.entries.push(Arc::new(blob_info));
         }
@@ -683,8 +683,8 @@ impl RafsStore for RafsV5BlobTable {
             .iter()
             .enumerate()
             .try_for_each::<_, Result<()>>(|(idx, entry)| {
-                w.write_all(&u32::to_le_bytes(entry.readahead_offset() as u32))?;
-                w.write_all(&u32::to_le_bytes(entry.readahead_size() as u32))?;
+                w.write_all(&u32::to_le_bytes(entry.prefetch_offset() as u32))?;
+                w.write_all(&u32::to_le_bytes(entry.prefetch_size() as u32))?;
                 w.write_all(entry.blob_id().as_bytes())?;
                 if idx != self.entries.len() - 1 {
                     size += size_of::<u32>() * 2 + entry.blob_id().len() + 1;
@@ -960,6 +960,26 @@ impl RafsV5Inode {
     #[inline]
     pub fn is_reg(&self) -> bool {
         self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+    }
+
+    /// Check whether the inode is a char device node.
+    pub fn is_chrdev(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+    }
+
+    /// Check whether the inode is a block device node.
+    pub fn is_blkdev(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
+    }
+
+    /// Check whether the inode is a FIFO.
+    pub fn is_fifo(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32
+    }
+
+    /// Check whether the inode is a socket.
+    pub fn is_sock(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32
     }
 
     /// Check whether the inode is a hardlink.

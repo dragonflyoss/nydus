@@ -14,8 +14,8 @@ use std::{
 
 use nydus_rafs::metadata::{RafsInodeExt, RafsInodeWalkAction, RafsSuper};
 use nydus_rafs::{RafsIoRead, RafsIoReader};
+use nydus_storage::device::BlobChunkInfo;
 use serde_json::Value;
-use storage::device::BlobChunkInfo;
 
 pub(crate) struct RafsInspector {
     request_mode: bool,
@@ -242,8 +242,8 @@ impl RafsInspector {
         for (_i, blob_info) in blob_infos.iter().enumerate() {
             if self.request_mode {
                 let v = json!({"blob_id": blob_info.blob_id(), 
-                                    "readahead_offset": blob_info.readahead_offset(),
-                                    "readahead_size": blob_info.readahead_size(),
+                                    "readahead_offset": blob_info.prefetch_offset(),
+                                    "readahead_size": blob_info.prefetch_size(),
                                     "decompressed_size": blob_info.uncompressed_size(),
                                     "compressed_size": blob_info.compressed_size(),});
                 value.as_array_mut().unwrap().push(v);
@@ -257,8 +257,8 @@ Cache Size:         {cache_size}
 Compressed Size:    {compressed_size}
 "#,
                     blob_id = blob_info.blob_id(),
-                    readahead_offset = blob_info.readahead_offset(),
-                    readahead_size = blob_info.readahead_size(),
+                    readahead_offset = blob_info.prefetch_offset(),
+                    readahead_size = blob_info.prefetch_size(),
                     cache_size = blob_info.uncompressed_size(),
                     compressed_size = blob_info.compressed_size(),
                 );

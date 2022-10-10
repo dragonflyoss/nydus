@@ -3,25 +3,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
-use rafs::metadata::layout::v5::RafsV5PrefetchTable;
-use rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
+use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
+use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 use crate::node::Node;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
     None,
-    /// Readahead will be issued from Fs layer, which leverages inode/chunkinfo to prefetch data
+    /// Prefetch will be issued from Fs layer, which leverages inode/chunkinfo to prefetch data
     /// from blob no matter where it resides(OSS/Localfs). Basically, it is willing to cache the
     /// data into blobcache(if exists). It's more nimble. With this policy applied, image builder
-    /// currently puts readahead files' data into a continuous region within blob which behaves very
+    /// currently puts prefetch files' data into a continuous region within blob which behaves very
     /// similar to `Blob` policy.
     Fs,
-    /// Readahead will be issued directly from backend/blob layer
+    /// Prefetch will be issued directly from backend/blob layer
     Blob,
 }
 
@@ -43,45 +43,60 @@ impl FromStr for PrefetchPolicy {
     }
 }
 
-/// Gather readahead file paths line by line from stdin.
+/// Gather prefetch patterns from STDIN line by line.
 ///
 /// Input format:
 ///    printf "/relative/path/to/rootfs/1\n/relative/path/to/rootfs/2"
-/// This routine does not guarantee that specified file must exist in local filesystem,
-/// this is because we can't guarantee that source rootfs directory of parent bootstrap
-/// is located in local file system.
-fn gather_readahead_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
+///
+/// It does not guarantee that specified path exist in local filesystem because the specified path
+/// may exist in parent image/layers.
+fn get_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     let stdin = std::io::stdin();
-    let mut files = BTreeMap::new();
+    let mut patterns = Vec::new();
 
     loop {
         let mut file = String::new();
         let size = stdin
             .read_line(&mut file)
-            .context("failed to parse readahead files")?;
+            .context("failed to read prefetch pattern")?;
         if size == 0 {
-            break;
+            return generate_patterns(patterns);
         }
+        patterns.push(file);
+    }
+}
 
+fn generate_patterns(mut input: Vec<String>) -> Result<BTreeMap<PathBuf, Option<u64>>> {
+    let mut patterns = BTreeMap::new();
+
+    input.sort_unstable();
+    for (idx, file) in input.iter().enumerate() {
         let file_trimmed: PathBuf = file.trim().into();
         // Sanity check for the list format.
-        if !file_trimmed.starts_with(Path::new("/")) {
+        if !file_trimmed.is_absolute() {
             warn!(
-                "Illegal file path specified. It {:?} must start with '/'",
+                "Illegal file path {} specified, should be absolute path",
                 file
             );
             continue;
         }
 
-        debug!(
-            "readahead file: {}, trimmed file name {:?}",
-            file, file_trimmed
-        );
-        // The inode index is not decided yet, but will do during fs-walk.
-        files.insert(file_trimmed, None);
+        let mut skip = false;
+        for prefix in input.iter().take(idx) {
+            if file_trimmed.starts_with(prefix) {
+                skip = true;
+            }
+        }
+        if !skip {
+            debug!(
+                "prefetch pattern: {}, trimmed file name {:?}",
+                file, file_trimmed
+            );
+            patterns.insert(file_trimmed, None);
+        }
     }
 
-    Ok(files)
+    Ok(patterns)
 }
 
 #[derive(Default, Clone)]
@@ -90,21 +105,19 @@ pub struct Prefetch {
 
     pub disabled: bool,
 
-    /// Specify patterns for prefetch.
-    /// Their inode numbers will be persist to prefetch table. They could be directory's or regular
-    /// file's inode number, by which its inode index of inode table can be calculated.
-    readahead_patterns: BTreeMap<PathBuf, Option<u64>>,
+    // Patterns to generate prefetch inode array, which will be put into the prefetch array
+    // in the RAFS bootstrap. It may access directory or file inodes.
+    patterns: BTreeMap<PathBuf, Option<u64>>,
 
-    /// Readahead file list, use BTreeMap to keep stable iteration order.
-    /// Files from this collection are all regular files and will be persisted to blob following
-    /// a certain scheme.
-    readahead_files: BTreeMap<PathBuf, u64>,
+    // File list to help optimizing layout of data blobs.
+    // Files from this list may be put at the head of data blob for better prefetch performance.
+    files: BTreeMap<PathBuf, u64>,
 }
 
 impl Prefetch {
     pub fn new(policy: PrefetchPolicy) -> Result<Self> {
-        let readahead_patterns = if policy != PrefetchPolicy::None {
-            gather_readahead_patterns().context("failed to get readahead files")?
+        let patterns = if policy != PrefetchPolicy::None {
+            get_patterns().context("failed to get prefetch patterns")?
         } else {
             BTreeMap::new()
         };
@@ -112,15 +125,14 @@ impl Prefetch {
         Ok(Self {
             policy,
             disabled: false,
-            readahead_patterns,
-            readahead_files: BTreeMap::new(),
+            patterns,
+            files: BTreeMap::new(),
         })
     }
 
     pub fn insert_if_need(&mut self, node: &Node) {
         let path = node.target();
         let index = node.index;
-        let mut remove_node = false;
 
         // Newly created root inode of this rafs has zero size
         if self.policy == PrefetchPolicy::None
@@ -130,47 +142,50 @@ impl Prefetch {
             return;
         }
 
-        for (f, v) in self.readahead_patterns.iter_mut() {
+        for (f, v) in self.patterns.iter_mut() {
             // As path is canonicalized, it should be reliable.
             if path == f {
                 if self.policy == PrefetchPolicy::Fs {
                     *v = Some(index);
                 }
-                self.readahead_files.insert(path.clone(), index);
-            } else if path.starts_with(f) {
-                // FIXME: path may not exist in prefetch pattern, no need to remove it from readahead_patterns
-                remove_node = true;
-                debug!("remove path {:?}", path);
-                self.readahead_files.insert(path.clone(), index);
+                if node.is_reg() {
+                    self.files.insert(path.clone(), index);
+                }
+            } else if path.starts_with(f) && node.is_reg() {
+                self.files.insert(path.clone(), index);
             }
-        }
-
-        if remove_node {
-            // Users can specify hinted parent directory with its child files hinted as well.
-            // Only put the parent directory into prefetch table since a hinted directory's
-            // all child files will be prefetched after mount.
-            self.readahead_patterns.remove(path);
         }
     }
 
     pub fn contains(&self, node: &Node) -> bool {
-        self.readahead_files.contains_key(node.target())
+        self.files.contains_key(node.target())
     }
 
     pub fn get_file_indexes(&self) -> Vec<u64> {
-        let mut indexes: Vec<u64> = self.readahead_files.values().copied().collect();
+        let mut indexes: Vec<u64> = self.files.values().copied().collect();
 
         // Later, we might write chunks of data one by one according to inode number order.
         indexes.sort_unstable();
         indexes
     }
 
+    pub fn len(&self) -> u32 {
+        if self.policy == PrefetchPolicy::Fs {
+            self.patterns.values().len() as u32
+        } else {
+            0
+        }
+    }
+
+    /// Generate filesystem layer prefetch list for RAFS v5.
     pub fn get_rafsv5_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
-            for i in self.readahead_patterns.values().filter_map(|v| *v) {
+            for i in self.patterns.values().filter_map(|v| *v) {
                 // Rafs v5 has inode number equal to index.
-                prefetch_table.add_entry(i as u32);
+                if i < u32::MAX as u64 {
+                    prefetch_table.add_entry(i as u32);
+                }
             }
             Some(prefetch_table)
         } else {
@@ -178,14 +193,7 @@ impl Prefetch {
         }
     }
 
-    pub fn len(&self) -> u32 {
-        if self.policy == PrefetchPolicy::Fs {
-            self.readahead_patterns.values().len() as u32
-        } else {
-            0
-        }
-    }
-
+    /// Generate filesystem layer prefetch list for RAFS v6.
     pub fn get_rafsv6_prefetch_table(
         &mut self,
         nodes: &[Node],
@@ -193,23 +201,25 @@ impl Prefetch {
     ) -> Option<RafsV6PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV6PrefetchTable::new();
-            for i in self.readahead_patterns.values().filter_map(|v| *v) {
+            for i in self.patterns.values().filter_map(|v| *v) {
                 debug_assert!(i > 0);
                 // i holds the Node.index, which starts at 1, so it needs to be converted to the
                 // index of the Node array to index the corresponding Node
                 let array_index = i as usize - 1;
+                let nid = calculate_nid(nodes[array_index].v6_offset, meta_addr);
                 trace!(
                     "v6 prefetch table: map node index {} to offset {} nid {} path {:?} name {:?}",
                     i,
                     nodes[array_index].v6_offset,
-                    calculate_nid(nodes[array_index].v6_offset, meta_addr),
+                    nid,
                     nodes[array_index].path(),
                     nodes[array_index].name()
                 );
                 // 32bit nid can represent 128GB bootstrap, it is large enough, no need
                 // to worry about casting here
-                prefetch_table
-                    .add_entry(calculate_nid(nodes[array_index].v6_offset, meta_addr) as u32);
+                if nid < u32::MAX as u64 {
+                    prefetch_table.add_entry(nid as u32);
+                }
             }
             Some(prefetch_table)
         } else {
@@ -223,6 +233,34 @@ impl Prefetch {
 
     pub fn clear(&mut self) {
         self.disabled = false;
-        self.readahead_files.clear();
+        self.files.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_pattern() {
+        let input = vec![
+            "/a/b".to_string(),
+            "/a/b/c".to_string(),
+            "/a/b/d".to_string(),
+            "/a/b/d/e".to_string(),
+            "/f".to_string(),
+            "/h/i".to_string(),
+        ];
+        let patterns = generate_patterns(input).unwrap();
+        assert_eq!(patterns.len(), 3);
+        assert!(patterns.contains_key(&PathBuf::from("/a/b")));
+        assert!(patterns.contains_key(&PathBuf::from("/f")));
+        assert!(patterns.contains_key(&PathBuf::from("/h/i")));
+        assert!(!patterns.contains_key(&PathBuf::from("/")));
+        assert!(!patterns.contains_key(&PathBuf::from("/a")));
+        assert!(!patterns.contains_key(&PathBuf::from("/a/b/c")));
+        assert!(!patterns.contains_key(&PathBuf::from("/a/b/d")));
+        assert!(!patterns.contains_key(&PathBuf::from("/a/b/d/e")));
+        assert!(!patterns.contains_key(&PathBuf::from("/k")));
     }
 }

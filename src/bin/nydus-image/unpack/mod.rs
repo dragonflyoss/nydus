@@ -15,7 +15,7 @@ use nydus_rafs::{
     metadata::{RafsInodeExt, RafsMode, RafsSuper},
     RafsIoReader, RafsIterator,
 };
-use storage::{
+use nydus_storage::{
     backend::{localfs::LocalFs, BlobBackend, BlobReader},
     device::BlobInfo,
 };

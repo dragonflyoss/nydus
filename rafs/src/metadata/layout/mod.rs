@@ -229,7 +229,7 @@ pub struct RafsXAttrs {
 }
 
 impl RafsXAttrs {
-    /// Create a new instance of `RafsV5Xattrs`.
+    /// Create a new instance of `RafsXattrs`.
     pub fn new() -> Self {
         Self {
             pairs: HashMap::new(),

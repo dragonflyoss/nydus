@@ -7,6 +7,7 @@
 
 use std::any::Any;
 use std::collections::HashSet;
+use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
@@ -38,8 +39,10 @@ mod md_v6;
 mod noop;
 
 pub mod cached_v5;
+pub mod chunk;
 pub mod direct_v5;
 pub mod direct_v6;
+pub mod inode;
 pub mod layout;
 
 // Reexport from nydus_storage crate.
@@ -435,6 +438,46 @@ impl Default for RafsSuperMeta {
             chunk_table_offset: 0,
             chunk_table_size: 0,
         }
+    }
+}
+
+/// RAFS filesystem versions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RafsVersion {
+    /// RAFS v5
+    V5,
+    /// RAFS v6
+    V6,
+}
+
+impl Default for RafsVersion {
+    fn default() -> Self {
+        RafsVersion::V5
+    }
+}
+
+impl TryFrom<u32> for RafsVersion {
+    type Error = Error;
+
+    fn try_from(version: u32) -> std::result::Result<Self, Self::Error> {
+        if version == RAFS_SUPER_VERSION_V5 {
+            return Ok(RafsVersion::V5);
+        } else if version == RAFS_SUPER_VERSION_V6 {
+            return Ok(RafsVersion::V6);
+        }
+        Err(einval!(format!("invalid RAFS version number {}", version)))
+    }
+}
+
+impl RafsVersion {
+    /// Check whether it's RAFS v5.
+    pub fn is_v5(&self) -> bool {
+        self == &Self::V5
+    }
+
+    /// Check whether it's RAFS v6.
+    pub fn is_v6(&self) -> bool {
+        self == &Self::V6
     }
 }
 

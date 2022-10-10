@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use nydus_api::http::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
+use nydus_rafs::metadata::RafsVersion;
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
@@ -36,8 +37,7 @@ use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
 use crate::core::blob_compact::BlobCompactor;
 use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, RafsVersion,
-    SourceType,
+    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, SourceType,
 };
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::Prefetch;
