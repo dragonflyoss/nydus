@@ -245,6 +245,10 @@ impl RafsInode for MockInode {
         self
     }
 
+    fn file_parent_inode(&self) -> Result<Inode> {
+        Ok(self.i_parent)
+    }
+
     impl_getter!(ino, i_ino, u64);
     impl_getter!(parent, i_parent, u64);
     impl_getter!(size, i_size, u64);

@@ -842,6 +842,12 @@ impl RafsInode for OndiskInodeWrapper {
         self
     }
 
+    fn file_parent_inode(&self) -> Result<Inode> {
+        let state = self.state();
+        let inode = self.inode(state.deref());
+        Ok(inode.i_parent)
+    }
+
     impl_inode_wrapper!(is_dir, bool);
     impl_inode_wrapper!(is_reg, bool);
     impl_inode_wrapper!(is_symlink, bool);

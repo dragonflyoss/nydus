@@ -225,6 +225,9 @@ pub trait RafsInode: Any {
         }
         Ok(())
     }
+
+    // Get parent inode of the file inode
+    fn file_parent_inode(&self) -> Result<Inode>;
 }
 
 /// Trait to store Rafs meta block and validate alignment.

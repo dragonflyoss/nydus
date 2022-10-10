@@ -33,6 +33,7 @@ use std::slice;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
+use nydus_utils::metrics::Inode;
 
 use crate::metadata::layout::MetaRange;
 use crate::metadata::{
@@ -49,8 +50,8 @@ use crate::metadata::{
         XattrName, XattrValue,
     },
     {
-        Attr, ChildInodeHandler, Entry, Inode, PostWalkAction, RafsInode, RafsSuperBlock,
-        RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
+        Attr, ChildInodeHandler, Entry, PostWalkAction, RafsInode, RafsSuperBlock, RafsSuperInodes,
+        RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
     },
 };
 use crate::{MetaType, RafsError, RafsIoReader, RafsResult};
@@ -58,6 +59,7 @@ use nydus_utils::{
     digest::{Algorithm, RafsDigest},
     div_round_up, round_up,
 };
+use std::collections::VecDeque;
 use storage::device::{
     v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc,
     BlobIoVec,
@@ -1102,7 +1104,6 @@ impl RafsInode for OndiskInodeWrapper {
         match self.name.borrow().as_ref() {
             Some(name) => return name.clone(),
             None => {
-                debug_assert!(self.is_dir());
                 let cur_ino = self.ino();
                 if cur_ino == self.mapping.root_ino() {
                     return OsString::from("");
@@ -1159,12 +1160,47 @@ impl RafsInode for OndiskInodeWrapper {
         match self.parent_inode.get() {
             Some(parent) => parent,
             None => {
-                debug_assert!(self.is_dir());
-                let ino = self.get_child_by_name(OsStr::new("..")).unwrap().ino();
+                let ino = if self.is_dir() {
+                    self.get_child_by_name(OsStr::new("..")).unwrap().ino()
+                } else {
+                    // current file inode and root inode exist,
+                    // so unwrap parent_inode will not cause panic.
+                    self.file_parent_inode().unwrap()
+                };
                 self.parent_inode.set(Some(ino));
                 ino
             }
         }
+    }
+
+    /// Get inode number of parent directory that current file inode belongs to.
+    /// Only rafs v6 need to traverse root directory when using 'nydus-image inspect'.
+    fn file_parent_inode(&self) -> Result<Inode> {
+        let root_ino = self.mapping.root_ino();
+        let root = self.mapping.get_inode(root_ino, false)?;
+        if !root.is_dir() {
+            return Err(einval!("root inode is not a directory"));
+        }
+
+        let mut stack = VecDeque::new();
+        stack.push_back(root);
+        while !stack.is_empty() {
+            // Stack is not empty, so unwrap stack.pop_front() will not cause panic
+            let parent = stack.pop_front().unwrap();
+            for child_idx in 0..parent.get_child_count() {
+                if let Ok(child) = parent.get_child_by_index(child_idx) {
+                    if child.ino() == self.ino() {
+                        return Ok(parent.ino());
+                    }
+
+                    if child.is_dir() {
+                        let child_inode = self.mapping.get_inode(child.ino(), false)?;
+                        stack.push_back(child_inode);
+                    }
+                }
+            }
+        }
+        Err(einval!("file inode is not found"))
     }
 
     /// Get real device number of the inode.
