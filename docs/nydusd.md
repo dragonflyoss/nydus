@@ -244,7 +244,7 @@ INFO [storage/src/backend/connection.rs:136] backend config: CommonConfig { prox
 Add `device.backend.config.mirrors` field to enable mirrors for storage backend. The mirror can be a P2P distribution server (such as [Dragonfly](https://d7y.io/)) or registry. If the request to mirror server failed, it will fall back to the original registry.
 Currently, the mirror mode is only tested in the registry backend, and in theory, the OSS backend also supports it.
 
-<font color='red'>!!</font> The `mirrors` field is conflicts with `proxy` field.
+<font color='red'>!!</font> The `mirrors` field conflicts with `proxy` field.
 
 ```
 {
@@ -254,12 +254,12 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
       "config": {
         "mirrors": [
           {
-            // Mirror server URL (include scheme), e.g. Dragonfly dfdaemon server URL
+            // Mirror server URL (including scheme), e.g. Dragonfly dfdaemon server URL
             "host": "http://dragonfly1.io:65001",
             // Headers for mirror server
             "headers": {
-              // For Dragonfly dfdaemon server URL, we need to specify "X-Dragonfly-Registry" (include scheme). 
-              // When Dragonfly does not cache data, it will pull them from "X-Dragonfly-Registry". 
+              // For Dragonfly dfdaemon server URL, we need to specify "X-Dragonfly-Registry" (including scheme).
+              // When Dragonfly does not cache data, nydusd will pull it from "X-Dragonfly-Registry".
               // If not set "X-Dragonfly-Registry", Dragonfly will pull data from proxy.registryMirror.url.
               "X-Dragonfly-Registry": "https://index.docker.io"
             }
