@@ -1908,11 +1908,11 @@ pub mod tests {
         assert_eq!(xattrs.size(), 0);
 
         xattrs
-            .add2("user.key1", vec![0x1u8, 0x2, 0x3, 0x4])
+            .add(OsString::from("user.key1"), vec![0x1u8, 0x2, 0x3, 0x4])
             .unwrap();
         assert_eq!(xattrs.size(), 18);
         xattrs
-            .add2("user.key21", vec![0x1u8, 0x2, 0x3, 0x4])
+            .add(OsString::from("user.key21"), vec![0x1u8, 0x2, 0x3, 0x4])
             .unwrap();
         assert_eq!(xattrs.size(), 37);
         xattrs.remove(&OsString::from("user.key1"));
