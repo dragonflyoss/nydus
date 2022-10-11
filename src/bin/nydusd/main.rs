@@ -263,7 +263,7 @@ fn append_fuse_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("threads")
             .long("thread-num")
             .short("T")
-            .default_value("1")
+            .default_value("4")
             .help("Number of worker threads to serve IO requests")
             .takes_value(true)
             .required(false)
