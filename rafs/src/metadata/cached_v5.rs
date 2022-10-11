@@ -355,27 +355,36 @@ impl CachedInodeV5 {
 }
 
 impl RafsInode for CachedInodeV5 {
-    #[allow(clippy::collapsible_if)]
+    // Somehow we got invalid `inode_count` from superblock.
     fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
-        if self.i_ino == 0 || self.i_name.len() > RAFS_MAX_NAME || self.i_nlink == 0 {
+        if self.i_ino == 0
+            // || self.i_ino > inode_count
+            || self.i_nlink == 0
+            || (self.i_ino != RAFS_V5_ROOT_INODE && self.i_parent == 0)
+            || self.i_name.len() > RAFS_MAX_NAME
+            || self.i_name.is_empty()
+        {
             return Err(einval!("invalid inode"));
+        }
+        if !self.is_hardlink() && self.i_parent >= self.i_ino {
+            return Err(einval!("invalid parent inode"));
         }
         if self.is_reg() {
             let chunks = (self.i_size + chunk_size - 1) / chunk_size;
             if !self.has_hole() && chunks != self.i_data.len() as u64 {
                 return Err(einval!("invalid chunk count"));
             }
+            let blocks = (self.i_size + 511) / 512;
+            // Old stargz builder generates inode with 0 blocks
+            if blocks != self.i_blocks && self.i_blocks != 0 {
+                return Err(einval!("invalid block count"));
+            }
         } else if self.is_dir() {
-            if (self.i_child_idx as Inode) < self.i_ino {
+            if self.i_child_cnt != 0 && (self.i_child_idx as Inode) <= self.i_ino {
                 return Err(einval!("invalid directory"));
             }
-        } else if self.is_symlink() {
-            if self.i_target.is_empty() {
-                return Err(einval!("invalid symlink target"));
-            }
-        }
-        if !self.is_hardlink() && self.i_parent >= self.i_ino {
-            return Err(einval!("invalid parent inode"));
+        } else if self.is_symlink() && self.i_target.is_empty() {
+            return Err(einval!("invalid symlink target"));
         }
 
         Ok(())
@@ -783,10 +792,11 @@ mod cached_tests {
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
         ondisk_inode.i_child_count = 1;
         ondisk_inode.i_ino = 3;
-        ondisk_inode.i_parent = 0;
+        ondisk_inode.i_parent = RAFS_V5_ROOT_INODE;
         ondisk_inode.i_size = 8192;
         ondisk_inode.i_mode = libc::S_IFREG as u32;
         ondisk_inode.i_nlink = 1;
+        ondisk_inode.i_blocks = 16;
         let mut chunk = RafsV5ChunkInfo::new();
         chunk.uncompressed_size = 8192;
         chunk.uncompressed_offset = 0;
@@ -850,7 +860,7 @@ mod cached_tests {
         let mut ondisk_inode = RafsV5Inode::new();
         ondisk_inode.i_name_size = file_name.byte_size() as u16;
         ondisk_inode.i_ino = 3;
-        ondisk_inode.i_parent = 0;
+        ondisk_inode.i_parent = RAFS_V5_ROOT_INODE;
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_symlink_size = symlink_name.byte_size() as u16;
         ondisk_inode.i_mode = libc::S_IFLNK as u32;
@@ -863,7 +873,9 @@ mod cached_tests {
         inode.store(&mut writer).unwrap();
 
         f.seek(Start(0)).unwrap();
-        let meta = Arc::new(RafsSuperMeta::default());
+        let mut meta = Arc::new(RafsSuperMeta::default());
+        Arc::get_mut(&mut meta).unwrap().chunk_size = 1024 * 1024;
+        Arc::get_mut(&mut meta).unwrap().inodes_count = 4;
         let blob_table = Arc::new(RafsV5BlobTable::new());
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
@@ -890,11 +902,12 @@ mod cached_tests {
         let mut ondisk_inode = RafsV5Inode::new();
         ondisk_inode.i_name_size = rafsv5_align(file_name.len()) as u16;
         ondisk_inode.i_ino = 3;
-        ondisk_inode.i_parent = 0;
+        ondisk_inode.i_parent = RAFS_V5_ROOT_INODE;
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_child_count = 4;
         ondisk_inode.i_mode = libc::S_IFREG as u32;
         ondisk_inode.i_size = 1024 * 1024 * 3 + 8192;
+        ondisk_inode.i_blocks = 6160;
 
         let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
@@ -917,6 +930,7 @@ mod cached_tests {
         f.seek(Start(0)).unwrap();
         let mut meta = Arc::new(RafsSuperMeta::default());
         Arc::get_mut(&mut meta).unwrap().chunk_size = 1024 * 1024;
+        Arc::get_mut(&mut meta).unwrap().inodes_count = 4;
         let mut blob_table = Arc::new(RafsV5BlobTable::new());
         Arc::get_mut(&mut blob_table).unwrap().add(
             String::from("123333"),
@@ -984,7 +998,7 @@ mod cached_tests {
         inode.i_ino = 2;
         inode.i_mode = libc::S_IFDIR as u32;
         inode.i_nlink = 2;
-        inode.i_parent = 1;
+        inode.i_parent = RAFS_V5_ROOT_INODE;
         sb.hash_inode(Arc::new(inode)).unwrap();
         assert_eq!(sb.max_inode, 2);
         assert_eq!(sb.s_inodes.len(), 2);
@@ -993,7 +1007,7 @@ mod cached_tests {
         inode.i_ino = 2;
         inode.i_mode = libc::S_IFDIR as u32;
         inode.i_nlink = 2;
-        inode.i_parent = 1;
+        inode.i_parent = RAFS_V5_ROOT_INODE;
         sb.hash_inode(Arc::new(inode)).unwrap();
         assert_eq!(sb.max_inode, 2);
         assert_eq!(sb.s_inodes.len(), 2);
@@ -1002,7 +1016,7 @@ mod cached_tests {
         inode.i_ino = 4;
         inode.i_mode = libc::S_IFDIR as u32;
         inode.i_nlink = 1;
-        inode.i_parent = 1;
+        inode.i_parent = RAFS_V5_ROOT_INODE;
         sb.hash_inode(Arc::new(inode)).unwrap();
         assert_eq!(sb.max_inode, 4);
         assert_eq!(sb.s_inodes.len(), 3);
