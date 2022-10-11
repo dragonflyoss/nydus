@@ -286,32 +286,33 @@ struct RegistryReader {
 }
 
 impl RegistryReader {
-    /// Request registry server with `authorization` header
+    /// Request registry server with authorization workflow, it has two authentication modes:
     ///
-    /// Bearer token authenticate workflow:
+    /// # Bearer token authenticate workflow:
     ///
-    /// Request:  POST https://my-registry.com/test/repo/blobs/uploads
+    /// Request:  GET https://my-registry.com/namespace/repo/blobs/sha256:<blob_id>
     /// Response: status: 401 Unauthorized
-    ///           header: www-authenticate: Bearer realm="https://auth.my-registry.com/token",service="my-registry.com",scope="repository:test/repo:pull,push"
+    ///           header: www-authenticate: Bearer realm="https://auth.my-registry.com/token",service="my-registry.com",scope="repository:namespace/repo:pull,push"
     ///
     /// Request:  POST https://auth.my-registry.com/token
-    ///           body: "service=my-registry.com&scope=repository:test/repo:pull,push&grant_type=password&username=x&password=x&client_id=nydus-registry-client"
+    ///           body: "service=my-registry.com&scope=repository:namespace/repo:pull,push&grant_type=password&username=x&password=x&client_id=nydus-registry-client"
     /// Response: status: 200 Ok
     ///           body: { "token": "<token>" }
     ///
-    /// Request:  POST https://my-registry.com/test/repo/blobs/uploads
+    /// Request:  GET https://my-registry.com/namespace/repo/blobs/sha256:<blob_id>
     ///           header: authorization: Bearer <token>
-    /// Response: status: 200 Ok
+    /// Response: status: 200/301/307
     ///
-    /// Basic authenticate workflow:
     ///
-    /// Request:  POST https://my-registry.com/test/repo/blobs/uploads
+    /// # Basic authenticate workflow:
+    ///
+    /// Request:  GET https://my-registry.com/namespace/repo/blobs/sha256:<blob_id>
     /// Response: status: 401 Unauthorized
     ///           header: www-authenticate: Basic
     ///
-    /// Request:  POST https://my-registry.com/test/repo/blobs/uploads
+    /// Request:  GET https://my-registry.com/namespace/repo/blobs/sha256:<blob_id>
     ///           header: authorization: Basic base64(<username:password>)
-    /// Response: status: 200 Ok
+    /// Response: status: 200/301/307
     fn request<R: Read + Send + 'static>(
         &self,
         method: Method,
@@ -377,17 +378,16 @@ impl RegistryReader {
         respond(resp, catch_status).map_err(RegistryError::Request)
     }
 
-    /// Read data from registry server
-    ///
-    /// Step:
+    /// Read data from registry server, steps:
     ///
     /// Request:  GET /blobs/sha256:<blob_id>
-    /// Response: status: 307 Temporary Redirect
+    /// Response: status: 301/307
     ///           header: location: https://raw-blob-storage-host.com/signature=x
     ///
     /// Request:  GET https://raw-blob-storage-host.com/signature=x
-    /// Response: status: 200 Ok / 403 Forbidden
-    /// If responding 403, we need to repeat step one
+    /// Response: status: 200/403
+    ///
+    /// If responding with 403, we need to go authorization workflow
     fn _try_read(
         &self,
         mut buf: &mut [u8],
@@ -747,5 +747,31 @@ mod tests {
         assert_eq!(trim(Some("  test".to_owned())), Some("test".to_owned()));
         assert_eq!(trim(Some("  te st  ".to_owned())), Some("te st".to_owned()));
         assert_eq!(trim(Some("te st".to_owned())), Some("te st".to_owned()));
+    }
+
+    #[test]
+    fn test_ghcr() {
+        let config = serde_json::json!({"scheme":"https","host":"ghcr.io","repo":"dragonflyoss/image-service/ubuntu"});
+        let registry = Registry::new(config, Some("registry")).unwrap();
+
+        // The blob is holding by ghcr.io/dragonflyoss/image-service/ubuntu:nydus-latest
+        // it will no longer be updated, so we can use it here safely.
+        let reader = registry
+            .get_reader("e4183a80fb08a0cf8470fbd5739aef5a86cdfde821743ad1e7d1fd195ea9016a")
+            .unwrap();
+        let _ = reader.blob_size().unwrap();
+    }
+
+    #[test]
+    fn test_docker_hub() {
+        let config = serde_json::json!({"scheme":"https","host":"index.docker.io","repo":"goharbor/harbor-acceld"});
+        let registry = Registry::new(config, Some("registry")).unwrap();
+
+        // The blob is holding by goharbor/harbor-acceld:v0.1.0
+        // it will no longer be updated, so we can use it here safely.
+        let reader = registry
+            .get_reader("cb54d1184a86b82843c849bbd232f27fd0b1b012c8770baea97b5a05244b2f48")
+            .unwrap();
+        let _ = reader.blob_size().unwrap();
     }
 }
