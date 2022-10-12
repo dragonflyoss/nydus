@@ -68,11 +68,22 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 // Push will push the meta and blob file to remote backend
 // at this moment, oss is the only possible backend, the meta file name is user defined
 // and blob file name is the hash of the blobfile that is extracted from output.json
-func (p *Pusher) Push(req PushRequest) (pushResult PushResult, err error) {
+func (p *Pusher) Push(req PushRequest) (pushResult PushResult, retErr error) {
 	p.logger.Info("start to push meta and blob to remote backend")
 	// todo: add a suitable timeout
 	ctx := context.Background()
 	// todo: use blob desc to build manifest
+
+	defer func() {
+		if retErr != nil {
+			if err := p.blobBackend.Finalize(true); err != nil {
+				logrus.WithError(err).Warnf("Cancel blob backend upload")
+			}
+			if err := p.metaBackend.Finalize(true); err != nil {
+				logrus.WithError(err).Warnf("Cancel meta backend upload")
+			}
+		}
+	}()
 
 	for _, blob := range req.ParentBlobs {
 		// try push parent blobs
@@ -91,12 +102,19 @@ func (p *Pusher) Push(req PushRequest) (pushResult PushResult, err error) {
 			pushResult.RemoteBlob = desc.URLs[0]
 		}
 	}
-	desc, err := p.metaBackend.Upload(ctx, req.Meta, p.bootstrapPath(req.Meta), 0, true)
-	if err != nil {
-		return PushResult{}, errors.Wrapf(err, "failed to put metafile to remote")
+	if retErr = p.blobBackend.Finalize(false); retErr != nil {
+		return PushResult{}, errors.Wrap(retErr, "Finalize blob backend upload")
+	}
+
+	desc, retErr := p.metaBackend.Upload(ctx, req.Meta, p.bootstrapPath(req.Meta), 0, true)
+	if retErr != nil {
+		return PushResult{}, errors.Wrapf(retErr, "failed to put metafile to remote")
 	}
 	if len(desc.URLs) != 0 {
 		pushResult.RemoteMeta = desc.URLs[0]
+	}
+	if retErr = p.metaBackend.Finalize(false); retErr != nil {
+		return PushResult{}, errors.Wrap(retErr, "Finalize meta backend upload")
 	}
 
 	return
