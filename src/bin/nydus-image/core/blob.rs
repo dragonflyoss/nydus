@@ -17,13 +17,8 @@ use super::node::Node;
 pub struct Blob {}
 
 impl Blob {
-    pub fn new() -> Self {
-        Self {}
-    }
-
     /// Dump blob file and generate chunks
     pub fn dump(
-        &mut self,
         ctx: &BuildContext,
         nodes: &mut [Node],
         blob_mgr: &mut BlobManager,

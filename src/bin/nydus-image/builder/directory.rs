@@ -159,9 +159,8 @@ impl Builder for DirectoryBuilder {
         }
 
         // Dump blob file
-        let mut blob = Blob::new();
         timing_tracer!(
-            { blob.dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
+            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
             "dump_blob"
         )?;
 
