@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
+use std::fmt;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::path::PathBuf;
@@ -77,6 +78,24 @@ impl FromStr for ConversionType {
             "directory" => Ok(Self::DirectoryToRafs),
             "stargz_index" => Ok(Self::StargzIndexToRef),
             _ => Err(anyhow!("invalid conversion type")),
+        }
+    }
+}
+
+impl fmt::Display for ConversionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConversionType::DirectoryToRafs => write!(f, "dir-rafs"),
+            ConversionType::DirectoryToStargz => write!(f, "dir-stargz"),
+            ConversionType::DirectoryToTargz => write!(f, "dir-targz"),
+            ConversionType::StargzToRafs => write!(f, "stargz-rafs"),
+            ConversionType::StargzToRef => write!(f, "stargz-ref"),
+            ConversionType::StargzIndexToRef => write!(f, "stargztoc-ref"),
+            ConversionType::TargzToRafs => write!(f, "targz-rafs"),
+            ConversionType::TargzToStargz => write!(f, "targz-ref"),
+            ConversionType::TargzToRef => write!(f, "targz-ref"),
+            ConversionType::TarToRafs => write!(f, "tar-rafs"),
+            ConversionType::TarToStargz => write!(f, "tar-stargz"),
         }
     }
 }
@@ -268,31 +287,33 @@ impl ArtifactWriter {
         Ok(header)
     }
 
+    /// Finalize the metadata/data blob.
+    ///
+    /// When `name` is None, it means that the blob is empty and should be removed.
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
         self.file.flush()?;
 
         if let Some(n) = name {
             if let ArtifactStorage::FileDir(s) = &self.storage {
-                let might_exist_path = Path::new(s).join(n);
-                if might_exist_path.exists() {
-                    return Ok(());
-                }
-
-                if let Some(tmp_file) = &self.tmp_file {
-                    rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
-                        format!(
-                            "failed to rename blob {:?} to {:?}",
-                            tmp_file.as_path(),
-                            might_exist_path
-                        )
-                    })?;
+                let path = Path::new(s).join(n);
+                if !path.exists() {
+                    if let Some(tmp_file) = &self.tmp_file {
+                        rename(tmp_file.as_path(), &path).with_context(|| {
+                            format!(
+                                "failed to rename blob {:?} to {:?}",
+                                tmp_file.as_path(),
+                                path
+                            )
+                        })?;
+                    }
                 }
             }
         } else if let ArtifactStorage::SingleFile(s) = &self.storage {
-            // `new_name` is None means no blob is really built, perhaps due to dedup.
-            // We don't want to puzzle user, so delete it from here.
-            // In the future, FIFO could be leveraged, don't remove it then.
-            remove_file(s).with_context(|| format!("failed to remove blob {:?}", s))?;
+            if let Ok(md) = s.metadata() {
+                if md.is_file() {
+                    remove_file(s).with_context(|| format!("failed to remove blob {:?}", s))?;
+                }
+            }
         }
 
         Ok(())
