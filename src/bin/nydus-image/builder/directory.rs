@@ -4,22 +4,16 @@
 
 use std::fs;
 use std::fs::DirEntry;
-use std::io::Write;
 
 use anyhow::{Context, Result};
-use sha2::Digest;
 
-use crate::builder::Builder;
+use crate::builder::{build_bootstrap, dump_bootstrap, Builder};
 use crate::core::blob::Blob;
-use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
-
-const TAR_BLOB_NAME: &str = "image.blob";
-const TAR_BOOTSTRAP_NAME: &str = "image.boot";
 
 struct FilesystemTreeBuilder {}
 
@@ -124,28 +118,6 @@ impl Builder for DirectoryBuilder {
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
-        let mut bootstrap = Bootstrap::new()?;
-
-        // Scan source directory to build upper layer tree.
-        let mut tree = self.build_tree(ctx, &mut bootstrap_ctx, layer_idx)?;
-
-        // Merge with lower layer if there's one.
-        if bootstrap_ctx.layered {
-            let origin_bootstarp_offset = bootstrap_ctx.offset;
-            // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
-            ctx.prefetch.disable();
-            bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
-            tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
-            bootstrap_ctx.offset = origin_bootstarp_offset;
-            bootstrap_ctx.layered = false;
-        }
-
-        // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
-        timing_tracer!(
-            { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },
-            "build_bootstrap"
-        )?;
-
         let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
             Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?)
         } else {
@@ -158,52 +130,26 @@ impl Builder for DirectoryBuilder {
             let (_, _) = blob_mgr.get_or_create_current_blob(ctx)?;
         }
 
+        // Scan source directory to build upper layer tree.
+        let tree = self.build_tree(ctx, &mut bootstrap_ctx, layer_idx)?;
+        let mut bootstrap =
+            build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
+
         // Dump blob file
         timing_tracer!(
             { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
             "dump_blob"
         )?;
 
-        // Dump bootstrap file
-        let blob_table = blob_mgr.to_blob_table(ctx)?;
-        bootstrap.dump(
+        // Dump blob meta to blob file
+        dump_bootstrap(
             ctx,
-            &mut bootstrap_mgr.bootstrap_storage,
+            bootstrap_mgr,
             &mut bootstrap_ctx,
-            &blob_table,
+            &mut bootstrap,
+            blob_mgr,
+            &mut blob_writer,
         )?;
-
-        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            // Safe to unwrap because we have ensure blob_writer is valid above.
-            let blob_writer = blob_writer.as_mut().unwrap();
-            if ctx.inline_bootstrap {
-                let header = blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
-                blob_ctx.blob_hash.update(header.as_bytes());
-
-                let reader = bootstrap_ctx.writer.as_reader()?;
-                let mut size = 0;
-                let mut buf = vec![0u8; 16384];
-                loop {
-                    let sz = reader.read(&mut buf)?;
-                    if sz == 0 {
-                        break;
-                    }
-                    blob_writer.write_all(&buf[..sz])?;
-                    blob_ctx.blob_hash.update(&buf[..sz]);
-                    size += sz;
-                }
-
-                let header = blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, size as u64)?;
-                blob_ctx.blob_hash.update(header.as_bytes());
-
-                if ctx.blob_id.is_empty() {
-                    ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
-                }
-                blob_writer.finalize(Some(ctx.blob_id.clone()))?;
-            } else {
-                blob_writer.finalize(blob_ctx.blob_id())?;
-            }
-        }
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }

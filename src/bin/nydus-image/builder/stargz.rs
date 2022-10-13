@@ -26,9 +26,8 @@ use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::{try_round_up_4k, ByteSize};
 use serde::{Deserialize, Serialize};
 
-use crate::builder::Builder;
+use crate::builder::{build_bootstrap, Builder};
 use crate::core::blob::Blob;
-use crate::core::bootstrap::Bootstrap;
 use crate::core::context::{
     BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
@@ -795,26 +794,11 @@ impl Builder for StargzBuilder {
         assert!(!ctx.inline_bootstrap);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
-        let mut bootstrap = Bootstrap::new()?;
 
         // Build filesystem tree from the stargz TOC.
-        let mut tree = self.build_tree(ctx, layer_idx)?;
-
-        // Merge with lower layer if there's one.
-        if bootstrap_ctx.layered {
-            let origin_bootstarp_offset = bootstrap_ctx.offset;
-            // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
-            ctx.prefetch.disable();
-            bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
-            tree = bootstrap.apply(ctx, &mut bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
-            bootstrap_ctx.offset = origin_bootstarp_offset;
-            bootstrap_ctx.layered = false;
-        }
-
-        timing_tracer!(
-            { bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree) },
-            "build_bootstrap"
-        )?;
+        let tree = timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
+        let mut bootstrap =
+            build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
 
         // Generate node chunks and digest
         let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0);
