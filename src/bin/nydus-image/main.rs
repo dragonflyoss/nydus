@@ -161,7 +161,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                     Arg::with_name("SOURCE")
                         .help("source to build the RAFS filesystem from")
                         .required(true)
-                        .multiple(true),
+                        .multiple(false),
                 )
                 .arg(
                     Arg::with_name("type")
