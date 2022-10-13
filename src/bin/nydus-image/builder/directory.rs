@@ -131,9 +131,14 @@ impl Builder for DirectoryBuilder {
         }
 
         // Scan source directory to build upper layer tree.
-        let tree = self.build_tree(ctx, &mut bootstrap_ctx, layer_idx)?;
-        let mut bootstrap =
-            build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
+        let tree = timing_tracer!(
+            { self.build_tree(ctx, &mut bootstrap_ctx, layer_idx) },
+            "build_tree"
+        )?;
+        let mut bootstrap = timing_tracer!(
+            { build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree) },
+            "build_bootstrap"
+        )?;
 
         // Dump blob file
         timing_tracer!(
@@ -142,13 +147,18 @@ impl Builder for DirectoryBuilder {
         )?;
 
         // Dump blob meta to blob file
-        dump_bootstrap(
-            ctx,
-            bootstrap_mgr,
-            &mut bootstrap_ctx,
-            &mut bootstrap,
-            blob_mgr,
-            &mut blob_writer,
+        timing_tracer!(
+            {
+                dump_bootstrap(
+                    ctx,
+                    bootstrap_mgr,
+                    &mut bootstrap_ctx,
+                    &mut bootstrap,
+                    blob_mgr,
+                    &mut blob_writer,
+                )
+            },
+            "dump_bootstrap"
         )?;
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)

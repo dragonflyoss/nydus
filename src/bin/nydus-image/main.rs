@@ -30,14 +30,14 @@ use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
 use serde::{Deserialize, Serialize};
 
-use crate::builder::{Builder, DirectoryBuilder, StargzBuilder};
+use crate::builder::{Builder, DirectoryBuilder, StargzBuilder, TarballBuilder};
 use crate::core::blob_compact::BlobCompactor;
 use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
 use crate::core::node::{self, WhiteoutSpec};
-use crate::core::prefetch::Prefetch;
+use crate::core::prefetch::{Prefetch, PrefetchPolicy};
 use crate::core::tree;
 use crate::merge::Merger;
 use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
@@ -171,7 +171,13 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .help("image conversion type:")
                         .takes_value(true)
                         .default_value("directory")
-                        .possible_values(&["directory", "stargz_index"])
+                        .possible_values(&[
+                            "directory",
+                            "dir-rafs",
+                            "tar-rafs",
+                            "stargztoc-ref",
+                            "stargz_index",
+                        ])
                 )
                 .arg(
                     Arg::with_name("bootstrap")
@@ -611,41 +617,60 @@ impl Command {
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
                 } else if blob_meta_stor.is_some() {
-                    bail!("'--input-type directory' conflicts with '--blob-meta'");
+                    bail!(
+                        "conversion type {} conflicts with '--blob-meta'",
+                        conversion_type
+                    );
                 }
             }
-            ConversionType::DirectoryToTargz => unimplemented!(),
-            ConversionType::DirectoryToStargz => unimplemented!(),
-            ConversionType::StargzToRafs => unimplemented!(),
-            ConversionType::StargzToRef => unimplemented!(),
-            ConversionType::StargzIndexToRef => {
+            ConversionType::StargzToRafs
+            | ConversionType::TargzToRafs
+            | ConversionType::TarToRafs => {
+                Self::ensure_file(&source_path)?;
+                if blob_stor.is_none() {
+                    bail!("both --blob and --blob-dir are not provided");
+                } else if blob_meta_stor.is_some() {
+                    bail!(
+                        "conversion type {} conflicts with '--blob-meta'",
+                        conversion_type
+                    );
+                } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
+                    bail!(
+                        "conversion type {} conflicts with '--prefetch-policy blob'",
+                        conversion_type
+                    );
+                }
+            }
+            ConversionType::StargzToRef
+            | ConversionType::StargzIndexToRef
+            | ConversionType::TargzToRef => {
                 Self::ensure_file(&source_path)?;
                 if inline_bootstrap {
-                    bail!("'--type stargz_index' conflicts with '--inline-bootstrap'");
-                }
-                if blob_id.trim() == "" {
-                    bail!("'--blob-id' is missing for '--type stargz_index'");
+                    bail!(
+                        "conversion type '{}' conflicts with '--inline-bootstrap'",
+                        conversion_type
+                    );
                 }
                 if compressor != compress::Algorithm::GZip {
-                    trace!(
-                        "only gzip is supported for '--type stargz_index', compressor set to {}",
-                        compress::Algorithm::GZip
-                    );
+                    trace!("only gzip is supported the conversion, use gzip for compression");
                 }
                 compressor = compress::Algorithm::GZip;
                 if digester != digest::Algorithm::Sha256 {
-                    trace!(
-                        "only sha256 is supported for '--type stargz_index', digester set to {}",
-                        digest::Algorithm::Sha256
-                    );
+                    trace!("only sha256 is supported for the conversion, use sha256 for digest");
                 }
                 digester = digest::Algorithm::Sha256;
+                if conversion_type == ConversionType::StargzIndexToRef && blob_id.trim() == "" {
+                    bail!("'--blob-id' is missing for '--type stargz_index'");
+                }
             }
-            ConversionType::TargzToRafs => unimplemented!(),
-            ConversionType::TargzToStargz => unimplemented!(),
-            ConversionType::TarToRafs => unimplemented!(),
-            ConversionType::TarToStargz => unimplemented!(),
-            ConversionType::TargzToRef => unimplemented!(),
+            ConversionType::DirectoryToStargz
+            | ConversionType::TargzToStargz
+            | ConversionType::TarToStargz => {
+                unimplemented!()
+            }
+            ConversionType::DirectoryToTargz => {
+                unimplemented!()
+            }
         }
 
         let mut build_ctx = BuildContext::new(
@@ -683,15 +708,15 @@ impl Command {
 
         let mut builder: Box<dyn Builder> = match conversion_type {
             ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
-            ConversionType::DirectoryToTargz => unimplemented!(),
             ConversionType::DirectoryToStargz => unimplemented!(),
-            ConversionType::StargzToRafs => unimplemented!(),
-            ConversionType::StargzToRef => unimplemented!(),
+            ConversionType::DirectoryToTargz => unimplemented!(),
+            ConversionType::StargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
+            ConversionType::StargzToRef => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
-            ConversionType::TargzToRafs => unimplemented!(),
-            ConversionType::TargzToRef => unimplemented!(),
+            ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
+            ConversionType::TargzToRef => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TargzToStargz => unimplemented!(),
-            ConversionType::TarToRafs => unimplemented!(),
+            ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TarToStargz => unimplemented!(),
         };
         let build_output = timing_tracer!(
@@ -917,40 +942,39 @@ impl Command {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
-        let blob_stor = if conversion_type == ConversionType::DirectoryToRafs {
-            if let Some(p) = matches
-                .value_of("blob")
-                .map(|b| ArtifactStorage::SingleFile(b.into()))
-            {
-                Some(p)
-            } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
-                if !d.exists() {
-                    bail!("Directory to store blobs does not exist")
-                }
-                Some(ArtifactStorage::FileDir(d))
-            } else if let Some(config_json) = matches.value_of("backend-config") {
-                let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
-                warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
-                if let Some(bf) = config.get("blob_file") {
-                    // Even unwrap, it is caused by invalid json. Image creation just can't start.
-                    let b: PathBuf = bf
-                        .as_str()
-                        .ok_or_else(|| anyhow!("backend-config is invalid"))?
-                        .to_string()
-                        .into();
-                    Some(ArtifactStorage::SingleFile(b))
-                } else {
-                    error!("Wrong backend config input!");
-                    return Err(anyhow!("invalid backend config"));
-                }
+        if conversion_type == ConversionType::StargzIndexToRef
+            || conversion_type == ConversionType::TargzToRef
+            || conversion_type == ConversionType::StargzToRef
+        {
+            Ok(None)
+        } else if let Some(p) = matches
+            .value_of("blob")
+            .map(|b| ArtifactStorage::SingleFile(b.into()))
+        {
+            Ok(Some(p))
+        } else if let Some(d) = matches.value_of("blob-dir").map(PathBuf::from) {
+            if !d.exists() {
+                bail!("Directory to store blobs does not exist")
+            }
+            Ok(Some(ArtifactStorage::FileDir(d)))
+        } else if let Some(config_json) = matches.value_of("backend-config") {
+            let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
+            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
+            if let Some(bf) = config.get("blob_file") {
+                // Even unwrap, it is caused by invalid json. Image creation just can't start.
+                let b: PathBuf = bf
+                    .as_str()
+                    .ok_or_else(|| anyhow!("backend-config is invalid"))?
+                    .to_string()
+                    .into();
+                Ok(Some(ArtifactStorage::SingleFile(b)))
             } else {
-                bail!("both --blob and --blob-dir are missing, please specify one to store the generated data blob file");
+                error!("Wrong backend config input!");
+                Err(anyhow!("invalid backend config"))
             }
         } else {
-            None
-        };
-
-        Ok(blob_stor)
+            bail!("both --blob and --blob-dir are missing, please specify one to store the generated data blob file");
+        }
     }
 
     fn get_blob_meta_storage(matches: &clap::ArgMatches) -> Result<Option<ArtifactStorage>> {

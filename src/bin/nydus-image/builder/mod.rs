@@ -15,9 +15,11 @@ use crate::core::tree::Tree;
 
 pub(crate) use self::directory::DirectoryBuilder;
 pub(crate) use self::stargz::StargzBuilder;
+pub(crate) use self::tarball::TarballBuilder;
 
 mod directory;
 mod stargz;
+mod tarball;
 
 /// Trait to generate a RAFS filesystem from the source.
 pub(crate) trait Builder {

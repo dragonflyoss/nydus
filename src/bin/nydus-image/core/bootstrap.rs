@@ -454,7 +454,7 @@ impl Bootstrap {
         if ctx.explicit_uidgid {
             super_block.set_explicit_uidgid();
         }
-        if ctx.source_type == ConversionType::StargzIndexToRef {
+        if ctx.conversion_type == ConversionType::StargzIndexToRef {
             super_block.set_block_size(STARGZ_DEFAULT_BLOCK_SIZE);
         }
 

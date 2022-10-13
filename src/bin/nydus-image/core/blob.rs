@@ -24,22 +24,41 @@ impl Blob {
         blob_mgr: &mut BlobManager,
         blob_writer: &mut Option<ArtifactWriter>,
     ) -> Result<()> {
-        if ctx.source_type == ConversionType::DirectoryToRafs {
-            let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch, nodes)?;
-            let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
-            for (idx, inode) in inodes.iter().enumerate() {
-                let node = &mut nodes[*inode];
-                let size = node
-                    .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
-                    .context("failed to dump blob chunks")?;
-                if idx < prefetch_entries {
-                    if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-                        blob_ctx.blob_prefetch_size += size;
+        match ctx.conversion_type {
+            ConversionType::DirectoryToRafs => {
+                let (inodes, prefetch_entries) =
+                    BlobLayout::layout_blob_simple(&ctx.prefetch, nodes)?;
+                let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
+                for (idx, inode) in inodes.iter().enumerate() {
+                    let node = &mut nodes[*inode];
+                    let size = node
+                        .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
+                        .context("failed to dump blob chunks")?;
+                    if idx < prefetch_entries {
+                        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                            blob_ctx.blob_prefetch_size += size;
+                        }
                     }
                 }
+                if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                    Self::dump_meta_data(ctx, blob_ctx, blob_writer)?;
+                }
             }
-            if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-                Self::dump_meta_data(ctx, blob_ctx, blob_writer)?;
+            ConversionType::TarToRafs
+            | ConversionType::TargzToRafs
+            | ConversionType::StargzToRafs => {
+                if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                    Self::dump_meta_data(ctx, blob_ctx, blob_writer)?;
+                }
+            }
+            ConversionType::TargzToRef
+            | ConversionType::StargzToRef
+            | ConversionType::StargzIndexToRef
+            | ConversionType::TarToStargz
+            | ConversionType::DirectoryToTargz
+            | ConversionType::DirectoryToStargz
+            | ConversionType::TargzToStargz => {
+                unimplemented!()
             }
         }
 

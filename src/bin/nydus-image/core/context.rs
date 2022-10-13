@@ -435,7 +435,8 @@ impl BlobContext {
     // TODO: check the logic to reset prefetch size
     pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
         if (self.compressed_blob_size > 0
-            || (ctx.source_type == ConversionType::StargzIndexToRef && !self.blob_id.is_empty()))
+            || (ctx.conversion_type == ConversionType::StargzIndexToRef
+                && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
         {
             self.blob_prefetch_size = 0;
@@ -817,8 +818,8 @@ pub struct BuildContext {
     /// Version number of output metadata and data blob.
     pub fs_version: RafsVersion,
 
-    /// Type of source to build the image from.
-    pub source_type: ConversionType,
+    /// Format conversion type.
+    pub conversion_type: ConversionType,
     /// Path of source to build the image from:
     /// - Directory: `source_path` should be a directory path
     /// - StargzIndex: `source_path` should be a stargz index json file path
@@ -863,7 +864,7 @@ impl BuildContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             fs_version: RafsVersion::default(),
 
-            source_type,
+            conversion_type: source_type,
             source_path,
 
             prefetch,
@@ -897,7 +898,7 @@ impl Default for BuildContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             fs_version: RafsVersion::default(),
 
-            source_type: ConversionType::default(),
+            conversion_type: ConversionType::default(),
             source_path: PathBuf::new(),
 
             prefetch: Prefetch::default(),

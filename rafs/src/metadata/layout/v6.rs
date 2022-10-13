@@ -1179,9 +1179,9 @@ struct RafsV6Blob {
     digest_algo: u32,
     // Flags for the compression information array.
     meta_features: u32,
-    // Size of the compressed blob.
+    // Size of the compressed blob, not including CI array and header.
     compressed_size: u64,
-    // Size of the uncompressed blob.
+    // Size of the uncompressed blob, not including CI array and header.
     uncompressed_size: u64,
 
     reserved1: u32,

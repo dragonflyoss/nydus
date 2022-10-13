@@ -323,12 +323,43 @@ impl Node {
         }
     }
 
+    /// Dump data from the file assoicated with the node into the data blob, and generate chunk
+    /// information.
+    ///
+    /// # Arguments
+    /// - blob_writer: optional writer to write data into the data blob.
+    /// - data_buf: scratch buffer used to stored data read from the reader.
     pub fn dump_node_data(
         self: &mut Node,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut Option<ArtifactWriter>,
         chunk_data_buf: &mut [u8],
+    ) -> Result<u64> {
+        let mut reader = if self.is_reg() {
+            let file = File::open(&self.path)
+                .with_context(|| format!("failed to open node file {:?}", self.path))?;
+            Some(file)
+        } else {
+            None
+        };
+
+        self.dump_node_data_with_reader(ctx, blob_mgr, blob_writer, reader.as_mut(), chunk_data_buf)
+    }
+
+    /// Dump data from a reader into the data blob, and generate chunk information.
+    ///
+    /// # Arguments
+    /// - blob_writer: optional writer to write data into the data blob.
+    /// - reader: reader to provide chunk data
+    /// - data_buf: scratch buffer used to stored data read from the reader.
+    pub fn dump_node_data_with_reader<R: Read>(
+        &mut self,
+        ctx: &BuildContext,
+        blob_mgr: &mut BlobManager,
+        blob_writer: &mut Option<ArtifactWriter>,
+        reader: Option<&mut R>,
+        data_buf: &mut [u8],
     ) -> Result<u64> {
         if self.is_dir() {
             return Ok(0);
@@ -346,8 +377,7 @@ impl Node {
             return Ok(0);
         }
 
-        let mut file = File::open(&self.path)
-            .with_context(|| format!("failed to open node file {:?}", self.path))?;
+        let reader = reader.ok_or_else(|| anyhow!("missing reader to read file data"))?;
         let mut inode_hasher = RafsDigest::hasher(ctx.digester);
         let mut blob_size = 0u64;
 
@@ -365,8 +395,9 @@ impl Node {
                 chunk_size
             };
 
-            let chunk_data = &mut chunk_data_buf[0..uncompressed_size as usize];
-            file.read_exact(chunk_data)
+            let chunk_data = &mut data_buf[0..uncompressed_size as usize];
+            reader
+                .read_exact(chunk_data)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
 
             let chunk_id = RafsDigest::from_buf(chunk_data, ctx.digester);
@@ -459,7 +490,6 @@ impl Node {
             blob_ctx.compressed_offset += compressed_size as u64;
             blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
             blob_ctx.compressed_blob_size += compressed_size as u64;
-            // TODO: check the logic.
             blob_ctx.uncompressed_blob_size = pre_uncompressed_offset + aligned_chunk_size as u64;
             blob_ctx.blob_hash.update(&compressed);
 
@@ -528,7 +558,7 @@ impl Node {
 
             // Dump chunk info
             if self.is_reg() && self.inode.child_count() as usize != self.chunks.len() {
-                bail!("invalid chunks count {}: {}", self.chunks.len(), self);
+                bail!("invalid chunk count {}: {}", self.chunks.len(), self);
             }
             for chunk in &self.chunks {
                 chunk
