@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![deny(warnings)]
-#[macro_use(crate_authors, crate_version)]
+#[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
 extern crate anyhow;
@@ -542,7 +542,7 @@ fn init_log(matches: &ArgMatches) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
+    let (bti_string, build_info) = BuildTimeInfo::dump();
 
     let cmd = prepare_cmd_args(bti_string);
 
