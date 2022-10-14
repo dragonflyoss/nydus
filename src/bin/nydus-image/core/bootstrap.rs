@@ -405,12 +405,13 @@ impl Bootstrap {
         let inode_table_size = inode_table.size();
 
         // Set prefetch table
-        let (prefetch_table_size, prefetch_table_entries) =
-            if let Some(prefetch_table) = ctx.prefetch.get_rafsv5_prefetch_table() {
-                (prefetch_table.size(), prefetch_table.len() as u32)
-            } else {
-                (0, 0u32)
-            };
+        let (prefetch_table_size, prefetch_table_entries) = if let Some(prefetch_table) =
+            ctx.prefetch.get_rafsv5_prefetch_table(&bootstrap_ctx.nodes)
+        {
+            (prefetch_table.size(), prefetch_table.len() as u32)
+        } else {
+            (0, 0u32)
+        };
 
         // Set blob table, use sha256 string (length 64) as blob id if not specified
         let prefetch_table_offset = super_block_size + inode_table_size;
@@ -481,7 +482,9 @@ impl Bootstrap {
             .context("failed to store inode table")?;
 
         // Dump prefetch table
-        if let Some(mut prefetch_table) = ctx.prefetch.get_rafsv5_prefetch_table() {
+        if let Some(mut prefetch_table) =
+            ctx.prefetch.get_rafsv5_prefetch_table(&bootstrap_ctx.nodes)
+        {
             prefetch_table
                 .store(bootstrap_ctx.writer.as_mut())
                 .context("failed to store prefetch table")?;
