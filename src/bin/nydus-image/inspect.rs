@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    ffi::OsString,
     fs::Permissions,
     io::{Error, ErrorKind, Write},
     ops::DerefMut,
     os::unix::prelude::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -164,7 +165,8 @@ impl RafsInspector {
     fn cmd_stat_file(&self, file_name: &str) -> Result<Option<Value>, anyhow::Error> {
         // Stat current directory
         if file_name == "." {
-            return self.stat_single_file(self.cur_dir_ino);
+            let inode = self.rafs_meta.get_inode(self.cur_dir_ino, false)?;
+            return self.stat_single_file(Some(inode.parent()), self.cur_dir_ino);
         }
 
         // Walk through children inodes to find the file
@@ -173,7 +175,7 @@ impl RafsInspector {
         dir_inode.walk_children_inodes(0, &mut |_inode, child_name, child_ino, _offset| {
             if child_name == file_name {
                 // Print file information
-                if let Err(e) = self.stat_single_file(child_ino) {
+                if let Err(e) = self.stat_single_file(Some(dir_inode.ino()), child_ino) {
                     return Err(Error::new(ErrorKind::Other, e));
                 }
 
@@ -273,6 +275,36 @@ Compressed Size:    {compressed_size}
         Ok(None)
     }
 
+    // Convert an inode number to a file path, the rafs v6 file is handled separately.
+    fn path_from_ino(&self, ino: u64) -> Result<PathBuf, anyhow::Error> {
+        let inode = self.rafs_meta.superblock.get_inode(ino, false)?;
+        if ino == self.rafs_meta.superblock.root_ino() {
+            return Ok(self
+                .rafs_meta
+                .superblock
+                .get_inode(ino, false)?
+                .name()
+                .into());
+        }
+
+        let mut file_path = PathBuf::from("");
+        if self.rafs_meta.meta.is_v6() && !inode.is_dir() {
+            self.rafs_meta.walk_dir(
+                self.rafs_meta.superblock.root_ino(),
+                None,
+                &mut |inode, path| {
+                    if inode.ino() == ino {
+                        file_path = PathBuf::from(path);
+                    }
+                    Ok(())
+                },
+            )?;
+        } else {
+            file_path = self.rafs_meta.path_from_ino(ino as u64)?;
+        };
+        Ok(file_path)
+    }
+
     // Implement command "prefetch"
     fn cmd_list_prefetch(&self) -> Result<Option<Value>, anyhow::Error> {
         let mut guard = self.bootstrap.lock().unwrap();
@@ -283,7 +315,7 @@ Compressed Size:    {compressed_size}
         let o = if self.request_mode {
             let mut value = json!([]);
             for ino in prefetch_inos {
-                let path = self.rafs_meta.path_from_ino(ino as u64)?;
+                let path = self.path_from_ino(ino as u64)?;
                 let v = json!({"inode": ino, "path": path});
                 value.as_array_mut().unwrap().push(v);
             }
@@ -294,7 +326,7 @@ Compressed Size:    {compressed_size}
                 self.rafs_meta.meta.prefetch_table_entries
             );
             for ino in prefetch_inos {
-                let path = self.rafs_meta.path_from_ino(ino as u64)?;
+                let path = self.path_from_ino(ino as u64)?;
                 println!(
                     r#"Inode Number:{inode_number:10} | Path: {path:?} "#,
                     path = path,
@@ -362,15 +394,56 @@ Blob ID: {}
         Ok(None)
     }
 
+    /// Walkthrough the file tree rooted at ino, calling cb for each file or directory
+    /// in the tree by DFS order, including ino, please ensure ino is a directory.
+    fn walk_dir(
+        &self,
+        ino: u64,
+        parent: Option<&PathBuf>,
+        parent_ino: Option<u64>,
+        cb: &mut dyn FnMut(Option<u64>, &dyn RafsInode, &Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let inode = self.rafs_meta.superblock.get_inode(ino, false)?;
+        if !inode.is_dir() {
+            bail!("inode {} is not a directory", ino);
+        }
+        self.walk_dir_inner(inode.as_ref(), parent, parent_ino, cb)
+    }
+
+    fn walk_dir_inner(
+        &self,
+        inode: &dyn RafsInode,
+        parent: Option<&PathBuf>,
+        parent_ino: Option<u64>,
+        cb: &mut dyn FnMut(Option<u64>, &dyn RafsInode, &Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let path = if let Some(parent) = parent {
+            parent.join(inode.name())
+        } else {
+            PathBuf::from("/")
+        };
+        cb(parent_ino, inode, &path)?;
+        if !inode.is_dir() {
+            return Ok(());
+        }
+        let child_count = inode.get_child_count();
+        for idx in 0..child_count {
+            let child = inode.get_child_by_index(idx)?;
+            self.walk_dir_inner(child.as_ref(), Some(&path), Some(inode.ino()), cb)?;
+        }
+        Ok(())
+    }
+
     // Implement command "icheck"
     fn cmd_check_inode(&self, ino: u64) -> Result<Option<Value>, anyhow::Error> {
-        self.rafs_meta.walk_dir(
+        self.walk_dir(
             self.rafs_meta.superblock.root_ino(),
             None,
-            &mut |inode, path| {
+            None,
+            &mut |parent, inode, path| {
                 if inode.ino() == ino {
                     println!(r#"{}"#, path.to_string_lossy(),);
-                    self.stat_single_file(ino)?;
+                    self.stat_single_file(parent, ino)?;
                 }
                 Ok(())
             },
@@ -380,14 +453,41 @@ Blob ID: {}
 }
 
 impl RafsInspector {
+    /// Get file name of the inode, the rafs v6 file is handled separately.
+    fn get_file_name(&self, parent_inode: &dyn RafsInode, inode: &dyn RafsInode) -> OsString {
+        let mut filename = OsString::from("");
+        if self.rafs_meta.meta.is_v6() && !inode.is_dir() {
+            parent_inode
+                .walk_children_inodes(
+                    0,
+                    &mut |_inode: Option<Arc<dyn RafsInode>>, name: OsString, cur_ino, _offset| {
+                        if cur_ino == inode.ino() {
+                            filename = name;
+                        }
+                        Ok(PostWalkAction::Continue)
+                    },
+                )
+                .unwrap();
+        } else {
+            filename = inode.name();
+        }
+        filename
+    }
+
     // print information of single file
-    fn stat_single_file(&self, ino: u64) -> Result<Option<Value>, anyhow::Error> {
+    fn stat_single_file(
+        &self,
+        parent_ino: Option<u64>,
+        ino: u64,
+    ) -> Result<Option<Value>, anyhow::Error> {
         // get RafsInode of current ino
         let inode = self.rafs_meta.get_inode(ino, false)?;
         let inode_attr = inode.get_attr();
 
-        println!(
-            r#"
+        if let Some(parent_ino) = parent_ino {
+            let parent = self.rafs_meta.superblock.get_inode(parent_ino, false)?;
+            println!(
+                r#"
 Inode Number:       {inode_number}
 Name:               {name:?}
 Size:               {size}
@@ -400,19 +500,20 @@ GID:                {gid}
 Mtime:              {mtime}
 MtimeNsec:          {mtime_nsec}
 Blocks:             {blocks}"#,
-            inode_number = inode.ino(),
-            name = inode.name(),
-            size = inode.size(),
-            parent = inode.parent(),
-            mode = inode_attr.mode,
-            permissions = Permissions::from_mode(inode_attr.mode).mode(),
-            nlink = inode_attr.nlink,
-            uid = inode_attr.uid,
-            gid = inode_attr.gid,
-            mtime = inode_attr.mtime,
-            mtime_nsec = inode_attr.mtimensec,
-            blocks = inode_attr.blocks,
-        );
+                inode_number = inode.ino(),
+                name = self.get_file_name(parent.as_ref(), inode.as_ref()),
+                size = inode.size(),
+                parent = parent.ino(),
+                mode = inode_attr.mode,
+                permissions = Permissions::from_mode(inode_attr.mode).mode(),
+                nlink = inode_attr.nlink,
+                uid = inode_attr.uid,
+                gid = inode_attr.gid,
+                mtime = inode_attr.mtime,
+                mtime_nsec = inode_attr.mtimensec,
+                blocks = inode_attr.blocks,
+            );
+        }
 
         Ok(None)
     }
