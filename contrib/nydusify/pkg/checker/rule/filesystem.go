@@ -205,14 +205,15 @@ func (rule *FilesystemRule) pullSourceImage() (*tool.Image, error) {
 func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
 	logrus.Infof("Mounting source image to %s", rule.SourceMountPath)
 
-	if err := os.MkdirAll(rule.SourceMountPath, 0755); err != nil {
-		return nil, errors.Wrap(err, "create mountpoint directory of source image")
-	}
-
 	image, err := rule.pullSourceImage()
 	if err != nil {
 		return nil, errors.Wrap(err, "pull source image")
 	}
+
+	if err := image.Umount(); err != nil {
+		return nil, errors.Wrap(err, "umount previous rootfs")
+	}
+
 	if err := image.Mount(); err != nil {
 		return nil, errors.Wrap(err, "mount source image")
 	}
