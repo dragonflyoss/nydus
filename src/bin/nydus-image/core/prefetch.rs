@@ -165,12 +165,12 @@ impl Prefetch {
         indexes
     }
 
-    pub fn get_rafsv5_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
+    pub fn get_rafsv5_prefetch_table(&mut self, nodes: &[Node]) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self.readahead_patterns.values().filter_map(|v| *v) {
                 // Rafs v5 has inode number equal to index.
-                prefetch_table.add_entry(i as u32);
+                prefetch_table.add_entry(nodes[i as usize - 1].inode.ino() as u32);
             }
             Some(prefetch_table)
         } else {
