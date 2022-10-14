@@ -985,7 +985,7 @@ impl RafsV5Inode {
     /// Check whether the inode is a hardlink.
     #[inline]
     pub fn is_hardlink(&self) -> bool {
-        self.i_nlink > 1
+        self.is_reg() && self.i_nlink > 1
     }
 
     /// Get inode flags
