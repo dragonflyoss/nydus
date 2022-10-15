@@ -19,11 +19,11 @@ use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
 use std::ops::{Add, BitAnd, Not};
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use nydus_utils::compress;
 use nydus_utils::digest::RafsDigest;
+use nydus_utils::filemap::FileMapState;
 
 use crate::backend::BlobReader;
 use crate::device::{BlobChunkInfo, BlobInfo};
@@ -349,25 +349,9 @@ impl BlobMetaInfo {
             file.set_len(expected_size as u64)?;
         }
 
-        let fd = file.as_raw_fd();
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                expected_size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(last_error!("failed to mmap blob chunk_map"));
-        } else if base.is_null() {
-            return Err(ebadf!("failed to mmap blob chunk_map"));
-        }
-
-        let header = unsafe { (base as *mut u8).add(aligned_info_size as usize) };
-        let header = unsafe { &mut *(header as *mut BlobMetaHeaderOndisk) };
+        let mut filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
+        let base = filemap.validate_range(0, expected_size)?;
+        let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
         if u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
             || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
             || u32::from_le(header.s_features) != blob_info.meta_flags()
@@ -390,15 +374,17 @@ impl BlobMetaInfo {
             header.s_ci_offset = u64::to_le(blob_info.meta_ci_offset());
             header.s_ci_compressed_size = u64::to_le(blob_info.meta_ci_compressed_size());
             header.s_ci_uncompressed_size = u64::to_le(blob_info.meta_ci_uncompressed_size());
+            filemap.sync_data()?;
 
-            file.sync_data()?;
+            let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
             header.s_magic = u32::to_le(BLOB_METADATA_MAGIC);
             header.s_magic2 = u32::to_le(BLOB_METADATA_MAGIC);
+            filemap.sync_data()?;
         }
 
         let chunk_infos = unsafe {
             ManuallyDrop::new(Vec::from_raw_parts(
-                base as *mut BlobChunkInfoOndisk,
+                base as *mut u8 as *mut BlobChunkInfoOndisk,
                 chunk_count as usize,
                 chunk_count as usize,
             ))
@@ -410,8 +396,7 @@ impl BlobMetaInfo {
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_count,
             chunks: chunk_infos,
-            base: base as *const u8,
-            unmap_len: expected_size,
+            _filemap: filemap,
             is_stargz: blob_info.is_stargz(),
         });
 
@@ -712,24 +697,9 @@ pub struct BlobMetaState {
     uncompressed_size: u64,
     chunk_count: u32,
     chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
-    base: *const u8,
-    unmap_len: usize,
+    _filemap: FileMapState,
     /// The blob meta is for an stargz image.
     is_stargz: bool,
-}
-
-// // Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for BlobMetaState {}
-unsafe impl Sync for BlobMetaState {}
-
-impl Drop for BlobMetaState {
-    fn drop(&mut self) {
-        if !self.base.is_null() {
-            let size = self.unmap_len;
-            unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, size) };
-            self.base = std::ptr::null();
-        }
-    }
 }
 
 impl BlobMetaState {
@@ -848,6 +818,7 @@ mod tests {
     use nydus_utils::metrics::BackendMetrics;
     use std::fs::{File, OpenOptions};
     use std::io::Write;
+    use std::os::unix::io::AsRawFd;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
@@ -867,8 +838,7 @@ mod tests {
                     comp_info: 0x00ff_f000_0010_0000,
                 },
             ]),
-            base: std::ptr::null(),
-            unmap_len: 0,
+            _filemap: FileMapState::default(),
             is_stargz: false,
         };
 
@@ -952,8 +922,7 @@ mod tests {
                     comp_info: 0x00ff_f000_0000_5000,
                 },
             ]),
-            base: std::ptr::null(),
-            unmap_len: 0,
+            _filemap: FileMapState::default(),
             is_stargz: false,
         };
         let info = BlobMetaInfo {
