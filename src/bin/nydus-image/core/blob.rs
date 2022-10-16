@@ -6,7 +6,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
-use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{BlobChunkInfoV1Ondisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, try_round_up_4k};
 use sha2::Digest;
 
@@ -75,13 +75,13 @@ impl Blob {
 
     fn dump_meta_data_raw(
         pos: u64,
-        blob_meta_info: &[BlobChunkInfoOndisk],
+        blob_meta_info: &[BlobChunkInfoV1Ondisk],
         compressor: compress::Algorithm,
     ) -> Result<(std::borrow::Cow<[u8]>, BlobMetaHeaderOndisk)> {
         let data = unsafe {
             std::slice::from_raw_parts(
                 blob_meta_info.as_ptr() as *const u8,
-                blob_meta_info.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+                blob_meta_info.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
             )
         };
         let (buf, compressed) = compress::compress(data, compressor)

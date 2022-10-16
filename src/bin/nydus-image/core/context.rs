@@ -28,7 +28,7 @@ use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{BlobChunkInfoV1Ondisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
@@ -330,7 +330,7 @@ pub struct BlobContext {
     pub blob_meta_info_enabled: bool,
     /// Data chunks stored in the data blob, for v6.
     /// TODO: zran
-    pub blob_meta_info: Vec<BlobChunkInfoOndisk>,
+    pub blob_meta_info: Vec<BlobChunkInfoV1Ondisk>,
     /// Blob metadata header stored in the data blob, for v6
     pub blob_meta_header: BlobMetaHeaderOndisk,
 
@@ -453,7 +453,7 @@ impl BlobContext {
         }
 
         debug_assert!(chunk.index() as usize == self.blob_meta_info.len());
-        let mut meta = BlobChunkInfoOndisk::default();
+        let mut meta = BlobChunkInfoV1Ondisk::default();
         meta.set_compressed_offset(chunk.compressed_offset());
         meta.set_compressed_size(chunk.compressed_size());
         meta.set_uncompressed_offset(chunk.uncompressed_offset());
