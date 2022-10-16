@@ -577,6 +577,7 @@ impl BlobMetaInfo {
     }
 }
 
+/// Struct to maintain state and provide accessors to blob meta information.
 pub struct BlobMetaState {
     blob_index: u32,
     // The file size of blob file when it contains compressed chunks.
@@ -691,6 +692,53 @@ impl BlobChunkInfo for BlobMetaChunk {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Trait to get blob meta chunk information.
+pub trait BlobMetaChunkInfo {
+    /// Get compressed offset of the chunk.
+    fn compressed_offset(&self) -> u64;
+
+    /// Set compressed offset of the chunk.
+    fn set_compressed_offset(&mut self, offset: u64);
+
+    /// Get compressed size of the chunk.
+    fn compressed_size(&self) -> u32;
+
+    /// Set compressed size of the chunk.
+    fn set_compressed_size(&mut self, size: u32);
+
+    fn compressed_end(&self) -> u64 {
+        self.compressed_offset() + self.compressed_size() as u64
+    }
+
+    /// Get uncompressed offset of the chunk.
+    fn uncompressed_offset(&self) -> u64;
+
+    /// Set uncompressed offset of the chunk.
+    fn set_uncompressed_offset(&mut self, offset: u64);
+
+    /// Get uncompressed end of the chunk.
+    fn uncompressed_size(&self) -> u32;
+
+    /// Set uncompressed end of the chunk.
+    fn set_uncompressed_size(&mut self, size: u32);
+
+    /// Get uncompressed size of the chunk.
+    fn uncompressed_end(&self) -> u64 {
+        self.uncompressed_offset() + self.uncompressed_size() as u64
+    }
+
+    /// Get 4k aligned uncompressed size of the chunk.
+    fn aligned_uncompressed_end(&self) -> u64 {
+        round_up_4k(self.uncompressed_end())
+    }
+
+    /// Check whether the blob chunk is compressed or not.
+    ///
+    /// Assume the image builder guarantee that compress_size < uncompress_size if the chunk is
+    /// compressed.
+    fn is_compressed(&self) -> bool;
 }
 
 fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<u16>>(val: T) -> T {

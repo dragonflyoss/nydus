@@ -28,7 +28,7 @@ use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobChunkInfoV1Ondisk, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{BlobChunkInfoV1Ondisk, BlobMetaChunkInfo, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
