@@ -31,7 +31,7 @@ use crate::utils::alloc_buf;
 use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 
 mod chunk_info_v1;
-pub use chunk_info_v1::BlobChunkInfoV1Ondisk;
+use chunk_info_v1::BlobChunkInfoV1Ondisk;
 
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
@@ -632,6 +632,65 @@ impl BlobMetaState {
             "start: {}, end: {}, addr: {}",
             start, end, addr
         )))
+    }
+}
+
+/// A customized array to generate chunk information array.
+pub enum BlobMetaChunkArray {
+    /// Chunk information V1 array.
+    V1(Vec<BlobChunkInfoV1Ondisk>),
+}
+
+impl BlobMetaChunkArray {
+    /// Create a `BlokMetaChunkArray` for v1 chunk information format.
+    pub fn new_v1() -> Self {
+        BlobMetaChunkArray::V1(Vec::new())
+    }
+
+    /// Get number of entry in the blob chunk information array.
+    pub fn len(&self) -> usize {
+        match self {
+            BlobMetaChunkArray::V1(v) => v.len(),
+        }
+    }
+
+    /// Check whether the chunk information array is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            BlobMetaChunkArray::V1(v) => v.is_empty(),
+        }
+    }
+
+    /// Get the chunk information data as a u8 slice.
+    pub fn as_byte_slice(&self) -> &[u8] {
+        match self {
+            BlobMetaChunkArray::V1(v) => unsafe {
+                std::slice::from_raw_parts(
+                    v.as_ptr() as *const u8,
+                    v.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
+                )
+            },
+        }
+    }
+
+    /// Add an v1 chunk information entry.
+    pub fn add_v1(
+        &mut self,
+        compressed_offset: u64,
+        compressed_size: u32,
+        uncompressed_offset: u64,
+        uncompressed_size: u32,
+    ) {
+        match self {
+            BlobMetaChunkArray::V1(v) => {
+                let mut meta = BlobChunkInfoV1Ondisk::default();
+                meta.set_compressed_offset(compressed_offset);
+                meta.set_compressed_size(compressed_size);
+                meta.set_uncompressed_offset(uncompressed_offset);
+                meta.set_uncompressed_size(uncompressed_size);
+                v.push(meta);
+            }
+        }
     }
 }
 

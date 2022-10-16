@@ -28,7 +28,7 @@ use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobChunkInfoV1Ondisk, BlobMetaChunkInfo, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{BlobMetaChunkArray, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
@@ -329,8 +329,7 @@ pub struct BlobContext {
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
     /// Data chunks stored in the data blob, for v6.
-    /// TODO: zran
-    pub blob_meta_info: Vec<BlobChunkInfoV1Ondisk>,
+    pub blob_meta_info: BlobMetaChunkArray,
     /// Blob metadata header stored in the data blob, for v6
     pub blob_meta_header: BlobMetaHeaderOndisk,
 
@@ -351,37 +350,16 @@ pub struct BlobContext {
     pub chunk_source: ChunkSource,
 }
 
-impl Clone for BlobContext {
-    fn clone(&self) -> Self {
-        Self {
-            blob_id: self.blob_id.clone(),
-            blob_hash: self.blob_hash.clone(),
-            blob_prefetch_size: self.blob_prefetch_size,
-            blob_meta_info_enabled: self.blob_meta_info_enabled,
-            blob_meta_info: self.blob_meta_info.clone(),
-            blob_meta_header: self.blob_meta_header,
-
-            compressed_blob_size: self.compressed_blob_size,
-            uncompressed_blob_size: self.uncompressed_blob_size,
-
-            compressed_offset: self.compressed_offset,
-            uncompressed_offset: self.uncompressed_offset,
-
-            chunk_count: self.chunk_count,
-            chunk_size: self.chunk_size,
-            chunk_source: self.chunk_source.clone(),
-        }
-    }
-}
-
 impl BlobContext {
     pub fn new(blob_id: String, blob_offset: u64) -> Self {
+        let blob_meta_info = BlobMetaChunkArray::new_v1();
+
         Self {
             blob_id,
             blob_hash: Sha256::new(),
             blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
-            blob_meta_info: Vec::new(),
+            blob_meta_info,
             blob_meta_header: BlobMetaHeaderOndisk::default(),
 
             compressed_blob_size: 0,
@@ -448,22 +426,15 @@ impl BlobContext {
     }
 
     pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper) -> Result<()> {
-        if !self.blob_meta_info_enabled {
-            return Ok(());
+        if self.blob_meta_info_enabled {
+            assert_eq!(chunk.index() as usize, self.blob_meta_info.len());
+            self.blob_meta_info.add_v1(
+                chunk.compressed_offset(),
+                chunk.compressed_size(),
+                chunk.uncompressed_offset(),
+                chunk.uncompressed_size(),
+            );
         }
-
-        debug_assert!(chunk.index() as usize == self.blob_meta_info.len());
-        let mut meta = BlobChunkInfoV1Ondisk::default();
-        meta.set_compressed_offset(chunk.compressed_offset());
-        meta.set_compressed_size(chunk.compressed_size());
-        meta.set_uncompressed_offset(chunk.uncompressed_offset());
-        meta.set_uncompressed_size(chunk.uncompressed_size());
-        trace!(
-            "chunk uncompressed {} size {}",
-            meta.uncompressed_offset(),
-            meta.uncompressed_size()
-        );
-        self.blob_meta_info.push(meta);
 
         Ok(())
     }
