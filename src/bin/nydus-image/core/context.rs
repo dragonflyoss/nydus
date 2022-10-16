@@ -28,7 +28,9 @@ use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobMetaChunkArray, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{
+    BlobMetaChunkArray, BlobMetaHeaderOndisk, BLOB_META_FEATURE_CHUNK_INFO_V2,
+};
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
@@ -351,8 +353,12 @@ pub struct BlobContext {
 }
 
 impl BlobContext {
-    pub fn new(blob_id: String, blob_offset: u64) -> Self {
-        let blob_meta_info = BlobMetaChunkArray::new_v1();
+    pub fn new(blob_id: String, blob_offset: u64, features: u32) -> Self {
+        let blob_meta_info = if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+            BlobMetaChunkArray::new_v2()
+        } else {
+            BlobMetaChunkArray::new_v1()
+        };
 
         Self {
             blob_id,
@@ -375,7 +381,7 @@ impl BlobContext {
     }
 
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0);
+        let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0, blob.meta_flags());
 
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
@@ -400,6 +406,9 @@ impl BlobContext {
                 .blob_meta_header
                 .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
             blob_ctx.blob_meta_header.set_4k_aligned(true);
+            blob_ctx
+                .blob_meta_header
+                .set_chunk_info_v2(blob.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0);
             blob_ctx.blob_meta_info_enabled = true;
         }
 
@@ -425,15 +434,29 @@ impl BlobContext {
         self.blob_meta_info_enabled = enable;
     }
 
-    pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper) -> Result<()> {
+    pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper, data: u64) -> Result<()> {
         if self.blob_meta_info_enabled {
             assert_eq!(chunk.index() as usize, self.blob_meta_info.len());
-            self.blob_meta_info.add_v1(
-                chunk.compressed_offset(),
-                chunk.compressed_size(),
-                chunk.uncompressed_offset(),
-                chunk.uncompressed_size(),
-            );
+            match &self.blob_meta_info {
+                BlobMetaChunkArray::V1(_) => {
+                    self.blob_meta_info.add_v1(
+                        chunk.compressed_offset(),
+                        chunk.compressed_size(),
+                        chunk.uncompressed_offset(),
+                        chunk.uncompressed_size(),
+                    );
+                }
+                BlobMetaChunkArray::V2(_) => {
+                    self.blob_meta_info.add_v2(
+                        chunk.compressed_offset(),
+                        chunk.compressed_size(),
+                        chunk.uncompressed_offset(),
+                        chunk.uncompressed_size(),
+                        chunk.is_compressed(),
+                        data,
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -492,7 +515,8 @@ impl BlobManager {
     }
 
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), ctx.blob_offset);
+        let mut blob_ctx =
+            BlobContext::new(ctx.blob_id.clone(), ctx.blob_offset, ctx.blob_meta_features);
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
 
@@ -802,6 +826,7 @@ pub struct BuildContext {
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_meta_storage: Option<ArtifactStorage>,
+    pub blob_meta_features: u32,
     pub inline_bootstrap: bool,
     pub has_xattr: bool,
 }
@@ -841,6 +866,7 @@ impl BuildContext {
             prefetch,
             blob_storage,
             blob_meta_storage,
+            blob_meta_features: 0,
             inline_bootstrap,
             has_xattr: false,
         }
@@ -875,6 +901,7 @@ impl Default for BuildContext {
             prefetch: Prefetch::default(),
             blob_storage: None,
             blob_meta_storage: None,
+            blob_meta_features: 0,
             has_xattr: true,
             inline_bootstrap: false,
         }

@@ -84,6 +84,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
     fn is_compressed(&self) -> bool {
         self.compressed_size() != self.uncompressed_size()
     }
+
+    fn get_data(&self) -> u64 {
+        0
+    }
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ use nydus_rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5Inode
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobChunkFlags;
-use nydus_storage::meta::BlobMetaHeaderOndisk;
+use nydus_storage::meta::{BlobMetaHeaderOndisk, BLOB_META_FEATURE_CHUNK_INFO_V2};
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
@@ -666,6 +666,7 @@ impl StargzBuilder {
         if ctx.fs_version == RafsVersion::V6 {
             let mut header = BlobMetaHeaderOndisk::default();
             header.set_4k_aligned(true);
+            header.set_chunk_info_v2(ctx.blob_meta_features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0);
             blob_ctx.blob_meta_header = header;
             blob_ctx.set_meta_info_enabled(true);
         } else {
@@ -715,7 +716,7 @@ impl StargzBuilder {
             if !chunk_map.contains_key(chunk.inner.id()) {
                 let chunk_index = blob_ctx.alloc_chunk_index()?;
                 chunk.inner.set_index(chunk_index);
-                blob_ctx.add_chunk_meta_info(&chunk.inner)?;
+                blob_ctx.add_chunk_meta_info(&chunk.inner, 0)?;
                 chunk_map.insert(*chunk.inner.id(), chunk_index);
             } else {
                 bail!("stargz unexpected duplicated data chunk");
@@ -801,7 +802,7 @@ impl Builder for StargzBuilder {
             build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
 
         // Generate node chunks and digest
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0);
+        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0, ctx.blob_meta_features);
         self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
 
         // Dump blob meta

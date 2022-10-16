@@ -93,6 +93,10 @@ impl Blob {
         header.set_ci_compressed_size(buf.len() as u64);
         header.set_ci_uncompressed_size(data.len() as u64);
         header.set_4k_aligned(true);
+        match blob_meta_info {
+            BlobMetaChunkArray::V1(_) => header.set_chunk_info_v2(false),
+            BlobMetaChunkArray::V2(_) => header.set_chunk_info_v2(true),
+        }
 
         Ok((buf, header))
     }

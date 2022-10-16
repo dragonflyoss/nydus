@@ -32,6 +32,8 @@ use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 
 mod chunk_info_v1;
 use chunk_info_v1::BlobChunkInfoV1Ondisk;
+mod chunk_info_v2;
+use chunk_info_v2::BlobChunkInfoV2Ondisk;
 
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
@@ -40,10 +42,14 @@ const BLOB_METADATA_CHUNK_SIZE_MASK: u64 = 0xff_ffff;
 const BLOB_METADATA_V1_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 16;
 const BLOB_METADATA_V1_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
 
+const BLOB_METADATA_V2_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 24;
+
 /// File suffix for blob meta file.
 pub const FILE_SUFFIX: &str = "blob.meta";
 /// Uncompressed chunk data is 4K aligned.
 pub const BLOB_META_FEATURE_4K_ALIGNED: u32 = 0x1;
+/// Blob chunk information format v2.
+pub const BLOB_META_FEATURE_CHUNK_INFO_V2: u32 = 0x2;
 
 /// Blob metadata on disk format.
 #[repr(C)]
@@ -156,6 +162,15 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    /// Set whether the uncompressed data chunk is 4k aligned.
+    pub fn set_chunk_info_v2(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
+        } else {
+            self.s_features &= !BLOB_META_FEATURE_CHUNK_INFO_V2;
+        }
+    }
+
     pub fn meta_flags(&self) -> u32 {
         self.s_features
     }
@@ -199,6 +214,7 @@ impl BlobMetaInfo {
             BLOB_METADATA_HEADER_SIZE
         );
         assert_eq!(size_of::<BlobChunkInfoV1Ondisk>(), 16);
+        assert_eq!(size_of::<BlobChunkInfoV2Ondisk>(), 24);
         let chunk_count = blob_info.chunk_count();
         if chunk_count == 0 || chunk_count > RAFS_MAX_CHUNKS_PER_BLOB {
             return Err(einval!("chunk count should be greater than 0"));
@@ -433,7 +449,13 @@ impl BlobMetaInfo {
         let chunk_count = blob_info.chunk_count();
         let info_size = u64::from_le(header.s_ci_uncompressed_size) as usize;
         let aligned_info_size = round_up_4k(info_size);
-        if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
+        if blob_info.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+            if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV2Ondisk>())
+                || (aligned_info_size as u64) > BLOB_METADATA_V2_MAX_SIZE
+            {
+                return Err(einval!("blob metadata size is too big!"));
+            }
+        } else if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
             || (aligned_info_size as u64) > BLOB_METADATA_V1_MAX_SIZE
         {
             return Err(einval!("blob metadata size is too big!"));
@@ -508,21 +530,29 @@ impl BlobMetaState {
 
 /// A customized array to generate chunk information array.
 pub enum BlobMetaChunkArray {
-    /// Chunk information V1 array.
+    /// V1 chunk information array.
     V1(Vec<BlobChunkInfoV1Ondisk>),
+    /// V2 chunk information array.
+    V2(Vec<BlobChunkInfoV2Ondisk>),
 }
 
 // Methods for RAFS filesystem builder.
 impl BlobMetaChunkArray {
-    /// Create a `BlokMetaChunkArray` for v1 chunk information format.
+    /// Create a `BlokMetaChunkArray` with v2 chunk information format.
     pub fn new_v1() -> Self {
         BlobMetaChunkArray::V1(Vec::new())
+    }
+
+    /// Create a `BlokMetaChunkArray` with v2 chunk information format.
+    pub fn new_v2() -> Self {
+        BlobMetaChunkArray::V2(Vec::new())
     }
 
     /// Get number of entry in the blob chunk information array.
     pub fn len(&self) -> usize {
         match self {
             BlobMetaChunkArray::V1(v) => v.len(),
+            BlobMetaChunkArray::V2(v) => v.len(),
         }
     }
 
@@ -530,6 +560,7 @@ impl BlobMetaChunkArray {
     pub fn is_empty(&self) -> bool {
         match self {
             BlobMetaChunkArray::V1(v) => v.is_empty(),
+            BlobMetaChunkArray::V2(v) => v.is_empty(),
         }
     }
 
@@ -539,7 +570,13 @@ impl BlobMetaChunkArray {
             BlobMetaChunkArray::V1(v) => unsafe {
                 std::slice::from_raw_parts(
                     v.as_ptr() as *const u8,
-                    v.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
+                    v.len() * size_of::<BlobChunkInfoV1Ondisk>(),
+                )
+            },
+            BlobMetaChunkArray::V2(v) => unsafe {
+                std::slice::from_raw_parts(
+                    v.as_ptr() as *const u8,
+                    v.len() * size_of::<BlobChunkInfoV2Ondisk>(),
                 )
             },
         }
@@ -562,6 +599,32 @@ impl BlobMetaChunkArray {
                 meta.set_uncompressed_size(uncompressed_size);
                 v.push(meta);
             }
+            BlobMetaChunkArray::V2(_v) => unimplemented!(),
+        }
+    }
+
+    /// Add an v2 chunk information entry.
+    pub fn add_v2(
+        &mut self,
+        compressed_offset: u64,
+        compressed_size: u32,
+        uncompressed_offset: u64,
+        uncompressed_size: u32,
+        compressed: bool,
+        data: u64,
+    ) {
+        match self {
+            BlobMetaChunkArray::V2(v) => {
+                let mut meta = BlobChunkInfoV2Ondisk::default();
+                meta.set_compressed_offset(compressed_offset);
+                meta.set_compressed_size(compressed_size);
+                meta.set_uncompressed_offset(uncompressed_offset);
+                meta.set_uncompressed_size(uncompressed_size);
+                meta.set_compressed(compressed);
+                meta.set_data(data);
+                v.push(meta);
+            }
+            BlobMetaChunkArray::V1(_v) => unimplemented!(),
         }
     }
 }
@@ -569,22 +632,36 @@ impl BlobMetaChunkArray {
 impl BlobMetaChunkArray {
     fn from_file_map(filemap: &FileMapState, blob_info: &BlobInfo) -> Result<Self> {
         let chunk_count = blob_info.chunk_count();
-        let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV1Ondisk>();
-        let base = filemap.validate_range(0, chunk_size)?;
-        let v = unsafe {
-            Vec::from_raw_parts(
-                base as *mut u8 as *mut BlobChunkInfoV1Ondisk,
-                chunk_count as usize,
-                chunk_count as usize,
-            )
-        };
-        Ok(BlobMetaChunkArray::V1(v))
+        if blob_info.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+            let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV2Ondisk>();
+            let base = filemap.validate_range(0, chunk_size)?;
+            let v = unsafe {
+                Vec::from_raw_parts(
+                    base as *mut u8 as *mut BlobChunkInfoV2Ondisk,
+                    chunk_count as usize,
+                    chunk_count as usize,
+                )
+            };
+            Ok(BlobMetaChunkArray::V2(v))
+        } else {
+            let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV1Ondisk>();
+            let base = filemap.validate_range(0, chunk_size)?;
+            let v = unsafe {
+                Vec::from_raw_parts(
+                    base as *mut u8 as *mut BlobChunkInfoV1Ondisk,
+                    chunk_count as usize,
+                    chunk_count as usize,
+                )
+            };
+            Ok(BlobMetaChunkArray::V1(v))
+        }
     }
 
     #[cfg(test)]
     fn get_chunk_index_nocheck(&self, addr: u64, compressed: bool) -> Result<usize> {
         match self {
             BlobMetaChunkArray::V1(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
+            BlobMetaChunkArray::V2(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
         }
     }
 
@@ -599,6 +676,9 @@ impl BlobMetaChunkArray {
             BlobMetaChunkArray::V1(v) => {
                 Self::_get_chunks_compressed(state, v, start, end, batch_end)
             }
+            BlobMetaChunkArray::V2(v) => {
+                Self::_get_chunks_compressed(state, v, start, end, batch_end)
+            }
         }
     }
 
@@ -610,6 +690,7 @@ impl BlobMetaChunkArray {
     ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
         match self {
             BlobMetaChunkArray::V1(v) => Self::_add_more_chunks(state, v, chunks, max_size),
+            BlobMetaChunkArray::V2(v) => Self::_add_more_chunks(state, v, chunks, max_size),
         }
     }
 
@@ -624,36 +705,44 @@ impl BlobMetaChunkArray {
             BlobMetaChunkArray::V1(v) => {
                 Self::_get_chunks_uncompressed(state, v, start, end, batch_end)
             }
+            BlobMetaChunkArray::V2(v) => {
+                Self::_get_chunks_uncompressed(state, v, start, end, batch_end)
+            }
         }
     }
 
     fn compressed_offset(&self, index: usize) -> u64 {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].compressed_offset(),
+            BlobMetaChunkArray::V2(v) => v[index].compressed_offset(),
         }
     }
 
     fn compressed_size(&self, index: usize) -> u32 {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].compressed_size(),
+            BlobMetaChunkArray::V2(v) => v[index].compressed_size(),
         }
     }
 
     fn uncompressed_offset(&self, index: usize) -> u64 {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].uncompressed_offset(),
+            BlobMetaChunkArray::V2(v) => v[index].uncompressed_offset(),
         }
     }
 
     fn uncompressed_size(&self, index: usize) -> u32 {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].uncompressed_size(),
+            BlobMetaChunkArray::V2(v) => v[index].uncompressed_size(),
         }
     }
 
     fn is_compressed(&self, index: usize) -> bool {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].is_compressed(),
+            BlobMetaChunkArray::V2(v) => v[index].is_compressed(),
         }
     }
 
@@ -976,6 +1065,9 @@ pub trait BlobMetaChunkInfo {
     /// Assume the image builder guarantee that compress_size < uncompress_size if the chunk is
     /// compressed.
     fn is_compressed(&self) -> bool;
+
+    /// Get misc data associated with the entry. V2 only, V1 just returns zero.
+    fn get_data(&self) -> u64;
 }
 
 fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<u16>>(val: T) -> T {
