@@ -26,7 +26,7 @@ use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::metadata::RafsVersion;
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
-use nydus_storage::meta::format_blob_meta_features;
+use nydus_storage::meta::{format_blob_meta_features, BLOB_META_FEATURE_CHUNK_INFO_V2};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
 use serde::{Deserialize, Serialize};
@@ -710,7 +710,10 @@ impl Command {
         };
 
         let mut builder: Box<dyn Builder> = match conversion_type {
-            ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
+            ConversionType::DirectoryToRafs => {
+                build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
+                Box::new(DirectoryBuilder::new())
+            }
             ConversionType::DirectoryToStargz => unimplemented!(),
             ConversionType::DirectoryToTargz => unimplemented!(),
             ConversionType::EStargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
