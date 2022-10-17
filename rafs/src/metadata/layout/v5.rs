@@ -988,6 +988,11 @@ impl RafsV5Inode {
         self.i_nlink > 1
     }
 
+    /// Get inode flags
+    pub fn has_hardlink(&self) -> bool {
+        self.i_flags.contains(RafsV5InodeFlags::HARDLINK)
+    }
+
     /// Mark the inode as having extended attributes.
     #[inline]
     pub fn has_xattr(&self) -> bool {

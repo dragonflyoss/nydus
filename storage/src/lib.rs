@@ -71,6 +71,8 @@ macro_rules! impl_getter {
 pub const RAFS_DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
 /// Maximum blob chunk size, 16MB.
 pub const RAFS_MAX_CHUNK_SIZE: u64 = 1024 * 1024 * 16;
+/// Maximum numbers of chunk per data blob
+pub const RAFS_MAX_CHUNKS_PER_BLOB: u32 = 1u32 << 24;
 
 /// Error codes related to storage subsystem.
 #[derive(Debug)]

@@ -265,7 +265,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --fs-version {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --blob-data-size 0 --fs-version {} --log-level info {:?}",
                 self.builder,
                 self.work_dir.join(blob_id),
                 blob_meta,
@@ -294,7 +294,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --fs-version {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --blob-data-size 30000 --fs-version {} --log-level info {:?}",
                 self.builder,
                 self.work_dir.join(blob_id),
                 blob_meta,
@@ -321,7 +321,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --fs-version {} --log-level info {:?}",
+                "{:?} create --source-type stargz_index --chunk-size 0x400000 --bootstrap {:?} {} --blob-id {} --blob-data-size 15000 --fs-version {} --log-level info {:?}",
                 self.builder,
                 self.work_dir.join(blob_id),
                 blob_meta,

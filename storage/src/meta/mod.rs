@@ -209,7 +209,7 @@ impl BlobChunkInfoOndisk {
     #[inline]
     pub fn set_compressed_size(&mut self, size: u32) {
         let size = size as u64;
-        debug_assert!(size > 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
+        assert!(size > 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
 
         let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
         let size_high = ((size - 1) & BLOB_CHUNK_SIZE_HIGH_MASK) << BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT;

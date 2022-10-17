@@ -141,6 +141,14 @@ impl InodeWrapper {
         self.is_chrdev() || self.is_blkdev() || self.is_fifo() || self.is_sock()
     }
 
+    /// Get inode flags.
+    pub fn has_hardlink(&self) -> bool {
+        match self {
+            InodeWrapper::V5(i) => i.has_hardlink(),
+            InodeWrapper::V6(i) => i.has_hardlink(),
+        }
+    }
+
     /// Check whether the inode has associated xattrs.
     pub fn has_xattr(&self) -> bool {
         match self {

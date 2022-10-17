@@ -14,8 +14,6 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
-extern crate nydus_rafs as rafs;
-extern crate nydus_storage as storage;
 
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -227,11 +225,16 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .takes_value(true)
                 )
                 .arg(
+                    Arg::with_name("blob-data-size")
+                        .long("blob-data-size")
+                        .help("specify blob data size of stargz conversion")
+                        .takes_value(true),
+                )
+                .arg(
                     Arg::with_name("chunk-size")
                         .long("chunk-size")
                         .short("S")
                         .help("size of data chunk, must be power of two and between 0x1000-0x1000000:")
-                        .default_value("0x100000")
                         .required(false)
                         .takes_value(true),
                 )
@@ -576,7 +579,6 @@ struct Command {}
 impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(matches)?;
-        let chunk_size = Self::get_chunk_size(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_bootstrap = Self::get_parent_bootstrap(matches)?;
         let prefetch = Self::get_prefetch(matches)?;
@@ -587,6 +589,7 @@ impl Command {
         let inline_bootstrap = matches.is_present("inline-bootstrap");
         let repeatable = matches.is_present("repeatable");
         let version = Self::get_fs_version(matches)?;
+        let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let aligned_chunk = if version.is_v6() {
             info!("v6 enforces to use \"aligned-chunk\".");
             true
@@ -600,6 +603,7 @@ impl Command {
             .parse()?;
         let mut compressor = matches.value_of("compressor").unwrap_or_default().parse()?;
         let mut digester = matches.value_of("digester").unwrap_or_default().parse()?;
+        let blob_data_size = Self::get_blob_size(matches, conversion_type)?;
 
         match conversion_type {
             ConversionType::DirectoryToRafs => {
@@ -616,15 +620,24 @@ impl Command {
             ConversionType::StargzToRef => unimplemented!(),
             ConversionType::StargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
+                if inline_bootstrap {
+                    bail!("'--type stargz_index' conflicts with '--inline-bootstrap'");
+                }
                 if blob_id.trim() == "" {
-                    bail!("blob-id can't be empty");
+                    bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
                 if compressor != compress::Algorithm::GZip {
-                    trace!("compressor set to {}", compress::Algorithm::GZip);
+                    trace!(
+                        "only gzip is supported for '--type stargz_index', compressor set to {}",
+                        compress::Algorithm::GZip
+                    );
                 }
                 compressor = compress::Algorithm::GZip;
                 if digester != digest::Algorithm::Sha256 {
-                    trace!("digester set to {}", digest::Algorithm::Sha256);
+                    trace!(
+                        "only sha256 is supported for '--type stargz_index', digester set to {}",
+                        digest::Algorithm::Sha256
+                    );
                 }
                 digester = digest::Algorithm::Sha256;
             }
@@ -674,7 +687,7 @@ impl Command {
             ConversionType::DirectoryToStargz => unimplemented!(),
             ConversionType::StargzToRafs => unimplemented!(),
             ConversionType::StargzToRef => unimplemented!(),
-            ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new()),
+            ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
             ConversionType::TargzToRafs => unimplemented!(),
             ConversionType::TargzToRef => unimplemented!(),
             ConversionType::TargzToStargz => unimplemented!(),
@@ -983,6 +996,22 @@ impl Command {
         Ok(blob_id)
     }
 
+    fn get_blob_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u64> {
+        if ty != ConversionType::StargzIndexToRef {
+            return Ok(0);
+        }
+
+        match matches.value_of("blob-data-size") {
+            None => bail!("no value specified for '--blob-data-size'"),
+            Some(v) => {
+                let param = v.trim_start_matches("0x").trim_start_matches("0X");
+                let size = u64::from_str_radix(param, 16)
+                    .context(format!("invalid blob data size {}", v))?;
+                Ok(size)
+            }
+        }
+    }
+
     fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
         if !matches.is_present("disable-check") {
             let mut validator = Validator::new(bootstrap_path)?;
@@ -999,11 +1028,17 @@ impl Command {
         Ok(())
     }
 
-    fn get_chunk_size(matches: &clap::ArgMatches) -> Result<u32> {
+    fn get_chunk_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u32> {
         match matches.value_of("chunk-size") {
-            None => Ok(RAFS_DEFAULT_CHUNK_SIZE as u32),
+            None => {
+                if ty == ConversionType::StargzIndexToRef {
+                    Ok(0x400000u32)
+                } else {
+                    Ok(RAFS_DEFAULT_CHUNK_SIZE as u32)
+                }
+            }
             Some(v) => {
-                let param = v.trim_start_matches("0x").trim_end_matches("0X");
+                let param = v.trim_start_matches("0x").trim_start_matches("0X");
                 let chunk_size =
                     u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
                 if chunk_size as u64 > RAFS_MAX_CHUNK_SIZE
