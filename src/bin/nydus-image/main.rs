@@ -100,7 +100,8 @@ impl OutputSerializer {
                 trace,
             };
 
-            serde_json::to_writer(w, &output).context("failed to write result to output file")?;
+            serde_json::to_writer_pretty(w, &output)
+                .context("failed to write result to output file")?;
         }
 
         Ok(())

@@ -47,9 +47,10 @@ use std::io::Result;
 use std::path::PathBuf;
 
 use flexi_logger::{
-    self, colored_opt_format, opt_format, Cleanup, Criterion, FileSpec, Logger, Naming,
+    self, style, Cleanup, Criterion, DeferredNow, FileSpec, Logger, Naming,
+    TS_DASHES_BLANK_COLONS_DOT_BLANK,
 };
-use log::LevelFilter;
+use log::{Level, LevelFilter, Record};
 
 pub mod signal;
 
@@ -111,6 +112,70 @@ impl BuildTimeInfo {
         };
 
         (info_string, info)
+    }
+}
+
+fn get_file_name<'a>(record: &'a Record) -> Option<&'a str> {
+    record.file().map(|v| match v.rfind("/src/") {
+        None => v,
+        Some(pos) => match v[..pos].rfind('/') {
+            None => &v[pos..],
+            Some(p) => &v[p..],
+        },
+    })
+}
+
+fn opt_format(
+    w: &mut dyn std::io::Write,
+    now: &mut DeferredNow,
+    record: &Record,
+) -> std::result::Result<(), std::io::Error> {
+    let level = record.level();
+    if level == Level::Info {
+        write!(
+            w,
+            "[{}] {} {}",
+            now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK),
+            record.level(),
+            &record.args()
+        )
+    } else {
+        write!(
+            w,
+            "[{}] {} [{}:{}] {}",
+            now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK),
+            record.level(),
+            get_file_name(record).unwrap_or("<unnamed>"),
+            record.line().unwrap_or(0),
+            &record.args()
+        )
+    }
+}
+
+fn colored_opt_format(
+    w: &mut dyn std::io::Write,
+    now: &mut DeferredNow,
+    record: &Record,
+) -> std::result::Result<(), std::io::Error> {
+    let level = record.level();
+    if level == Level::Info {
+        write!(
+            w,
+            "[{}] {} {}",
+            style(level).paint(now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK)),
+            style(level).paint(level.to_string()),
+            style(level).paint(&record.args().to_string())
+        )
+    } else {
+        write!(
+            w,
+            "[{}] {} [{}:{}] {}",
+            style(level).paint(now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK)),
+            style(level).paint(level.to_string()),
+            get_file_name(record).unwrap_or("<unnamed>"),
+            record.line().unwrap_or(0),
+            style(level).paint(&record.args().to_string())
+        )
     }
 }
 
