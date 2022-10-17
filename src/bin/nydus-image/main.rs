@@ -263,7 +263,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("fs-version")
                         .short('v')
                         .help("RAFS filesystem format version number:")
-                        .default_value("5")
+                        .default_value("6")
                         .value_parser(["5", "6"]),
                 )
                 .arg(
@@ -280,7 +280,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("aligned-chunk")
                         .long("aligned-chunk")
                         .short('A')
-                        .help("Align uncompressed data chunk to 4K")
+                        .help("Align uncompressed data chunk to 4K, apply to RAFS V5 only")
                         .action(ArgAction::SetTrue)
                 )
                 .arg(
@@ -578,7 +578,6 @@ impl Command {
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let aligned_chunk = if version.is_v6() {
-            info!("v6 enforces to use \"aligned-chunk\".");
             true
         } else {
             // get_fs_version makes sure it's either v6 or v5.

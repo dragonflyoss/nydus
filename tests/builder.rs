@@ -363,7 +363,7 @@ impl<'a> Builder<'a> {
 
         exec(
             format!(
-                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"blob_file\": {:?}}}' --log-level info --compressor {} --whiteout-spec {} {:?}",
+                "{:?} create --bootstrap {:?} --backend-type localfs --backend-config '{{\"blob_file\": {:?}}}' --fs-version 5 --log-level info --compressor {} --whiteout-spec {} {:?}",
                 self.builder,
                 self.work_dir.join("bootstrap-specialfiles"),
                 self.work_dir.join("smoke-localfs-blob"),
