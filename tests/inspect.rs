@@ -8,7 +8,7 @@ pub fn test_image_inspect_cmd(cmd: &str, bootstrap_path: &str) {
         std::env::var("NYDUS_IMAGE").unwrap_or_else(|_| String::from(default_nydus_image));
 
     let output = exec(
-        format!("{} inspect -B {} -R {}", nydus_image, bootstrap_path, cmd).as_str(),
+        format!("{} inspect -R {} {}", nydus_image, cmd, bootstrap_path).as_str(),
         true,
         b"",
     )

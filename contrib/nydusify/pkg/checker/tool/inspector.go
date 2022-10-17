@@ -55,7 +55,6 @@ func (p *Inspector) Inspect(option InspectOption) (interface{}, error) {
 	)
 	args = []string{
 		"inspect",
-		"--bootstrap",
 		option.Bootstrap,
 		"--request",
 	}

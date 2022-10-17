@@ -34,12 +34,11 @@ func NewBuilder(binaryPath string) *Builder {
 func (builder *Builder) Check(option BuilderOption) error {
 	args := []string{
 		"check",
-		"--bootstrap",
-		option.BootstrapPath,
 		"--log-level",
 		"warn",
 		"--output-json",
 		option.DebugOutputPath,
+		option.BootstrapPath,
 	}
 
 	cmd := exec.Command(builder.binaryPath, args...)

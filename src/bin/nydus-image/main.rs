@@ -356,9 +356,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .about("Validate RAFS filesystem metadata")
                 .arg(
                     Arg::new("bootstrap")
-                        .long("bootstrap")
-                        .short('B')
-                        .help("path to RAFS metadata blob (required)")
+                        .help("path to RAFS metadata blob file (required)")
                         .required(true),
                 )
                 .arg(
@@ -375,19 +373,17 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         )
         .subcommand(
             App::new("inspect")
-                .about("Inspects nydus image's filesystem metadata")
+                .about("Inspect RAFS filesystem metadata")
                 .arg(
                     Arg::new("bootstrap")
-                        .long("bootstrap")
-                        .short('B')
-                        .help("path to nydus image's metadata blob (required)")
+                        .help("path to RAFS metadata file)")
                         .required(true),
                 )
                 .arg(
                     Arg::new("request")
                         .long("request")
                         .short('R')
-                        .help("inspect nydus image's filesystem metadata in request mode")
+                        .help("inspect RAFS filesystem metadata in request mode")
                         .required(false),
                 )
         )
