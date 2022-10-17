@@ -26,6 +26,7 @@ use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::metadata::RafsVersion;
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
+use nydus_storage::meta::format_blob_meta_features;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
 use serde::{Deserialize, Serialize};
@@ -827,15 +828,16 @@ impl Command {
             .check(verbose)
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
-        println!("RAFS metadata is valid, data blobs: ");
+        println!("RAFS filesystem metadata is valid and references data blobs: ");
         let mut blob_ids = Vec::new();
         for (idx, blob) in blobs.iter().enumerate() {
             println!(
-                "\t {}: {}, compressed size 0x{:x}, uncompressed size 0x{:x}",
+                "\t {}: {}, compressed size 0x{:x}, uncompressed size 0x{:x}, meta features: {}",
                 idx,
                 blob.blob_id(),
                 blob.compressed_size(),
-                blob.uncompressed_size()
+                blob.uncompressed_size(),
+                format_blob_meta_features(blob.meta_flags()),
             );
             blob_ids.push(blob.blob_id().to_string());
         }

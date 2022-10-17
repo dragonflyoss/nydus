@@ -1070,6 +1070,19 @@ pub trait BlobMetaChunkInfo {
     fn get_data(&self) -> u64;
 }
 
+/// Generate description string for blob meta features.
+pub fn format_blob_meta_features(features: u32) -> String {
+    let mut output = String::new();
+    if features & BLOB_META_FEATURE_4K_ALIGNED != 0 {
+        output += "4K-align ";
+    }
+    if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+        output += "chunk-v2 ";
+    }
+
+    output.trim_end().to_string()
+}
+
 fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<u16>>(val: T) -> T {
     (val + T::from(0xfff)) & !T::from(0xfff)
 }
