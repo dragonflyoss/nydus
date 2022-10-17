@@ -19,8 +19,12 @@ use self::lz4_standard::*;
 mod zstd_standard;
 use self::zstd_standard::*;
 
+#[cfg(feature = "zran")]
+pub mod zlib_random;
+
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
+/// Supported compression algorithms.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Algorithm {
     None,
@@ -92,18 +96,13 @@ impl TryFrom<u64> for Algorithm {
 }
 
 impl Algorithm {
+    /// Check whether the compression algorithm is none.
     pub fn is_none(self) -> bool {
         self == Self::None
     }
 }
 
-// Algorithm::LZ4Block:
-// 1. Default ratio
-// 2. No prepend size
-
-// For compatibility reason, we use liblz4 version to compress/decompress directly
-// with data blocks so that we don't really care about lz4 header magic numbers like
-// as being done with all these rust lz4 implementations
+/// Compress data with the specified compression algorithm.
 pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
     let src_size = src.len();
     if src_size == 0 {
@@ -157,10 +156,80 @@ pub fn decompress(
     }
 }
 
+/// Stream decoder for zlib/gzip.
+pub struct ZlibDecoder<R> {
+    stream: GzDecoder<BufReader<R>>,
+}
+
+impl<R: Read> ZlibDecoder<R> {
+    pub fn new(reader: R) -> Self {
+        ZlibDecoder {
+            stream: GzDecoder::new(BufReader::new(reader)),
+        }
+    }
+}
+
+impl<R: Read> Read for ZlibDecoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.stream.read(buf)
+    }
+}
+
+/// Estimate the maximum compressed data size from uncompressed data size.
+///
+/// Gzip is special that it doesn't carry compress_size. We need to read the maximum possible size
+/// of compressed data for `chunk_decompress_size`, and try to decompress `chunk_decompress_size`
+/// bytes of data out of it.
+//
+// Per man(1) gzip
+// The worst case expansion is a few bytes for the gzip file header, plus 5 bytes every 32K block,
+// or an expansion ratio of 0.015% for large files.
+//
+// Per http://www.zlib.org/rfc-gzip.html#header-trailer, each member has the following structure:
+// +---+---+---+---+---+---+---+---+---+---+
+// |ID1|ID2|CM |FLG|     MTIME     |XFL|OS | (more-->)
+// +---+---+---+---+---+---+---+---+---+---+
+// (if FLG.FEXTRA set)
+// +---+---+=================================+
+// | XLEN  |...XLEN bytes of "extra field"...| (more-->)
+// +---+---+=================================+
+// (if FLG.FNAME set)
+// +=========================================+
+// |...original file name, zero-terminated...| (more-->)
+// +=========================================+
+// (if FLG.FCOMMENT set)
+// +===================================+
+// |...file comment, zero-terminated...| (more-->)
+// +===================================+
+// (if FLG.FHCRC set)
+// +---+---+
+// | CRC16 |
+// +---+---+
+// +=======================+
+// |...compressed blocks...| (more-->)
+// +=======================+
+//   0   1   2   3   4   5   6   7
+// +---+---+---+---+---+---+---+---+
+// |     CRC32     |     ISIZE     |
+// +---+---+---+---+---+---+---+---+
+// gzip head+footer is at least 10+8 bytes, stargz header doesn't include any flags
+// so it's 18 bytes. Let's read at least 128 bytes more, to allow the decompressor to
+// find out end of the gzip stream.
+//
+// Ideally we should introduce a streaming cache for stargz that maintains internal
+// chunks and expose stream APIs.
+pub fn compute_compressed_gzip_size(size: usize, max_size: usize) -> usize {
+    let size = size + 10 + 8 + 5 + (size / (16 << 10)) * 5 + 128;
+
+    std::cmp::min(size, max_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom};
+    use std::path::Path;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
@@ -418,53 +487,25 @@ mod tests {
         assert_eq!(sz, 4097);
         assert_eq!(buf, decompressed);
     }
-}
 
-/// Estimate the maximum compressed data size from uncompressed data size.
-///
-/// Gzip is special that it doesn't carry compress_size. We need to read the maximum possible size
-/// of compressed data for `chunk_decompress_size`, and try to decompress `chunk_decompress_size`
-/// bytes of data out of it.
-//
-// Per man(1) gzip
-// The worst case expansion is a few bytes for the gzip file header, plus 5 bytes every 32K block,
-// or an expansion ratio of 0.015% for large files.
-//
-// Per http://www.zlib.org/rfc-gzip.html#header-trailer, each member has the following structure:
-// +---+---+---+---+---+---+---+---+---+---+
-// |ID1|ID2|CM |FLG|     MTIME     |XFL|OS | (more-->)
-// +---+---+---+---+---+---+---+---+---+---+
-// (if FLG.FEXTRA set)
-// +---+---+=================================+
-// | XLEN  |...XLEN bytes of "extra field"...| (more-->)
-// +---+---+=================================+
-// (if FLG.FNAME set)
-// +=========================================+
-// |...original file name, zero-terminated...| (more-->)
-// +=========================================+
-// (if FLG.FCOMMENT set)
-// +===================================+
-// |...file comment, zero-terminated...| (more-->)
-// +===================================+
-// (if FLG.FHCRC set)
-// +---+---+
-// | CRC16 |
-// +---+---+
-// +=======================+
-// |...compressed blocks...| (more-->)
-// +=======================+
-//   0   1   2   3   4   5   6   7
-// +---+---+---+---+---+---+---+---+
-// |     CRC32     |     ISIZE     |
-// +---+---+---+---+---+---+---+---+
-// gzip head+footer is at least 10+8 bytes, stargz header doesn't include any flags
-// so it's 18 bytes. Let's read at least 128 bytes more, to allow the decompressor to
-// find out end of the gzip stream.
-//
-// Ideally we should introduce a streaming cache for stargz that maintains internal
-// chunks and expose stream APIs.
-pub fn compute_compressed_gzip_size(size: usize, max_size: usize) -> usize {
-    let size = size + 10 + 8 + 5 + (size / (16 << 10)) * 5 + 128;
+    #[test]
+    fn test_zlib_decoder() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = Path::new(root_dir).join("../tests/texture/zran/zlib_sample.txt.gz");
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let mut decoder = ZlibDecoder::new(file);
+        let mut buf = [0u8; 8];
 
-    std::cmp::min(size, max_size)
+        decoder.read_exact(&mut buf).unwrap();
+        assert_eq!(&String::from_utf8_lossy(&buf), "This is ");
+        decoder.read_exact(&mut buf).unwrap();
+        assert_eq!(&String::from_utf8_lossy(&buf), "a test f");
+        decoder.read_exact(&mut buf).unwrap();
+        assert_eq!(&String::from_utf8_lossy(&buf), "ile for ");
+        let ret = decoder.read(&mut buf).unwrap();
+        assert_eq!(ret, 6);
+        assert_eq!(&String::from_utf8_lossy(&buf[0..6]), "zlib.\n");
+        let ret = decoder.read(&mut buf).unwrap();
+        assert_eq!(ret, 0);
+    }
 }
