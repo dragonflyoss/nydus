@@ -175,6 +175,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                             "directory",
                             "dir-rafs",
                             "tar-rafs",
+                            "targz-rafs",
                             "stargztoc-ref",
                             "stargz_index",
                         ])

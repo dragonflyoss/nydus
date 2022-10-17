@@ -29,6 +29,7 @@ use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
 use nydus_utils::compact::makedev;
+use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, ByteSize};
 use tar::{Archive, Entry, EntryType, Header};
@@ -43,12 +44,14 @@ use crate::core::tree::Tree;
 
 enum TarReader {
     File(File),
+    TarGz(ZlibDecoder<File>),
 }
 
 impl Read for TarReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             TarReader::File(f) => f.read(buf),
+            TarReader::TarGz(f) => f.read(buf),
         }
     }
 }
@@ -91,9 +94,10 @@ impl<'a> TarballTreeBuilder<'a> {
 
         let reader = match self.ty {
             ConversionType::TarToRafs => TarReader::File(file),
-            /*
             ConversionType::StargzToRafs | ConversionType::TargzToRafs => {
+                TarReader::TarGz(ZlibDecoder::new(file))
             }
+            /*
             ConversionType::StargzToRef | ConversionType::TargzToRef => {
                 assert!(self.writer.is_none());
             }
