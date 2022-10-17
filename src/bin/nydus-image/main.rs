@@ -246,7 +246,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .short('c')
                         .help("algorithm to compress image data blob:")
                         .required(false)
-                        .default_value("lz4_block")
+                        .default_value("zstd")
                         .value_parser(["none", "lz4_block", "gzip", "zstd"]),
                 )
                 .arg(
