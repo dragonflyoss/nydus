@@ -759,7 +759,7 @@ impl Command {
             }
         }
 
-        info!("build successfully: {:?}", build_output,);
+        info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
     }
 

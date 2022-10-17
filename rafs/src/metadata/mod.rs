@@ -248,24 +248,24 @@ bitflags! {
     /// Rafs filesystem feature flags.
     #[derive(Serialize)]
     pub struct RafsSuperFlags: u64 {
-        /// V5: Data chunks are not compressed.
-        const COMPRESS_NONE = 0x0000_0001;
-        /// V5: Data chunks are compressed with lz4_block.
-        const COMPRESS_LZ4_BLOCK = 0x0000_0002;
-        /// V5: Use blake3 hash algorithm to calculate digest.
-        const DIGESTER_BLAKE3 = 0x0000_0004;
-        /// V5: Use sha256 hash algorithm to calculate digest.
-        const DIGESTER_SHA256 = 0x0000_0008;
+        /// Data chunks are not compressed.
+        const COMPRESSION_NONE = 0x0000_0001;
+        /// Data chunks are compressed with lz4_block.
+        const COMPRESSION_LZ4 = 0x0000_0002;
+        /// Use blake3 hash algorithm to calculate digest.
+        const HASH_BLAKE3 = 0x0000_0004;
+        /// Use sha256 hash algorithm to calculate digest.
+        const HASH_SHA256 = 0x0000_0008;
         /// Inode has explicit uid gid fields.
         ///
         /// If unset, use nydusd process euid/egid for all inodes at runtime.
         const EXPLICIT_UID_GID = 0x0000_0010;
         /// Inode may have associated extended attributes.
         const HAS_XATTR = 0x0000_0020;
-        // V5: Data chunks are compressed with gzip
-        const COMPRESS_GZIP = 0x0000_0040;
-        // V5: Data chunks are compressed with zstd
-        const COMPRESS_ZSTD = 0x0000_0080;
+        // Data chunks are compressed with gzip
+        const COMPRESSION_GZIP = 0x0000_0040;
+        // Data chunks are compressed with zstd
+        const COMPRESSION_ZSTD = 0x0000_0080;
     }
 }
 
@@ -285,8 +285,8 @@ impl Display for RafsSuperFlags {
 impl From<RafsSuperFlags> for digest::Algorithm {
     fn from(flags: RafsSuperFlags) -> Self {
         match flags {
-            x if x.contains(RafsSuperFlags::DIGESTER_BLAKE3) => digest::Algorithm::Blake3,
-            x if x.contains(RafsSuperFlags::DIGESTER_SHA256) => digest::Algorithm::Sha256,
+            x if x.contains(RafsSuperFlags::HASH_BLAKE3) => digest::Algorithm::Blake3,
+            x if x.contains(RafsSuperFlags::HASH_SHA256) => digest::Algorithm::Sha256,
             _ => digest::Algorithm::Blake3,
         }
     }
@@ -295,8 +295,8 @@ impl From<RafsSuperFlags> for digest::Algorithm {
 impl From<digest::Algorithm> for RafsSuperFlags {
     fn from(d: digest::Algorithm) -> RafsSuperFlags {
         match d {
-            digest::Algorithm::Blake3 => RafsSuperFlags::DIGESTER_BLAKE3,
-            digest::Algorithm::Sha256 => RafsSuperFlags::DIGESTER_SHA256,
+            digest::Algorithm::Blake3 => RafsSuperFlags::HASH_BLAKE3,
+            digest::Algorithm::Sha256 => RafsSuperFlags::HASH_SHA256,
         }
     }
 }
@@ -304,10 +304,10 @@ impl From<digest::Algorithm> for RafsSuperFlags {
 impl From<RafsSuperFlags> for compress::Algorithm {
     fn from(flags: RafsSuperFlags) -> Self {
         match flags {
-            x if x.contains(RafsSuperFlags::COMPRESS_NONE) => compress::Algorithm::None,
-            x if x.contains(RafsSuperFlags::COMPRESS_LZ4_BLOCK) => compress::Algorithm::Lz4Block,
-            x if x.contains(RafsSuperFlags::COMPRESS_GZIP) => compress::Algorithm::GZip,
-            x if x.contains(RafsSuperFlags::COMPRESS_ZSTD) => compress::Algorithm::Zstd,
+            x if x.contains(RafsSuperFlags::COMPRESSION_NONE) => compress::Algorithm::None,
+            x if x.contains(RafsSuperFlags::COMPRESSION_LZ4) => compress::Algorithm::Lz4Block,
+            x if x.contains(RafsSuperFlags::COMPRESSION_GZIP) => compress::Algorithm::GZip,
+            x if x.contains(RafsSuperFlags::COMPRESSION_ZSTD) => compress::Algorithm::Zstd,
             _ => compress::Algorithm::Lz4Block,
         }
     }
@@ -316,10 +316,10 @@ impl From<RafsSuperFlags> for compress::Algorithm {
 impl From<compress::Algorithm> for RafsSuperFlags {
     fn from(c: compress::Algorithm) -> RafsSuperFlags {
         match c {
-            compress::Algorithm::None => RafsSuperFlags::COMPRESS_NONE,
-            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESS_LZ4_BLOCK,
-            compress::Algorithm::GZip => RafsSuperFlags::COMPRESS_GZIP,
-            compress::Algorithm::Zstd => RafsSuperFlags::COMPRESS_ZSTD,
+            compress::Algorithm::None => RafsSuperFlags::COMPRESSION_NONE,
+            compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESSION_LZ4,
+            compress::Algorithm::GZip => RafsSuperFlags::COMPRESSION_GZIP,
+            compress::Algorithm::Zstd => RafsSuperFlags::COMPRESSION_ZSTD,
         }
     }
 }
@@ -917,24 +917,24 @@ mod tests {
     #[test]
     fn test_rafs_compressor() {
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_NONE),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_NONE),
             compress::Algorithm::None
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_GZIP),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_GZIP),
             compress::Algorithm::GZip
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_LZ4_BLOCK),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_LZ4),
             compress::Algorithm::Lz4Block
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_ZSTD),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_ZSTD),
             compress::Algorithm::Zstd
         );
         assert_eq!(
             compress::Algorithm::from(
-                RafsSuperFlags::COMPRESS_ZSTD | RafsSuperFlags::COMPRESS_LZ4_BLOCK,
+                RafsSuperFlags::COMPRESSION_ZSTD | RafsSuperFlags::COMPRESSION_LZ4,
             ),
             compress::Algorithm::Lz4Block
         );
@@ -947,17 +947,15 @@ mod tests {
     #[test]
     fn test_rafs_digestor() {
         assert_eq!(
-            digest::Algorithm::from(RafsSuperFlags::DIGESTER_BLAKE3),
+            digest::Algorithm::from(RafsSuperFlags::HASH_BLAKE3),
             digest::Algorithm::Blake3
         );
         assert_eq!(
-            digest::Algorithm::from(RafsSuperFlags::DIGESTER_SHA256),
+            digest::Algorithm::from(RafsSuperFlags::HASH_SHA256),
             digest::Algorithm::Sha256
         );
         assert_eq!(
-            digest::Algorithm::from(
-                RafsSuperFlags::DIGESTER_SHA256 | RafsSuperFlags::DIGESTER_BLAKE3,
-            ),
+            digest::Algorithm::from(RafsSuperFlags::HASH_SHA256 | RafsSuperFlags::HASH_BLAKE3,),
             digest::Algorithm::Blake3
         );
         assert_eq!(

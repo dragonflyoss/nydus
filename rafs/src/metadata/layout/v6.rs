@@ -342,10 +342,10 @@ impl RafsV6SuperBlockExt {
     /// Validate the Rafs v6 super block.
     pub fn validate(&self) -> Result<()> {
         let mut flags = self.flags();
-        flags &= RafsSuperFlags::COMPRESS_NONE.bits()
-            | RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits()
-            | RafsSuperFlags::COMPRESS_GZIP.bits()
-            | RafsSuperFlags::COMPRESS_ZSTD.bits();
+        flags &= RafsSuperFlags::COMPRESSION_NONE.bits()
+            | RafsSuperFlags::COMPRESSION_LZ4.bits()
+            | RafsSuperFlags::COMPRESSION_GZIP.bits()
+            | RafsSuperFlags::COMPRESSION_ZSTD.bits();
         if flags.count_ones() != 1 {
             return Err(einval!(format!(
                 "invalid flags {:#x} related to compression algorithm in Rafs v6 extended superblock",
@@ -354,7 +354,7 @@ impl RafsV6SuperBlockExt {
         }
 
         let mut flags = self.flags();
-        flags &= RafsSuperFlags::DIGESTER_BLAKE3.bits() | RafsSuperFlags::DIGESTER_SHA256.bits();
+        flags &= RafsSuperFlags::HASH_BLAKE3.bits() | RafsSuperFlags::HASH_SHA256.bits();
         if flags.count_ones() != 1 {
             return Err(einval!(format!(
                 "invalid flags {:#x} related to digest algorithm in Rafs v6 extended superblock",
@@ -384,10 +384,10 @@ impl RafsV6SuperBlockExt {
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         let c: RafsSuperFlags = compressor.into();
 
-        self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_ZSTD.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_LZ4.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_GZIP.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_ZSTD.bits();
         self.s_flags |= c.bits();
     }
 
@@ -405,8 +405,8 @@ impl RafsV6SuperBlockExt {
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();
 
-        self.s_flags &= !RafsSuperFlags::DIGESTER_BLAKE3.bits();
-        self.s_flags &= !RafsSuperFlags::DIGESTER_SHA256.bits();
+        self.s_flags &= !RafsSuperFlags::HASH_BLAKE3.bits();
+        self.s_flags &= !RafsSuperFlags::HASH_SHA256.bits();
         self.s_flags |= c.bits();
     }
 

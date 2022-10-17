@@ -223,10 +223,10 @@ impl RafsV5SuperBlock {
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         let c: RafsSuperFlags = compressor.into();
 
-        self.s_flags &= !RafsSuperFlags::COMPRESS_NONE.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_LZ4_BLOCK.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_GZIP.bits();
-        self.s_flags &= !RafsSuperFlags::COMPRESS_ZSTD.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_LZ4.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_GZIP.bits();
+        self.s_flags &= !RafsSuperFlags::COMPRESSION_ZSTD.bits();
         self.s_flags |= c.bits();
     }
 
@@ -234,8 +234,8 @@ impl RafsV5SuperBlock {
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();
 
-        self.s_flags &= !RafsSuperFlags::DIGESTER_BLAKE3.bits();
-        self.s_flags &= !RafsSuperFlags::DIGESTER_SHA256.bits();
+        self.s_flags &= !RafsSuperFlags::HASH_BLAKE3.bits();
+        self.s_flags &= !RafsSuperFlags::HASH_SHA256.bits();
         self.s_flags |= c.bits();
     }
 
@@ -1726,51 +1726,51 @@ pub mod tests {
     fn test_rafsv5_superflags() {
         assert_eq!(
             RafsSuperFlags::from(digest::Algorithm::Blake3),
-            RafsSuperFlags::DIGESTER_BLAKE3
+            RafsSuperFlags::HASH_BLAKE3
         );
         assert_eq!(
             RafsSuperFlags::from(digest::Algorithm::Sha256),
-            RafsSuperFlags::DIGESTER_SHA256
+            RafsSuperFlags::HASH_SHA256
         );
         assert_eq!(
-            digest::Algorithm::from(RafsSuperFlags::DIGESTER_BLAKE3),
+            digest::Algorithm::from(RafsSuperFlags::HASH_BLAKE3),
             digest::Algorithm::Blake3
         );
         assert_eq!(
-            digest::Algorithm::from(RafsSuperFlags::DIGESTER_SHA256),
+            digest::Algorithm::from(RafsSuperFlags::HASH_SHA256),
             digest::Algorithm::Sha256
         );
 
         assert_eq!(
             RafsSuperFlags::from(compress::Algorithm::Zstd),
-            RafsSuperFlags::COMPRESS_ZSTD
+            RafsSuperFlags::COMPRESSION_ZSTD
         );
         assert_eq!(
             RafsSuperFlags::from(compress::Algorithm::GZip),
-            RafsSuperFlags::COMPRESS_GZIP
+            RafsSuperFlags::COMPRESSION_GZIP
         );
         assert_eq!(
             RafsSuperFlags::from(compress::Algorithm::Lz4Block),
-            RafsSuperFlags::COMPRESS_LZ4_BLOCK
+            RafsSuperFlags::COMPRESSION_LZ4
         );
         assert_eq!(
             RafsSuperFlags::from(compress::Algorithm::None),
-            RafsSuperFlags::COMPRESS_NONE
+            RafsSuperFlags::COMPRESSION_NONE
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_ZSTD),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_ZSTD),
             compress::Algorithm::Zstd
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_GZIP),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_GZIP),
             compress::Algorithm::GZip
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_LZ4_BLOCK),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_LZ4),
             compress::Algorithm::Lz4Block
         );
         assert_eq!(
-            compress::Algorithm::from(RafsSuperFlags::COMPRESS_NONE),
+            compress::Algorithm::from(RafsSuperFlags::COMPRESSION_NONE),
             compress::Algorithm::None
         );
     }
