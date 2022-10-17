@@ -64,6 +64,8 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 pub struct OutputSerializer {
     /// The binary version of builder (nydus-image).
     version: String,
+    /// RAFS meta data file path.
+    bootstrap: String,
     /// Represents all blob in blob table ordered by blob index, this field
     /// only include the layer that does have a blob, and should be deprecated
     /// in future, use `artifacts` field to replace.
@@ -93,6 +95,7 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
+                bootstrap: build_output.bootstrap_path.unwrap_or_default(),
                 blobs: build_output.blobs,
                 trace,
             };
@@ -107,6 +110,7 @@ impl OutputSerializer {
         matches: &clap::ArgMatches,
         build_info: &BuildTimeInfo,
         blob_ids: Vec<String>,
+        bootstrap: &Path,
     ) -> Result<()> {
         let output_json: Option<PathBuf> = matches
             .get_one::<String>("output-json")
@@ -123,6 +127,7 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
+                bootstrap: bootstrap.display().to_string(),
                 blobs: blob_ids,
                 trace,
             };
@@ -866,7 +871,7 @@ impl Command {
             blob_ids.push(blob.blob_id().to_string());
         }
 
-        OutputSerializer::dump_with_check(matches, build_info, blob_ids)?;
+        OutputSerializer::dump_with_check(matches, build_info, blob_ids, bootstrap_path)?;
 
         Ok(())
     }
