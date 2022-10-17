@@ -10,20 +10,20 @@ use std::io::SeekFrom;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
-use nydus_utils::digest::{DigestHasher, RafsDigest};
-use rafs::metadata::layout::v5::{
+use nydus_rafs::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
-use rafs::metadata::layout::v6::{
+use nydus_rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
-use rafs::metadata::layout::RafsBlobTable;
+use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
+use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper};
+use nydus_utils::digest::{DigestHasher, RafsDigest};
 
-use rafs::metadata::layout::RAFS_V5_ROOT_INODE;
-use rafs::metadata::{RafsMode, RafsStore, RafsSuper};
-
-use super::context::{BlobManager, BootstrapContext, BootstrapManager, BuildContext, SourceType};
+use super::context::{
+    ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
+};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::tree::Tree;
 
@@ -60,28 +60,25 @@ impl Bootstrap {
         bootstrap_ctx: &mut BootstrapContext,
         tree: &mut Tree,
     ) -> Result<()> {
-        tree.node.index = RAFS_V5_ROOT_INODE;
+        // used to compute nid(ino) for v6
+        let root_offset = bootstrap_ctx.offset;
+        let mut nodes = Vec::with_capacity(0x10000);
+
+        // Special handling of the root inode
+        assert!(tree.node.is_dir());
+        // 0 is reserved and 1 also matches RAFS_V5_ROOT_INODE.
+        tree.node.index = 1;
         // Rafs v6 root inode number can't be decided until the end of dumping.
         if ctx.fs_version.is_v5() {
             tree.node.inode.set_ino(RAFS_V5_ROOT_INODE);
         }
-        // Filesystem walking skips root inode within subsequent while loop, however, we allow
-        // user to pass the source root as prefetch hint. Check it here.
         ctx.prefetch.insert_if_need(&tree.node);
-
-        bootstrap_ctx.inode_map.insert(
-            (tree.node.layer_idx, tree.node.src_ino, tree.node.src_dev),
-            vec![tree.node.index],
-        );
-
-        // indicates where v6's meta_addr starts
-        let root_offset = bootstrap_ctx.offset;
-        let mut nodes = Vec::with_capacity(0x10000);
         nodes.push(tree.node.clone());
-        self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes)?;
 
+        self.build_rafs(ctx, bootstrap_ctx, tree, &mut nodes)?;
         if ctx.fs_version.is_v6() && !bootstrap_ctx.layered {
-            self.update_dirents(&mut nodes, tree, root_offset);
+            // generate on-disk metadata layout for v6
+            self.rafsv6_update_dirents(&mut nodes, tree, root_offset);
         }
         bootstrap_ctx.nodes = nodes;
 
@@ -141,13 +138,12 @@ impl Bootstrap {
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
 
-        // Sort children list by name, so that we can improve performance in fs read_dir using
-        // binary search.
-        tree.children
-            .sort_by_key(|child| child.node.name().to_os_string());
-
         // Maybe the parent is not a directory in multi-layers build scenario, so we check here.
         if parent.is_dir() {
+            // Sort children list by name, so that we can improve performance in fs read_dir using
+            // binary search.
+            tree.children
+                .sort_by_key(|child| child.node.name().to_os_string());
             parent.inode.set_child_index(index);
             parent.inode.set_child_count(tree.children.len() as u32);
             if ctx.fs_version.is_v6() {
@@ -155,9 +151,11 @@ impl Bootstrap {
             }
         }
 
-        tree.node.v6_offset = parent.v6_offset;
-        // alignment for inode, which is 32 bytes;
-        bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
+        if ctx.fs_version.is_v6() {
+            tree.node.v6_offset = parent.v6_offset;
+            // alignment for inode, which is 32 bytes;
+            bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
+        }
 
         // Cache dir tree for BFS walk
         let mut dirs: Vec<&mut Tree> = Vec::new();
@@ -187,7 +185,7 @@ impl Bootstrap {
                 }
                 indexes.push(index);
                 // set offset for rafs v6 hardlinks
-                v6_hardlink_offset = Some(nodes[indexes[0] as usize - 1].v6_offset);
+                v6_hardlink_offset = Some(nodes[first_index as usize - 1].v6_offset);
             } else {
                 child.node.inode.set_ino(index);
                 child.node.inode.set_nlink(1);
@@ -199,10 +197,8 @@ impl Bootstrap {
             }
 
             // update bootstrap_ctx.offset for rafs v6.
-            if !child.node.is_dir() {
-                if ctx.fs_version.is_v6() {
-                    child.node.v6_set_offset(bootstrap_ctx, v6_hardlink_offset);
-                }
+            if !child.node.is_dir() && ctx.fs_version.is_v6() {
+                child.node.v6_set_offset(bootstrap_ctx, v6_hardlink_offset);
                 bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
             }
 
@@ -263,8 +259,9 @@ impl Bootstrap {
     }
 
     /// Rafsv6 update offset
-    fn update_dirents(&self, nodes: &mut Vec<Node>, tree: &mut Tree, parent_offset: u64) {
+    fn rafsv6_update_dirents(&self, nodes: &mut Vec<Node>, tree: &mut Tree, parent_offset: u64) {
         let node = &mut nodes[tree.node.index as usize - 1];
+        let node_offset = node.v6_offset;
         if !node.is_dir() {
             return;
         }
@@ -276,7 +273,7 @@ impl Bootstrap {
         #[allow(clippy::useless_conversion)]
         {
             node.v6_dirents
-                .push((node.v6_offset, OsString::from("."), libc::S_IFDIR.into()));
+                .push((node_offset, OsString::from("."), libc::S_IFDIR.into()));
             node.v6_dirents
                 .push((parent_offset, OsString::from(".."), libc::S_IFDIR.into()));
         }
@@ -285,7 +282,7 @@ impl Bootstrap {
         for child in tree.children.iter_mut() {
             trace!(
                 "{:?} child {:?} offset {}, mode {}",
-                tree.node.name(),
+                node.name(),
                 child.node.name(),
                 child.node.v6_offset,
                 child.node.inode.mode()
@@ -295,17 +292,15 @@ impl Bootstrap {
                 child.node.name().to_os_string(),
                 child.node.inode.mode(),
             ));
-
             if child.node.is_dir() {
                 dirs.push(child);
             }
         }
-        /* XXX: `.' and `..' should be sorted globally too */
         node.v6_dirents
             .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()) as std::cmp::Ordering);
 
         for dir in dirs {
-            self.update_dirents(nodes, dir, tree.node.v6_offset);
+            self.rafsv6_update_dirents(nodes, dir, node_offset);
         }
     }
 
@@ -349,7 +344,7 @@ impl Bootstrap {
     }
 
     /// Calculate inode digest for directory.
-    fn digest_node(
+    fn rafsv5_digest_node(
         &self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
@@ -377,17 +372,37 @@ impl Bootstrap {
     pub fn dump(
         &mut self,
         ctx: &mut BuildContext,
+        bootstrap_storage: &mut Option<ArtifactStorage>,
         bootstrap_ctx: &mut BootstrapContext,
         blob_table: &RafsBlobTable,
     ) -> Result<()> {
         match blob_table {
-            RafsBlobTable::V5(table) => self.dump_rafsv5(ctx, bootstrap_ctx, table),
-            RafsBlobTable::V6(table) => self.dump_rafsv6(ctx, bootstrap_ctx, table),
+            RafsBlobTable::V5(table) => self.rafsv5_dump(ctx, bootstrap_ctx, table)?,
+            RafsBlobTable::V6(table) => self.rafsv6_dump(ctx, bootstrap_ctx, table)?,
+        }
+
+        if let Some(ArtifactStorage::FileDir(p)) = bootstrap_storage {
+            let reader = bootstrap_ctx.writer.as_reader()?;
+            let mut digester = RafsDigest::hasher(ctx.digester);
+            let mut buf = vec![0u8; 16384];
+            loop {
+                let sz = reader.read(&mut buf)?;
+                if sz == 0 {
+                    break;
+                }
+                digester.digest_update(&buf[..sz]);
+            }
+            let name = digester.digest_finalize().to_string();
+            bootstrap_ctx.writer.finalize(Some(name.clone()))?;
+            *bootstrap_storage = Some(ArtifactStorage::SingleFile(p.join(name)));
+            Ok(())
+        } else {
+            bootstrap_ctx.writer.finalize(Some(String::default()))
         }
     }
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
-    fn dump_rafsv5(
+    fn rafsv5_dump(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
@@ -395,7 +410,7 @@ impl Bootstrap {
     ) -> Result<()> {
         // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
         for idx in (0..bootstrap_ctx.nodes.len()).rev() {
-            self.digest_node(ctx, bootstrap_ctx, idx);
+            self.rafsv5_digest_node(ctx, bootstrap_ctx, idx);
         }
 
         // Set inode table
@@ -439,7 +454,7 @@ impl Bootstrap {
         if ctx.explicit_uidgid {
             super_block.set_explicit_uidgid();
         }
-        if ctx.source_type == SourceType::StargzIndex {
+        if ctx.source_type == ConversionType::StargzIndexToRef {
             super_block.set_block_size(STARGZ_DEFAULT_BLOCK_SIZE);
         }
 
@@ -514,13 +529,11 @@ impl Bootstrap {
             Result<()>
         )?;
 
-        bootstrap_ctx.writer.finalize(Some(String::default()))?;
-
         Ok(())
     }
 
     /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
-    fn dump_rafsv6(
+    fn rafsv6_dump(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
@@ -537,8 +550,6 @@ impl Bootstrap {
         // |   |         |devslot     |             |                                              |
         // +---+---------+------------+-------------+----------------------------------------------+
 
-        let blob_table_size = blob_table.size() as u64;
-
         // get devt_slotoff
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         for entry in blob_table.entries.iter() {
@@ -549,30 +560,31 @@ impl Bootstrap {
                     "only blob id of length 64 is supported, blob id {:?}",
                     entry.blob_id()
                 ));
+            } else if entry.uncompressed_size() / EROFS_BLOCK_SIZE > u32::MAX as u64 {
+                bail!(format!(
+                    "uncompressed blob size (0x:{:x}) is too big",
+                    entry.uncompressed_size()
+                ));
             }
             devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
-            devslot.set_blocks(
-                (entry.uncompressed_size() / EROFS_BLOCK_SIZE)
-                    .try_into()
-                    .unwrap(),
-            );
+            devslot.set_blocks((entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32);
             devslot.set_mapped_blkaddr(0);
             devtable.push(devslot);
         }
 
         let devtable_len = devtable.len() * size_of::<RafsV6Device>();
+        let blob_table_size = blob_table.size() as u64;
         let blob_table_offset = align_offset(
             (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
             EROFS_BLOCK_SIZE as u64,
         );
+        let blob_table_entries = blob_table.entries.len();
         trace!(
             "devtable len {} blob table offset {} blob table size {}",
             devtable_len,
             blob_table_offset,
             blob_table_size
         );
-
-        let blob_table_entries = blob_table.entries.len();
 
         let (prefetch_table_offset, prefetch_table_size) =
             // If blob_table_size equal to 0, there is no prefetch.
@@ -604,20 +616,17 @@ impl Bootstrap {
         };
 
         let root_nid = calculate_nid(
-            bootstrap_ctx.nodes[0].v6_offset - orig_meta_addr + meta_addr,
+            bootstrap_ctx.nodes[0].v6_offset + (meta_addr - orig_meta_addr),
             meta_addr,
         );
 
         // Dump superblock
         let mut sb = RafsV6SuperBlock::new();
         sb.set_inos(bootstrap_ctx.nodes.len() as u64);
-        // FIXME
         sb.set_blocks(EROFS_BLOCK_SIZE as u32);
         sb.set_root_nid(root_nid as u16);
         sb.set_meta_addr(meta_addr);
-
         sb.set_extra_devices(blob_table_entries as u16);
-
         sb.store(bootstrap_ctx.writer.as_mut())
             .context("failed to store SB")?;
 
@@ -653,6 +662,7 @@ impl Bootstrap {
         blob_table
             .store(bootstrap_ctx.writer.as_mut())
             .context("failed to store extended blob table")?;
+
         // collect all chunks in this bootstrap.
         // HashChunkDict cannot be used here, because there will be duplicate chunks between layers,
         // but there is no deduplication during the actual construction.
@@ -684,7 +694,6 @@ impl Bootstrap {
         let prefetch_table = ctx
             .prefetch
             .get_rafsv6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
-
         if let Some(mut pt) = prefetch_table {
             // Device slots are very close to extended super block.
             ext_sb.set_prefetch_table_offset(prefetch_table_offset);
@@ -693,14 +702,7 @@ impl Bootstrap {
                 .writer
                 .seek_offset(prefetch_table_offset as u64)
                 .context("failed seek prefetch table offset")?;
-
             pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
-        }
-
-        // EROFS does not have inode table, so we lose the chance to decide if this
-        // image has xattr. So we have to rewrite extended super block.
-        if ctx.has_xattr {
-            ext_sb.set_has_xattr();
         }
 
         // append chunk info table.
@@ -714,9 +716,7 @@ impl Bootstrap {
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end for chunk table")?;
-
         let chunk_table_offset = pos + padding;
-
         let mut chunk_table_size: u64 = 0;
         for (_, chunk) in chunk_cache.iter() {
             let chunk_size = chunk
@@ -724,14 +724,17 @@ impl Bootstrap {
                 .context("failed to dump chunk table")?;
             chunk_table_size += chunk_size as u64;
         }
-
         debug!(
             "chunk_table offset {} size {}",
             chunk_table_offset, chunk_table_size
         );
 
         ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
-
+        // EROFS does not have inode table, so we lose the chance to decide if this
+        // image has xattr. So we have to rewrite extended super block.
+        if ctx.has_xattr {
+            ext_sb.set_has_xattr();
+        }
         bootstrap_ctx.writer.seek(SeekFrom::Start(ext_sb_offset))?;
         ext_sb
             .store(bootstrap_ctx.writer.as_mut())
@@ -755,8 +758,6 @@ impl Bootstrap {
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
-
-        bootstrap_ctx.writer.finalize(Some(String::default()))?;
 
         Ok(())
     }

@@ -7,7 +7,7 @@
 
 use std::convert::TryFrom;
 use std::fmt;
-use std::io::Error;
+use std::io::{Error, Read};
 use std::str::FromStr;
 
 use sha2::digest::Digest;
@@ -39,7 +39,7 @@ impl fmt::Display for Algorithm {
 impl FromStr for Algorithm {
     type Err = Error;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "blake3" => Ok(Self::Blake3),
             "sha256" => Ok(Self::Sha256),
@@ -163,6 +163,19 @@ impl RafsDigest {
         };
 
         RafsDigest { data }
+    }
+
+    /// Compute message digest with the given algorithm by read data from the reader.
+    pub fn from_reader<R: Read>(reader: &mut R, algorithm: Algorithm) -> std::io::Result<Self> {
+        let mut digester = Self::hasher(algorithm);
+        let mut buf = vec![0u8; 16384];
+        loop {
+            let sz = reader.read(&mut buf)?;
+            if sz == 0 {
+                return Ok(digester.digest_finalize());
+            }
+            digester.digest_update(&buf[..sz]);
+        }
     }
 
     pub fn hasher(algorithm: Algorithm) -> RafsDigestHasher {

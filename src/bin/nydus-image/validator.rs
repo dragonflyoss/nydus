@@ -5,9 +5,11 @@
 //! Validator for RAFS format
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rafs::metadata::{RafsMode, RafsSuper};
+use nydus_rafs::metadata::{RafsMode, RafsSuper};
+use nydus_storage::device::BlobInfo;
 
 use crate::tree::Tree;
 
@@ -22,28 +24,20 @@ impl Validator {
         Ok(Self { sb })
     }
 
-    pub fn check(&mut self, verbosity: bool) -> Result<Vec<String>> {
+    pub fn check(&mut self, verbosity: bool) -> Result<Vec<Arc<BlobInfo>>> {
         let err = "failed to load bootstrap for validator";
         let tree = Tree::from_bootstrap(&self.sb, &mut ()).context(err)?;
 
         tree.iterate(&mut |node| {
             if verbosity {
-                info!("{}", node);
+                println!("inode: {}", node);
                 for chunk in &node.chunks {
-                    debug!("chunk {}", chunk);
+                    println!("\t chunk: {}", chunk);
                 }
             }
             true
         })?;
 
-        let blob_ids = self
-            .sb
-            .superblock
-            .get_blob_infos()
-            .iter()
-            .map(|entry| entry.blob_id().to_owned())
-            .collect::<Vec<String>>();
-
-        Ok(blob_ids)
+        Ok(self.sb.superblock.get_blob_infos())
     }
 }

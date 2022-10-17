@@ -154,9 +154,11 @@ pub trait RafsIoWrite: Write + Seek + 'static {
         Ok(())
     }
 
-    /// Get all data has been written.
-    fn data(&self) -> &[u8] {
-        unimplemented!();
+    /// Get a reader to fetch all data written.
+    ///
+    /// No more data should be written after calling as_reader().
+    fn as_reader(&mut self) -> Result<&mut dyn Read> {
+        unimplemented!()
     }
 }
 

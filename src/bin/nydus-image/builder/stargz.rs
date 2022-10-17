@@ -724,8 +724,13 @@ impl Builder for StargzBuilder {
 
         // Dump bootstrap file
         let blob_table = blob_mgr.to_blob_table(ctx)?;
-        bootstrap.dump(ctx, &mut bootstrap_ctx, &blob_table)?;
+        bootstrap.dump(
+            ctx,
+            &mut bootstrap_mgr.bootstrap_storage,
+            &mut bootstrap_ctx,
+            &blob_table,
+        )?;
 
-        BuildOutput::new(blob_mgr)
+        BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }
 }

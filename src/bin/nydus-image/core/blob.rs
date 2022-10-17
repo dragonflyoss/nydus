@@ -10,26 +10,21 @@ use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, try_round_up_4k};
 use sha2::Digest;
 
-use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, SourceType};
+use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
 use super::layout::BlobLayout;
 use super::node::Node;
 
 pub struct Blob {}
 
 impl Blob {
-    pub fn new() -> Self {
-        Self {}
-    }
-
     /// Dump blob file and generate chunks
     pub fn dump(
-        &mut self,
         ctx: &BuildContext,
         nodes: &mut [Node],
         blob_mgr: &mut BlobManager,
         blob_writer: &mut Option<ArtifactWriter>,
     ) -> Result<()> {
-        if ctx.source_type == SourceType::Directory {
+        if ctx.source_type == ConversionType::DirectoryToRafs {
             let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch, nodes)?;
             let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
             for (idx, inode) in inodes.iter().enumerate() {
@@ -101,11 +96,8 @@ impl Blob {
         // Write blob metadata to the data blob itself.
         if let Some(writer) = blob_writer {
             let pos = writer.pos()?;
-            let (data, header) = Self::dump_meta_data_raw(
-                pos,
-                &blob_ctx.blob_meta_info,
-                compress::Algorithm::Lz4Block,
-            )?;
+            let (data, header) =
+                Self::dump_meta_data_raw(pos, &blob_ctx.blob_meta_info, ctx.compressor)?;
 
             writer.write_all(&data)?;
             writer.write_all(header.as_bytes())?;

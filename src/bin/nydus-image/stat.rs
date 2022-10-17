@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
-use rafs::metadata::{RafsMode, RafsSuper};
+use nydus_rafs::metadata::{RafsMode, RafsSuper};
 use serde::Serialize;
 
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};

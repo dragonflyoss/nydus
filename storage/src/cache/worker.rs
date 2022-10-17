@@ -473,7 +473,8 @@ mod tests {
             .is_ok());
         assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 3);
         thread::sleep(Duration::from_secs(1));
-        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 2);
+        assert!(mgr.prefetch_inflight.load(Ordering::Acquire) <= 2);
+        assert!(mgr.prefetch_inflight.load(Ordering::Acquire) >= 1);
         thread::sleep(Duration::from_secs(3));
         assert!(mgr.prefetch_inflight.load(Ordering::Acquire) >= 1);
         assert!(mgr.prefetch_delayed.load(Ordering::Acquire) >= 1);
