@@ -44,7 +44,7 @@ use crate::core::tree::Tree;
 
 enum TarReader {
     File(File),
-    TarGz(ZlibDecoder<File>),
+    TarGz(Box<ZlibDecoder<File>>),
 }
 
 impl Read for TarReader {
@@ -94,8 +94,8 @@ impl<'a> TarballTreeBuilder<'a> {
 
         let reader = match self.ty {
             ConversionType::TarToRafs => TarReader::File(file),
-            ConversionType::StargzToRafs | ConversionType::TargzToRafs => {
-                TarReader::TarGz(ZlibDecoder::new(file))
+            ConversionType::EStargzToRafs | ConversionType::TargzToRafs => {
+                TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
             }
             /*
             ConversionType::StargzToRef | ConversionType::TargzToRef => {
@@ -133,7 +133,9 @@ impl<'a> TarballTreeBuilder<'a> {
             let path = path.components().as_path();
             self.make_lost_dirs(&path, &mut nodes)?;
             let node = self.parse_entry(&nodes, &mut entry, path)?;
-            nodes.push(node);
+            if self.ty != ConversionType::EStargzToRafs || !Self::filter_estargz_files(path) {
+                nodes.push(node);
+            }
         }
 
         // Convert generated RAFS nodes into a tree.
@@ -461,6 +463,18 @@ impl<'a> TarballTreeBuilder<'a> {
         }
         tree.node.v5_set_dir_size(RafsVersion::V5, &tree.children);
     }
+
+    // TOC MUST be a JSON file contained as the last tar entry and MUST be named stargz.index.json.
+    //
+    // The Landmark file MUST be a regular file entry with 4 bits contents 0xf in eStargz.
+    // It MUST be recorded to TOC as a TOCEntry. Prefetch landmark MUST be named .prefetch.landmark.
+    // No-prefetch landmark MUST be named .no.prefetch.landmark.
+    // TODO: check "a regular file entry with 4 bits contents 0xf"
+    fn filter_estargz_files(path: &Path) -> bool {
+        path == Path::new("/stargz.index.json")
+            || path == Path::new("/.prefetch.landmark")
+            || path == Path::new("/.no.prefetch.landmark")
+    }
 }
 
 pub(crate) struct TarballBuilder {
@@ -487,7 +501,7 @@ impl Builder for TarballBuilder {
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
 
         match self.ty {
-            ConversionType::StargzToRafs
+            ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
@@ -496,7 +510,7 @@ impl Builder for TarballBuilder {
                     return Err(anyhow!("missing configuration for target path"));
                 }
             }
-            ConversionType::StargzToRef | ConversionType::TargzToRef => {}
+            ConversionType::EStargzToRef | ConversionType::TargzToRef => {}
             _ => return Err(anyhow!("unsupported image conversion type '{}'", self.ty)),
         };
 

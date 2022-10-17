@@ -156,7 +156,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
         .about("Build or inspect RAFS filesystems for Nydus accelerated container images.")
         .subcommand(
             SubCommand::with_name("create")
-                .about("Create a RAFS filesystem from a directory, a tarball or an stargz ToC")
+                .about("Create a RAFS filesystem from a directory, an OCI tar file or an estargz file")
                 .arg(
                     Arg::with_name("SOURCE")
                         .help("source to build the RAFS filesystem from")
@@ -174,9 +174,10 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .possible_values(&[
                             "directory",
                             "dir-rafs",
+                            "estargz-rafs",
+                            "estargztoc-ref",
                             "tar-rafs",
                             "targz-rafs",
-                            "stargztoc-ref",
                             "stargz_index",
                         ])
                 )
@@ -234,7 +235,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                 .arg(
                     Arg::with_name("blob-data-size")
                         .long("blob-data-size")
-                        .help("specify blob data size of stargz conversion")
+                        .help("specify blob data size of estargz conversion")
                         .takes_value(true),
                 )
                 .arg(
@@ -624,7 +625,7 @@ impl Command {
                     );
                 }
             }
-            ConversionType::StargzToRafs
+            ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => {
                 Self::ensure_file(&source_path)?;
@@ -642,8 +643,8 @@ impl Command {
                     );
                 }
             }
-            ConversionType::StargzToRef
-            | ConversionType::StargzIndexToRef
+            ConversionType::EStargzToRef
+            | ConversionType::EStargzIndexToRef
             | ConversionType::TargzToRef => {
                 Self::ensure_file(&source_path)?;
                 if inline_bootstrap {
@@ -660,7 +661,7 @@ impl Command {
                     trace!("only sha256 is supported for the conversion, use sha256 for digest");
                 }
                 digester = digest::Algorithm::Sha256;
-                if conversion_type == ConversionType::StargzIndexToRef && blob_id.trim() == "" {
+                if conversion_type == ConversionType::EStargzIndexToRef && blob_id.trim() == "" {
                     bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
             }
@@ -711,9 +712,9 @@ impl Command {
             ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
             ConversionType::DirectoryToStargz => unimplemented!(),
             ConversionType::DirectoryToTargz => unimplemented!(),
-            ConversionType::StargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::StargzToRef => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::StargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
+            ConversionType::EStargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
+            ConversionType::EStargzToRef => Box::new(TarballBuilder::new(conversion_type)),
+            ConversionType::EStargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
             ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TargzToRef => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TargzToStargz => unimplemented!(),
@@ -943,9 +944,9 @@ impl Command {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
-        if conversion_type == ConversionType::StargzIndexToRef
+        if conversion_type == ConversionType::EStargzIndexToRef
             || conversion_type == ConversionType::TargzToRef
-            || conversion_type == ConversionType::StargzToRef
+            || conversion_type == ConversionType::EStargzToRef
         {
             Ok(None)
         } else if let Some(p) = matches
@@ -1022,7 +1023,7 @@ impl Command {
     }
 
     fn get_blob_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u64> {
-        if ty != ConversionType::StargzIndexToRef {
+        if ty != ConversionType::EStargzIndexToRef {
             return Ok(0);
         }
 
@@ -1056,7 +1057,7 @@ impl Command {
     fn get_chunk_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u32> {
         match matches.value_of("chunk-size") {
             None => {
-                if ty == ConversionType::StargzIndexToRef {
+                if ty == ConversionType::EStargzIndexToRef {
                     Ok(0x400000u32)
                 } else {
                     Ok(RAFS_DEFAULT_CHUNK_SIZE as u32)

@@ -46,14 +46,14 @@ impl Blob {
             }
             ConversionType::TarToRafs
             | ConversionType::TargzToRafs
-            | ConversionType::StargzToRafs => {
+            | ConversionType::EStargzToRafs => {
                 if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                     Self::dump_meta_data(ctx, blob_ctx, blob_writer)?;
                 }
             }
             ConversionType::TargzToRef
-            | ConversionType::StargzToRef
-            | ConversionType::StargzIndexToRef
+            | ConversionType::EStargzToRef
+            | ConversionType::EStargzIndexToRef
             | ConversionType::TarToStargz
             | ConversionType::DirectoryToTargz
             | ConversionType::DirectoryToStargz

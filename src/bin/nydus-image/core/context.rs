@@ -43,9 +43,9 @@ pub enum ConversionType {
     DirectoryToRafs,
     DirectoryToStargz,
     DirectoryToTargz,
-    StargzToRafs,
-    StargzToRef,
-    StargzIndexToRef,
+    EStargzToRafs,
+    EStargzToRef,
+    EStargzIndexToRef,
     TargzToRafs,
     TargzToStargz,
     TargzToRef,
@@ -66,9 +66,9 @@ impl FromStr for ConversionType {
             "dir-rafs" => Ok(Self::DirectoryToRafs),
             "dir-stargz" => Ok(Self::DirectoryToStargz),
             "dir-targz" => Ok(Self::DirectoryToTargz),
-            "stargz-rafs" => Ok(Self::StargzToRafs),
-            "stargz-ref" => Ok(Self::StargzToRef),
-            "stargztoc-ref" => Ok(Self::StargzIndexToRef),
+            "estargz-rafs" => Ok(Self::EStargzToRafs),
+            "estargz-ref" => Ok(Self::EStargzToRef),
+            "estargztoc-ref" => Ok(Self::EStargzIndexToRef),
             "targz-rafs" => Ok(Self::TargzToRafs),
             "targz-stargz" => Ok(Self::TargzToStargz),
             "targz-ref" => Ok(Self::TargzToRef),
@@ -76,7 +76,7 @@ impl FromStr for ConversionType {
             "tar-stargz" => Ok(Self::TarToStargz),
             // kept for backward compatibility
             "directory" => Ok(Self::DirectoryToRafs),
-            "stargz_index" => Ok(Self::StargzIndexToRef),
+            "stargz_index" => Ok(Self::EStargzIndexToRef),
             _ => Err(anyhow!("invalid conversion type")),
         }
     }
@@ -88,9 +88,9 @@ impl fmt::Display for ConversionType {
             ConversionType::DirectoryToRafs => write!(f, "dir-rafs"),
             ConversionType::DirectoryToStargz => write!(f, "dir-stargz"),
             ConversionType::DirectoryToTargz => write!(f, "dir-targz"),
-            ConversionType::StargzToRafs => write!(f, "stargz-rafs"),
-            ConversionType::StargzToRef => write!(f, "stargz-ref"),
-            ConversionType::StargzIndexToRef => write!(f, "stargztoc-ref"),
+            ConversionType::EStargzToRafs => write!(f, "estargz-rafs"),
+            ConversionType::EStargzToRef => write!(f, "estargz-ref"),
+            ConversionType::EStargzIndexToRef => write!(f, "estargztoc-ref"),
             ConversionType::TargzToRafs => write!(f, "targz-rafs"),
             ConversionType::TargzToStargz => write!(f, "targz-ref"),
             ConversionType::TargzToRef => write!(f, "targz-ref"),
@@ -435,7 +435,7 @@ impl BlobContext {
     // TODO: check the logic to reset prefetch size
     pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
         if (self.compressed_blob_size > 0
-            || (ctx.conversion_type == ConversionType::StargzIndexToRef
+            || (ctx.conversion_type == ConversionType::EStargzIndexToRef
                 && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
         {
