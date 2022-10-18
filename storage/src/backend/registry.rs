@@ -198,6 +198,7 @@ impl RegistryState {
                 Some(ReqBody::Form(form)),
                 &mut headers,
                 true,
+                true,
             )
             .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
         let ret: TokenResponse = token_resp.json().map_err(|e| {
@@ -312,7 +313,7 @@ impl RegistryReader {
     /// Request:  POST https://my-registry.com/test/repo/blobs/uploads
     ///           header: authorization: Basic base64(<username:password>)
     /// Response: status: 200 Ok
-    fn request<R: Read + Send + 'static>(
+    fn request<R: Read + Clone + Send + 'static>(
         &self,
         method: Method,
         url: &str,
@@ -336,16 +337,40 @@ impl RegistryReader {
         if let Some(data) = data {
             return self
                 .connection
-                .call(method, url, None, Some(data), &mut headers, catch_status)
+                .call(
+                    method,
+                    url,
+                    None,
+                    Some(data),
+                    &mut headers,
+                    catch_status,
+                    false,
+                )
                 .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
-        let resp = self
+        let mut resp = self
             .connection
-            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
+            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
             .map_err(RegistryError::Request)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
+            if headers.contains_key(HEADER_AUTHORIZATION) {
+                // If we request registry (harbor server) with expired authorization token,
+                // the `www-authenticate: Basic realm="harbor"` in response headers is not expected.
+                // Related code in harbor:
+                // https://github.com/goharbor/harbor/blob/v2.5.3/src/server/middleware/v2auth/auth.go#L98
+                //
+                // We can remove the expired authorization token and
+                // resend the request to get the correct "www-authenticate" value.
+                headers.remove(HEADER_AUTHORIZATION);
+
+                resp = self
+                    .connection
+                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+                    .map_err(RegistryError::Request)?;
+            };
+
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
                 // Get token from registry authorization server
                 if let Some(auth) = RegistryState::parse_auth(resp_auth_header, &self.state.auth) {
@@ -353,6 +378,7 @@ impl RegistryReader {
                         .state
                         .get_auth_header(auth, &self.connection)
                         .map_err(|e| RegistryError::Common(e.to_string()))?;
+
                     headers.insert(
                         HEADER_AUTHORIZATION,
                         HeaderValue::from_str(auth_header.as_str()).unwrap(),
@@ -361,7 +387,7 @@ impl RegistryReader {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .connection
-                        .call(method, url, None, data, &mut headers, catch_status)
+                        .call(method, url, None, data, &mut headers, catch_status, false)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -416,6 +442,7 @@ impl RegistryReader {
                     None,
                     None,
                     &mut headers,
+                    false,
                     false,
                 )
                 .map_err(RegistryError::Request)?;
@@ -473,6 +500,7 @@ impl RegistryReader {
                             None,
                             &mut headers,
                             true,
+                            false,
                         )
                         .map_err(RegistryError::Request);
                     match resp_ret {

@@ -143,7 +143,15 @@ impl BlobReader for OssReader {
 
         let resp = self
             .connection
-            .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, &mut headers, true)
+            .call::<&[u8]>(
+                Method::HEAD,
+                url.as_str(),
+                None,
+                None,
+                &mut headers,
+                true,
+                false,
+            )
             .map_err(OssError::Request)?;
         let content_length = resp
             .headers()
@@ -178,7 +186,15 @@ impl BlobReader for OssReader {
         // Safe because the the call() is a synchronous operation.
         let mut resp = self
             .connection
-            .call::<&[u8]>(Method::GET, url.as_str(), None, None, &mut headers, true)
+            .call::<&[u8]>(
+                Method::GET,
+                url.as_str(),
+                None,
+                None,
+                &mut headers,
+                true,
+                false,
+            )
             .map_err(OssError::Request)?;
         Ok(resp
             .copy_to(&mut buf)
