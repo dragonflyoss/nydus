@@ -424,10 +424,17 @@ impl Default for ProxyConfig {
 /// Configuration for mirror.
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct MirrorConfig {
-    /// Mirror server URL, for example http://127.0.0.1:65001
+    /// Mirror server URL, for example http://127.0.0.1:65001.
     pub host: String,
-    /// HTTP request headers to be passed to mirror server
-    pub headers: Option<HashMap<String, String>>,
+    /// HTTP request headers to be passed to mirror server.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// Whether the authorization process is through mirror? default false.
+    /// true: authorization through mirror, e.g. Using normal registry as mirror.
+    /// false: authorization through original registry,
+    /// e.g. when using Dragonfly server as mirror, authorization through it will affect performance.
+    #[serde(default)]
+    pub auth_through: bool,
 }
 
 #[derive(Debug)]

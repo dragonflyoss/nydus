@@ -579,7 +579,28 @@ impl FileCacheEntry {
         }
 
         if !bitmap.wait_for_range_ready(chunk_index, count)? {
-            Err(eio!("failed to read data from storage backend"))
+            if prefetch {
+                return Err(eio!("failed to read data from storage backend"));
+            }
+            // if we are in ondemand path, retry for the timeout chunks
+            for chunk in chunks {
+                if self.chunk_map.is_ready(chunk.as_ref())? {
+                    continue;
+                }
+                info!("retry for timeout chunk, {}", chunk.id());
+                let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
+                self.read_raw_chunk(chunk.as_ref(), &mut buf, false, None)
+                    .map_err(|e| eio!(format!("read_raw_chunk failed, {:?}", e)))?;
+                if self.dio_enabled {
+                    self.adjust_buffer_for_dio(&mut buf)
+                }
+                Self::persist_chunk(&self.file, chunk.uncompressed_offset(), &buf)
+                    .map_err(|e| eio!(format!("do_fetch_chunk failed to persist data, {:?}", e)))?;
+                self.chunk_map
+                    .set_ready_and_clear_pending(chunk.as_ref())
+                    .unwrap_or_else(|e| error!("set chunk ready failed, {}", e));
+            }
+            Ok(total_size)
         } else {
             Ok(total_size)
         }

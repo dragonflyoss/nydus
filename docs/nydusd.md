@@ -256,6 +256,9 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
           {
             // Mirror server URL (include scheme), e.g. Dragonfly dfdaemon server URL
             "host": "http://dragonfly1.io:65001",
+            // true: Send the authorization request to the mirror e.g. another docker registry.
+            // false: Authorization request won't be relayed by the mirror e.g. Dragonfly.
+            "auth_through": false,
             // Headers for mirror server
             "headers": {
               // For Dragonfly dfdaemon server URL, we need to specify "X-Dragonfly-Registry" (include scheme). 
