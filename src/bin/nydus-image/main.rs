@@ -213,7 +213,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("blob")
                         .short('b')
                         .help("path to store generated RAFS filesystem data blob")
-                        .required_unless_present_any(&["backend-type", "type", "blob-dir"]),
+                        .required_unless_present_any(&["type", "blob-dir"]),
                 )
                 .arg(
                     Arg::new("blob-id")
@@ -316,18 +316,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 )
                 .arg(
                     arg_output_json.clone(),
-                )
-                .arg(
-                    Arg::new("backend-type")
-                        .long("backend-type")
-                        .help("[deprecated!] Blob storage backend type, only support localfs for compatibility. Try use --blob instead.")
-                        .requires("backend-config")
-                        .value_parser(["localfs"]),
-                )
-                .arg(
-                    Arg::new("backend-config")
-                        .long("backend-config")
-                        .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility"),
                 )
         )
         .subcommand(
