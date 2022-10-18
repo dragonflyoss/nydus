@@ -134,7 +134,7 @@ impl<R: Read + Send + 'static> Read for Progress<R> {
 
 /// HTTP request data to send to server.
 #[derive(Clone)]
-pub enum ReqBody<R> {
+pub enum ReqBody<R: Clone> {
     Read(Progress<R>, usize),
     Buf(Vec<u8>),
     Form(HashMap<String, String>),
@@ -240,10 +240,29 @@ pub(crate) struct Mirror {
     config: MirrorConfig,
     /// Mirror status, it will be set to false by atomic operation when mirror is not work.
     status: AtomicBool,
-    /// Falied times for mirror, the status will be marked as false when failed_times = failure_limit.
+    /// Failed times requesting mirror, the status will be marked as false when failed_times = failure_limit.
     failed_times: AtomicU8,
     /// Failed limit for mirror.
     failure_limit: u8,
+}
+
+impl Mirror {
+    /// Convert original URL to mirror URL.
+    fn mirror_url(&self, url: &str) -> ConnectionResult<Url> {
+        let mirror_host = Url::parse(self.config.host.as_ref()).map_err(ConnectionError::Url)?;
+        let mut current_url = Url::parse(url).map_err(ConnectionError::Url)?;
+
+        current_url
+            .set_scheme(mirror_host.scheme())
+            .map_err(|_| ConnectionError::Scheme)?;
+        current_url
+            .set_host(mirror_host.host_str())
+            .map_err(|_| ConnectionError::Host)?;
+        current_url
+            .set_port(mirror_host.port())
+            .map_err(|_| ConnectionError::Port)?;
+        Ok(current_url)
+    }
 }
 
 impl Connection {
@@ -354,8 +373,15 @@ impl Connection {
         self.shutdown.store(true, Ordering::Release);
     }
 
-    /// Send a request to server and wait for response.
-    pub fn call<R: Read + Send + 'static>(
+    /// If the auth_through is enable, all requests are send to the mirror server.
+    /// If the auth_through disabled, e.g. P2P/Dragonfly, we try to avoid sending
+    /// non-authorization request to the mirror server, which causes performance loss.
+    /// requesting_auth means this request is to get authorization from a server,
+    /// which must be a non-authorization request.
+    /// IOW, only the requesting_auth is false and the headers contain authorization token,
+    /// we send this request to mirror.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call<R: Read + Clone + Send + 'static>(
         &self,
         method: Method,
         url: &str,
@@ -363,6 +389,8 @@ impl Connection {
         data: Option<ReqBody<R>>,
         headers: &mut HeaderMap,
         catch_status: bool,
+        // This means the request is dedicated to authorization.
+        requesting_auth: bool,
     ) -> ConnectionResult<Response> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ConnectionError::Disconnected);
@@ -370,11 +398,7 @@ impl Connection {
 
         if let Some(proxy) = &self.proxy {
             if proxy.health.ok() {
-                let data_cloned: Option<ReqBody<R>> = match data.as_ref() {
-                    Some(ReqBody::Form(form)) => Some(ReqBody::Form(form.clone())),
-                    Some(ReqBody::Buf(buf)) => Some(ReqBody::Buf(buf.clone())),
-                    _ => None,
-                };
+                let data_cloned = data.as_ref().cloned();
 
                 let http_url: Option<String>;
                 let mut replaced_url = url;
@@ -428,90 +452,89 @@ impl Connection {
         let current_mirror = self.mirror_state.current.load();
 
         if let Some(mirror) = current_mirror.as_ref() {
-            let data_cloned: Option<ReqBody<R>> = match data.as_ref() {
-                Some(ReqBody::Form(form)) => Some(ReqBody::Form(form.clone())),
-                Some(ReqBody::Buf(buf)) => Some(ReqBody::Buf(buf.clone())),
-                _ => None,
-            };
+            // With configuration `auth_through` disabled, we should not intend to send authentication
+            // request to mirror. Mainly because mirrors like P2P/Dragonfly has a poor performance when
+            // relaying non-data requests. But it's still possible that ever returned token is expired.
+            // So mirror might still respond us with status code UNAUTHORIZED, which should be handle
+            // by sending authentication request to the original registry.
+            //
+            // - For non-authentication request with token in request header, handle is as usual requests to registry.
+            //   This request should already take token in header.
+            // - For authentication request
+            //      1. auth_through is disabled(false): directly pass below mirror translations and jump to original registry handler.
+            //      2. auth_through is enabled(true): try to get authenticated from mirror and should also handle status code UNAUTHORIZED.
+            if mirror.config.auth_through
+                || !requesting_auth && headers.contains_key(HEADER_AUTHORIZATION)
+            {
+                let data_cloned = data.as_ref().cloned();
 
-            let mirror_host = Url::parse(&mirror.config.host).map_err(ConnectionError::Url)?;
-
-            let mut current_url = Url::parse(url).map_err(ConnectionError::Url)?;
-
-            current_url
-                .set_scheme(mirror_host.scheme())
-                .map_err(|_| ConnectionError::Scheme)?;
-            current_url
-                .set_host(mirror_host.host_str())
-                .map_err(|_| ConnectionError::Host)?;
-            current_url
-                .set_port(mirror_host.port())
-                .map_err(|_| ConnectionError::Port)?;
-
-            if let Some(working_headers) = &mirror.config.headers {
-                for (key, value) in working_headers.iter() {
+                for (key, value) in mirror.config.headers.iter() {
                     headers.insert(
                         HeaderName::from_str(key).unwrap(),
                         HeaderValue::from_str(value).unwrap(),
                     );
                 }
-            }
 
-            let result = self.call_inner(
-                &self.client,
-                method.clone(),
-                current_url.to_string().as_str(),
-                &query,
-                data_cloned,
-                headers,
-                catch_status,
-                false,
-            );
+                let current_url = mirror.mirror_url(url)?;
+                debug!("mirror server url {}", current_url);
 
-            match result {
-                Ok(resp) => {
-                    if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                        return Ok(resp);
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        "request mirror server failed, mirror: {},  error: {:?}",
-                        format!("{:?}", mirror).to_lowercase(),
-                        err
-                    );
-                    mirror.failed_times.fetch_add(1, Ordering::Relaxed);
+                let result = self.call_inner(
+                    &self.client,
+                    method.clone(),
+                    current_url.as_str(),
+                    &query,
+                    data_cloned,
+                    headers,
+                    catch_status,
+                    false,
+                );
 
-                    if mirror.failed_times.load(Ordering::Relaxed) >= mirror.failure_limit {
-                        warn!(
-                            "reach to fail limit {}, disable mirror: {}",
-                            mirror.failure_limit,
-                            format!("{:?}", mirror).to_lowercase()
-                        );
-                        mirror.status.store(false, Ordering::Relaxed);
-
-                        let mut idx = 0;
-                        loop {
-                            if idx == self.mirror_state.mirrors.len() {
-                                break None;
-                            }
-                            let m = &self.mirror_state.mirrors[idx];
-                            if m.status.load(Ordering::Relaxed) {
-                                warn!(
-                                    "mirror server has been changed to {}",
-                                    format!("{:?}", m).to_lowercase()
-                                );
-                                break Some(m);
-                            }
-
-                            idx += 1;
+                match result {
+                    Ok(resp) => {
+                        // If the response status >= INTERNAL_SERVER_ERROR, fall back to original registry.
+                        if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
+                            return Ok(resp);
                         }
-                        .map(|m| self.mirror_state.current.store(Some(m.clone())))
-                        .unwrap_or_else(|| self.mirror_state.current.store(None));
+                    }
+                    Err(err) => {
+                        warn!(
+                            "request mirror server failed, mirror: {:?},  error: {:?}",
+                            mirror, err
+                        );
+                        mirror.failed_times.fetch_add(1, Ordering::Relaxed);
+
+                        if mirror.failed_times.load(Ordering::Relaxed) >= mirror.failure_limit {
+                            warn!(
+                                "reach to failure limit {}, disable mirror: {:?}",
+                                mirror.failure_limit, mirror
+                            );
+                            mirror.status.store(false, Ordering::Relaxed);
+
+                            let mut idx = 0;
+                            loop {
+                                if idx == self.mirror_state.mirrors.len() {
+                                    break None;
+                                }
+                                let m = &self.mirror_state.mirrors[idx];
+                                if m.status.load(Ordering::Relaxed) {
+                                    warn!("mirror server has been changed to {:?}", m);
+                                    break Some(m);
+                                }
+
+                                idx += 1;
+                            }
+                            .map(|m| self.mirror_state.current.store(Some(m.clone())))
+                            .unwrap_or_else(|| self.mirror_state.current.store(None));
+                        }
                     }
                 }
+                // FIXME: Move to the next available mirror directly when mirror health checking is available.
+                warn!("Failed to request mirror server, fallback to original server.");
+                // Remove mirror-related headers to avoid sending them to the original registry.
+                for (key, _) in mirror.config.headers.iter() {
+                    headers.remove(HeaderName::from_str(key).unwrap());
+                }
             }
-            warn!("Failed to request mirror server, fallback to original server.");
         }
 
         self.call_inner(
@@ -555,7 +578,7 @@ impl Connection {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn call_inner<R: Read + Send + 'static>(
+    fn call_inner<R: Read + Clone + Send + 'static>(
         &self,
         client: &Client,
         method: Method,
