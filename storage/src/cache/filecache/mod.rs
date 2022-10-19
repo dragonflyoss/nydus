@@ -179,7 +179,7 @@ impl FileCacheEntry {
             .create(true)
             .write(true)
             .read(true)
-            .open(&blob_file_path)?;
+            .open(blob_file_path.clone() + ".blob.data")?;
         let (chunk_map, is_direct_chunkmap) =
             Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
         let reader = mgr
@@ -211,11 +211,7 @@ impl FileCacheEntry {
                 assert_eq!(file_size, blob_info.uncompressed_size());
             }
 
-            let meta = FileCacheMeta::new(
-                blob_file_path.to_string(),
-                blob_info.clone(),
-                Some(reader.clone()),
-            )?;
+            let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
             Some(meta)
         } else {
             None

@@ -195,7 +195,7 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     DAEMON_CONTROLLER.shutdown();
 }
 
-const SHARED_DIR_HELP_MESSAGE: &str = "Local directory to share via `passthroughfs` mode";
+const SHARED_DIR_HELP_MESSAGE: &str = "Local directory to share via passthroughfs FUSE driver";
 
 pub fn thread_validator(v: String) -> std::result::Result<(), String> {
     ensure_threads(v).map(|_| ())
@@ -206,10 +206,19 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("bootstrap")
             .long("bootstrap")
             .short("B")
-            .help("Bootstrap file of a rafs filesystem, which also enables `rafs` mode")
+            .help("RAFS filesystem metadata file, which also enables `rafs` mode")
             .takes_value(true)
-            .requires("config")
             .conflicts_with("shared-dir"),
+    )
+    .arg(
+        Arg::with_name("localfs-dir")
+            .long("localfs-dir")
+            .short("D")
+            .help(
+                "Enable 'localfs' storage backend by using the directory for blob and cache files",
+            )
+            .takes_value(true)
+            .conflicts_with("config"),
     )
     .arg(
         Arg::with_name("shared-dir")
@@ -223,7 +232,7 @@ fn append_fs_options(app: App<'static, 'static>) -> App<'static, 'static> {
         Arg::with_name("prefetch-files")
             .long("prefetch-files")
             .short("P")
-            .help("List of file/directory to prefetch")
+            .help("List of files/directories to prefetch")
             .takes_value(true)
             .required(false)
             .requires("bootstrap")
@@ -590,9 +599,45 @@ fn process_fs_service(
 
         Some(cmd)
     } else if let Some(b) = bootstrap {
-        let config = args.value_of("config").ok_or_else(|| {
-            DaemonError::InvalidArguments("config file is not provided".to_string())
-        })?;
+        let config = match args.value_of("localfs-dir") {
+            Some(v) => {
+                format!(
+                    r###"
+        {{
+            "device": {{
+                "backend": {{
+                    "type": "localfs",
+                    "config": {{
+                        "dir": {:?},
+                        "readahead": true
+                    }}
+                }},
+                "cache": {{
+                    "type": "blobcache",
+                    "config": {{
+                        "compressed": false,
+                        "work_dir": {:?}
+                    }}
+                }}
+            }},
+            "mode": "direct",
+            "digest_validate": false,
+            "iostats_files": false
+        }}
+        "###,
+                    v, v
+                )
+            }
+            None => match args.value_of("config") {
+                Some(v) => std::fs::read_to_string(v)?,
+                None => {
+                    let e = DaemonError::InvalidArguments(
+                        "both --config and --localfs-dir are missing".to_string(),
+                    );
+                    return Err(e.into());
+                }
+            },
+        };
 
         let prefetch_files: Option<Vec<String>> = args
             .values_of("prefetch-files")
@@ -601,7 +646,7 @@ fn process_fs_service(
         let cmd = FsBackendMountCmd {
             fs_type: nydus::FsBackendType::Rafs,
             source: b.to_string(),
-            config: std::fs::read_to_string(config)?,
+            config,
             mountpoint: virtual_mnt.to_string(),
             prefetch_files,
         };
