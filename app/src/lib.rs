@@ -22,7 +22,7 @@
 //!
 //! fn main() -> Result<()> {
 //!     let level = cmd.value_of("log-level").unwrap().parse().unwrap();
-//!     let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
+//!     let (bti_string, build_info) = BuildTimeInfo::dump();
 //!     let _cmd = App::new("")
 //!                 .version(bti_string.as_str())
 //!                 .author(crate_authors!())
@@ -65,14 +65,15 @@ pub mod built_info {
     pub const PROFILE: &str = env!("PROFILE");
     pub const RUSTC_VERSION: &str = env!("RUSTC_VERSION");
     pub const BUILT_TIME_UTC: &str = env!("BUILT_TIME_UTC");
+    pub const GIT_COMMIT_VERSION: &str = env!("GIT_COMMIT_VERSION");
     pub const GIT_COMMIT_HASH: &str = env!("GIT_COMMIT_HASH");
 }
 
 /// Dump program build and version information.
-pub fn dump_program_info(prog_version: &str) {
+pub fn dump_program_info() {
     info!(
         "Program Version: {}, Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
-        prog_version,
+        built_info::GIT_COMMIT_VERSION,
         built_info::GIT_COMMIT_HASH,
         built_info::BUILT_TIME_UTC,
         built_info::PROFILE,
@@ -91,10 +92,10 @@ pub struct BuildTimeInfo {
 }
 
 impl BuildTimeInfo {
-    pub fn dump(package_ver: &str) -> (String, Self) {
+    pub fn dump() -> (String, Self) {
         let info_string = format!(
             "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}\nProfile: \t{}\nRustc: \t\t{}\n",
-            package_ver,
+            built_info::GIT_COMMIT_VERSION,
             built_info::GIT_COMMIT_HASH,
             built_info::BUILT_TIME_UTC,
             built_info::PROFILE,
@@ -102,7 +103,7 @@ impl BuildTimeInfo {
         );
 
         let info = Self {
-            package_ver: package_ver.to_string(),
+            package_ver: built_info::GIT_COMMIT_VERSION.to_string(),
             git_commit: built_info::GIT_COMMIT_HASH.to_string(),
             build_time: built_info::BUILT_TIME_UTC.to_string(),
             profile: built_info::PROFILE.to_string(),

@@ -39,7 +39,7 @@ use nydus_app::{BuildTimeInfo, setup_logging};
 
 fn main() -> Result<()> {
     let level = cmd.value_of("log-level").unwrap().parse().unwrap();
-    let (bti_string, build_info) = BuildTimeInfo::dump(crate_version!());
+    let (bti_string, build_info) = BuildTimeInfo::dump();
     let _cmd = App::new("")
         .version(bti_string.as_str())
         .author(crate_authors!())

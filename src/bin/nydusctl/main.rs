@@ -4,7 +4,7 @@
 
 #![deny(warnings)]
 
-#[macro_use(crate_authors, crate_version)]
+#[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
 extern crate anyhow;
@@ -25,11 +25,13 @@ mod commands;
 use commands::{
     CommandBackend, CommandCache, CommandDaemon, CommandFsStats, CommandMount, CommandUmount,
 };
+use nydus_app::BuildTimeInfo;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let (_, build_info) = BuildTimeInfo::dump();
     let app = App::new("A client to query and configure the nydusd daemon\n")
-        .version(crate_version!())
+        .version(build_info.package_ver.as_str())
         .author(crate_authors!())
         .arg(
             Arg::with_name("sock")
