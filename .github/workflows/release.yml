@@ -205,7 +205,7 @@ jobs:
       with:
         name: "Nydus Image Service ${{ env.tag }}"
         body: |
-          Mirror (update in 10 min): https://registry.npmmirror.com/binary.html?path=nydus/${{ env.tag }}/
+          Binaries download mirror (sync within a few hours): https://registry.npmmirror.com/binary.html?path=nydus/${{ env.tag }}/
         generate_release_notes: true
         files: |
           ${{ env.tarballs }}
