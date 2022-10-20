@@ -102,11 +102,9 @@ jobs:
               "target": "musl"
           }
           EOF
-      - name: run test_api
+      - name: run e2e tests
         run: |
           cd /home/runner/work/image-service/image-service/contrib/nydus-test
           sudo mkdir -p /blobdir
           sudo python3 nydus_test_config.py --dist fs_structure.yaml
-          sudo pytest -vs --durations=0  functional-test/test_api.py \
-                                         functional-test/test_nydus.py \
-                                         functional-test/test_layered_image.py
+          sudo pytest -vs -x --durations=0 functional-test/test_api.py functional-test/test_nydus.py functional-test/test_layered_image.py
