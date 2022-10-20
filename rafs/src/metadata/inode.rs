@@ -48,6 +48,14 @@ impl InodeWrapper {
         }
     }
 
+    /// Check whether is a RAFS V5 inode.
+    pub fn is_v5(&self) -> bool {
+        match self {
+            InodeWrapper::V5(_i) => true,
+            InodeWrapper::V6(_i) => false,
+        }
+    }
+
     /// Get file content size of the inode.
     pub fn inode_size(&self) -> usize {
         match self {

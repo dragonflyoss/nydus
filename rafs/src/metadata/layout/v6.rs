@@ -16,7 +16,7 @@ use lazy_static::lazy_static;
 
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{BlobMetaHeaderOndisk, BLOB_META_FEATURE_4K_ALIGNED};
-use nydus_storage::RAFS_MAX_CHUNK_SIZE;
+use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
@@ -1163,7 +1163,7 @@ pub fn calculate_nid(offset: u64, meta_size: u64) -> u64 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RafsV6Blob {
     // SHA256 blob id in string form.
     blob_id: [u8; BLOB_SHA256_LEN],
@@ -1296,14 +1296,13 @@ impl RafsV6Blob {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
                     error!(
-                        "RafsV6Blob: idx {} v.len {} is invalid",
+                        "RafsV6Blob: idx {} blob id length {:x} is invalid",
                         blob_index,
                         v.len()
                     );
                     return false;
                 }
             }
-
             Err(_) => {
                 error!(
                     "RafsV6Blob: idx {} blob_id from_utf8 is invalid",
@@ -1313,10 +1312,11 @@ impl RafsV6Blob {
             }
         }
 
-        if self.blob_index != blob_index.to_le() {
+        if u32::from_le(self.blob_index) != blob_index {
             error!(
-                "RafsV6Blob: blob_index mismatch {} {}",
-                self.blob_index, blob_index
+                "RafsV6Blob: blob_index doesn't match {} {}",
+                u32::from_le(self.blob_index),
+                blob_index
             );
             return false;
         }
@@ -1328,38 +1328,17 @@ impl RafsV6Blob {
             || c_size != chunk_size as u64
         {
             error!(
-                "RafsV6Blob: idx {} invalid c_size {}, count_ones() {}",
-                blob_index,
-                c_size,
-                c_size.count_ones()
+                "RafsV6Blob: idx {} invalid chunk_size {:x}",
+                blob_index, c_size,
             );
             return false;
         }
 
-        if u32::from_le(self.chunk_count) >= (1u32 << 24) {
+        let chunk_count = u32::from_le(self.chunk_count);
+        if chunk_count > RAFS_MAX_CHUNKS_PER_BLOB {
             error!(
-                "RafsV6Blob: idx {} invalid chunk_count {}",
-                blob_index,
-                u32::from_le(self.chunk_count)
-            );
-            return false;
-        }
-
-        let uncompressed_blob_size = u64::from_le(self.uncompressed_size);
-        let compressed_blob_size = u64::from_le(self.compressed_size);
-        // TODO: Make blobs of 4k size aligned.
-
-        if uncompressed_blob_size > BLOB_MAX_SIZE_UNCOMPRESSED {
-            error!(
-                "RafsV6Blob: idx {} invalid uncompressed_size {}",
-                blob_index, uncompressed_blob_size
-            );
-            return false;
-        }
-        if compressed_blob_size > BLOB_MAX_SIZE_COMPRESSED {
-            error!(
-                "RafsV6Blob: idx {} invalid compressed_size {}",
-                blob_index, compressed_blob_size
+                "RafsV6Blob: idx {} invalid chunk_count {:x}",
+                blob_index, chunk_count
             );
             return false;
         }
@@ -1375,14 +1354,34 @@ impl RafsV6Blob {
             return false;
         }
 
+        let uncompressed_blob_size = u64::from_le(self.uncompressed_size);
+        let compressed_blob_size = u64::from_le(self.compressed_size);
+        if uncompressed_blob_size > BLOB_MAX_SIZE_UNCOMPRESSED {
+            error!(
+                "RafsV6Blob: idx {} invalid uncompressed_size {:x}",
+                blob_index, uncompressed_blob_size
+            );
+            return false;
+        }
+        if compressed_blob_size > BLOB_MAX_SIZE_COMPRESSED {
+            error!(
+                "RafsV6Blob: idx {} invalid compressed_size {:x}",
+                blob_index, compressed_blob_size
+            );
+            return false;
+        }
+
         if self.ci_digest != [0u8; 32] {
             error!("RafsV6Blob: idx {} invalid ci_digest", blob_index);
             return false;
         }
 
-        // for now the uncompressed data chunk of v6 image is 4k aligned.
-        if u32::from_le(self.meta_features) & BLOB_META_FEATURE_4K_ALIGNED == 0 {
-            error!("RafsV6Blob: idx {} invalid meta_features", blob_index);
+        let meta_features = u32::from_le(self.meta_features);
+        if meta_features & BLOB_META_FEATURE_4K_ALIGNED == 0 {
+            error!(
+                "RafsV6Blob: idx {} should have 4K-aligned feature bit",
+                blob_index
+            );
             return false;
         }
 

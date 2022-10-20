@@ -12,8 +12,8 @@ const BLOB_METADATA_V1_CHUNK_SIZE_LOW_SHIFT: u64 = 44;
 const BLOB_METADATA_V1_CHUNK_SIZE_HIGH_COMP_SHIFT: u64 = 20;
 const BLOB_METADATA_V1_CHUNK_SIZE_HIGH_UNCOMP_SHIFT: u64 = 12;
 
-/// Blob chunk compression information on disk format.
-#[repr(C)]
+/// Blob chunk compression information on disk format V1.
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct BlobChunkInfoV1Ondisk {
     // 20bits: size (low), 32bits: offset, 4bits: size (high), 8bits reserved

@@ -29,7 +29,8 @@ use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
-    BlobMetaChunkArray, BlobMetaHeaderOndisk, BLOB_META_FEATURE_CHUNK_INFO_V2,
+    BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaHeaderOndisk,
+    BLOB_META_FEATURE_CHUNK_INFO_V2,
 };
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
@@ -434,7 +435,11 @@ impl BlobContext {
         self.blob_meta_info_enabled = enable;
     }
 
-    pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper, data: u64) -> Result<()> {
+    pub fn add_chunk_meta_info(
+        &mut self,
+        chunk: &ChunkWrapper,
+        chunk_info: Option<BlobChunkInfoV2Ondisk>,
+    ) -> Result<()> {
         if self.blob_meta_info_enabled {
             assert_eq!(chunk.index() as usize, self.blob_meta_info.len());
             match &self.blob_meta_info {
@@ -447,14 +452,18 @@ impl BlobContext {
                     );
                 }
                 BlobMetaChunkArray::V2(_) => {
-                    self.blob_meta_info.add_v2(
-                        chunk.compressed_offset(),
-                        chunk.compressed_size(),
-                        chunk.uncompressed_offset(),
-                        chunk.uncompressed_size(),
-                        chunk.is_compressed(),
-                        data,
-                    );
+                    if let Some(info) = chunk_info {
+                        self.blob_meta_info.add_v2_info(info);
+                    } else {
+                        self.blob_meta_info.add_v2(
+                            chunk.compressed_offset(),
+                            chunk.compressed_size(),
+                            chunk.uncompressed_offset(),
+                            chunk.uncompressed_size(),
+                            chunk.is_compressed(),
+                            0,
+                        );
+                    }
                 }
             }
         }
@@ -789,7 +798,6 @@ impl BootstrapManager {
     }
 }
 
-#[derive(Clone)]
 pub struct BuildContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,

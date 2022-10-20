@@ -716,7 +716,7 @@ impl StargzBuilder {
             if !chunk_map.contains_key(chunk.inner.id()) {
                 let chunk_index = blob_ctx.alloc_chunk_index()?;
                 chunk.inner.set_index(chunk_index);
-                blob_ctx.add_chunk_meta_info(&chunk.inner, 0)?;
+                blob_ctx.add_chunk_meta_info(&chunk.inner, None)?;
                 chunk_map.insert(*chunk.inner.id(), chunk_index);
             } else {
                 bail!("stargz unexpected duplicated data chunk");

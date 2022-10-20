@@ -131,9 +131,9 @@ impl<'a> TarballTreeBuilder<'a> {
                 .with_context(|| "failed to to get path from tar entry")?;
             let path = PathBuf::from("/").join(path);
             let path = path.components().as_path();
-            self.make_lost_dirs(&path, &mut nodes)?;
-            let node = self.parse_entry(&nodes, &mut entry, path)?;
-            if self.ty != ConversionType::EStargzToRafs || !Self::filter_estargz_files(path) {
+            if !self.is_special_files(path) {
+                self.make_lost_dirs(&path, &mut nodes)?;
+                let node = self.parse_entry(&nodes, &mut entry, path)?;
                 nodes.push(node);
             }
         }
@@ -464,16 +464,19 @@ impl<'a> TarballTreeBuilder<'a> {
         tree.node.v5_set_dir_size(RafsVersion::V5, &tree.children);
     }
 
+    // Filter out special files of estargz.
+    //
     // TOC MUST be a JSON file contained as the last tar entry and MUST be named stargz.index.json.
     //
     // The Landmark file MUST be a regular file entry with 4 bits contents 0xf in eStargz.
     // It MUST be recorded to TOC as a TOCEntry. Prefetch landmark MUST be named .prefetch.landmark.
     // No-prefetch landmark MUST be named .no.prefetch.landmark.
     // TODO: check "a regular file entry with 4 bits contents 0xf"
-    fn filter_estargz_files(path: &Path) -> bool {
-        path == Path::new("/stargz.index.json")
-            || path == Path::new("/.prefetch.landmark")
-            || path == Path::new("/.no.prefetch.landmark")
+    fn is_special_files(&self, path: &Path) -> bool {
+        self.ty == ConversionType::EStargzToRafs
+            && (path == Path::new("/stargz.index.json")
+                || path == Path::new("/.prefetch.landmark")
+                || path == Path::new("/.no.prefetch.landmark"))
     }
 }
 

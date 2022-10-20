@@ -14,7 +14,7 @@ const CHUNK_V2_UNCOMP_SIZE_SHIFT: u64 = 32;
 //const CHUNK_V2_FLAG_MASK: u64 = 0xff00_0000_0000_0000;
 const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
 
-/// Blob chunk compression information on disk format.
+/// Blob chunk compression information on disk format V2.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct BlobChunkInfoV2Ondisk {

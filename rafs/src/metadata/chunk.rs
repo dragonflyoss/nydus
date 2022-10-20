@@ -184,6 +184,14 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set flag for whether chunk is compressed.
+    pub fn set_compressed(&mut self, compressed: bool) {
+        match self {
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::COMPRESSED, compressed),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::COMPRESSED, compressed),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Set a group of chunk information fields.
     pub fn set_chunk_info(

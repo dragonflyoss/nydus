@@ -31,9 +31,9 @@ use crate::utils::alloc_buf;
 use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 
 mod chunk_info_v1;
-use chunk_info_v1::BlobChunkInfoV1Ondisk;
+pub use chunk_info_v1::BlobChunkInfoV1Ondisk;
 mod chunk_info_v2;
-use chunk_info_v2::BlobChunkInfoV2Ondisk;
+pub use chunk_info_v2::BlobChunkInfoV2Ondisk;
 
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
@@ -624,6 +624,14 @@ impl BlobMetaChunkArray {
                 meta.set_data(data);
                 v.push(meta);
             }
+            BlobMetaChunkArray::V1(_v) => unimplemented!(),
+        }
+    }
+
+    /// Add an v2 chunk information entry with pre-built entry.
+    pub fn add_v2_info(&mut self, chunk_info: BlobChunkInfoV2Ondisk) {
+        match self {
+            BlobMetaChunkArray::V2(v) => v.push(chunk_info),
             BlobMetaChunkArray::V1(_v) => unimplemented!(),
         }
     }

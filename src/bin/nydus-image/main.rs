@@ -171,7 +171,7 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
                         .alias("source-type")
                         .help("image conversion type:")
                         .takes_value(true)
-                        .default_value("directory")
+                        .default_value("dir-rafs")
                         .possible_values(&[
                             "directory",
                             "dir-rafs",
