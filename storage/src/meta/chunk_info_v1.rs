@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::meta::{BlobMetaChunkInfo, BLOB_METADATA_CHUNK_SIZE_MASK};
+use crate::meta::{BlobMetaChunkInfo, BlobMetaState, BLOB_METADATA_CHUNK_SIZE_MASK};
 
 const BLOB_METADATA_V1_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const BLOB_METADATA_V1_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
@@ -85,8 +85,49 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         self.compressed_size() != self.uncompressed_size()
     }
 
+    fn is_zran(&self) -> bool {
+        false
+    }
+
+    fn get_zran_index(&self) -> u32 {
+        unimplemented!()
+    }
+
+    fn get_zran_offset(&self) -> u32 {
+        unimplemented!()
+    }
+
     fn get_data(&self) -> u64 {
         0
+    }
+
+    fn validate(&self, state: &BlobMetaState) -> std::io::Result<()> {
+        if self.compressed_end() > state.compressed_size
+            || self.uncompressed_end() > state.uncompressed_size
+            || self.uncompressed_size() == 0
+            || (!self.is_compressed() && self.uncompressed_size() != self.compressed_size())
+        {
+            warn!(
+                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {} is_compressed {}",
+                state.blob_index,
+                self.compressed_end(),
+                state.compressed_size,
+                self.uncompressed_end(),
+                state.uncompressed_size,
+                self.is_compressed(),
+            );
+            return Err(einval!(format!(
+                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {} is_compressed {}",
+                state.blob_index,
+                self.compressed_end(),
+                state.compressed_size,
+                self.uncompressed_end(),
+                state.uncompressed_size,
+                self.is_compressed(),
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -144,6 +185,7 @@ mod tests {
     fn test_get_chunk_index_with_hole() {
         let state = BlobMetaState {
             blob_index: 0,
+            meta_flags: 0,
             compressed_size: 0,
             uncompressed_size: 0,
             chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
@@ -156,7 +198,9 @@ mod tests {
                     comp_info: 0x00ff_f000_0010_0000,
                 },
             ])),
-            _filemap: FileMapState::default(),
+            zran_info_array: Default::default(),
+            zran_dict_table: Default::default(),
+            filemap: FileMapState::default(),
         };
 
         assert_eq!(
@@ -205,6 +249,7 @@ mod tests {
     fn test_get_chunks() {
         let state = BlobMetaState {
             blob_index: 1,
+            meta_flags: 0,
             compressed_size: 0x6001,
             uncompressed_size: 0x102001,
             chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
@@ -229,7 +274,9 @@ mod tests {
                     comp_info: 0x00ff_f000_0000_5000,
                 },
             ])),
-            _filemap: FileMapState::default(),
+            zran_info_array: Default::default(),
+            zran_dict_table: Default::default(),
+            filemap: FileMapState::default(),
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),

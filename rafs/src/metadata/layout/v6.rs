@@ -1462,6 +1462,12 @@ impl RafsV6Blob {
                         blob_index, zran_count, zran_size
                     );
                     return false;
+                } else if zran_count > RAFS_MAX_CHUNKS_PER_BLOB {
+                    error!(
+                        "RafsV6Blob: idx {} invalid ci_zran_count {:x} is too big",
+                        blob_index, zran_count
+                    );
+                    return false;
                 }
             }
             BLOB_META_FEATURE_CHUNK_INFO_V2 => {

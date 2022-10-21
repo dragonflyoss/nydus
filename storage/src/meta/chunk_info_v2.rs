@@ -4,7 +4,9 @@
 
 use std::fmt::{Display, Formatter};
 
-use crate::meta::{BlobMetaChunkInfo, BLOB_METADATA_CHUNK_SIZE_MASK};
+use crate::meta::{
+    BlobMetaChunkInfo, BlobMetaState, BLOB_METADATA_CHUNK_SIZE_MASK, BLOB_META_FEATURE_ZRAN,
+};
 
 const CHUNK_V2_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const CHUNK_V2_COMP_SIZE_SHIFT: u64 = 40;
@@ -14,6 +16,7 @@ const CHUNK_V2_UNCOMP_SIZE_SHIFT: u64 = 32;
 //const CHUNK_V2_FLAG_MASK: u64 = 0xff00_0000_0000_0000;
 const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
 const CHUNK_V2_FLAG_ZRAN: u64 = 0x2 << 56;
+const CHUNK_V2_FLAG_MASK: u64 = 0x3 << 56;
 
 /// Blob chunk compression information on disk format V2.
 #[repr(C, packed)]
@@ -58,6 +61,10 @@ impl BlobChunkInfoV2Ondisk {
         let mut data = u64::from_le(self.data) & !0x0000_0000_ffff_ffff;
         data |= offset as u64;
         self.data = u64::to_le(data);
+    }
+
+    fn check_flags(&self) -> u8 {
+        ((self.uncomp_info & !CHUNK_V2_FLAG_MASK) >> 56) as u8
     }
 }
 
@@ -110,8 +117,72 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         self.uncomp_info & CHUNK_V2_FLAG_COMPRESSED != 0
     }
 
+    fn is_zran(&self) -> bool {
+        self.uncomp_info & CHUNK_V2_FLAG_ZRAN != 0
+    }
+
+    fn get_zran_index(&self) -> u32 {
+        assert!(self.is_zran());
+        (u64::from_le(self.data) >> 32) as u32
+    }
+
+    fn get_zran_offset(&self) -> u32 {
+        assert!(self.is_zran());
+        u64::from_le(self.data) as u32
+    }
+
     fn get_data(&self) -> u64 {
         self.data
+    }
+
+    fn validate(&self, state: &BlobMetaState) -> std::io::Result<()> {
+        if self.compressed_end() > state.compressed_size
+            || self.uncompressed_end() > state.uncompressed_size
+            || self.uncompressed_size() == 0
+            || self.compressed_size() == 0
+            || (!self.is_compressed() && self.uncompressed_size() != self.compressed_size())
+        {
+            return Err(einval!(format!(
+                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {} is_compressed {}",
+                state.blob_index,
+                self.compressed_end(),
+                self.compressed_size(),
+                self.uncompressed_end(),
+                self.uncompressed_size(),
+                self.is_compressed(),
+            )));
+        }
+
+        let invalid_flags = self.check_flags();
+        if invalid_flags != 0 {
+            return Err(einval!(format!("unknown chunk flags {:x}", invalid_flags)));
+        }
+
+        if state.meta_flags & BLOB_META_FEATURE_ZRAN == 0 && self.is_zran() {
+            return Err(einval!("invalid chunk flag ZRan for non-ZRan blob"));
+        } else if self.is_zran() {
+            let index = self.get_zran_index() as usize;
+            if index >= state.zran_info_array.len() {
+                return Err(einval!(format!(
+                    "ZRan index {:x} is too big, max {:x}",
+                    self.get_zran_index(),
+                    state.zran_info_array.len()
+                )));
+            }
+            let ctx = &state.zran_info_array[index];
+            if self.get_zran_offset() >= ctx.out_size()
+                || self.get_zran_offset() + self.uncompressed_size() > ctx.out_size()
+            {
+                return Err(einval!(format!(
+                    "ZRan range {:x}/{:x} is invalid, should be with in 0/{:x}",
+                    self.get_zran_offset(),
+                    self.uncompressed_size(),
+                    ctx.out_size()
+                )));
+            }
+        }
+
+        Ok(())
     }
 }
 
