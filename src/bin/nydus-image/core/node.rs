@@ -31,6 +31,7 @@ use nydus_rafs::metadata::layout::v6::{
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsStore, RafsVersion};
 use nydus_rafs::RafsIoWrite;
+use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::compress;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, round_down_4k, round_up, try_round_up_4k, ByteSize};
@@ -393,7 +394,7 @@ impl Node {
             };
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];
-            let chunk = self.read_file_chunk(ctx, reader, chunk_data)?;
+            let (chunk, chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
             if let Some(h) = inode_hasher.as_mut() {
                 h.digest_update(chunk.id().as_ref());
             }
@@ -414,10 +415,10 @@ impl Node {
             chunk.set_blob_index(blob_index);
             chunk.set_index(chunk_index);
             chunk.set_file_offset(file_offset);
-            let _ = self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
+            self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
 
             blob_size += chunk.compressed_size() as u64;
-            blob_ctx.add_chunk_meta_info(&chunk, None)?;
+            blob_ctx.add_chunk_meta_info(&chunk, chunk_info)?;
             blob_mgr.layered_chunk_dict.add_chunk(chunk.clone());
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
@@ -532,14 +533,32 @@ impl Node {
         ctx: &BuildContext,
         reader: &mut R,
         buf: &mut [u8],
-    ) -> Result<ChunkWrapper> {
-        reader
-            .read_exact(buf)
-            .with_context(|| format!("failed to read node file {:?}", self.path))?;
-        let chunk_id = RafsDigest::from_buf(buf, ctx.digester);
+    ) -> Result<(ChunkWrapper, Option<BlobChunkInfoV2Ondisk>)> {
         let mut chunk = self.inode.create_chunk();
+        let mut chunk_info = None;
+        if let Some(ref zran) = ctx.blob_zran_generator {
+            let mut zran = zran.lock().unwrap();
+            zran.start_chunk(ctx.chunk_size as u64)?;
+            reader
+                .read_exact(buf)
+                .with_context(|| format!("failed to read node file {:?}", self.path))?;
+            let info = zran.finish_chunk()?;
+
+            chunk.set_uncompressed_offset(info.uncompressed_offset());
+            chunk.set_uncompressed_size(info.uncompressed_size());
+            chunk.set_compressed_offset(info.compressed_offset());
+            chunk.set_compressed_size(info.compressed_size());
+            chunk.set_compressed(true);
+            chunk_info = Some(info);
+        } else {
+            reader
+                .read_exact(buf)
+                .with_context(|| format!("failed to read node file {:?}", self.path))?;
+        }
+
+        let chunk_id = RafsDigest::from_buf(buf, ctx.digester);
         chunk.set_id(chunk_id);
-        Ok(chunk)
+        Ok((chunk, chunk_info))
     }
 
     fn dump_file_chunk(
@@ -549,7 +568,7 @@ impl Node {
         blob_writer: &mut Option<ArtifactWriter>,
         chunk_data: &[u8],
         chunk: &mut ChunkWrapper,
-    ) -> Result<u64> {
+    ) -> Result<()> {
         // Compress chunk data
         let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
             .with_context(|| format!("failed to compress node file {:?}", self.path))?;
@@ -585,7 +604,7 @@ impl Node {
         chunk.set_compressed_size(compressed_size);
         chunk.set_compressed(is_compressed);
 
-        Ok(0)
+        Ok(())
     }
 
     fn find_duplicated_chunk(

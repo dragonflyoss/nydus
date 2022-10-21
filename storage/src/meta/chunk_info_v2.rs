@@ -13,10 +13,11 @@ const CHUNK_V2_UNCOMP_OFFSET_SHIFT: u64 = 12;
 const CHUNK_V2_UNCOMP_SIZE_SHIFT: u64 = 32;
 //const CHUNK_V2_FLAG_MASK: u64 = 0xff00_0000_0000_0000;
 const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
+const CHUNK_V2_FLAG_ZRAN: u64 = 0x2 << 56;
 
 /// Blob chunk compression information on disk format V2.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct BlobChunkInfoV2Ondisk {
     // 32bits: offset, 24bits: size, 8bits: flags
     pub(crate) uncomp_info: u64,
@@ -35,8 +36,28 @@ impl BlobChunkInfoV2Ondisk {
         }
     }
 
+    pub(crate) fn set_zran(&mut self, zran: bool) {
+        if zran {
+            self.uncomp_info |= CHUNK_V2_FLAG_ZRAN;
+        } else {
+            self.uncomp_info &= !CHUNK_V2_FLAG_ZRAN;
+        }
+    }
+
     pub(crate) fn set_data(&mut self, data: u64) {
         self.data = data;
+    }
+
+    pub(crate) fn set_zran_index(&mut self, index: u32) {
+        let mut data = u64::from_le(self.data) & !0xffff_ffff_0000_0000;
+        data |= (index as u64) << 32;
+        self.data = u64::to_le(data);
+    }
+
+    pub(crate) fn set_zran_offset(&mut self, offset: u32) {
+        let mut data = u64::from_le(self.data) & !0x0000_0000_ffff_ffff;
+        data |= offset as u64;
+        self.data = u64::to_le(data);
     }
 }
 

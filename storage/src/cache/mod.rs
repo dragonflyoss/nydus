@@ -278,7 +278,10 @@ pub trait BlobCache: Send + Sync {
             let c_size = if self.is_stargz() {
                 let blob_size = self.blob_compressed_size()?;
                 let max_size = blob_size.checked_sub(offset).ok_or_else(|| {
-                    einval!("chunk compressed offset is bigger than blob file size")
+                    einval!(format!(
+                        "chunk compressed offset {:x} is bigger than blob file size {:x}",
+                        offset, blob_size
+                    ))
                 })?;
                 let max_size = cmp::min(max_size, usize::MAX as u64);
                 compress::compute_compressed_gzip_size(buffer.len(), max_size as usize)

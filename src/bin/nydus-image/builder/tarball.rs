@@ -21,14 +21,17 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
+use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
 use nydus_utils::compact::makedev;
+use nydus_utils::compress::zlib_random::ZranReader;
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, ByteSize};
@@ -45,6 +48,7 @@ use crate::core::tree::Tree;
 enum TarReader {
     File(File),
     TarGz(Box<ZlibDecoder<File>>),
+    Zran(ZranReader<File>),
 }
 
 impl Read for TarReader {
@@ -52,6 +56,7 @@ impl Read for TarReader {
         match self {
             TarReader::File(f) => f.read(buf),
             TarReader::TarGz(f) => f.read(buf),
+            TarReader::Zran(f) => f.read(buf),
         }
     }
 }
@@ -98,10 +103,15 @@ impl<'a> TarballTreeBuilder<'a> {
                 TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
             }
             /*
-            ConversionType::StargzToRef | ConversionType::TargzToRef => {
-                assert!(self.writer.is_none());
-            }
+            ConversionType::StargzToRef |
              */
+            ConversionType::TargzToRef => {
+                assert!(self.writer.is_none());
+                let generator = ZranContextGenerator::new(file)?;
+                let reader = generator.reader();
+                self.ctx.blob_zran_generator = Some(Mutex::new(generator));
+                TarReader::Zran(reader)
+            }
             _ => return Err(anyhow!("unsupported image conversion type")),
         };
         let mut tar = Archive::new(reader);

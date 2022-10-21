@@ -15,7 +15,11 @@ use std::sync::Arc;
 use lazy_static::lazy_static;
 
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobMetaHeaderOndisk, BLOB_META_FEATURE_4K_ALIGNED};
+use nydus_storage::meta::{
+    BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobMetaHeaderOndisk, ZranInflateContext,
+    BLOB_META_FEATURE_4K_ALIGNED, BLOB_META_FEATURE_CHUNK_INFO_V2, BLOB_META_FEATURE_MASK,
+    BLOB_META_FEATURE_SEPARATE, BLOB_META_FEATURE_ZRAN,
+};
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
@@ -74,7 +78,6 @@ const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 const BLOB_SHA256_LEN: usize = 64;
 const BLOB_MAX_SIZE_UNCOMPRESSED: u64 = 1u64 << 44;
 const BLOB_MAX_SIZE_COMPRESSED: u64 = 1u64 << 40;
-const BLOB_MAX_CI_SIZE_UNCOMPRESSED: u64 = 16u64 * (1 << 24);
 
 /// RAFS v6 superblock on-disk format, 128 bytes.
 ///
@@ -1196,28 +1199,34 @@ struct RafsV6Blob {
     // SHA256 digest of the compression information array in binary form.
     ci_digest: [u8; 32],
 
-    reserved2: [u8; 88],
+    ci_zran_offset: u64,
+    ci_zran_size: u64,
+    ci_zran_count: u32,
+    reserved2: [u8; 68],
 }
 
 impl Default for RafsV6Blob {
     fn default() -> Self {
         RafsV6Blob {
             blob_id: [0u8; BLOB_SHA256_LEN],
-            blob_index: 0u32.to_le(),
-            chunk_size: 0u32.to_le(),
-            chunk_count: 0u32.to_le(),
+            blob_index: 0u32,
+            chunk_size: 0u32,
+            chunk_count: 0u32,
             compression_algo: (compress::Algorithm::None as u32).to_le(),
             digest_algo: (digest::Algorithm::Blake3 as u32).to_le(),
-            meta_features: 0u32.to_le(),
-            compressed_size: 0u64.to_le(),
-            uncompressed_size: 0u64.to_le(),
-            reserved1: 0u32.to_le(),
+            meta_features: 0u32,
+            compressed_size: 0u64,
+            uncompressed_size: 0u64,
+            reserved1: 0u32,
             ci_compressor: (compress::Algorithm::None as u32).to_le(),
-            ci_offset: 0u64.to_le(),
-            ci_compressed_size: 0u64.to_le(),
-            ci_uncompressed_size: 0u64.to_le(),
+            ci_offset: 0u64,
+            ci_compressed_size: 0u64,
+            ci_uncompressed_size: 0u64,
             ci_digest: [0u8; 32],
-            reserved2: [0u8; 88],
+            ci_zran_offset: 0,
+            ci_zran_size: 0,
+            ci_zran_count: 0,
+            reserved2: [0u8; 68],
         }
     }
 }
@@ -1256,6 +1265,13 @@ impl RafsV6Blob {
             u64::from_le(self.ci_uncompressed_size),
             u32::from_le(self.ci_compressor),
         );
+        if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
+            blob_info.set_blob_meta_zran_info(
+                u32::from_le(self.ci_zran_count),
+                u64::from_le(self.ci_zran_offset),
+                u64::from_le(self.ci_zran_size),
+            );
+        }
 
         Ok(blob_info)
     }
@@ -1287,7 +1303,10 @@ impl RafsV6Blob {
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
             ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
             ci_digest: [0u8; 32],
-            reserved2: [0u8; 88],
+            ci_zran_count: u32::to_le(blob_info.meta_ci_zran_count()),
+            ci_zran_offset: u64::to_le(blob_info.meta_ci_zran_offset()),
+            ci_zran_size: u64::to_le(blob_info.meta_ci_zran_size()),
+            reserved2: [0u8; 68],
         })
     }
 
@@ -1377,7 +1396,13 @@ impl RafsV6Blob {
         }
 
         let meta_features = u32::from_le(self.meta_features);
-        if meta_features & BLOB_META_FEATURE_4K_ALIGNED == 0 {
+        if meta_features & !BLOB_META_FEATURE_MASK != 0 {
+            error!(
+                "RafsV6Blob: idx {} unknown blob feature bits {:x}",
+                blob_index, meta_features
+            );
+            return false;
+        } else if meta_features & BLOB_META_FEATURE_4K_ALIGNED == 0 {
             error!(
                 "RafsV6Blob: idx {} should have 4K-aligned feature bit",
                 blob_index
@@ -1389,23 +1414,78 @@ impl RafsV6Blob {
         let ci_compr_size = u64::from_le(self.ci_compressed_size);
         let ci_uncompr_size = u64::from_le(self.ci_uncompressed_size);
         if ci_offset.checked_add(ci_compr_size).is_none() {
-            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} wraps around", blob_index, ci_compr_size, ci_offset);
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {:x} + ci_offset {:x} wraps around", blob_index, ci_compr_size, ci_offset);
+            return false;
+        } else if ci_compr_size > ci_uncompr_size {
+            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {:x} is greater than ci_uncompressed_size {:x}", blob_index, ci_compr_size, ci_uncompr_size);
             return false;
         }
-        if ci_offset != compressed_blob_size && ci_offset + ci_compr_size > compressed_blob_size {
-            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} + ci_offset {} is bigger than blob size {}", blob_index, ci_compr_size, ci_offset, compressed_blob_size);
+
+        if meta_features & BLOB_META_FEATURE_SEPARATE != 0 {
+            if ci_offset != 0 || ci_compr_size != ci_uncompr_size {
+                error!("RafsV6Blob: idx {} invalid fields for separate CI, ci_compressed_size {:x},  ci_uncompressed_size {:x}, ci_offset {:x}", blob_index, ci_compr_size, ci_uncompr_size,ci_offset);
+                return false;
+            }
+        } else if ci_offset != compressed_blob_size
+            && ci_offset + ci_compr_size > compressed_blob_size
+        {
+            error!("RafsV6Blob: idx {} invalid fields for embedded CI, ci_compressed_size {:x} + ci_offset {:x} is bigger than blob size {:x}", blob_index, ci_compr_size, ci_offset, compressed_blob_size);
             return false;
         }
-        if ci_uncompr_size > BLOB_MAX_CI_SIZE_UNCOMPRESSED {
-            error!(
-                "RafsV6Blob: idx {} invalid fields, ci_uncompressed_size {}",
-                blob_index, ci_uncompr_size
-            );
-            return false;
-        }
-        if ci_compr_size > ci_uncompr_size {
-            error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {} is greater than ci_uncompressed_size {}", blob_index, ci_compr_size, ci_uncompr_size);
-            return false;
+
+        let count = chunk_count as u64;
+        const ZRAN_FLAGS: u32 = BLOB_META_FEATURE_CHUNK_INFO_V2 | BLOB_META_FEATURE_ZRAN;
+        match meta_features & (BLOB_META_FEATURE_CHUNK_INFO_V2 | BLOB_META_FEATURE_ZRAN) {
+            ZRAN_FLAGS => {
+                if ci_uncompr_size < count * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
+                    error!(
+                        "RafsV6Blob: idx {} invalid ci_uncompressed_size {}",
+                        blob_index, ci_uncompr_size
+                    );
+                    return false;
+                }
+                let zran_count = u32::from_le(self.ci_zran_count);
+                let zran_offset = u64::from_le(self.ci_zran_offset);
+                let zran_size = u64::from_le(self.ci_zran_size);
+                if zran_offset != chunk_count as u64 * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
+                    error!(
+                        "RafsV6Blob: idx {} invalid ci_zran_offset {:x}, should be {:x}",
+                        blob_index,
+                        zran_offset,
+                        chunk_count as u64 * size_of::<BlobChunkInfoV2Ondisk>() as u64
+                    );
+                    return false;
+                }
+                if zran_count as u64 * size_of::<ZranInflateContext>() as u64 > zran_size {
+                    error!(
+                        "RafsV6Blob: idx {} invalid ci_zran_count {:x} and ci_zran_size {:x}",
+                        blob_index, zran_count, zran_size
+                    );
+                    return false;
+                }
+            }
+            BLOB_META_FEATURE_CHUNK_INFO_V2 => {
+                if ci_uncompr_size != count * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
+                    error!(
+                        "RafsV6Blob: idx {} invalid ci_uncompressed_size {}",
+                        blob_index, ci_uncompr_size
+                    );
+                    return false;
+                }
+            }
+            0 => {
+                if ci_uncompr_size != count * size_of::<BlobChunkInfoV1Ondisk>() as u64 {
+                    error!("RafsV6Blob: idx {} invalid fields, ci_uncompressed_size {:x}, chunk_count {:x}", blob_index, ci_uncompr_size, chunk_count);
+                    return false;
+                }
+            }
+            _ => {
+                error!(
+                    "RafsV6Blob: idx {} invalid feature bits {}",
+                    blob_index, meta_features
+                );
+                return false;
+            }
         }
 
         true
@@ -1483,6 +1563,13 @@ impl RafsV6BlobTable {
             header.ci_uncompressed_size(),
             header.ci_compressor() as u32,
         );
+        if header.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
+            blob_info.set_blob_meta_zran_info(
+                header.ci_zran_count(),
+                header.ci_zran_offset(),
+                header.ci_zran_size(),
+            );
+        }
 
         self.entries.push(Arc::new(blob_info));
 

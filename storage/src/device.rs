@@ -103,6 +103,12 @@ pub struct BlobInfo {
     meta_ci_compressed_size: u64,
     /// V6: Size of the uncompressed chunk information array.
     meta_ci_uncompressed_size: u64,
+    /// V6: offset of zran context data.
+    meta_ci_zran_offset: u64,
+    /// V6: size of zran context data.
+    meta_ci_zran_size: u64,
+    /// V6: count of Zran context entries
+    meta_ci_zran_count: u32,
 
     fs_cache_file: Option<Arc<File>>,
 }
@@ -138,6 +144,9 @@ impl BlobInfo {
             meta_ci_offset: 0,
             meta_ci_compressed_size: 0,
             meta_ci_uncompressed_size: 0,
+            meta_ci_zran_count: 0,
+            meta_ci_zran_offset: 0,
+            meta_ci_zran_size: 0,
 
             fs_cache_file: None,
         };
@@ -291,6 +300,12 @@ impl BlobInfo {
         self.meta_ci_uncompressed_size = uncompressed_size;
     }
 
+    pub fn set_blob_meta_zran_info(&mut self, count: u32, offset: u64, size: u64) {
+        self.meta_ci_zran_count = count;
+        self.meta_ci_zran_offset = offset;
+        self.meta_ci_zran_size = size;
+    }
+
     /// Get compression algorithm for chunk information array.
     pub fn meta_ci_compressor(&self) -> compress::Algorithm {
         if self.meta_ci_compressor == compress::Algorithm::Lz4Block as u32 {
@@ -322,6 +337,21 @@ impl BlobInfo {
     /// Get the uncompressed size of the chunk information array.
     pub fn meta_ci_uncompressed_size(&self) -> u64 {
         self.meta_ci_uncompressed_size
+    }
+
+    /// Get number of Zran context entries.
+    pub fn meta_ci_zran_count(&self) -> u32 {
+        self.meta_ci_zran_count
+    }
+
+    /// Get offset of Zran context data.
+    pub fn meta_ci_zran_offset(&self) -> u64 {
+        self.meta_ci_zran_offset
+    }
+
+    /// Get size of Zran context data.
+    pub fn meta_ci_zran_size(&self) -> u64 {
+        self.meta_ci_zran_size
     }
 
     /// Check whether compression metadata is available.

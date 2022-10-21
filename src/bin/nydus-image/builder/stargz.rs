@@ -19,7 +19,6 @@ use nydus_rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5Inode
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobChunkFlags;
-use nydus_storage::meta::{BlobMetaHeaderOndisk, BLOB_META_FEATURE_CHUNK_INFO_V2};
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
@@ -664,10 +663,14 @@ impl StargzBuilder {
         blob_mgr: &mut BlobManager,
     ) -> Result<()> {
         if ctx.fs_version == RafsVersion::V6 {
+            /*
             let mut header = BlobMetaHeaderOndisk::default();
             header.set_4k_aligned(true);
+            header.set_ci_separate(ctx.blob_meta_features & BLOB_META_FEATURE_SEPARATE != 0);
             header.set_chunk_info_v2(ctx.blob_meta_features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0);
+            header.set_ci_zran(ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0);
             blob_ctx.blob_meta_header = header;
+             */
             blob_ctx.set_meta_info_enabled(true);
         } else {
             blob_ctx.set_meta_info_enabled(false);

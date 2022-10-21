@@ -34,13 +34,17 @@ mod chunk_info_v1;
 pub use chunk_info_v1::BlobChunkInfoV1Ondisk;
 mod chunk_info_v2;
 pub use chunk_info_v2::BlobChunkInfoV2Ondisk;
+mod zran;
+pub use zran::{ZranContextGenerator, ZranInflateContext};
 
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
 const BLOB_METADATA_CHUNK_SIZE_MASK: u64 = 0xff_ffff;
 
 const BLOB_METADATA_V1_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 16;
-const BLOB_METADATA_V1_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
+//const BLOB_METADATA_V1_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
+/// Add three more fields: s_ci_zran_offset/size/count
+const BLOB_METADATA_V2_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 64;
 
 const BLOB_METADATA_V2_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 24;
 
@@ -48,8 +52,14 @@ const BLOB_METADATA_V2_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 24;
 pub const FILE_SUFFIX: &str = "blob.meta";
 /// Uncompressed chunk data is 4K aligned.
 pub const BLOB_META_FEATURE_4K_ALIGNED: u32 = 0x1;
+/// Blob meta information data is stored in a separate file.
+pub const BLOB_META_FEATURE_SEPARATE: u32 = 0x2;
 /// Blob chunk information format v2.
-pub const BLOB_META_FEATURE_CHUNK_INFO_V2: u32 = 0x2;
+pub const BLOB_META_FEATURE_CHUNK_INFO_V2: u32 = 0x4;
+/// Blob compression information data include context data for zlib random access.
+pub const BLOB_META_FEATURE_ZRAN: u32 = 0x8;
+/// All valid blob feature bits.
+pub const BLOB_META_FEATURE_MASK: u32 = 0xf;
 
 /// Blob metadata on disk format.
 #[repr(C)]
@@ -69,7 +79,13 @@ pub struct BlobMetaHeaderOndisk {
     s_ci_compressed_size: u64,
     /// Size of uncompressed chunk information array
     s_ci_uncompressed_size: u64,
-    s_reserved: [u8; BLOB_METADATA_V1_RESERVED_SIZE as usize],
+    /// Offset of zran context table.
+    s_ci_zran_offset: u64,
+    /// Size of zran context data.
+    s_ci_zran_size: u64,
+    /// Number of zran context information entries.
+    s_ci_zran_count: u32,
+    s_reserved: [u8; BLOB_METADATA_V2_RESERVED_SIZE as usize],
     /// Second blob metadata magic number
     s_magic2: u32,
 }
@@ -84,7 +100,10 @@ impl Default for BlobMetaHeaderOndisk {
             s_ci_offset: 0,
             s_ci_compressed_size: 0,
             s_ci_uncompressed_size: 0,
-            s_reserved: [0u8; BLOB_METADATA_V1_RESERVED_SIZE as usize],
+            s_ci_zran_offset: 0,
+            s_ci_zran_size: 0,
+            s_ci_zran_count: 0,
+            s_reserved: [0u8; BLOB_METADATA_V2_RESERVED_SIZE as usize],
             s_magic2: BLOB_METADATA_MAGIC,
         }
     }
@@ -148,6 +167,36 @@ impl BlobMetaHeaderOndisk {
         self.s_ci_uncompressed_size = size;
     }
 
+    /// Get Zran context entry count.
+    pub fn ci_zran_count(&self) -> u32 {
+        self.s_ci_zran_count
+    }
+
+    /// Set Zran context entry count.
+    pub fn set_ci_zran_count(&mut self, count: u32) {
+        self.s_ci_zran_count = count;
+    }
+
+    /// Get offset of zran context data.
+    pub fn ci_zran_offset(&self) -> u64 {
+        self.s_ci_zran_offset
+    }
+
+    /// Set offset of zran context data.
+    pub fn set_ci_zran_offset(&mut self, offset: u64) {
+        self.s_ci_zran_offset = offset;
+    }
+
+    /// Get size of zran context data.
+    pub fn ci_zran_size(&self) -> u64 {
+        self.s_ci_zran_size
+    }
+
+    /// Set size of zran context data.
+    pub fn set_ci_zran_size(&mut self, size: u64) {
+        self.s_ci_zran_size = size;
+    }
+
     /// Check whether the uncompressed data chunk is 4k aligned.
     pub fn is_4k_aligned(&self) -> bool {
         self.s_features & BLOB_META_FEATURE_4K_ALIGNED != 0
@@ -171,6 +220,26 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    /// Set whether the blob compression information data is stored in a separate file or
+    /// embedded in the blob itserlf.
+    pub fn set_ci_separate(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BLOB_META_FEATURE_SEPARATE;
+        } else {
+            self.s_features &= !BLOB_META_FEATURE_SEPARATE;
+        }
+    }
+
+    /// Set whether the blob compression information data contains zlib random access contexts.
+    pub fn set_ci_zran(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BLOB_META_FEATURE_ZRAN;
+        } else {
+            self.s_features &= !BLOB_META_FEATURE_ZRAN;
+        }
+    }
+
+    /// Get blob meta data flags.
     pub fn meta_flags(&self) -> u32 {
         self.s_features
     }
@@ -436,6 +505,18 @@ impl BlobMetaInfo {
     }
 
     fn validate_header(blob_info: &BlobInfo, header: &BlobMetaHeaderOndisk) -> Result<bool> {
+        trace!("magic {:x}/{:x}, features {:x}/{:x}, ci_offset {:x}/{:x}, compressed_size {:x}/{:x}, uncompressed_size {:x}/{:x}",
+                u32::from_le(header.s_magic),
+                BLOB_METADATA_MAGIC,
+                u32::from_le(header.s_features),
+                blob_info.meta_flags(),
+                u64::from_le(header.s_ci_offset),
+                blob_info.meta_ci_offset(),
+                u64::from_le(header.s_ci_compressed_size),
+                blob_info.meta_ci_compressed_size(),
+                u64::from_le(header.s_ci_uncompressed_size),
+                blob_info.meta_ci_uncompressed_size());
+
         if u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
             || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
             || u32::from_le(header.s_features) != blob_info.meta_flags()

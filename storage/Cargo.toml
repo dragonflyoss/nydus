@@ -28,11 +28,12 @@ vm-memory = "0.9"
 fuse-backend-rs = { version = "0.9" }
 
 nydus-api = { version = "0.1", path = "../api" }
-nydus-utils = { version = "0.3", path = "../utils" }
+nydus-utils = { version = "0.3", path = "../utils", features = ["zran"] }
 nydus-error = { version = "0.2", path = "../error" }
 
 [dev-dependencies]
 vmm-sys-util = "0.10"
+tar = "0.4.38"
 
 [features]
 backend-localfs = []
