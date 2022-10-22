@@ -395,7 +395,6 @@ impl BlobMetaInfo {
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_info_array: chunk_infos,
             _filemap: filemap,
-            is_stargz: blob_info.is_stargz(),
         });
 
         Ok(BlobMetaInfo { state })
@@ -598,8 +597,6 @@ pub struct BlobMetaState {
     uncompressed_size: u64,
     chunk_info_array: ManuallyDrop<BlobMetaChunkArray>,
     _filemap: FileMapState,
-    /// The blob meta is for an stargz image.
-    is_stargz: bool,
 }
 
 impl BlobMetaState {
@@ -633,8 +630,7 @@ impl BlobMetaState {
     }
 
     fn validate_chunk<T: BlobMetaChunkInfo>(&self, entry: &T) -> Result<()> {
-        // For stargz blob, self.compressed_size == 0, so don't validate it.
-        if (!self.is_stargz && entry.compressed_end() > self.compressed_size)
+        if entry.compressed_end() > self.compressed_size
             || entry.uncompressed_end() > self.uncompressed_size
         {
             Err(einval!(format!(
@@ -952,7 +948,7 @@ impl BlobMetaChunkArray {
                 state.validate_chunk(entry)?;
 
                 // For stargz chunks, disable this check.
-                if !state.is_stargz && entry.uncompressed_offset() != last_end {
+                if entry.uncompressed_offset() != last_end {
                     return Err(einval!(format!(
                         "mismatch uncompressed {} size {} last_end {}",
                         entry.uncompressed_offset(),
@@ -1006,14 +1002,6 @@ impl BlobMetaChunkArray {
                 index += 1;
                 let entry = &chunk_info_array[index];
                 state.validate_chunk(entry)?;
-                if !state.is_stargz && entry.compressed_offset() != last_end {
-                    return Err(einval!(format!(
-                        "mismatch compressed {} size {} last_end {}",
-                        entry.compressed_offset(),
-                        entry.compressed_size(),
-                        last_end
-                    )));
-                }
 
                 // Avoid read amplify if next chunk is too big.
                 if last_end >= end && entry.compressed_end() > batch_end {

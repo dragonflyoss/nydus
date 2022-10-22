@@ -157,7 +157,6 @@ mod tests {
                 },
             ])),
             _filemap: FileMapState::default(),
-            is_stargz: false,
         };
 
         assert_eq!(
@@ -231,7 +230,6 @@ mod tests {
                 },
             ])),
             _filemap: FileMapState::default(),
-            is_stargz: false,
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),
