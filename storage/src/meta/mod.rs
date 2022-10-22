@@ -1430,31 +1430,20 @@ fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::backend::{BackendResult, BlobReader};
     use crate::device::BlobFeatures;
-    use crate::RAFS_MAX_CHUNK_SIZE;
+    use crate::RAFS_DEFAULT_CHUNK_SIZE;
     use nix::sys::uio;
     use nydus_utils::metrics::BackendMetrics;
-    use std::fs::{File, OpenOptions};
-    use std::io::Write;
+    use std::fs::File;
     use std::os::unix::io::AsRawFd;
-    use vmm_sys_util::tempfile::TempFile;
+    use std::path::PathBuf;
 
-    #[test]
-    fn test_round_up_4k() {
-        assert_eq!(round_up_4k(0), 0x0u32);
-        assert_eq!(round_up_4k(1), 0x1000u32);
-        assert_eq!(round_up_4k(0xfff), 0x1000u32);
-        assert_eq!(round_up_4k(0x1000), 0x1000u32);
-        assert_eq!(round_up_4k(0x1001), 0x2000u32);
-        assert_eq!(round_up_4k(0x1fff), 0x2000u64);
-    }
-
-    struct DummyBlobReader {
+    pub(crate) struct DummyBlobReader {
         pub metrics: Arc<BackendMetrics>,
-        file: File,
+        pub file: File,
     }
 
     impl BlobReader for DummyBlobReader {
@@ -1473,131 +1462,198 @@ mod tests {
     }
 
     #[test]
-    fn test_read_metadata_compressor_none() {
-        let temp = TempFile::new().unwrap();
-        let mut w = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.as_path())
-            .unwrap();
-        let r = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(temp.as_path())
-            .unwrap();
-
-        let chunks = vec![
-            BlobChunkInfoV1Ondisk {
-                uncomp_info: 0x01ff_f000_0000_0000,
-                comp_info: 0x00ff_f000_0000_0000,
-            },
-            BlobChunkInfoV1Ondisk {
-                uncomp_info: 0x01ff_f000_0010_0000,
-                comp_info: 0x00ff_f000_0010_0000,
-            },
-        ];
-
-        let data = unsafe {
-            std::slice::from_raw_parts(
-                chunks.as_ptr() as *const u8,
-                chunks.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
-            )
-        };
-
-        let pos = 0;
-        w.write_all(data).unwrap();
-
-        let mut blob_info = BlobInfo::new(
-            0,
-            "dummy".to_string(),
-            0,
-            0,
-            RAFS_MAX_CHUNK_SIZE as u32,
-            0,
-            BlobFeatures::default(),
-        );
-        blob_info.set_blob_meta_info(
-            0,
-            pos,
-            data.len() as u64,
-            data.len() as u64,
-            compress::Algorithm::None as u32,
-        );
-
-        let mut buffer = alloc_buf(data.len());
-        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
-            metrics: BackendMetrics::new("dummy", "localfs"),
-            file: r,
-        });
-        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
-
-        assert_eq!(buffer, data);
+    fn test_round_up_4k() {
+        assert_eq!(round_up_4k(0), 0x0u32);
+        assert_eq!(round_up_4k(1), 0x1000u32);
+        assert_eq!(round_up_4k(0xfff), 0x1000u32);
+        assert_eq!(round_up_4k(0x1000), 0x1000u32);
+        assert_eq!(round_up_4k(0x1001), 0x2000u32);
+        assert_eq!(round_up_4k(0x1fff), 0x2000u64);
     }
 
     #[test]
-    fn test_read_metadata_compressor_lz4() {
-        let temp = TempFile::new().unwrap();
-        let mut w = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.as_path())
-            .unwrap();
-        let r = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(temp.as_path())
-            .unwrap();
+    fn test_load_meta_ci_zran_add_more_chunks() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
-        let chunks = vec![
-            BlobChunkInfoV1Ondisk {
-                uncomp_info: 0x01ff_f000_0000_0000,
-                comp_info: 0x00ff_f000_0000_0000,
-            },
-            BlobChunkInfoV1Ondisk {
-                uncomp_info: 0x01ff_f000_0010_0000,
-                comp_info: 0x00ff_f000_0010_0000,
-            },
-        ];
-
-        let data = unsafe {
-            std::slice::from_raw_parts(
-                chunks.as_ptr() as *const u8,
-                chunks.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
-            )
-        };
-
-        let (buf, compressed) = compress::compress(data, compress::Algorithm::Lz4Block).unwrap();
-        assert!(compressed);
-
-        let pos = 0;
-        w.write_all(&buf).unwrap();
-
-        let compressed_size = buf.len();
-        let uncompressed_size = data.len();
         let mut blob_info = BlobInfo::new(
             0,
-            "dummy".to_string(),
-            0,
-            0,
-            RAFS_MAX_CHUNK_SIZE as u32,
-            0,
-            BlobFeatures::default(),
+            "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            BlobFeatures::empty(),
         );
+        let features = BLOB_META_FEATURE_4K_ALIGNED
+            | BLOB_META_FEATURE_SEPARATE
+            | BLOB_META_FEATURE_CHUNK_INFO_V2
+            | BLOB_META_FEATURE_ZRAN;
         blob_info.set_blob_meta_info(
+            features,
             0,
-            pos,
-            compressed_size as u64,
-            uncompressed_size as u64,
-            compress::Algorithm::Lz4Block as u32,
+            0xa1290,
+            0xa1290,
+            compress::Algorithm::None as u32,
         );
+        blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
+        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
+        assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
+        assert_eq!(meta.state.zran_info_array.len(), 0x15);
+        assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
 
-        let mut buffer = alloc_buf(uncompressed_size);
-        let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
-            metrics: BackendMetrics::new("dummy", "localfs"),
-            file: r,
-        });
-        BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
+        let chunks = vec![BlobMetaChunk::new(0, &meta.state)];
+        let chunks = meta.add_more_chunks(chunks.as_slice(), 0x30000).unwrap();
+        assert_eq!(chunks.len(), 67);
 
-        assert_eq!(buffer, data);
+        let chunks = vec![BlobMetaChunk::new(0, &meta.state)];
+        let chunks = meta
+            .add_more_chunks(chunks.as_slice(), RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 67);
+
+        let chunks = vec![BlobMetaChunk::new(66, &meta.state)];
+        let chunks = meta
+            .add_more_chunks(chunks.as_slice(), RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 67);
+
+        let chunks = vec![BlobMetaChunk::new(116, &meta.state)];
+        let chunks = meta
+            .add_more_chunks(chunks.as_slice(), RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
+
+        let chunks = vec![BlobMetaChunk::new(162, &meta.state)];
+        let chunks = meta
+            .add_more_chunks(chunks.as_slice(), RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 12);
+    }
+
+    #[test]
+    fn test_load_meta_ci_zran_get_chunks_uncompressed() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
+
+        let mut blob_info = BlobInfo::new(
+            0,
+            "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            BlobFeatures::empty(),
+        );
+        let features = BLOB_META_FEATURE_4K_ALIGNED
+            | BLOB_META_FEATURE_SEPARATE
+            | BLOB_META_FEATURE_CHUNK_INFO_V2
+            | BLOB_META_FEATURE_ZRAN;
+        blob_info.set_blob_meta_info(
+            features,
+            0,
+            0xa1290,
+            0xa1290,
+            compress::Algorithm::None as u32,
+        );
+        blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
+        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
+        assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
+        assert_eq!(meta.state.zran_info_array.len(), 0x15);
+        assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
+
+        let chunks = meta.get_chunks_uncompressed(0, 1, 0x30000).unwrap();
+        assert_eq!(chunks.len(), 67);
+
+        let chunks = meta
+            .get_chunks_uncompressed(0, 1, RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 67);
+
+        let chunks = meta
+            .get_chunks_uncompressed(0x112000, 0x10000, RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 116);
+
+        let chunks = meta
+            .get_chunks_uncompressed(0xf9b000, 0x100, RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 12);
+
+        let chunks = meta
+            .get_chunks_uncompressed(0xf9b000, 0x100, 4 * RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 13);
+
+        let chunks = meta
+            .get_chunks_uncompressed(0x16c5000, 0x100, 4 * RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 12);
+
+        assert!(meta
+            .get_chunks_uncompressed(0x2000000, 0x100, 4 * RAFS_DEFAULT_CHUNK_SIZE)
+            .is_err());
+    }
+
+    #[test]
+    fn test_load_meta_ci_zran_get_chunks_compressed() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
+
+        let mut blob_info = BlobInfo::new(
+            0,
+            "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            BlobFeatures::empty(),
+        );
+        let features = BLOB_META_FEATURE_4K_ALIGNED
+            | BLOB_META_FEATURE_SEPARATE
+            | BLOB_META_FEATURE_CHUNK_INFO_V2
+            | BLOB_META_FEATURE_ZRAN;
+        blob_info.set_blob_meta_info(
+            features,
+            0,
+            0xa1290,
+            0xa1290,
+            compress::Algorithm::None as u32,
+        );
+        blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
+        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
+        assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
+        assert_eq!(meta.state.zran_info_array.len(), 0x15);
+        assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
+
+        let chunks = meta.get_chunks_compressed(0xb8, 1, 0x30000).unwrap();
+        assert_eq!(chunks.len(), 67);
+
+        let chunks = meta
+            .get_chunks_compressed(0xb8, 1, RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 116);
+
+        let chunks = meta
+            .get_chunks_compressed(0xb8, 1, 2 * RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 120);
+
+        let chunks = meta
+            .get_chunks_compressed(0x5fd41e, 1, RAFS_DEFAULT_CHUNK_SIZE / 2)
+            .unwrap();
+        assert_eq!(chunks.len(), 3);
+
+        let chunks = meta
+            .get_chunks_compressed(0x95d55d, 0x20, RAFS_DEFAULT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(chunks.len(), 12);
+
+        assert!(meta
+            .get_chunks_compressed(0x0, 0x1, RAFS_DEFAULT_CHUNK_SIZE)
+            .is_err());
+        assert!(meta
+            .get_chunks_compressed(0x1000000, 0x1, RAFS_DEFAULT_CHUNK_SIZE)
+            .is_err());
     }
 }
