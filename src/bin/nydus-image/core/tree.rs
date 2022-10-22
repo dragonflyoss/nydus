@@ -132,10 +132,7 @@ impl Tree {
                 if depth == target_paths_len - 1 {
                     let mut node = target.clone();
                     node.overlay = Overlay::UpperModification;
-                    *child = Tree {
-                        node,
-                        children: child.children.clone(),
-                    };
+                    child.node = node;
                     return Ok(true);
                 }
                 if child.node.is_dir() {

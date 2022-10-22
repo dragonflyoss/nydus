@@ -303,54 +303,38 @@ impl BlobCompactor {
             for chunk_idx in 0..node.chunks.len() {
                 let chunk = &mut node.chunks[chunk_idx];
                 let chunk_key = ChunkKey::from(&chunk.inner);
-                if !matches!(
-                    self.states[chunk.inner.blob_index() as usize],
-                    Some(State::ChunkDict)
-                ) {
+                if let Some(State::ChunkDict) = self.states[chunk.inner.blob_index() as usize] {
                     // dedup by chunk dict
                     if let Some(c) = chunk_dict.get_chunk(chunk.inner.id()) {
                         apply_chunk_change(c, &mut chunk.inner)?;
+                    } else if let Some(c) = all_chunks.get_chunk(&chunk_key) {
+                        apply_chunk_change(c, &mut chunk.inner)?;
                     } else {
-                        match all_chunks.get_chunk(&chunk_key) {
-                            Some(c) => {
-                                // do dedup
-                                apply_chunk_change(c, &mut chunk.inner)?;
-                            }
-                            None => {
-                                all_chunks.add_chunk(&chunk.inner);
-                                // add to per blob ChunkSet
-                                let blob_index = chunk.inner.blob_index() as usize;
-                                if self.states[blob_index].is_none() {
-                                    self.states[blob_index]
-                                        .replace(State::Original(ChunkSet::new(self.version)));
-                                }
-                                if let Some(State::Original(cs)) = &mut self.states[blob_index] {
-                                    cs.add_chunk(&chunk.inner);
-                                }
-                            }
-                        };
+                        all_chunks.add_chunk(&chunk.inner);
+                        // add to per blob ChunkSet
+                        let blob_index = chunk.inner.blob_index() as usize;
+                        if self.states[blob_index].is_none() {
+                            self.states[blob_index]
+                                .replace(State::Original(ChunkSet::new(self.version)));
+                        }
+                        if let Some(State::Original(cs)) = &mut self.states[blob_index] {
+                            cs.add_chunk(&chunk.inner);
+                        }
                     }
                 }
+
                 // construct blobs/chunk --> nodes index map
-                match self.c2nodes.get_mut(&chunk_key) {
-                    None => {
-                        self.c2nodes.insert(chunk_key, vec![(node_idx, chunk_idx)]);
-                    }
-                    Some(list) => {
-                        list.push((node_idx, chunk_idx));
-                    }
-                };
-                match self.b2nodes.get_mut(&chunk.inner.blob_index()) {
-                    None => {
-                        self.b2nodes
-                            .insert(chunk.inner.blob_index(), vec![(node_idx, chunk_idx)]);
-                    }
-                    Some(list) => {
-                        list.push((node_idx, chunk_idx));
-                    }
-                }
+                self.c2nodes
+                    .entry(chunk_key)
+                    .or_insert(vec![])
+                    .push((node_idx, chunk_idx));
+                self.b2nodes
+                    .entry(chunk.inner.blob_index())
+                    .or_insert(vec![])
+                    .push((node_idx, chunk_idx));
             }
         }
+
         Ok(())
     }
 

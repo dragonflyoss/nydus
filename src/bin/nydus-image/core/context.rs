@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
+use std::fmt;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::path::PathBuf;
@@ -42,9 +43,9 @@ pub enum ConversionType {
     DirectoryToRafs,
     DirectoryToStargz,
     DirectoryToTargz,
-    StargzToRafs,
-    StargzToRef,
-    StargzIndexToRef,
+    EStargzToRafs,
+    EStargzToRef,
+    EStargzIndexToRef,
     TargzToRafs,
     TargzToStargz,
     TargzToRef,
@@ -65,9 +66,9 @@ impl FromStr for ConversionType {
             "dir-rafs" => Ok(Self::DirectoryToRafs),
             "dir-stargz" => Ok(Self::DirectoryToStargz),
             "dir-targz" => Ok(Self::DirectoryToTargz),
-            "stargz-rafs" => Ok(Self::StargzToRafs),
-            "stargz-ref" => Ok(Self::StargzToRef),
-            "stargztoc-ref" => Ok(Self::StargzIndexToRef),
+            "estargz-rafs" => Ok(Self::EStargzToRafs),
+            "estargz-ref" => Ok(Self::EStargzToRef),
+            "estargztoc-ref" => Ok(Self::EStargzIndexToRef),
             "targz-rafs" => Ok(Self::TargzToRafs),
             "targz-stargz" => Ok(Self::TargzToStargz),
             "targz-ref" => Ok(Self::TargzToRef),
@@ -75,8 +76,26 @@ impl FromStr for ConversionType {
             "tar-stargz" => Ok(Self::TarToStargz),
             // kept for backward compatibility
             "directory" => Ok(Self::DirectoryToRafs),
-            "stargz_index" => Ok(Self::StargzIndexToRef),
+            "stargz_index" => Ok(Self::EStargzIndexToRef),
             _ => Err(anyhow!("invalid conversion type")),
+        }
+    }
+}
+
+impl fmt::Display for ConversionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConversionType::DirectoryToRafs => write!(f, "dir-rafs"),
+            ConversionType::DirectoryToStargz => write!(f, "dir-stargz"),
+            ConversionType::DirectoryToTargz => write!(f, "dir-targz"),
+            ConversionType::EStargzToRafs => write!(f, "estargz-rafs"),
+            ConversionType::EStargzToRef => write!(f, "estargz-ref"),
+            ConversionType::EStargzIndexToRef => write!(f, "estargztoc-ref"),
+            ConversionType::TargzToRafs => write!(f, "targz-rafs"),
+            ConversionType::TargzToStargz => write!(f, "targz-ref"),
+            ConversionType::TargzToRef => write!(f, "targz-ref"),
+            ConversionType::TarToRafs => write!(f, "tar-rafs"),
+            ConversionType::TarToStargz => write!(f, "tar-stargz"),
         }
     }
 }
@@ -268,31 +287,33 @@ impl ArtifactWriter {
         Ok(header)
     }
 
+    /// Finalize the metadata/data blob.
+    ///
+    /// When `name` is None, it means that the blob is empty and should be removed.
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
         self.file.flush()?;
 
         if let Some(n) = name {
             if let ArtifactStorage::FileDir(s) = &self.storage {
-                let might_exist_path = Path::new(s).join(n);
-                if might_exist_path.exists() {
-                    return Ok(());
-                }
-
-                if let Some(tmp_file) = &self.tmp_file {
-                    rename(tmp_file.as_path(), &might_exist_path).with_context(|| {
-                        format!(
-                            "failed to rename blob {:?} to {:?}",
-                            tmp_file.as_path(),
-                            might_exist_path
-                        )
-                    })?;
+                let path = Path::new(s).join(n);
+                if !path.exists() {
+                    if let Some(tmp_file) = &self.tmp_file {
+                        rename(tmp_file.as_path(), &path).with_context(|| {
+                            format!(
+                                "failed to rename blob {:?} to {:?}",
+                                tmp_file.as_path(),
+                                path
+                            )
+                        })?;
+                    }
                 }
             }
         } else if let ArtifactStorage::SingleFile(s) = &self.storage {
-            // `new_name` is None means no blob is really built, perhaps due to dedup.
-            // We don't want to puzzle user, so delete it from here.
-            // In the future, FIFO could be leveraged, don't remove it then.
-            remove_file(s).with_context(|| format!("failed to remove blob {:?}", s))?;
+            if let Ok(md) = s.metadata() {
+                if md.is_file() {
+                    remove_file(s).with_context(|| format!("failed to remove blob {:?}", s))?;
+                }
+            }
         }
 
         Ok(())
@@ -414,7 +435,8 @@ impl BlobContext {
     // TODO: check the logic to reset prefetch size
     pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
         if (self.compressed_blob_size > 0
-            || (ctx.source_type == ConversionType::StargzIndexToRef && !self.blob_id.is_empty()))
+            || (ctx.conversion_type == ConversionType::EStargzIndexToRef
+                && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
         {
             self.blob_prefetch_size = 0;
@@ -796,8 +818,8 @@ pub struct BuildContext {
     /// Version number of output metadata and data blob.
     pub fs_version: RafsVersion,
 
-    /// Type of source to build the image from.
-    pub source_type: ConversionType,
+    /// Format conversion type.
+    pub conversion_type: ConversionType,
     /// Path of source to build the image from:
     /// - Directory: `source_path` should be a directory path
     /// - StargzIndex: `source_path` should be a stargz index json file path
@@ -842,7 +864,7 @@ impl BuildContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             fs_version: RafsVersion::default(),
 
-            source_type,
+            conversion_type: source_type,
             source_path,
 
             prefetch,
@@ -876,7 +898,7 @@ impl Default for BuildContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             fs_version: RafsVersion::default(),
 
-            source_type: ConversionType::default(),
+            conversion_type: ConversionType::default(),
             source_path: PathBuf::new(),
 
             prefetch: Prefetch::default(),
