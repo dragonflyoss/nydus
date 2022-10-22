@@ -86,6 +86,7 @@ impl ZranInflateContext {
     }
 }
 
+/// Struct to generate zlib/gzip random access context information.
 pub struct ZranContextGenerator<R> {
     generator: ZranGenerator<R>,
     reader: ZranReader<R>,

@@ -2,17 +2,40 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Struct to generate and access blob metadata.
+//! Struct to generate and access blob meta data.
 //!
-//! Currently, the major responsibility of the blob metadata subsystem is to query chunks covering
-//! a specific uncompressed data range. To support this functionality, some blob metadata and
-//! a blob header is appended to the compressed blob. So the compressed blob is laid out as
-//! `[compressed chunk data], [compressed metadata], [uncompressed header]`.
+//! RAFS v6 filesystem includes three types data:
+//! - RAFS v6 meta blob: contain filesystem meta data including super block, inode table, dirent etc.
+//! - RAFS v6 data blob: contain chunked file data in compressed or uncompressed form.
+//! - RAFS v6 blob meta: contain information to extra file chunk data from the data blob.
 //!
-//! At runtime, the compressed chunk data will be uncompressed into local cache blob file named as
-//! `blobid`. The compressed metadata and header will be uncompressed into another file named as
-//! `blobid.blob.meata`. Together with the chunk map file `blobid.chunkmap`, they may be used to
-//! optimize the communication between blob manager and blob manager clients such as virtiofsd.
+//! A blob meta data is associated with each data blob, which contains information about how to
+//! extract file chunks from the data blob. The blob meta data includes a data and a header,
+//! and the header is actually located at the tail. The RAFS v6 blob meta data may be embedded
+//! in the corresponding data blob, or packed into the RAFS meta blob. When packed in the RAFS meta
+//! blob, it will have the BLOB_META_FEATURE_SEPARATE flag set.
+//!
+//! The blob meta data contains following information:
+//! - chunk compression information table: to locate compressed/uncompressed chunks in the data blob
+//! - optional ZRan context table: to support randomly access/decompress gzip file
+//! - optional ZRan dictionary table: to support randomly access/decompress gzip file
+//!
+//! The blob meta data is laid as below:
+//! |chunk compression info table|optional ZRan context table|optional ZRan dictionary table|
+//!
+//! RAFS v6 supports several types of data blob:
+//! - RAFS v6 native data blob
+//! - OCIv1 tarball (targz) for backward compatibility
+//! - EStargz tarball (stargz) for backward compatibility
+//!
+//! For native RAFS v6 filesystems, native data blobs will be generated and laid out as below:
+//! - RAFS V6 meta blob: |RAFS v6 meta data|
+//! - RAFS V6 data blob file: |blob data|blob meta data|blob meta data header|
+//!
+//! For compatible RAFS v6 filesystems, it references the original targz/stargz blobs instead of
+//! generating new native RAFS data blobs. And it's laid out as below:
+//! -- RAFS v6 meta blob: |tar header|RAFS v6 meta data|tar header|blob meta data|blob meta data header|
+//! -- targz/stargz (unchanged): |tar header|tar header|file data|tar header|
 
 use std::any::Any;
 use std::fs::OpenOptions;
@@ -61,32 +84,38 @@ pub const BLOB_META_FEATURE_ZRAN: u32 = 0x8;
 /// All valid blob feature bits.
 pub const BLOB_META_FEATURE_MASK: u32 = 0xf;
 
-/// Blob metadata on disk format.
+/// On disk format for blob meta data header, containing meta information for a data blob.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BlobMetaHeaderOndisk {
-    /// Blob metadata magic number
+    /// Magic number to identify the blob meta data header.
     s_magic: u32,
-    /// Blob metadata feature flags.
+    /// Feature flags for the data blob.
     s_features: u32,
-    /// Compression algorithm for chunk information array.
+    /// Compression algorithm to compress/uncompress chunk information array.
     s_ci_compressor: u32,
     /// Number of entries in chunk information array.
     s_ci_entires: u32,
-    /// Offset of compressed chunk information array in the compressed blob.
+    /// File offset to get the blob meta data.
+    ///
+    /// If embedded in the data blob itself, the blob meta data will be compressed.
+    /// If stored into a separate file, the blob meta data will be uncompressed.
     s_ci_offset: u64,
-    /// Size of compressed chunk information array
+    /// Size of compressed blob meta data.
+    ///
+    /// If stored into a separate file, the blob meta data will be uncompressed and
+    /// s_ci_compressed_size should be equal to s_ci_uncompressed_size.
     s_ci_compressed_size: u64,
-    /// Size of uncompressed chunk information array
+    /// Size of uncompressed blob meta data.
     s_ci_uncompressed_size: u64,
-    /// Offset of zran context table.
+    /// File offset to get the optional ZRan context data.
     s_ci_zran_offset: u64,
-    /// Size of zran context data.
+    /// Size of ZRan context data, including the ZRan context information table and dictionary table.
     s_ci_zran_size: u64,
-    /// Number of zran context information entries.
+    /// Number of entries in the ZRan context information table.
     s_ci_zran_count: u32,
     s_reserved: [u8; BLOB_METADATA_V2_RESERVED_SIZE as usize],
-    /// Second blob metadata magic number
+    /// Second magic number to identify the blob meta data header.
     s_magic2: u32,
 }
 
@@ -110,7 +139,7 @@ impl Default for BlobMetaHeaderOndisk {
 }
 
 impl BlobMetaHeaderOndisk {
-    /// Get compression algorithm for chunk information array.
+    /// Get compression algorithm to compress chunk information array.
     pub fn ci_compressor(&self) -> compress::Algorithm {
         if self.s_ci_compressor == compress::Algorithm::Lz4Block as u32 {
             compress::Algorithm::Lz4Block
@@ -123,6 +152,7 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    /// Set compression algorithm to compress chunk information array.
     pub fn set_ci_compressor(&mut self, algo: compress::Algorithm) {
         self.s_ci_compressor = algo as u32;
     }
@@ -167,32 +197,32 @@ impl BlobMetaHeaderOndisk {
         self.s_ci_uncompressed_size = size;
     }
 
-    /// Get Zran context entry count.
+    /// Get ZRan context information entry count.
     pub fn ci_zran_count(&self) -> u32 {
         self.s_ci_zran_count
     }
 
-    /// Set Zran context entry count.
+    /// Set ZRan context information entry count.
     pub fn set_ci_zran_count(&mut self, count: u32) {
         self.s_ci_zran_count = count;
     }
 
-    /// Get offset of zran context data.
+    /// Get offset of ZRan context information table.
     pub fn ci_zran_offset(&self) -> u64 {
         self.s_ci_zran_offset
     }
 
-    /// Set offset of zran context data.
+    /// Set offset of ZRan context information table.
     pub fn set_ci_zran_offset(&mut self, offset: u64) {
         self.s_ci_zran_offset = offset;
     }
 
-    /// Get size of zran context data.
+    /// Get size of ZRan context information table and dictionary table.
     pub fn ci_zran_size(&self) -> u64 {
         self.s_ci_zran_size
     }
 
-    /// Set size of zran context data.
+    /// Set size of ZRan context information table and dictionary table.
     pub fn set_ci_zran_size(&mut self, size: u64) {
         self.s_ci_zran_size = size;
     }
@@ -202,7 +232,7 @@ impl BlobMetaHeaderOndisk {
         self.s_features & BLOB_META_FEATURE_4K_ALIGNED != 0
     }
 
-    /// Set whether the uncompressed data chunk is 4k aligned.
+    /// Set flag indicating whether the uncompressed data chunk is 4k aligned.
     pub fn set_4k_aligned(&mut self, aligned: bool) {
         if aligned {
             self.s_features |= BLOB_META_FEATURE_4K_ALIGNED;
@@ -211,7 +241,7 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
-    /// Set whether the uncompressed data chunk is 4k aligned.
+    /// Set flag indicating whether to chunk information format v2 is used or not.
     pub fn set_chunk_info_v2(&mut self, enable: bool) {
         if enable {
             self.s_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
@@ -220,8 +250,8 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
-    /// Set whether the blob compression information data is stored in a separate file or
-    /// embedded in the blob itserlf.
+    /// Set flag indicating whether the blob compression information data is stored in a separate
+    /// file or embedded in the blob itserlf.
     pub fn set_ci_separate(&mut self, enable: bool) {
         if enable {
             self.s_features |= BLOB_META_FEATURE_SEPARATE;
@@ -230,7 +260,7 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
-    /// Set whether the blob compression information data contains zlib random access contexts.
+    /// Set flag indicating whether the blob meta contains data for ZRan or not.
     pub fn set_ci_zran(&mut self, enable: bool) {
         if enable {
             self.s_features |= BLOB_META_FEATURE_ZRAN;
@@ -239,7 +269,7 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
-    /// Get blob meta data flags.
+    /// Get blob meta feature flags.
     pub fn meta_flags(&self) -> u32 {
         self.s_features
     }
@@ -284,16 +314,19 @@ impl BlobMetaInfo {
         );
         assert_eq!(size_of::<BlobChunkInfoV1Ondisk>(), 16);
         assert_eq!(size_of::<BlobChunkInfoV2Ondisk>(), 24);
+        assert_eq!(size_of::<ZranInflateContext>(), 40);
+
         let chunk_count = blob_info.chunk_count();
         if chunk_count == 0 || chunk_count > RAFS_MAX_CHUNKS_PER_BLOB {
-            return Err(einval!("chunk count should be greater than 0"));
+            return Err(einval!("invalid chunk count in blob meta header"));
         }
 
+        let info_size = blob_info.meta_ci_uncompressed_size() as usize;
         let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         trace!(
             "meta_path {:?} info_size {} chunk_count {}",
             meta_path,
-            blob_info.meta_ci_uncompressed_size(),
+            info_size,
             chunk_count
         );
         let enable_write = reader.is_some();
@@ -309,12 +342,18 @@ impl BlobMetaInfo {
                 ))
             })?;
 
-        let info_size = blob_info.meta_ci_uncompressed_size() as usize;
         let aligned_info_size = round_up_4k(info_size);
         let expected_size = BLOB_METADATA_HEADER_SIZE as usize + aligned_info_size;
-        let file_size = file.metadata()?.len();
+        let mut file_size = file.metadata()?.len();
         if file_size == 0 && enable_write {
             file.set_len(expected_size as u64)?;
+            file_size = expected_size as u64;
+        }
+        if file_size != expected_size as u64 {
+            return Err(einval!(format!(
+                "size of blob meta file '{}' doesn't match, expect {:x}, got {:x}",
+                meta_path, expected_size, file_size
+            )));
         }
 
         let mut filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
@@ -322,7 +361,10 @@ impl BlobMetaInfo {
         let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
         if !Self::validate_header(blob_info, header)? {
             if !enable_write {
-                return Err(enoent!("blob metadata file is not ready"));
+                return Err(enoent!(format!(
+                    "blob metadata file '{}' header is invalid",
+                    meta_path
+                )));
             }
 
             let buffer = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
@@ -461,7 +503,7 @@ impl BlobMetaInfo {
                 .read(buffer, blob_info.meta_ci_offset())
                 .map_err(|e| {
                     eio!(format!(
-                        "failed to read metadata from backend(compressor is none), {:?}",
+                        "failed to read metadata from backend(compressor is None), {:?}",
                         e
                     ))
                 })?;
@@ -495,7 +537,7 @@ impl BlobMetaInfo {
             let mut uncom_buf = vec![0u8; buffer.len()];
             compress::decompress(&buf, None, &mut uncom_buf, blob_info.meta_ci_compressor())
                 .map_err(|e| {
-                    error!("failed to decompress metadata: {}", e);
+                    error!("failed to decompress blob meta data: {}", e);
                     e
                 })?;
             buffer.copy_from_slice(&uncom_buf);
@@ -771,18 +813,6 @@ impl BlobMetaChunkArray {
         }
     }
 
-    fn add_more_chunks(
-        &self,
-        state: &Arc<BlobMetaState>,
-        chunks: &[Arc<dyn BlobChunkInfo>],
-        max_size: u64,
-    ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
-        match self {
-            BlobMetaChunkArray::V1(v) => Self::_add_more_chunks(state, v, chunks, max_size),
-            BlobMetaChunkArray::V2(v) => Self::_add_more_chunks(state, v, chunks, max_size),
-        }
-    }
-
     fn get_chunks_uncompressed(
         &self,
         state: &Arc<BlobMetaState>,
@@ -797,6 +827,18 @@ impl BlobMetaChunkArray {
             BlobMetaChunkArray::V2(v) => {
                 Self::_get_chunks_uncompressed(state, v, start, end, batch_end)
             }
+        }
+    }
+
+    fn add_more_chunks(
+        &self,
+        state: &Arc<BlobMetaState>,
+        chunks: &[Arc<dyn BlobChunkInfo>],
+        max_size: u64,
+    ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
+        match self {
+            BlobMetaChunkArray::V1(v) => Self::_add_more_chunks(state, v, chunks, max_size),
+            BlobMetaChunkArray::V2(v) => Self::_add_more_chunks(state, v, chunks, max_size),
         }
     }
 
@@ -1039,16 +1081,11 @@ impl BlobMetaChunkArray {
         }
 
         trace!("try to extend request with {} more bytes", last_end - end);
-
         Some(vec)
     }
 }
 
-/// A fake `BlobChunkInfo` object created from blob metadata.
-///
-/// It represents a chunk within memory mapped chunk maps, which
-/// means it is only used with blobs with chunk meta accommodated.
-/// So for rafs v5, we should avoid using it on IO path.
+/// A fake `BlobChunkInfo` object created from RAFS V6 blob metadata.
 pub struct BlobMetaChunk {
     chunk_index: usize,
     meta: Arc<BlobMetaState>,
@@ -1057,7 +1094,7 @@ pub struct BlobMetaChunk {
 impl BlobMetaChunk {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(chunk_index: usize, meta: &Arc<BlobMetaState>) -> Arc<dyn BlobChunkInfo> {
-        debug_assert!(chunk_index <= u32::MAX as usize);
+        assert!(chunk_index <= RAFS_MAX_CHUNKS_PER_BLOB as usize);
         Arc::new(BlobMetaChunk {
             chunk_index,
             meta: meta.clone(),
@@ -1165,10 +1202,15 @@ pub fn format_blob_meta_features(features: u32) -> String {
     if features & BLOB_META_FEATURE_4K_ALIGNED != 0 {
         output += "4K-align ";
     }
+    if features & BLOB_META_FEATURE_SEPARATE != 0 {
+        output += "separate ";
+    }
     if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
         output += "chunk-v2 ";
     }
-
+    if features & BLOB_META_FEATURE_ZRAN != 0 {
+        output += "zran ";
+    }
     output.trim_end().to_string()
 }
 
