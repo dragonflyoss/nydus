@@ -9,10 +9,9 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use tokio::runtime::Runtime;
-
 use nydus_api::http::{CacheConfig, FileCacheConfig};
 use nydus_utils::metrics::BlobcacheMetrics;
+use tokio::runtime::Runtime;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
@@ -26,8 +25,6 @@ use crate::device::{BlobFeatures, BlobInfo};
 #[derive(Clone)]
 pub struct FileCacheMgr {
     blobs: Arc<RwLock<HashMap<String, Arc<FileCacheEntry>>>>,
-    #[allow(unused)]
-    blobs_need: usize,
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -47,7 +44,6 @@ impl FileCacheMgr {
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
-        blobs_need: usize,
     ) -> Result<FileCacheMgr> {
         let blob_config: FileCacheConfig =
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
@@ -58,7 +54,6 @@ impl FileCacheMgr {
 
         Ok(FileCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
-            blobs_need,
             backend,
             metrics,
             prefetch_config,
@@ -138,11 +133,10 @@ impl BlobCacheMgr for FileCacheMgr {
         for key in reclaim.iter() {
             let mut guard = self.blobs.write().unwrap();
             if let Some(entry) = guard.get(key) {
-                if Arc::strong_count(entry) > 1 {
-                    continue;
+                if Arc::strong_count(entry) == 1 {
+                    guard.remove(key);
                 }
             }
-            guard.remove(key);
         }
 
         self.blobs.read().unwrap().len() == 0

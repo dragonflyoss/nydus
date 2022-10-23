@@ -156,14 +156,6 @@ pub trait BlobCache: Send + Sync {
         None
     }
 
-    /// Start to prefetch requested data in background.
-    fn prefetch(
-        &self,
-        cache: Arc<dyn BlobCache>,
-        prefetches: &[BlobPrefetchRequest],
-        bios: &[BlobIoDesc],
-    ) -> StorageResult<usize>;
-
     /// Enable prefetching blob data in background.
     ///
     /// It should be paired with stop_prefetch().
@@ -176,6 +168,14 @@ pub trait BlobCache: Send + Sync {
 
     // Check whether data prefetch is still active.
     fn is_prefetch_active(&self) -> bool;
+
+    /// Start to prefetch requested data in background.
+    fn prefetch(
+        &self,
+        cache: Arc<dyn BlobCache>,
+        prefetches: &[BlobPrefetchRequest],
+        bios: &[BlobIoDesc],
+    ) -> StorageResult<usize>;
 
     /// Execute filesystem data prefetch.
     fn prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {

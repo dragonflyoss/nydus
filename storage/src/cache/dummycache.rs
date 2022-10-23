@@ -84,15 +84,6 @@ impl BlobCache for DummyCache {
         None
     }
 
-    fn prefetch(
-        &self,
-        _blob_cache: Arc<dyn BlobCache>,
-        _prefetches: &[BlobPrefetchRequest],
-        _bios: &[BlobIoDesc],
-    ) -> StorageResult<usize> {
-        Err(StorageError::Unsupported)
-    }
-
     fn start_prefetch(&self) -> StorageResult<()> {
         Ok(())
     }
@@ -105,6 +96,15 @@ impl BlobCache for DummyCache {
         false
     }
 
+    fn prefetch(
+        &self,
+        _blob_cache: Arc<dyn BlobCache>,
+        _prefetches: &[BlobPrefetchRequest],
+        _bios: &[BlobIoDesc],
+    ) -> StorageResult<usize> {
+        Err(StorageError::Unsupported)
+    }
+
     fn read(&self, iovec: &mut BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
         let bios = &iovec.bi_vec;
 
@@ -114,7 +114,6 @@ impl BlobCache for DummyCache {
 
         let bios_len = bios.len();
         let offset = bios[0].offset;
-        //let chunk = bios[0].chunkinfo.as_v5()?;
         let d_size = bios[0].chunkinfo.uncompressed_size() as usize;
         // Use the destination buffer to receive the uncompressed data if possible.
         if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {

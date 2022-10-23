@@ -53,6 +53,7 @@ impl FsCacheMgr {
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         BLOB_FACTORY.start_mgr_checker();
+
         Ok(FsCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
             blobs_need,
@@ -155,7 +156,7 @@ impl BlobCacheMgr for FsCacheMgr {
         let guard = self.blobs.read().unwrap();
         if guard.len() != self.blobs_need {
             info!(
-                "blob mgr not ready to check stat, need blobs {} have blobs {}",
+                "blob mgr not ready to check stat, need blobs {} have {} entries",
                 self.blobs_need,
                 guard.len()
             );
