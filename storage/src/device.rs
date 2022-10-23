@@ -20,7 +20,6 @@
 //!   one or more blob IO descriptors
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
 use std::any::Any;
-use std::cmp;
 use std::collections::hash_map::Drain;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -33,7 +32,6 @@ use arc_swap::ArcSwap;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use fuse_backend_rs::file_traits::FileReadWriteVolatile;
-use vm_memory::bytes::Bytes;
 
 use nydus_api::http::FactoryConfig;
 use nydus_utils::compress;
@@ -41,8 +39,6 @@ use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
-
-static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
 bitflags! {
     /// Features bits for blob management.
@@ -1108,30 +1104,6 @@ struct BlobDeviceIoVec<'a> {
 impl<'a> BlobDeviceIoVec<'a> {
     fn new(dev: &'a BlobDevice, iovec: &'a mut BlobIoVec) -> Self {
         BlobDeviceIoVec { dev, iovec }
-    }
-}
-
-#[allow(dead_code)]
-impl BlobDeviceIoVec<'_> {
-    fn fill_hole(&self, bufs: &[FileVolatileSlice], size: usize) -> Result<usize, Error> {
-        let mut count: usize = 0;
-        let mut remain = size;
-
-        for &buf in bufs.iter() {
-            let mut total = cmp::min(remain, buf.len());
-            let mut offset = 0;
-            while total > 0 {
-                let cnt = cmp::min(total, ZEROS.len());
-                buf.write_slice(&ZEROS[0..cnt], offset)
-                    .map_err(|_| eio!("decompression failed"))?;
-                count += cnt;
-                remain -= cnt;
-                total -= cnt;
-                offset += cnt;
-            }
-        }
-
-        Ok(count)
     }
 }
 
