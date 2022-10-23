@@ -109,29 +109,15 @@ impl RafsSuper {
         Ok(())
     }
 
-    fn merge_chunks_io(orig: &mut BlobIoVec, more: &[BlobIoVec]) {
-        if orig.bi_vec.is_empty() {
-            return;
-        }
-
-        // safe to unwrap since it is already checked before
-        let mut cki = &orig.bi_vec.last().unwrap().chunkinfo;
-        let mut last_chunk = cki.as_base();
-
-        // caller should ensure that `window_base` won't overlap last chunk of user IO.
-        for d in more {
-            let head_ck = &d.bi_vec[0].chunkinfo.as_base();
-
-            if last_chunk.compressed_offset() + last_chunk.compressed_size() as u64
-                != head_ck.compressed_offset()
-            {
-                break;
+    fn merge_chunks_io(orig: &mut BlobIoVec, vec: BlobIoVec) {
+        assert!(!orig.is_empty());
+        if !vec.is_empty() {
+            let last = orig.blob_io_desc(orig.len() - 1).unwrap().clone();
+            let head = vec.blob_io_desc(0).unwrap();
+            if last.is_continuous(head) {
+                // Safe to unwrap since d is not empty.
+                orig.append(vec);
             }
-
-            // Safe to unwrap since bi_vec shouldn't be empty
-            cki = &d.bi_vec.last().unwrap().chunkinfo;
-            last_chunk = cki.as_base();
-            orig.bi_vec.extend_from_slice(d.bi_vec.as_slice());
         }
     }
 
@@ -149,24 +135,24 @@ impl RafsSuper {
         mut window_size: u64,
     ) -> Result<()> {
         let inode_size = inode.size();
-
-        let last_desc = if let Some(d) = descs.last_mut() {
-            d
-        } else {
-            return Ok(());
+        let last_desc = match descs.last_mut() {
+            Some(d) if !d.is_empty() => d,
+            _ => return Ok(()),
         };
 
         // Read left content of current file.
         if window_base < inode_size {
-            let size = inode_size - window_base;
-            let sz = std::cmp::min(size, window_size);
-            let amplified_io_vec = inode.alloc_bio_vecs(window_base, sz as usize, false)?;
-            debug_assert!(!amplified_io_vec.is_empty() && !amplified_io_vec[0].bi_vec.is_empty());
-            // caller should ensure that `window_base` won't overlap last chunk of user IO.
-            Self::merge_chunks_io(last_desc, &amplified_io_vec);
-            window_size -= sz;
-            if window_size == 0 {
-                return Ok(());
+            let size = std::cmp::min(inode_size - window_base, window_size);
+            let amplified_io_vec = inode.alloc_bio_vecs(window_base, size as usize, false)?;
+            for vec in amplified_io_vec {
+                if last_desc.has_same_blob(&vec) {
+                    window_size = if window_size > vec.size() as u64 {
+                        window_size - vec.size() as u64
+                    } else {
+                        0
+                    };
+                    Self::merge_chunks_io(last_desc, vec);
+                }
             }
         }
 
@@ -179,24 +165,22 @@ impl RafsSuper {
                     let next_size = ni.size();
                     if next_size > max_size as u64 {
                         break;
-                    }
-
-                    if next_size == 0 {
+                    } else if next_size == 0 {
                         continue;
                     }
 
                     let sz = std::cmp::min(window_size, next_size);
                     let amplified_io_vec = ni.alloc_bio_vecs(0, sz as usize, false)?;
-                    debug_assert!(
-                        !amplified_io_vec.is_empty() && !amplified_io_vec[0].bi_vec.is_empty()
-                    );
-                    if last_desc.has_same_blob(&amplified_io_vec[0]) {
-                        // caller should ensure that `window_base` won't overlap last chunk
-                        Self::merge_chunks_io(last_desc, &amplified_io_vec);
-                    } else {
-                        break;
+                    for vec in amplified_io_vec {
+                        if last_desc.has_same_blob(&vec) {
+                            window_size = if window_size > vec.size() as u64 {
+                                window_size - vec.size() as u64
+                            } else {
+                                0
+                            };
+                            Self::merge_chunks_io(last_desc, vec);
+                        }
                     }
-                    window_size -= sz;
                 }
             } else {
                 break;

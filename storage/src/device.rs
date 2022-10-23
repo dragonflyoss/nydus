@@ -548,6 +548,17 @@ impl BlobIoDesc {
             user_io,
         }
     }
+
+    /// Check whether the `other` BlobIoDesc is continuous to current one.
+    pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
+        let offset = self.chunkinfo.compressed_offset();
+        let prev_size = prev.chunkinfo.compressed_size() as u64;
+        if let Some(prev_end) = prev.chunkinfo.compressed_offset().checked_add(prev_size) {
+            prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
+        } else {
+            false
+        }
+    }
 }
 
 impl Debug for BlobIoDesc {
@@ -563,44 +574,42 @@ impl Debug for BlobIoDesc {
     }
 }
 
-impl BlobIoDesc {
-    /// Check whether the `other` BlobIoDesc is continuous to current one.
-    pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
-        let offset = self.chunkinfo.compressed_offset();
-        let prev_size = prev.chunkinfo.compressed_size() as u64;
-        if let Some(prev_end) = prev.chunkinfo.compressed_offset().checked_add(prev_size) {
-            prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
-        } else {
-            false
-        }
-    }
-}
-
 /// Scatter/gather list for blob IO operation, containing zero or more blob IO descriptors
-#[derive(Default)]
 pub struct BlobIoVec {
-    /// Blob IO flags.
-    pub bi_flags: u32,
+    /// The blob associated with the IO operation.
+    bi_blob: Arc<BlobInfo>,
     /// Total size of blob IOs to be performed.
-    pub bi_size: u32,
+    bi_size: u32,
     /// Array of blob IOs, these IOs should executed sequentially.
-    // TODO: As bi_vec must stay within the same blob, move BlobInfo out here?
-    pub bi_vec: Vec<BlobIoDesc>,
+    pub(crate) bi_vec: Vec<BlobIoDesc>,
 }
 
 impl BlobIoVec {
     /// Create a new blob IO scatter/gather list object.
-    pub fn new() -> Self {
+    pub fn new(bi_blob: Arc<BlobInfo>) -> Self {
         BlobIoVec {
-            ..Default::default()
+            bi_blob,
+            bi_size: 0,
+            bi_vec: Vec::with_capacity(128),
         }
     }
 
+    /// Add a new 'BlobIoDesc' to the 'BlobIoVec'.
+    pub fn push(&mut self, desc: BlobIoDesc) {
+        assert_eq!(self.bi_blob.blob_index(), desc.blob.blob_index());
+        assert_eq!(self.bi_blob.blob_id(), desc.blob.blob_id());
+        assert!(self.bi_size.checked_add(desc.size).is_some());
+        self.bi_size += desc.size;
+        self.bi_vec.push(desc);
+    }
+
     /// Append another blob io vector to current one.
-    pub fn append(&mut self, mut desc: BlobIoVec) {
-        self.bi_vec.append(desc.bi_vec.as_mut());
-        self.bi_size += desc.bi_size;
-        debug_assert!(self.validate());
+    pub fn append(&mut self, mut vec: BlobIoVec) {
+        assert_eq!(self.bi_blob.blob_index(), vec.bi_blob.blob_index());
+        assert_eq!(self.bi_blob.blob_id(), vec.bi_blob.blob_id());
+        assert!(self.bi_size.checked_add(vec.bi_size).is_some());
+        self.bi_vec.append(vec.bi_vec.as_mut());
+        self.bi_size += vec.bi_size;
     }
 
     /// Reset the blob io vector.
@@ -609,53 +618,43 @@ impl BlobIoVec {
         self.bi_vec.truncate(0);
     }
 
-    /// Get the target blob of the blob io vector.
-    pub fn get_target_blob(&self) -> Option<Arc<BlobInfo>> {
-        if self.bi_vec.is_empty() {
-            None
+    /// Get number of 'BlobIoDesc' in the 'BlobIoVec'.
+    pub fn len(&self) -> usize {
+        self.bi_vec.len()
+    }
+
+    /// Chech whether there's 'BlobIoDesc' in the'BlobIoVec'.
+    pub fn is_empty(&self) -> bool {
+        self.bi_vec.is_empty()
+    }
+
+    /// Get size of pending IO data.
+    pub fn size(&self) -> u32 {
+        self.bi_size
+    }
+
+    /// Get `BlobIoChunk` associated with the specified `BlobIoDesc`.
+    pub fn blob_io_desc(&self, index: usize) -> Option<&BlobIoDesc> {
+        if index < self.bi_vec.len() {
+            Some(&self.bi_vec[index])
         } else {
-            debug_assert!(self.validate());
-            Some(self.bi_vec[0].blob.clone())
+            None
         }
     }
 
     /// Get the target blob index of the blob io vector.
-    pub fn get_target_blob_index(&self) -> Option<u32> {
-        if self.bi_vec.is_empty() {
-            None
-        } else {
-            debug_assert!(self.validate());
-            Some(self.bi_vec[0].blob.blob_index())
-        }
+    pub fn blob_index(&self) -> u32 {
+        self.bi_blob.blob_index()
     }
 
     /// Check whether the blob io vector is targeting the blob with `blob_index`
     pub fn is_target_blob(&self, blob_index: u32) -> bool {
-        debug_assert!(self.validate());
-        !self.bi_vec.is_empty() && self.bi_vec[0].blob.blob_index() == blob_index
+        self.bi_blob.blob_index() == blob_index
     }
 
     /// Check whether two blob io vector targets the same blob.
     pub fn has_same_blob(&self, desc: &BlobIoVec) -> bool {
-        debug_assert!(self.validate());
-        debug_assert!(desc.validate());
-        !self.bi_vec.is_empty()
-            && !desc.bi_vec.is_empty()
-            && self.bi_vec[0].blob.blob_index() == desc.bi_vec[0].blob.blob_index()
-    }
-
-    /// Validate the io vector.
-    pub fn validate(&self) -> bool {
-        if self.bi_vec.len() > 1 {
-            let blob_index = self.bi_vec[0].blob.blob_index();
-            for n in &self.bi_vec[1..] {
-                if n.blob.blob_index() != blob_index {
-                    return false;
-                }
-            }
-        }
-
-        true
+        self.bi_blob.blob_index() == desc.bi_blob.blob_index()
     }
 }
 
@@ -957,8 +956,6 @@ impl BlobDevice {
             } else {
                 Err(einval!("BlobIoVec size doesn't match."))
             }
-        } else if !desc.validate() {
-            Err(einval!("BlobIoVec targets multiple blobs."))
         } else if desc.bi_vec[0].blob.blob_index() as usize >= self.blob_count {
             Err(einval!("BlobIoVec has out of range blob_index."))
         } else {
@@ -1029,10 +1026,9 @@ impl BlobDevice {
     }
 
     fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
-        if let Some(blob_index) = iovec.get_target_blob_index() {
-            if (blob_index as usize) < self.blob_count {
-                return Some(self.blobs.load()[blob_index as usize].clone());
-            }
+        let blob_index = iovec.blob_index();
+        if (blob_index as usize) < self.blob_count {
+            return Some(self.blobs.load()[blob_index as usize].clone());
         }
 
         None
@@ -1086,6 +1082,9 @@ impl BlobDevice {
 }
 
 /// Struct to execute Io requests with a single blob.
+///
+/// It's used to support `BlobDevice::read_to()` and acts the main entrance to read chunk data
+/// from data blobs.
 struct BlobDeviceIoVec<'a> {
     dev: &'a BlobDevice,
     iovec: &'a mut BlobIoVec,
@@ -1122,18 +1121,15 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         buffers: &[FileVolatileSlice],
         _offset: u64,
     ) -> Result<usize, Error> {
-        // BlobDevice::read_to() has validated that:
-        // - bi_vec[0] is valid
-        // - bi_vec[0].blob.blob_index() is valid
-        // - all IOs are against a single blob.
-        if let Some(index) = self.iovec.get_target_blob_index() {
-            let blobs = &self.dev.blobs.load();
-            if (index as usize) < blobs.len() {
-                return blobs[index as usize].read(self.iovec, buffers);
-            }
-        }
+        // BlobDevice::read_to() has validated that all IOs are against a single blob.
+        let index = self.iovec.blob_index();
+        let blobs = &self.dev.blobs.load();
 
-        Err(einval!("can not get blob index"))
+        if (index as usize) < blobs.len() {
+            blobs[index as usize].read(self.iovec, buffers)
+        } else {
+            Err(einval!("failed to get blob object for BlobIoVec"))
+        }
     }
 
     fn write_at_volatile(

@@ -947,29 +947,29 @@ mod cached_tests {
         cached_inode.load(&meta, &mut reader).unwrap();
         let descs = cached_inode.alloc_bio_vecs(0, 100, true).unwrap();
         let desc1 = &descs[0];
-        assert_eq!(desc1.bi_size, 100);
-        assert_eq!(desc1.bi_vec.len(), 1);
-        assert_eq!(desc1.bi_vec[0].offset, 0);
-        assert_eq!(desc1.bi_vec[0].blob.blob_id(), "123333");
+        assert_eq!(desc1.size(), 100);
+        assert_eq!(desc1.len(), 1);
+        assert_eq!(desc1.blob_io_desc(0).unwrap().offset, 0);
+        assert_eq!(desc1.blob.blob_id(), "123333");
 
         let descs = cached_inode
             .alloc_bio_vecs(1024 * 1024 - 100, 200, true)
             .unwrap();
         let desc2 = &descs[0];
-        assert_eq!(desc2.bi_size, 200);
-        assert_eq!(desc2.bi_vec.len(), 2);
-        assert_eq!(desc2.bi_vec[0].offset, 1024 * 1024 - 100);
-        assert_eq!(desc2.bi_vec[0].size, 100);
-        assert_eq!(desc2.bi_vec[1].offset, 0);
-        assert_eq!(desc2.bi_vec[1].size, 100);
+        assert_eq!(desc2.size(), 200);
+        assert_eq!(desc2.len(), 2);
+        assert_eq!(desc2.blob_io_desc(0).unwrap().offset, 1024 * 1024 - 100);
+        assert_eq!(desc2.blob_io_desc(0).unwrap().size, 100);
+        assert_eq!(desc2.blob_io_desc(1).unwrap().offset, 0);
+        assert_eq!(desc2.blob_io_desc(1).unwrap().size, 100);
 
         let descs = cached_inode
             .alloc_bio_vecs(1024 * 1024 + 8192, 1024 * 1024 * 4, true)
             .unwrap();
         let desc3 = &descs[0];
-        assert_eq!(desc3.bi_size, 1024 * 1024 * 2);
-        assert_eq!(desc3.bi_vec.len(), 3);
-        assert_eq!(desc3.bi_vec[2].size, 8192);
+        assert_eq!(desc3.size(), 1024 * 1024 * 2);
+        assert_eq!(desc3.len(), 3);
+        assert_eq!(desc3.blob_io_desc(2).unwrap().size, 8192);
 
         drop(f);
         std::fs::remove_file("/tmp/buf_3").unwrap();

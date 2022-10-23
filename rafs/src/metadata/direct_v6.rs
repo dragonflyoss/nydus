@@ -739,7 +739,6 @@ impl RafsInode for OndiskInodeWrapper {
         let chunks = self
             .chunk_addresses(head_chunk_index as u32)
             .map_err(err_invalidate_data)?;
-
         if chunks.is_empty() {
             return Ok(vec);
         }
@@ -747,54 +746,30 @@ impl RafsInode for OndiskInodeWrapper {
         let content_offset = (offset % chunk_size as u64) as u32;
         let mut left = std::cmp::min(self.size(), size as u64) as u32;
         let mut content_len = std::cmp::min(chunk_size - content_offset, left);
+        let desc = self.make_chunk_io(&chunks[0], content_offset, content_len, user_io);
 
-        // Safe to unwrap because chunks is not empty to reach here.
-        let first_chunk_addr = chunks.first().unwrap();
-        let desc = self.make_chunk_io(first_chunk_addr, content_offset, content_len, user_io);
-
-        let mut descs = BlobIoVec::new();
-        descs.bi_vec.push(desc);
-        descs.bi_size += content_len;
+        let mut descs = BlobIoVec::new(desc.blob.clone());
+        descs.push(desc);
         left -= content_len;
-
         if left != 0 {
             // Handle the rest of chunks since they shares the same content length = 0.
             for c in chunks.iter().skip(1) {
                 content_len = std::cmp::min(chunk_size, left);
                 let desc = self.make_chunk_io(c, 0, content_len, user_io);
-
-                if desc.blob.blob_index() != descs.bi_vec[0].blob.blob_index() {
-                    trace!(
-                        "Continuous storage IO has {} bios offset {} io size {} {:?}",
-                        descs.bi_vec.len(),
-                        offset,
-                        size,
-                        descs.bi_vec
-                    );
+                if desc.blob.blob_index() != descs.blob_index() {
                     vec.push(descs);
-                    descs = BlobIoVec::new();
+                    descs = BlobIoVec::new(desc.blob.clone());
                 }
-
-                descs.bi_vec.push(desc);
-                descs.bi_size += content_len;
+                descs.push(desc);
                 left -= content_len;
                 if left == 0 {
                     break;
                 }
             }
         }
-
-        if !descs.bi_vec.is_empty() {
-            trace!(
-                "Continuous storage IO has {} bios offset {} io size {} {:?}",
-                descs.bi_vec.len(),
-                offset,
-                size,
-                descs.bi_vec
-            );
+        if !descs.is_empty() {
             vec.push(descs)
         }
-
         assert_eq!(left, 0);
 
         Ok(vec)

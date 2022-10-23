@@ -542,7 +542,7 @@ impl Rafs {
         // - or file prefetch list in metadata
         let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
         let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
-            if desc.bi_size > 0 {
+            if desc.size() > 0 {
                 device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                     warn!("Prefetch error, {:?}", e);
                 });
@@ -558,7 +558,7 @@ impl Rafs {
         if prefetch_all && !ignore_prefetch_all {
             let root = vec![root_ino];
             let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
-                if desc.bi_size > 0 {
+                if desc.size() > 0 {
                     device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                         warn!("Prefetch error, {:?}", e);
                     });
@@ -716,7 +716,7 @@ impl FileSystem for Rafs {
         let real_size = cmp::min(size as u64, inode_size - offset);
         let mut result = 0;
         let mut descs = inode.alloc_bio_vecs(offset, real_size as usize, true)?;
-        debug_assert!(!descs.is_empty() && !descs[0].bi_vec.is_empty());
+        assert!(!descs.is_empty() && !descs[0].is_empty());
 
         // Try to amplify user io for Rafs v5, to improve performance.
         if self.sb.meta.is_v5() && size < self.amplify_io {
@@ -742,15 +742,14 @@ impl FileSystem for Rafs {
         let start = self.ios.latency_start();
 
         for desc in descs.iter_mut() {
-            debug_assert!(desc.validate());
-            debug_assert!(!desc.bi_vec.is_empty());
-            debug_assert!(desc.bi_size != 0);
+            assert!(!desc.is_empty());
+            assert_ne!(desc.size(), 0);
 
             // Avoid copying `desc`
             let r = self.device.read_to(w, desc)?;
             result += r;
             recorder.mark_success(r);
-            if r as u32 != desc.bi_size {
+            if r as u32 != desc.size() {
                 break;
             }
         }

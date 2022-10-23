@@ -1222,19 +1222,20 @@ pub(crate) fn rafsv5_alloc_bio_vecs<I: RafsInode + RafsV5InodeChunkOps + RafsV5I
         return Ok(vec![]);
     }
 
-    let mut descs = Vec::with_capacity(4);
-    let mut desc = BlobIoVec::new();
     let chunk = inode.get_chunk_info_v5(index_start)?;
     let blob = inode.get_blob_by_index(chunk.blob_index())?;
+    let mut desc = BlobIoVec::new(blob.clone());
     if !add_chunk_to_bio_desc(&mut desc, offset, end, chunk, blob, user_io) {
         return Err(einval!("failed to create blob io vector"));
     }
+
+    let mut descs = Vec::with_capacity(4);
     for idx in index_start + 1..index_end {
         let chunk = inode.get_chunk_info_v5(idx)?;
         let blob = inode.get_blob_by_index(chunk.blob_index())?;
-        if blob.blob_index() != desc.bi_vec[0].blob.blob_index() {
+        if blob.blob_index() != desc.blob_index() {
             descs.push(desc);
-            desc = BlobIoVec::new();
+            desc = BlobIoVec::new(blob.clone());
         }
         if !add_chunk_to_bio_desc(&mut desc, offset, end, chunk, blob, user_io) {
             return Err(einval!("failed to create blob io vector"));
@@ -1295,7 +1296,6 @@ fn add_chunk_to_bio_desc(
         uncompressed_size: chunk.uncompressed_size(),
         flags: chunk.flags(),
     }) as Arc<dyn BlobChunkInfo>;
-
     let bio = BlobIoDesc::new(
         blob,
         BlobIoChunk::Base(io_chunk),
@@ -1303,8 +1303,7 @@ fn add_chunk_to_bio_desc(
         (chunk_end - chunk_start) as u32,
         user_io,
     );
-    desc.bi_size += bio.size;
-    desc.bi_vec.push(bio);
+    desc.push(bio);
 
     true
 }
@@ -1647,7 +1646,6 @@ pub mod tests {
         ];
 
         for (offset, end, expected_chunk_start, expected_size, result) in data.iter() {
-            let mut desc = BlobIoVec::new();
             let blob = Arc::new(BlobInfo::new(
                 0,
                 String::from("blobid"),
@@ -1657,11 +1655,12 @@ pub mod tests {
                 0,
                 BlobFeatures::V5_NO_EXT_BLOB_TABLE,
             ));
+            let mut desc = BlobIoVec::new(blob.clone());
             let res = add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), blob, true);
             assert_eq!(*result, res);
-            if !desc.bi_vec.is_empty() {
-                assert_eq!(desc.bi_vec.len(), 1);
-                let bio = &desc.bi_vec[0];
+            if !desc.is_empty() {
+                assert_eq!(desc.len(), 1);
+                let bio = &desc.blob_io_desc(0).unwrap();
                 assert_eq!(*expected_chunk_start, bio.offset);
                 assert_eq!(*expected_size as u32, bio.size);
             }

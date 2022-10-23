@@ -363,9 +363,8 @@ impl BlobCache for FileCacheEntry {
     }
 
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
-        debug_assert!(iovec.validate());
         self.metrics.total.inc();
-        self.workers.consume_prefetch_budget(iovec.bi_size);
+        self.workers.consume_prefetch_budget(iovec.size());
 
         if let Some(meta) = self.meta.as_ref() {
             if let Some(bm) = meta.get_blob_meta() {
@@ -382,9 +381,9 @@ impl BlobCache for FileCacheEntry {
             }
         }
 
-        if iovec.bi_vec.is_empty() {
+        if iovec.is_empty() {
             Ok(0)
-        } else if iovec.bi_vec.len() == 1 {
+        } else if iovec.len() == 1 {
             let mut state = FileIoMergeState::new();
             let mut cursor = MemSliceCursor::new(buffers);
             let req = BlobIoRange::new(&iovec.bi_vec[0], 1);
