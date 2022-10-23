@@ -744,7 +744,7 @@ impl RafsInode for OndiskInodeWrapper {
         }
 
         let content_offset = (offset % chunk_size as u64) as u32;
-        let mut left = std::cmp::min(self.size(), size as u64) as u32;
+        let mut left = std::cmp::min(self.size() - offset, size as u64) as u32;
         let mut content_len = std::cmp::min(chunk_size - content_offset, left);
         let desc = self.make_chunk_io(&chunks[0], content_offset, content_len, user_io);
 
