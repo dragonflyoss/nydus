@@ -163,6 +163,7 @@ impl Drop for FileCacheMgr {
 }
 
 impl FileCacheEntry {
+    //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     fn new_file_cache(
         mgr: &FileCacheMgr,
         blob_info: Arc<BlobInfo>,
@@ -272,6 +273,7 @@ impl FileCacheEntry {
 
         Ok((chunk_map, direct_chunkmap))
     }
+    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
 
 #[cfg(test)]

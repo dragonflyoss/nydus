@@ -280,6 +280,45 @@ pub trait BlobCache: Send + Sync {
         let mut c_buf = None;
 
         if self.is_zran() {
+            /*
+            warn!("read_chunk_from_backend for zran");
+            let meta = self
+                .get_blob_meta_info()?
+                .ok_or_else(|| einval!("failed to get blob meta object for ZRan"))?;
+            let (ctx, dict) = meta
+                .get_zran_context(chunk.id())
+                .ok_or_else(|| einval!("failed to get ZRan context for decompression"))?;
+            let c_offset = ctx.in_offset;
+            let c_size = ctx.in_len as u64;
+            let blob_compressed_size = self.blob_compressed_size()?;
+            if c_offset >= blob_compressed_size
+                || c_offset.checked_add(c_size).is_none()
+                || c_offset + c_size > blob_compressed_size
+                || ctx.out_len as u64 > RAFS_MAX_CHUNK_SIZE
+            {
+                let msg = format!(
+                    "invalid ZRan context information: blob size 0x{:x}, compressed data 0x{:x}/0x{:x}, uncompressed size 0x{:x}",
+                    blob_compressed_size, c_offset, c_size, ctx.out_len
+                );
+                return Err(einval!(msg));
+            }
+
+            let mut raw_input = alloc_buf(c_size as usize);
+            let mut raw_output = alloc_buf(ctx.out_len as usize);
+            let size = self
+                .reader()
+                .read(raw_input.as_mut_slice(), c_offset)
+                .map_err(|e| eio!(e))?;
+            if size != raw_input.len() {
+                return Err(eio!("storage backend returns less data than requested"));
+            }
+
+            let mut decoder = ZranDecoder::new()?;
+            decoder.uncompress(&ctx, Some(dict), &raw_input, &mut raw_output)?;
+            let zran_offset = meta.get_zran_offset(chunk.id());
+
+            c_buf = Some(raw_input);
+             */
             return Err(enosys!("read_chunk_from_backend"));
         } else if chunk.is_compressed() {
             let c_size = if self.is_legacy_stargz() {

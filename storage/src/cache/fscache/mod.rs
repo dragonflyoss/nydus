@@ -190,6 +190,7 @@ impl Drop for FsCacheMgr {
     }
 }
 
+//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 impl FileCacheEntry {
     pub fn new_fs_cache(
         mgr: &FsCacheMgr,
@@ -251,3 +252,4 @@ impl FileCacheEntry {
         })
     }
 }
+//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>

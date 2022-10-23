@@ -22,6 +22,7 @@ use crate::cache::{BlobCache, BlobIoRange};
 use crate::factory::ASYNC_RUNTIME;
 use crate::RAFS_MAX_CHUNK_SIZE;
 
+//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 /// Configuration information for asynchronous workers.
 pub(crate) struct AsyncPrefetchConfig {
     /// Whether or not to enable prefetch.
@@ -389,6 +390,7 @@ impl AsyncWorkerMgr {
         self.workers.fetch_add(n, Ordering::Relaxed);
     }
 }
+//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 #[cfg(test)]
 mod tests {
