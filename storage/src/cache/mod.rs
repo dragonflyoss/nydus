@@ -73,23 +73,23 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
         self.size as usize
     }
 
-    /// Push the a new io descriptor into the pending list.
+    /// Push a new io descriptor into the pending list.
     #[inline]
     pub fn push(&mut self, bio: &'a BlobIoDesc) {
         let size = bio.chunkinfo.compressed_size();
 
-        debug_assert!(self.size.checked_add(size).is_some());
+        assert!(self.size.checked_add(size).is_some());
         self.bios.push(bio);
         self.size += bio.chunkinfo.compressed_size();
     }
 
-    /// Issue the pending io descriptors.
+    /// Issue all pending io descriptors.
     #[inline]
     pub fn issue(&mut self) {
         if !self.bios.is_empty() {
             let mut mr = BlobIoRange::new(self.bios[0], self.bios.len());
             for bio in self.bios[1..].iter() {
-                mr.merge(bio);
+                mr.merge(bio, 0);
             }
             (self.cb)(mr);
 
@@ -105,7 +105,7 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
             let mut state = BlobIoMergeState::new(&bios[0], op);
 
             for cur_bio in &bios[1..] {
-                if !cur_bio.is_continuous(&bios[index - 1]) || state.size() >= max_size {
+                if !bios[index - 1].is_continuous(cur_bio, 0) || state.size() >= max_size {
                     state.issue();
                 }
                 state.push(cur_bio);
@@ -499,7 +499,7 @@ mod tests {
         BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
         assert_eq!(count, 2);
 
-        assert!(desc2.is_continuous(&desc1));
-        assert!(!desc3.is_continuous(&desc1));
+        assert!(desc1.is_continuous(&desc2, 0));
+        assert!(!desc1.is_continuous(&desc3, 0));
     }
 }

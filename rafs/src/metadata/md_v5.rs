@@ -115,7 +115,7 @@ impl RafsSuper {
         if !vec.is_empty() {
             let last = orig.blob_io_desc(orig.len() - 1).unwrap().clone();
             let head = vec.blob_io_desc(0).unwrap();
-            if last.is_continuous(head) {
+            if last.is_continuous(head, 0) {
                 // Safe to unwrap since d is not empty.
                 orig.append(vec);
             }

@@ -722,12 +722,13 @@ impl FileSystem for Rafs {
         if self.sb.meta.is_v5() && size < self.amplify_io {
             let all_chunks_ready = self.device.all_chunks_ready(&descs);
             if !all_chunks_ready {
-                let chunk_size = self.metadata().chunk_size as u64;
-                let next_chunk_base = (offset + (size as u64) + chunk_size) & !chunk_size;
-                let window_base = std::cmp::min(next_chunk_base, inode_size);
-                let actual_size = window_base - (offset & !chunk_size);
+                let chunk_mask = self.metadata().chunk_size as u64 - 1;
+                let next_chunk_base = (offset + (size as u64) + chunk_mask) & !chunk_mask;
+                let window_base = cmp::min(next_chunk_base, inode_size);
+                let actual_size = window_base - (offset & !chunk_mask);
                 if actual_size < self.amplify_io as u64 {
                     let window_size = self.amplify_io as u64 - actual_size;
+                    let orig_cnt = descs.iter().fold(0, |s, d| s + d.len());
                     self.sb.amplify_io(
                         &self.device,
                         self.amplify_io,
@@ -736,6 +737,12 @@ impl FileSystem for Rafs {
                         window_base,
                         window_size,
                     )?;
+                    let new_cnt = descs.iter().fold(0, |s, d| s + d.len());
+                    trace!(
+                        "amplify RAFS v5 read from {} to {} chunks",
+                        orig_cnt,
+                        new_cnt
+                    );
                 }
             }
         }

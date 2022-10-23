@@ -515,11 +515,16 @@ impl BlobIoDesc {
     }
 
     /// Check whether the `other` BlobIoDesc is continuous to current one.
-    pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
-        let offset = self.chunkinfo.compressed_offset();
-        let prev_size = prev.chunkinfo.compressed_size() as u64;
-        if let Some(prev_end) = prev.chunkinfo.compressed_offset().checked_add(prev_size) {
-            prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
+    pub fn is_continuous(&self, next: &BlobIoDesc, max_gap: u64) -> bool {
+        let prev_end = self.chunkinfo.compressed_offset() + self.chunkinfo.compressed_size() as u64;
+        let next_offset = next.chunkinfo.compressed_offset();
+
+        if self.chunkinfo.blob_index() == next.chunkinfo.blob_index() && next_offset >= prev_end {
+            if next.blob.is_stargz() {
+                next_offset - prev_end <= max_gap * 8
+            } else {
+                next_offset - prev_end <= max_gap
+            }
         } else {
             false
         }
@@ -677,7 +682,6 @@ impl BlobIoSegment {
     #[inline]
     pub fn append(&mut self, _offset: u32, len: u32) {
         debug_assert!(_offset.checked_add(len).is_some());
-        debug_assert!((self.offset + self.len).checked_add(len).is_some());
 
         self.len += len;
     }
@@ -753,14 +757,22 @@ impl BlobIoRange {
     }
 
     /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
-    pub fn merge(&mut self, bio: &BlobIoDesc) {
+    pub fn merge(&mut self, bio: &BlobIoDesc, max_gap: u64) {
+        let end = self.blob_offset + self.blob_size;
+        let offset = bio.chunkinfo.compressed_offset();
+        let size = bio.chunkinfo.compressed_size() as u64;
+        let size = if end == offset {
+            assert!(offset.checked_add(size).is_some());
+            size
+        } else {
+            assert!((offset > end && offset - end <= max_gap));
+            size + (offset - end)
+        };
+        assert!(end.checked_add(size).is_some());
+
+        self.blob_size += size;
         self.tags.push(Self::tag_from_desc(bio));
         self.chunks.push(bio.chunkinfo.0.clone());
-        debug_assert!(
-            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compressed_offset())
-        );
-        self.blob_size += bio.chunkinfo.compressed_size() as u64;
-        debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
     }
 
     /// Check the `BlobIoRange` object is valid.
@@ -1179,7 +1191,88 @@ mod tests {
     }
 
     #[test]
-    fn test_is_all_chunk_ready() {
-        // TODO
+    fn test_chunk_is_continuous() {
+        let blob_info = Arc::new(BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+        ));
+        let chunk1 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0,
+            uncompress_offset: 0,
+            file_offset: 0,
+            index: 0,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let chunk2 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x800,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let chunk3 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x1800,
+            uncompress_offset: 0x3000,
+            file_offset: 0x3000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+
+        let desc1 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk1.into(),
+            offset: 0,
+            size: 0x1000,
+            user_io: true,
+        };
+        let desc2 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk2.into(),
+            offset: 0,
+            size: 0x1000,
+            user_io: true,
+        };
+        let desc3 = BlobIoDesc {
+            blob: blob_info,
+            chunkinfo: chunk3.into(),
+            offset: 0,
+            size: 0x1000,
+            user_io: true,
+        };
+
+        assert!(desc1.is_continuous(&desc2, 0x0));
+        assert!(desc1.is_continuous(&desc2, 0x1000));
+        assert!(!desc2.is_continuous(&desc1, 0x1000));
+        assert!(!desc2.is_continuous(&desc1, 0x0));
+
+        assert!(!desc1.is_continuous(&desc3, 0x0));
+        assert!(!desc1.is_continuous(&desc3, 0x400));
+        assert!(!desc1.is_continuous(&desc3, 0x800));
+        assert!(desc1.is_continuous(&desc3, 0x1000));
+
+        assert!(!desc2.is_continuous(&desc3, 0x0));
+        assert!(!desc2.is_continuous(&desc3, 0x400));
+        assert!(desc2.is_continuous(&desc3, 0x800));
+        assert!(desc2.is_continuous(&desc3, 0x1000));
     }
 }
