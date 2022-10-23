@@ -196,36 +196,6 @@ impl BlobCache for FileCacheEntry {
         }
     }
 
-    fn prefetch(
-        &self,
-        blob_cache: Arc<dyn BlobCache>,
-        prefetches: &[BlobPrefetchRequest],
-        bios: &[BlobIoDesc],
-    ) -> StorageResult<usize> {
-        let mut bios = bios.to_vec();
-        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
-        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
-
-        // Handle blob prefetch request first, it may help performance.
-        for req in prefetches {
-            let msg = AsyncPrefetchMessage::new_blob_prefetch(
-                blob_cache.clone(),
-                req.offset as u64,
-                req.len as u64,
-            );
-            let _ = self.workers.send_prefetch_message(msg);
-        }
-
-        // Then handle fs prefetch
-        let merging_size = self.prefetch_config.merging_size;
-        BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
-            let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
-            let _ = self.workers.send_prefetch_message(msg);
-        });
-
-        Ok(0)
-    }
-
     fn start_prefetch(&self) -> StorageResult<()> {
         self.prefetch_state.fetch_add(1, Ordering::Release);
         Ok(())
@@ -256,6 +226,36 @@ impl BlobCache for FileCacheEntry {
 
     fn is_prefetch_active(&self) -> bool {
         self.prefetch_state.load(Ordering::Acquire) > 0
+    }
+
+    fn prefetch(
+        &self,
+        blob_cache: Arc<dyn BlobCache>,
+        prefetches: &[BlobPrefetchRequest],
+        bios: &[BlobIoDesc],
+    ) -> StorageResult<usize> {
+        let mut bios = bios.to_vec();
+        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
+        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
+
+        // Handle blob prefetch request first, it may help performance.
+        for req in prefetches {
+            let msg = AsyncPrefetchMessage::new_blob_prefetch(
+                blob_cache.clone(),
+                req.offset as u64,
+                req.len as u64,
+            );
+            let _ = self.workers.send_prefetch_message(msg);
+        }
+
+        // Then handle fs prefetch
+        let merging_size = self.prefetch_config.merging_size;
+        BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
+            let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
+            let _ = self.workers.send_prefetch_message(msg);
+        });
+
+        Ok(0)
     }
 
     fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {
@@ -634,7 +634,7 @@ impl FileCacheEntry {
             // - the chunk is ready in the file cache
             // - the data in the file cache is uncompressed.
             // - data validation is disabled
-            if is_ready && !self.is_compressed && !self.need_validate {
+            if is_ready && !self.is_compressed && !self.need_validate() {
                 // Internal IO should not be committed to local cache region, just
                 // commit this region without pushing any chunk to avoid discontinuous
                 // chunks in a region.
@@ -675,7 +675,7 @@ impl FileCacheEntry {
                 let tag = if let BlobIoTag::User(ref s) = req.tags[i] {
                     BlobIoTag::User(s.clone())
                 } else {
-                    BlobIoTag::Internal(chunk.compressed_offset())
+                    BlobIoTag::Internal
                 };
                 // NOTE: Only this request region can read more chunks from backend with user io.
                 state.push(
@@ -1105,7 +1105,7 @@ impl Region {
         tag: BlobIoTag,
         chunk: Option<Arc<dyn BlobChunkInfo>>,
     ) -> StorageResult<()> {
-        debug_assert!(self.status != RegionStatus::Committed);
+        assert_ne!(self.status, RegionStatus::Committed);
 
         if self.status == RegionStatus::Init {
             self.status = RegionStatus::Open;
@@ -1113,7 +1113,7 @@ impl Region {
             self.blob_len = len;
             self.count = 1;
         } else {
-            debug_assert!(self.status == RegionStatus::Open);
+            assert_eq!(self.status, RegionStatus::Open);
             if self.blob_address + self.blob_len as u64 != start
                 || start.checked_add(len as u64).is_none()
             {
@@ -1192,7 +1192,7 @@ impl FileIoMergeState {
 
     #[inline]
     fn joinable(&self, region_type: RegionType) -> bool {
-        debug_assert!(!self.regions.is_empty());
+        assert!(!self.regions.is_empty());
         let idx = self.regions.len() - 1;
 
         self.regions[idx].r#type.joinable(region_type) && self.last_region_joinable

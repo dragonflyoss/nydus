@@ -1102,8 +1102,7 @@ pub(crate) mod tests {
             uid: 0,
         };
         match rafs.lookup(ctx, 1, &std::ffi::CString::new("/etc").unwrap()) {
-            Err(e) => {
-                println!("{:?}", e);
+            Err(_e) => {
                 panic!("failed to lookup /etc from ino 1");
             }
             Ok(e) => {

@@ -19,10 +19,8 @@ use std::time::Duration;
 
 use lazy_static::lazy_static;
 use nydus_api::http::{BackendConfig, FactoryConfig};
-use tokio::{
-    runtime::{Builder, Runtime},
-    time,
-};
+use tokio::runtime::{Builder, Runtime};
+use tokio::time;
 
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
@@ -125,7 +123,6 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
-                    blobs_need,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>

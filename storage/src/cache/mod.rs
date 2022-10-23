@@ -156,14 +156,6 @@ pub trait BlobCache: Send + Sync {
         None
     }
 
-    /// Start to prefetch requested data in background.
-    fn prefetch(
-        &self,
-        cache: Arc<dyn BlobCache>,
-        prefetches: &[BlobPrefetchRequest],
-        bios: &[BlobIoDesc],
-    ) -> StorageResult<usize>;
-
     /// Enable prefetching blob data in background.
     ///
     /// It should be paired with stop_prefetch().
@@ -176,6 +168,14 @@ pub trait BlobCache: Send + Sync {
 
     // Check whether data prefetch is still active.
     fn is_prefetch_active(&self) -> bool;
+
+    /// Start to prefetch requested data in background.
+    fn prefetch(
+        &self,
+        cache: Arc<dyn BlobCache>,
+        prefetches: &[BlobPrefetchRequest],
+        bios: &[BlobIoDesc],
+    ) -> StorageResult<usize>;
 
     /// Execute filesystem data prefetch.
     fn prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {
@@ -190,8 +190,8 @@ pub trait BlobCache: Send + Sync {
     /// This is an interface to optimize chunk data fetch performance by merging multiple continuous
     /// chunks into one backend request. Callers must ensure that chunks in `chunks` covers a
     /// continuous range, and the range exactly matches [`blob_offset`..`blob_offset` + `blob_size`].
-    /// Function `read_chunks()` returns one buffer containing decompressed chunk data for each
-    /// entry in the `chunks` array in corresponding order.
+    /// Function `read_chunks_from_backend()` returns one buffer containing decompressed chunk data
+    /// for each entry in the `chunks` array in corresponding order.
     ///
     /// This method returns success only if all requested data are successfully fetched.
     fn read_chunks(
