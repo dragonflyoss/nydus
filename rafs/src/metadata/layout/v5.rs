@@ -51,7 +51,7 @@ use vm_memory::VolatileMemory;
 // have been moved into the storage manager.
 use nydus_storage::device::v5::BlobV5ChunkInfo;
 use nydus_storage::device::{
-    BlobChunkFlags, BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoVec,
+    BlobChunkFlags, BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec,
 };
 
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER_VERSION_V5};
@@ -1298,7 +1298,7 @@ fn add_chunk_to_bio_desc(
     }) as Arc<dyn BlobChunkInfo>;
     let bio = BlobIoDesc::new(
         blob,
-        BlobIoChunk::Base(io_chunk),
+        io_chunk.into(),
         chunk_start as u32,
         (chunk_end - chunk_start) as u32,
         user_io,

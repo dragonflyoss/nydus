@@ -432,84 +432,49 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 /// This helps to feed unified IO description to storage subsystem from both rafs v6 and v5 since
 /// rafs v6 have a different ChunkInfo definition on bootstrap.
 #[derive(Clone)]
-pub enum BlobIoChunk {
-    // For rafs v6 to pass chunk info to storage module.
-    // (blob_index, chunk_index) since it can't load chunks info from bootstrap
-    Address(u32, u32),
-    Base(Arc<dyn BlobChunkInfo>),
-}
-
-impl BlobIoChunk {
-    /// Convert a [BlobIoChunk] to a reference to [BlobChunkInfo] trait object.
-    pub fn as_base(&self) -> &(dyn BlobChunkInfo) {
-        match self {
-            BlobIoChunk::Base(v) => v.as_ref(),
-            _ => panic!("Chunk is not fully loaded"),
-        }
-    }
-
-    pub fn inner(&self) -> Arc<dyn BlobChunkInfo> {
-        match self {
-            BlobIoChunk::Base(v) => v.clone(),
-            // TODO: Don't panic?
-            _ => panic!("Chunk is not fully loaded"),
-        }
-    }
-}
+pub struct BlobIoChunk(Arc<dyn BlobChunkInfo>);
 
 impl From<Arc<dyn BlobChunkInfo>> for BlobIoChunk {
     fn from(v: Arc<dyn BlobChunkInfo>) -> Self {
-        BlobIoChunk::Base(v)
+        BlobIoChunk(v)
     }
 }
 
 impl BlobChunkInfo for BlobIoChunk {
     fn chunk_id(&self) -> &RafsDigest {
-        self.as_base().chunk_id()
+        self.0.chunk_id()
     }
 
     fn id(&self) -> u32 {
-        // BlobIoChunk::Address is a medium type to pass chunk IO description
-        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
-        // causes panic. So this is a workaround to avoid panic.
-        match self {
-            Self::Address(_, index) => *index,
-            _ => self.as_base().id(),
-        }
+        self.0.id()
     }
 
     fn blob_index(&self) -> u32 {
-        self.as_base().blob_index()
+        self.0.blob_index()
     }
 
     fn compressed_offset(&self) -> u64 {
-        // BlobIoChunk::Address is a medium type to pass chunk IO description
-        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
-        // causes panic. So this is a workaround to avoid panic.
-        match self {
-            Self::Address(_, _) => 0,
-            _ => self.as_base().compressed_offset(),
-        }
+        self.0.compressed_offset()
     }
 
     fn compressed_size(&self) -> u32 {
-        self.as_base().compressed_size()
+        self.0.compressed_size()
     }
 
     fn uncompressed_offset(&self) -> u64 {
-        self.as_base().uncompressed_offset()
+        self.0.uncompressed_offset()
     }
 
     fn uncompressed_size(&self) -> u32 {
-        self.as_base().uncompressed_size()
+        self.0.uncompressed_size()
     }
 
     fn is_compressed(&self) -> bool {
-        self.as_base().is_compressed()
+        self.0.is_compressed()
     }
 
     fn as_any(&self) -> &dyn Any {
-        self.as_base().as_any()
+        self
     }
 }
 
@@ -776,7 +741,7 @@ impl BlobIoRange {
         let mut chunks = Vec::with_capacity(capacity);
         let mut tags = Vec::with_capacity(capacity);
         tags.push(Self::tag_from_desc(bio));
-        chunks.push(bio.chunkinfo.inner());
+        chunks.push(bio.chunkinfo.0.clone());
 
         BlobIoRange {
             blob_info: bio.blob.clone(),
@@ -790,7 +755,7 @@ impl BlobIoRange {
     /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
     pub fn merge(&mut self, bio: &BlobIoDesc) {
         self.tags.push(Self::tag_from_desc(bio));
-        self.chunks.push(bio.chunkinfo.inner());
+        self.chunks.push(bio.chunkinfo.0.clone());
         debug_assert!(
             self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compressed_offset())
         );
@@ -882,7 +847,7 @@ pub trait BlobObject: AsRawFd {
 ///
 /// All blob Io requests are actually served by the underlying [BlobCache] object. The wrapper
 /// provides an interface to dynamically switch underlying [BlobCache] objects.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BlobDevice {
     blobs: Arc<ArcSwap<Vec<Arc<dyn BlobCache>>>>,
     blob_count: usize,
@@ -1007,43 +972,6 @@ impl BlobDevice {
         }
     }
 
-    /// Check all chunks related to the blob io vector are ready.
-    pub fn all_chunks_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
-        for io_vec in io_vecs.iter() {
-            if let Some(blob) = self.get_blob_by_iovec(io_vec) {
-                let chunk_map = blob.get_chunk_map();
-                for desc in io_vec.bi_vec.iter() {
-                    if !chunk_map.is_ready(&desc.chunkinfo).unwrap_or(false) {
-                        return false;
-                    }
-                }
-            } else {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
-        let blob_index = iovec.blob_index();
-        if (blob_index as usize) < self.blob_count {
-            return Some(self.blobs.load()[blob_index as usize].clone());
-        }
-
-        None
-    }
-
-    fn get_blob_by_id(&self, blob_id: &str) -> Option<Arc<dyn BlobCache>> {
-        for blob in self.blobs.load().iter() {
-            if blob.blob_id() == blob_id {
-                return Some(blob.clone());
-            }
-        }
-
-        None
-    }
-
     /// fetch specified blob data in a synchronous way.
     pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
         for req in prefetches {
@@ -1078,6 +1006,54 @@ impl BlobDevice {
         }
 
         Ok(())
+    }
+
+    /// Check all chunks related to the blob io vector are ready.
+    pub fn all_chunks_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
+        for io_vec in io_vecs.iter() {
+            if let Some(blob) = self.get_blob_by_iovec(io_vec) {
+                let chunk_map = blob.get_chunk_map();
+                for desc in io_vec.bi_vec.iter() {
+                    if !chunk_map.is_ready(&desc.chunkinfo).unwrap_or(false) {
+                        return false;
+                    }
+                }
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// RAFS V6: create a `BlobIoChunk` for chunk with index `chunk_index`.
+    pub fn create_io_chunk(&self, blob_index: u32, chunk_index: u32) -> Option<BlobIoChunk> {
+        if (blob_index as usize) < self.blob_count {
+            let state = self.blobs.load();
+            let blob = &state[blob_index as usize];
+            blob.get_chunk_info(chunk_index).map(|v| v.into())
+        } else {
+            None
+        }
+    }
+
+    fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
+        let blob_index = iovec.blob_index();
+        if (blob_index as usize) < self.blob_count {
+            return Some(self.blobs.load()[blob_index as usize].clone());
+        }
+
+        None
+    }
+
+    fn get_blob_by_id(&self, blob_id: &str) -> Option<Arc<dyn BlobCache>> {
+        for blob in self.blobs.load().iter() {
+            if blob.blob_id() == blob_id {
+                return Some(blob.clone());
+            }
+        }
+
+        None
     }
 }
 

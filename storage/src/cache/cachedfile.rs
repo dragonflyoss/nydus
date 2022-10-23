@@ -30,8 +30,8 @@ use crate::cache::state::ChunkMap;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
-    BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
-    BlobIoVec, BlobObject, BlobPrefetchRequest,
+    BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
+    BlobObject, BlobPrefetchRequest,
 };
 use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
@@ -181,6 +181,13 @@ impl BlobCache for FileCacheEntry {
         &self.chunk_map
     }
 
+    fn get_chunk_info(&self, chunk_index: u32) -> Option<Arc<dyn BlobChunkInfo>> {
+        self.meta
+            .as_ref()
+            .and_then(|v| v.get_blob_meta())
+            .map(|v| BlobMetaChunk::new(chunk_index as usize, &v.state))
+    }
+
     fn get_blob_object(&self) -> Option<&dyn BlobObject> {
         if self.is_get_blob_object_supported {
             Some(self)
@@ -196,27 +203,8 @@ impl BlobCache for FileCacheEntry {
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
         let mut bios = bios.to_vec();
-        let mut fail = false;
-        bios.iter_mut().for_each(|b| {
-            if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
-                if let Some(meta) = self.meta.as_ref() {
-                    if let Some(bm) = meta.get_blob_meta() {
-                        let cki = BlobMetaChunk::new(chunk_index as usize, &bm.state);
-                        // TODO: Improve the type conversion
-                        b.chunkinfo = BlobIoChunk::Base(cki);
-                    } else {
-                        warn!("failed to get blob.meta for prefetch");
-                        fail = true;
-                    }
-                }
-            }
-        });
-        if fail {
-            bios = vec![];
-        } else {
-            bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
-            self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
-        }
+        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
+        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
 
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
@@ -365,21 +353,6 @@ impl BlobCache for FileCacheEntry {
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
         self.metrics.total.inc();
         self.workers.consume_prefetch_budget(iovec.size());
-
-        if let Some(meta) = self.meta.as_ref() {
-            if let Some(bm) = meta.get_blob_meta() {
-                // Convert `BlocIoChunk::Address` to `BlobIoChunk::Base` since rafs v6 has no chunks' meta
-                // in bootstrap.
-                for b in iovec.bi_vec.iter_mut() {
-                    if let BlobIoChunk::Address(_blob_index, chunk_index) = b.chunkinfo {
-                        b.chunkinfo =
-                            BlobIoChunk::Base(BlobMetaChunk::new(chunk_index as usize, &bm.state));
-                    }
-                }
-            } else {
-                return Err(einval!("failed to get blob.meta for read"));
-            }
-        }
 
         if iovec.is_empty() {
             Ok(0)

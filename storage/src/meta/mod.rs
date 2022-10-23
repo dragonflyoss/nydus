@@ -289,8 +289,9 @@ impl BlobMetaHeaderOndisk {
 /// Currently, the major responsibility of the `BlobMetaInfo` object is to query chunks covering
 /// a specific uncompressed data range by
 /// [BlobMetaInfo::get_chunks()](struct.BlobMetaInfo.html#method.get_chunks).
+#[derive(Clone)]
 pub struct BlobMetaInfo {
-    pub state: Arc<BlobMetaState>,
+    pub(crate) state: Arc<BlobMetaState>,
 }
 
 impl BlobMetaInfo {
@@ -1285,6 +1286,7 @@ impl BlobMetaChunkArray {
 }
 
 /// A fake `BlobChunkInfo` object created from RAFS V6 blob metadata.
+#[derive(Clone)]
 pub struct BlobMetaChunk {
     chunk_index: usize,
     meta: Arc<BlobMetaState>,

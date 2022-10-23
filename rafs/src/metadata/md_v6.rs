@@ -69,6 +69,7 @@ impl RafsSuper {
 
     pub(crate) fn prefetch_data_v6<F>(
         &self,
+        device: &BlobDevice,
         r: &mut RafsIoReader,
         root_ino: Inode,
         fetcher: F,
@@ -106,7 +107,7 @@ impl RafsSuper {
                 found_root_inode = true;
             }
             debug!("hint prefetch inode {}", ino);
-            self.prefetch_data(ino as u64, &mut state, &mut hardlinks, &fetcher)
+            self.prefetch_data(device, ino as u64, &mut state, &mut hardlinks, &fetcher)
                 .map_err(|e| RafsError::Prefetch(e.to_string()))?;
         }
         // The left chunks whose size is smaller than 4MB will be fetched here.

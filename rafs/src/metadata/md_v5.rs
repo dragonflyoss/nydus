@@ -57,6 +57,7 @@ impl RafsSuper {
 
     pub(crate) fn prefetch_data_v5<F>(
         &self,
+        device: &BlobDevice,
         r: &mut RafsIoReader,
         root_ino: Inode,
         fetcher: F,
@@ -93,7 +94,7 @@ impl RafsSuper {
                 found_root_inode = true;
             }
             debug!("hint prefetch inode {}", ino);
-            self.prefetch_data(ino as u64, &mut state, &mut hardlinks, &fetcher)
+            self.prefetch_data(device, ino as u64, &mut state, &mut hardlinks, &fetcher)
                 .map_err(|e| RafsError::Prefetch(e.to_string()))?;
         }
         for (_id, mut desc) in state.drain() {
@@ -128,6 +129,7 @@ impl RafsSuper {
     // expect that those chunks are likely to be continuous with user IO's chunks.
     pub(crate) fn amplify_io(
         &self,
+        device: &BlobDevice,
         max_size: u32,
         descs: &mut [BlobIoVec],
         inode: &Arc<dyn RafsInode>,
@@ -143,7 +145,8 @@ impl RafsSuper {
         // Read left content of current file.
         if window_base < inode_size {
             let size = std::cmp::min(inode_size - window_base, window_size);
-            let amplified_io_vec = inode.alloc_bio_vecs(window_base, size as usize, false)?;
+            let amplified_io_vec =
+                inode.alloc_bio_vecs(device, window_base, size as usize, false)?;
             for vec in amplified_io_vec {
                 if last_desc.has_same_blob(&vec) {
                     window_size = if window_size > vec.size() as u64 {
@@ -170,7 +173,7 @@ impl RafsSuper {
                     }
 
                     let sz = std::cmp::min(window_size, next_size);
-                    let amplified_io_vec = ni.alloc_bio_vecs(0, sz as usize, false)?;
+                    let amplified_io_vec = ni.alloc_bio_vecs(device, 0, sz as usize, false)?;
                     for vec in amplified_io_vec {
                         if last_desc.has_same_blob(&vec) {
                             window_size = if window_size > vec.size() as u64 {

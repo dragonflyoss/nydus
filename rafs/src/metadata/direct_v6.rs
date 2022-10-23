@@ -36,8 +36,7 @@ use std::sync::Arc;
 use arc_swap::{ArcSwap, Guard};
 use nydus_utils::{digest::RafsDigest, div_round_up, round_up};
 use storage::device::{
-    v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoChunk, BlobIoDesc,
-    BlobIoVec,
+    v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobDevice, BlobInfo, BlobIoDesc, BlobIoVec,
 };
 use storage::utils::readahead;
 
@@ -574,11 +573,12 @@ impl OndiskInodeWrapper {
 
     fn make_chunk_io(
         &self,
+        device: &BlobDevice,
         chunk_addr: &RafsV6InodeChunkAddr,
         content_offset: u32,
         content_len: u32,
         user_io: bool,
-    ) -> BlobIoDesc {
+    ) -> Option<BlobIoDesc> {
         let state = self.mapping.state.load();
         let blob_table = &state.blob_table.entries;
 
@@ -586,11 +586,11 @@ impl OndiskInodeWrapper {
         // while `blob_table` doesn't, it is subtracted 1.
         let blob_index = chunk_addr.blob_index() - 1;
         let chunk_index = chunk_addr.blob_comp_index();
-        let io_chunk = BlobIoChunk::Address(blob_index as u32, chunk_index);
-
         let blob = blob_table[blob_index as usize].clone();
 
-        BlobIoDesc::new(blob, io_chunk, content_offset, content_len, user_io)
+        device
+            .create_io_chunk(blob.blob_index(), chunk_index)
+            .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io))
     }
 
     fn chunk_size(&self) -> u32 {
@@ -730,7 +730,13 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(())
     }
 
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+    fn alloc_bio_vecs(
+        &self,
+        device: &BlobDevice,
+        offset: u64,
+        size: usize,
+        user_io: bool,
+    ) -> Result<Vec<BlobIoVec>> {
         let chunk_size = self.chunk_size();
         let head_chunk_index = offset / chunk_size as u64;
 
@@ -746,7 +752,9 @@ impl RafsInode for OndiskInodeWrapper {
         let content_offset = (offset % chunk_size as u64) as u32;
         let mut left = std::cmp::min(self.size() - offset, size as u64) as u32;
         let mut content_len = std::cmp::min(chunk_size - content_offset, left);
-        let desc = self.make_chunk_io(&chunks[0], content_offset, content_len, user_io);
+        let desc = self
+            .make_chunk_io(device, &chunks[0], content_offset, content_len, user_io)
+            .ok_or_else(|| einval!("failed to get chunk information"))?;
 
         let mut descs = BlobIoVec::new(desc.blob.clone());
         descs.push(desc);
@@ -755,7 +763,9 @@ impl RafsInode for OndiskInodeWrapper {
             // Handle the rest of chunks since they shares the same content length = 0.
             for c in chunks.iter().skip(1) {
                 content_len = std::cmp::min(chunk_size, left);
-                let desc = self.make_chunk_io(c, 0, content_len, user_io);
+                let desc = self
+                    .make_chunk_io(device, c, 0, content_len, user_io)
+                    .ok_or_else(|| einval!("failed to get chunk information"))?;
                 if desc.blob.blob_index() != descs.blob_index() {
                     vec.push(descs);
                     descs = BlobIoVec::new(desc.blob.clone());
