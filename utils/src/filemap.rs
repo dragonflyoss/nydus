@@ -5,7 +5,7 @@
 use std::fs::File;
 use std::io::Result;
 use std::mem::size_of;
-use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 /// Struct to manage memory range mapped from file objects.
 ///
@@ -17,6 +17,10 @@ pub struct FileMapState {
     size: usize,
     fd: RawFd,
 }
+
+// Safe to Send/Sync because the underlying data structures are readonly
+unsafe impl Send for FileMapState {}
+unsafe impl Sync for FileMapState {}
 
 impl Default for FileMapState {
     fn default() -> Self {
@@ -48,12 +52,17 @@ impl FileMapState {
     /// Memory map a region of the file object into current process.
     ///
     /// It takes ownership of the file object and will close it when the returned object is dropped.
-    pub fn new(file: File, offset: libc::off_t, size: usize) -> Result<Self> {
+    pub fn new(file: File, offset: libc::off_t, size: usize, writable: bool) -> Result<Self> {
+        let prot = if writable {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_READ
+        };
         let base = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 size,
-                libc::PROT_READ,
+                prot,
                 libc::MAP_NORESERVE | libc::MAP_SHARED,
                 file.as_raw_fd(),
                 offset,
@@ -96,6 +105,23 @@ impl FileMapState {
         Ok(unsafe { &*(start as *const T) })
     }
 
+    /// Cast a subregion of the mapped area to an mutable object reference.
+    pub fn get_mut<T>(&mut self, offset: usize) -> Result<&mut T> {
+        let start = self.base.wrapping_add(offset);
+        let end = start.wrapping_add(size_of::<T>());
+
+        if start > end
+            || start < self.base
+            || end < self.base
+            || end > self.end
+            || start as usize & (std::mem::align_of::<T>() - 1) != 0
+        {
+            return Err(einval!("invalid mmap offset"));
+        }
+
+        Ok(unsafe { &mut *(start as *const T as *mut T) })
+    }
+
     /// Check whether the range [offset, offset + size) is valid and return the start address.
     pub fn validate_range(&self, offset: usize, size: usize) -> Result<*const u8> {
         let start = self.base.wrapping_add(offset);
@@ -115,6 +141,14 @@ impl FileMapState {
     pub unsafe fn offset(&self, offset: usize) -> *const u8 {
         self.base.wrapping_add(offset)
     }
+
+    /// Sync mapped file data into disk.
+    pub fn sync_data(&self) -> Result<()> {
+        let file = unsafe { File::from_raw_fd(self.fd) };
+        let result = file.sync_data();
+        std::mem::forget(file);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -132,7 +166,7 @@ mod tests {
             .write(false)
             .open(&path)
             .unwrap();
-        let map = FileMapState::new(file, 0, 4096).unwrap();
+        let map = FileMapState::new(file, 0, 4096, false).unwrap();
 
         let magic = map.get_ref::<u32>(0).unwrap();
         assert_eq!(u32::from_le(*magic), 0x52414653);

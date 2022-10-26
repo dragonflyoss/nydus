@@ -6,7 +6,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
-use nydus_storage::meta::{BlobChunkInfoOndisk, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{BlobMetaChunkArray, BlobMetaHeaderOndisk};
 use nydus_utils::{compress, try_round_up_4k};
 use sha2::Digest;
 
@@ -75,15 +75,10 @@ impl Blob {
 
     fn dump_meta_data_raw(
         pos: u64,
-        blob_meta_info: &[BlobChunkInfoOndisk],
+        blob_meta_info: &BlobMetaChunkArray,
         compressor: compress::Algorithm,
     ) -> Result<(std::borrow::Cow<[u8]>, BlobMetaHeaderOndisk)> {
-        let data = unsafe {
-            std::slice::from_raw_parts(
-                blob_meta_info.as_ptr() as *const u8,
-                blob_meta_info.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
-            )
-        };
+        let data = blob_meta_info.as_byte_slice();
         let (buf, compressed) = compress::compress(data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
 
@@ -98,6 +93,10 @@ impl Blob {
         header.set_ci_compressed_size(buf.len() as u64);
         header.set_ci_uncompressed_size(data.len() as u64);
         header.set_4k_aligned(true);
+        match blob_meta_info {
+            BlobMetaChunkArray::V1(_) => header.set_chunk_info_v2(false),
+            BlobMetaChunkArray::V2(_) => header.set_chunk_info_v2(true),
+        }
 
         Ok((buf, header))
     }

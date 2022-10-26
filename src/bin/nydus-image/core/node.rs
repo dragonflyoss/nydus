@@ -514,7 +514,8 @@ impl Node {
                 is_compressed,
             )?;
 
-            blob_ctx.add_chunk_meta_info(&chunk)?;
+            // TODO: figure correct value for data
+            blob_ctx.add_chunk_meta_info(&chunk, 0)?;
             blob_mgr.layered_chunk_dict.add_chunk(chunk.clone());
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,

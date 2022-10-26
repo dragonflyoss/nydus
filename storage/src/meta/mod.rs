@@ -19,32 +19,37 @@ use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
 use std::ops::{Add, BitAnd, Not};
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use nydus_utils::compress;
 use nydus_utils::digest::RafsDigest;
+use nydus_utils::filemap::FileMapState;
 
 use crate::backend::BlobReader;
 use crate::device::{BlobChunkInfo, BlobInfo};
 use crate::utils::alloc_buf;
+use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 
-const BLOB_METADATA_MAX_CHUNKS: u32 = 0xf_ffff;
-const BLOB_METADATA_MAX_SIZE: u64 = 0x100_0000u64;
-const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
-const BLOB_METADATA_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
+mod chunk_info_v1;
+use chunk_info_v1::BlobChunkInfoV1Ondisk;
+mod chunk_info_v2;
+use chunk_info_v2::BlobChunkInfoV2Ondisk;
+
 const BLOB_METADATA_MAGIC: u32 = 0xb10bb10bu32;
-const BLOB_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
-const BLOB_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
-const BLOB_CHUNK_SIZE_MASK: u64 = 0xff_ffff;
-const BLOB_CHUNK_SIZE_LOW_MASK: u64 = 0x0f_ffff;
-const BLOB_CHUNK_SIZE_HIGH_MASK: u64 = 0xf0_0000;
-const BLOB_CHUNK_SIZE_LOW_SHIFT: u64 = 44;
-const BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT: u64 = 20;
-const BLOB_CHUNK_SIZE_HIGH_UNCOMP_SHIFT: u64 = 12;
-const FILE_SUFFIX: &str = "blob.meta";
+const BLOB_METADATA_HEADER_SIZE: u64 = 0x1000u64;
+const BLOB_METADATA_CHUNK_SIZE_MASK: u64 = 0xff_ffff;
 
-pub const BLOB_FEATURE_4K_ALIGNED: u32 = 0x1;
+const BLOB_METADATA_V1_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 16;
+const BLOB_METADATA_V1_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 44;
+
+const BLOB_METADATA_V2_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 24;
+
+/// File suffix for blob meta file.
+pub const FILE_SUFFIX: &str = "blob.meta";
+/// Uncompressed chunk data is 4K aligned.
+pub const BLOB_META_FEATURE_4K_ALIGNED: u32 = 0x1;
+/// Blob chunk information format v2.
+pub const BLOB_META_FEATURE_CHUNK_INFO_V2: u32 = 0x2;
 
 /// Blob metadata on disk format.
 #[repr(C)]
@@ -64,7 +69,7 @@ pub struct BlobMetaHeaderOndisk {
     s_ci_compressed_size: u64,
     /// Size of uncompressed chunk information array
     s_ci_uncompressed_size: u64,
-    s_reserved: [u8; BLOB_METADATA_RESERVED_SIZE as usize],
+    s_reserved: [u8; BLOB_METADATA_V1_RESERVED_SIZE as usize],
     /// Second blob metadata magic number
     s_magic2: u32,
 }
@@ -79,7 +84,7 @@ impl Default for BlobMetaHeaderOndisk {
             s_ci_offset: 0,
             s_ci_compressed_size: 0,
             s_ci_uncompressed_size: 0,
-            s_reserved: [0u8; BLOB_METADATA_RESERVED_SIZE as usize],
+            s_reserved: [0u8; BLOB_METADATA_V1_RESERVED_SIZE as usize],
             s_magic2: BLOB_METADATA_MAGIC,
         }
     }
@@ -145,15 +150,24 @@ impl BlobMetaHeaderOndisk {
 
     /// Check whether the uncompressed data chunk is 4k aligned.
     pub fn is_4k_aligned(&self) -> bool {
-        self.s_features & BLOB_FEATURE_4K_ALIGNED != 0
+        self.s_features & BLOB_META_FEATURE_4K_ALIGNED != 0
     }
 
     /// Set whether the uncompressed data chunk is 4k aligned.
     pub fn set_4k_aligned(&mut self, aligned: bool) {
         if aligned {
-            self.s_features |= BLOB_FEATURE_4K_ALIGNED;
+            self.s_features |= BLOB_META_FEATURE_4K_ALIGNED;
         } else {
-            self.s_features &= !BLOB_FEATURE_4K_ALIGNED;
+            self.s_features &= !BLOB_META_FEATURE_4K_ALIGNED;
+        }
+    }
+
+    /// Set whether the uncompressed data chunk is 4k aligned.
+    pub fn set_chunk_info_v2(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
+        } else {
+            self.s_features &= !BLOB_META_FEATURE_CHUNK_INFO_V2;
         }
     }
 
@@ -166,119 +180,9 @@ impl BlobMetaHeaderOndisk {
         unsafe {
             std::slice::from_raw_parts(
                 self as *const BlobMetaHeaderOndisk as *const u8,
-                std::mem::size_of::<BlobMetaHeaderOndisk>(),
+                size_of::<BlobMetaHeaderOndisk>(),
             )
         }
-    }
-}
-
-/// Blob chunk compression information on disk format.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct BlobChunkInfoOndisk {
-    // 20bits: size (low), 32bits: offset, 4bits: size (high), 8bits reserved
-    uncomp_info: u64,
-    // 20bits: size (low), 4bits: size (high), offset: 40bits
-    comp_info: u64,
-}
-
-impl BlobChunkInfoOndisk {
-    /// Get compressed offset of the chunk.
-    #[inline]
-    pub fn compressed_offset(&self) -> u64 {
-        self.comp_info & BLOB_CHUNK_COMP_OFFSET_MASK
-    }
-
-    /// Set compressed offset of the chunk.
-    #[inline]
-    pub fn set_compressed_offset(&mut self, offset: u64) {
-        debug_assert!(offset & !BLOB_CHUNK_COMP_OFFSET_MASK == 0);
-        self.comp_info &= !BLOB_CHUNK_COMP_OFFSET_MASK;
-        self.comp_info |= offset & BLOB_CHUNK_COMP_OFFSET_MASK;
-    }
-
-    /// Get compressed size of the chunk.
-    #[inline]
-    pub fn compressed_size(&self) -> u32 {
-        let bit20 = self.comp_info >> BLOB_CHUNK_SIZE_LOW_SHIFT;
-        let bit4 = (self.comp_info & 0xf0000000000) >> BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT;
-        (bit4 | bit20) as u32 + 1
-    }
-
-    /// Set compressed size of the chunk.
-    #[inline]
-    pub fn set_compressed_size(&mut self, size: u32) {
-        let size = size as u64;
-        assert!(size > 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
-
-        let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
-        let size_high = ((size - 1) & BLOB_CHUNK_SIZE_HIGH_MASK) << BLOB_CHUNK_SIZE_HIGH_COMP_SHIFT;
-        let offset = self.comp_info & BLOB_CHUNK_COMP_OFFSET_MASK;
-
-        self.comp_info = size_low | size_high | offset;
-    }
-
-    /// Get compressed end of the chunk.
-    #[inline]
-    pub fn compressed_end(&self) -> u64 {
-        self.compressed_offset() + self.compressed_size() as u64
-    }
-
-    /// Get uncompressed offset of the chunk.
-    #[inline]
-    pub fn uncompressed_offset(&self) -> u64 {
-        self.uncomp_info & BLOB_CHUNK_UNCOMP_OFFSET_MASK
-    }
-
-    /// Set uncompressed offset of the chunk.
-    #[inline]
-    pub fn set_uncompressed_offset(&mut self, offset: u64) {
-        debug_assert!(offset & !BLOB_CHUNK_UNCOMP_OFFSET_MASK == 0);
-        self.uncomp_info &= !BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-        self.uncomp_info |= offset & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-    }
-
-    /// Get uncompressed end of the chunk.
-    #[inline]
-    pub fn uncompressed_size(&self) -> u32 {
-        let size_high = (self.uncomp_info & 0xf00) << BLOB_CHUNK_SIZE_HIGH_UNCOMP_SHIFT;
-        let size_low = self.uncomp_info >> BLOB_CHUNK_SIZE_LOW_SHIFT;
-        (size_high | size_low) as u32 + 1
-    }
-
-    /// Set uncompressed end of the chunk.
-    #[inline]
-    pub fn set_uncompressed_size(&mut self, size: u32) {
-        let size = size as u64;
-        debug_assert!(size != 0 && size <= BLOB_CHUNK_SIZE_MASK + 1);
-
-        let size_low = ((size - 1) & BLOB_CHUNK_SIZE_LOW_MASK) << BLOB_CHUNK_SIZE_LOW_SHIFT;
-        let size_high =
-            ((size - 1) & BLOB_CHUNK_SIZE_HIGH_MASK) >> BLOB_CHUNK_SIZE_HIGH_UNCOMP_SHIFT;
-        let offset = self.uncomp_info & BLOB_CHUNK_UNCOMP_OFFSET_MASK;
-
-        self.uncomp_info = size_low | offset | size_high;
-    }
-
-    /// Get uncompressed size of the chunk.
-    #[inline]
-    pub fn uncompressed_end(&self) -> u64 {
-        self.uncompressed_offset() + self.uncompressed_size() as u64
-    }
-
-    /// Get 4k aligned uncompressed size of the chunk.
-    #[inline]
-    pub fn aligned_uncompressed_end(&self) -> u64 {
-        round_up_4k(self.uncompressed_end())
-    }
-
-    /// Check whether the blob chunk is compressed or not.
-    ///
-    /// Assume the image builder guarantee that compress_size < uncompress_size if the chunk is
-    /// compressed.
-    #[inline]
-    pub fn is_compressed(&self) -> bool {
-        self.compressed_size() != self.uncompressed_size()
     }
 }
 
@@ -309,9 +213,10 @@ impl BlobMetaInfo {
             size_of::<BlobMetaHeaderOndisk>() as u64,
             BLOB_METADATA_HEADER_SIZE
         );
-        assert_eq!(size_of::<BlobChunkInfoOndisk>(), 16);
+        assert_eq!(size_of::<BlobChunkInfoV1Ondisk>(), 16);
+        assert_eq!(size_of::<BlobChunkInfoV2Ondisk>(), 24);
         let chunk_count = blob_info.chunk_count();
-        if chunk_count == 0 || chunk_count > BLOB_METADATA_MAX_CHUNKS {
+        if chunk_count == 0 || chunk_count > RAFS_MAX_CHUNKS_PER_BLOB {
             return Err(einval!("chunk count should be greater than 0"));
         }
 
@@ -338,43 +243,15 @@ impl BlobMetaInfo {
         let info_size = blob_info.meta_ci_uncompressed_size() as usize;
         let aligned_info_size = round_up_4k(info_size);
         let expected_size = BLOB_METADATA_HEADER_SIZE as usize + aligned_info_size;
-        if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoOndisk>())
-            || (aligned_info_size as u64) > BLOB_METADATA_MAX_SIZE
-        {
-            return Err(einval!("blob metadata size is too big!"));
-        }
-
         let file_size = file.metadata()?.len();
         if file_size == 0 && enable_write {
             file.set_len(expected_size as u64)?;
         }
 
-        let fd = file.as_raw_fd();
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                expected_size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(last_error!("failed to mmap blob chunk_map"));
-        } else if base.is_null() {
-            return Err(ebadf!("failed to mmap blob chunk_map"));
-        }
-
-        let header = unsafe { (base as *mut u8).add(aligned_info_size as usize) };
-        let header = unsafe { &mut *(header as *mut BlobMetaHeaderOndisk) };
-        if u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
-            || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
-            || u32::from_le(header.s_features) != blob_info.meta_flags()
-            || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
-            || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
-            || u64::from_le(header.s_ci_uncompressed_size) != blob_info.meta_ci_uncompressed_size()
-        {
+        let mut filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
+        let base = filemap.validate_range(0, expected_size)?;
+        let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
+        if !Self::validate_header(blob_info, header)? {
             if !enable_write {
                 return Err(enoent!("blob metadata file is not ready"));
             }
@@ -386,32 +263,27 @@ impl BlobMetaInfo {
                 reader.as_ref().unwrap(),
                 &mut buffer[..info_size],
             )?;
+
             header.s_features = u32::to_le(blob_info.meta_flags());
             header.s_ci_offset = u64::to_le(blob_info.meta_ci_offset());
             header.s_ci_compressed_size = u64::to_le(blob_info.meta_ci_compressed_size());
             header.s_ci_uncompressed_size = u64::to_le(blob_info.meta_ci_uncompressed_size());
+            filemap.sync_data()?;
 
-            file.sync_data()?;
+            let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
             header.s_magic = u32::to_le(BLOB_METADATA_MAGIC);
             header.s_magic2 = u32::to_le(BLOB_METADATA_MAGIC);
+            filemap.sync_data()?;
         }
 
-        let chunk_infos = unsafe {
-            ManuallyDrop::new(Vec::from_raw_parts(
-                base as *mut BlobChunkInfoOndisk,
-                chunk_count as usize,
-                chunk_count as usize,
-            ))
-        };
-
+        let chunk_infos = BlobMetaChunkArray::from_file_map(&filemap, blob_info)?;
+        let chunk_infos = ManuallyDrop::new(chunk_infos);
         let state = Arc::new(BlobMetaState {
             blob_index: blob_info.blob_index(),
             compressed_size: blob_info.compressed_size(),
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
-            chunk_count,
-            chunks: chunk_infos,
-            base: base as *const u8,
-            unmap_len: expected_size,
+            chunk_info_array: chunk_infos,
+            _filemap: filemap,
             is_stargz: blob_info.is_stargz(),
         });
 
@@ -432,10 +304,15 @@ impl BlobMetaInfo {
         size: u64,
         batch_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
-        let end = start.checked_add(size).ok_or_else(|| einval!())?;
+        let end = start.checked_add(size).ok_or_else(|| {
+            einval!(format!(
+                "get_chunks_uncompressed: invalid start {}/size {}",
+                start, size
+            ))
+        })?;
         if end > self.state.uncompressed_size {
             return Err(einval!(format!(
-                "get_chunks_uncompressed: end {} uncompressed_size {}",
+                "get_chunks_uncompressed: invalid end {}/uncompressed_size {}",
                 end, self.state.uncompressed_size
             )));
         }
@@ -448,59 +325,7 @@ impl BlobMetaInfo {
             )
         };
 
-        let infos = &*self.state.chunks;
-        let mut index = self.state.get_chunk_index_nocheck(start, false)?;
-        debug_assert!(index < infos.len());
-        let entry = &infos[index];
-        self.validate_chunk(entry)?;
-        debug_assert!(entry.uncompressed_offset() <= start);
-        debug_assert!(entry.uncompressed_end() > start);
-        trace!(
-            "get_chunks_uncompressed: entry {} {}",
-            entry.uncompressed_offset(),
-            entry.uncompressed_end()
-        );
-
-        let mut vec = Vec::with_capacity(512);
-        vec.push(BlobMetaChunk::new(index, &self.state));
-
-        let mut last_end = entry.aligned_uncompressed_end();
-        if last_end >= batch_end {
-            Ok(vec)
-        } else {
-            while index + 1 < infos.len() {
-                index += 1;
-                let entry = &infos[index];
-                self.validate_chunk(entry)?;
-
-                // For stargz chunks, disable this check.
-                if !self.state.is_stargz && entry.uncompressed_offset() != last_end {
-                    return Err(einval!(format!(
-                        "mismatch uncompressed {} size {} last_end {}",
-                        entry.uncompressed_offset(),
-                        entry.uncompressed_size(),
-                        last_end
-                    )));
-                }
-
-                // Avoid read amplify if next chunk is too big.
-                if last_end >= end && entry.aligned_uncompressed_end() > batch_end {
-                    return Ok(vec);
-                }
-
-                vec.push(BlobMetaChunk::new(index, &self.state));
-                last_end = entry.aligned_uncompressed_end();
-                if last_end >= batch_end {
-                    return Ok(vec);
-                }
-            }
-
-            Err(einval!(format!(
-                "entry not found index {} infos.len {}",
-                index,
-                infos.len(),
-            )))
-        }
+        self.state.get_chunks_uncompressed(start, end, batch_end)
     }
 
     /// Get blob chunks covering compressed data range [start, start + size).
@@ -516,10 +341,15 @@ impl BlobMetaInfo {
         size: u64,
         batch_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
-        let end = start.checked_add(size).ok_or_else(|| einval!())?;
+        let end = start.checked_add(size).ok_or_else(|| {
+            einval!(einval!(format!(
+                "get_chunks_compressed: invalid start {}/size {}",
+                start, size
+            )))
+        })?;
         if end > self.state.compressed_size {
             return Err(einval!(format!(
-                "get_chunks_compressed: end {} compressed_size {}",
+                "get_chunks_compressed: invalid end {}/compressed_size {}",
                 end, self.state.compressed_size
             )));
         }
@@ -532,41 +362,7 @@ impl BlobMetaInfo {
             )
         };
 
-        let infos = &*self.state.chunks;
-        let mut index = self.state.get_chunk_index_nocheck(start, true)?;
-        debug_assert!(index < infos.len());
-        let entry = &infos[index];
-        self.validate_chunk(entry)?;
-
-        let mut vec = Vec::with_capacity(512);
-        vec.push(BlobMetaChunk::new(index, &self.state));
-
-        let mut last_end = entry.compressed_end();
-        if last_end >= batch_end {
-            Ok(vec)
-        } else {
-            while index + 1 < infos.len() {
-                index += 1;
-                let entry = &infos[index];
-                self.validate_chunk(entry)?;
-                if entry.compressed_offset() != last_end {
-                    return Err(einval!());
-                }
-
-                // Avoid read amplify if next chunk is too big.
-                if last_end >= end && entry.compressed_end() > batch_end {
-                    return Ok(vec);
-                }
-
-                vec.push(BlobMetaChunk::new(index, &self.state));
-                last_end = entry.compressed_end();
-                if last_end >= batch_end {
-                    return Ok(vec);
-                }
-            }
-
-            Err(einval!())
-        }
+        self.state.get_chunks_compressed(start, end, batch_end)
     }
 
     /// Try to amplify the request by appending more continuous chunks.
@@ -575,68 +371,7 @@ impl BlobMetaInfo {
         chunks: &[Arc<dyn BlobChunkInfo>],
         max_size: u64,
     ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
-        let infos = &*self.state.chunks;
-        let mut index = chunks[chunks.len() - 1].id() as usize;
-        debug_assert!(index < infos.len());
-        let entry = &infos[index];
-        if self.validate_chunk(entry).is_err() {
-            return None;
-        }
-        let end = entry.compressed_end();
-        if end > self.state.compressed_size {
-            return None;
-        }
-        let batch_end = std::cmp::min(
-            end.checked_add(max_size).unwrap_or(end),
-            self.state.compressed_size,
-        );
-        if batch_end <= end {
-            return None;
-        }
-
-        let mut last_end = end;
-        let mut vec = chunks.to_vec();
-        while index + 1 < infos.len() {
-            index += 1;
-            let entry = &infos[index];
-            if self.validate_chunk(entry).is_err() || entry.compressed_offset() != last_end {
-                break;
-            }
-
-            // Avoid read amplification if next chunk is too big.
-            if entry.compressed_end() > batch_end {
-                break;
-            }
-
-            vec.push(BlobMetaChunk::new(index, &self.state));
-            last_end = entry.compressed_end();
-            if last_end >= batch_end {
-                break;
-            }
-        }
-
-        trace!("try to extend request with {} more bytes", last_end - end);
-
-        Some(vec)
-    }
-
-    #[inline]
-    fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
-        // For stargz blob, self.state.compressed_size == 0, so don't validate it.
-        if (!self.state.is_stargz && entry.compressed_end() > self.state.compressed_size)
-            || entry.uncompressed_end() > self.state.uncompressed_size
-        {
-            Err(einval!(format!(
-                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {}",
-                self.state.blob_index,
-                entry.compressed_end(),
-                self.state.compressed_size,
-                entry.uncompressed_end(),
-                self.state.uncompressed_size,
-            )))
-        } else {
-            Ok(())
-        }
+        self.state.add_more_chunks(chunks, max_size)
     }
 
     fn read_metadata(
@@ -697,12 +432,40 @@ impl BlobMetaInfo {
             buffer.copy_from_slice(&uncom_buf);
         }
 
-        // TODO: validate metadata
-
         Ok(())
+    }
+
+    fn validate_header(blob_info: &BlobInfo, header: &BlobMetaHeaderOndisk) -> Result<bool> {
+        if u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
+            || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
+            || u32::from_le(header.s_features) != blob_info.meta_flags()
+            || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
+            || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
+            || u64::from_le(header.s_ci_uncompressed_size) != blob_info.meta_ci_uncompressed_size()
+        {
+            return Ok(false);
+        }
+
+        let chunk_count = blob_info.chunk_count();
+        let info_size = u64::from_le(header.s_ci_uncompressed_size) as usize;
+        let aligned_info_size = round_up_4k(info_size);
+        if blob_info.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+            if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV2Ondisk>())
+                || (aligned_info_size as u64) > BLOB_METADATA_V2_MAX_SIZE
+            {
+                return Err(einval!("blob metadata size is too big!"));
+            }
+        } else if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
+            || (aligned_info_size as u64) > BLOB_METADATA_V1_MAX_SIZE
+        {
+            return Err(einval!("blob metadata size is too big!"));
+        }
+
+        Ok(true)
     }
 }
 
+/// Struct to maintain state and provide accessors to blob meta information.
 pub struct BlobMetaState {
     blob_index: u32,
     // The file size of blob file when it contains compressed chunks.
@@ -710,32 +473,285 @@ pub struct BlobMetaState {
     // The file size of blob file when it contains raw(uncompressed)
     // chunks, it usually refers to a blob file in cache(e.g. filecache).
     uncompressed_size: u64,
-    chunk_count: u32,
-    chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
-    base: *const u8,
-    unmap_len: usize,
+    chunk_info_array: ManuallyDrop<BlobMetaChunkArray>,
+    _filemap: FileMapState,
     /// The blob meta is for an stargz image.
     is_stargz: bool,
 }
 
-// // Safe to Send/Sync because the underlying data structures are readonly
-unsafe impl Send for BlobMetaState {}
-unsafe impl Sync for BlobMetaState {}
+impl BlobMetaState {
+    fn get_chunks_uncompressed(
+        self: &Arc<BlobMetaState>,
+        start: u64,
+        end: u64,
+        batch_end: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        self.chunk_info_array
+            .get_chunks_uncompressed(self, start, end, batch_end)
+    }
 
-impl Drop for BlobMetaState {
-    fn drop(&mut self) {
-        if !self.base.is_null() {
-            let size = self.unmap_len;
-            unsafe { libc::munmap(self.base as *mut u8 as *mut libc::c_void, size) };
-            self.base = std::ptr::null();
+    fn get_chunks_compressed(
+        self: &Arc<BlobMetaState>,
+        start: u64,
+        end: u64,
+        batch_end: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        self.chunk_info_array
+            .get_chunks_compressed(self, start, end, batch_end)
+    }
+
+    fn add_more_chunks(
+        self: &Arc<BlobMetaState>,
+        chunks: &[Arc<dyn BlobChunkInfo>],
+        max_size: u64,
+    ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
+        self.chunk_info_array
+            .add_more_chunks(self, chunks, max_size)
+    }
+
+    fn validate_chunk<T: BlobMetaChunkInfo>(&self, entry: &T) -> Result<()> {
+        // For stargz blob, self.compressed_size == 0, so don't validate it.
+        if (!self.is_stargz && entry.compressed_end() > self.compressed_size)
+            || entry.uncompressed_end() > self.uncompressed_size
+        {
+            Err(einval!(format!(
+                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {}",
+                self.blob_index,
+                entry.compressed_end(),
+                self.compressed_size,
+                entry.uncompressed_end(),
+                self.uncompressed_size,
+            )))
+        } else {
+            Ok(())
         }
     }
 }
 
-impl BlobMetaState {
+/// A customized array to generate chunk information array.
+pub enum BlobMetaChunkArray {
+    /// V1 chunk information array.
+    V1(Vec<BlobChunkInfoV1Ondisk>),
+    /// V2 chunk information array.
+    V2(Vec<BlobChunkInfoV2Ondisk>),
+}
+
+// Methods for RAFS filesystem builder.
+impl BlobMetaChunkArray {
+    /// Create a `BlokMetaChunkArray` with v2 chunk information format.
+    pub fn new_v1() -> Self {
+        BlobMetaChunkArray::V1(Vec::new())
+    }
+
+    /// Create a `BlokMetaChunkArray` with v2 chunk information format.
+    pub fn new_v2() -> Self {
+        BlobMetaChunkArray::V2(Vec::new())
+    }
+
+    /// Get number of entry in the blob chunk information array.
+    pub fn len(&self) -> usize {
+        match self {
+            BlobMetaChunkArray::V1(v) => v.len(),
+            BlobMetaChunkArray::V2(v) => v.len(),
+        }
+    }
+
+    /// Check whether the chunk information array is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            BlobMetaChunkArray::V1(v) => v.is_empty(),
+            BlobMetaChunkArray::V2(v) => v.is_empty(),
+        }
+    }
+
+    /// Get the chunk information data as a u8 slice.
+    pub fn as_byte_slice(&self) -> &[u8] {
+        match self {
+            BlobMetaChunkArray::V1(v) => unsafe {
+                std::slice::from_raw_parts(
+                    v.as_ptr() as *const u8,
+                    v.len() * size_of::<BlobChunkInfoV1Ondisk>(),
+                )
+            },
+            BlobMetaChunkArray::V2(v) => unsafe {
+                std::slice::from_raw_parts(
+                    v.as_ptr() as *const u8,
+                    v.len() * size_of::<BlobChunkInfoV2Ondisk>(),
+                )
+            },
+        }
+    }
+
+    /// Add an v1 chunk information entry.
+    pub fn add_v1(
+        &mut self,
+        compressed_offset: u64,
+        compressed_size: u32,
+        uncompressed_offset: u64,
+        uncompressed_size: u32,
+    ) {
+        match self {
+            BlobMetaChunkArray::V1(v) => {
+                let mut meta = BlobChunkInfoV1Ondisk::default();
+                meta.set_compressed_offset(compressed_offset);
+                meta.set_compressed_size(compressed_size);
+                meta.set_uncompressed_offset(uncompressed_offset);
+                meta.set_uncompressed_size(uncompressed_size);
+                v.push(meta);
+            }
+            BlobMetaChunkArray::V2(_v) => unimplemented!(),
+        }
+    }
+
+    /// Add an v2 chunk information entry.
+    pub fn add_v2(
+        &mut self,
+        compressed_offset: u64,
+        compressed_size: u32,
+        uncompressed_offset: u64,
+        uncompressed_size: u32,
+        compressed: bool,
+        data: u64,
+    ) {
+        match self {
+            BlobMetaChunkArray::V2(v) => {
+                let mut meta = BlobChunkInfoV2Ondisk::default();
+                meta.set_compressed_offset(compressed_offset);
+                meta.set_compressed_size(compressed_size);
+                meta.set_uncompressed_offset(uncompressed_offset);
+                meta.set_uncompressed_size(uncompressed_size);
+                meta.set_compressed(compressed);
+                meta.set_data(data);
+                v.push(meta);
+            }
+            BlobMetaChunkArray::V1(_v) => unimplemented!(),
+        }
+    }
+}
+
+impl BlobMetaChunkArray {
+    fn from_file_map(filemap: &FileMapState, blob_info: &BlobInfo) -> Result<Self> {
+        let chunk_count = blob_info.chunk_count();
+        if blob_info.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+            let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV2Ondisk>();
+            let base = filemap.validate_range(0, chunk_size)?;
+            let v = unsafe {
+                Vec::from_raw_parts(
+                    base as *mut u8 as *mut BlobChunkInfoV2Ondisk,
+                    chunk_count as usize,
+                    chunk_count as usize,
+                )
+            };
+            Ok(BlobMetaChunkArray::V2(v))
+        } else {
+            let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV1Ondisk>();
+            let base = filemap.validate_range(0, chunk_size)?;
+            let v = unsafe {
+                Vec::from_raw_parts(
+                    base as *mut u8 as *mut BlobChunkInfoV1Ondisk,
+                    chunk_count as usize,
+                    chunk_count as usize,
+                )
+            };
+            Ok(BlobMetaChunkArray::V1(v))
+        }
+    }
+
+    #[cfg(test)]
     fn get_chunk_index_nocheck(&self, addr: u64, compressed: bool) -> Result<usize> {
-        let chunks = &self.chunks;
-        let mut size = self.chunk_count as usize;
+        match self {
+            BlobMetaChunkArray::V1(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
+            BlobMetaChunkArray::V2(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
+        }
+    }
+
+    fn get_chunks_compressed(
+        &self,
+        state: &Arc<BlobMetaState>,
+        start: u64,
+        end: u64,
+        batch_end: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        match self {
+            BlobMetaChunkArray::V1(v) => {
+                Self::_get_chunks_compressed(state, v, start, end, batch_end)
+            }
+            BlobMetaChunkArray::V2(v) => {
+                Self::_get_chunks_compressed(state, v, start, end, batch_end)
+            }
+        }
+    }
+
+    fn add_more_chunks(
+        &self,
+        state: &Arc<BlobMetaState>,
+        chunks: &[Arc<dyn BlobChunkInfo>],
+        max_size: u64,
+    ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
+        match self {
+            BlobMetaChunkArray::V1(v) => Self::_add_more_chunks(state, v, chunks, max_size),
+            BlobMetaChunkArray::V2(v) => Self::_add_more_chunks(state, v, chunks, max_size),
+        }
+    }
+
+    fn get_chunks_uncompressed(
+        &self,
+        state: &Arc<BlobMetaState>,
+        start: u64,
+        end: u64,
+        batch_end: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        match self {
+            BlobMetaChunkArray::V1(v) => {
+                Self::_get_chunks_uncompressed(state, v, start, end, batch_end)
+            }
+            BlobMetaChunkArray::V2(v) => {
+                Self::_get_chunks_uncompressed(state, v, start, end, batch_end)
+            }
+        }
+    }
+
+    fn compressed_offset(&self, index: usize) -> u64 {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].compressed_offset(),
+            BlobMetaChunkArray::V2(v) => v[index].compressed_offset(),
+        }
+    }
+
+    fn compressed_size(&self, index: usize) -> u32 {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].compressed_size(),
+            BlobMetaChunkArray::V2(v) => v[index].compressed_size(),
+        }
+    }
+
+    fn uncompressed_offset(&self, index: usize) -> u64 {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].uncompressed_offset(),
+            BlobMetaChunkArray::V2(v) => v[index].uncompressed_offset(),
+        }
+    }
+
+    fn uncompressed_size(&self, index: usize) -> u32 {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].uncompressed_size(),
+            BlobMetaChunkArray::V2(v) => v[index].uncompressed_size(),
+        }
+    }
+
+    fn is_compressed(&self, index: usize) -> bool {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].is_compressed(),
+            BlobMetaChunkArray::V2(v) => v[index].is_compressed(),
+        }
+    }
+
+    fn _get_chunk_index_nocheck<T: BlobMetaChunkInfo>(
+        chunks: &[T],
+        addr: u64,
+        compressed: bool,
+    ) -> Result<usize> {
+        let mut size = chunks.len();
         let mut left = 0;
         let mut right = size;
         let mut start = 0;
@@ -746,7 +762,7 @@ impl BlobMetaState {
             // SAFETY: the call is made safe by the following invariants:
             // - `mid >= 0`
             // - `mid < size`: `mid` is limited by `[left; right)` bound.
-            let entry = unsafe { chunks.get_unchecked(mid) };
+            let entry = &chunks[mid];
             if compressed {
                 start = entry.compressed_offset();
                 end = entry.compressed_end();
@@ -766,12 +782,176 @@ impl BlobMetaState {
             size = right - left;
         }
 
-        // if addr == self.chunks[last].compressed_offset, return einval
-        // with error msg.
+        // if addr == self.chunks[last].compressed_offset, return einval with error msg.
         Err(einval!(format!(
             "start: {}, end: {}, addr: {}",
             start, end, addr
         )))
+    }
+
+    fn _get_chunks_uncompressed<T: BlobMetaChunkInfo>(
+        state: &Arc<BlobMetaState>,
+        chunk_info_array: &[T],
+        start: u64,
+        end: u64,
+        batch_end: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        let mut vec = Vec::with_capacity(512);
+
+        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, false)?;
+        assert!(index < chunk_info_array.len());
+        let entry = &chunk_info_array[index];
+        state.validate_chunk(entry)?;
+        assert!(entry.uncompressed_offset() <= start);
+        assert!(entry.uncompressed_end() > start);
+        trace!(
+            "get_chunks_uncompressed: entry {} {}",
+            entry.uncompressed_offset(),
+            entry.uncompressed_end()
+        );
+        vec.push(BlobMetaChunk::new(index, state));
+
+        let mut last_end = entry.aligned_uncompressed_end();
+        if last_end >= batch_end {
+            Ok(vec)
+        } else {
+            while index + 1 < chunk_info_array.len() {
+                index += 1;
+                let entry = &chunk_info_array[index];
+                state.validate_chunk(entry)?;
+
+                // For stargz chunks, disable this check.
+                if !state.is_stargz && entry.uncompressed_offset() != last_end {
+                    return Err(einval!(format!(
+                        "mismatch uncompressed {} size {} last_end {}",
+                        entry.uncompressed_offset(),
+                        entry.uncompressed_size(),
+                        last_end
+                    )));
+                }
+
+                // Avoid read amplify if next chunk is too big.
+                if last_end >= end && entry.aligned_uncompressed_end() > batch_end {
+                    return Ok(vec);
+                }
+
+                vec.push(BlobMetaChunk::new(index, state));
+                last_end = entry.aligned_uncompressed_end();
+                if last_end >= batch_end {
+                    return Ok(vec);
+                }
+            }
+
+            Err(einval!(format!(
+                "entry not found index {} chunk_info_array.len {}",
+                index,
+                chunk_info_array.len(),
+            )))
+        }
+    }
+
+    fn _get_chunks_compressed<T: BlobMetaChunkInfo>(
+        state: &Arc<BlobMetaState>,
+        chunk_info_array: &[T],
+        start: u64,
+        end: u64,
+        batch_end: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        let mut vec = Vec::with_capacity(512);
+
+        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, true)?;
+        assert!(index < chunk_info_array.len());
+        let entry = &chunk_info_array[index];
+        state.validate_chunk(entry)?;
+        assert!(entry.compressed_offset() <= start);
+        assert!(entry.compressed_end() > start);
+        vec.push(BlobMetaChunk::new(index, state));
+
+        let mut last_end = entry.compressed_end();
+        if last_end >= batch_end {
+            Ok(vec)
+        } else {
+            while index + 1 < chunk_info_array.len() {
+                index += 1;
+                let entry = &chunk_info_array[index];
+                state.validate_chunk(entry)?;
+                if !state.is_stargz && entry.compressed_offset() != last_end {
+                    return Err(einval!(format!(
+                        "mismatch compressed {} size {} last_end {}",
+                        entry.compressed_offset(),
+                        entry.compressed_size(),
+                        last_end
+                    )));
+                }
+
+                // Avoid read amplify if next chunk is too big.
+                if last_end >= end && entry.compressed_end() > batch_end {
+                    return Ok(vec);
+                }
+
+                vec.push(BlobMetaChunk::new(index, state));
+                last_end = entry.compressed_end();
+                if last_end >= batch_end {
+                    return Ok(vec);
+                }
+            }
+
+            Err(einval!(format!(
+                "entry not found index {} chunk_info_array.len {}",
+                index,
+                chunk_info_array.len(),
+            )))
+        }
+    }
+
+    fn _add_more_chunks<T: BlobMetaChunkInfo>(
+        state: &Arc<BlobMetaState>,
+        chunk_info_array: &[T],
+        chunks: &[Arc<dyn BlobChunkInfo>],
+        max_size: u64,
+    ) -> Option<Vec<Arc<dyn BlobChunkInfo>>> {
+        let mut index = chunks[chunks.len() - 1].id() as usize;
+        assert!(index < chunk_info_array.len());
+        let entry = &chunk_info_array[index];
+        if state.validate_chunk(entry).is_err() {
+            return None;
+        }
+        let end = entry.compressed_end();
+        if end > state.compressed_size {
+            return None;
+        }
+        let batch_end = std::cmp::min(
+            end.checked_add(max_size).unwrap_or(end),
+            state.compressed_size,
+        );
+        if batch_end <= end {
+            return None;
+        }
+
+        let mut last_end = end;
+        let mut vec = chunks.to_vec();
+        while index + 1 < chunk_info_array.len() {
+            index += 1;
+            let entry = &chunk_info_array[index];
+            if state.validate_chunk(entry).is_err() || entry.compressed_offset() != last_end {
+                break;
+            }
+
+            // Avoid read amplification if next chunk is too big.
+            if entry.compressed_end() > batch_end {
+                break;
+            }
+
+            vec.push(BlobMetaChunk::new(index, state));
+            last_end = entry.compressed_end();
+            if last_end >= batch_end {
+                break;
+            }
+        }
+
+        trace!("try to extend request with {} more bytes", last_end - end);
+
+        Some(vec)
     }
 }
 
@@ -810,28 +990,84 @@ impl BlobChunkInfo for BlobMetaChunk {
     }
 
     fn compressed_offset(&self) -> u64 {
-        self.meta.chunks[self.chunk_index].compressed_offset()
+        self.meta
+            .chunk_info_array
+            .compressed_offset(self.chunk_index)
     }
 
     fn compressed_size(&self) -> u32 {
-        self.meta.chunks[self.chunk_index].compressed_size()
+        self.meta.chunk_info_array.compressed_size(self.chunk_index)
     }
 
     fn uncompressed_offset(&self) -> u64 {
-        self.meta.chunks[self.chunk_index].uncompressed_offset()
+        self.meta
+            .chunk_info_array
+            .uncompressed_offset(self.chunk_index)
     }
 
     fn uncompressed_size(&self) -> u32 {
-        self.meta.chunks[self.chunk_index].uncompressed_size()
+        self.meta
+            .chunk_info_array
+            .uncompressed_size(self.chunk_index)
     }
 
     fn is_compressed(&self) -> bool {
-        self.meta.chunks[self.chunk_index].is_compressed()
+        self.meta.chunk_info_array.is_compressed(self.chunk_index)
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Trait to get blob meta chunk information.
+pub trait BlobMetaChunkInfo {
+    /// Get compressed offset of the chunk.
+    fn compressed_offset(&self) -> u64;
+
+    /// Set compressed offset of the chunk.
+    fn set_compressed_offset(&mut self, offset: u64);
+
+    /// Get compressed size of the chunk.
+    fn compressed_size(&self) -> u32;
+
+    /// Set compressed size of the chunk.
+    fn set_compressed_size(&mut self, size: u32);
+
+    fn compressed_end(&self) -> u64 {
+        self.compressed_offset() + self.compressed_size() as u64
+    }
+
+    /// Get uncompressed offset of the chunk.
+    fn uncompressed_offset(&self) -> u64;
+
+    /// Set uncompressed offset of the chunk.
+    fn set_uncompressed_offset(&mut self, offset: u64);
+
+    /// Get uncompressed end of the chunk.
+    fn uncompressed_size(&self) -> u32;
+
+    /// Set uncompressed end of the chunk.
+    fn set_uncompressed_size(&mut self, size: u32);
+
+    /// Get uncompressed size of the chunk.
+    fn uncompressed_end(&self) -> u64 {
+        self.uncompressed_offset() + self.uncompressed_size() as u64
+    }
+
+    /// Get 4k aligned uncompressed size of the chunk.
+    fn aligned_uncompressed_end(&self) -> u64 {
+        round_up_4k(self.uncompressed_end())
+    }
+
+    /// Check whether the blob chunk is compressed or not.
+    ///
+    /// Assume the image builder guarantee that compress_size < uncompress_size if the chunk is
+    /// compressed.
+    fn is_compressed(&self) -> bool;
+
+    /// Get misc data associated with the entry. V2 only, V1 just returns zero.
+    fn get_data(&self) -> u64;
 }
 
 fn round_up_4k<T: Add<Output = T> + BitAnd<Output = T> + Not<Output = T> + From<u16>>(val: T) -> T {
@@ -848,157 +1084,8 @@ mod tests {
     use nydus_utils::metrics::BackendMetrics;
     use std::fs::{File, OpenOptions};
     use std::io::Write;
+    use std::os::unix::io::AsRawFd;
     use vmm_sys_util::tempfile::TempFile;
-
-    #[test]
-    fn test_get_chunk_index_with_hole() {
-        let state = BlobMetaState {
-            blob_index: 0,
-            compressed_size: 0,
-            uncompressed_size: 0,
-            chunk_count: 2,
-            chunks: ManuallyDrop::new(vec![
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x01ff_f000_0000_0000,
-                    comp_info: 0x00ff_f000_0000_0000,
-                },
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x01ff_f000_0010_0000,
-                    comp_info: 0x00ff_f000_0010_0000,
-                },
-            ]),
-            base: std::ptr::null(),
-            unmap_len: 0,
-            is_stargz: false,
-        };
-
-        assert_eq!(state.get_chunk_index_nocheck(0, false).unwrap(), 0);
-        assert_eq!(state.get_chunk_index_nocheck(0x1fff, false).unwrap(), 0);
-        assert_eq!(state.get_chunk_index_nocheck(0x100000, false).unwrap(), 1);
-        assert_eq!(state.get_chunk_index_nocheck(0x101fff, false).unwrap(), 1);
-        state.get_chunk_index_nocheck(0x2000, false).unwrap_err();
-        state.get_chunk_index_nocheck(0xfffff, false).unwrap_err();
-        state.get_chunk_index_nocheck(0x102000, false).unwrap_err();
-    }
-
-    #[test]
-    fn test_new_chunk_on_disk() {
-        let mut chunk = BlobChunkInfoOndisk::default();
-
-        assert_eq!(chunk.compressed_offset(), 0);
-        assert_eq!(chunk.compressed_size(), 1);
-        assert_eq!(chunk.compressed_end(), 1);
-        assert_eq!(chunk.uncompressed_offset(), 0);
-        assert_eq!(chunk.uncompressed_size(), 1);
-        assert_eq!(chunk.aligned_uncompressed_end(), 0x1000);
-
-        chunk.set_compressed_offset(0x1000);
-        chunk.set_compressed_size(0x100);
-        assert_eq!(chunk.compressed_offset(), 0x1000);
-        assert_eq!(chunk.compressed_size(), 0x100);
-
-        chunk.set_uncompressed_offset(0x1000);
-        chunk.set_uncompressed_size(0x100);
-        assert_eq!(chunk.uncompressed_offset(), 0x1000);
-        assert_eq!(chunk.uncompressed_size(), 0x100);
-
-        chunk.set_compressed_offset(0xffffffffff);
-        chunk.set_compressed_size(0x1000000);
-        assert_eq!(chunk.compressed_offset(), 0xffffffffff);
-        assert_eq!(chunk.compressed_size(), 0x1000000);
-
-        chunk.set_uncompressed_offset(0xffffffff000);
-        chunk.set_uncompressed_size(0x1000000);
-        assert_eq!(chunk.uncompressed_offset(), 0xffffffff000);
-        assert_eq!(chunk.uncompressed_size(), 0x1000000);
-
-        // For testing old format compatibility.
-        let chunk = BlobChunkInfoOndisk {
-            uncomp_info: 0xffff_ffff_f100_0000,
-            comp_info: 0xffff_f0ff_ffff_ffff,
-        };
-        assert_eq!(chunk.uncompressed_size(), 0x000f_ffff + 1);
-        assert_eq!(chunk.uncompressed_offset(), 0xffff_1000 * 0x1000);
-        assert_eq!(chunk.compressed_size(), 0x000f_ffff + 1);
-        assert_eq!(chunk.compressed_offset(), 0x00ff_ffff_ffff);
-    }
-
-    #[test]
-    fn test_get_chunks() {
-        let state = BlobMetaState {
-            blob_index: 1,
-            compressed_size: 0x6001,
-            uncompressed_size: 0x102001,
-            chunk_count: 5,
-            chunks: ManuallyDrop::new(vec![
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x0100_0000_0000_0000,
-                    comp_info: 0x00ff_f000_0000_0000,
-                },
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x01ff_f000_0000_2000,
-                    comp_info: 0x01ff_f000_0000_1000,
-                },
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x01ff_f000_0000_4000,
-                    comp_info: 0x00ff_f000_0000_3000,
-                },
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x01ff_f000_0010_0000,
-                    comp_info: 0x00ff_f000_0000_4000,
-                },
-                BlobChunkInfoOndisk {
-                    uncomp_info: 0x01ff_f000_0010_2000,
-                    comp_info: 0x00ff_f000_0000_5000,
-                },
-            ]),
-            base: std::ptr::null(),
-            unmap_len: 0,
-            is_stargz: false,
-        };
-        let info = BlobMetaInfo {
-            state: Arc::new(state),
-        };
-
-        let vec = info.get_chunks_uncompressed(0x0, 0x1001, 0).unwrap();
-        assert_eq!(vec.len(), 1);
-        assert_eq!(vec[0].blob_index(), 1);
-        assert_eq!(vec[0].id(), 0);
-        assert_eq!(vec[0].compressed_offset(), 0);
-        assert_eq!(vec[0].compressed_size(), 0x1000);
-        assert_eq!(vec[0].uncompressed_offset(), 0);
-        assert_eq!(vec[0].uncompressed_size(), 0x1001);
-        assert!(vec[0].is_compressed());
-
-        let vec = info.get_chunks_uncompressed(0x0, 0x4000, 0).unwrap();
-        assert_eq!(vec.len(), 2);
-        assert_eq!(vec[1].blob_index(), 1);
-        assert_eq!(vec[1].id(), 1);
-        assert_eq!(vec[1].compressed_offset(), 0x1000);
-        assert_eq!(vec[1].compressed_size(), 0x2000);
-        assert_eq!(vec[1].uncompressed_offset(), 0x2000);
-        assert_eq!(vec[1].uncompressed_size(), 0x2000);
-        assert!(!vec[1].is_compressed());
-
-        let vec = info.get_chunks_uncompressed(0x0, 0x4001, 0).unwrap();
-        assert_eq!(vec.len(), 3);
-
-        let vec = info.get_chunks_uncompressed(0x100000, 0x2000, 0).unwrap();
-        assert_eq!(vec.len(), 1);
-
-        assert!(info.get_chunks_uncompressed(0x0, 0x6001, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0xfffff, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x100000, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x104000, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x0, 0x104001, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x2001, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x4000, 0).is_err());
-        assert!(info.get_chunks_uncompressed(0x100000, 0x4001, 0).is_err());
-        assert!(info
-            .get_chunks_uncompressed(0x102000, 0xffff_ffff_ffff_ffff, 0)
-            .is_err());
-        assert!(info.get_chunks_uncompressed(0x104000, 0x1, 0).is_err());
-    }
 
     #[test]
     fn test_round_up_4k() {
@@ -1045,11 +1132,11 @@ mod tests {
             .unwrap();
 
         let chunks = vec![
-            BlobChunkInfoOndisk {
+            BlobChunkInfoV1Ondisk {
                 uncomp_info: 0x01ff_f000_0000_0000,
                 comp_info: 0x00ff_f000_0000_0000,
             },
-            BlobChunkInfoOndisk {
+            BlobChunkInfoV1Ondisk {
                 uncomp_info: 0x01ff_f000_0010_0000,
                 comp_info: 0x00ff_f000_0010_0000,
             },
@@ -1058,7 +1145,7 @@ mod tests {
         let data = unsafe {
             std::slice::from_raw_parts(
                 chunks.as_ptr() as *const u8,
-                chunks.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+                chunks.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
             )
         };
 
@@ -1107,11 +1194,11 @@ mod tests {
             .unwrap();
 
         let chunks = vec![
-            BlobChunkInfoOndisk {
+            BlobChunkInfoV1Ondisk {
                 uncomp_info: 0x01ff_f000_0000_0000,
                 comp_info: 0x00ff_f000_0000_0000,
             },
-            BlobChunkInfoOndisk {
+            BlobChunkInfoV1Ondisk {
                 uncomp_info: 0x01ff_f000_0010_0000,
                 comp_info: 0x00ff_f000_0010_0000,
             },
@@ -1120,7 +1207,7 @@ mod tests {
         let data = unsafe {
             std::slice::from_raw_parts(
                 chunks.as_ptr() as *const u8,
-                chunks.len() * std::mem::size_of::<BlobChunkInfoOndisk>(),
+                chunks.len() * std::mem::size_of::<BlobChunkInfoV1Ondisk>(),
             )
         };
 

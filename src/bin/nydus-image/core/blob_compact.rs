@@ -164,7 +164,7 @@ impl ChunkSet {
             new_chunk.set_blob_index(new_blob_idx);
             new_chunk.set_compressed_offset(new_blob_ctx.compressed_offset);
             new_chunk.set_uncompressed_offset(new_blob_ctx.uncompressed_offset);
-            new_blob_ctx.add_chunk_meta_info(&new_chunk)?;
+            new_blob_ctx.add_chunk_meta_info(&new_chunk, 0)?;
             // insert change ops
             chunks_change.push((chunk.clone(), new_chunk));
 
@@ -520,7 +520,8 @@ impl BlobCompactor {
                 }
                 State::Rebuild(cs) => {
                     let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
-                    let mut blob_ctx = BlobContext::new(String::from(""), 0);
+                    let mut blob_ctx =
+                        BlobContext::new(String::from(""), 0, build_ctx.blob_meta_features);
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
                     let new_chunks = cs.dump(

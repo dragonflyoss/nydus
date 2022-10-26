@@ -15,7 +15,7 @@ use std::sync::Arc;
 use lazy_static::lazy_static;
 
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobMetaHeaderOndisk, BLOB_FEATURE_4K_ALIGNED};
+use nydus_storage::meta::{BlobMetaHeaderOndisk, BLOB_META_FEATURE_4K_ALIGNED};
 use nydus_storage::RAFS_MAX_CHUNK_SIZE;
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
@@ -1381,7 +1381,7 @@ impl RafsV6Blob {
         }
 
         // for now the uncompressed data chunk of v6 image is 4k aligned.
-        if u32::from_le(self.meta_features) & BLOB_FEATURE_4K_ALIGNED == 0 {
+        if u32::from_le(self.meta_features) & BLOB_META_FEATURE_4K_ALIGNED == 0 {
             error!("RafsV6Blob: idx {} invalid meta_features", blob_index);
             return false;
         }
