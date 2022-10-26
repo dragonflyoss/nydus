@@ -982,6 +982,7 @@ dependencies = [
  "fuse-backend-rs",
  "hyper",
  "hyperlocal",
+ "indexmap",
  "lazy_static",
  "libc",
  "log",

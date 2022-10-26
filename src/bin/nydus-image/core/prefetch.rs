@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Error, Result};
+use indexmap::IndexMap;
 use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
 use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
@@ -50,7 +51,7 @@ impl FromStr for PrefetchPolicy {
 ///
 /// It does not guarantee that specified path exist in local filesystem because the specified path
 /// may exist in parent image/layers.
-fn get_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
+fn get_patterns() -> Result<IndexMap<PathBuf, Option<u64>>> {
     let stdin = std::io::stdin();
     let mut patterns = Vec::new();
 
@@ -66,10 +67,9 @@ fn get_patterns() -> Result<BTreeMap<PathBuf, Option<u64>>> {
     }
 }
 
-fn generate_patterns(mut input: Vec<String>) -> Result<BTreeMap<PathBuf, Option<u64>>> {
-    let mut patterns = BTreeMap::new();
+fn generate_patterns(input: Vec<String>) -> Result<IndexMap<PathBuf, Option<u64>>> {
+    let mut patterns = IndexMap::new();
 
-    input.sort_unstable();
     for (idx, file) in input.iter().enumerate() {
         let file_trimmed: PathBuf = file.trim().into();
         // Sanity check for the list format.
@@ -107,7 +107,7 @@ pub struct Prefetch {
 
     // Patterns to generate prefetch inode array, which will be put into the prefetch array
     // in the RAFS bootstrap. It may access directory or file inodes.
-    patterns: BTreeMap<PathBuf, Option<u64>>,
+    patterns: IndexMap<PathBuf, Option<u64>>,
 
     // File list to help optimizing layout of data blobs.
     // Files from this list may be put at the head of data blob for better prefetch performance.
@@ -119,7 +119,7 @@ impl Prefetch {
         let patterns = if policy != PrefetchPolicy::None {
             get_patterns().context("failed to get prefetch patterns")?
         } else {
-            BTreeMap::new()
+            IndexMap::new()
         };
 
         Ok(Self {
@@ -162,11 +162,7 @@ impl Prefetch {
     }
 
     pub fn get_file_indexes(&self) -> Vec<u64> {
-        let mut indexes: Vec<u64> = self.files.values().copied().collect();
-
-        // Later, we might write chunks of data one by one according to inode number order.
-        indexes.sort_unstable();
-        indexes
+        self.files.values().copied().collect()
     }
 
     pub fn len(&self) -> u32 {
