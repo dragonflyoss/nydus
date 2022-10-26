@@ -478,10 +478,6 @@ impl RafsV5PrefetchTable {
 
     /// Store the inode prefetch table to a writer.
     pub fn store(&mut self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        // Sort prefetch table by inode index, hopefully, it can save time when mounting rafs
-        // Because file data is dumped in the order of inode index.
-        self.inodes.sort_unstable();
-
         let (_, data, _) = unsafe { self.inodes.align_to::<u8>() };
         w.write_all(data.as_ref())?;
 

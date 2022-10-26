@@ -62,6 +62,7 @@ nydus-rafs = { version = "0.1.0", path = "rafs", features = ["backend-registry",
 nydus-storage = { version = "0.5.0", path = "storage" }
 nydus-utils = { version = "0.3.0", path = "utils" }
 nydus-blobfs = { version = "0.1.0", path = "blobfs", features = ["virtiofs"], optional = true }
+indexmap = "1.9.1"
 
 [dev-dependencies]
 sendfd = "0.3.3"
