@@ -573,11 +573,12 @@ impl BlobMetaInfo {
             // time, the memory consumption and performance impact are relatively
             // small.
             let mut uncom_buf = vec![0u8; buffer.len()];
-            compress::decompress(&buf, None, &mut uncom_buf, blob_info.meta_ci_compressor())
-                .map_err(|e| {
+            compress::decompress(&buf, &mut uncom_buf, blob_info.meta_ci_compressor()).map_err(
+                |e| {
                     error!("failed to decompress blob meta data: {}", e);
                     e
-                })?;
+                },
+            )?;
             buffer.copy_from_slice(&uncom_buf);
         }
 

@@ -10,19 +10,18 @@
 //! on the in-kernel fscache system.
 
 use std::fs::File;
-use std::io::{ErrorKind, Result, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Result};
 use std::mem::ManuallyDrop;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::slice;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
-use nix::unistd::dup;
+use nydus_utils::compress::Decoder;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use nydus_utils::{compress, digest};
+use nydus_utils::{compress, digest, FileRangeReader};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
@@ -922,58 +921,33 @@ impl FileCacheEntry {
     }
 
     fn read_file_cache(&self, chunk: &dyn BlobChunkInfo, buffer: &mut [u8]) -> Result<()> {
-        let offset = if self.is_compressed {
-            chunk.compressed_offset()
+        if !self.is_compressed {
+            let offset = chunk.uncompressed_offset();
+            let size = chunk.uncompressed_size() as u64;
+            FileRangeReader::new(&self.file, offset, size).read_exact(buffer)?;
         } else {
-            chunk.uncompressed_offset()
-        };
-
-        let mut d;
-        let raw_buffer = if self.is_compressed && !self.is_stargz {
-            // Need to put compressed data into a temporary buffer so as to perform decompression.
-            //
-            // gzip is special that it doesn't carry compress_size, instead, we make an IO stream
-            // out of the file cache. So no need for an internal buffer here.
-            let c_size = chunk.compressed_size() as usize;
-            d = alloc_buf(c_size);
-            d.as_mut_slice()
-        } else {
-            // We have this unsafe assignment as it can directly store data into call's buffer.
-            unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) }
-        };
-
-        let mut raw_stream = None;
-        if self.is_stargz {
-            debug!("using blobcache file offset {} as data stream", offset,);
-            // FIXME: In case of multiple threads duplicating the same fd, they still share the
-            // same file offset.
-            let fd = dup(self.file.as_raw_fd()).map_err(|_| last_error!())?;
-            let mut f = unsafe { File::from_raw_fd(fd) };
-            f.seek(SeekFrom::Start(offset)).map_err(|_| last_error!())?;
-            raw_stream = Some(f)
-        } else {
-            debug!(
-                "reading blob cache file offset {} size {}",
-                offset,
-                raw_buffer.len()
-            );
-            let nr_read = uio::pread(self.file.as_raw_fd(), raw_buffer, offset as i64)
-                .map_err(|_| last_error!())?;
-            if nr_read == 0 || nr_read != raw_buffer.len() {
-                return Err(einval!());
+            let offset = chunk.compressed_offset();
+            let size = if self.is_stargz() {
+                self.get_legacy_stargz_size(offset, chunk.uncompressed_size() as usize)? as u64
+            } else {
+                chunk.compressed_size() as u64
+            };
+            let mut reader = FileRangeReader::new(&self.file, offset, size);
+            if self.compressor() == compress::Algorithm::Lz4Block {
+                let mut buf = alloc_buf(size as usize);
+                reader.read_exact(&mut buf)?;
+                let size = compress::decompress(&buf, buffer, self.compressor)?;
+                if size != buffer.len() {
+                    return Err(einval!(
+                        "data size decoded by lz4_block doesn't match expected"
+                    ));
+                }
+            } else {
+                let mut decoder = Decoder::new(reader, self.compressor())?;
+                decoder.read_exact(buffer)?;
             }
         }
-
-        // Try to validate data just fetched from backend inside.
-        self.process_raw_chunk(
-            chunk,
-            raw_buffer,
-            raw_stream,
-            buffer,
-            self.is_compressed,
-            false,
-        )?;
-
+        self.validate_chunk_data(chunk, buffer, false)?;
         Ok(())
     }
 

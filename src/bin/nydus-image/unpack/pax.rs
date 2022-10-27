@@ -737,13 +737,8 @@ impl ChunkReader {
         }
 
         let mut data = vec![0u8; chunk.uncompressed_size() as usize];
-        compress::decompress(
-            buf.as_mut_slice(),
-            None,
-            data.as_mut_slice(),
-            self.compressor,
-        )
-        .with_context(|| "fail to decompress")?;
+        compress::decompress(buf.as_mut_slice(), data.as_mut_slice(), self.compressor)
+            .with_context(|| "fail to decompress")?;
 
         self.chunk = Cursor::new(data);
 

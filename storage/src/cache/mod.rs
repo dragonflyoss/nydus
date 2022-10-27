@@ -17,7 +17,6 @@
 //!   configuration.
 
 use std::cmp;
-use std::fs::File;
 use std::io::Result;
 use std::slice;
 use std::sync::Arc;
@@ -140,6 +139,22 @@ pub trait BlobCache: Send + Sync {
     /// Check whether the cache object is for an stargz image.
     fn is_stargz(&self) -> bool;
 
+    /// Get maximum size of gzip compressed data.
+    fn get_legacy_stargz_size(&self, offset: u64, uncomp_size: usize) -> Result<usize> {
+        let blob_size = self.blob_compressed_size()?;
+        let max_size = blob_size.checked_sub(offset).ok_or_else(|| {
+            einval!(format!(
+                "chunk compressed offset {:x} is bigger than blob file size {:x}",
+                offset, blob_size
+            ))
+        })?;
+        let max_size = cmp::min(max_size, usize::MAX as u64) as usize;
+        Ok(compress::compute_compressed_gzip_size(
+            uncomp_size,
+            max_size,
+        ))
+    }
+
     /// Check whether need to validate the data chunk by digest value.
     fn need_validate(&self) -> bool;
 
@@ -247,14 +262,8 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
 
-            self.process_raw_chunk(
-                chunk.as_ref(),
-                buf,
-                None,
-                &mut buffer,
-                chunk.is_compressed(),
-                false,
-            )?;
+            self.decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
+            self.validate_chunk_data(chunk.as_ref(), &buffer, false)?;
             buffers.push(buffer);
             last = offset + size as u64;
         }
@@ -280,15 +289,7 @@ pub trait BlobCache: Send + Sync {
         let raw_chunk = if chunk.is_compressed() {
             // Need a scratch buffer to decompress compressed data.
             let c_size = if self.is_stargz() {
-                let blob_size = self.blob_compressed_size()?;
-                let max_size = blob_size.checked_sub(offset).ok_or_else(|| {
-                    einval!(format!(
-                        "chunk compressed offset {:x} is bigger than blob file size {:x}",
-                        offset, blob_size
-                    ))
-                })?;
-                let max_size = cmp::min(max_size, usize::MAX as u64);
-                compress::compute_compressed_gzip_size(buffer.len(), max_size as usize)
+                self.get_legacy_stargz_size(offset, buffer.len())?
             } else {
                 chunk.compressed_size() as usize
             };
@@ -304,14 +305,8 @@ pub trait BlobCache: Send + Sync {
             return Err(eio!("storage backend returns less data than requested"));
         }
 
-        self.process_raw_chunk(
-            chunk,
-            raw_chunk,
-            None,
-            buffer,
-            chunk.is_compressed(),
-            force_validation,
-        )?;
+        self.decompress_chunk_data(raw_chunk, buffer, chunk.is_compressed())?;
+        self.validate_chunk_data(chunk, buffer, force_validation)?;
         if let Some(hook) = raw_hook {
             hook(raw_chunk)
         }
@@ -319,31 +314,32 @@ pub trait BlobCache: Send + Sync {
         Ok(buffer.len())
     }
 
-    /// Hook point to post-process data received from storage backend.
-    ///
-    /// This hook method provides a chance to transform data received from storage backend into
-    /// data cached on local disk.
-    fn process_raw_chunk(
+    /// Decompress chunk data.
+    fn decompress_chunk_data(
         &self,
-        chunk: &dyn BlobChunkInfo,
         raw_buffer: &[u8],
-        raw_stream: Option<File>,
         buffer: &mut [u8],
         need_decompress: bool,
-        force_validation: bool,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         if need_decompress {
-            compress::decompress(raw_buffer, raw_stream, buffer, self.compressor()).map_err(
-                |e| {
-                    error!("failed to decompress chunk: {}", e);
-                    e
-                },
-            )?;
+            compress::decompress(raw_buffer, buffer, self.compressor()).map_err(|e| {
+                error!("failed to decompress chunk: {}", e);
+                e
+            })?;
         } else if raw_buffer.as_ptr() != buffer.as_ptr() {
             // raw_chunk and chunk may point to the same buffer, so only copy data when needed.
             buffer.copy_from_slice(raw_buffer);
         }
+        Ok(())
+    }
 
+    /// Validate chunk data.
+    fn validate_chunk_data(
+        &self,
+        chunk: &dyn BlobChunkInfo,
+        buffer: &[u8],
+        force_validation: bool,
+    ) -> Result<usize> {
         let d_size = chunk.uncompressed_size() as usize;
         if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
