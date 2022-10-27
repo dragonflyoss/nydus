@@ -51,6 +51,7 @@ pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
 struct BlobIoMergeState<'a, F: FnMut(BlobIoRange)> {
     cb: F,
+    // size of compressed data
     size: u32,
     bios: Vec<&'a BlobIoDesc>,
 }

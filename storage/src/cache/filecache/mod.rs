@@ -191,7 +191,7 @@ impl FileCacheEntry {
         let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap;
 
         trace!(
-            "comp {} direct {} stargz {}",
+            "filecache entry: compressed {}, direct {} stargz {}",
             mgr.is_compressed,
             is_direct_chunkmap,
             is_stargz

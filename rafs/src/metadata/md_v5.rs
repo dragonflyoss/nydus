@@ -27,7 +27,7 @@ impl RafsSuper {
         self.meta.chunk_size = sb.block_size();
         self.meta.flags = RafsSuperFlags::from_bits(sb.flags())
             .ok_or_else(|| einval!(format!("invalid super flags {:x}", sb.flags())))?;
-        info!("rafs superblock features: {}", self.meta.flags);
+        info!("RAFS v5 super block features: {}", self.meta.flags);
 
         self.meta.inodes_count = sb.inodes_count();
         self.meta.inode_table_entries = sb.inode_table_entries();
@@ -130,7 +130,7 @@ impl RafsSuper {
     pub(crate) fn amplify_io(
         &self,
         device: &BlobDevice,
-        max_size: u32,
+        max_uncomp_size: u32,
         descs: &mut [BlobIoVec],
         inode: &Arc<dyn RafsInode>,
         window_base: u64,
@@ -166,7 +166,7 @@ impl RafsSuper {
             if let Ok(ni) = self.get_inode(next_ino, false) {
                 if ni.is_reg() {
                     let next_size = ni.size();
-                    if next_size > max_size as u64 {
+                    if next_size > max_uncomp_size as u64 {
                         break;
                     } else if next_size == 0 {
                         continue;

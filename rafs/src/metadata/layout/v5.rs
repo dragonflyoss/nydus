@@ -599,7 +599,7 @@ impl RafsV5BlobTable {
             return Ok(());
         }
 
-        debug!("blob table size {}", blob_table_size);
+        debug!("RAFS v5 blob table size {}", blob_table_size);
         let mut data = vec![0u8; blob_table_size as usize];
         r.read_exact(&mut data)?;
 
@@ -624,7 +624,7 @@ impl RafsV5BlobTable {
             } else {
                 buf = &mut buf[pos + 1..];
             }
-            debug!("blob {:?} lies on", blob_id);
+            debug!("blob {} {:?}", self.entries.len(), blob_id);
 
             let index = self.entries.len();
             let (chunk_count, uncompressed_size, compressed_size, blob_features) =
