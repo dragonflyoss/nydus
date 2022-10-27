@@ -748,7 +748,6 @@ impl FileSystem for Rafs {
         }
 
         let start = self.ios.latency_start();
-
         for desc in descs.iter_mut() {
             assert!(!desc.is_empty());
             assert_ne!(desc.size(), 0);
