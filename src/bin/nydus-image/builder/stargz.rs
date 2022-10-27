@@ -21,6 +21,7 @@ use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobChunkFlags;
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
+use nydus_utils::compress::compute_compressed_gzip_size;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::{try_round_up_4k, ByteSize};
 use serde::{Deserialize, Serialize};
@@ -709,9 +710,19 @@ impl StargzBuilder {
             } else if next - curr > RAFS_MAX_CHUNK_SIZE {
                 bail!("stargz compressed size is too big");
             }
+            let uncomp_size = blob_chunks[idx].inner.uncompressed_size() as usize;
+            let max_size = (next - curr) as usize;
+            let max_gzip_size = compute_compressed_gzip_size(uncomp_size, max_size);
+            if max_gzip_size < max_size {
+                trace!(
+                    "shrink max gzip size from {} to {}",
+                    max_size,
+                    max_gzip_size
+                );
+            }
             blob_chunks[idx]
                 .inner
-                .set_compressed_size((next - curr) as u32);
+                .set_compressed_size(max_gzip_size as u32);
         }
 
         let mut chunk_map = HashMap::new();
