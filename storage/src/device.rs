@@ -655,8 +655,9 @@ impl BlobIoSegment {
     }
 
     #[inline]
-    pub fn append(&mut self, _offset: u32, len: u32) {
-        debug_assert!(_offset.checked_add(len).is_some());
+    pub fn append(&mut self, offset: u32, len: u32) {
+        assert!(offset.checked_add(len).is_some());
+        assert_eq!(offset, 0);
 
         self.len += len;
     }

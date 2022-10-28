@@ -34,7 +34,7 @@ use crate::device::{
 };
 use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::{StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::{StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MERGING_SIZE_TO_GAP_SHIFT};
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 20;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 500;
@@ -121,6 +121,7 @@ pub(crate) struct FileCacheEntry {
     pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
     pub(crate) need_validate: bool,
+    pub(crate) batch_size: u64,
     pub(crate) prefetch_config: Arc<AsyncPrefetchConfig>,
 }
 
@@ -330,11 +331,16 @@ impl BlobCache for FileCacheEntry {
         }
 
         // Then handle fs prefetch
-        let merging_size = self.prefetch_config.merging_size;
-        BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
-            let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
-            let _ = self.workers.send_prefetch_message(msg);
-        });
+        let max_comp_size = self.prefetch_config.merging_size;
+        BlobIoMergeState::merge_and_issue(
+            &bios,
+            max_comp_size,
+            max_comp_size as u64 >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+            |req: BlobIoRange| {
+                let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
+                let _ = self.workers.send_prefetch_message(msg);
+            },
+        );
 
         Ok(0)
     }
@@ -453,7 +459,7 @@ impl BlobObject for FileCacheEntry {
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let chunks = meta.get_chunks_compressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
+        let chunks = meta.get_chunks_compressed(offset, size, self.batch_size)?;
         assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, true)
     }
@@ -461,7 +467,7 @@ impl BlobObject for FileCacheEntry {
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let chunks = meta.get_chunks_uncompressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
+        let chunks = meta.get_chunks_uncompressed(offset, size, self.batch_size * 2)?;
         assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, false)
     }
@@ -656,7 +662,7 @@ impl FileCacheEntry {
     fn read_iter(&self, bios: &mut [BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
         // Merge requests with continuous blob addresses.
         let requests = self
-            .merge_requests_for_user(bios, RAFS_DEFAULT_CHUNK_SIZE as usize * 2)
+            .merge_requests_for_user(bios, self.batch_size as usize)
             .ok_or_else(|| {
                 for bio in bios.iter() {
                     self.update_chunk_pending_status(&bio.chunkinfo, false);
@@ -972,13 +978,18 @@ impl FileCacheEntry {
     fn merge_requests_for_user(
         &self,
         bios: &[BlobIoDesc],
-        merging_size: usize,
+        max_comp_size: usize,
     ) -> Option<Vec<BlobIoRange>> {
         let mut requests: Vec<BlobIoRange> = Vec::with_capacity(bios.len());
 
-        BlobIoMergeState::merge_and_issue(bios, merging_size, |mr: BlobIoRange| {
-            requests.push(mr);
-        });
+        BlobIoMergeState::merge_and_issue(
+            bios,
+            max_comp_size,
+            max_comp_size as u64 >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+            |mr: BlobIoRange| {
+                requests.push(mr);
+            },
+        );
 
         if requests.is_empty() {
             None
@@ -1106,12 +1117,12 @@ impl Region {
             self.count = 1;
         } else {
             assert_eq!(self.status, RegionStatus::Open);
-            if self.blob_address + self.blob_len as u64 != start
-                || start.checked_add(len as u64).is_none()
-            {
+            let end = self.blob_address + self.blob_len as u64;
+            if end + RAFS_DEFAULT_CHUNK_SIZE < start || start.checked_add(len as u64).is_none() {
                 return Err(StorageError::NotContinuous);
             }
-            self.blob_len += len;
+            let sz = start + len as u64 - end;
+            self.blob_len += sz as u32;
             self.count += 1;
         }
 
@@ -1180,6 +1191,7 @@ impl FileIoMergeState {
 
     fn reset(&mut self) {
         self.regions.truncate(0);
+        self.last_region_joinable = true;
     }
 
     #[inline]
@@ -1251,10 +1263,10 @@ mod tests {
         assert!(region.has_user_io());
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x4000,
+            offset: 0x0000,
             len: 0x2000,
         });
-        region.append(0x4000, 0x2000, tag, None).unwrap_err();
+        region.append(0x100004000, 0x2000, tag, None).unwrap_err();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
         assert_eq!(region.blob_len, 0x2000);
@@ -1265,13 +1277,13 @@ mod tests {
         assert!(region.has_user_io());
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x3000,
+            offset: 0x0000,
             len: 0x2000,
         });
-        region.append(0x3000, 0x2000, tag, None).unwrap();
+        region.append(0x4000, 0x2000, tag, None).unwrap();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
-        assert_eq!(region.blob_len, 0x4000);
+        assert_eq!(region.blob_len, 0x5000);
         assert_eq!(region.seg.offset, 0x1800);
         assert_eq!(region.seg.len, 0x3800);
         assert_eq!(region.chunks.len(), 0);
@@ -1295,7 +1307,7 @@ mod tests {
         assert_eq!(state.regions.len(), 1);
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x3000,
+            offset: 0x0000,
             len: 0x2000,
         });
         state
@@ -1304,7 +1316,7 @@ mod tests {
         assert_eq!(state.regions.len(), 1);
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x5000,
+            offset: 0x0000,
             len: 0x2000,
         });
         state

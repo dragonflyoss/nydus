@@ -19,6 +19,7 @@ use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunk
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
+use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with local storage.
@@ -232,6 +233,7 @@ impl FileCacheEntry {
             is_stargz,
             dio_enabled: false,
             need_validate,
+            batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })
     }

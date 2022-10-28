@@ -66,29 +66,37 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
         }
     }
 
-    /// Get size of pending io operations.
+    /// Get size of pending compressed data.
     #[inline]
-    pub fn size(&self) -> usize {
+    fn size(&self) -> usize {
         self.size as usize
     }
 
     /// Push a new io descriptor into the pending list.
     #[inline]
-    pub fn push(&mut self, bio: &'a BlobIoDesc) {
-        let size = bio.chunkinfo.compressed_size();
-
+    fn push(&mut self, bio: &'a BlobIoDesc) {
+        let start = bio.chunkinfo.compressed_offset();
+        let size = if !self.bios.is_empty() {
+            let last = &self.bios[self.bios.len() - 1].chunkinfo;
+            let prev = last.compressed_offset() + last.compressed_size() as u64;
+            assert!(prev <= start);
+            assert!(start - prev < u32::MAX as u64);
+            (start - prev) as u32 + bio.chunkinfo.compressed_size()
+        } else {
+            bio.chunkinfo.compressed_size()
+        };
         assert!(self.size.checked_add(size).is_some());
+        self.size += size;
         self.bios.push(bio);
-        self.size += bio.chunkinfo.compressed_size();
     }
 
     /// Issue all pending io descriptors.
     #[inline]
-    pub fn issue(&mut self) {
+    pub fn issue(&mut self, max_gap: u64) {
         if !self.bios.is_empty() {
             let mut mr = BlobIoRange::new(self.bios[0], self.bios.len());
             for bio in self.bios[1..].iter() {
-                mr.merge(bio, 0);
+                mr.merge(bio, max_gap);
             }
             (self.cb)(mr);
 
@@ -97,20 +105,24 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
         }
     }
 
-    /// Merge and issue all blob Io descriptors.
-    pub fn merge_and_issue(bios: &[BlobIoDesc], max_size: usize, op: F) {
+    /// Merge adjacent chunks into bigger request with compressed size no bigger than `max_size`
+    /// and issue all blob IO descriptors.
+    pub fn merge_and_issue(bios: &[BlobIoDesc], max_comp_size: usize, max_gap: u64, op: F) {
         if !bios.is_empty() {
             let mut index = 1;
             let mut state = BlobIoMergeState::new(&bios[0], op);
 
             for cur_bio in &bios[1..] {
-                if !bios[index - 1].is_continuous(cur_bio, 0) || state.size() >= max_size {
-                    state.issue();
+                // Issue pending descriptors when next chunk is not continuous with current chunk
+                // or the accumulated compressed data size is big enough.
+                if !bios[index - 1].is_continuous(cur_bio, max_gap) || state.size() >= max_comp_size
+                {
+                    state.issue(max_gap);
                 }
                 state.push(cur_bio);
                 index += 1
             }
-            state.issue();
+            state.issue(max_gap);
         }
     }
 }
@@ -464,7 +476,7 @@ mod tests {
         assert_eq!(state.size, 0x1000);
         assert_eq!(state.bios.len(), 2);
 
-        state.issue();
+        state.issue(0);
         assert_eq!(state.size(), 0x0);
         assert_eq!(state.bios.len(), 0);
 
@@ -479,7 +491,7 @@ mod tests {
         assert_eq!(state.size, 0x800);
         assert_eq!(state.bios.len(), 1);
 
-        state.issue();
+        state.issue(0);
         assert_eq!(state.size(), 0x0);
         assert_eq!(state.bios.len(), 0);
 
@@ -487,6 +499,7 @@ mod tests {
         BlobIoMergeState::merge_and_issue(
             &[desc1.clone(), desc2.clone(), desc3.clone()],
             0x4000,
+            0x0,
             |_v| count += 1,
         );
         assert_eq!(count, 1);
@@ -495,12 +508,15 @@ mod tests {
         BlobIoMergeState::merge_and_issue(
             &[desc1.clone(), desc2.clone(), desc3.clone()],
             0x1000,
+            0x0,
             |_v| count += 1,
         );
         assert_eq!(count, 2);
 
         let mut count = 0;
-        BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
+        BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, 0x0, |_v| {
+            count += 1
+        });
         assert_eq!(count, 2);
 
         assert!(desc1.is_continuous(&desc2, 0));

@@ -19,6 +19,7 @@ use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
+use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with Linux fscache subsystem.
@@ -238,6 +239,7 @@ impl FileCacheEntry {
             is_stargz: blob_info.is_stargz(),
             dio_enabled: true,
             need_validate: mgr.validate,
+            batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })
     }
