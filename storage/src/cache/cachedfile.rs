@@ -164,7 +164,7 @@ impl BlobCache for FileCacheEntry {
         self.digester
     }
 
-    fn is_stargz(&self) -> bool {
+    fn is_legacy_stargz(&self) -> bool {
         self.is_stargz
     }
 
@@ -275,7 +275,7 @@ impl BlobCache for FileCacheEntry {
                 // For digested chunk map, we must check whether the cached data is valid because
                 // the digested chunk map cannot persist readiness state.
                 let d_size = c.uncompressed_size() as usize;
-                match self.read_raw_chunk(c.as_ref(), &mut buf[0..d_size], true, None) {
+                match self.read_chunk_from_backend(c.as_ref(), &mut buf[0..d_size], true, None) {
                     Ok(_v) => {
                         // The cached data is valid, set the chunk as ready.
                         let _ = self
@@ -316,8 +316,9 @@ impl BlobCache for FileCacheEntry {
             let blob_end = pending[end].compressed_offset() + pending[end].compressed_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
 
-            match self.read_chunks(blob_offset, blob_size, &pending[start..=end], true) {
-                Ok(v) => {
+            match self.read_chunks_from_backend(blob_offset, blob_size, &pending[start..=end], true)
+            {
+                Ok((v, _r)) => {
                     total_size += blob_size;
                     for idx in start..=end {
                         let offset = if self.is_compressed {
@@ -359,7 +360,6 @@ impl BlobCache for FileCacheEntry {
             let mut state = FileIoMergeState::new();
             let mut cursor = MemSliceCursor::new(buffers);
             let req = BlobIoRange::new(&iovec.bi_vec[0], 1);
-
             self.dispatch_one_range(&req, &mut cursor, &mut state)
         } else {
             self.read_iter(&mut iovec.bi_vec, buffers)
@@ -384,7 +384,7 @@ impl BlobObject for FileCacheEntry {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_compressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
-        debug_assert!(!chunks.is_empty());
+        assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, true)
     }
 
@@ -392,7 +392,7 @@ impl BlobObject for FileCacheEntry {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_uncompressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
-        debug_assert!(!chunks.is_empty());
+        assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, false)
     }
 
@@ -424,8 +424,8 @@ impl BlobObject for FileCacheEntry {
             return Ok(0);
         }
 
-        if range.blob_size < RAFS_DEFAULT_CHUNK_SIZE {
-            let max_size = RAFS_DEFAULT_CHUNK_SIZE - range.blob_size;
+        if range.blob_size < self.prefetch_config.merging_size as u64 {
+            let max_size = self.prefetch_config.merging_size as u64 - range.blob_size;
             if let Some(meta) = self.meta.as_ref() {
                 if let Some(bm) = meta.get_blob_meta() {
                     if let Some(chunks) = bm.add_more_chunks(chunks, max_size) {
@@ -443,12 +443,12 @@ impl BlobObject for FileCacheEntry {
 
 impl FileCacheEntry {
     fn do_fetch_chunks(&self, chunks: &[Arc<dyn BlobChunkInfo>], prefetch: bool) -> Result<usize> {
-        if self.is_stargz() {
+        if self.is_legacy_stargz() {
             // FIXME: for stargz, we need to implement fetching multiple chunks. here
             // is a heavy overhead workaround, needs to be optimized.
             for chunk in chunks {
                 let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                self.read_raw_chunk(chunk.as_ref(), &mut buf, false, None)
+                self.read_chunk_from_backend(chunk.as_ref(), &mut buf, false, None)
                     .map_err(|e| {
                         eio!(format!(
                             "read_raw_chunk failed to read and decompress stargz chunk, {:?}",
@@ -502,13 +502,13 @@ impl FileCacheEntry {
                 chunks[end_idx].compressed_offset() + chunks[end_idx].compressed_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
 
-            match self.read_chunks(
+            match self.read_chunks_from_backend(
                 blob_offset,
                 blob_size,
                 &chunks[start_idx..=end_idx],
                 prefetch,
             ) {
-                Ok(mut v) => {
+                Ok((mut v, _r)) => {
                     total_size += blob_size;
                     trace!(
                         "range persist chunk start {} {} pending {} {}",
@@ -560,7 +560,7 @@ impl FileCacheEntry {
                 }
                 info!("retry for timeout chunk, {}", chunk.id());
                 let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                self.read_raw_chunk(chunk.as_ref(), &mut buf, false, None)
+                self.read_chunk_from_backend(chunk.as_ref(), &mut buf, false, None)
                     .map_err(|e| eio!(format!("read_raw_chunk failed, {:?}", e)))?;
                 if self.dio_enabled {
                     self.adjust_buffer_for_dio(&mut buf)
@@ -578,7 +578,7 @@ impl FileCacheEntry {
     }
 
     fn adjust_buffer_for_dio(&self, buf: &mut Vec<u8>) {
-        debug_assert!(buf.capacity() % 0x1000 == 0);
+        assert_eq!(buf.capacity() % 0x1000, 0);
         if buf.len() != buf.capacity() {
             // Padding with 0 for direct IO.
             buf.resize(buf.capacity(), 0);
@@ -710,6 +710,7 @@ impl FileCacheEntry {
         readv(self.file.as_raw_fd(), &mut iovec, offset)
     }
 
+    // Try to read data from blob cache and validate it, fallback to storage backend.
     fn dispatch_cache_slow(&self, cursor: &mut MemSliceCursor, region: &Region) -> Result<usize> {
         let mut total_read = 0;
 
@@ -744,7 +745,8 @@ impl FileCacheEntry {
             region.chunks.len()
         );
 
-        let mut chunks = self.read_chunks(region.blob_address, blob_size, &region.chunks, false)?;
+        let (mut chunks, _) =
+            self.read_chunks_from_backend(region.blob_address, blob_size, &region.chunks, false)?;
         assert_eq!(region.chunks.len(), chunks.len());
 
         let mut chunk_buffers = Vec::with_capacity(region.chunks.len());
@@ -848,7 +850,13 @@ impl FileCacheEntry {
         size: u32,
         mem_cursor: &mut MemSliceCursor,
     ) -> Result<usize> {
-        debug!("single bio, blob offset {}", chunk.compressed_offset());
+        trace!(
+            "read_single_chunk {:x}:{:x}:{:x}/@{}",
+            chunk.compressed_offset(),
+            user_offset,
+            size,
+            chunk.blob_index()
+        );
 
         let is_ready = self.chunk_map.is_ready(chunk.as_ref())?;
         let buffer_holder;
@@ -872,7 +880,7 @@ impl FileCacheEntry {
             );
             &d
         } else if !self.is_compressed {
-            self.read_raw_chunk(chunk.as_ref(), d.mut_slice(), false, None)?;
+            self.read_chunk_from_backend(chunk.as_ref(), d.mut_slice(), false, None)?;
             buffer_holder = Arc::new(d.convert_to_owned_buffer());
             self.delay_persist(chunk.clone(), buffer_holder.clone());
             buffer_holder.as_ref()
@@ -892,7 +900,8 @@ impl FileCacheEntry {
                     self.chunk_map.clear_pending(chunk.as_ref())
                 }
             };
-            self.read_raw_chunk(
+
+            self.read_chunk_from_backend(
                 chunk.as_ref(),
                 d.mut_slice(),
                 false,
@@ -927,7 +936,7 @@ impl FileCacheEntry {
             FileRangeReader::new(&self.file, offset, size).read_exact(buffer)?;
         } else {
             let offset = chunk.compressed_offset();
-            let size = if self.is_stargz() {
+            let size = if self.is_legacy_stargz() {
                 self.get_legacy_stargz_size(offset, chunk.uncompressed_size() as usize)? as u64
             } else {
                 chunk.compressed_size() as u64

@@ -232,7 +232,7 @@ pub fn alloc_buf(size: usize) -> Vec<u8> {
 }
 
 /// Check hash of data matches provided one
-pub fn digest_check(data: &[u8], digest: &RafsDigest, digester: digest::Algorithm) -> bool {
+pub fn check_digest(data: &[u8], digest: &RafsDigest, digester: digest::Algorithm) -> bool {
     digest == &RafsDigest::from_buf(data, digester)
 }
 

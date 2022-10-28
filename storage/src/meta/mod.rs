@@ -324,7 +324,7 @@ impl BlobMetaInfo {
         let info_size = blob_info.meta_ci_uncompressed_size() as usize;
         let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         trace!(
-            "meta_path {:?} info_size {} chunk_count {}",
+            "try to open blob meta file: path {:?} info_size {} chunk_count {}",
             meta_path,
             info_size,
             chunk_count
