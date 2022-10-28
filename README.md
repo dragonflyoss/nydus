@@ -50,10 +50,10 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 | Distribution  | [Dragonfly](https://github.com/dragonflyoss/Dragonfly2)                                                         | Improve the runtime performance of Nydus image even further with the Dragonfly P2P data distribution system                                                  | ✅      |
 | Build         | [Buildkit](https://github.com/moby/buildkit/pull/2581)                                                          | Provides the ability to build and export Nydus images directly from Dockerfile                                                                               | 🚧      |
 | Runtime       | Kubernetes                                                                                                      | Run Nydus image using CRI interface                                                                                                                          | ✅      |
-| Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Run Nydus image in containerd with nydus-snapshotter                                                                                                         | ✅      |
-| Runtime       | [CRI-O / Podman](https://github.com/containers/nydus-storage-plugin)                                            | Run Nydus image with CRI-O or Podman                                                                                                                         | 🚧    |
+| Runtime       | [Containerd](https://github.com/containerd/nydus-snapshotter)                                                   | Nydus Snapshotter, a containerd remote plugin to run Nydus image                                                                                             | ✅      |
+| Runtime       | [CRI-O / Podman](https://github.com/containers/nydus-storage-plugin)                                            | Run Nydus image with CRI-O or Podman                                                                                                                         | 🚧      |
 | Runtime       | [Docker](https://github.com/dragonflyoss/image-service/tree/master/contrib/docker-nydus-graphdriver)            | Run Nydus image in Docker container with graphdriver plugin                                                                                                  | ✅      |
-| Runtime       | [Nerdctl](https://github.com/containerd/nerdctl)                                                                | Run Nydus image with `nerdctl --snapshotter nydus run ...`                                                                                                   | ✅      |
+| Build/Runtime | [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md)                                      | The containerd client to build or run (requires nydus snapshotter) Nydus image                                                                               | ✅      |
 | Runtime       | [KataContainers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/kata-nydus-design.md) | Run Nydus image in KataContainers as a native solution                                                                                                       | ✅      |
 | Runtime       | [EROFS](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)                                          | Run Nydus image directly in-kernel EROFS for even greater performance improvement                                                                            | ✅      |
 
@@ -82,7 +82,7 @@ For more details on how to lazily start a container with `nydus-snapshotter` and
 
 Build Nydus image from directory source: [Nydus Image Builder](./docs/nydus-image.md).
 
-Convert OCI image to Nydus image: [Nydusify](./docs/nydusify.md).
+Convert OCIv1 image to Nydus image: [Nydusify](./docs/nydusify.md), [Acceld](https://github.com/goharbor/acceleration-service) or [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md#build-nydus-image-using-nerdctl-image-convert).
 
 ## Nydus Snapshotter
 
