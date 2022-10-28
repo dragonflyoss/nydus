@@ -116,7 +116,7 @@ pub(crate) struct FileCacheEntry {
     // Whether direct chunkmap is used.
     pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
-    pub(crate) is_stargz: bool,
+    pub(crate) is_legacy_stargz: bool,
     // True if direct IO is enabled for the `self.file`, supported for fscache only.
     pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
@@ -128,7 +128,7 @@ pub(crate) struct FileCacheEntry {
 impl FileCacheEntry {
     pub(crate) fn get_blob_size(reader: &Arc<dyn BlobReader>, blob_info: &BlobInfo) -> Result<u64> {
         // Stargz needs blob size information, so hacky!
-        let size = if blob_info.is_stargz() {
+        let size = if blob_info.is_legacy_stargz() {
             reader.blob_size().map_err(|e| einval!(e))?
         } else {
             0
@@ -248,7 +248,7 @@ impl BlobCache for FileCacheEntry {
     }
 
     fn is_legacy_stargz(&self) -> bool {
-        self.is_stargz
+        self.is_legacy_stargz
     }
 
     fn need_validate(&self) -> bool {
@@ -726,13 +726,11 @@ impl FileCacheEntry {
                 } else {
                     state.commit()
                 }
-            } else if self.is_stargz || !self.is_direct_chunkmap || is_ready {
+            } else if !self.is_direct_chunkmap || is_ready {
                 // Case to try loading data from cache
                 // - chunk is ready but data validation is needed.
                 // - direct chunk map is not used, so there may be data in the file cache but
                 //   the readiness flag has been lost.
-                // - special path for stargz blobs. An stargz blob is abstracted as a compressed
-                //   file cache always need validation.
                 if req.tags[i].is_user_io() {
                     state.push(
                         RegionType::CacheSlow,
@@ -882,17 +880,15 @@ impl FileCacheEntry {
             chunk.blob_index()
         );
 
-        let is_ready = self.chunk_map.is_ready(chunk.as_ref())?;
         let buffer_holder;
         let d_size = chunk.uncompressed_size() as usize;
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
 
         // Try to read and validate data from cache if:
-        // - it's an stargz image and the chunk is ready.
-        // - chunk data validation is enabled.
-        // - digested or dummy chunk map is used.
-        let try_cache = is_ready || (!self.is_stargz && !self.is_direct_chunkmap);
-        let buffer = if try_cache && self.read_file_cache(chunk.as_ref(), d.mut_slice()).is_ok() {
+        // - the chunk is marked as ready
+        // - it's not in direct map mode and blob is not a legacy stargz. Legacy stargz has
+        //   incorrect chunk hash value, so can't be used to validate data from cache.
+        let buffer = if self.read_file_cache(chunk.as_ref(), d.mut_slice()).is_ok() {
             self.metrics.whole_hits.inc();
             self.chunk_map.set_ready_and_clear_pending(chunk.as_ref())?;
             trace!(

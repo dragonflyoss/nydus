@@ -767,7 +767,10 @@ impl StargzBuilder {
                     chunk.inner.uncompressed_offset() + chunk.inner.uncompressed_size() as u64,
                     uncompressed_blob_size,
                 );
-                compressed_blob_size += chunk.inner.compressed_size() as u64;
+                compressed_blob_size = std::cmp::max(
+                    compressed_blob_size,
+                    chunk.inner.compressed_offset() + chunk.inner.compressed_size() as u64,
+                );
                 if let Some(h) = inode_hasher.as_mut() {
                     h.digest_update(chunk.inner.id().as_ref());
                 }

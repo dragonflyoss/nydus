@@ -216,7 +216,7 @@ impl BlobCacheMgr for DummyCacheMgr {
             reader,
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
-            is_stargz: blob_info.is_stargz(),
+            is_stargz: blob_info.is_legacy_stargz(),
             validate: self.validate,
         }))
     }

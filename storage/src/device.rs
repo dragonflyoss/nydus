@@ -39,6 +39,7 @@ use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
+use crate::meta::BLOB_META_FEATURE_CHUNK_INFO_V2;
 
 bitflags! {
     /// Features bits for blob management.
@@ -84,8 +85,8 @@ pub struct BlobInfo {
     prefetch_offset: u32,
     /// Size of blob data to prefetch.
     prefetch_size: u32,
-    /// The blob is for an stargz image.
-    stargz: bool,
+    /// The blob is for a legacy estargz image.
+    is_legacy_stargz: bool,
 
     /// V6: Version number of the blob metadata.
     meta_flags: u32,
@@ -132,7 +133,7 @@ impl BlobInfo {
             digester: digest::Algorithm::Blake3,
             prefetch_offset: 0,
             prefetch_size: 0,
-            stargz: false,
+            is_legacy_stargz: false,
             meta_ci_compressor: 0,
             meta_flags: 0,
             meta_ci_offset: 0,
@@ -221,8 +222,8 @@ impl BlobInfo {
     }
 
     /// Check whether this blob is for an stargz image.
-    pub fn is_stargz(&self) -> bool {
-        self.stargz
+    pub fn is_legacy_stargz(&self) -> bool {
+        self.is_legacy_stargz
     }
 
     /// Set metadata information for a blob.
@@ -324,8 +325,10 @@ impl BlobInfo {
         if self.chunk_count == 0 {
             self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
         }
-        if self.compressor == compress::Algorithm::GZip {
-            self.stargz = true;
+        if self.compressor == compress::Algorithm::GZip
+            && self.meta_flags & BLOB_META_FEATURE_CHUNK_INFO_V2 == 0
+        {
+            self.is_legacy_stargz = true;
         }
     }
 }
@@ -484,7 +487,7 @@ impl BlobIoDesc {
         let next_offset = next.chunkinfo.compressed_offset();
 
         if self.chunkinfo.blob_index() == next.chunkinfo.blob_index() && next_offset >= prev_end {
-            if next.blob.is_stargz() {
+            if next.blob.is_legacy_stargz() {
                 next_offset - prev_end <= max_gap * 8
             } else {
                 next_offset - prev_end <= max_gap

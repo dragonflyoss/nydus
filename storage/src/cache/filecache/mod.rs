@@ -186,16 +186,16 @@ impl FileCacheEntry {
         let blob_uncompressed_size = blob_info.uncompressed_size();
         let compressor = blob_info.compressor();
         let digester = blob_info.digester();
-        let is_stargz = blob_info.is_stargz();
-        let is_compressed = mgr.is_compressed || is_stargz;
-        let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_stargz;
+        let is_legacy_stargz = blob_info.is_legacy_stargz();
+        let is_compressed = mgr.is_compressed;
+        let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
         let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap;
 
         trace!(
-            "filecache entry: compressed {}, direct {} stargz {}",
+            "filecache entry: compressed {}, direct {}, legacy_stargz {}",
             mgr.is_compressed,
             is_direct_chunkmap,
-            is_stargz
+            is_legacy_stargz
         );
         let meta = if blob_info.meta_ci_is_valid() {
             // Set cache file to its expected size.
@@ -230,7 +230,7 @@ impl FileCacheEntry {
             is_get_blob_object_supported,
             is_compressed,
             is_direct_chunkmap,
-            is_stargz,
+            is_legacy_stargz,
             dio_enabled: false,
             need_validate,
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,

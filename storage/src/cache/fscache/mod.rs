@@ -236,7 +236,7 @@ impl FileCacheEntry {
             is_get_blob_object_supported: true,
             is_compressed: false,
             is_direct_chunkmap: true,
-            is_stargz: blob_info.is_stargz(),
+            is_legacy_stargz: blob_info.is_legacy_stargz(),
             dio_enabled: true,
             need_validate: mgr.validate,
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,
