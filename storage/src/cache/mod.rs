@@ -231,7 +231,7 @@ pub trait BlobCache: Send + Sync {
         }
         let duration = Instant::now().duration_since(start).as_millis();
         debug!(
-            "read_chunks: {} {} {} bytes at {}, duration {}ms",
+            "read_chunks_from_backend: {} {} {} bytes at {}, duration {}ms",
             std::thread::current().name().unwrap_or_default(),
             if prefetch { "prefetch" } else { "fetch" },
             blob_size,
@@ -251,20 +251,11 @@ pub trait BlobCache: Send + Sync {
         chunk: &dyn BlobChunkInfo,
         buffer: &mut [u8],
         force_validation: bool,
-        raw_hook: Option<&dyn Fn(&[u8])>,
-    ) -> Result<usize> {
+    ) -> Result<Option<Vec<u8>>> {
         let offset = chunk.compressed_offset();
 
-        if !chunk.is_compressed() {
-            let size = self.reader().read(buffer, offset).map_err(|e| eio!(e))?;
-            if size != buffer.len() {
-                return Err(eio!("storage backend returns less data than requested"));
-            }
-            self.validate_chunk_data(chunk, buffer, force_validation)?;
-            if let Some(hook) = raw_hook {
-                hook(buffer);
-            }
-        } else {
+        let mut c_buf = None;
+        if chunk.is_compressed() {
             let c_size = if self.is_legacy_stargz() {
                 self.get_legacy_stargz_size(offset, buffer.len())?
             } else {
@@ -279,13 +270,17 @@ pub trait BlobCache: Send + Sync {
                 return Err(eio!("storage backend returns less data than requested"));
             }
             self.decompress_chunk_data(&raw_buffer, buffer, true)?;
-            self.validate_chunk_data(chunk, buffer, force_validation)?;
-            if let Some(hook) = raw_hook {
-                hook(&raw_buffer);
+            c_buf = Some(raw_buffer);
+        } else {
+            let size = self.reader().read(buffer, offset).map_err(|e| eio!(e))?;
+            if size != buffer.len() {
+                return Err(eio!("storage backend returns less data than requested"));
             }
         }
 
-        Ok(buffer.len())
+        self.validate_chunk_data(chunk, buffer, force_validation)?;
+
+        Ok(c_buf)
     }
 
     fn decompress_normal_chunks(
