@@ -318,7 +318,7 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
             self.decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
-            self.validate_chunk_data(chunk.as_ref(), &buffer, false)?;
+            self.validate_chunk_data(chunk.as_ref(), &buffer, self.need_validate())?;
             buffers.push(buffer);
         }
 

@@ -956,7 +956,7 @@ impl FileCacheEntry {
                 decoder.read_exact(buffer)?;
             }
         }
-        self.validate_chunk_data(chunk, buffer, false)?;
+        self.validate_chunk_data(chunk, buffer, self.need_validate)?;
         Ok(())
     }
 
