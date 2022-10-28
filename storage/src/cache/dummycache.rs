@@ -122,7 +122,8 @@ impl BlobCache for DummyCache {
                 return Ok(0);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
-            return self.read_chunk_from_backend(&bios[0].chunkinfo, buf, false, None);
+            self.read_chunk_from_backend(&bios[0].chunkinfo, buf, false)?;
+            return Ok(buf.len());
         }
 
         let mut user_size = 0;
@@ -130,7 +131,7 @@ impl BlobCache for DummyCache {
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompressed_size() as usize);
-                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice(), false, None)?;
+                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice(), false)?;
                 buffer_holder.push(d);
                 // Even a merged IO can hardly reach u32::MAX. So this is safe
                 user_size += bio.size;
