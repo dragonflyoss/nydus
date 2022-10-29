@@ -13,7 +13,7 @@ use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::path::PathBuf;
 use std::path::{Display, Path};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Error, Result};
 use sha2::{Digest, Sha256};
@@ -29,7 +29,9 @@ use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
-    BlobMetaChunkArray, BlobMetaHeaderOndisk, BLOB_META_FEATURE_CHUNK_INFO_V2,
+    BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaHeaderOndisk, ZranContextGenerator,
+    BLOB_META_FEATURE_4K_ALIGNED, BLOB_META_FEATURE_CHUNK_INFO_V2, BLOB_META_FEATURE_SEPARATE,
+    BLOB_META_FEATURE_ZRAN,
 };
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
@@ -168,6 +170,7 @@ impl RafsIoWrite for ArtifactFileWriter {
     }
 
     fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+        self.0.file.flush()?;
         self.0.reader.seek_offset(0)?;
         Ok(&mut self.0.reader)
     }
@@ -359,8 +362,7 @@ impl BlobContext {
         } else {
             BlobMetaChunkArray::new_v1()
         };
-
-        Self {
+        let mut blob_ctx = Self {
             blob_id,
             blob_hash: Sha256::new(),
             blob_prefetch_size: 0,
@@ -377,7 +379,22 @@ impl BlobContext {
             chunk_count: 0,
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_source: ChunkSource::Build,
+        };
+
+        if features & BLOB_META_FEATURE_4K_ALIGNED != 0 {
+            blob_ctx.blob_meta_header.set_4k_aligned(true);
         }
+        if features & BLOB_META_FEATURE_SEPARATE != 0 {
+            blob_ctx.blob_meta_header.set_ci_separate(true);
+        }
+        if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+            blob_ctx.blob_meta_header.set_chunk_info_v2(true);
+        }
+        if features & BLOB_META_FEATURE_ZRAN != 0 {
+            blob_ctx.blob_meta_header.set_ci_zran(true);
+        }
+
+        blob_ctx
     }
 
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
@@ -434,7 +451,11 @@ impl BlobContext {
         self.blob_meta_info_enabled = enable;
     }
 
-    pub fn add_chunk_meta_info(&mut self, chunk: &ChunkWrapper, data: u64) -> Result<()> {
+    pub fn add_chunk_meta_info(
+        &mut self,
+        chunk: &ChunkWrapper,
+        chunk_info: Option<BlobChunkInfoV2Ondisk>,
+    ) -> Result<()> {
         if self.blob_meta_info_enabled {
             assert_eq!(chunk.index() as usize, self.blob_meta_info.len());
             match &self.blob_meta_info {
@@ -447,14 +468,18 @@ impl BlobContext {
                     );
                 }
                 BlobMetaChunkArray::V2(_) => {
-                    self.blob_meta_info.add_v2(
-                        chunk.compressed_offset(),
-                        chunk.compressed_size(),
-                        chunk.uncompressed_offset(),
-                        chunk.uncompressed_size(),
-                        chunk.is_compressed(),
-                        data,
-                    );
+                    if let Some(info) = chunk_info {
+                        self.blob_meta_info.add_v2_info(info);
+                    } else {
+                        self.blob_meta_info.add_v2(
+                            chunk.compressed_offset(),
+                            chunk.compressed_size(),
+                            chunk.uncompressed_offset(),
+                            chunk.uncompressed_size(),
+                            chunk.is_compressed(),
+                            0,
+                        );
+                    }
                 }
             }
         }
@@ -789,7 +814,6 @@ impl BootstrapManager {
     }
 }
 
-#[derive(Clone)]
 pub struct BuildContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,
@@ -826,6 +850,7 @@ pub struct BuildContext {
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_meta_storage: Option<ArtifactStorage>,
+    pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
     pub blob_meta_features: u32,
     pub inline_bootstrap: bool,
     pub has_xattr: bool,
@@ -866,6 +891,7 @@ impl BuildContext {
             prefetch,
             blob_storage,
             blob_meta_storage,
+            blob_zran_generator: None,
             blob_meta_features: 0,
             inline_bootstrap,
             has_xattr: false,
@@ -901,6 +927,7 @@ impl Default for BuildContext {
             prefetch: Prefetch::default(),
             blob_storage: None,
             blob_meta_storage: None,
+            blob_zran_generator: None,
             blob_meta_features: 0,
             has_xattr: true,
             inline_bootstrap: false,

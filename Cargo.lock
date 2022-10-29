@@ -1038,6 +1038,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tar",
  "tokio",
  "url",
  "vm-memory",

@@ -16,6 +16,7 @@ use libz_sys::{
     inflate, inflateEnd, inflateInit2_, inflatePrime, inflateReset, inflateSetDictionary, uInt,
     z_stream, Z_BLOCK, Z_BUF_ERROR, Z_OK, Z_STREAM_END,
 };
+use sha2::{Digest, Sha256};
 
 /// Size of inflate dictionary to support random access.
 pub const ZRAN_DICT_WIN_SIZE: usize = 1 << 15;
@@ -27,7 +28,7 @@ const ZRAN_MIN_COMP_SIZE: u64 = 768 * 1024;
 const ZRAN_MAX_COMP_SIZE: u64 = 2048 * 1024;
 const ZRAN_MAX_UNCOMP_SIZE: u64 = 2048 * 1024;
 const ZLIB_ALIGN: usize = std::mem::align_of::<usize>();
-const ZLIB_VERSION: &'static str = "1.2.8\0";
+const ZLIB_VERSION: &str = "1.2.8\0";
 
 /// Information to retrieve a data chunk from an associated random access slice.
 #[derive(Debug, Eq, PartialEq)]
@@ -38,6 +39,10 @@ pub struct ZranChunkInfo {
     pub ci_offset: u32,
     /// Size of the uncompressed chunk data.
     pub ci_len: u32,
+    /// Position in the compressed data stream.
+    pub in_pos: u64,
+    /// Size of compressed data in input stream.
+    pub in_len: u32,
 }
 
 /// Context information to decode data from a random access slice.
@@ -112,7 +117,7 @@ impl ZranDecoder {
         let dict = dict.unwrap_or(ctx.dict.as_slice());
         self.stream.set_dict(dict)?;
 
-        self.stream.set_next_in(&input);
+        self.stream.set_next_in(input);
         self.stream.set_avail_in(ctx.in_len as uInt);
         self.stream.set_next_out(output);
         self.stream.set_avail_out(ctx.out_len as uInt);
@@ -152,6 +157,7 @@ pub struct ZranGenerator<R> {
     max_uncomp_size: u64,
     curr_block_start: u64,
     curr_ci_offset: u64,
+    curr_in_offset: u64,
     curr_ci_idx: Option<usize>,
     ci_array: Vec<ZranContext>,
 }
@@ -166,6 +172,7 @@ impl<R: Read> ZranGenerator<R> {
             max_uncomp_size: ZRAN_MAX_UNCOMP_SIZE,
             curr_block_start: 0,
             curr_ci_offset: 0,
+            curr_in_offset: 0,
             curr_ci_idx: None,
             ci_array: Vec::new(),
         }
@@ -175,6 +182,7 @@ impl<R: Read> ZranGenerator<R> {
     ///
     /// # Arguments
     /// - `chunk_size`: size of data to be read from the zlib stream.
+    #[allow(clippy::if_same_then_else)]
     pub fn begin_read(&mut self, chunk_size: u64) -> Result<u32> {
         let info = self.reader.get_current_ctx_info();
         let ci_idx = if let Some(idx) = self.curr_ci_idx {
@@ -206,6 +214,7 @@ impl<R: Read> ZranGenerator<R> {
         } else {
             self.curr_ci_idx = Some(ci_idx);
             self.curr_ci_offset = info.out_pos;
+            self.curr_in_offset = info.in_pos;
             Ok(ci_idx as u32)
         }
     }
@@ -218,16 +227,12 @@ impl<R: Read> ZranGenerator<R> {
             let ctx = &mut self.ci_array[idx];
             let comp_size = info.in_pos - ctx.in_offset;
             let uncomp_size = info.out_pos - ctx.out_offset;
-            /*
-            if uncomp_size > self.max_uncomp_size || comp_size > self.max_comp_size {
-                return Err(einval!("uncompressed data size is too big"));
-            }
-             */
-
             let ci = ZranChunkInfo {
                 ci_index: idx as u32,
                 ci_offset: (self.curr_ci_offset - ctx.out_offset) as u32,
                 ci_len: (info.out_pos - self.curr_ci_offset) as u32,
+                in_pos: self.curr_in_offset,
+                in_len: (info.in_pos - self.curr_in_offset) as u32,
             };
             ctx.out_len = uncomp_size as u32;
             ctx.in_len = comp_size as u32;
@@ -238,8 +243,7 @@ impl<R: Read> ZranGenerator<R> {
     }
 
     /// Get an immutable reference to the random access context information array.
-    pub fn get_compression_ctx_array(&mut self) -> &[ZranContext] {
-        self.curr_ci_idx = None;
+    pub fn get_compression_ctx_array(&self) -> &[ZranContext] {
         &self.ci_array
     }
 
@@ -278,6 +282,12 @@ impl<R: Read> ZranGenerator<R> {
     }
 }
 
+impl<R: Read> Read for ZranGenerator<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
 /// A specialized gzip reader for OCI image tarballs.
 ///
 /// This reader assumes that the compressed file is a tar file, and restricts access patterns.
@@ -292,6 +302,16 @@ impl<R> ZranReader<R> {
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
         })
+    }
+
+    /// Get size of data read from the reader.
+    pub fn get_data_size(&self) -> u64 {
+        self.inner.lock().unwrap().reader_size
+    }
+
+    /// Get sha256 hash value of data read from the reader.
+    pub fn get_data_digest(&self) -> Sha256 {
+        self.inner.lock().unwrap().reader_hash.clone()
     }
 
     /// Get inflate context information for current inflate position.
@@ -339,6 +359,8 @@ struct ZranReaderState<R> {
     stream: ZranStream,
     input: Vec<u8>,
     reader: R,
+    reader_hash: Sha256,
+    reader_size: u64,
     block_ctx_info: ZranCompInfo,
     block_ctx_dict: Vec<u8>,
     block_ctx_dict_size: usize,
@@ -348,14 +370,16 @@ struct ZranReaderState<R> {
 impl<R> ZranReaderState<R> {
     fn new(reader: R) -> Result<Self> {
         let mut stream = ZranStream::new(false)?;
-        let mut input = vec![0u8; ZRAN_READER_BUF_SIZE];
-        stream.set_next_in(&mut input);
+        let input = vec![0u8; ZRAN_READER_BUF_SIZE];
+        stream.set_next_in(&input);
         stream.set_avail_in(0);
 
         Ok(ZranReaderState {
             stream,
             input,
             reader,
+            reader_hash: Sha256::new(),
+            reader_size: 0,
             block_ctx_info: ZranCompInfo::default(),
             block_ctx_dict: vec![0u8; ZRAN_DICT_WIN_SIZE],
             block_ctx_dict_size: 0,
@@ -389,6 +413,8 @@ impl<R: Read> Read for ZranReaderState<R> {
                 if sz == 0 {
                     return Ok(0);
                 }
+                self.reader_hash.update(&self.input[0..sz]);
+                self.reader_size += sz as u64;
                 self.stream.set_next_in(&self.input);
                 self.stream.set_avail_in(sz as u32);
             }
@@ -767,7 +793,7 @@ mod tests {
         let reader = ZranReader::new(file).unwrap();
         let mut tar = Archive::new(reader.clone());
         tar.set_ignore_zeros(true);
-        let mut generator = ZranGenerator::new(reader.clone());
+        let mut generator = ZranGenerator::new(reader);
         generator.set_min_compressed_size(1024);
         generator.set_max_compressed_size(2048);
         generator.set_max_uncompressed_size(4096);
@@ -780,10 +806,10 @@ mod tests {
                     let _start = generator.begin_read(512).unwrap();
                     let mut buf = vec![0u8; 512];
                     let sz = entry.read(&mut buf).unwrap();
-                    let _info = generator.end_read().unwrap();
                     if sz == 0 {
                         break;
                     }
+                    let _info = generator.end_read().unwrap();
                 }
             }
         }
@@ -801,7 +827,7 @@ mod tests {
         let reader = ZranReader::new(file).unwrap();
         let mut tar = Archive::new(reader.clone());
         tar.set_ignore_zeros(true);
-        let mut generator = ZranGenerator::new(reader.clone());
+        let mut generator = ZranGenerator::new(reader);
         generator.set_min_compressed_size(1024);
         generator.set_max_compressed_size(2048);
         generator.set_max_uncompressed_size(4096);
@@ -824,8 +850,7 @@ mod tests {
 
         let ctx_array = generator.get_compression_ctx_array();
         assert_eq!(ctx_array.len(), 3);
-        for i in 0..3 {
-            let ctx = &ctx_array[i];
+        for ctx in ctx_array.iter().take(3) {
             let mut c_buf = vec![0u8; ctx.in_len as usize];
             let mut file = OpenOptions::new().read(true).open(&path).unwrap();
             file.seek(SeekFrom::Start(ctx.in_offset)).unwrap();

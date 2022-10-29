@@ -164,7 +164,7 @@ impl ChunkSet {
             new_chunk.set_blob_index(new_blob_idx);
             new_chunk.set_compressed_offset(new_blob_ctx.compressed_offset);
             new_chunk.set_uncompressed_offset(new_blob_ctx.uncompressed_offset);
-            new_blob_ctx.add_chunk_meta_info(&new_chunk, 0)?;
+            new_blob_ctx.add_chunk_meta_info(&new_chunk, None)?;
             // insert change ops
             chunks_change.push((chunk.clone(), new_chunk));
 

@@ -6,7 +6,7 @@
 use std::any::Any;
 use std::ffi::{CStr, CString};
 use std::fs::metadata;
-use std::io::{Error, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
@@ -113,11 +113,12 @@ impl FuseServer {
         let _ebadf = Error::from_raw_os_error(libc::EBADF);
 
         loop {
-            if let Some((reader, writer)) = self
-                .ch
-                .get_request()
-                .map_err(|e| eother!(format!("failed to get fuse request from /dev/fuse, {}", e)))?
-            {
+            if let Some((reader, writer)) = self.ch.get_request().map_err(|e| {
+                Error::new(
+                    ErrorKind::Other,
+                    format!("failed to get fuse request from /dev/fuse, {}", e),
+                )
+            })? {
                 if let Err(e) =
                     self.server
                         .handle_message(reader, writer.into(), None, Some(metrics_hook))
