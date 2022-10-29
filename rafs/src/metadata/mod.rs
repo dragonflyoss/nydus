@@ -692,7 +692,7 @@ impl RafsSuper {
         r: &mut RafsIoReader,
         root_ino: Inode,
         files: Option<Vec<Inode>>,
-        fetcher: &dyn Fn(&mut BlobIoVec),
+        fetcher: &dyn Fn(&mut BlobIoVec, bool),
     ) -> RafsResult<bool> {
         // Try to prefetch files according to the list specified by the `--prefetch-files` option.
         if let Some(files) = files {
@@ -704,7 +704,7 @@ impl RafsSuper {
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
             for (_id, mut desc) in state.drain() {
-                fetcher(&mut desc);
+                fetcher(&mut desc, true);
             }
             // Flush the pending prefetch requests.
             Ok(false)
@@ -720,16 +720,13 @@ impl RafsSuper {
     }
 
     #[inline]
-    fn prefetch_inode<F>(
+    fn prefetch_inode(
         device: &BlobDevice,
         inode: &Arc<dyn RafsInode>,
         state: &mut BlobIoMerge,
         hardlinks: &mut HashSet<u64>,
-        prefetcher: F,
-    ) -> Result<()>
-    where
-        F: Fn(&mut BlobIoMerge),
-    {
+        fetcher: &dyn Fn(&mut BlobIoVec, bool),
+    ) -> Result<()> {
         // Check for duplicated hardlinks.
         if inode.is_hardlink() {
             if hardlinks.contains(&inode.ino()) {
@@ -742,36 +739,22 @@ impl RafsSuper {
         let descs = inode.alloc_bio_vecs(device, 0, inode.size() as usize, false)?;
         for desc in descs {
             state.append(desc);
-            prefetcher(state);
+            if let Some(desc) = state.get_current_element() {
+                fetcher(desc, false);
+            }
         }
 
         Ok(())
     }
 
-    fn prefetch_data<F>(
+    fn prefetch_data(
         &self,
         device: &BlobDevice,
         ino: u64,
         state: &mut BlobIoMerge,
         hardlinks: &mut HashSet<u64>,
-        fetcher: F,
-    ) -> Result<()>
-    where
-        F: Fn(&mut BlobIoVec),
-    {
-        let try_prefetch = |state: &mut BlobIoMerge| {
-            if let Some(desc) = state.get_current_element() {
-                // Issue a prefetch request since target is large enough.
-                // As files belonging to the same directory are arranged in adjacent,
-                // it should fetch a range of blob in batch.
-                if (desc.size() as u64) >= RAFS_DEFAULT_CHUNK_SIZE {
-                    trace!("fetching head bio size {}", desc.size());
-                    fetcher(desc);
-                    desc.reset();
-                }
-            }
-        };
-
+        fetcher: &dyn Fn(&mut BlobIoVec, bool),
+    ) -> Result<()> {
         let inode = self
             .superblock
             .get_inode(ino, self.validate_digest)
@@ -781,7 +764,7 @@ impl RafsSuper {
             let mut descendants = Vec::new();
             let _ = inode.collect_descendants_inodes(&mut descendants)?;
             for i in descendants.iter() {
-                Self::prefetch_inode(device, i, state, hardlinks, try_prefetch)?;
+                Self::prefetch_inode(device, i, state, hardlinks, fetcher)?;
             }
         } else if !inode.is_empty_size() && inode.is_reg() {
             // An empty regular file will also be packed into nydus image,
@@ -789,7 +772,7 @@ impl RafsSuper {
             // Moreover, for rafs v5, symlink has size of zero but non-zero size
             // for symlink size. For rafs v6, symlink size is also represented by i_size.
             // So we have to restrain the condition here.
-            Self::prefetch_inode(device, &inode, state, hardlinks, try_prefetch)?;
+            Self::prefetch_inode(device, &inode, state, hardlinks, fetcher)?;
         }
 
         Ok(())

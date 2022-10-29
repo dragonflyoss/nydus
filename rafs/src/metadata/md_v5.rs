@@ -64,7 +64,7 @@ impl RafsSuper {
         fetcher: F,
     ) -> RafsResult<bool>
     where
-        F: Fn(&mut BlobIoVec),
+        F: Fn(&mut BlobIoVec, bool),
     {
         let hint_entries = self.meta.prefetch_table_entries as usize;
         if hint_entries == 0 {
@@ -99,7 +99,7 @@ impl RafsSuper {
                 .map_err(|e| RafsError::Prefetch(e.to_string()))?;
         }
         for (_id, mut desc) in state.drain() {
-            fetcher(&mut desc);
+            fetcher(&mut desc, true);
         }
 
         Ok(found_root_inode)

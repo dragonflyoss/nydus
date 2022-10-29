@@ -560,7 +560,7 @@ impl BlobIoVec {
         self.bi_vec.len()
     }
 
-    /// Chech whether there's 'BlobIoDesc' in the'BlobIoVec'.
+    /// Check whether there's 'BlobIoDesc' in the'BlobIoVec'.
     pub fn is_empty(&self) -> bool {
         self.bi_vec.is_empty()
     }
@@ -615,8 +615,8 @@ pub struct BlobIoMerge {
 impl BlobIoMerge {
     /// Append an `BlobIoVec` object to the merge state object.
     pub fn append(&mut self, desc: BlobIoVec) {
-        if !desc.bi_vec.is_empty() {
-            let id = desc.bi_vec[0].blob.blob_id.as_str();
+        if !desc.is_empty() {
+            let id = desc.bi_blob.blob_id.as_str();
             if self.current != id {
                 self.current = id.to_string();
             }
@@ -794,14 +794,20 @@ pub trait BlobObject: AsRawFd {
     fn is_all_data_ready(&self) -> bool;
 
     /// Fetch data from storage backend covering compressed blob range [offset, offset + size).
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+    ///
+    /// Used by asynchronous prefetch worker to implement blob prefetch.
+    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<()>;
 
     /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
     /// for use.
-    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+    ///
+    /// Used by rafs to support blobfs.
+    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<()>;
 
     /// Prefetch data for specified chunks from storage backend.
-    fn prefetch_chunks(&self, range: &BlobIoRange) -> io::Result<usize>;
+    ///
+    /// Used by asynchronous prefetch worker to implement fs prefetch.
+    fn prefetch_chunks(&self, range: &BlobIoRange) -> io::Result<()>;
 }
 
 /// A wrapping object over an underlying [BlobCache] object.

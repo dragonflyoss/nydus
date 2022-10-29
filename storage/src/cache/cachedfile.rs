@@ -316,10 +316,6 @@ impl BlobCache for FileCacheEntry {
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
-        let mut bios = bios.to_vec();
-        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
-        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
-
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
             let msg = AsyncPrefetchMessage::new_blob_prefetch(
@@ -332,6 +328,9 @@ impl BlobCache for FileCacheEntry {
 
         // Then handle fs prefetch
         let max_comp_size = self.prefetch_config.merging_size;
+        let mut bios = bios.to_vec();
+        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
+        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         BlobIoMergeState::merge_and_issue(
             &bios,
             max_comp_size,
@@ -456,150 +455,121 @@ impl BlobObject for FileCacheEntry {
         }
     }
 
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
+    fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<()> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_compressed(offset, size, self.batch_size)?;
-        assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, true)
     }
 
-    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
+    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<()> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let chunks = meta.get_chunks_uncompressed(offset, size, self.batch_size * 2)?;
-        assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, false)
     }
 
-    fn prefetch_chunks(&self, range: &BlobIoRange) -> Result<usize> {
-        let chunks = &range.chunks;
-        if chunks.is_empty() {
-            return Ok(0);
-        }
-
-        let mut ready_or_pending = matches!(
-            self.chunk_map.is_ready_or_pending(chunks[0].as_ref()),
-            Ok(true)
-        );
-        for idx in 1..chunks.len() {
-            if chunks[idx - 1].id() + 1 != chunks[idx].id() {
-                return Err(einval!("chunks for fetch_chunks() must be continuous"));
-            }
-            if ready_or_pending
-                && !matches!(
-                    self.chunk_map.is_ready_or_pending(chunks[idx].as_ref()),
-                    Ok(true)
-                )
-            {
-                ready_or_pending = false;
-            }
-        }
-        // All chunks to be prefetched are already pending for downloading, no need to reissue.
-        if ready_or_pending {
-            return Ok(0);
-        }
-
-        if range.blob_size < self.prefetch_config.merging_size as u64 {
-            let max_size = self.prefetch_config.merging_size as u64 - range.blob_size;
-            if let Some(meta) = self.meta.as_ref() {
-                if let Some(bm) = meta.get_blob_meta() {
-                    if let Some(chunks) = bm.add_more_chunks(chunks, max_size) {
-                        return self.do_fetch_chunks(&chunks, true);
-                    }
+    fn prefetch_chunks(&self, range: &BlobIoRange) -> Result<()> {
+        let chunks_expanded;
+        let mut chunks = &range.chunks;
+        if let Some(meta) = self.meta.as_ref() {
+            if let Some(bm) = meta.get_blob_meta() {
+                let max_size = if range.blob_size < self.prefetch_config.merging_size as u64 {
+                    self.prefetch_config.merging_size as u64 - range.blob_size
                 } else {
-                    return Err(einval!("failed to get blob.meta"));
+                    0
+                };
+                if let Some(expanded) = bm.add_more_chunks(chunks, max_size) {
+                    chunks_expanded = expanded;
+                    chunks = &chunks_expanded;
                 }
+            } else {
+                return Err(einval!("failed to get blob.meta"));
             }
         }
 
-        self.do_fetch_chunks(chunks, true)
+        let mut start = 0;
+        while start < chunks.len() {
+            // Figure out the range with continuous chunk ids, be careful that `end` is inclusive.
+            let mut end = start;
+            while end < chunks.len() - 1 && chunks[end + 1].id() == chunks[end].id() + 1 {
+                end += 1;
+            }
+            self.do_fetch_chunks(&chunks[start..=end], true)?;
+            start = end + 1;
+        }
+
+        Ok(())
     }
 }
 
 impl FileCacheEntry {
-    fn do_fetch_chunks(&self, chunks: &[Arc<dyn BlobChunkInfo>], prefetch: bool) -> Result<usize> {
-        if self.is_legacy_stargz() {
-            // FIXME: for stargz, we need to implement fetching multiple chunks. here
-            // is a heavy overhead workaround, needs to be optimized.
-            for chunk in chunks {
-                let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                self.read_chunk_from_backend(chunk.as_ref(), &mut buf, false)
-                    .map_err(|e| {
-                        eio!(format!(
-                            "read_raw_chunk failed to read and decompress stargz chunk, {:?}",
-                            e
-                        ))
-                    })?;
-                if self.dio_enabled {
-                    self.adjust_buffer_for_dio(&mut buf)
-                }
-                Self::persist_cached_data(&self.file, chunk.uncompressed_offset(), &buf).map_err(
-                    |e| {
-                        eio!(format!(
-                            "do_fetch_chunk failed to persist stargz chunk, {:?}",
-                            e
-                        ))
-                    },
-                )?;
-                self.chunk_map
-                    .set_ready_and_clear_pending(chunk.as_ref())
-                    .unwrap_or_else(|e| error!("set stargz chunk ready failed, {}", e));
+    fn do_fetch_chunks(&self, chunks: &[Arc<dyn BlobChunkInfo>], prefetch: bool) -> Result<()> {
+        // Validate input parameters.
+        assert!(!chunks.is_empty());
+        if chunks.len() > 1 {
+            for idx in 0..chunks.len() - 1 {
+                assert_eq!(chunks[idx].id() + 1, chunks[idx + 1].id());
             }
-            return Ok(0);
         }
 
-        debug_assert!(!chunks.is_empty());
+        // Get chunks not ready yet, also marking them as in-flight.
         let bitmap = self
             .chunk_map
             .as_range_map()
             .ok_or_else(|| einval!("invalid chunk_map for do_fetch_chunks()"))?;
         let chunk_index = chunks[0].id();
         let count = chunks.len() as u32;
-
-        // Get chunks not ready yet, also marking them as inflight.
         let pending = match bitmap.check_range_ready_and_mark_pending(chunk_index, count)? {
-            None => return Ok(0),
+            None => return Ok(()),
             Some(v) => v,
         };
 
-        let mut total_size = 0;
-        let mut start = 0;
-        while start < pending.len() {
-            let mut end = start + 1;
-            while end < pending.len() && pending[end] == pending[end - 1] + 1 {
-                end += 1;
-            }
+        let mut status = vec![false; count as usize];
+        let mut start = u32::MAX;
+        let mut end = 0;
+        for chunk_id in pending.iter() {
+            status[(*chunk_id - chunk_index) as usize] = true;
+            start = std::cmp::min(*chunk_id - chunk_index, start);
+            end = std::cmp::max(*chunk_id - chunk_index, end);
+        }
+        if end < start {
+            return Ok(());
+        }
 
-            let start_idx = (pending[start] - chunk_index) as usize;
-            let end_idx = start_idx + (end - start) - 1;
-            let blob_offset = chunks[start_idx].compressed_offset();
-            let blob_end =
-                chunks[end_idx].compressed_offset() + chunks[end_idx].compressed_size() as u64;
-            let blob_size = (blob_end - blob_offset) as usize;
+        let start_idx = start as usize;
+        let end_idx = end as usize;
+        let start_chunk = &chunks[start_idx];
+        let end_chunk = &chunks[end_idx];
+        let blob_offset = start_chunk.compressed_offset();
+        let blob_end = end_chunk.compressed_offset() + end_chunk.compressed_size() as u64;
+        let blob_size = (blob_end - blob_offset) as usize;
+        trace!(
+            "fetch data range {:x}-{:x} for chunk {}-{} from blob {:x}",
+            blob_offset,
+            blob_end,
+            start_chunk.id(),
+            end_chunk.id(),
+            chunks[0].blob_index()
+        );
 
-            match self.read_chunks_from_backend(
-                blob_offset,
-                blob_size,
-                &chunks[start_idx..=end_idx],
-                prefetch,
-            ) {
-                Ok((mut v, c)) => {
-                    total_size += blob_size;
-                    trace!(
-                        "range persist chunk start {} {} pending {} {}",
-                        start,
-                        end,
-                        start_idx,
-                        end_idx
-                    );
-                    if self.is_compressed {
-                        let res = Self::persist_cached_data(&self.file, blob_offset, &c);
-                        for c in chunks.iter().take(end + 1).skip(start) {
-                            self.update_chunk_pending_status(c.as_ref(), res.is_ok());
+        match self.read_chunks_from_backend(
+            blob_offset,
+            blob_size,
+            &chunks[start_idx..=end_idx],
+            prefetch,
+        ) {
+            Ok((mut v, c)) => {
+                if self.is_compressed {
+                    let res = Self::persist_cached_data(&self.file, blob_offset, &c);
+                    for idx in start_idx..=end_idx {
+                        if status[idx] {
+                            self.update_chunk_pending_status(chunks[idx].as_ref(), res.is_ok());
                         }
-                    } else {
-                        for idx in start_idx..=end_idx {
+                    }
+                } else {
+                    for idx in start_idx..=end_idx {
+                        if status[idx] {
                             let buf = &mut v[idx - start_idx];
                             if self.dio_enabled {
                                 self.adjust_buffer_for_dio(buf)
@@ -608,37 +578,46 @@ impl FileCacheEntry {
                         }
                     }
                 }
-                Err(e) => {
-                    bitmap.clear_range_pending(pending[start], (end - start) as u32);
-                    return Err(e);
-                }
             }
-
-            start = end;
+            Err(e) => {
+                warn!("do_fetch_chunks persist error");
+                for idx in 0..chunks.len() {
+                    if status[idx] {
+                        bitmap.clear_range_pending(chunks[idx].id(), 1)
+                    }
+                }
+                return Err(e);
+            }
         }
 
         if !bitmap.wait_for_range_ready(chunk_index, count)? {
             if prefetch {
                 return Err(eio!("failed to read data from storage backend"));
             }
-            // if we are in ondemand path, retry for the timeout chunks
+
+            // if we are in on-demand path, retry for the timeout chunks
             for chunk in chunks {
-                if self.chunk_map.is_ready(chunk.as_ref())? {
-                    continue;
+                match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
+                    Err(e) => return Err(eio!(format!("do_fetch_chunks failed, {:?}", e))),
+                    Ok(true) => {}
+                    Ok(false) => {
+                        info!("retry for timeout chunk, {}", chunk.id());
+                        let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
+                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf, false)
+                            .map_err(|e| {
+                                self.update_chunk_pending_status(chunk.as_ref(), false);
+                                eio!(format!("read_raw_chunk failed, {:?}", e))
+                            })?;
+                        if self.dio_enabled {
+                            self.adjust_buffer_for_dio(&mut buf)
+                        }
+                        self.persist_chunk_data(chunk.as_ref(), &buf);
+                    }
                 }
-                info!("retry for timeout chunk, {}", chunk.id());
-                let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                self.read_chunk_from_backend(chunk.as_ref(), &mut buf, false)
-                    .map_err(|e| eio!(format!("read_raw_chunk failed, {:?}", e)))?;
-                if self.dio_enabled {
-                    self.adjust_buffer_for_dio(&mut buf)
-                }
-                self.persist_chunk_data(chunk.as_ref(), &buf);
             }
-            Ok(total_size)
-        } else {
-            Ok(total_size)
         }
+
+        Ok(())
     }
 
     fn adjust_buffer_for_dio(&self, buf: &mut Vec<u8>) {
@@ -821,9 +800,16 @@ impl FileCacheEntry {
             region.chunks.len()
         );
 
-        let (mut chunks, c) =
-            self.read_chunks_from_backend(region.blob_address, blob_size, &region.chunks, false)?;
+        let (mut chunks, c) = self
+            .read_chunks_from_backend(region.blob_address, blob_size, &region.chunks, false)
+            .map_err(|e| {
+                for c in &region.chunks {
+                    self.chunk_map.clear_pending(c.as_ref());
+                }
+                e
+            })?;
         assert_eq!(region.chunks.len(), chunks.len());
+
         if self.is_compressed {
             let res = Self::persist_cached_data(&self.file, region.blob_address, &c);
             for chunk in region.chunks.iter() {
@@ -865,6 +851,7 @@ impl FileCacheEntry {
         Ok(total_read)
     }
 
+    // Called with chunk in READY or PENDING state, exit with chunk set to READY or PENDING cleared.
     fn read_single_chunk(
         &self,
         chunk: Arc<dyn BlobChunkInfo>,
@@ -900,7 +887,12 @@ impl FileCacheEntry {
             );
             &d
         } else {
-            let c = self.read_chunk_from_backend(chunk.as_ref(), d.mut_slice(), false)?;
+            let c = self
+                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice(), false)
+                .map_err(|e| {
+                    self.chunk_map.clear_pending(chunk.as_ref());
+                    e
+                })?;
             if self.is_compressed {
                 match c {
                     Some(v) => {
