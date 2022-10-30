@@ -33,6 +33,18 @@ impl TryFrom<&str> for FailoverPolicy {
     }
 }
 
+impl TryFrom<&String> for FailoverPolicy {
+    type Error = std::io::Error;
+
+    fn try_from(p: &String) -> std::result::Result<Self, Self::Error> {
+        match p.as_ref() {
+            "flush" => Ok(FailoverPolicy::Flush),
+            "resend" => Ok(FailoverPolicy::Resend),
+            x => Err(einval!(x)),
+        }
+    }
+}
+
 pub fn add_mounts_state(
     _mgr: &mut UpgradeManager,
     _cmd: FsBackendMountCmd,

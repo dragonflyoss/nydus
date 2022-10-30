@@ -120,7 +120,7 @@ impl ServiceController {
                 return Err(einval!("--fscache option contains invalid characters"));
             }
         };
-        let tag = subargs.value_of("fscache-tag");
+        let tag = subargs.value_of("fscache-tag").map(|s| s.as_str());
 
         let threads = if let Some(threads_value) = subargs.value_of("fscache-threads") {
             ensure_threads(threads_value).map_err(|err| einval!(err))?
