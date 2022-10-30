@@ -120,7 +120,7 @@ pub(crate) struct FileCacheEntry {
     // True if direct IO is enabled for the `self.file`, supported for fscache only.
     pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
-    pub(crate) need_validate: bool,
+    pub(crate) need_validation: bool,
     pub(crate) batch_size: u64,
     pub(crate) prefetch_config: Arc<AsyncPrefetchConfig>,
 }
@@ -251,8 +251,8 @@ impl BlobCache for FileCacheEntry {
         self.is_legacy_stargz
     }
 
-    fn need_validate(&self) -> bool {
-        self.need_validate
+    fn need_validation(&self) -> bool {
+        self.need_validation
     }
 
     fn reader(&self) -> &dyn BlobReader {
@@ -603,7 +603,7 @@ impl FileCacheEntry {
                     Ok(false) => {
                         info!("retry for timeout chunk, {}", chunk.id());
                         let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf, false)
+                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf)
                             .map_err(|e| {
                                 self.update_chunk_pending_status(chunk.as_ref(), false);
                                 eio!(format!("read_raw_chunk failed, {:?}", e))
@@ -690,7 +690,7 @@ impl FileCacheEntry {
             // - the chunk is ready in the file cache
             // - the data in the file cache is uncompressed.
             // - data validation is disabled
-            if is_ready && !self.is_compressed && !self.need_validate() {
+            if is_ready && !self.is_compressed && !self.need_validation() {
                 // Internal IO should not be committed to local cache region, just
                 // commit this region without pushing any chunk to avoid discontinuous
                 // chunks in a region.
@@ -888,7 +888,7 @@ impl FileCacheEntry {
             &d
         } else {
             let c = self
-                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice(), false)
+                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice())
                 .map_err(|e| {
                     self.chunk_map.clear_pending(chunk.as_ref());
                     e
@@ -959,7 +959,7 @@ impl FileCacheEntry {
             let size = chunk.uncompressed_size() as u64;
             FileRangeReader::new(&self.file, offset, size).read_exact(buffer)?;
         }
-        self.validate_chunk_data(chunk, buffer, self.need_validate())?;
+        self.validate_chunk_data(chunk, buffer, false)?;
         Ok(())
     }
 

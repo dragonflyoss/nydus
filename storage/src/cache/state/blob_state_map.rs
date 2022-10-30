@@ -111,7 +111,6 @@ where
 
         let index = C::get_index(chunk);
         let mut guard = self.inflight_tracer.lock().unwrap();
-        trace!("chunk index {}, tracer scale {}", index, guard.len());
 
         if let Some(i) = guard.get(&index).cloned() {
             drop(guard);

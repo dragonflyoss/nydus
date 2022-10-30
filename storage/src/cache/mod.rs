@@ -167,7 +167,7 @@ pub trait BlobCache: Send + Sync {
     }
 
     /// Check whether need to validate the data chunk by digest value.
-    fn need_validate(&self) -> bool;
+    fn need_validation(&self) -> bool;
 
     /// Get the [BlobReader](../backend/trait.BlobReader.html) to read data from storage backend.
     fn reader(&self) -> &dyn BlobReader;
@@ -262,11 +262,11 @@ pub trait BlobCache: Send + Sync {
         &self,
         chunk: &dyn BlobChunkInfo,
         buffer: &mut [u8],
-        force_validation: bool,
     ) -> Result<Option<Vec<u8>>> {
+        let start = Instant::now();
         let offset = chunk.compressed_offset();
-
         let mut c_buf = None;
+
         if chunk.is_compressed() {
             let c_size = if self.is_legacy_stargz() {
                 self.get_legacy_stargz_size(offset, buffer.len())?
@@ -290,7 +290,15 @@ pub trait BlobCache: Send + Sync {
             }
         }
 
-        self.validate_chunk_data(chunk, buffer, force_validation)?;
+        let duration = Instant::now().duration_since(start).as_millis();
+        debug!(
+            "read_chunk_from_backend: {} {} bytes at {}, duration {}ms",
+            std::thread::current().name().unwrap_or_default(),
+            chunk.compressed_size(),
+            chunk.compressed_offset(),
+            duration
+        );
+        self.validate_chunk_data(chunk, buffer, false)?;
 
         Ok(c_buf)
     }
@@ -323,7 +331,7 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
             self.decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
-            self.validate_chunk_data(chunk.as_ref(), &buffer, self.need_validate())?;
+            self.validate_chunk_data(chunk.as_ref(), &buffer, false)?;
             buffers.push(buffer);
         }
 
@@ -362,7 +370,8 @@ pub trait BlobCache: Send + Sync {
         let d_size = chunk.uncompressed_size() as usize;
         if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
-        } else if (self.need_validate() || force_validation)
+        } else if (self.need_validation() || force_validation)
+            && !self.is_legacy_stargz()
             && !check_digest(buffer, chunk.chunk_id(), self.digester())
         {
             Err(eio!("data digest value doesn't match"))

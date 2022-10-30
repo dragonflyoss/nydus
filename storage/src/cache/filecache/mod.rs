@@ -188,7 +188,7 @@ impl FileCacheEntry {
         let digester = blob_info.digester();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
         let is_compressed = mgr.is_compressed;
-        let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
+        let need_validation = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
         let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap;
 
         trace!(
@@ -232,7 +232,7 @@ impl FileCacheEntry {
             is_direct_chunkmap,
             is_legacy_stargz,
             dio_enabled: false,
-            need_validate,
+            need_validation,
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })

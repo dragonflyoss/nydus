@@ -1045,7 +1045,7 @@ impl RafsInode for OndiskInodeWrapper {
                     self.ino(),
                     OsString::from(name),
                 )?) as Arc<dyn RafsInode>;
-                trace!("found file {:?}, nid {}", name, nid);
+                //trace!("found entry {:?}, nid {}", name, nid);
                 cur_offset += 1;
                 match handler(Some(inode), name.to_os_string(), nid, cur_offset) {
                     // Break returned by handler indicates that there is not enough buffer of readdir for entries inreaddir,
