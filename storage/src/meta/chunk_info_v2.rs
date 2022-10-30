@@ -146,17 +146,18 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         if self.compressed_end() > state.compressed_size
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
-            || self.compressed_size() == 0
+            || (!self.is_zran() && self.compressed_size() == 0)
             || (!self.is_compressed() && self.uncompressed_size() != self.compressed_size())
         {
             return Err(einval!(format!(
-                "invalid chunk, blob: index {}/c_end 0x{:}/d_end 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {}",
+                "invalid chunk, blob: index {}/c_end 0x{:}/d_end 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} zran {}",
                 state.blob_index,
                 state.compressed_size,
                 state.uncompressed_size,
                 self.compressed_end(),
                 self.uncompressed_end(),
                 self.is_compressed(),
+                self.is_zran(),
             )));
         }
 

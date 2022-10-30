@@ -45,6 +45,7 @@ use std::ops::{Add, BitAnd, Not};
 use std::sync::Arc;
 
 use nydus_utils::compress;
+use nydus_utils::compress::zlib_random::ZranContext;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::filemap::FileMapState;
 
@@ -57,6 +58,7 @@ mod chunk_info_v1;
 pub use chunk_info_v1::BlobChunkInfoV1Ondisk;
 mod chunk_info_v2;
 pub use chunk_info_v2::BlobChunkInfoV2Ondisk;
+
 mod zran;
 pub use zran::{ZranContextGenerator, ZranInflateContext};
 
@@ -523,6 +525,21 @@ impl BlobMetaInfo {
         self.state.add_more_chunks(chunks, max_size)
     }
 
+    /// Get ZRan index associated with the chunk.
+    pub fn get_zran_index(&self, chunk_index: u32) -> u32 {
+        self.state.get_zran_index(chunk_index as usize)
+    }
+
+    /// Get ZRan offset associated with the chunk.
+    pub fn get_zran_offset(&self, chunk_index: u32) -> u32 {
+        self.state.get_zran_offset(chunk_index as usize)
+    }
+
+    /// Get ZRan context information for decoding.
+    pub fn get_zran_context(&self, zran_index: u32) -> Option<(ZranContext, &[u8])> {
+        self.state.get_zran_context(zran_index as usize)
+    }
+
     fn read_metadata(
         blob_info: &BlobInfo,
         reader: &Arc<dyn BlobReader>,
@@ -728,6 +745,33 @@ impl BlobMetaState {
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         self.chunk_info_array
             .add_more_chunks(self, chunks, max_size)
+    }
+
+    fn get_zran_index(&self, chunk_index: usize) -> u32 {
+        self.chunk_info_array.zran_index(chunk_index)
+    }
+
+    fn get_zran_offset(&self, chunk_index: usize) -> u32 {
+        self.chunk_info_array.zran_offset(chunk_index)
+    }
+
+    /// Get ZRan context information for decoding.
+    fn get_zran_context(&self, zran_index: usize) -> Option<(ZranContext, &[u8])> {
+        if zran_index < self.zran_info_array.len() {
+            let entry = &self.zran_info_array[zran_index];
+            let dict_off = entry.dict_offset() as usize;
+            let dict_size = entry.dict_size() as usize;
+            if dict_off.checked_add(dict_size).is_none()
+                || dict_off + dict_size > self.zran_dict_table.len()
+            {
+                return None;
+            };
+            let dict = &self.zran_dict_table[dict_off..dict_off + dict_size];
+            let ctx = ZranContext::from(entry);
+            Some((ctx, dict))
+        } else {
+            None
+        }
     }
 }
 
@@ -952,8 +996,6 @@ impl BlobMetaChunkArray {
         }
     }
 
-    /*
-    #[cfg(test)]
     fn zran_index(&self, index: usize) -> u32 {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].get_zran_index(),
@@ -961,14 +1003,12 @@ impl BlobMetaChunkArray {
         }
     }
 
-    #[cfg(test)]
     fn zran_offset(&self, index: usize) -> u32 {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].get_zran_offset(),
             BlobMetaChunkArray::V2(v) => v[index].get_zran_offset(),
         }
     }
-     */
 
     fn is_compressed(&self, index: usize) -> bool {
         match self {
@@ -1245,6 +1285,7 @@ impl BlobMetaChunkArray {
                 } else {
                     vec.push(BlobMetaChunk::new(index, state));
                 }
+                index += 1;
             }
         } else {
             for idx in 0..chunks.len() - 1 {
@@ -1274,13 +1315,6 @@ impl BlobMetaChunkArray {
                 last_idx += 1;
             }
         }
-
-        let extended_end =
-            vec[vec.len() - 1].compressed_offset() + vec[vec.len() - 1].compressed_size() as u64;
-        trace!(
-            "extended request with {} more bytes",
-            extended_end - last_entry.compressed_end()
-        );
 
         Ok(vec)
     }

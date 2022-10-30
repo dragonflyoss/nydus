@@ -9,7 +9,7 @@ use std::slice;
 use crate::meta::chunk_info_v2::BlobChunkInfoV2Ondisk;
 use crate::meta::{round_up_4k, BlobMetaChunkInfo};
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
-use nydus_utils::compress::zlib_random::{ZranGenerator, ZranReader};
+use nydus_utils::compress::zlib_random::{ZranContext, ZranGenerator, ZranReader};
 
 /// Context information to support zlib random access.
 #[repr(C, packed)]
@@ -82,6 +82,20 @@ impl ZranInflateContext {
                 self as *const ZranInflateContext as *const u8,
                 size_of::<ZranInflateContext>(),
             )
+        }
+    }
+}
+
+impl From<&ZranInflateContext> for ZranContext {
+    fn from(ctx: &ZranInflateContext) -> Self {
+        ZranContext {
+            in_offset: ctx.in_offset(),
+            out_offset: ctx.out_offset(),
+            in_len: ctx.in_size(),
+            out_len: ctx.out_size(),
+            ctx_byte: ctx.ctx_byte(),
+            ctx_bits: ctx.ctx_bits(),
+            dict: vec![],
         }
     }
 }

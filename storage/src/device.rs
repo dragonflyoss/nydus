@@ -379,11 +379,21 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     /// Get the size of the compressed chunk.
     fn compressed_size(&self) -> u32;
 
+    /// Get end of the chunk in the compressed blob.
+    fn compressed_end(&self) -> u64 {
+        self.compressed_offset() + self.compressed_size() as u64
+    }
+
     /// Get the chunk offset in the uncompressed blob.
     fn uncompressed_offset(&self) -> u64;
 
     /// Get the size of the uncompressed chunk.
     fn uncompressed_size(&self) -> u32;
+
+    /// Get end of the chunk in the compressed blob.
+    fn uncompressed_end(&self) -> u64 {
+        self.uncompressed_offset() + self.uncompressed_size() as u64
+    }
 
     /// Check whether the chunk is compressed or not.
     ///

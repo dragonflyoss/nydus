@@ -19,6 +19,7 @@ use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
+use crate::meta::BLOB_META_FEATURE_ZRAN;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -221,6 +222,7 @@ impl FileCacheEntry {
         } else {
             None
         };
+        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
 
         Ok(FileCacheEntry {
             blob_info: blob_info.clone(),
@@ -241,6 +243,7 @@ impl FileCacheEntry {
             is_compressed: false,
             is_direct_chunkmap: true,
             is_legacy_stargz: blob_info.is_legacy_stargz(),
+            is_zran,
             dio_enabled: true,
             need_validation: mgr.need_validation && !blob_info.is_legacy_stargz(),
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,

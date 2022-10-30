@@ -118,6 +118,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
     pub(crate) is_legacy_stargz: bool,
+    // The blob is based on ZRan decompression algorithm.
+    pub(crate) is_zran: bool,
     // True if direct IO is enabled for the `self.file`, supported for fscache only.
     pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
@@ -254,30 +256,89 @@ impl FileCacheEntry {
 
     fn strip_ready_chunks(
         &self,
-        _meta: Arc<BlobMetaInfo>,
-        _old_chunks: Option<&[Arc<dyn BlobChunkInfo>]>,
+        meta: Arc<BlobMetaInfo>,
+        old_chunks: Option<&[Arc<dyn BlobChunkInfo>]>,
         mut extended_chunks: Vec<Arc<dyn BlobChunkInfo>>,
     ) -> Vec<Arc<dyn BlobChunkInfo>> {
-        while !extended_chunks.is_empty() {
-            let chunk = &extended_chunks[extended_chunks.len() - 1];
-            if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
-                extended_chunks.pop();
-            } else {
-                break;
+        if self.is_zran {
+            let mut set = HashSet::new();
+            for c in extended_chunks.iter() {
+                if !matches!(self.chunk_map.is_ready(c.as_ref()), Ok(true)) {
+                    set.insert(meta.get_zran_index(c.id()));
+                }
             }
-        }
-        extended_chunks
-    }
 
-    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobMetaInfo>>> {
-        if let Some(meta) = self.meta.as_ref() {
-            if let Some(bm) = meta.get_blob_meta() {
-                Ok(Some(bm))
+            let first = old_chunks.as_ref().map(|v| v[0].id()).unwrap_or(u32::MAX);
+            let mut start = 0;
+            while start < extended_chunks.len() {
+                let id = extended_chunks[start].id();
+                if id == first || set.contains(&meta.get_zran_index(id)) {
+                    break;
+                }
+                start += 1;
+            }
+
+            let last = old_chunks
+                .as_ref()
+                .map(|v| v[v.len() - 1].id())
+                .unwrap_or(u32::MAX);
+            let mut end = extended_chunks.len() - 1;
+            while end > start {
+                let id = extended_chunks[end].id();
+                if id == last || set.contains(&meta.get_zran_index(id)) {
+                    break;
+                }
+                end -= 1;
+            }
+
+            assert!(end >= start);
+            if start == 0 && end == extended_chunks.len() - 1 {
+                extended_chunks
             } else {
-                Err(einval!("failed to get blob meta object for cache file"))
+                extended_chunks[start..=end].to_vec()
             }
         } else {
-            Ok(None)
+            while !extended_chunks.is_empty() {
+                let chunk = &extended_chunks[extended_chunks.len() - 1];
+                if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
+                    extended_chunks.pop();
+                } else {
+                    break;
+                }
+            }
+            extended_chunks
+        }
+    }
+
+    fn get_blob_range(&self, chunks: &[Arc<dyn BlobChunkInfo>]) -> Result<(u64, u64, usize)> {
+        assert!(!chunks.is_empty());
+        let (start, end) = if self.is_zran {
+            let meta = self
+                .get_blob_meta_info()?
+                .ok_or_else(|| einval!("failed to get blob meta object"))?;
+            let zran_index = meta.get_zran_index(chunks[0].id());
+            let (ctx, _) = meta
+                .get_zran_context(zran_index)
+                .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;
+            let blob_start = ctx.in_offset;
+            let zran_index = meta.get_zran_index(chunks[chunks.len() - 1].id());
+            let (ctx, _) = meta
+                .get_zran_context(zran_index)
+                .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;
+            let blob_end = ctx.in_offset + ctx.in_len as u64;
+            (blob_start, blob_end)
+        } else {
+            let last = chunks.len() - 1;
+            (chunks[0].compressed_offset(), chunks[last].compressed_end())
+        };
+
+        let size = end - start;
+        if end - start > u32::MAX as u64 {
+            Err(einval!(
+                "requested blob range is too bigger, larger than u32::MAX"
+            ))
+        } else {
+            Ok((start, end, size as usize))
         }
     }
 }
@@ -311,6 +372,10 @@ impl BlobCache for FileCacheEntry {
 
     fn is_legacy_stargz(&self) -> bool {
         self.is_legacy_stargz
+    }
+
+    fn is_zran(&self) -> bool {
+        self.is_zran
     }
 
     fn need_validation(&self) -> bool {
@@ -451,23 +516,33 @@ impl BlobCache for FileCacheEntry {
                 end += 1;
             }
 
-            // Don't forget to clear its pending state whenever backend IO fails.
-            let blob_offset = pending[start].compressed_offset();
-            let blob_end = pending[end].compressed_offset() + pending[end].compressed_size() as u64;
-            let blob_size = (blob_end - blob_offset) as usize;
-
+            let (blob_offset, _blob_end, blob_size) = self.get_blob_range(&pending[start..=end])?;
             match self.read_chunks_from_backend(blob_offset, blob_size, &pending[start..=end], true)
             {
-                Ok((v, c)) => {
+                Ok(mut bufs) => {
                     total_size += blob_size;
                     if self.is_compressed {
-                        let res = Self::persist_cached_data(&self.file, blob_offset, &c);
+                        let res = Self::persist_cached_data(
+                            &self.file,
+                            blob_offset,
+                            bufs.compressed_buf(),
+                        );
                         for c in pending.iter().take(end + 1).skip(start) {
                             self.update_chunk_pending_status(c.as_ref(), res.is_ok());
                         }
                     } else {
                         for idx in start..=end {
-                            self.persist_chunk_data(pending[idx].as_ref(), &v[idx - start]);
+                            let buf = match bufs.next() {
+                                None => return Err(einval!("invalid chunk decompressed status")),
+                                Some(Err(e)) => {
+                                    for chunk in &mut pending[idx..=end] {
+                                        self.update_chunk_pending_status(chunk.as_ref(), false);
+                                    }
+                                    return Err(e);
+                                }
+                                Some(Ok(v)) => v,
+                            };
+                            self.persist_chunk_data(pending[idx].as_ref(), &buf);
                         }
                     }
                 }
@@ -498,6 +573,18 @@ impl BlobCache for FileCacheEntry {
             self.dispatch_one_range(&req, &mut cursor, &mut state)
         } else {
             self.read_iter(&mut iovec.bi_vec, buffers)
+        }
+    }
+
+    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobMetaInfo>>> {
+        if let Some(meta) = self.meta.as_ref() {
+            if let Some(bm) = meta.get_blob_meta() {
+                Ok(Some(bm))
+            } else {
+                Err(einval!("failed to get blob meta object for cache file"))
+            }
+        } else {
+            Ok(None)
         }
     }
 }
@@ -589,7 +676,12 @@ impl FileCacheEntry {
         };
 
         let mut status = vec![false; count as usize];
-        let (start_idx, end_idx) = {
+        let (start_idx, end_idx) = if self.is_zran {
+            for chunk_id in pending.iter() {
+                status[(*chunk_id - chunk_index) as usize] = true;
+            }
+            (0, pending.len())
+        } else {
             let mut start = u32::MAX;
             let mut end = 0;
             for chunk_id in pending.iter() {
@@ -605,9 +697,8 @@ impl FileCacheEntry {
 
         let start_chunk = &chunks[start_idx];
         let end_chunk = &chunks[end_idx];
-        let blob_offset = start_chunk.compressed_offset();
-        let blob_end = end_chunk.compressed_offset() + end_chunk.compressed_size() as u64;
-        let blob_size = (blob_end - blob_offset) as usize;
+        let (blob_offset, blob_end, blob_size) =
+            self.get_blob_range(&chunks[start_idx..=end_idx])?;
         trace!(
             "fetch data range {:x}-{:x} for chunk {}-{} from blob {:x}",
             blob_offset,
@@ -623,9 +714,10 @@ impl FileCacheEntry {
             &chunks[start_idx..=end_idx],
             prefetch,
         ) {
-            Ok((mut v, c)) => {
+            Ok(mut bufs) => {
                 if self.is_compressed {
-                    let res = Self::persist_cached_data(&self.file, blob_offset, &c);
+                    let res =
+                        Self::persist_cached_data(&self.file, blob_offset, bufs.compressed_buf());
                     for idx in start_idx..=end_idx {
                         if status[idx] {
                             self.update_chunk_pending_status(chunks[idx].as_ref(), res.is_ok());
@@ -633,10 +725,22 @@ impl FileCacheEntry {
                     }
                 } else {
                     for idx in start_idx..=end_idx {
+                        let mut buf = match bufs.next() {
+                            None => return Err(einval!("invalid chunk decompressed status")),
+                            Some(Err(e)) => {
+                                for idx in idx..=end_idx {
+                                    if status[idx] {
+                                        bitmap.clear_range_pending(chunks[idx].id(), 1)
+                                    }
+                                }
+                                return Err(e);
+                            }
+                            Some(Ok(v)) => v,
+                        };
+
                         if status[idx] {
-                            let buf = &mut v[idx - start_idx];
                             if self.dio_enabled {
-                                self.adjust_buffer_for_dio(buf)
+                                self.adjust_buffer_for_dio(&mut buf)
                             }
                             self.persist_chunk_data(chunks[idx].as_ref(), buf.as_ref());
                         }
@@ -886,7 +990,7 @@ impl FileCacheEntry {
                 }
                 region = &region_hold;
                 trace!(
-                    "extended blob request from {:x}/{:x} to {:x} {:x} with {} chunks",
+                    "extended blob request from 0x{:x}/0x{:x} to 0x{:x}/0x{:x} with {} chunks",
                     r.blob_address,
                     r.blob_len,
                     region_hold.blob_address,
@@ -896,7 +1000,16 @@ impl FileCacheEntry {
             }
         }
 
-        let (mut chunks, c) = self
+        if self.is_zran() {
+            let mut r = region.clone();
+            let (blob_offset, _blob_end, blob_size) = self.get_blob_range(&r.chunks)?;
+            r.blob_address = blob_offset;
+            r.blob_len = blob_size as u32;
+            region_hold = r;
+            region = &region_hold;
+        }
+
+        let bufs = self
             .read_chunks_from_backend(
                 region.blob_address,
                 region.blob_len as usize,
@@ -909,10 +1022,10 @@ impl FileCacheEntry {
                 }
                 e
             })?;
-        assert_eq!(region.chunks.len(), chunks.len());
 
         if self.is_compressed {
-            let res = Self::persist_cached_data(&self.file, region.blob_address, &c);
+            let res =
+                Self::persist_cached_data(&self.file, region.blob_address, bufs.compressed_buf());
             for chunk in region.chunks.iter() {
                 self.update_chunk_pending_status(chunk.as_ref(), res.is_ok());
             }
@@ -921,8 +1034,8 @@ impl FileCacheEntry {
 
         let mut chunk_buffers = Vec::with_capacity(region.chunks.len());
         let mut buffer_holder = Vec::with_capacity(region.chunks.len());
-        for (i, v) in chunks.drain(..).enumerate() {
-            let d = Arc::new(DataBuffer::Allocated(v));
+        for (i, v) in bufs.enumerate() {
+            let d = Arc::new(DataBuffer::Allocated(v?));
             if region.tags[i] {
                 buffer_holder.push(d.clone());
             }
@@ -1160,6 +1273,7 @@ impl RegionType {
 }
 
 /// A continuous region in cache file or backend storage/blob, it may contain several chunks.
+#[derive(Clone)]
 struct Region {
     r#type: RegionType,
     status: RegionStatus,
