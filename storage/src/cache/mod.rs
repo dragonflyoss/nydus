@@ -107,7 +107,7 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
 
     /// Merge adjacent chunks into bigger request with compressed size no bigger than `max_size`
     /// and issue all blob IO descriptors.
-    pub fn merge_and_issue(bios: &[BlobIoDesc], max_comp_size: usize, max_gap: u64, op: F) {
+    pub fn merge_and_issue(bios: &[BlobIoDesc], max_comp_size: u64, max_gap: u64, op: F) {
         if !bios.is_empty() {
             let mut index = 1;
             let mut state = BlobIoMergeState::new(&bios[0], op);
@@ -115,7 +115,8 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
             for cur_bio in &bios[1..] {
                 // Issue pending descriptors when next chunk is not continuous with current chunk
                 // or the accumulated compressed data size is big enough.
-                if !bios[index - 1].is_continuous(cur_bio, max_gap) || state.size() >= max_comp_size
+                if !bios[index - 1].is_continuous(cur_bio, max_gap)
+                    || state.size() as u64 >= max_comp_size
                 {
                     state.issue(max_gap);
                 }

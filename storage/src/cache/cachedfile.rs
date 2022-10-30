@@ -9,6 +9,7 @@
 //! performance. It may be used by both the userspace `FileCacheMgr` or the `FsCacheMgr` based
 //! on the in-kernel fscache system.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::ManuallyDrop;
@@ -218,6 +219,67 @@ impl FileCacheEntry {
             chunk_map.clear_pending(chunk);
         }
     }
+
+    fn prefetch_batch_size(&self) -> u64 {
+        if self.prefetch_config.merging_size < 0x2_0000 {
+            0x2_0000
+        } else {
+            self.prefetch_config.merging_size as u64
+        }
+    }
+
+    fn ondemand_batch_size(&self) -> u64 {
+        if self.batch_size < 0x2_0000 {
+            0x2_0000
+        } else {
+            self.batch_size
+        }
+    }
+
+    fn extend_pending_chunks(
+        &self,
+        chunks: &[Arc<dyn BlobChunkInfo>],
+        batch_size: u64,
+    ) -> Result<Option<Vec<Arc<dyn BlobChunkInfo>>>> {
+        assert!(!chunks.is_empty());
+        match self.get_blob_meta_info() {
+            Err(e) => Err(e),
+            Ok(None) => Ok(None),
+            Ok(Some(bm)) => {
+                let v = bm.add_more_chunks(chunks, batch_size)?;
+                Ok(Some(self.strip_ready_chunks(bm, Some(chunks), v)))
+            }
+        }
+    }
+
+    fn strip_ready_chunks(
+        &self,
+        _meta: Arc<BlobMetaInfo>,
+        _old_chunks: Option<&[Arc<dyn BlobChunkInfo>]>,
+        mut extended_chunks: Vec<Arc<dyn BlobChunkInfo>>,
+    ) -> Vec<Arc<dyn BlobChunkInfo>> {
+        while !extended_chunks.is_empty() {
+            let chunk = &extended_chunks[extended_chunks.len() - 1];
+            if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
+                extended_chunks.pop();
+            } else {
+                break;
+            }
+        }
+        extended_chunks
+    }
+
+    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobMetaInfo>>> {
+        if let Some(meta) = self.meta.as_ref() {
+            if let Some(bm) = meta.get_blob_meta() {
+                Ok(Some(bm))
+            } else {
+                Err(einval!("failed to get blob meta object for cache file"))
+            }
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl AsRawFd for FileCacheEntry {
@@ -327,7 +389,7 @@ impl BlobCache for FileCacheEntry {
         }
 
         // Then handle fs prefetch
-        let max_comp_size = self.prefetch_config.merging_size;
+        let max_comp_size = self.prefetch_batch_size();
         let mut bios = bios.to_vec();
         bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
@@ -383,10 +445,8 @@ impl BlobCache for FileCacheEntry {
         let mut total_size = 0;
         let mut start = 0;
         while start < pending.len() {
-            // Be careful that `end` is inclusive.
+            // Figure out the range with continuous chunk ids, be careful that `end` is inclusive.
             let mut end = start;
-
-            // Figure out the range with continuous chunk ids.
             while end < pending.len() - 1 && pending[end + 1].id() == pending[end].id() + 1 {
                 end += 1;
             }
@@ -458,34 +518,37 @@ impl BlobObject for FileCacheEntry {
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<()> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let chunks = meta.get_chunks_compressed(offset, size, self.batch_size)?;
-        self.do_fetch_chunks(&chunks, true)
+        let mut chunks = meta.get_chunks_compressed(offset, size, self.prefetch_batch_size())?;
+        if let Some(meta) = self.get_blob_meta_info()? {
+            chunks = self.strip_ready_chunks(meta, None, chunks);
+        }
+        if chunks.is_empty() {
+            Ok(())
+        } else {
+            self.do_fetch_chunks(&chunks, true)
+        }
     }
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<()> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let chunks = meta.get_chunks_uncompressed(offset, size, self.batch_size * 2)?;
-        self.do_fetch_chunks(&chunks, false)
+        let mut chunks = meta.get_chunks_uncompressed(offset, size, self.ondemand_batch_size())?;
+        if let Some(meta) = self.get_blob_meta_info()? {
+            chunks = self.strip_ready_chunks(meta, None, chunks);
+        }
+        if chunks.is_empty() {
+            Ok(())
+        } else {
+            self.do_fetch_chunks(&chunks, false)
+        }
     }
 
     fn prefetch_chunks(&self, range: &BlobIoRange) -> Result<()> {
-        let chunks_expanded;
+        let chunks_extended;
         let mut chunks = &range.chunks;
-        if let Some(meta) = self.meta.as_ref() {
-            if let Some(bm) = meta.get_blob_meta() {
-                let max_size = if range.blob_size < self.prefetch_config.merging_size as u64 {
-                    self.prefetch_config.merging_size as u64 - range.blob_size
-                } else {
-                    0
-                };
-                if let Some(expanded) = bm.add_more_chunks(chunks, max_size) {
-                    chunks_expanded = expanded;
-                    chunks = &chunks_expanded;
-                }
-            } else {
-                return Err(einval!("failed to get blob.meta"));
-            }
+        if let Some(v) = self.extend_pending_chunks(chunks, self.prefetch_batch_size())? {
+            chunks_extended = v;
+            chunks = &chunks_extended;
         }
 
         let mut start = 0;
@@ -526,19 +589,20 @@ impl FileCacheEntry {
         };
 
         let mut status = vec![false; count as usize];
-        let mut start = u32::MAX;
-        let mut end = 0;
-        for chunk_id in pending.iter() {
-            status[(*chunk_id - chunk_index) as usize] = true;
-            start = std::cmp::min(*chunk_id - chunk_index, start);
-            end = std::cmp::max(*chunk_id - chunk_index, end);
-        }
-        if end < start {
-            return Ok(());
-        }
+        let (start_idx, end_idx) = {
+            let mut start = u32::MAX;
+            let mut end = 0;
+            for chunk_id in pending.iter() {
+                status[(*chunk_id - chunk_index) as usize] = true;
+                start = std::cmp::min(*chunk_id - chunk_index, start);
+                end = std::cmp::max(*chunk_id - chunk_index, end);
+            }
+            if end < start {
+                return Ok(());
+            }
+            (start as usize, end as usize)
+        };
 
-        let start_idx = start as usize;
-        let end_idx = end as usize;
         let start_chunk = &chunks[start_idx];
         let end_chunk = &chunks[end_idx];
         let blob_offset = start_chunk.compressed_offset();
@@ -580,7 +644,6 @@ impl FileCacheEntry {
                 }
             }
             Err(e) => {
-                warn!("do_fetch_chunks persist error");
                 for idx in 0..chunks.len() {
                     if status[idx] {
                         bitmap.clear_range_pending(chunks[idx].id(), 1)
@@ -641,7 +704,7 @@ impl FileCacheEntry {
     fn read_iter(&self, bios: &mut [BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
         // Merge requests with continuous blob addresses.
         let requests = self
-            .merge_requests_for_user(bios, self.batch_size as usize)
+            .merge_requests_for_user(bios, self.ondemand_batch_size())
             .ok_or_else(|| {
                 for bio in bios.iter() {
                     self.update_chunk_pending_status(&bio.chunkinfo, false);
@@ -781,7 +844,15 @@ impl FileCacheEntry {
         Ok(total_read)
     }
 
-    fn dispatch_backend(&self, mem_cursor: &mut MemSliceCursor, region: &Region) -> Result<usize> {
+    fn dispatch_backend(&self, mem_cursor: &mut MemSliceCursor, r: &Region) -> Result<usize> {
+        let mut region = r;
+        debug!(
+            "{} try to read {} bytes of {} chunks from backend",
+            std::thread::current().name().unwrap_or_default(),
+            region.blob_len,
+            region.chunks.len()
+        );
+
         if region.chunks.is_empty() {
             return Ok(0);
         } else if !region.has_user_io() {
@@ -791,17 +862,47 @@ impl FileCacheEntry {
             }
             return Ok(0);
         }
+        if region.chunks.len() > 1 {
+            for idx in 0..region.chunks.len() - 1 {
+                assert_eq!(region.chunks[idx].id() + 1, region.chunks[idx + 1].id());
+            }
+        }
 
-        let blob_size = region.blob_len as usize;
-        debug!(
-            "{} try to read {} bytes of {} chunks from backend",
-            std::thread::current().name().unwrap_or_default(),
-            blob_size,
-            region.chunks.len()
-        );
+        // Try to extend requests.
+        let mut region_hold;
+        if let Some(v) = self.extend_pending_chunks(&region.chunks, self.ondemand_batch_size())? {
+            if v.len() > r.chunks.len() {
+                let mut tag_set = HashSet::new();
+                for (idx, chunk) in region.chunks.iter().enumerate() {
+                    if region.tags[idx] {
+                        tag_set.insert(chunk.id());
+                    }
+                }
+                region_hold = Region::with(region, v);
+                for (idx, c) in region_hold.chunks.iter().enumerate() {
+                    if tag_set.contains(&c.id()) {
+                        region_hold.tags[idx] = true;
+                    }
+                }
+                region = &region_hold;
+                trace!(
+                    "extended blob request from {:x}/{:x} to {:x} {:x} with {} chunks",
+                    r.blob_address,
+                    r.blob_len,
+                    region_hold.blob_address,
+                    region_hold.blob_len,
+                    region_hold.chunks.len(),
+                );
+            }
+        }
 
         let (mut chunks, c) = self
-            .read_chunks_from_backend(region.blob_address, blob_size, &region.chunks, false)
+            .read_chunks_from_backend(
+                region.blob_address,
+                region.blob_len as usize,
+                &region.chunks,
+                false,
+            )
             .map_err(|e| {
                 for c in &region.chunks {
                     self.chunk_map.clear_pending(c.as_ref());
@@ -966,14 +1067,14 @@ impl FileCacheEntry {
     fn merge_requests_for_user(
         &self,
         bios: &[BlobIoDesc],
-        max_comp_size: usize,
+        max_comp_size: u64,
     ) -> Option<Vec<BlobIoRange>> {
         let mut requests: Vec<BlobIoRange> = Vec::with_capacity(bios.len());
 
         BlobIoMergeState::merge_and_issue(
             bios,
             max_comp_size,
-            max_comp_size as u64 >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+            max_comp_size >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
             |mr: BlobIoRange| {
                 requests.push(mr);
             },
@@ -1035,14 +1136,14 @@ impl DataBuffer {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum RegionStatus {
     Init,
     Open,
     Committed,
 }
 
-#[derive(PartialEq, Copy, Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum RegionType {
     // Fast path to read data from the cache directly, no decompression and validation needed.
     CacheFast,
@@ -1086,6 +1187,27 @@ impl Region {
             blob_address: 0,
             blob_len: 0,
             seg: Default::default(),
+        }
+    }
+
+    fn with(region: &Region, chunks: Vec<Arc<dyn BlobChunkInfo>>) -> Self {
+        assert!(!chunks.is_empty());
+        let len = chunks.len();
+        let blob_address = chunks[0].compressed_offset();
+        let last = &chunks[len - 1];
+        let sz = last.compressed_offset() - blob_address;
+        assert!(sz < u32::MAX as u64);
+        let blob_len = sz as u32 + last.compressed_size();
+
+        Region {
+            r#type: region.r#type,
+            status: region.status,
+            count: len as u32,
+            chunks,
+            tags: vec![false; len],
+            blob_address,
+            blob_len,
+            seg: region.seg.clone(),
         }
     }
 
