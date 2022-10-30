@@ -19,6 +19,7 @@ use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunk
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
+use crate::meta::BLOB_META_FEATURE_ZRAN;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -202,15 +203,20 @@ impl FileCacheEntry {
             let file_size = file.metadata()?.len();
             if file_size == 0 {
                 file.set_len(blob_info.uncompressed_size())?;
-            } else {
-                assert_eq!(file_size, blob_info.uncompressed_size());
+            } else if file_size != blob_info.uncompressed_size() {
+                let msg = format!(
+                    "blob data file size doesn't match: got 0x{:x}, expect 0x{:x}",
+                    file_size,
+                    blob_info.uncompressed_size()
+                );
+                return Err(einval!(msg));
             }
-
             let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
             Some(meta)
         } else {
             None
         };
+        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
 
         Ok(FileCacheEntry {
             blob_info,
@@ -231,6 +237,7 @@ impl FileCacheEntry {
             is_compressed,
             is_direct_chunkmap,
             is_legacy_stargz,
+            is_zran,
             dio_enabled: false,
             need_validation,
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,
