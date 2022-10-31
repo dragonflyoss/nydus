@@ -138,7 +138,7 @@ Note: For private registry repo, please make sure you are authorized to pull and
 sudo nydusify convert --nydus-image /usr/local/bin/nydus-image --source ubuntu --target localhost:5000/ubuntu-nydus
 ```
 
-For more details about how to build nydus image, please refer to [nydusify](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusify.md) conversion tool and [acceld](https://github.com/goharbor/acceleration-service).
+For more details about how to build nydus image, please refer to [Nydusify](https://github.com/dragonflyoss/image-service/blob/master/docs/nydusify.md) conversion tool, [Acceld](https://github.com/goharbor/acceleration-service) conversion service or [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md#build-nydus-image-using-nerdctl-image-convert).
 
 ## Try Nydus with `nerdctl`
 
