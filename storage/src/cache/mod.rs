@@ -353,8 +353,7 @@ pub trait BlobCache: Send + Sync {
             && !self.is_legacy_stargz()
             && !check_digest(buffer, chunk.chunk_id(), self.digester())
         {
-            panic!("data digest value doesn't match");
-            //Err(eio!("data digest value doesn't match"))
+            Err(eio!("data digest value doesn't match"))
         } else {
             Ok(d_size)
         }
