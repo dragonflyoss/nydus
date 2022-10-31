@@ -649,21 +649,21 @@ impl Command {
                     );
                 }
                 if compressor != compress::Algorithm::GZip {
-                    warn!("only gzip is supported the conversion, use gzip for compression");
+                    info!(
+                        "only gzip is supported by the conversion type, use gzip for compression"
+                    );
                 }
                 compressor = compress::Algorithm::GZip;
                 if digester != digest::Algorithm::Sha256 {
-                    warn!("only sha256 is supported for the conversion, use sha256 for digest");
+                    info!("only sha256 is supported by the conversion type, use sha256 for digest");
                 }
                 digester = digest::Algorithm::Sha256;
-                /*
                 if version != RafsVersion::V6 {
                     bail!(
-                        "'--fs-version 5' conflicts with conversion type'{}', only V6 is supported",
+                        "'--fs-version 5' conflicts with conversion type '{}', only V6 is supported",
                         conversion_type
                     );
                 }
-                 */
                 if conversion_type == ConversionType::EStargzIndexToRef && blob_id.trim() == "" {
                     bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
