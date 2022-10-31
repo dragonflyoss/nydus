@@ -541,11 +541,11 @@ impl<'a> SubCmdArgs<'a> {
         }
     }
 
-    pub fn values_of(&self, key: &str) -> Option<ValuesRef<&str>> {
-        if let Some(v) = self.subargs.get_many::<&str>(key) {
+    pub fn values_of(&self, key: &str) -> Option<ValuesRef<String>> {
+        if let Some(v) = self.subargs.get_many::<String>(key) {
             Some(v)
         } else {
-            self.args.get_many::<&str>(key)
+            self.args.get_many::<String>(key)
         }
     }
 
