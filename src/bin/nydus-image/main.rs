@@ -213,7 +213,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("blob-id")
                         .long("blob-id")
-                        .requires_ifs([("type", "estargztoc-ref"), ("type", "stargz_index")])
+                        .required_if_eq_any([("type", "estargztoc-ref"), ("type", "stargz_index")])
                         .help("specify blob id (as object id in backend/oss)")
                 )
                 .arg(
