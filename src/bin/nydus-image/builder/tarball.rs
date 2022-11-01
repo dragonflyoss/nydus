@@ -102,10 +102,7 @@ impl<'a> TarballTreeBuilder<'a> {
             ConversionType::EStargzToRafs | ConversionType::TargzToRafs => {
                 TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
             }
-            /*
-            ConversionType::StargzToRef |
-             */
-            ConversionType::TargzToRef => {
+            ConversionType::EStargzToRef | ConversionType::TargzToRef => {
                 assert!(self.writer.is_none());
                 let generator = ZranContextGenerator::new(file)?;
                 let reader = generator.reader();
@@ -483,7 +480,7 @@ impl<'a> TarballTreeBuilder<'a> {
     // No-prefetch landmark MUST be named .no.prefetch.landmark.
     // TODO: check "a regular file entry with 4 bits contents 0xf"
     fn is_special_files(&self, path: &Path) -> bool {
-        self.ty == ConversionType::EStargzToRafs
+        (self.ty == ConversionType::EStargzToRafs || self.ty == ConversionType::EStargzToRef)
             && (path == Path::new("/stargz.index.json")
                 || path == Path::new("/.prefetch.landmark")
                 || path == Path::new("/.no.prefetch.landmark"))

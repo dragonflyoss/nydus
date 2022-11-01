@@ -175,6 +175,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                             "directory",
                             "dir-rafs",
                             "estargz-rafs",
+                            "estargz-ref",
                             "estargztoc-ref",
                             "tar-rafs",
                             "targz-rafs",
@@ -731,7 +732,7 @@ impl Command {
                 Box::new(StargzBuilder::new(blob_data_size))
             }
             ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::TargzToRef => {
+            ConversionType::TargzToRef | ConversionType::TargzToStargz => {
                 if version.is_v6() {
                     build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
                     build_ctx.blob_meta_features |= BLOB_META_FEATURE_SEPARATE;
@@ -739,7 +740,6 @@ impl Command {
                 }
                 Box::new(TarballBuilder::new(conversion_type))
             }
-            ConversionType::TargzToStargz => unimplemented!(),
             ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TarToStargz => unimplemented!(),
         };
