@@ -145,8 +145,8 @@ func (cache *Cache) recordToLayer(record *Record) (*ocispec.Descriptor, *ocispec
 			utils.LayerAnnotationUncompressed: record.NydusBootstrapDiffID.String(),
 		},
 	}
-	if refenceBlobsStr, ok := record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs]; ok {
-		bootstrapCacheDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = refenceBlobsStr
+	if referenceBlobsStr, ok := record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs]; ok {
+		bootstrapCacheDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = referenceBlobsStr
 	}
 
 	var blobCacheDesc *ocispec.Descriptor
