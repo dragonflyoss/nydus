@@ -541,8 +541,8 @@ impl Rafs {
         // - prefetch listed passed in by user
         // - or file prefetch list in metadata
         let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-        let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
-            if desc.bi_size > 0 {
+        let res = sb.prefetch_files(&device, &mut reader, root_ino, inodes, &|desc| {
+            if desc.size() > 0 {
                 device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                     warn!("Prefetch error, {:?}", e);
                 });
@@ -557,8 +557,8 @@ impl Rafs {
         // Last optionally prefetch all data
         if prefetch_all && !ignore_prefetch_all {
             let root = vec![root_ino];
-            let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
-                if desc.bi_size > 0 {
+            let res = sb.prefetch_files(&device, &mut reader, root_ino, Some(root), &|desc| {
+                if desc.size() > 0 {
                     device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                         warn!("Prefetch error, {:?}", e);
                     });
@@ -715,42 +715,48 @@ impl FileSystem for Rafs {
 
         let real_size = cmp::min(size as u64, inode_size - offset);
         let mut result = 0;
-        let mut descs = inode.alloc_bio_vecs(offset, real_size as usize, true)?;
-        debug_assert!(!descs.is_empty() && !descs[0].bi_vec.is_empty());
+        let mut descs = inode.alloc_bio_vecs(&self.device, offset, real_size as usize, true)?;
+        assert!(!descs.is_empty() && !descs[0].is_empty());
 
         // Try to amplify user io for Rafs v5, to improve performance.
         if self.sb.meta.is_v5() && size < self.amplify_io {
             let all_chunks_ready = self.device.all_chunks_ready(&descs);
             if !all_chunks_ready {
-                let chunk_size = self.metadata().chunk_size as u64;
-                let next_chunk_base = (offset + (size as u64) + chunk_size) & !chunk_size;
-                let window_base = std::cmp::min(next_chunk_base, inode_size);
-                let actual_size = window_base - (offset & !chunk_size);
+                let chunk_mask = self.metadata().chunk_size as u64 - 1;
+                let next_chunk_base = (offset + (size as u64) + chunk_mask) & !chunk_mask;
+                let window_base = cmp::min(next_chunk_base, inode_size);
+                let actual_size = window_base - (offset & !chunk_mask);
                 if actual_size < self.amplify_io as u64 {
                     let window_size = self.amplify_io as u64 - actual_size;
+                    let orig_cnt = descs.iter().fold(0, |s, d| s + d.len());
                     self.sb.amplify_io(
+                        &self.device,
                         self.amplify_io,
                         &mut descs,
                         &inode,
                         window_base,
                         window_size,
                     )?;
+                    let new_cnt = descs.iter().fold(0, |s, d| s + d.len());
+                    trace!(
+                        "amplify RAFS v5 read from {} to {} chunks",
+                        orig_cnt,
+                        new_cnt
+                    );
                 }
             }
         }
 
         let start = self.ios.latency_start();
-
         for desc in descs.iter_mut() {
-            debug_assert!(desc.validate());
-            debug_assert!(!desc.bi_vec.is_empty());
-            debug_assert!(desc.bi_size != 0);
+            assert!(!desc.is_empty());
+            assert_ne!(desc.size(), 0);
 
             // Avoid copying `desc`
             let r = self.device.read_to(w, desc)?;
             result += r;
             recorder.mark_success(r);
-            if r as u32 != desc.bi_size {
+            if r as u32 != desc.size() {
                 break;
             }
         }
@@ -1095,8 +1101,7 @@ pub(crate) mod tests {
             uid: 0,
         };
         match rafs.lookup(ctx, 1, &std::ffi::CString::new("/etc").unwrap()) {
-            Err(e) => {
-                println!("{:?}", e);
+            Err(_e) => {
                 panic!("failed to lookup /etc from ino 1");
             }
             Ok(e) => {

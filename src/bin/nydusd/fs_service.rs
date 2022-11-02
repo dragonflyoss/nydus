@@ -99,7 +99,7 @@ pub trait FsService: Send + Sync {
         }
         let backend = fs_backend_factory(&cmd)?;
         let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
-        info!("{} mounted at {}", &cmd.fs_type, &cmd.mountpoint);
+        info!("{} filesystem mounted at {}", &cmd.fs_type, &cmd.mountpoint);
         self.backend_collection().add(&cmd.mountpoint, &cmd)?;
 
         // Add mounts opaque to UpgradeManager
@@ -203,7 +203,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
             let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
             let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
             rafs.import(bootstrap, prefetch_files)?;
-            info!("Rafs imported");
+            info!("RAFS filesystem imported");
             Ok(Box::new(rafs))
         }
         FsBackendType::PassthroughFs => {

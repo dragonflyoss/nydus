@@ -30,6 +30,7 @@ use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
+use crate::meta::BLOB_META_FEATURE_ZRAN;
 use crate::utils::{alloc_buf, copyv};
 use crate::{StorageError, StorageResult};
 
@@ -64,7 +65,7 @@ impl BlobCache for DummyCache {
         self.digester
     }
 
-    fn is_stargz(&self) -> bool {
+    fn is_legacy_stargz(&self) -> bool {
         self.is_stargz
     }
 
@@ -80,13 +81,8 @@ impl BlobCache for DummyCache {
         &self.chunk_map
     }
 
-    fn prefetch(
-        &self,
-        _blob_cache: Arc<dyn BlobCache>,
-        _prefetches: &[BlobPrefetchRequest],
-        _bios: &[BlobIoDesc],
-    ) -> StorageResult<usize> {
-        Err(StorageError::Unsupported)
+    fn get_chunk_info(&self, _chunk_index: u32) -> Option<Arc<dyn BlobChunkInfo>> {
+        None
     }
 
     fn start_prefetch(&self) -> StorageResult<()> {
@@ -101,16 +97,24 @@ impl BlobCache for DummyCache {
         false
     }
 
+    fn prefetch(
+        &self,
+        _blob_cache: Arc<dyn BlobCache>,
+        _prefetches: &[BlobPrefetchRequest],
+        _bios: &[BlobIoDesc],
+    ) -> StorageResult<usize> {
+        Err(StorageError::Unsupported)
+    }
+
     fn read(&self, iovec: &mut BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
         let bios = &iovec.bi_vec;
 
-        if iovec.bi_size == 0 || bios.is_empty() {
+        if iovec.size() == 0 || bios.is_empty() {
             return Err(einval!("parameter `bios` is empty"));
         }
 
         let bios_len = bios.len();
         let offset = bios[0].offset;
-        //let chunk = bios[0].chunkinfo.as_v5()?;
         let d_size = bios[0].chunkinfo.uncompressed_size() as usize;
         // Use the destination buffer to receive the uncompressed data if possible.
         if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
@@ -118,7 +122,8 @@ impl BlobCache for DummyCache {
                 return Ok(0);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
-            return self.read_raw_chunk(&bios[0].chunkinfo, buf, false, None);
+            self.read_chunk_from_backend(&bios[0].chunkinfo, buf, false)?;
+            return Ok(buf.len());
         }
 
         let mut user_size = 0;
@@ -126,7 +131,7 @@ impl BlobCache for DummyCache {
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompressed_size() as usize);
-                self.read_raw_chunk(&bio.chunkinfo, d.as_mut_slice(), false, None)?;
+                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice(), false)?;
                 buffer_holder.push(d);
                 // Even a merged IO can hardly reach u32::MAX. So this is safe
                 user_size += bio.size;
@@ -196,6 +201,12 @@ impl BlobCacheMgr for DummyCacheMgr {
     }
 
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
+        if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
+            return Err(einval!(
+                "BlobCacheMgr doesn't support ZRan based RAFS data blobs"
+            ));
+        }
+
         let blob_id = blob_info.blob_id().to_owned();
         let reader = self.backend.get_reader(&blob_id).map_err(|e| eother!(e))?;
 

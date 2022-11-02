@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
 use nydus_storage::device::v5::BlobV5ChunkInfo;
-use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo, BlobIoVec};
+use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobDevice, BlobInfo, BlobIoVec};
 use nydus_storage::utils::readahead;
 use nydus_utils::digest::RafsDigest;
 
@@ -558,7 +558,13 @@ impl RafsInode for OndiskInodeWrapper {
         Ok(())
     }
 
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+    fn alloc_bio_vecs(
+        &self,
+        _device: &BlobDevice,
+        offset: u64,
+        size: usize,
+        user_io: bool,
+    ) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 

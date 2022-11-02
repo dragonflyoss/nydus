@@ -289,8 +289,9 @@ impl BlobMetaHeaderOndisk {
 /// Currently, the major responsibility of the `BlobMetaInfo` object is to query chunks covering
 /// a specific uncompressed data range by
 /// [BlobMetaInfo::get_chunks()](struct.BlobMetaInfo.html#method.get_chunks).
+#[derive(Clone)]
 pub struct BlobMetaInfo {
-    pub state: Arc<BlobMetaState>,
+    pub(crate) state: Arc<BlobMetaState>,
 }
 
 impl BlobMetaInfo {
@@ -323,7 +324,7 @@ impl BlobMetaInfo {
         let info_size = blob_info.meta_ci_uncompressed_size() as usize;
         let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         trace!(
-            "meta_path {:?} info_size {} chunk_count {}",
+            "try to open blob meta file: path {:?} info_size {} chunk_count {}",
             meta_path,
             info_size,
             chunk_count
@@ -572,11 +573,12 @@ impl BlobMetaInfo {
             // time, the memory consumption and performance impact are relatively
             // small.
             let mut uncom_buf = vec![0u8; buffer.len()];
-            compress::decompress(&buf, None, &mut uncom_buf, blob_info.meta_ci_compressor())
-                .map_err(|e| {
+            compress::decompress(&buf, &mut uncom_buf, blob_info.meta_ci_compressor()).map_err(
+                |e| {
                     error!("failed to decompress blob meta data: {}", e);
                     e
-                })?;
+                },
+            )?;
             buffer.copy_from_slice(&uncom_buf);
         }
 
@@ -1285,6 +1287,7 @@ impl BlobMetaChunkArray {
 }
 
 /// A fake `BlobChunkInfo` object created from RAFS V6 blob metadata.
+#[derive(Clone)]
 pub struct BlobMetaChunk {
     chunk_index: usize,
     meta: Arc<BlobMetaState>,

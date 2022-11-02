@@ -223,7 +223,7 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
 
 /// A customized buf allocator that avoids zeroing
 pub fn alloc_buf(size: usize) -> Vec<u8> {
-    debug_assert!(size < isize::MAX as usize);
+    assert!(size < isize::MAX as usize);
     let layout = Layout::from_size_align(size, 0x1000)
         .unwrap()
         .pad_to_align();
@@ -232,7 +232,7 @@ pub fn alloc_buf(size: usize) -> Vec<u8> {
 }
 
 /// Check hash of data matches provided one
-pub fn digest_check(data: &[u8], digest: &RafsDigest, digester: digest::Algorithm) -> bool {
+pub fn check_digest(data: &[u8], digest: &RafsDigest, digester: digest::Algorithm) -> bool {
     digest == &RafsDigest::from_buf(data, digester)
 }
 

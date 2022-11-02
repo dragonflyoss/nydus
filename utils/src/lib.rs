@@ -12,6 +12,10 @@ extern crate serde;
 extern crate lazy_static;
 
 use std::convert::{Into, TryFrom, TryInto};
+use std::fs::File;
+use std::io::Read;
+use std::marker::PhantomData;
+use std::os::unix::io::{AsRawFd, RawFd};
 
 pub use self::exec::*;
 pub use self::inode_bitmap::InodeBitmap;
@@ -57,9 +61,41 @@ pub fn round_down_4k(x: u64) -> u64 {
     x & (!4095u64)
 }
 
+/// A wrapper reader to read a range of data from a file.
+pub struct FileRangeReader<'a> {
+    fd: RawFd,
+    offset: u64,
+    size: u64,
+    r: PhantomData<&'a u8>,
+}
+
+impl<'a> FileRangeReader<'a> {
+    /// Create a wrapper reader to read a range of data from the file.
+    pub fn new(f: &File, offset: u64, size: u64) -> Self {
+        Self {
+            fd: f.as_raw_fd(),
+            offset,
+            size,
+            r: PhantomData,
+        }
+    }
+}
+
+impl<'a> Read for FileRangeReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let size = std::cmp::min(self.size as usize, buf.len());
+        let nr_read = nix::sys::uio::pread(self.fd, &mut buf[0..size], self.offset as i64)
+            .map_err(|_| last_error!())?;
+        self.offset += nr_read as u64;
+        self.size -= nr_read as u64;
+        Ok(nr_read)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_rounders() {
@@ -94,5 +130,18 @@ mod tests {
         assert_eq!(try_round_up_4k::<u64, _>(u64::MAX - 1), None);
         // fail to convert u64 to u32
         assert_eq!(try_round_up_4k::<u32, _>(u64::MAX - 4096), None);
+    }
+
+    #[test]
+    fn test_file_range_reader() {
+        let file = TempFile::new().unwrap();
+        std::fs::write(file.as_path(), b"This is a test").unwrap();
+        let mut reader = FileRangeReader::new(file.as_file(), 4, 6);
+        let mut buf = vec![0u8; 128];
+        let res = reader.read(&mut buf).unwrap();
+        assert_eq!(res, 6);
+        assert_eq!(&buf[..6], b" is a ".as_slice());
+        let res = reader.read(&mut buf).unwrap();
+        assert_eq!(res, 0);
     }
 }

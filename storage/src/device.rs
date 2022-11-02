@@ -20,7 +20,6 @@
 //!   one or more blob IO descriptors
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
 use std::any::Any;
-use std::cmp;
 use std::collections::hash_map::Drain;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -33,7 +32,6 @@ use arc_swap::ArcSwap;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use fuse_backend_rs::file_traits::FileReadWriteVolatile;
-use vm_memory::bytes::Bytes;
 
 use nydus_api::http::FactoryConfig;
 use nydus_utils::compress;
@@ -41,8 +39,6 @@ use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
-
-static ZEROS: &[u8] = &[0u8; 4096]; // why 4096? volatile slice default size, unfortunately
 
 bitflags! {
     /// Features bits for blob management.
@@ -88,8 +84,6 @@ pub struct BlobInfo {
     prefetch_offset: u32,
     /// Size of blob data to prefetch.
     prefetch_size: u32,
-    /// Whether to validate blob data.
-    validate_data: bool,
     /// The blob is for an stargz image.
     stargz: bool,
 
@@ -110,6 +104,7 @@ pub struct BlobInfo {
     /// V6: count of Zran context entries
     meta_ci_zran_count: u32,
 
+    /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
 }
 
@@ -137,7 +132,6 @@ impl BlobInfo {
             digester: digest::Algorithm::Blake3,
             prefetch_offset: 0,
             prefetch_size: 0,
-            validate_data: false,
             stargz: false,
             meta_ci_compressor: 0,
             meta_flags: 0,
@@ -156,44 +150,9 @@ impl BlobInfo {
         blob_info
     }
 
-    /// Generate feature flags according to blob configuration.
-    pub fn compute_features(&mut self) {
-        if self.chunk_count == 0 {
-            self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
-        }
-        if self.compressor == compress::Algorithm::GZip {
-            self.stargz = true;
-        }
-    }
-
-    /// Get blob feature bits.
-    pub fn get_features(&self) -> BlobFeatures {
-        self.blob_features
-    }
-
-    /// Check whether the requested features are available.
-    pub fn has_feature(&self, features: BlobFeatures) -> bool {
-        self.blob_features.bits() & features.bits() == features.bits()
-    }
-
-    /// Set blob feature bits.
-    pub fn set_features(&mut self, features: BlobFeatures) {
-        self.blob_features |= features;
-    }
-
-    /// Reset blob feature bits.
-    pub fn reset_features(&mut self) {
-        self.blob_features = BlobFeatures::empty();
-    }
-
     /// Get the blob index in the blob array.
     pub fn blob_index(&self) -> u32 {
         self.blob_index
-    }
-
-    /// Set the blob index.
-    pub fn set_blob_index(&mut self, index: u32) {
-        self.blob_index = index;
     }
 
     /// Get the id of the blob.
@@ -261,24 +220,9 @@ impl BlobInfo {
         self.prefetch_size = size as u32;
     }
 
-    /// Check blob data validation configuration.
-    pub fn validate_data(&self) -> bool {
-        self.validate_data
-    }
-
-    /// Enable blob data validation
-    pub fn enable_data_validation(&mut self, validate: bool) {
-        self.validate_data = validate;
-    }
-
     /// Check whether this blob is for an stargz image.
     pub fn is_stargz(&self) -> bool {
         self.stargz
-    }
-
-    /// Set whether the blob is for an stargz image.
-    pub fn set_stargz(&mut self, stargz: bool) {
-        self.stargz = stargz;
     }
 
     /// Set metadata information for a blob.
@@ -293,17 +237,23 @@ impl BlobInfo {
         uncompressed_size: u64,
         compressor: u32,
     ) {
-        self.meta_ci_compressor = compressor;
         self.meta_flags = flags;
+        self.meta_ci_compressor = compressor;
         self.meta_ci_offset = offset;
         self.meta_ci_compressed_size = compressed_size;
         self.meta_ci_uncompressed_size = uncompressed_size;
     }
 
+    /// Set ZRan information.
     pub fn set_blob_meta_zran_info(&mut self, count: u32, offset: u64, size: u64) {
         self.meta_ci_zran_count = count;
         self.meta_ci_zran_offset = offset;
         self.meta_ci_zran_size = size;
+    }
+
+    /// Get blob metadata flags.
+    pub fn meta_flags(&self) -> u32 {
+        self.meta_flags
     }
 
     /// Get compression algorithm for chunk information array.
@@ -317,11 +267,6 @@ impl BlobInfo {
         } else {
             compress::Algorithm::None
         }
-    }
-
-    /// Get blob metadata flags.
-    pub fn meta_flags(&self) -> u32 {
-        self.meta_flags
     }
 
     /// Get offset of chunk information array in the compressed blob.
@@ -365,8 +310,23 @@ impl BlobInfo {
     }
 
     /// Get the associated `File` object provided by Linux fscache subsystem.
-    pub fn get_fscache_file(&self) -> Option<Arc<File>> {
+    pub(crate) fn get_fscache_file(&self) -> Option<Arc<File>> {
         self.fs_cache_file.clone()
+    }
+
+    /// Check whether the requested features are available.
+    pub(crate) fn has_feature(&self, features: BlobFeatures) -> bool {
+        self.blob_features.bits() & features.bits() == features.bits()
+    }
+
+    /// Generate feature flags according to blob configuration.
+    fn compute_features(&mut self) {
+        if self.chunk_count == 0 {
+            self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
+        }
+        if self.compressor == compress::Algorithm::GZip {
+            self.stargz = true;
+        }
     }
 }
 
@@ -432,88 +392,53 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 }
 
 /// An enumeration to encapsulate different [BlobChunkInfo] implementations for [BlobIoDesc].
-
+///
 /// This helps to feed unified IO description to storage subsystem from both rafs v6 and v5 since
 /// rafs v6 have a different ChunkInfo definition on bootstrap.
 #[derive(Clone)]
-pub enum BlobIoChunk {
-    // For rafs v6 to pass chunk info to storage module.
-    // (blob_index, chunk_index) since it can't load chunks info from bootstrap
-    Address(u32, u32),
-    Base(Arc<dyn BlobChunkInfo>),
-}
-
-impl BlobIoChunk {
-    /// Convert a [BlobIoChunk] to a reference to [BlobChunkInfo] trait object.
-    pub fn as_base(&self) -> &(dyn BlobChunkInfo) {
-        match self {
-            BlobIoChunk::Base(v) => v.as_ref(),
-            _ => panic!("Chunk is not fully loaded"),
-        }
-    }
-
-    pub fn inner(&self) -> Arc<dyn BlobChunkInfo> {
-        match self {
-            BlobIoChunk::Base(v) => v.clone(),
-            // TODO: Don't panic?
-            _ => panic!("Chunk is not fully loaded"),
-        }
-    }
-}
+pub struct BlobIoChunk(Arc<dyn BlobChunkInfo>);
 
 impl From<Arc<dyn BlobChunkInfo>> for BlobIoChunk {
     fn from(v: Arc<dyn BlobChunkInfo>) -> Self {
-        BlobIoChunk::Base(v)
+        BlobIoChunk(v)
     }
 }
 
 impl BlobChunkInfo for BlobIoChunk {
     fn chunk_id(&self) -> &RafsDigest {
-        self.as_base().chunk_id()
+        self.0.chunk_id()
     }
 
     fn id(&self) -> u32 {
-        // BlobIoChunk::Address is a medium type to pass chunk IO description
-        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
-        // causes panic. So this is a workaround to avoid panic.
-        match self {
-            Self::Address(_, index) => *index,
-            _ => self.as_base().id(),
-        }
+        self.0.id()
     }
 
     fn blob_index(&self) -> u32 {
-        self.as_base().blob_index()
+        self.0.blob_index()
     }
 
     fn compressed_offset(&self) -> u64 {
-        // BlobIoChunk::Address is a medium type to pass chunk IO description
-        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
-        // causes panic. So this is a workaround to avoid panic.
-        match self {
-            Self::Address(_, _) => 0,
-            _ => self.as_base().compressed_offset(),
-        }
+        self.0.compressed_offset()
     }
 
     fn compressed_size(&self) -> u32 {
-        self.as_base().compressed_size()
+        self.0.compressed_size()
     }
 
     fn uncompressed_offset(&self) -> u64 {
-        self.as_base().uncompressed_offset()
+        self.0.uncompressed_offset()
     }
 
     fn uncompressed_size(&self) -> u32 {
-        self.as_base().uncompressed_size()
+        self.0.uncompressed_size()
     }
 
     fn is_compressed(&self) -> bool {
-        self.as_base().is_compressed()
+        self.0.is_compressed()
     }
 
     fn as_any(&self) -> &dyn Any {
-        self.as_base().as_any()
+        self
     }
 }
 
@@ -532,7 +457,7 @@ pub struct BlobIoDesc {
     ///
     /// It might be initiated by user io amplification. With this flag, lower device
     /// layer may choose how to prioritize the IO operation.
-    pub user_io: bool,
+    pub(crate) user_io: bool,
 }
 
 impl BlobIoDesc {
@@ -552,59 +477,73 @@ impl BlobIoDesc {
             user_io,
         }
     }
-}
 
-impl Debug for BlobIoDesc {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("RafsBio")
-            .field("blob index", &self.blob.blob_index)
-            .field("blob compress offset", &self.chunkinfo.compressed_offset())
-            .field("chunk id", &self.chunkinfo.id())
-            .field("file offset", &self.offset)
-            .field("size", &self.size)
-            .field("user", &self.user_io)
-            .finish()
-    }
-}
-
-impl BlobIoDesc {
     /// Check whether the `other` BlobIoDesc is continuous to current one.
-    pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
-        let offset = self.chunkinfo.compressed_offset();
-        let prev_size = prev.chunkinfo.compressed_size() as u64;
-        if let Some(prev_end) = prev.chunkinfo.compressed_offset().checked_add(prev_size) {
-            prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
+    pub fn is_continuous(&self, next: &BlobIoDesc, max_gap: u64) -> bool {
+        let prev_end = self.chunkinfo.compressed_offset() + self.chunkinfo.compressed_size() as u64;
+        let next_offset = next.chunkinfo.compressed_offset();
+
+        if self.chunkinfo.blob_index() == next.chunkinfo.blob_index() && next_offset >= prev_end {
+            if next.blob.is_stargz() {
+                next_offset - prev_end <= max_gap * 8
+            } else {
+                next_offset - prev_end <= max_gap
+            }
         } else {
             false
         }
     }
 }
 
+impl Debug for BlobIoDesc {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("BlobIoDesc")
+            .field("blob_index", &self.blob.blob_index)
+            .field("chunk_index", &self.chunkinfo.id())
+            .field("compressed_offset", &self.chunkinfo.compressed_offset())
+            .field("file_offset", &self.offset)
+            .field("size", &self.size)
+            .field("user", &self.user_io)
+            .finish()
+    }
+}
+
 /// Scatter/gather list for blob IO operation, containing zero or more blob IO descriptors
-#[derive(Default)]
 pub struct BlobIoVec {
-    /// Blob IO flags.
-    pub bi_flags: u32,
+    /// The blob associated with the IO operation.
+    bi_blob: Arc<BlobInfo>,
     /// Total size of blob IOs to be performed.
-    pub bi_size: u32,
+    bi_size: u32,
     /// Array of blob IOs, these IOs should executed sequentially.
-    // TODO: As bi_vec must stay within the same blob, move BlobInfo out here?
-    pub bi_vec: Vec<BlobIoDesc>,
+    pub(crate) bi_vec: Vec<BlobIoDesc>,
 }
 
 impl BlobIoVec {
     /// Create a new blob IO scatter/gather list object.
-    pub fn new() -> Self {
+    pub fn new(bi_blob: Arc<BlobInfo>) -> Self {
         BlobIoVec {
-            ..Default::default()
+            bi_blob,
+            bi_size: 0,
+            bi_vec: Vec::with_capacity(128),
         }
     }
 
+    /// Add a new 'BlobIoDesc' to the 'BlobIoVec'.
+    pub fn push(&mut self, desc: BlobIoDesc) {
+        assert_eq!(self.bi_blob.blob_index(), desc.blob.blob_index());
+        assert_eq!(self.bi_blob.blob_id(), desc.blob.blob_id());
+        assert!(self.bi_size.checked_add(desc.size).is_some());
+        self.bi_size += desc.size;
+        self.bi_vec.push(desc);
+    }
+
     /// Append another blob io vector to current one.
-    pub fn append(&mut self, mut desc: BlobIoVec) {
-        self.bi_vec.append(desc.bi_vec.as_mut());
-        self.bi_size += desc.bi_size;
-        debug_assert!(self.validate());
+    pub fn append(&mut self, mut vec: BlobIoVec) {
+        assert_eq!(self.bi_blob.blob_index(), vec.bi_blob.blob_index());
+        assert_eq!(self.bi_blob.blob_id(), vec.bi_blob.blob_id());
+        assert!(self.bi_size.checked_add(vec.bi_size).is_some());
+        self.bi_vec.append(vec.bi_vec.as_mut());
+        self.bi_size += vec.bi_size;
     }
 
     /// Reset the blob io vector.
@@ -613,53 +552,53 @@ impl BlobIoVec {
         self.bi_vec.truncate(0);
     }
 
-    /// Get the target blob of the blob io vector.
-    pub fn get_target_blob(&self) -> Option<Arc<BlobInfo>> {
-        if self.bi_vec.is_empty() {
-            None
+    /// Get number of 'BlobIoDesc' in the 'BlobIoVec'.
+    pub fn len(&self) -> usize {
+        self.bi_vec.len()
+    }
+
+    /// Chech whether there's 'BlobIoDesc' in the'BlobIoVec'.
+    pub fn is_empty(&self) -> bool {
+        self.bi_vec.is_empty()
+    }
+
+    /// Get size of pending IO data.
+    pub fn size(&self) -> u32 {
+        self.bi_size
+    }
+
+    /// Get an immutable reference to a `BlobIoDesc` entry.
+    pub fn blob_io_desc(&self, index: usize) -> Option<&BlobIoDesc> {
+        if index < self.bi_vec.len() {
+            Some(&self.bi_vec[index])
         } else {
-            debug_assert!(self.validate());
-            Some(self.bi_vec[0].blob.clone())
+            None
         }
     }
 
     /// Get the target blob index of the blob io vector.
-    pub fn get_target_blob_index(&self) -> Option<u32> {
-        if self.bi_vec.is_empty() {
-            None
-        } else {
-            debug_assert!(self.validate());
-            Some(self.bi_vec[0].blob.blob_index())
-        }
+    pub fn blob_index(&self) -> u32 {
+        self.bi_blob.blob_index()
     }
 
     /// Check whether the blob io vector is targeting the blob with `blob_index`
     pub fn is_target_blob(&self, blob_index: u32) -> bool {
-        debug_assert!(self.validate());
-        !self.bi_vec.is_empty() && self.bi_vec[0].blob.blob_index() == blob_index
+        self.bi_blob.blob_index() == blob_index
     }
 
     /// Check whether two blob io vector targets the same blob.
     pub fn has_same_blob(&self, desc: &BlobIoVec) -> bool {
-        debug_assert!(self.validate());
-        debug_assert!(desc.validate());
-        !self.bi_vec.is_empty()
-            && !desc.bi_vec.is_empty()
-            && self.bi_vec[0].blob.blob_index() == desc.bi_vec[0].blob.blob_index()
+        self.bi_blob.blob_index() == desc.bi_blob.blob_index()
     }
+}
 
-    /// Validate the io vector.
-    pub fn validate(&self) -> bool {
-        if self.bi_vec.len() > 1 {
-            let blob_index = self.bi_vec[0].blob.blob_index();
-            for n in &self.bi_vec[1..] {
-                if n.blob.blob_index() != blob_index {
-                    return false;
-                }
-            }
-        }
-
-        true
+impl Debug for BlobIoVec {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("BlobIoDesc")
+            .field("blob_index", &self.bi_blob.blob_index)
+            .field("size", &self.bi_size)
+            .field("decriptors", &self.bi_vec)
+            .finish()
     }
 }
 
@@ -698,10 +637,11 @@ impl BlobIoMerge {
 }
 
 /// A segment representing a continuous range for a blob IO operation.
+///
 /// It can span multiple chunks while the `offset` is where the user io starts
 /// within the first chunk and `len` is the total user io length of these chunks.
 #[derive(Clone, Debug, Default)]
-pub struct BlobIoSegment {
+pub(crate) struct BlobIoSegment {
     /// Start position of the range within the chunk
     pub offset: u32,
     /// Size of the range within the chunk
@@ -717,7 +657,6 @@ impl BlobIoSegment {
     #[inline]
     pub fn append(&mut self, _offset: u32, len: u32) {
         debug_assert!(_offset.checked_add(len).is_some());
-        debug_assert!((self.offset + self.len).checked_add(len).is_some());
 
         self.len += len;
     }
@@ -729,11 +668,11 @@ impl BlobIoSegment {
 
 /// Struct to maintain information about blob IO operation.
 #[derive(Clone, Debug)]
-pub enum BlobIoTag {
+pub(crate) enum BlobIoTag {
     /// Io requests to fulfill user requests.
     User(BlobIoSegment),
     /// Io requests to fulfill internal requirements.
-    Internal(u64),
+    Internal,
 }
 
 impl BlobIoTag {
@@ -753,19 +692,19 @@ impl BlobIoTag {
 /// A `BlobIoRange` request targets a continuous range of a single blob.
 #[derive(Default, Clone)]
 pub struct BlobIoRange {
-    pub blob_info: Arc<BlobInfo>,
-    pub blob_offset: u64,
-    pub blob_size: u64,
-    pub chunks: Vec<Arc<dyn BlobChunkInfo>>,
-    pub tags: Vec<BlobIoTag>,
+    pub(crate) blob_info: Arc<BlobInfo>,
+    pub(crate) blob_offset: u64,
+    pub(crate) blob_size: u64,
+    pub(crate) chunks: Vec<Arc<dyn BlobChunkInfo>>,
+    pub(crate) tags: Vec<BlobIoTag>,
 }
 
 impl Debug for BlobIoRange {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         f.debug_struct("BlobIoRange")
-            .field("blob id", &self.blob_info.blob_id())
-            .field("blob offset", &self.blob_offset)
-            .field("blob size", &self.blob_size)
+            .field("blob_id", &self.blob_info.blob_id())
+            .field("blob_offset", &self.blob_offset)
+            .field("blob_size", &self.blob_size)
             .field("tags", &self.tags)
             .finish()
     }
@@ -781,7 +720,7 @@ impl BlobIoRange {
         let mut chunks = Vec::with_capacity(capacity);
         let mut tags = Vec::with_capacity(capacity);
         tags.push(Self::tag_from_desc(bio));
-        chunks.push(bio.chunkinfo.inner());
+        chunks.push(bio.chunkinfo.0.clone());
 
         BlobIoRange {
             blob_info: bio.blob.clone(),
@@ -793,51 +732,29 @@ impl BlobIoRange {
     }
 
     /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
-    pub fn merge(&mut self, bio: &BlobIoDesc) {
+    pub fn merge(&mut self, bio: &BlobIoDesc, max_gap: u64) {
+        let end = self.blob_offset + self.blob_size;
+        let offset = bio.chunkinfo.compressed_offset();
+        let size = bio.chunkinfo.compressed_size() as u64;
+        let size = if end == offset {
+            assert!(offset.checked_add(size).is_some());
+            size
+        } else {
+            assert!((offset > end && offset - end <= max_gap));
+            size + (offset - end)
+        };
+        assert!(end.checked_add(size).is_some());
+
+        self.blob_size += size;
         self.tags.push(Self::tag_from_desc(bio));
-        self.chunks.push(bio.chunkinfo.inner());
-        debug_assert!(
-            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compressed_offset())
-        );
-        self.blob_size += bio.chunkinfo.compressed_size() as u64;
-        debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
-    }
-
-    /// Check the `BlobIoRange` object is valid.
-    pub fn validate(&self) -> bool {
-        let blob_end = self.blob_info.uncompressed_size;
-        if self.blob_offset >= blob_end || self.blob_size > blob_end {
-            return false;
-        }
-        match self.blob_offset.checked_add(self.blob_size) {
-            None => return false,
-            Some(end) => {
-                if end > blob_end {
-                    return false;
-                }
-            }
-        }
-
-        if self.chunks.len() != self.tags.len() {
-            return false;
-        }
-
-        if self.chunks.len() > 1 {
-            for idx in 1..self.chunks.len() {
-                if self.chunks[idx - 1].id() != self.chunks[idx].id() {
-                    return false;
-                }
-            }
-        }
-
-        true
+        self.chunks.push(bio.chunkinfo.0.clone());
     }
 
     fn tag_from_desc(bio: &BlobIoDesc) -> BlobIoTag {
         if bio.user_io {
             BlobIoTag::User(BlobIoSegment::new(bio.offset, bio.size as u32))
         } else {
-            BlobIoTag::Internal(bio.chunkinfo.compressed_offset())
+            BlobIoTag::Internal
         }
     }
 }
@@ -885,22 +802,12 @@ pub trait BlobObject: AsRawFd {
 
 /// A wrapping object over an underlying [BlobCache] object.
 ///
-/// All blob Io requests are actually served by the underlying [BlobCache] object. A new method
-/// [update()]() is added to switch the storage backend on demand.
+/// All blob Io requests are actually served by the underlying [BlobCache] object. The wrapper
+/// provides an interface to dynamically switch underlying [BlobCache] objects.
+#[derive(Clone, Default)]
 pub struct BlobDevice {
-    //meta: ArcSwap<Arc<dyn BlobCache>>,
-    blobs: ArcSwap<Vec<Arc<dyn BlobCache>>>,
+    blobs: Arc<ArcSwap<Vec<Arc<dyn BlobCache>>>>,
     blob_count: usize,
-}
-
-impl Clone for BlobDevice {
-    fn clone(&self) -> Self {
-        BlobDevice {
-            // https://docs.rs/arc-swap/latest/arc_swap/docs/limitations/index.html#no-clone-implementation
-            blobs: ArcSwap::new(self.blobs.load_full()),
-            blob_count: self.blob_count,
-        }
-    }
 }
 
 impl BlobDevice {
@@ -916,7 +823,7 @@ impl BlobDevice {
         }
 
         Ok(BlobDevice {
-            blobs: ArcSwap::new(Arc::new(blobs)),
+            blobs: Arc::new(ArcSwap::new(Arc::new(blobs))),
             blob_count: blob_infos.len(),
         })
     }
@@ -932,8 +839,11 @@ impl BlobDevice {
         fs_prefetch: bool,
     ) -> io::Result<()> {
         if self.blobs.load().len() != blob_infos.len() {
-            return Err(einval!("number of blobs doesn't match"));
+            return Err(einval!(
+                "number of blobs doesn't match when update 'BlobDevice' object"
+            ));
         }
+
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
             let blob = BLOB_FACTORY.new_blob_cache(config, blob_info, blob_infos.len())?;
@@ -959,7 +869,7 @@ impl BlobDevice {
         Ok(())
     }
 
-    /// Read a range of data from blob into the provided writer
+    /// Read a range of data from a data blob into the provided writer
     pub fn read_to(&self, w: &mut dyn ZeroCopyWriter, desc: &mut BlobIoVec) -> io::Result<usize> {
         // Validate that:
         // - bi_vec[0] is valid
@@ -971,9 +881,7 @@ impl BlobDevice {
             } else {
                 Err(einval!("BlobIoVec size doesn't match."))
             }
-        } else if !desc.validate() {
-            Err(einval!("BlobIoVec targets multiple blobs."))
-        } else if desc.bi_vec[0].blob.blob_index() as usize >= self.blob_count {
+        } else if desc.blob_index() as usize >= self.blob_count {
             Err(einval!("BlobIoVec has out of range blob_index."))
         } else {
             let size = desc.bi_size;
@@ -1024,44 +932,6 @@ impl BlobDevice {
         }
     }
 
-    /// Check all chunks related to the blob io vector are ready.
-    pub fn all_chunks_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
-        for io_vec in io_vecs.iter() {
-            if let Some(blob) = self.get_blob_by_iovec(io_vec) {
-                let chunk_map = blob.get_chunk_map();
-                for desc in io_vec.bi_vec.iter() {
-                    if !chunk_map.is_ready(&desc.chunkinfo).unwrap_or(false) {
-                        return false;
-                    }
-                }
-            } else {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
-        if let Some(blob_index) = iovec.get_target_blob_index() {
-            if (blob_index as usize) < self.blob_count {
-                return Some(self.blobs.load()[blob_index as usize].clone());
-            }
-        }
-
-        None
-    }
-
-    fn get_blob_by_id(&self, blob_id: &str) -> Option<Arc<dyn BlobCache>> {
-        for blob in self.blobs.load().iter() {
-            if blob.blob_id() == blob_id {
-                return Some(blob.clone());
-            }
-        }
-
-        None
-    }
-
     /// fetch specified blob data in a synchronous way.
     pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
         for req in prefetches {
@@ -1097,9 +967,60 @@ impl BlobDevice {
 
         Ok(())
     }
+
+    /// Check all chunks related to the blob io vector are ready.
+    pub fn all_chunks_ready(&self, io_vecs: &[BlobIoVec]) -> bool {
+        for io_vec in io_vecs.iter() {
+            if let Some(blob) = self.get_blob_by_iovec(io_vec) {
+                let chunk_map = blob.get_chunk_map();
+                for desc in io_vec.bi_vec.iter() {
+                    if !chunk_map.is_ready(&desc.chunkinfo).unwrap_or(false) {
+                        return false;
+                    }
+                }
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// RAFS V6: create a `BlobIoChunk` for chunk with index `chunk_index`.
+    pub fn create_io_chunk(&self, blob_index: u32, chunk_index: u32) -> Option<BlobIoChunk> {
+        if (blob_index as usize) < self.blob_count {
+            let state = self.blobs.load();
+            let blob = &state[blob_index as usize];
+            blob.get_chunk_info(chunk_index).map(|v| v.into())
+        } else {
+            None
+        }
+    }
+
+    fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
+        let blob_index = iovec.blob_index();
+        if (blob_index as usize) < self.blob_count {
+            return Some(self.blobs.load()[blob_index as usize].clone());
+        }
+
+        None
+    }
+
+    fn get_blob_by_id(&self, blob_id: &str) -> Option<Arc<dyn BlobCache>> {
+        for blob in self.blobs.load().iter() {
+            if blob.blob_id() == blob_id {
+                return Some(blob.clone());
+            }
+        }
+
+        None
+    }
 }
 
 /// Struct to execute Io requests with a single blob.
+///
+/// It's used to support `BlobDevice::read_to()` and acts the main entrance to read chunk data
+/// from data blobs.
 struct BlobDeviceIoVec<'a> {
     dev: &'a BlobDevice,
     iovec: &'a mut BlobIoVec,
@@ -1108,30 +1029,6 @@ struct BlobDeviceIoVec<'a> {
 impl<'a> BlobDeviceIoVec<'a> {
     fn new(dev: &'a BlobDevice, iovec: &'a mut BlobIoVec) -> Self {
         BlobDeviceIoVec { dev, iovec }
-    }
-}
-
-#[allow(dead_code)]
-impl BlobDeviceIoVec<'_> {
-    fn fill_hole(&self, bufs: &[FileVolatileSlice], size: usize) -> Result<usize, Error> {
-        let mut count: usize = 0;
-        let mut remain = size;
-
-        for &buf in bufs.iter() {
-            let mut total = cmp::min(remain, buf.len());
-            let mut offset = 0;
-            while total > 0 {
-                let cnt = cmp::min(total, ZEROS.len());
-                buf.write_slice(&ZEROS[0..cnt], offset)
-                    .map_err(|_| eio!("decompression failed"))?;
-                count += cnt;
-                remain -= cnt;
-                total -= cnt;
-                offset += cnt;
-            }
-        }
-
-        Ok(count)
     }
 }
 
@@ -1160,18 +1057,20 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         buffers: &[FileVolatileSlice],
         _offset: u64,
     ) -> Result<usize, Error> {
-        // BlobDevice::read_to() has validated that:
-        // - bi_vec[0] is valid
-        // - bi_vec[0].blob.blob_index() is valid
-        // - all IOs are against a single blob.
-        if let Some(index) = self.iovec.get_target_blob_index() {
-            let blobs = &self.dev.blobs.load();
-            if (index as usize) < blobs.len() {
-                return blobs[index as usize].read(self.iovec, buffers);
-            }
-        }
+        // BlobDevice::read_to() has validated that all IOs are against a single blob.
+        let index = self.iovec.blob_index();
+        let blobs = &self.dev.blobs.load();
 
-        Err(einval!("can not get blob index"))
+        if (index as usize) < blobs.len() {
+            blobs[index as usize].read(self.iovec, buffers)
+        } else {
+            let msg = format!(
+                "failed to get blob object for BlobIoVec, index {}, blob array len: {}",
+                index,
+                blobs.len()
+            );
+            Err(einval!(msg))
+        }
     }
 
     fn write_at_volatile(
@@ -1245,7 +1144,88 @@ mod tests {
     }
 
     #[test]
-    fn test_is_all_chunk_ready() {
-        // TODO
+    fn test_chunk_is_continuous() {
+        let blob_info = Arc::new(BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+        ));
+        let chunk1 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0,
+            uncompress_offset: 0,
+            file_offset: 0,
+            index: 0,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let chunk2 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x800,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let chunk3 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x1800,
+            uncompress_offset: 0x3000,
+            file_offset: 0x3000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+
+        let desc1 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk1.into(),
+            offset: 0,
+            size: 0x1000,
+            user_io: true,
+        };
+        let desc2 = BlobIoDesc {
+            blob: blob_info.clone(),
+            chunkinfo: chunk2.into(),
+            offset: 0,
+            size: 0x1000,
+            user_io: true,
+        };
+        let desc3 = BlobIoDesc {
+            blob: blob_info,
+            chunkinfo: chunk3.into(),
+            offset: 0,
+            size: 0x1000,
+            user_io: true,
+        };
+
+        assert!(desc1.is_continuous(&desc2, 0x0));
+        assert!(desc1.is_continuous(&desc2, 0x1000));
+        assert!(!desc2.is_continuous(&desc1, 0x1000));
+        assert!(!desc2.is_continuous(&desc1, 0x0));
+
+        assert!(!desc1.is_continuous(&desc3, 0x0));
+        assert!(!desc1.is_continuous(&desc3, 0x400));
+        assert!(!desc1.is_continuous(&desc3, 0x800));
+        assert!(desc1.is_continuous(&desc3, 0x1000));
+
+        assert!(!desc2.is_continuous(&desc3, 0x0));
+        assert!(!desc2.is_continuous(&desc3, 0x400));
+        assert!(desc2.is_continuous(&desc3, 0x800));
+        assert!(desc2.is_continuous(&desc3, 0x1000));
     }
 }
