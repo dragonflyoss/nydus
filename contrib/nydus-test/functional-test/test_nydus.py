@@ -664,7 +664,7 @@ def test_certain_files_prefetch(
     rafs_conf.dump_rafs_conf()
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
-        rafs.thread_num(7).mount()
+    rafs.thread_num(7).mount()
 
     wg = WorkloadGen(nydus_anchor.mountpoint, nydus_scratch_image.rootfs())
 
@@ -698,7 +698,6 @@ def test_digest_validate(
     wg.finish_torture_read()
 
 
-@pytest.mark.skip(reason="This test cases runs forever")
 @pytest.mark.parametrize("backend", [Backend.BACKEND_PROXY])
 def test_specified_prefetch(
     nydus_anchor: NydusAnchor,
@@ -711,9 +710,8 @@ def test_specified_prefetch(
         Nydusd can have a list including files and directories input when started.
         Then it can prefetch files from backend per as to the list.
     """
-
     rafs_conf.set_rafs_backend(backend)
-    rafs_conf.enable_fs_prefetch(prefetch_all=True)
+    rafs_conf.enable_fs_prefetch(prefetch_all=False)
     rafs_conf.enable_rafs_blobcache()
     rafs_conf.dump_rafs_conf()
 
@@ -729,34 +727,38 @@ def test_specified_prefetch(
     nydus_scratch_image.set_backend(backend).create_image()
 
     prefetching_files = dirs
-    prefetching_files += dist.files[:-10]
-    prefetching_files += dist.dirs[:-5]
-    prefetching_files += dist.symlinks[:-10]
+    prefetching_files += dist.files[:10]
+    prefetching_files += dist.dirs[:5]
+    prefetching_files += dist.symlinks[:10]
+    prefetching_files.append(list(dist.hardlinks.values())[1][0])
     # Fuzz
     prefetching_files.append("/a/b/c/d")
     prefetching_files.append(os.path.join("/", "f/g/h/"))
 
-    specified_dirs = " ".join([os.path.join("/", d) for d in prefetching_files])
+    specified_files = " ".join([os.path.join("/", d) for d in prefetching_files])
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
-    rafs.prefetch_files(specified_dirs).mount()
-    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_scratch_image.rootfs())
+    rafs.prefetch_files(specified_files).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
-    wg.setup_workload_generator()
-    blobcache_metrics = nc.get_blobcache_metrics()
-    wg.torture_read(5, 10)
 
-    while blobcache_metrics["prefetch_workers"] != 0:
-        time.sleep(0.5)
-        blobcache_metrics = nc.get_blobcache_metrics()
+    # blobcache_metrics = nc.get_blobcache_metrics()
+    # Storage prefetch workers does not stop any more
+    # while blobcache_metrics["prefetch_workers"] != 0:
+    #     time.sleep(0.5)
+    #     blobcache_metrics = nc.get_blobcache_metrics()
 
-    begin = nc.get_backend_metrics()["read_amount_total"]
     time.sleep(1)
-    end = nc.get_backend_metrics()["read_amount_total"]
+    begin = nc.get_backend_metrics()["read_amount_total"]
+    # end = nc.get_backend_metrics()["read_amount_total"]
 
-    assert end == begin
+    assert begin != 0
+    wg = WorkloadGen(nydus_anchor.mountpoint, nydus_scratch_image.rootfs())
+    wg.setup_workload_generator()
+    wg.torture_read(5, 10)
     wg.finish_torture_read()
+
+    assert not wg.io_error
 
 
 def test_build_image_param_blobid(
