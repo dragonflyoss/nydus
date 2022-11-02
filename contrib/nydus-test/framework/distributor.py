@@ -101,7 +101,6 @@ class Distributor:
         self.hardlinks[source_file] = []
         self.hardlink_aliases = []
         for i in range(0, count):
-
             if randint(0, 16) % 4 == 0:
                 source_file = _create_new_source()
                 self.hardlinks[source_file] = []
