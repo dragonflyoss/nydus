@@ -503,12 +503,19 @@ class Skopeo:
             repo = Skopeo.repo_from_image_ref(image)
             cmd = [
                 self.bin,
+                "--insecure-policy",
                 "copy",
                 f"docker://{repo}@{resource_digest}",
                 f"dir:{extraced_dir}",
             ]
         else:
-            cmd = [self.bin, "copy", f"docker://{image}", f"dir:{extraced_dir}"]
+            cmd = [
+                self.bin,
+                "copy",
+                "--insecure-policy",
+                f"docker://{image}",
+                f"dir:{extraced_dir}",
+            ]
 
         if not tls_verify:
             cmd.insert(1, "--tls-verify=false")
@@ -538,6 +545,7 @@ class Skopeo:
     def copy_all_to_registry(self, source_image_tagged, dest_image_tagged):
         cmd = [
             self.bin,
+            "--insecure-policy",
             "copy",
             "--all",
             "--tls-verify=false",
