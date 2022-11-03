@@ -194,19 +194,15 @@ func appendBlobs(oldBlobs []string, newBlobs []string) []string {
 	return oldBlobs
 }
 
-func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) error {
+func (mm *manifestManager) Push(ctx context.Context, builtLayers []*buildLayer) error {
 	var (
-		blobListInAnnotation []string
-		referenceBlobs       []string
-		layers               []ocispec.Descriptor
+		referenceBlobs []string
+		layers         []ocispec.Descriptor
 	)
-	for idx, _layer := range buildLayers {
+	for idx, _layer := range builtLayers {
 		record := _layer.GetCacheRecord()
 		referenceBlobs = appendBlobs(referenceBlobs, layersHex(_layer.referenceBlobs))
-		blobListInAnnotation = appendBlobs(blobListInAnnotation, layersHex(_layer.referenceBlobs))
 		if record.NydusBlobDesc != nil {
-			// Write blob digest list in JSON format to layer annotation of bootstrap.
-			blobListInAnnotation = append(blobListInAnnotation, record.NydusBlobDesc.Digest.Hex())
 			// For registry backend, we need to write the blob layer to
 			// manifest to prevent them from being deleted by registry GC.
 			if mm.backend.Type() == backend.RegistryBackend {
@@ -222,15 +218,10 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 			}
 		}
 
-		// Only need to write lastest bootstrap layer in nydus manifest
-		if idx == len(buildLayers)-1 {
-			blobListBytes, err := json.Marshal(blobListInAnnotation)
-			if err != nil {
-				return errors.Wrap(err, "Marshal blob list")
-			}
-			record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobIDs] = string(blobListBytes)
+		// Only need to write latest bootstrap layer in nydus manifest
+		if idx == len(builtLayers)-1 {
 			if len(referenceBlobs) > 0 {
-				blobListBytes, err = json.Marshal(referenceBlobs)
+				blobListBytes, err := json.Marshal(referenceBlobs)
 				if err != nil {
 					return errors.Wrap(err, "Marshal blob list")
 				}
@@ -250,7 +241,6 @@ func (mm *manifestManager) Push(ctx context.Context, buildLayers []*buildLayer) 
 	// Remove useless annotations from layer
 	validAnnotationKeys := map[string]bool{
 		utils.LayerAnnotationNydusBlob:             true,
-		utils.LayerAnnotationNydusBlobIDs:          true,
 		utils.LayerAnnotationNydusReferenceBlobIDs: true,
 		utils.LayerAnnotationNydusBootstrap:        true,
 		utils.LayerAnnotationNydusFsVersion:        true,
