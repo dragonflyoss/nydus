@@ -423,6 +423,7 @@ impl Default for ProxyConfig {
 
 /// Configuration for mirror.
 #[derive(Clone, Deserialize, Serialize, Debug)]
+#[serde(default)]
 pub struct MirrorConfig {
     /// Mirror server URL, for example http://127.0.0.1:65001.
     pub host: String,
@@ -435,6 +436,28 @@ pub struct MirrorConfig {
     /// e.g. when using Dragonfly server as mirror, authorization through it will affect performance.
     #[serde(default)]
     pub auth_through: bool,
+    /// Interval of mirror health checking, in seconds.
+    #[serde(default = "default_check_interval")]
+    pub health_check_interval: u64,
+    /// Failure count for which mirror is considered unavailable.
+    #[serde(default = "default_failure_limit")]
+    pub failure_limit: u8,
+    /// Ping URL to check mirror server health.
+    #[serde(default)]
+    pub ping_url: String,
+}
+
+impl Default for MirrorConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            headers: HashMap::new(),
+            auth_through: false,
+            health_check_interval: 5,
+            failure_limit: 5,
+            ping_url: String::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -948,6 +971,14 @@ fn default_http_scheme() -> String {
 }
 
 fn default_http_timeout() -> u32 {
+    5
+}
+
+fn default_check_interval() -> u64 {
+    5
+}
+
+fn default_failure_limit() -> u8 {
     5
 }
 
