@@ -43,7 +43,6 @@
       "digest": "sha256:aec98c9e3dce739877b8f5fe1cddd339de1db2b36c20995d76f6265056dbdb08",
       "size": 273320,
       "annotations": {
-        "containerd.io/snapshot/nydus-blob-ids": "[\"09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059\",\"b413839e4ee5248697ef30fe9a84b659fa744d69bbc9b7754113adc2b2b6bc90\",\"b6a85be8248b0d3c2f0565ef71d549f404f8edcee1ab666c9871a8e6d9384860\",\"00d151e7d392e68e2c756a6fc42640006ddc0a98d37dba3f90a7b73f63188bbd\"]",
         "containerd.io/snapshot/nydus-bootstrap": "true",
         "containerd.io/snapshot/nydus-reference-blob-ids": "[\"09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059\"]"
       }
