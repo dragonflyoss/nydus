@@ -20,7 +20,8 @@ type mockBackend struct {
 
 func (m *mockBackend) Upload(ctx context.Context, blobID, blobPath string, blobSize int64, forcePush bool) (*ocispec.Descriptor, error) {
 	args := m.Called(ctx, blobID, blobPath, blobSize, forcePush)
-	return nil, args.Error(0)
+	desc := args.Get(0)
+	return desc.(*ocispec.Descriptor), nil
 }
 
 func (m *mockBackend) Finalize(cancel bool) error {
@@ -94,8 +95,12 @@ func TestPusher_Push(t *testing.T) {
 
 	hash := "3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090"
 	assert.Nil(t, err)
-	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
-	mp.On("Upload", mock.Anything, hash, mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
+	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{
+		URLs: []string{"oss://testbucket/testmetaprefix/mock.meta"},
+	}, nil)
+	mp.On("Upload", mock.Anything, hash, mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{
+		URLs: []string{"oss://testbucket/testblobprefix/3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090"},
+	}, nil)
 	res, err := pusher.Push(PushRequest{
 		Meta: "mock.meta",
 		Blob: hash,
