@@ -222,14 +222,14 @@ pub(crate) fn respond(resp: Response, catch_status: bool) -> ConnectionResult<Re
 pub(crate) struct Connection {
     client: Client,
     proxy: Option<Arc<Proxy>>,
-    mirrors: Vec<Arc<Mirror>>,
-    shutdown: AtomicBool,
+    pub mirrors: Vec<Arc<Mirror>>,
+    pub shutdown: AtomicBool,
 }
 
 #[derive(Debug)]
 pub(crate) struct Mirror {
     /// Information for mirror from configuration file.
-    config: MirrorConfig,
+    pub config: MirrorConfig,
     /// Mirror status, it will be set to false by atomic operation when mirror is not work.
     status: AtomicBool,
     /// Failed times requesting mirror, the status will be marked as false when failed_times = failure_limit.
