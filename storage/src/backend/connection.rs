@@ -303,7 +303,7 @@ impl Connection {
         connection.start_proxy_health_thread(config.connect_timeout as u64);
 
         // Start mirrors' health checking thread.
-        connection.start_mirror_health_thread(config.timeout as u64);
+        connection.start_mirrors_health_thread(config.timeout as u64);
 
         Ok(connection)
     }
@@ -351,7 +351,7 @@ impl Connection {
         }
     }
 
-    fn start_mirror_health_thread(&self, timeout: u64) {
+    fn start_mirrors_health_thread(&self, timeout: u64) {
         for mirror in self.mirrors.iter() {
             let mirror_cloned = mirror.clone();
             thread::spawn(move || {
