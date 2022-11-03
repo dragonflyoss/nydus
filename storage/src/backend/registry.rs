@@ -647,7 +647,7 @@ impl Registry {
 
         for mirror in mirrors.iter() {
             if !mirror.config.auth_through {
-                registry.run_refresh_token_thread();
+                registry.start_refresh_token_thread();
                 info!("Refresh token thread started.");
                 break;
             }
@@ -681,7 +681,7 @@ impl Registry {
         }
     }
 
-    fn run_refresh_token_thread(&self) {
+    fn start_refresh_token_thread(&self) {
         let conn = self.connection.clone();
         let state = self.state.clone();
         // The default refresh token internal is 10 minutes.
