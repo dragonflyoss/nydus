@@ -1,6 +1,6 @@
 [package]
 name = "nydus-blobfs"
-version = "0.1.0"
+version = "0.1.1"
 description = "Blob object file system for Nydus Image Service"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
