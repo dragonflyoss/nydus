@@ -265,13 +265,21 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
               // When Dragonfly does not cache data, it will pull them from "X-Dragonfly-Registry". 
               // If not set "X-Dragonfly-Registry", Dragonfly will pull data from proxy.registryMirror.url.
               "X-Dragonfly-Registry": "https://index.docker.io"
-            }
+            },
+            // This URL endpoint is used to check the health of mirror server, and if the mirror is unhealthy, 
+            // the request will fallback to the next mirror or the original registry server. 
+            // Use $host/v2 as default if left empty.
+            "ping_url": "http://127.0.0.1:40901/server/ping",
+            // Interval time (s) to check and recover unavailable mirror. Use 5 as default if left empty.
+            "health_check_interval": 5,
+            // Failure counts before disabling this mirror. Use 5 as default if left empty.
+            "failure_limit": 5,
           },
           {
             "host": "http://dragonfly2.io:65001",
             "headers": {
               "X-Dragonfly-Registry": "https://index.docker.io"
-            }
+            },
           }
         ],
         ...
