@@ -64,6 +64,8 @@ const BLOB_ID_MAXIMUM_LENGTH: usize = 255;
 pub struct OutputSerializer {
     /// The binary version of builder (nydus-image).
     version: String,
+    /// RAFS meta data file path.
+    bootstrap: String,
     /// Represents all blob in blob table ordered by blob index, this field
     /// only include the layer that does have a blob, and should be deprecated
     /// in future, use `artifacts` field to replace.
@@ -93,11 +95,13 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
+                bootstrap: build_output.bootstrap_path.unwrap_or_default(),
                 blobs: build_output.blobs,
                 trace,
             };
 
-            serde_json::to_writer(w, &output).context("failed to write result to output file")?;
+            serde_json::to_writer_pretty(w, &output)
+                .context("failed to write result to output file")?;
         }
 
         Ok(())
@@ -107,6 +111,7 @@ impl OutputSerializer {
         matches: &clap::ArgMatches,
         build_info: &BuildTimeInfo,
         blob_ids: Vec<String>,
+        bootstrap: &Path,
     ) -> Result<()> {
         let output_json: Option<PathBuf> = matches
             .get_one::<String>("output-json")
@@ -123,6 +128,7 @@ impl OutputSerializer {
             let version = format!("{}-{}", build_info.package_ver, build_info.git_commit);
             let output = Self {
                 version,
+                bootstrap: bootstrap.display().to_string(),
                 blobs: blob_ids,
                 trace,
             };
@@ -208,7 +214,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("blob")
                         .short('b')
                         .help("path to store generated RAFS filesystem data blob")
-                        .required_unless_present_any(&["backend-type", "type", "blob-dir"]),
+                        .required_unless_present_any(&["type", "blob-dir"]),
                 )
                 .arg(
                     Arg::new("blob-id")
@@ -246,7 +252,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .short('c')
                         .help("algorithm to compress image data blob:")
                         .required(false)
-                        .default_value("lz4_block")
+                        .default_value("zstd")
                         .value_parser(["none", "lz4_block", "gzip", "zstd"]),
                 )
                 .arg(
@@ -255,7 +261,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .short('d')
                         .help("algorithm to digest inodes and data chunks:")
                         .required(false)
-                        .default_value("blake3")
+                        .default_value("sha256")
                         .value_parser(["blake3", "sha256"]),
                 )
                 .arg(
@@ -263,7 +269,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("fs-version")
                         .short('v')
                         .help("RAFS filesystem format version number:")
-                        .default_value("5")
+                        .default_value("6")
                         .value_parser(["5", "6"]),
                 )
                 .arg(
@@ -280,7 +286,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("aligned-chunk")
                         .long("aligned-chunk")
                         .short('A')
-                        .help("Align uncompressed data chunk to 4K")
+                        .help("Align uncompressed data chunk to 4K, apply to RAFS V5 only")
                         .action(ArgAction::SetTrue)
                 )
                 .arg(
@@ -311,18 +317,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 )
                 .arg(
                     arg_output_json.clone(),
-                )
-                .arg(
-                    Arg::new("backend-type")
-                        .long("backend-type")
-                        .help("[deprecated!] Blob storage backend type, only support localfs for compatibility. Try use --blob instead.")
-                        .requires("backend-config")
-                        .value_parser(["localfs"]),
-                )
-                .arg(
-                    Arg::new("backend-config")
-                        .long("backend-config")
-                        .help("[deprecated!] Blob storage backend config - JSON string, only support localfs for compatibility"),
                 )
         )
         .subcommand(
@@ -356,9 +350,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .about("Validate RAFS filesystem metadata")
                 .arg(
                     Arg::new("bootstrap")
-                        .long("bootstrap")
-                        .short('B')
-                        .help("path to RAFS metadata blob (required)")
+                        .help("path to RAFS metadata blob file (required)")
                         .required(true),
                 )
                 .arg(
@@ -375,19 +367,17 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         )
         .subcommand(
             App::new("inspect")
-                .about("Inspects nydus image's filesystem metadata")
+                .about("Inspect RAFS filesystem metadata")
                 .arg(
                     Arg::new("bootstrap")
-                        .long("bootstrap")
-                        .short('B')
-                        .help("path to nydus image's metadata blob (required)")
+                        .help("path to RAFS metadata file)")
                         .required(true),
                 )
                 .arg(
                     Arg::new("request")
                         .long("request")
                         .short('R')
-                        .help("inspect nydus image's filesystem metadata in request mode")
+                        .help("inspect RAFS filesystem metadata in request mode")
                         .required(false),
                 )
         )
@@ -578,7 +568,6 @@ impl Command {
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let aligned_chunk = if version.is_v6() {
-            info!("v6 enforces to use \"aligned-chunk\".");
             true
         } else {
             // get_fs_version makes sure it's either v6 or v5.
@@ -764,7 +753,7 @@ impl Command {
             }
         }
 
-        info!("build successfully: {:?}", build_output,);
+        info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
     }
 
@@ -871,7 +860,7 @@ impl Command {
             blob_ids.push(blob.blob_id().to_string());
         }
 
-        OutputSerializer::dump_with_check(matches, build_info, blob_ids)?;
+        OutputSerializer::dump_with_check(matches, build_info, blob_ids, bootstrap_path)?;
 
         Ok(())
     }

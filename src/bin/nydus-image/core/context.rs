@@ -10,8 +10,7 @@ use std::convert::TryFrom;
 use std::fmt;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
-use std::path::PathBuf;
-use std::path::{Display, Path};
+use std::path::{Display, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -944,6 +943,23 @@ pub struct BuildOutput {
     pub blob_size: Option<u64>,
     /// File path for the metadata blob.
     pub bootstrap_path: Option<String>,
+}
+
+impl fmt::Display for BuildOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "meta blob path: {}",
+            self.bootstrap_path.as_deref().unwrap_or("<none>")
+        )?;
+        writeln!(
+            f,
+            "data blob size: 0x{:x}",
+            self.blob_size.unwrap_or_default()
+        )?;
+        write!(f, "data blobs: {:?}", self.blobs)?;
+        Ok(())
+    }
 }
 
 impl BuildOutput {
