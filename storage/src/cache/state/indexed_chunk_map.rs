@@ -210,7 +210,7 @@ mod tests {
         let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.map.count, 1);
-        assert_eq!(map.map.size, 0x1001);
+        assert_eq!(map.map.size(), 0x1001);
         assert!(!map.is_range_all_ready());
         assert!(!map.is_ready(chunk.as_base()).unwrap());
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
@@ -246,7 +246,7 @@ mod tests {
         let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.map.count, 1);
-        assert_eq!(map.map.size, 0x1001);
+        assert_eq!(map.map.size(), 0x1001);
         assert!(!map.is_range_all_ready());
         assert!(!map.is_ready(chunk.as_base()).unwrap());
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
@@ -292,7 +292,7 @@ mod tests {
         let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert!(map.is_range_all_ready());
         assert_eq!(map.map.count, 1);
-        assert_eq!(map.map.size, 0x1001);
+        assert_eq!(map.map.size(), 0x1001);
         assert!(map.is_ready(chunk.as_base()).unwrap());
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();
         assert!(map.is_ready(chunk.as_base()).unwrap());
@@ -337,7 +337,7 @@ mod tests {
         let map = IndexedChunkMap::new(&blob_path, 1, true).unwrap();
         assert_eq!(map.map.not_ready_count.load(Ordering::Acquire), 1);
         assert_eq!(map.map.count, 1);
-        assert_eq!(map.map.size, 0x1001);
+        assert_eq!(map.map.size(), 0x1001);
         assert!(!map.is_range_all_ready());
         assert!(!map.is_ready(chunk.as_base()).unwrap());
         map.set_ready_and_clear_pending(chunk.as_base()).unwrap();

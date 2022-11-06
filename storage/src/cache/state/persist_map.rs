@@ -3,13 +3,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Result, Write};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use nydus_utils::div_round_up;
+use nydus_utils::filemap::{clone_file, FileMapState};
 
 use crate::utils::readahead;
 
@@ -43,9 +43,8 @@ impl Header {
 
 pub(crate) struct PersistMap {
     pub count: u32,
-    pub size: usize,
-    pub base: *const u8,
     pub not_ready_count: AtomicU32,
+    filemap: FileMapState,
 }
 
 impl PersistMap {
@@ -86,24 +85,9 @@ impl PersistMap {
             return Err(einval!(format!("chunk_map file {:?} is invalid", filename)));
         }
 
-        let fd = file.as_raw_fd();
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                expected_size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(last_error!("failed to mmap blob chunk_map"));
-        } else if base.is_null() {
-            return Err(ebadf!("failed to mmap blob chunk_map"));
-        }
-
-        let header = unsafe { &mut *(base as *mut Header) };
+        let file2 = clone_file(file.as_raw_fd())?;
+        let mut filemap = FileMapState::new(file2, 0, expected_size as usize, true)?;
+        let header = filemap.get_mut::<Header>(0)?;
         if header.magic != MAGIC1 {
             if !create {
                 return Err(enoent!());
@@ -112,8 +96,7 @@ impl PersistMap {
             // There's race window between "file.set_len()" and "file.write(&header)". If that
             // happens, all file content should be zero. Detect the race window and write out
             // header again to fix it.
-            let content =
-                unsafe { std::slice::from_raw_parts(base as *const u8, expected_size as usize) };
+            let content = filemap.get_slice::<u8>(0, expected_size as usize)?;
             for c in content {
                 if *c != 0 {
                     return Err(einval!(format!(
@@ -127,6 +110,7 @@ impl PersistMap {
             Self::write_header(&mut file, expected_size)?;
         }
 
+        let header = filemap.get_mut::<Header>(0)?;
         let mut not_ready_count = chunk_count;
         if header.version >= 1 {
             if header.magic2 != MAGIC2 {
@@ -142,12 +126,13 @@ impl PersistMap {
             } else {
                 let mut ready_count = 0;
                 for idx in HEADER_SIZE..expected_size as usize {
-                    let current = unsafe { &*(base.add(idx) as *const AtomicU8) };
+                    let current = filemap.get_ref::<AtomicU8>(idx)?;
                     let val = current.load(Ordering::Acquire);
                     ready_count += val.count_ones() as u32;
                 }
 
                 if ready_count >= chunk_count {
+                    let header = filemap.get_mut::<Header>(0)?;
                     header.all_ready = MAGIC_ALL_READY;
                     let _ = file.sync_all();
                     not_ready_count = 0;
@@ -157,16 +142,15 @@ impl PersistMap {
             }
         }
 
-        readahead(fd, 0, expected_size);
+        readahead(file.as_raw_fd(), 0, expected_size);
         if !persist {
             let _ = std::fs::remove_file(filename);
         }
 
         Ok(Self {
             count: chunk_count,
-            size: expected_size as usize,
-            base: base as *const u8,
             not_ready_count: AtomicU32::new(not_ready_count),
+            filemap,
         })
     }
 
@@ -189,6 +173,11 @@ impl PersistMap {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn size(&self) -> usize {
+        self.filemap.size()
+    }
+
     #[inline]
     pub fn validate_index(&self, idx: u32) -> Result<u32> {
         if idx < self.count {
@@ -204,7 +193,7 @@ impl PersistMap {
     #[inline]
     fn read_u8(&self, idx: u32) -> u8 {
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let current = unsafe { &*(self.base.add(start) as *const AtomicU8) };
+        let current = self.filemap.get_ref::<AtomicU8>(start).unwrap();
 
         current.load(Ordering::Acquire)
     }
@@ -214,7 +203,7 @@ impl PersistMap {
         let mask = Self::index_to_mask(idx);
         let expected = current | mask;
         let start = HEADER_SIZE + (idx as usize >> 3);
-        let atomic_value = unsafe { &*(self.base.add(start) as *const AtomicU8) };
+        let atomic_value = self.filemap.get_ref::<AtomicU8>(start).unwrap();
 
         atomic_value
             .compare_exchange(current, expected, Ordering::Acquire, Ordering::Relaxed)
@@ -258,13 +247,13 @@ impl PersistMap {
     }
 
     fn mark_all_ready(&self) {
-        let base = self.base as *const c_void as *mut c_void;
-        unsafe {
-            if libc::msync(base, self.size, libc::MS_SYNC) == 0 {
-                let header = &mut *(self.base as *mut Header);
+        if self.filemap.sync_data().is_ok() {
+            /*
+            if let Ok(header) = self.filemap.get_mut::<Header>(0) {
                 header.all_ready = MAGIC_ALL_READY;
-                let _ = libc::msync(base, HEADER_SIZE, libc::MS_SYNC);
+                let _ = self.filemap.sync_data();
             }
+             */
         }
     }
 
@@ -273,16 +262,3 @@ impl PersistMap {
         self.not_ready_count.load(Ordering::Acquire) == 0
     }
 }
-
-impl Drop for PersistMap {
-    fn drop(&mut self) {
-        if !self.base.is_null() {
-            unsafe { libc::munmap(self.base as *mut libc::c_void, self.size) };
-            self.base = std::ptr::null();
-        }
-    }
-}
-
-unsafe impl Send for PersistMap {}
-
-unsafe impl Sync for PersistMap {}

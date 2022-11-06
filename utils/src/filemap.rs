@@ -88,6 +88,11 @@ impl FileMapState {
         })
     }
 
+    /// Get size of mapped region.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
     /// Cast a subregion of the mapped area to an object reference.
     pub fn get_ref<T>(&self, offset: usize) -> Result<&T> {
         let start = self.base.wrapping_add(offset);
