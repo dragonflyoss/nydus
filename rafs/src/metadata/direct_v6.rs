@@ -77,10 +77,9 @@ fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
 /// Other data structures should not store raw pointers, instead they should hold a reference to
 /// the DirectMappingState object and store an offset, so a `pointer` could be reconstruct by
 /// `DirectMappingState.base + offset`.
-#[derive(Clone)]
 struct DirectMappingState {
-    meta: RafsSuperMeta,
-    blob_table: Arc<RafsV6BlobTable>,
+    meta: Arc<RafsSuperMeta>,
+    blob_table: RafsV6BlobTable,
     base: *const u8,
     end: *const u8,
     size: usize,
@@ -94,8 +93,8 @@ unsafe impl Sync for DirectMappingState {}
 impl DirectMappingState {
     fn new(meta: &RafsSuperMeta) -> Self {
         DirectMappingState {
-            meta: *meta,
-            blob_table: Arc::new(RafsV6BlobTable::default()),
+            meta: Arc::new(*meta),
+            blob_table: RafsV6BlobTable::default(),
             fd: -1,
             base: std::ptr::null(),
             end: std::ptr::null(),
@@ -148,16 +147,9 @@ impl Drop for DirectMappingState {
 }
 
 /// Direct-mapped Rafs v6 super block.
+#[derive(Clone)]
 pub struct DirectSuperBlockV6 {
-    state: ArcSwap<DirectMappingState>,
-}
-
-impl Clone for DirectSuperBlockV6 {
-    fn clone(&self) -> Self {
-        DirectSuperBlockV6 {
-            state: ArcSwap::new(self.state.load_full()),
-        }
-    }
+    state: Arc<ArcSwap<DirectMappingState>>,
 }
 
 impl DirectSuperBlockV6 {
@@ -167,7 +159,7 @@ impl DirectSuperBlockV6 {
         let state = DirectMappingState::new(meta);
 
         Self {
-            state: ArcSwap::new(Arc::new(state)),
+            state: Arc::new(ArcSwap::new(Arc::new(state))),
         }
     }
 
@@ -277,8 +269,8 @@ impl DirectSuperBlockV6 {
         blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
 
         let state = DirectMappingState {
-            meta: old_state.meta,
-            blob_table: Arc::new(blob_table),
+            meta: old_state.meta.clone(),
+            blob_table,
             fd: file.into_raw_fd(),
             base,
             end,
