@@ -143,11 +143,9 @@ impl OutputSerializer {
 fn prepare_cmd_args(bti_string: &'static str) -> App {
     let arg_chunk_dict = Arg::new("chunk-dict")
         .long("chunk-dict")
-        .short('M')
         .help("Set a chunk dictionary for chunk deduplication");
     let arg_prefetch_policy = Arg::new("prefetch-policy")
         .long("prefetch-policy")
-        .short('P')
         .help("Set policy for blob data prefetch")
         .required(false)
         .default_value("none")
@@ -243,14 +241,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("chunk-size")
                         .long("chunk-size")
-                        .short('S')
                         .help("Set size of data chunk, must be power of two and between 0x1000-0x1000000:")
                         .required(false),
                 )
                 .arg(
                     Arg::new("compressor")
                         .long("compressor")
-                        .short('c')
                         .help("Set algorithm to compress chunks:")
                         .required(false)
                         .default_value("zstd")
@@ -259,7 +255,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("digester")
                         .long("digester")
-                        .short('d')
                         .help("Set algorithm to digest inodes and chunks:")
                         .required(false)
                         .default_value("sha256")
@@ -279,21 +274,18 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("parent-bootstrap")
                         .long("parent-bootstrap")
-                        .short('p')
                         .help("Path to parent/referenced RAFS filesystem metadata blob (optional)")
                         .required(false),
                 )
                 .arg(
                     Arg::new("aligned-chunk")
                         .long("aligned-chunk")
-                        .short('A')
                         .help("Align uncompressed data chunk to 4K, apply to RAFS V5 only")
                         .action(ArgAction::SetTrue)
                 )
                 .arg(
                     Arg::new("repeatable")
                         .long("repeatable")
-                        .short('R')
                         .help("Generate reproducible RAFS metadata")
                         .action(ArgAction::SetTrue)
                         .required(false),
@@ -308,7 +300,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("whiteout-spec")
                         .long("whiteout-spec")
-                        .short('W')
                         .help("Set type of whiteout specification:")
                         .default_value("oci")
                         .value_parser(["oci", "overlayfs", "none"])
@@ -442,7 +433,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("chunk-dict")
                         .long("chunk-dict")
-                        .short('M')
                         .help("Specify a chunk dictionary for chunk deduplication"),
                 )
                 .arg(
@@ -482,7 +472,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         .arg(
             Arg::new("log-file")
                 .long("log-file")
-                .short('o')
+                .short('L')
                 .help("Set log file path")
                 .required(false)
                 .global(true),
