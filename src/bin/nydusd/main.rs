@@ -229,7 +229,6 @@ fn append_fs_options(app: Command) -> Command {
     .arg(
         Arg::new("prefetch-files")
             .long("prefetch-files")
-            .short('P')
             .help("List of files/directories to prefetch")
             .required(false)
             .requires("bootstrap")
@@ -264,7 +263,6 @@ fn append_fuse_options(app: Command) -> Command {
     .arg(
         Arg::new("threads")
             .long("thread-num")
-            .short('T')
             .default_value("4")
             .help("Number of worker threads to serve IO requests")
             .value_parser(thread_validator)
@@ -273,7 +271,6 @@ fn append_fuse_options(app: Command) -> Command {
     .arg(
         Arg::new("writable")
             .long("writable")
-            .short('W')
             .action(ArgAction::SetTrue)
             .help("Mounts FUSE filesystem in rw mode"),
     )
@@ -291,7 +288,6 @@ fn append_virtiofs_options(cmd: Command) -> Command {
     cmd.arg(
         Arg::new("hybrid-mode")
             .long("hybrid-mode")
-            .short('H')
             .help("Enables both `rafs` and `passthroughfs` modes")
             .action(ArgAction::SetFalse)
             .required(false),
@@ -299,7 +295,6 @@ fn append_virtiofs_options(cmd: Command) -> Command {
     .arg(
         Arg::new("sock")
             .long("sock")
-            .short('v')
             .help("Vhost-user API socket")
             .required(false),
     )
@@ -332,9 +327,7 @@ fn append_fscache_options(app: Command) -> Command {
 
 fn append_services_subcmd_options(cmd: Command) -> Command {
     let subcmd = Command::new("singleton")
-        .about(
-            "Run as a global daemon instance to service multiple blobcache/fscache/fuse services.",
-        )
+        .about("Run as a global daemon to host multiple blobcache/fscache/fuse/virtio-fs services")
         .arg(
             Arg::new("fscache")
                 .long("fscache")
@@ -380,7 +373,6 @@ fn prepare_commandline_options() -> Command {
         .arg(
             Arg::new("id")
                 .long("id")
-                .short('I')
                 .help("Service instance identifier")
                 .required(false)
                 .requires("supervisor")
@@ -415,7 +407,6 @@ fn prepare_commandline_options() -> Command {
         .arg(
             Arg::new("rlimit-nofile")
                 .long("rlimit-nofile")
-                .short('R')
                 .default_value("1000000")
                 .help("Set rlimit for maximum file descriptor number (0 leaves it unchanged)")
                 .required(false)
@@ -424,7 +415,6 @@ fn prepare_commandline_options() -> Command {
         .arg(
             Arg::new("supervisor")
                 .long("supervisor")
-                .short('S')
                 .help("Supervisor API socket")
                 .required(false)
                 .requires("id")
@@ -433,7 +423,6 @@ fn prepare_commandline_options() -> Command {
         .arg(
             Arg::new("upgrade")
                 .long("upgrade")
-                .short('U')
                 .help("Starts daemon in upgrade mode")
                 .action(ArgAction::SetTrue)
                 .required(false)
