@@ -85,7 +85,6 @@ struct DirectMappingState {
     end: *const u8,
     size: usize,
     fd: RawFd,
-    validate_digest: bool,
 }
 
 // Safe to Send/Sync because the underlying data structures are readonly
@@ -93,7 +92,7 @@ unsafe impl Send for DirectMappingState {}
 unsafe impl Sync for DirectMappingState {}
 
 impl DirectMappingState {
-    fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
+    fn new(meta: &RafsSuperMeta) -> Self {
         DirectMappingState {
             meta: *meta,
             blob_table: Arc::new(RafsV6BlobTable::default()),
@@ -101,7 +100,6 @@ impl DirectMappingState {
             base: std::ptr::null(),
             end: std::ptr::null(),
             size: 0,
-            validate_digest,
         }
     }
 
@@ -164,9 +162,9 @@ impl Clone for DirectSuperBlockV6 {
 
 impl DirectSuperBlockV6 {
     /// Create a new instance of `DirectSuperBlockV6`.
-    pub fn new(meta: &RafsSuperMeta, validate_digest: bool) -> Self {
+    pub fn new(meta: &RafsSuperMeta) -> Self {
         CHUNK_DICT_MAP.with(|dict| *dict.borrow_mut() = None);
-        let state = DirectMappingState::new(meta, validate_digest);
+        let state = DirectMappingState::new(meta);
 
         Self {
             state: ArcSwap::new(Arc::new(state)),
@@ -278,8 +276,6 @@ impl DirectSuperBlockV6 {
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
         blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
 
-        let validate_digest = old_state.validate_digest;
-
         let state = DirectMappingState {
             meta: old_state.meta,
             blob_table: Arc::new(blob_table),
@@ -287,7 +283,6 @@ impl DirectSuperBlockV6 {
             base,
             end,
             size,
-            validate_digest,
         };
 
         // Swap new and old DirectMappingState object,
@@ -369,7 +364,7 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
     }
 
     fn destroy(&mut self) {
-        let state = DirectMappingState::new(&RafsSuperMeta::default(), false);
+        let state = DirectMappingState::new(&RafsSuperMeta::default());
 
         self.state.store(Arc::new(state));
     }

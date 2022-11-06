@@ -58,7 +58,7 @@ impl RafsSuper {
 
         match self.mode {
             RafsMode::Direct => {
-                let mut sb_v6 = DirectSuperBlockV6::new(&self.meta, self.validate_digest);
+                let mut sb_v6 = DirectSuperBlockV6::new(&self.meta);
                 sb_v6.load(r)?;
                 self.superblock = Arc::new(sb_v6);
                 Ok(true)
