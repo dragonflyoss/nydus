@@ -93,12 +93,11 @@ macro_rules! impl_chunkinfo_getter {
 /// Other data structures should not store raw pointers, instead they should hold a reference to
 /// the DirectMappingState object and store an offset, so a `pointer` could be reconstruct by
 /// `DirectMappingState.base + offset`.
-#[derive(Clone)]
 struct DirectMappingState {
     meta: RafsSuperMeta,
     inode_table: ManuallyDrop<RafsV5InodeTable>,
-    blob_table: Arc<RafsV5BlobTable>,
-    file_map: Arc<FileMapState>,
+    blob_table: RafsV5BlobTable,
+    file_map: FileMapState,
     mmapped_inode_table: bool,
     validate_inode: bool,
 }
@@ -108,8 +107,8 @@ impl DirectMappingState {
         DirectMappingState {
             meta: *meta,
             inode_table: ManuallyDrop::new(RafsV5InodeTable::default()),
-            blob_table: Arc::new(RafsV5BlobTable::default()),
-            file_map: Arc::new(FileMapState::default()),
+            blob_table: RafsV5BlobTable::default(),
+            file_map: FileMapState::default(),
             mmapped_inode_table: false,
             validate_inode,
         }
@@ -229,7 +228,7 @@ impl DirectSuperBlockV5 {
         readahead(file.as_raw_fd(), 0, len);
 
         // Mmap the bootstrap file into current process for direct access
-        let filemap = FileMapState::new(file, 0, size, false)?;
+        let file_map = FileMapState::new(file, 0, size, false)?;
 
         // Load blob table. Safe because we have validated the blob table layout.
         let mut blob_table = RafsV5BlobTable::new();
@@ -251,7 +250,7 @@ impl DirectSuperBlockV5 {
         let inode_table = unsafe {
             RafsV5InodeTable {
                 data: Vec::from_raw_parts(
-                    filemap.offset(inode_table_start as usize) as *const u32 as *mut u32,
+                    file_map.offset(inode_table_start as usize) as *const u32 as *mut u32,
                     old_state.meta.inode_table_entries as usize,
                     old_state.meta.inode_table_entries as usize,
                 ),
@@ -263,8 +262,8 @@ impl DirectSuperBlockV5 {
         let state = DirectMappingState {
             meta: old_state.meta,
             inode_table: ManuallyDrop::new(inode_table),
-            blob_table: Arc::new(blob_table),
-            file_map: Arc::new(filemap),
+            blob_table,
+            file_map,
             mmapped_inode_table: true,
             validate_inode,
         };
