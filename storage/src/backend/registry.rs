@@ -699,37 +699,15 @@ impl Registry {
                             if let Some(cached_bearer_auth) =
                                 state.cached_bearer_auth.load().as_deref()
                             {
-                                let mut cached_bearer_auth_clone = cached_bearer_auth.clone();
-                                if let Ok(url) = Url::parse(&cached_bearer_auth_clone.realm) {
-                                    let last_cached_auth = state.cached_auth.get();
-
-                                    let query: Vec<(_, _)> =
-                                        url.query_pairs().filter(|p| p.0 != "grant_type").collect();
-
-                                    let mut refresh_url = url.clone();
-                                    refresh_url.set_query(None);
-
-                                    for pair in query {
-                                        refresh_url.query_pairs_mut().append_pair(
-                                            &pair.0.to_string()[..],
-                                            &pair.1.to_string()[..],
-                                        );
-                                    }
-                                    refresh_url
-                                        .query_pairs_mut()
-                                        .append_pair("grant_type", "refresh_token");
-                                    cached_bearer_auth_clone.realm = refresh_url.to_string();
-
-                                    let token = state.get_token(cached_bearer_auth_clone, &conn);
-
-                                    if let Ok(token) = token {
-                                        let new_cached_auth = format!("Bearer {}", token);
-                                        info!(
-                                            "Authorization token for registry has been refreshed."
-                                        );
-                                        // Refresh authorization token
-                                        state.cached_auth.set(&last_cached_auth, new_cached_auth);
-                                    }
+                                if let Ok(token) =
+                                    state.get_token(cached_bearer_auth.to_owned(), &conn)
+                                {
+                                    let new_cached_auth = format!("Bearer {}", token);
+                                    info!("Authorization token for registry has been refreshed.");
+                                    // Refresh authorization token
+                                    state
+                                        .cached_auth
+                                        .set(&state.cached_auth.get(), new_cached_auth);
                                 }
                             }
                         }
