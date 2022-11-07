@@ -211,8 +211,8 @@ impl DirectSuperBlockV6 {
             let chunk = DirectChunkInfoV6::new(&state, self.clone(), idx)?;
             let chunk = Arc::new(chunk);
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
-            v6_chunk.set_blob_index((chunk.blob_index() + 1) as u8);
-            v6_chunk.set_blob_comp_index(chunk.id());
+            v6_chunk.set_blob_index(chunk.blob_index());
+            v6_chunk.set_blob_ci_index(chunk.id());
             v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
             chunk_dict.insert(v6_chunk, chunk);
         }
@@ -269,7 +269,7 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
     }
 
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
-        self.state.load().blob_table.entries.clone()
+        self.state.load().blob_table.get_all()
     }
 
     fn root_ino(&self) -> u64 {
@@ -446,17 +446,21 @@ impl OndiskInodeWrapper {
         user_io: bool,
     ) -> Option<BlobIoDesc> {
         let state = self.mapping.state.load();
-        let blob_table = &state.blob_table.entries;
+        let blob_index = chunk_addr.blob_index();
+        let chunk_index = chunk_addr.blob_ci_index();
 
-        // As ondisk blobs table contains bootstrap as the first blob device
-        // while `blob_table` doesn't, it is subtracted 1.
-        let blob_index = chunk_addr.blob_index() - 1;
-        let chunk_index = chunk_addr.blob_comp_index();
-        let blob = blob_table[blob_index as usize].clone();
-
-        device
-            .create_io_chunk(blob.blob_index(), chunk_index)
-            .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io))
+        match state.blob_table.get(blob_index) {
+            Err(e) => {
+                warn!(
+                    "failed to get blob with index {} for chunk address {:?}, {}",
+                    blob_index, chunk_addr, e
+                );
+                None
+            }
+            Ok(blob) => device
+                .create_io_chunk(blob.blob_index(), chunk_index)
+                .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io)),
+        }
     }
 
     fn chunk_size(&self) -> u32 {
@@ -774,7 +778,6 @@ impl RafsInode for OndiskInodeWrapper {
 
         let mut offset =
             self.offset + Self::inode_size(inode) + size_of::<RafsV6XattrIbodyHeader>();
-        // TODO: check why minus one here? (total -1)
         let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>();
         while remaining > 0 {
             let e: &RafsV6XattrEntry = state.map.get_ref(offset)?;
@@ -809,12 +812,9 @@ impl RafsInode for OndiskInodeWrapper {
             return Ok(xattrs);
         }
 
-        // xattr body size
         let mut offset =
             self.offset + Self::inode_size(inode) + size_of::<RafsV6XattrIbodyHeader>();
-        // TODO: check why minus one here? (total -1)
         let mut remaining = (total - 1) as usize * size_of::<RafsV6XattrEntry>();
-
         while remaining > 0 {
             let e: &RafsV6XattrEntry = state.map.get_ref(offset)?;
             let name: &[u8] = state.map.get_slice(
@@ -1177,6 +1177,7 @@ macro_rules! impl_chunkinfo_getter {
     };
 }
 
+/// RAFS v6 chunk information object.
 pub struct DirectChunkInfoV6 {
     mapping: DirectSuperBlockV6,
     offset: usize,

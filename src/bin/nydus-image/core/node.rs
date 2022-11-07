@@ -908,10 +908,15 @@ impl Node {
         meta_addr: u64,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, ChunkWrapper>,
     ) -> Result<()> {
+        let xattr_inline_count = self.xattrs.count_v6();
+        ensure!(
+            xattr_inline_count <= u16::MAX as usize,
+            "size of extended attributes is too big"
+        );
         let mut inode = new_v6_inode(
             &self.inode,
             self.v6_datalayout,
-            self.xattrs.count_v6() as u16,
+            xattr_inline_count as u16,
             self.v6_compact_inode,
         );
 
@@ -1286,8 +1291,8 @@ impl Node {
         for chunk in self.chunks.iter() {
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
             // Bump blob id by 1 for EROFS since device id 0 is used for the metadata blob.
-            v6_chunk.set_blob_index((chunk.inner.blob_index() + 1) as u8);
-            v6_chunk.set_blob_comp_index(chunk.inner.index());
+            v6_chunk.set_blob_index(chunk.inner.blob_index());
+            v6_chunk.set_blob_ci_index(chunk.inner.index());
             v6_chunk.set_block_addr((chunk.inner.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
             trace!("name {:?} chunk {}", self.name(), chunk);
             chunks.extend(v6_chunk.as_ref());
