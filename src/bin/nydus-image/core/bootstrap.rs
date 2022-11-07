@@ -698,7 +698,7 @@ impl Bootstrap {
         if let Some(mut pt) = prefetch_table {
             // Device slots are very close to extended super block.
             ext_sb.set_prefetch_table_offset(prefetch_table_offset);
-            ext_sb.set_prefetch_table_size(pt.len() as u32 * size_of::<u32>() as u32);
+            ext_sb.set_prefetch_table_size(prefetch_table_size);
             bootstrap_ctx
                 .writer
                 .seek_offset(prefetch_table_offset as u64)
