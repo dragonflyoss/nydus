@@ -36,13 +36,12 @@ use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
 use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
-use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
-use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
+use nydus_storage::device::{BlobDevice, BlobIoVec, BlobPrefetchRequest};
+use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 
 use crate::metadata::{
     Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
-    RAFS_MAX_CHUNK_SIZE,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -532,6 +531,23 @@ impl Rafs {
             }
         }
 
+        let fetcher = |desc: &mut BlobIoVec, last: bool| {
+            if desc.size() as u64 > RAFS_MAX_CHUNK_SIZE
+                || desc.len() > 1024
+                || (last && desc.size() > 0)
+            {
+                trace!(
+                    "fs prefetch: 0x{:x} bytes for {} descriptors",
+                    desc.size(),
+                    desc.len()
+                );
+                device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                    warn!("Prefetch error, {:?}", e);
+                });
+                desc.reset();
+            }
+        };
+
         let mut ignore_prefetch_all = prefetch_files
             .as_ref()
             .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
@@ -541,13 +557,7 @@ impl Rafs {
         // - prefetch listed passed in by user
         // - or file prefetch list in metadata
         let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-        let res = sb.prefetch_files(&device, &mut reader, root_ino, inodes, &|desc| {
-            if desc.size() > 0 {
-                device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
-                    warn!("Prefetch error, {:?}", e);
-                });
-            }
-        });
+        let res = sb.prefetch_files(&device, &mut reader, root_ino, inodes, &fetcher);
         match res {
             Ok(true) => ignore_prefetch_all = true,
             Ok(false) => {}
@@ -557,13 +567,7 @@ impl Rafs {
         // Last optionally prefetch all data
         if prefetch_all && !ignore_prefetch_all {
             let root = vec![root_ino];
-            let res = sb.prefetch_files(&device, &mut reader, root_ino, Some(root), &|desc| {
-                if desc.size() > 0 {
-                    device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
-                        warn!("Prefetch error, {:?}", e);
-                    });
-                }
-            });
+            let res = sb.prefetch_files(&device, &mut reader, root_ino, Some(root), &fetcher);
             if let Err(e) = res {
                 info!("No file to be prefetched {:?}", e);
             }

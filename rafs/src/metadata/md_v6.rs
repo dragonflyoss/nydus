@@ -75,7 +75,7 @@ impl RafsSuper {
         fetcher: F,
     ) -> RafsResult<bool>
     where
-        F: Fn(&mut BlobIoVec),
+        F: Fn(&mut BlobIoVec, bool),
     {
         let hint_entries = self.meta.prefetch_table_entries as usize;
         if hint_entries == 0 {
@@ -106,13 +106,13 @@ impl RafsSuper {
             if ino as Inode == root_ino {
                 found_root_inode = true;
             }
-            debug!("hint prefetch inode {}", ino);
+            trace!("hint prefetch inode {}", ino);
             self.prefetch_data(device, ino as u64, &mut state, &mut hardlinks, &fetcher)
                 .map_err(|e| RafsError::Prefetch(e.to_string()))?;
         }
         // The left chunks whose size is smaller than 4MB will be fetched here.
         for (_id, mut desc) in state.drain() {
-            fetcher(&mut desc);
+            fetcher(&mut desc, true);
         }
 
         Ok(found_root_inode)

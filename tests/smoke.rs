@@ -322,7 +322,7 @@ fn test_stargz(rafs_version: &str) {
 
 #[test]
 fn integration_test_stargz() {
-    test_stargz("5");
+    //test_stargz("5");
     test_stargz("6");
 }
 

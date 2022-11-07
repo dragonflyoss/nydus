@@ -181,6 +181,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                             "directory",
                             "dir-rafs",
                             "estargz-rafs",
+                            "estargz-ref",
                             "estargztoc-ref",
                             "tar-rafs",
                             "targz-rafs",
@@ -637,21 +638,21 @@ impl Command {
                     );
                 }
                 if compressor != compress::Algorithm::GZip {
-                    warn!("only gzip is supported the conversion, use gzip for compression");
+                    info!(
+                        "only gzip is supported by the conversion type, use gzip for compression"
+                    );
                 }
                 compressor = compress::Algorithm::GZip;
                 if digester != digest::Algorithm::Sha256 {
-                    warn!("only sha256 is supported for the conversion, use sha256 for digest");
+                    info!("only sha256 is supported by the conversion type, use sha256 for digest");
                 }
                 digester = digest::Algorithm::Sha256;
-                /*
                 if version != RafsVersion::V6 {
                     bail!(
-                        "'--fs-version 5' conflicts with conversion type'{}', only V6 is supported",
+                        "'--fs-version 5' conflicts with conversion type '{}', only V6 is supported",
                         conversion_type
                     );
                 }
-                 */
                 if conversion_type == ConversionType::EStargzIndexToRef && blob_id.trim() == "" {
                     bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
@@ -720,7 +721,7 @@ impl Command {
                 Box::new(StargzBuilder::new(blob_data_size))
             }
             ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::TargzToRef => {
+            ConversionType::TargzToRef | ConversionType::TargzToStargz => {
                 if version.is_v6() {
                     build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
                     build_ctx.blob_meta_features |= BLOB_META_FEATURE_SEPARATE;
@@ -728,7 +729,6 @@ impl Command {
                 }
                 Box::new(TarballBuilder::new(conversion_type))
             }
-            ConversionType::TargzToStargz => unimplemented!(),
             ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TarToStargz => unimplemented!(),
         };

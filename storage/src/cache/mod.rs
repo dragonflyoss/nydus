@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
+use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
@@ -29,6 +30,7 @@ use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
+use crate::meta::BlobMetaInfo;
 use crate::utils::{alloc_buf, check_digest};
 use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 
@@ -66,29 +68,37 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
         }
     }
 
-    /// Get size of pending io operations.
+    /// Get size of pending compressed data.
     #[inline]
-    pub fn size(&self) -> usize {
+    fn size(&self) -> usize {
         self.size as usize
     }
 
     /// Push a new io descriptor into the pending list.
     #[inline]
-    pub fn push(&mut self, bio: &'a BlobIoDesc) {
-        let size = bio.chunkinfo.compressed_size();
-
+    fn push(&mut self, bio: &'a BlobIoDesc) {
+        let start = bio.chunkinfo.compressed_offset();
+        let size = if !self.bios.is_empty() {
+            let last = &self.bios[self.bios.len() - 1].chunkinfo;
+            let prev = last.compressed_offset() + last.compressed_size() as u64;
+            assert!(prev <= start);
+            assert!(start - prev < u32::MAX as u64);
+            (start - prev) as u32 + bio.chunkinfo.compressed_size()
+        } else {
+            bio.chunkinfo.compressed_size()
+        };
         assert!(self.size.checked_add(size).is_some());
+        self.size += size;
         self.bios.push(bio);
-        self.size += bio.chunkinfo.compressed_size();
     }
 
     /// Issue all pending io descriptors.
     #[inline]
-    pub fn issue(&mut self) {
+    pub fn issue(&mut self, max_gap: u64) {
         if !self.bios.is_empty() {
             let mut mr = BlobIoRange::new(self.bios[0], self.bios.len());
             for bio in self.bios[1..].iter() {
-                mr.merge(bio, 0);
+                mr.merge(bio, max_gap);
             }
             (self.cb)(mr);
 
@@ -97,20 +107,25 @@ impl<'a, F: FnMut(BlobIoRange)> BlobIoMergeState<'a, F> {
         }
     }
 
-    /// Merge and issue all blob Io descriptors.
-    pub fn merge_and_issue(bios: &[BlobIoDesc], max_size: usize, op: F) {
+    /// Merge adjacent chunks into bigger request with compressed size no bigger than `max_size`
+    /// and issue all blob IO descriptors.
+    pub fn merge_and_issue(bios: &[BlobIoDesc], max_comp_size: u64, max_gap: u64, op: F) {
         if !bios.is_empty() {
             let mut index = 1;
             let mut state = BlobIoMergeState::new(&bios[0], op);
 
             for cur_bio in &bios[1..] {
-                if !bios[index - 1].is_continuous(cur_bio, 0) || state.size() >= max_size {
-                    state.issue();
+                // Issue pending descriptors when next chunk is not continuous with current chunk
+                // or the accumulated compressed data size is big enough.
+                if !bios[index - 1].is_continuous(cur_bio, max_gap)
+                    || state.size() as u64 >= max_comp_size
+                {
+                    state.issue(max_gap);
                 }
                 state.push(cur_bio);
                 index += 1
             }
-            state.issue();
+            state.issue(max_gap);
         }
     }
 }
@@ -154,8 +169,13 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
+    /// Check whether the blob is ZRan based.
+    fn is_zran(&self) -> bool {
+        false
+    }
+
     /// Check whether need to validate the data chunk by digest value.
-    fn need_validate(&self) -> bool;
+    fn need_validation(&self) -> bool;
 
     /// Get the [BlobReader](../backend/trait.BlobReader.html) to read data from storage backend.
     fn reader(&self) -> &dyn BlobReader;
@@ -209,13 +229,16 @@ pub trait BlobCache: Send + Sync {
     /// for each entry in the `chunks` array in corresponding order.
     ///
     /// This method returns success only if all requested data are successfully fetched.
-    fn read_chunks_from_backend(
-        &self,
+    fn read_chunks_from_backend<'a, 'b>(
+        &'a self,
         blob_offset: u64,
         blob_size: usize,
-        chunks: &[Arc<dyn BlobChunkInfo>],
+        chunks: &'b [Arc<dyn BlobChunkInfo>],
         prefetch: bool,
-    ) -> Result<(Vec<Vec<u8>>, Vec<u8>)> {
+    ) -> Result<ChunkDecompressState<'a, 'b>>
+    where
+        Self: Sized,
+    {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
         let start = Instant::now();
@@ -239,7 +262,8 @@ pub trait BlobCache: Send + Sync {
             duration
         );
 
-        self.decompress_normal_chunks(blob_offset, chunks, c_buf)
+        let chunks = chunks.iter().map(|v| v.as_ref()).collect();
+        Ok(ChunkDecompressState::new(blob_offset, self, chunks, c_buf))
     }
 
     /// Read a whole chunk directly from the storage backend.
@@ -250,12 +274,14 @@ pub trait BlobCache: Send + Sync {
         &self,
         chunk: &dyn BlobChunkInfo,
         buffer: &mut [u8],
-        force_validation: bool,
     ) -> Result<Option<Vec<u8>>> {
+        let start = Instant::now();
         let offset = chunk.compressed_offset();
-
         let mut c_buf = None;
-        if chunk.is_compressed() {
+
+        if self.is_zran() {
+            return Err(enosys!("read_chunk_from_backend"));
+        } else if chunk.is_compressed() {
             let c_size = if self.is_legacy_stargz() {
                 self.get_legacy_stargz_size(offset, buffer.len())?
             } else {
@@ -278,44 +304,17 @@ pub trait BlobCache: Send + Sync {
             }
         }
 
-        self.validate_chunk_data(chunk, buffer, force_validation)?;
+        let duration = Instant::now().duration_since(start).as_millis();
+        debug!(
+            "read_chunk_from_backend: {} {} bytes at {}, duration {}ms",
+            std::thread::current().name().unwrap_or_default(),
+            chunk.compressed_size(),
+            chunk.compressed_offset(),
+            duration
+        );
+        self.validate_chunk_data(chunk, buffer, false)?;
 
         Ok(c_buf)
-    }
-
-    fn decompress_normal_chunks(
-        &self,
-        blob_offset: u64,
-        chunks: &[Arc<dyn BlobChunkInfo>],
-        c_buf: Vec<u8>,
-    ) -> Result<(Vec<Vec<u8>>, Vec<u8>)> {
-        let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            let offset = chunk.compressed_offset();
-            let size = chunk.compressed_size();
-            let d_size = chunk.uncompressed_size() as usize;
-            // Ensure BlobIoChunk is valid and continuous.
-            if offset - blob_offset > usize::MAX as u64
-                || offset.checked_add(size as u64).is_none()
-                || offset + size as u64 - blob_offset > c_buf.len() as u64
-                || d_size as u64 > RAFS_MAX_CHUNK_SIZE
-            {
-                return Err(eio!(format!(
-                    "chunks to read_chunks() is invalid, offset {} blob_offset {} d_size {}",
-                    offset, blob_offset, d_size
-                )));
-            }
-
-            let offset_merged = (offset - blob_offset) as usize;
-            let end_merged = offset_merged + size as usize;
-            let buf = &c_buf[offset_merged..end_merged];
-            let mut buffer = alloc_buf(d_size);
-            self.decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
-            self.validate_chunk_data(chunk.as_ref(), &buffer, self.need_validate())?;
-            buffers.push(buffer);
-        }
-
-        Ok((buffers, c_buf))
     }
 
     /// Decompress chunk data.
@@ -350,13 +349,150 @@ pub trait BlobCache: Send + Sync {
         let d_size = chunk.uncompressed_size() as usize;
         if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
-        } else if (self.need_validate() || force_validation)
+        } else if (self.need_validation() || force_validation)
+            && !self.is_legacy_stargz()
             && !check_digest(buffer, chunk.chunk_id(), self.digester())
         {
             Err(eio!("data digest value doesn't match"))
         } else {
             Ok(d_size)
         }
+    }
+
+    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobMetaInfo>>> {
+        Ok(None)
+    }
+}
+
+/// An iterator to enumerate decompressed data for chunks.
+pub struct ChunkDecompressState<'a, 'b> {
+    blob_offset: u64,
+    chunk_idx: usize,
+    zran_idx: u32,
+    cache: &'a dyn BlobCache,
+    chunks: Vec<&'b dyn BlobChunkInfo>,
+    c_buf: Vec<u8>,
+    d_buf: Vec<u8>,
+}
+
+impl<'a, 'b> ChunkDecompressState<'a, 'b> {
+    fn new(
+        blob_offset: u64,
+        cache: &'a dyn BlobCache,
+        chunks: Vec<&'b dyn BlobChunkInfo>,
+        c_buf: Vec<u8>,
+    ) -> Self {
+        ChunkDecompressState {
+            blob_offset,
+            chunk_idx: 0,
+            zran_idx: u32::MAX,
+            cache,
+            chunks,
+            c_buf,
+            d_buf: Vec::new(),
+        }
+    }
+
+    fn decompress_zran(&mut self, meta: &Arc<BlobMetaInfo>) -> Result<()> {
+        let (ctx, dict) = meta
+            .get_zran_context(self.zran_idx)
+            .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;
+        let c_offset = ctx.in_offset;
+        let c_size = ctx.in_len as u64;
+        if c_offset < self.blob_offset
+            || c_offset.checked_add(c_size).is_none()
+            || c_offset + c_size > self.blob_offset + self.c_buf.len() as u64
+            || ctx.out_len as u64 > RAFS_MAX_CHUNK_SIZE
+        {
+            let msg = format!(
+                "invalid chunk: z_offset 0x{:x}, z_size 0x{:x}, c_offset 0x{:x}, c_size 0x{:x}, d_size 0x{:x}",
+                self.blob_offset,
+                self.c_buf.len(),
+                c_offset,
+                c_size,
+                ctx.out_len
+            );
+            return Err(einval!(msg));
+        }
+
+        let c_offset = (c_offset - self.blob_offset) as usize;
+        let input = &self.c_buf[c_offset..c_offset + c_size as usize];
+        let mut output = alloc_buf(ctx.out_len as usize);
+        let mut decoder = ZranDecoder::new()?;
+        decoder.uncompress(&ctx, Some(dict), input, &mut output)?;
+        self.d_buf = output;
+
+        Ok(())
+    }
+
+    fn next_zran(&mut self, chunk: &dyn BlobChunkInfo) -> Result<Vec<u8>> {
+        let meta = self
+            .cache
+            .get_blob_meta_info()?
+            .ok_or_else(|| einval!("failed to get blob meta object for ZRan"))?;
+        let zran_idx = meta.get_zran_index(chunk.id());
+        if zran_idx != self.zran_idx {
+            self.zran_idx = zran_idx;
+            self.decompress_zran(&meta)?;
+        }
+        let offset = meta.get_zran_offset(chunk.id()) as usize;
+        let end = offset + chunk.uncompressed_size() as usize;
+        if end > self.d_buf.len() {
+            return Err(einval!("invalid ZRan decompression status"));
+        }
+        Ok(self.d_buf[offset as usize..end].to_vec())
+    }
+
+    fn next_buf(&mut self, chunk: &dyn BlobChunkInfo) -> Result<Vec<u8>> {
+        let c_offset = chunk.compressed_offset();
+        let c_size = chunk.compressed_size();
+        let d_size = chunk.uncompressed_size() as usize;
+        if c_offset < self.blob_offset
+            || c_offset - self.blob_offset > usize::MAX as u64
+            || c_offset.checked_add(c_size as u64).is_none()
+            || c_offset + c_size as u64 > self.blob_offset + self.c_buf.len() as u64
+            || d_size as u64 > RAFS_MAX_CHUNK_SIZE
+        {
+            let msg = format!(
+                "invalid chunk info: c_offset 0x{:x}, c_size 0x{:x}, d_size 0x{:x}, blob_offset 0x{:x}",
+                c_offset, c_size, d_size, self.blob_offset
+            );
+            return Err(eio!(msg));
+        }
+
+        let offset_merged = (c_offset - self.blob_offset) as usize;
+        let end_merged = offset_merged + c_size as usize;
+        let buf = &self.c_buf[offset_merged..end_merged];
+        let mut buffer = alloc_buf(d_size);
+        self.cache
+            .decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
+        self.cache.validate_chunk_data(chunk, &buffer, false)?;
+        Ok(buffer)
+    }
+
+    /// Get an immutable reference to the compressed data buffer.
+    pub fn compressed_buf(&self) -> &[u8] {
+        &self.c_buf
+    }
+}
+
+impl<'a, 'b> Iterator for ChunkDecompressState<'a, 'b> {
+    type Item = Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.chunk_idx >= self.chunks.len() {
+            return None;
+        }
+
+        let cache = self.cache;
+        let chunk = self.chunks[self.chunk_idx];
+        self.chunk_idx += 1;
+        let res = if cache.is_zran() {
+            self.next_zran(chunk)
+        } else {
+            self.next_buf(chunk)
+        };
+        Some(res)
     }
 }
 
@@ -464,7 +600,7 @@ mod tests {
         assert_eq!(state.size, 0x1000);
         assert_eq!(state.bios.len(), 2);
 
-        state.issue();
+        state.issue(0);
         assert_eq!(state.size(), 0x0);
         assert_eq!(state.bios.len(), 0);
 
@@ -479,7 +615,7 @@ mod tests {
         assert_eq!(state.size, 0x800);
         assert_eq!(state.bios.len(), 1);
 
-        state.issue();
+        state.issue(0);
         assert_eq!(state.size(), 0x0);
         assert_eq!(state.bios.len(), 0);
 
@@ -487,6 +623,7 @@ mod tests {
         BlobIoMergeState::merge_and_issue(
             &[desc1.clone(), desc2.clone(), desc3.clone()],
             0x4000,
+            0x0,
             |_v| count += 1,
         );
         assert_eq!(count, 1);
@@ -495,12 +632,15 @@ mod tests {
         BlobIoMergeState::merge_and_issue(
             &[desc1.clone(), desc2.clone(), desc3.clone()],
             0x1000,
+            0x0,
             |_v| count += 1,
         );
         assert_eq!(count, 2);
 
         let mut count = 0;
-        BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, |_v| count += 1);
+        BlobIoMergeState::merge_and_issue(&[desc1.clone(), desc3.clone()], 0x4000, 0x0, |_v| {
+            count += 1
+        });
         assert_eq!(count, 2);
 
         assert!(desc1.is_continuous(&desc2, 0));

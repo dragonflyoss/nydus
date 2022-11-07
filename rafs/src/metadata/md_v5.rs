@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use nydus_storage::device::BlobChunkFlags;
+use nydus_storage::RAFS_MERGING_SIZE_TO_GAP_SHIFT;
 
 use super::cached_v5::CachedSuperBlockV5;
 use super::direct_v5::DirectSuperBlockV5;
@@ -63,7 +64,7 @@ impl RafsSuper {
         fetcher: F,
     ) -> RafsResult<bool>
     where
-        F: Fn(&mut BlobIoVec),
+        F: Fn(&mut BlobIoVec, bool),
     {
         let hint_entries = self.meta.prefetch_table_entries as usize;
         if hint_entries == 0 {
@@ -98,7 +99,7 @@ impl RafsSuper {
                 .map_err(|e| RafsError::Prefetch(e.to_string()))?;
         }
         for (_id, mut desc) in state.drain() {
-            fetcher(&mut desc);
+            fetcher(&mut desc, true);
         }
 
         Ok(found_root_inode)
@@ -110,12 +111,12 @@ impl RafsSuper {
         Ok(())
     }
 
-    fn merge_chunks_io(orig: &mut BlobIoVec, vec: BlobIoVec) {
+    fn merge_chunks_io(orig: &mut BlobIoVec, vec: BlobIoVec, max_gap: u64) {
         assert!(!orig.is_empty());
         if !vec.is_empty() {
             let last = orig.blob_io_desc(orig.len() - 1).unwrap().clone();
             let head = vec.blob_io_desc(0).unwrap();
-            if last.is_continuous(head, 0) {
+            if last.is_continuous(head, max_gap) {
                 // Safe to unwrap since d is not empty.
                 orig.append(vec);
             }
@@ -154,34 +155,48 @@ impl RafsSuper {
                     } else {
                         0
                     };
-                    Self::merge_chunks_io(last_desc, vec);
+                    Self::merge_chunks_io(
+                        last_desc,
+                        vec,
+                        (max_uncomp_size as u64) >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+                    );
                 }
             }
         }
 
         // Read more small files.
+        let mut max_tries = 64;
         let mut next_ino = inode.ino();
-        while window_size > 0 {
+        while window_size > 0 && max_tries > 0 {
             next_ino += 1;
             if let Ok(ni) = self.get_inode(next_ino, false) {
                 if ni.is_reg() {
                     let next_size = ni.size();
-                    if next_size > max_uncomp_size as u64 {
-                        break;
+                    let next_size = if next_size < window_size {
+                        next_size
+                    } else if window_size >= self.meta.chunk_size as u64 {
+                        window_size / self.meta.chunk_size as u64 * self.meta.chunk_size as u64
                     } else if next_size == 0 {
                         continue;
-                    }
+                    } else {
+                        break;
+                    };
 
-                    let sz = std::cmp::min(window_size, next_size);
-                    let amplified_io_vec = ni.alloc_bio_vecs(device, 0, sz as usize, false)?;
+                    let amplified_io_vec =
+                        ni.alloc_bio_vecs(device, 0, next_size as usize, false)?;
                     for vec in amplified_io_vec {
+                        max_tries -= 1;
                         if last_desc.has_same_blob(&vec) {
                             window_size = if window_size > vec.size() as u64 {
                                 window_size - vec.size() as u64
                             } else {
                                 0
                             };
-                            Self::merge_chunks_io(last_desc, vec);
+                            Self::merge_chunks_io(
+                                last_desc,
+                                vec,
+                                (max_uncomp_size as u64) >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+                            );
                         }
                     }
                 }

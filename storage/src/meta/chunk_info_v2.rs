@@ -86,14 +86,13 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
     fn compressed_size(&self) -> u32 {
         ((u64::from_le(self.comp_info) >> CHUNK_V2_COMP_SIZE_SHIFT) & BLOB_METADATA_CHUNK_SIZE_MASK)
             as u32
-            + 1
     }
 
     fn set_compressed_size(&mut self, size: u32) {
         let size = size as u64;
-        assert!(size > 0 && size - 1 <= BLOB_METADATA_CHUNK_SIZE_MASK);
+        assert!(size <= BLOB_METADATA_CHUNK_SIZE_MASK);
         self.comp_info &= u64::to_le(!(BLOB_METADATA_CHUNK_SIZE_MASK << CHUNK_V2_COMP_SIZE_SHIFT));
-        self.comp_info |= u64::to_le((size - 1) << CHUNK_V2_COMP_SIZE_SHIFT);
+        self.comp_info |= u64::to_le(size << CHUNK_V2_COMP_SIZE_SHIFT);
     }
 
     fn uncompressed_offset(&self) -> u64 {
@@ -147,17 +146,18 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         if self.compressed_end() > state.compressed_size
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
-            || self.compressed_size() == 0
+            || (!self.is_zran() && self.compressed_size() == 0)
             || (!self.is_compressed() && self.uncompressed_size() != self.compressed_size())
         {
             return Err(einval!(format!(
-                "invalid chunk, blob_index {} compressed_end {} compressed_size {} uncompressed_end {} uncompressed_size {} is_compressed {}",
+                "invalid chunk, blob: index {}/c_end 0x{:}/d_end 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} zran {}",
                 state.blob_index,
+                state.compressed_size,
+                state.uncompressed_size,
                 self.compressed_end(),
-                self.compressed_size(),
                 self.uncompressed_end(),
-                self.uncompressed_size(),
                 self.is_compressed(),
+                self.is_zran(),
             )));
         }
 
@@ -221,8 +221,8 @@ mod tests {
         let mut chunk = BlobChunkInfoV2Ondisk::default();
 
         assert_eq!(chunk.compressed_offset(), 0);
-        assert_eq!(chunk.compressed_size(), 1);
-        assert_eq!(chunk.compressed_end(), 1);
+        assert_eq!(chunk.compressed_size(), 0);
+        assert_eq!(chunk.compressed_end(), 0);
         assert_eq!(chunk.uncompressed_offset(), 0);
         assert_eq!(chunk.uncompressed_size(), 1);
         assert!(!chunk.is_zran());
@@ -239,9 +239,9 @@ mod tests {
         assert_eq!(chunk.uncompressed_size(), 0x100);
 
         chunk.set_compressed_offset(0xffffffffff);
-        chunk.set_compressed_size(0x1000000);
+        chunk.set_compressed_size(0x1000000 - 1);
         assert_eq!(chunk.compressed_offset(), 0xffffffffff);
-        assert_eq!(chunk.compressed_size(), 0x1000000);
+        assert_eq!(chunk.compressed_size(), 0x1000000 - 1);
 
         chunk.set_uncompressed_offset(0xffffffff000);
         chunk.set_uncompressed_size(0x1000000);
@@ -262,7 +262,7 @@ mod tests {
         };
         assert_eq!(chunk.uncompressed_offset(), 0x100000);
         assert_eq!(chunk.uncompressed_size(), 0x100 + 1);
-        assert_eq!(chunk.compressed_size(), 0x000f_ffff + 1);
+        assert_eq!(chunk.compressed_size(), 0x000f_ffff);
         assert_eq!(chunk.compressed_offset(), 0x00ff_ffff_ffff);
         assert_eq!(chunk.get_zran_index(), 3);
         assert_eq!(chunk.get_zran_offset(), 5);

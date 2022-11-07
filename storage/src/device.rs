@@ -39,6 +39,7 @@ use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
+use crate::meta::BLOB_META_FEATURE_CHUNK_INFO_V2;
 
 bitflags! {
     /// Features bits for blob management.
@@ -84,8 +85,8 @@ pub struct BlobInfo {
     prefetch_offset: u32,
     /// Size of blob data to prefetch.
     prefetch_size: u32,
-    /// The blob is for an stargz image.
-    stargz: bool,
+    /// The blob is for a legacy estargz image.
+    is_legacy_stargz: bool,
 
     /// V6: Version number of the blob metadata.
     meta_flags: u32,
@@ -132,7 +133,7 @@ impl BlobInfo {
             digester: digest::Algorithm::Blake3,
             prefetch_offset: 0,
             prefetch_size: 0,
-            stargz: false,
+            is_legacy_stargz: false,
             meta_ci_compressor: 0,
             meta_flags: 0,
             meta_ci_offset: 0,
@@ -221,8 +222,8 @@ impl BlobInfo {
     }
 
     /// Check whether this blob is for an stargz image.
-    pub fn is_stargz(&self) -> bool {
-        self.stargz
+    pub fn is_legacy_stargz(&self) -> bool {
+        self.is_legacy_stargz
     }
 
     /// Set metadata information for a blob.
@@ -324,8 +325,10 @@ impl BlobInfo {
         if self.chunk_count == 0 {
             self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
         }
-        if self.compressor == compress::Algorithm::GZip {
-            self.stargz = true;
+        if self.compressor == compress::Algorithm::GZip
+            && self.meta_flags & BLOB_META_FEATURE_CHUNK_INFO_V2 == 0
+        {
+            self.is_legacy_stargz = true;
         }
     }
 }
@@ -376,11 +379,21 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     /// Get the size of the compressed chunk.
     fn compressed_size(&self) -> u32;
 
+    /// Get end of the chunk in the compressed blob.
+    fn compressed_end(&self) -> u64 {
+        self.compressed_offset() + self.compressed_size() as u64
+    }
+
     /// Get the chunk offset in the uncompressed blob.
     fn uncompressed_offset(&self) -> u64;
 
     /// Get the size of the uncompressed chunk.
     fn uncompressed_size(&self) -> u32;
+
+    /// Get end of the chunk in the compressed blob.
+    fn uncompressed_end(&self) -> u64 {
+        self.uncompressed_offset() + self.uncompressed_size() as u64
+    }
 
     /// Check whether the chunk is compressed or not.
     ///
@@ -484,7 +497,7 @@ impl BlobIoDesc {
         let next_offset = next.chunkinfo.compressed_offset();
 
         if self.chunkinfo.blob_index() == next.chunkinfo.blob_index() && next_offset >= prev_end {
-            if next.blob.is_stargz() {
+            if next.blob.is_legacy_stargz() {
                 next_offset - prev_end <= max_gap * 8
             } else {
                 next_offset - prev_end <= max_gap
@@ -557,7 +570,7 @@ impl BlobIoVec {
         self.bi_vec.len()
     }
 
-    /// Chech whether there's 'BlobIoDesc' in the'BlobIoVec'.
+    /// Check whether there's 'BlobIoDesc' in the'BlobIoVec'.
     pub fn is_empty(&self) -> bool {
         self.bi_vec.is_empty()
     }
@@ -612,8 +625,8 @@ pub struct BlobIoMerge {
 impl BlobIoMerge {
     /// Append an `BlobIoVec` object to the merge state object.
     pub fn append(&mut self, desc: BlobIoVec) {
-        if !desc.bi_vec.is_empty() {
-            let id = desc.bi_vec[0].blob.blob_id.as_str();
+        if !desc.is_empty() {
+            let id = desc.bi_blob.blob_id.as_str();
             if self.current != id {
                 self.current = id.to_string();
             }
@@ -655,8 +668,9 @@ impl BlobIoSegment {
     }
 
     #[inline]
-    pub fn append(&mut self, _offset: u32, len: u32) {
-        debug_assert!(_offset.checked_add(len).is_some());
+    pub fn append(&mut self, offset: u32, len: u32) {
+        assert!(offset.checked_add(len).is_some());
+        assert_eq!(offset, 0);
 
         self.len += len;
     }
@@ -790,14 +804,20 @@ pub trait BlobObject: AsRawFd {
     fn is_all_data_ready(&self) -> bool;
 
     /// Fetch data from storage backend covering compressed blob range [offset, offset + size).
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+    ///
+    /// Used by asynchronous prefetch worker to implement blob prefetch.
+    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<()>;
 
     /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
     /// for use.
-    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<usize>;
+    ///
+    /// Used by rafs to support blobfs.
+    fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> io::Result<()>;
 
     /// Prefetch data for specified chunks from storage backend.
-    fn prefetch_chunks(&self, range: &BlobIoRange) -> io::Result<usize>;
+    ///
+    /// Used by asynchronous prefetch worker to implement fs prefetch.
+    fn prefetch_chunks(&self, range: &BlobIoRange) -> io::Result<()>;
 }
 
 /// A wrapping object over an underlying [BlobCache] object.

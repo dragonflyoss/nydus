@@ -31,7 +31,7 @@ use nydus_rafs::metadata::layout::v6::{
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsStore, RafsVersion};
 use nydus_rafs::RafsIoWrite;
-use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
+use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo, BLOB_META_FEATURE_ZRAN};
 use nydus_utils::compress;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, round_down_4k, round_up, try_round_up_4k, ByteSize};
@@ -543,9 +543,6 @@ impl Node {
                 .read_exact(buf)
                 .with_context(|| format!("failed to read node file {:?}", self.path))?;
             let info = zran.finish_chunk()?;
-
-            chunk.set_uncompressed_offset(info.uncompressed_offset());
-            chunk.set_uncompressed_size(info.uncompressed_size());
             chunk.set_compressed_offset(info.compressed_offset());
             chunk.set_compressed_size(info.compressed_size());
             chunk.set_compressed(true);
@@ -569,10 +566,6 @@ impl Node {
         chunk_data: &[u8],
         chunk: &mut ChunkWrapper,
     ) -> Result<()> {
-        // Compress chunk data
-        let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
-            .with_context(|| format!("failed to compress node file {:?}", self.path))?;
-        let compressed_size = compressed.len() as u32;
         let uncompressed_size = chunk_data.len() as u32;
         let aligned_chunk_size = if ctx.aligned_chunk {
             // Safe to unwrap because `chunk_size` is much less than u32::MAX.
@@ -580,29 +573,37 @@ impl Node {
         } else {
             uncompressed_size
         };
-
         let pre_compressed_offset = blob_ctx.compressed_offset;
         let pre_uncompressed_offset = blob_ctx.uncompressed_offset;
-        blob_ctx.compressed_offset += compressed_size as u64;
-        blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
-        blob_ctx.compressed_blob_size += compressed_size as u64;
         blob_ctx.uncompressed_blob_size = pre_uncompressed_offset + aligned_chunk_size as u64;
-        blob_ctx.blob_hash.update(&compressed);
-
-        // Dump compressed chunk data to blob
-        event_tracer!("blob_uncompressed_size", +uncompressed_size);
-        event_tracer!("blob_compressed_size", +compressed_size);
-        if let Some(writer) = blob_writer {
-            writer
-                .write_all(&compressed)
-                .context("failed to write blob")?;
-        }
-
+        blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
         chunk.set_uncompressed_offset(pre_uncompressed_offset);
         chunk.set_uncompressed_size(uncompressed_size);
-        chunk.set_compressed_offset(pre_compressed_offset);
-        chunk.set_compressed_size(compressed_size);
-        chunk.set_compressed(is_compressed);
+
+        let compressed_size = if ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0 {
+            chunk.compressed_size()
+        } else {
+            let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
+                .with_context(|| format!("failed to compress node file {:?}", self.path))?;
+            // Dump compressed chunk data to blob
+            if let Some(writer) = blob_writer {
+                writer
+                    .write_all(&compressed)
+                    .context("failed to write blob")?;
+            }
+
+            let compressed_size = compressed.len() as u32;
+            blob_ctx.blob_hash.update(&compressed);
+            blob_ctx.compressed_offset += compressed_size as u64;
+            blob_ctx.compressed_blob_size += compressed_size as u64;
+            chunk.set_compressed_offset(pre_compressed_offset);
+            chunk.set_compressed_size(compressed_size);
+            chunk.set_compressed(is_compressed);
+            compressed_size
+        };
+
+        event_tracer!("blob_uncompressed_size", +uncompressed_size);
+        event_tracer!("blob_compressed_size", +compressed_size);
 
         Ok(())
     }

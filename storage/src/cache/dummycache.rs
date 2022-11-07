@@ -40,8 +40,8 @@ struct DummyCache {
     reader: Arc<dyn BlobReader>,
     compressor: compress::Algorithm,
     digester: digest::Algorithm,
-    is_stargz: bool,
-    validate: bool,
+    is_legacy_stargz: bool,
+    need_validation: bool,
 }
 
 impl BlobCache for DummyCache {
@@ -66,11 +66,11 @@ impl BlobCache for DummyCache {
     }
 
     fn is_legacy_stargz(&self) -> bool {
-        self.is_stargz
+        self.is_legacy_stargz
     }
 
-    fn need_validate(&self) -> bool {
-        self.validate
+    fn need_validation(&self) -> bool {
+        self.need_validation
     }
 
     fn reader(&self) -> &dyn BlobReader {
@@ -122,7 +122,7 @@ impl BlobCache for DummyCache {
                 return Ok(0);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
-            self.read_chunk_from_backend(&bios[0].chunkinfo, buf, false)?;
+            self.read_chunk_from_backend(&bios[0].chunkinfo, buf)?;
             return Ok(buf.len());
         }
 
@@ -131,7 +131,7 @@ impl BlobCache for DummyCache {
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompressed_size() as usize);
-                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice(), false)?;
+                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice())?;
                 buffer_holder.push(d);
                 // Even a merged IO can hardly reach u32::MAX. So this is safe
                 user_size += bio.size;
@@ -160,7 +160,7 @@ impl BlobCache for DummyCache {
 pub struct DummyCacheMgr {
     backend: Arc<dyn BlobBackend>,
     cached: bool,
-    validate: bool,
+    need_validation: bool,
     closed: AtomicBool,
 }
 
@@ -174,7 +174,7 @@ impl DummyCacheMgr {
         Ok(DummyCacheMgr {
             backend,
             cached,
-            validate: config.cache_validate,
+            need_validation: config.cache_validate,
             closed: AtomicBool::new(false),
         })
     }
@@ -216,8 +216,8 @@ impl BlobCacheMgr for DummyCacheMgr {
             reader,
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
-            is_stargz: blob_info.is_stargz(),
-            validate: self.validate,
+            is_legacy_stargz: blob_info.is_legacy_stargz(),
+            need_validation: self.need_validation && !blob_info.is_legacy_stargz(),
         }))
     }
 

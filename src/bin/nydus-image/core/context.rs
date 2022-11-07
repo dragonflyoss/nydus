@@ -28,9 +28,9 @@ use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
-    BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaHeaderOndisk, ZranContextGenerator,
-    BLOB_META_FEATURE_4K_ALIGNED, BLOB_META_FEATURE_CHUNK_INFO_V2, BLOB_META_FEATURE_SEPARATE,
-    BLOB_META_FEATURE_ZRAN,
+    BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
+    ZranContextGenerator, BLOB_META_FEATURE_4K_ALIGNED, BLOB_META_FEATURE_CHUNK_INFO_V2,
+    BLOB_META_FEATURE_SEPARATE, BLOB_META_FEATURE_ZRAN,
 };
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
@@ -467,7 +467,8 @@ impl BlobContext {
                     );
                 }
                 BlobMetaChunkArray::V2(_) => {
-                    if let Some(info) = chunk_info {
+                    if let Some(mut info) = chunk_info {
+                        info.set_uncompressed_offset(chunk.uncompressed_offset());
                         self.blob_meta_info.add_v2_info(info);
                     } else {
                         self.blob_meta_info.add_v2(

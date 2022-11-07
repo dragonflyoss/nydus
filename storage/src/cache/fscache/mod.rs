@@ -19,6 +19,8 @@ use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
+use crate::meta::BLOB_META_FEATURE_ZRAN;
+use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with Linux fscache subsystem.
@@ -32,7 +34,7 @@ pub struct FsCacheMgr {
     runtime: Arc<Runtime>,
     worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
-    validate: bool,
+    need_validation: bool,
     closed: Arc<AtomicBool>,
 }
 
@@ -45,6 +47,10 @@ impl FsCacheMgr {
         id: &str,
         blobs_need: usize,
     ) -> Result<FsCacheMgr> {
+        if config.cache_compressed {
+            return Err(enosys!("fscache doesn't support compressed cache mode"));
+        }
+
         let blob_config: FsCacheConfig =
             serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
         let work_dir = blob_config.get_work_dir()?;
@@ -63,7 +69,7 @@ impl FsCacheMgr {
             runtime,
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
-            validate: config.cache_validate,
+            need_validation: config.cache_validate,
             closed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -216,6 +222,7 @@ impl FileCacheEntry {
         } else {
             None
         };
+        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
 
         Ok(FileCacheEntry {
             blob_info: blob_info.clone(),
@@ -235,9 +242,11 @@ impl FileCacheEntry {
             is_get_blob_object_supported: true,
             is_compressed: false,
             is_direct_chunkmap: true,
-            is_stargz: blob_info.is_stargz(),
+            is_legacy_stargz: blob_info.is_legacy_stargz(),
+            is_zran,
             dio_enabled: true,
-            need_validate: mgr.validate,
+            need_validation: mgr.need_validation && !blob_info.is_legacy_stargz(),
+            batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })
     }
