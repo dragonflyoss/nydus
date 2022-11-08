@@ -13,7 +13,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use lazy_static::lazy_static;
-
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
     BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobMetaHeaderOndisk, ZranInflateContext,
@@ -23,6 +22,8 @@ use nydus_storage::meta::{
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
+use crate::metadata::layout::v5::RafsV5ChunkInfo;
+use crate::metadata::layout::MetaRange;
 use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
 
@@ -57,7 +58,6 @@ const EROFS_BLOCK_BITS: u8 = 12;
 // Bits of EROFS metadata slot size.
 const EROFS_INODE_SLOT_BITS: u8 = 5;
 // 32-byte on-disk inode
-#[allow(dead_code)]
 const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
 // 64-byte on-disk inode
 const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
@@ -160,6 +160,13 @@ impl RafsV6SuperBlock {
             )));
         }
 
+        if u32::from_le(self.s_magic) != EROFS_SUPER_MAGIC_V1 {
+            return Err(einval!(format!(
+                "invalid EROFS magic number 0x{:x} in Rafsv6 superblock",
+                u32::from_le(self.s_magic)
+            )));
+        }
+
         if self.s_checksum != 0 {
             return Err(einval!(format!(
                 "invalid checksum {} in Rafsv6 superblock",
@@ -182,12 +189,32 @@ impl RafsV6SuperBlock {
             return Err(einval!("invalid extended slots in Rafsv6 superblock"));
         }
 
-        if self.s_blocks == 0 {
-            return Err(einval!("invalid blocks in Rafsv6 superblock"));
-        }
-
         if self.s_u != 0 {
             return Err(einval!("invalid union field in Rafsv6 superblock"));
+        }
+
+        if self.s_xattr_blkaddr != 0 {
+            return Err(einval!(
+                "invalid extended attribute address in Rafsv6 superblock"
+            ));
+        }
+
+        // There's a bug in old RAFS v6 images, which has set s_blocks to a fixed value 4096.
+        if self.s_extra_devices == 0 && self.s_blocks != 0 && u32::from_le(self.s_blocks) != 4096 {
+            warn!(
+                "rafs v6 extra devices {}, blocks {}",
+                self.s_extra_devices, self.s_blocks
+            );
+            return Err(einval!("invalid extra device count in Rafsv6 superblock"));
+        }
+
+        if u16::from_le(self.s_devt_slotoff)
+            != (EROFS_DEVTABLE_OFFSET / size_of::<RafsV6Device>() as u16)
+        {
+            return Err(einval!(format!(
+                "invalid device table slot offset {} in Rafsv6 superblock",
+                u16::from_le(self.s_devt_slotoff)
+            )));
         }
 
         // s_build_time may be used as compact_inode's timestamp in the future.
@@ -226,7 +253,7 @@ impl RafsV6SuperBlock {
 
     /// Get total inodes count of this Rafs
     pub fn inodes_count(&self) -> u64 {
-        self.s_inos
+        u64::from_le(self.s_inos)
     }
 
     /// Set number of logical blocks.
@@ -241,7 +268,7 @@ impl RafsV6SuperBlock {
 
     /// Set EROFS meta block address.
     pub fn set_meta_addr(&mut self, meta_addr: u64) {
-        debug_assert!(((meta_addr / EROFS_BLOCK_SIZE) >> 32) == 0);
+        assert!((meta_addr / EROFS_BLOCK_SIZE) <= u32::MAX as u64);
         self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE) as u32);
     }
 
@@ -274,24 +301,24 @@ impl Default for RafsV6SuperBlock {
         debug_assert!(size_of::<RafsV6Device>() == 128);
         Self {
             s_magic: u32::to_le(EROFS_SUPER_MAGIC_V1),
-            s_checksum: u32::to_le(0),
+            s_checksum: 0,
             s_feature_compat: u32::to_le(EROFS_FEATURE_COMPAT_RAFS_V6),
             s_blkszbits: EROFS_BLOCK_BITS,
             s_extslots: 0u8,
-            s_root_nid: u16::to_le(0),
-            s_inos: u64::to_le(0),
-            s_build_time: u64::to_le(0),
-            s_build_time_nsec: u32::to_le(0),
+            s_root_nid: 0,
+            s_inos: 0,
+            s_build_time: 0,
+            s_build_time_nsec: 0,
             s_blocks: u32::to_le(1),
-            s_meta_blkaddr: u32::to_le(0),
-            s_xattr_blkaddr: u32::to_le(0),
+            s_meta_blkaddr: 0,
+            s_xattr_blkaddr: 0,
             s_uuid: [0u8; 16],
             s_volume_name: [0u8; 16],
             s_feature_incompat: u32::to_le(
                 EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
             ),
-            s_u: u16::to_le(0),
-            s_extra_devices: u16::to_le(0),
+            s_u: 0,
+            s_extra_devices: 0,
             s_devt_slotoff: u16::to_le(EROFS_DEVTABLE_OFFSET / size_of::<RafsV6Device>() as u16),
             s_reserved: [0u8; 38],
         }
@@ -340,7 +367,7 @@ impl RafsV6SuperBlockExt {
     }
 
     /// Validate the Rafs v6 super block.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, meta_size: u64) -> Result<()> {
         let mut flags = self.flags();
         flags &= RafsSuperFlags::COMPRESSION_NONE.bits()
             | RafsSuperFlags::COMPRESSION_LZ4.bits()
@@ -370,11 +397,64 @@ impl RafsV6SuperBlockExt {
             return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
         }
 
-        if self.blob_table_offset() & (EROFS_BLOCK_SIZE - 1) != 0 {
+        let blob_offset = self.blob_table_offset();
+        let blob_size = self.blob_table_size() as u64;
+        if blob_offset & (EROFS_BLOCK_SIZE - 1) != 0
+            || blob_offset < EROFS_BLOCK_SIZE
+            || blob_size % size_of::<RafsV6Blob>() as u64 != 0
+            || blob_offset.checked_add(blob_size).is_none()
+            || blob_offset + blob_size > meta_size
+        {
             return Err(einval!(format!(
-                "invalid blob table offset {} in Rafs v6 extended superblock",
-                self.blob_table_offset()
+                "invalid blob table offset 0x{:x}/size 0x{:x} in Rafs v6 extended superblock",
+                blob_offset, blob_size
             )));
+        }
+        let blob_range = MetaRange::new(blob_offset, blob_size, true)?;
+
+        if self.chunk_table_size() > 0 {
+            let chunk_tbl_offset = self.chunk_table_offset();
+            let chunk_tbl_size = self.chunk_table_size();
+            if chunk_tbl_offset < EROFS_BLOCK_SIZE
+                || chunk_tbl_offset % EROFS_BLOCK_SIZE != 0
+                || chunk_tbl_size % size_of::<RafsV5ChunkInfo>() as u64 != 0
+                || chunk_tbl_offset.checked_add(chunk_tbl_size).is_none()
+                || chunk_tbl_offset + chunk_tbl_size > meta_size
+            {
+                return Err(einval!(format!(
+                    "invalid chunk table offset 0x{:x}/size 0x{:x} in Rafs v6 extended superblock",
+                    chunk_tbl_offset, chunk_tbl_size
+                )));
+            }
+            let chunk_range = MetaRange::new(chunk_tbl_offset, chunk_tbl_size, true)?;
+            if blob_range.intersect_with(&chunk_range) {
+                return Err(einval!(format!(
+                    "blob table intersects with chunk table in Rafs v6 extended superblock",
+                )));
+            }
+        }
+
+        // Legacy RAFS may have zero prefetch table offset but non-zero prefetch table size for
+        // empty filesystems.
+        if self.prefetch_table_size() > 0 && self.prefetch_table_offset() != 0 {
+            let tbl_offset = self.prefetch_table_offset();
+            let tbl_size = self.prefetch_table_size() as u64;
+            if tbl_offset < EROFS_BLOCK_SIZE
+                || tbl_size % size_of::<u32>() as u64 != 0
+                || tbl_offset.checked_add(tbl_size).is_none()
+                || tbl_offset + tbl_size > meta_size
+            {
+                return Err(einval!(format!(
+                    "invalid prefetch table offset 0x{:x}/size 0x{:x} in Rafs v6 extended superblock",
+                    tbl_offset, tbl_size
+                )));
+            }
+            let prefetch_range = MetaRange::new(tbl_offset, tbl_size, false)?;
+            if blob_range.intersect_with(&prefetch_range) {
+                return Err(einval!(format!(
+                    "blob table intersects with prefetch table in Rafs v6 extended superblock",
+                )));
+            }
         }
 
         Ok(())
@@ -464,14 +544,14 @@ impl RafsStore for RafsV6SuperBlockExt {
 impl Default for RafsV6SuperBlockExt {
     fn default() -> Self {
         Self {
-            s_flags: u64::to_le(0),
-            s_blob_table_offset: u64::to_le(0),
-            s_blob_table_size: u32::to_le(0),
-            s_chunk_size: u32::to_le(0),
-            s_chunk_table_offset: u64::to_le(0),
-            s_chunk_table_size: u64::to_le(0),
-            s_prefetch_table_offset: u64::to_le(0),
-            s_prefetch_table_size: u32::to_le(0),
+            s_flags: 0,
+            s_blob_table_offset: 0,
+            s_blob_table_size: 0,
+            s_chunk_size: 0,
+            s_chunk_table_offset: 0,
+            s_chunk_table_size: 0,
+            s_prefetch_table_offset: 0,
+            s_prefetch_table_size: 0,
             s_padding: u32::to_le(0),
             s_reserved: [0u8; 200],
         }
@@ -553,7 +633,7 @@ pub trait RafsV6OndiskInode: RafsStore {
 
 impl Debug for &dyn RafsV6OndiskInode {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("Ondisk Inode")
+        f.debug_struct("RafsV6OndiskInode")
             .field("format", &self.format())
             .field("ino", &self.ino())
             .field("mode", &self.mode())
@@ -590,15 +670,15 @@ impl RafsV6InodeCompact {
     pub fn new() -> Self {
         Self {
             i_format: u16::to_le(EROFS_INODE_LAYOUT_COMPACT | (EROFS_INODE_FLAT_PLAIN << 1)),
-            i_xattr_icount: u16::to_le(0),
-            i_mode: u16::to_le(0),
-            i_nlink: u16::to_le(0),
-            i_size: u32::to_le(0),
-            i_reserved: u32::to_le(0),
-            i_u: u32::to_le(0),
-            i_ino: u32::to_le(0),
-            i_uid: u16::to_le(0),
-            i_gid: u16::to_le(0),
+            i_xattr_icount: 0,
+            i_mode: 0,
+            i_nlink: 0,
+            i_size: 0,
+            i_reserved: 0,
+            i_u: 0,
+            i_ino: 0,
+            i_uid: 0,
+            i_gid: 0,
             i_reserved2: [0u8; 4],
         }
     }
@@ -719,8 +799,7 @@ impl RafsStore for RafsV6InodeCompact {
 pub struct RafsV6InodeExtended {
     /// Layout format for of the inode.
     pub i_format: u16,
-    /// TODO: doc
-    /// In unit of 4Byte
+    /// Size of extended attributes, in unit of 4Byte
     pub i_xattr_icount: u16,
     /// Protection mode.
     pub i_mode: u16,
@@ -749,17 +828,17 @@ impl RafsV6InodeExtended {
     pub fn new() -> Self {
         Self {
             i_format: u16::to_le(EROFS_INODE_LAYOUT_EXTENDED | (EROFS_INODE_FLAT_PLAIN << 1)),
-            i_xattr_icount: u16::to_le(0),
-            i_mode: u16::to_le(0),
-            i_reserved: u16::to_le(0),
-            i_size: u64::to_le(0),
-            i_u: u32::to_le(0),
-            i_ino: u32::to_le(0),
-            i_uid: u32::to_le(0),
-            i_gid: u32::to_le(0),
-            i_mtime: u64::to_le(0),
-            i_mtime_nsec: u32::to_le(0),
-            i_nlink: u32::to_le(0),
+            i_xattr_icount: 0,
+            i_mode: 0,
+            i_reserved: 0,
+            i_size: 0,
+            i_u: 0,
+            i_ino: 0,
+            i_uid: 0,
+            i_gid: 0,
+            i_mtime: 0,
+            i_mtime_nsec: 0,
+            i_nlink: 0,
             i_reserved2: [0u8; 16],
         }
     }
@@ -896,7 +975,7 @@ impl RafsV6Dirent {
             e_nid: u64::to_le(nid),
             e_nameoff: u16::to_le(nameoff),
             e_file_type: u8::to_le(file_type),
-            e_reserved: u8::to_le(0),
+            e_reserved: 0,
         }
     }
 
@@ -918,7 +997,7 @@ impl RafsV6Dirent {
 
     /// Set name offset of the dirent.
     pub fn set_name_offset(&mut self, offset: u16) {
-        debug_assert!(offset < EROFS_BLOCK_SIZE as u16);
+        assert!(offset < EROFS_BLOCK_SIZE as u16);
         self.e_nameoff = u16::to_le(offset);
     }
 
@@ -947,16 +1026,16 @@ pub struct RafsV6InodeChunkHeader {
 impl RafsV6InodeChunkHeader {
     /// Create a new instance of `RafsV6InodeChunkHeader`.
     pub fn new(chunk_size: u32) -> Self {
-        debug_assert!(chunk_size.is_power_of_two());
+        assert!(chunk_size.is_power_of_two());
         let chunk_bits = chunk_size.trailing_zeros() as u16;
-        debug_assert!(chunk_bits >= EROFS_BLOCK_BITS as u16);
+        assert!(chunk_bits >= EROFS_BLOCK_BITS as u16);
         let chunk_bits = chunk_bits - EROFS_BLOCK_BITS as u16;
-        debug_assert!(chunk_bits <= EROFS_CHUNK_FORMAT_SIZE_MASK);
+        assert!(chunk_bits <= EROFS_CHUNK_FORMAT_SIZE_MASK);
         let format = EROFS_CHUNK_FORMAT_INDEXES_FLAG | chunk_bits;
 
         Self {
             format: u16::to_le(format),
-            reserved: u16::to_le(0),
+            reserved: 0,
         }
     }
 
@@ -993,41 +1072,43 @@ impl RafsV6InodeChunkAddr {
     /// Create a new instance of `RafsV6InodeChunkIndex`.
     pub fn new() -> Self {
         Self {
-            c_blob_addr_lo: u16::to_le(0),
-            c_blob_addr_hi: u16::to_le(0),
-            c_blk_addr: u32::to_le(0),
+            c_blob_addr_lo: 0,
+            c_blob_addr_hi: 0,
+            c_blk_addr: 0,
         }
     }
 
+    /// Get the blob index associated with the chunk.
+    ///
     /// Note: for erofs, bump id by 1 since device id 0 is bootstrap.
     /// The index in BlobInfo grows from 0, so when using this method to index the corresponding blob,
     /// the index always needs to be minus 1
     /// Get the blob index of the chunk.
-    pub fn blob_index(&self) -> u8 {
-        (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u8
+    pub fn blob_index(&self) -> u32 {
+        (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u32 - 1
     }
 
     /// Set the blob index of the chunk.
-    pub fn set_blob_index(&mut self, blob_idx: u8) {
+    pub fn set_blob_index(&mut self, blob_idx: u32) {
+        assert!(blob_idx < u8::MAX as u32);
         let mut val = u16::from_le(self.c_blob_addr_hi);
         val &= 0xff00;
-        val |= blob_idx as u16;
+        val |= (blob_idx + 1) as u16;
         self.c_blob_addr_hi = val.to_le();
     }
 
-    /// Get the index into the blob compression information array.
-    /// Within blob, chunk's index 24bits
-    pub fn blob_comp_index(&self) -> u32 {
+    /// Get the 24-bits index into the blob compression information array.
+    pub fn blob_ci_index(&self) -> u32 {
         let val = (u16::from_le(self.c_blob_addr_hi) as u32) >> 8;
         (val << 16) | (u16::from_le(self.c_blob_addr_lo) as u32)
     }
 
     /// Set the index into the blob compression information array.
-    pub fn set_blob_comp_index(&mut self, comp_index: u32) {
-        debug_assert!(comp_index <= 0x00ff_ffff);
-        let val = (comp_index >> 8) as u16 & 0xff00 | (u16::from_le(self.c_blob_addr_hi) & 0x00ff);
+    pub fn set_blob_ci_index(&mut self, ci_index: u32) {
+        assert!(ci_index <= 0x00ff_ffff);
+        let val = (ci_index >> 8) as u16 & 0xff00 | (u16::from_le(self.c_blob_addr_hi) & 0x00ff);
         self.c_blob_addr_hi = val.to_le();
-        self.c_blob_addr_lo = u16::to_le(comp_index as u16);
+        self.c_blob_addr_lo = u16::to_le(ci_index as u16);
     }
 
     /// Get block address.
@@ -1038,6 +1119,12 @@ impl RafsV6InodeChunkAddr {
     /// Set block address.
     pub fn set_block_addr(&mut self, addr: u32) {
         self.c_blk_addr = addr.to_le();
+    }
+
+    /// Validate the 'RafsV6InodeChunkAddr' object.
+    pub fn validate(&self, max_blob_index: u32) -> bool {
+        let blob_idx = (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u32;
+        blob_idx > 0 && blob_idx - 1 <= max_blob_index
     }
 
     /// Load a `RafsV6InodeChunkAddr` from a reader.
@@ -1051,7 +1138,6 @@ impl_bootstrap_converter!(RafsV6InodeChunkAddr);
 impl RafsStore for RafsV6InodeChunkAddr {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
-
         Ok(self.as_ref().len())
     }
 }
@@ -1073,8 +1159,8 @@ impl Default for RafsV6Device {
     fn default() -> Self {
         Self {
             blob_id: [0u8; 64],
-            blocks: u32::to_le(0),
-            mapped_blkaddr: u32::to_le(0),
+            blocks: 0,
+            mapped_blkaddr: 0,
             reserved2: [0u8; 56],
         }
     }
@@ -1124,17 +1210,12 @@ impl RafsV6Device {
                     return Err(einval!(format!("v.len {} is invalid", v.len())));
                 }
             }
-
-            Err(_) => {
-                return Err(einval!("blob_id from_utf8 is invalid"));
-            }
+            Err(_) => return Err(einval!("blob_id from_utf8 is invalid")),
         }
 
         if self.blocks() == 0 {
-            return Err(einval!(format!(
-                "invalid blocks {} in Rafs v6 Device",
-                self.blocks()
-            )));
+            let msg = format!("invalid blocks {} in Rafs v6 Device", self.blocks());
+            return Err(einval!(msg));
         }
 
         if u32::from_le(self.mapped_blkaddr) != 0 {
@@ -1199,9 +1280,13 @@ struct RafsV6Blob {
     // SHA256 digest of the compression information array in binary form.
     ci_digest: [u8; 32],
 
+    // Offset of the ZRan context information array.
     ci_zran_offset: u64,
+    // Size of the ZRan context information array.
     ci_zran_size: u64,
+    // Number of the ZRan context information entries.
     ci_zran_count: u32,
+
     reserved2: [u8; 68],
 }
 
@@ -1257,7 +1342,6 @@ impl RafsV6Blob {
         let digest = digest::Algorithm::try_from(u32::from_le(self.digest_algo))
             .map_err(|_| einval!("invalid digest algorithm in Rafs v6 blob entry"))?;
         blob_info.set_digester(digest);
-        // blob_info.set_readahead(readahead_offset as u64, readahead_size as u64);
         blob_info.set_blob_meta_info(
             u32::from_le(self.meta_features),
             u64::from_le(self.ci_offset),
@@ -1278,10 +1362,8 @@ impl RafsV6Blob {
 
     fn from_blob_info(blob_info: &BlobInfo) -> Result<Self> {
         if blob_info.blob_id().len() != BLOB_SHA256_LEN {
-            return Err(einval!(format!(
-                "invalid blob id in blob info, {}",
-                blob_info.blob_id()
-            )));
+            let msg = format!("invalid blob id in blob info, {}", blob_info.blob_id());
+            return Err(einval!(msg));
         }
 
         let mut blob_id = [0u8; BLOB_SHA256_LEN];
@@ -1439,7 +1521,7 @@ impl RafsV6Blob {
             ZRAN_FLAGS => {
                 if ci_uncompr_size < count * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
                     error!(
-                        "RafsV6Blob: idx {} invalid ci_uncompressed_size {}",
+                        "RafsV6Blob: idx {} invalid ci_d_size {}",
                         blob_index, ci_uncompr_size
                     );
                     return false;
@@ -1473,7 +1555,7 @@ impl RafsV6Blob {
             BLOB_META_FEATURE_CHUNK_INFO_V2 => {
                 if ci_uncompr_size != count * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
                     error!(
-                        "RafsV6Blob: idx {} invalid ci_uncompressed_size {}",
+                        "RafsV6Blob: idx {} invalid ci_d_size {}",
                         blob_index, ci_uncompr_size
                     );
                     return false;
@@ -1481,7 +1563,10 @@ impl RafsV6Blob {
             }
             0 => {
                 if ci_uncompr_size != count * size_of::<BlobChunkInfoV1Ondisk>() as u64 {
-                    error!("RafsV6Blob: idx {} invalid fields, ci_uncompressed_size {:x}, chunk_count {:x}", blob_index, ci_uncompr_size, chunk_count);
+                    error!(
+                        "RafsV6Blob: idx {} invalid fields, ci_d_size {:x}, chunk_count {:x}",
+                        blob_index, ci_uncompr_size, chunk_count
+                    );
                     return false;
                 }
             }
@@ -1502,7 +1587,7 @@ impl RafsV6Blob {
 #[derive(Clone, Debug, Default)]
 pub struct RafsV6BlobTable {
     /// Base blob information array.
-    pub entries: Vec<Arc<BlobInfo>>,
+    entries: Vec<Arc<BlobInfo>>,
 }
 
 impl RafsV6BlobTable {
@@ -1594,10 +1679,8 @@ impl RafsV6BlobTable {
             return Ok(());
         }
         if blob_table_size as usize % size_of::<RafsV6Blob>() != 0 {
-            return Err(einval!(format!(
-                "invalid Rafs v6 blob table size {}",
-                blob_table_size
-            )));
+            let msg = format!("invalid Rafs v6 blob table size {}", blob_table_size);
+            return Err(einval!(msg));
         }
 
         for idx in 0..(blob_table_size as usize / size_of::<RafsV6Blob>()) {
@@ -1698,8 +1781,7 @@ lazy_static! {
 //                           /-----------------------\
 //                           |  erofs_xattr_entries+ |
 //                           +-----------------------+
-// inline xattrs must starts in erofs_xattr_ibody_header,
-// for read-only fs, no need to introduce h_refcount
+// inline xattrs must starts with erofs_xattr_ibody_header.
 #[repr(C)]
 #[derive(Default)]
 pub struct RafsV6XattrIbodyHeader {
@@ -1767,7 +1849,7 @@ impl RafsV6XattrEntry {
     }
 }
 
-pub fn recover_namespace(index: u8) -> Result<OsString> {
+pub(crate) fn recover_namespace(index: u8) -> Result<OsString> {
     let pos = RAFSV6_XATTR_TYPES
         .iter()
         .position(|x| x.index == index)
@@ -1807,7 +1889,6 @@ impl RafsXAttrs {
 
     /// Write Xattr to rafsv6 ondisk inode.
     pub fn store_v6(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        // TODO: check count of shared.
         let header = RafsV6XattrIbodyHeader::new();
         w.write_all(header.as_ref())?;
 
@@ -1833,7 +1914,6 @@ impl RafsXAttrs {
 
                 let size =
                     size_of::<RafsV6XattrEntry>() + key.byte_size() - prefix_len + value.len();
-
                 let padding =
                     round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64) as usize - size;
                 w.write_padding(padding)?;
@@ -2049,15 +2129,18 @@ mod tests {
 
         let mut chunk = RafsV6InodeChunkAddr::new();
         chunk.set_blob_index(3);
-        chunk.set_blob_comp_index(0x123456);
+        chunk.set_blob_ci_index(0x123456);
         chunk.set_block_addr(0xa5a53412);
         chunk.store(&mut writer).unwrap();
         writer.flush().unwrap();
         let mut chunk2 = RafsV6InodeChunkAddr::new();
         chunk2.load(&mut reader).unwrap();
         assert_eq!(chunk2.blob_index(), 3);
-        assert_eq!(chunk2.blob_comp_index(), 0x123456);
+        assert_eq!(chunk2.blob_ci_index(), 0x123456);
         assert_eq!(chunk2.block_addr(), 0xa5a53412);
+        assert!(chunk2.validate(4));
+        assert!(chunk2.validate(3));
+        assert!(!chunk2.validate(2));
     }
 
     #[test]

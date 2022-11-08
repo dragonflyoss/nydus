@@ -544,15 +544,16 @@ impl Bootstrap {
         //  EROFS_SUPER_OFFSET
         //     |
         // +---+---------+------------+-------------+----------------------------------------------+
-        // |   |         |            |             |                                              |
-        // |1k |super    |extended    | blob table  | inodes                                       |
-        // |   |block    |superblock+ |             |                                              |
-        // |   |         |devslot     |             |                                              |
+        // |   |         |            |             |                 |         |                  |
+        // |1k |super    |extended    | blob table  |  prefetch table | inodes  | chunk info table |
+        // |   |block    |superblock+ |             |                 |         |                  |
+        // |   |         |devslot     |             |                 |         |                  |
         // +---+---------+------------+-------------+----------------------------------------------+
 
         // get devt_slotoff
         let mut devtable: Vec<RafsV6Device> = Vec::new();
-        for entry in blob_table.entries.iter() {
+        let blobs = blob_table.get_all();
+        for entry in blobs.iter() {
             let mut devslot = RafsV6Device::new();
             // blob id is String, which is processed by sha256.finalize().
             if entry.blob_id().len() != 64 {
@@ -578,7 +579,8 @@ impl Bootstrap {
             (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
             EROFS_BLOCK_SIZE as u64,
         );
-        let blob_table_entries = blob_table.entries.len();
+        let blob_table_entries = blobs.len();
+        assert!(blob_table_entries < u16::MAX as usize);
         trace!(
             "devtable len {} blob table offset {} blob table size {}",
             devtable_len,
@@ -630,9 +632,8 @@ impl Bootstrap {
         sb.store(bootstrap_ctx.writer.as_mut())
             .context("failed to store SB")?;
 
-        let ext_sb_offset = bootstrap_ctx.writer.seek_current(0)?;
-
         // Dump extended superblock
+        let ext_sb_offset = bootstrap_ctx.writer.seek_current(0)?;
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.set_compressor(ctx.compressor);
         ext_sb.set_digester(ctx.digester);
@@ -724,12 +725,12 @@ impl Bootstrap {
                 .context("failed to dump chunk table")?;
             chunk_table_size += chunk_size as u64;
         }
+        ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
         debug!(
             "chunk_table offset {} size {}",
             chunk_table_offset, chunk_table_size
         );
 
-        ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
         // EROFS does not have inode table, so we lose the chance to decide if this
         // image has xattr. So we have to rewrite extended super block.
         if ctx.has_xattr {
@@ -758,6 +759,10 @@ impl Bootstrap {
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
             .context("failed to write 0 to padding of bootstrap's end")?;
+        bootstrap_ctx
+            .writer
+            .flush()
+            .context("failed to flush bootstrap")?;
 
         Ok(())
     }
