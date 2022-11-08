@@ -189,34 +189,40 @@ impl FileCacheEntry {
         let digester = blob_info.digester();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
         let is_compressed = mgr.is_compressed;
+        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
         let need_validation = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
-        let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap;
-
         trace!(
-            "filecache entry: compressed {}, direct {}, legacy_stargz {}",
+            "filecache entry: compressed {}, direct {}, legacy_stargz {}, zran {}",
             mgr.is_compressed,
             is_direct_chunkmap,
-            is_legacy_stargz
+            is_legacy_stargz,
+            is_zran,
         );
+
+        // Set cache file to its expected size.
+        let file_size = file.metadata()?.len();
+        let cached_file_size = if is_compressed {
+            blob_info.compressed_size()
+        } else {
+            blob_info.uncompressed_size()
+        };
+        if file_size == 0 {
+            file.set_len(cached_file_size)?;
+        } else if cached_file_size != 0 && file_size != cached_file_size {
+            let msg = format!(
+                "blob data file size doesn't match: got 0x{:x}, expect 0x{:x}",
+                file_size,
+                blob_info.uncompressed_size()
+            );
+            return Err(einval!(msg));
+        }
         let meta = if blob_info.meta_ci_is_valid() {
-            // Set cache file to its expected size.
-            let file_size = file.metadata()?.len();
-            if file_size == 0 {
-                file.set_len(blob_info.uncompressed_size())?;
-            } else if file_size != blob_info.uncompressed_size() {
-                let msg = format!(
-                    "blob data file size doesn't match: got 0x{:x}, expect 0x{:x}",
-                    file_size,
-                    blob_info.uncompressed_size()
-                );
-                return Err(einval!(msg));
-            }
             let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
             Some(meta)
         } else {
             None
         };
-        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
+        let is_get_blob_object_supported = meta.is_some() && is_direct_chunkmap;
 
         Ok(FileCacheEntry {
             blob_info,
@@ -250,13 +256,11 @@ impl FileCacheEntry {
         blob_info: &BlobInfo,
         blob_file: &str,
     ) -> Result<(Arc<dyn ChunkMap>, bool)> {
-        let mut direct_chunkmap = true;
         // The builder now records the number of chunks in the blob table, so we can
         // use IndexedChunkMap as a chunk map, but for the old Nydus bootstrap, we
         // need downgrade to use DigestedChunkMap as a compatible solution.
-
         let is_v5 = !blob_info.meta_ci_is_valid();
-
+        let mut direct_chunkmap = true;
         let chunk_map: Arc<dyn ChunkMap> = if (is_v5 && mgr.disable_indexed_map)
             || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
         {

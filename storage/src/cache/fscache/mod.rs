@@ -220,7 +220,9 @@ impl FileCacheEntry {
             let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
             Some(meta)
         } else {
-            None
+            return Err(enosys!(
+                "fscache doesn't support blobs without blob meta information"
+            ));
         };
         let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
 
