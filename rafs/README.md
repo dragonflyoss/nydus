@@ -1,4 +1,4 @@
-# nydus-storage
+# nydus-rafs
 
 The RAFS Fuse filesystem for [Nydus Image Service](https://nydus.dev/).
 
