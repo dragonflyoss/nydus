@@ -10,7 +10,7 @@ use std::str;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_api::http::LocalFsConfig;
+use nydus_api::LocalFsConfig;
 use nydus_rafs::{
     metadata::{RafsInodeExt, RafsMode, RafsSuper},
     RafsIoReader, RafsIterator,

@@ -17,7 +17,7 @@ use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
 use url::{ParseError, Url};
 
-use nydus_api::http::RegistryConfig;
+use nydus_api::RegistryConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{

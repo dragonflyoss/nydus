@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use nydus_api::http::{BackendConfig, FactoryConfig};
+use nydus_api::{BackendConfig, FactoryConfig};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 

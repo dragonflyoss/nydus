@@ -33,7 +33,7 @@ use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
-use nydus_api::http::FactoryConfig;
+use nydus_api::FactoryConfig;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 

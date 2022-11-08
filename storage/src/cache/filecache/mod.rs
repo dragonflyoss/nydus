@@ -9,7 +9,7 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use nydus_api::http::{CacheConfig, FileCacheConfig};
+use nydus_api::{CacheConfig, FileCacheConfig};
 use nydus_utils::compress;
 use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;

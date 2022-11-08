@@ -17,6 +17,8 @@ extern crate lazy_static;
 #[macro_use]
 extern crate nydus_error;
 
+pub mod config;
+pub use config::*;
 pub mod http;
 pub use self::http::*;
 

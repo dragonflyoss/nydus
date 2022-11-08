@@ -12,7 +12,7 @@ use hmac_sha1_compact::HMAC;
 use reqwest::header::{HeaderMap, CONTENT_LENGTH};
 use reqwest::Method;
 
-use nydus_api::http::OssConfig;
+use nydus_api::OssConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError};

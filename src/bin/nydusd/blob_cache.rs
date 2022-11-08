@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nydus_api::http::{BackendConfig, CacheConfig, FactoryConfig};
-use nydus_api::http::{
-    BlobCacheEntry, BlobCacheList, BlobCacheObjectId, FsCacheConfig, BLOB_CACHE_TYPE_BOOTSTRAP,
+use nydus_api::{
+    BackendConfig, BlobCacheEntry, BlobCacheList, BlobCacheObjectId, CacheConfig, FactoryConfig,
+    FsCacheConfig, BLOB_CACHE_TYPE_BOOTSTRAP,
 };
 use rafs::metadata::{RafsMode, RafsSuper};
 use storage::device::BlobInfo;
@@ -399,7 +399,7 @@ impl BlobCacheMgr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_api::http::BlobCacheEntryConfig;
+    use nydus_api::BlobCacheEntryConfig;
     use vmm_sys_util::tempdir::TempDir;
 
     fn create_factory_config() -> String {
