@@ -195,7 +195,7 @@ impl RafsV6SuperBlock {
 
         if self.s_xattr_blkaddr != 0 {
             return Err(einval!(
-                "invalid extended attribute address in Rafsv6 superblock"
+                "unsupported shared extended attribute namespace in Rafsv6 superblock"
             ));
         }
 

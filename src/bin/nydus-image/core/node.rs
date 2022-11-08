@@ -1290,11 +1290,9 @@ impl Node {
         let mut chunks: Vec<u8> = Vec::new();
         for chunk in self.chunks.iter() {
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
-            // Bump blob id by 1 for EROFS since device id 0 is used for the metadata blob.
             v6_chunk.set_blob_index(chunk.inner.blob_index());
             v6_chunk.set_blob_ci_index(chunk.inner.index());
             v6_chunk.set_block_addr((chunk.inner.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
-            trace!("name {:?} chunk {}", self.name(), chunk);
             chunks.extend(v6_chunk.as_ref());
             chunk_cache.insert(
                 DigestWithBlobIndex(*chunk.inner.id(), chunk.inner.blob_index() + 1),

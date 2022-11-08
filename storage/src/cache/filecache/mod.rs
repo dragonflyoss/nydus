@@ -211,8 +211,7 @@ impl FileCacheEntry {
         } else if cached_file_size != 0 && file_size != cached_file_size {
             let msg = format!(
                 "blob data file size doesn't match: got 0x{:x}, expect 0x{:x}",
-                file_size,
-                blob_info.uncompressed_size()
+                file_size, cached_file_size
             );
             return Err(einval!(msg));
         }
