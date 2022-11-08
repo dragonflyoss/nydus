@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, MutexGuard};
 
-use fuse_backend_rs::api::{BackendFileSystem, Vfs};
+use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use nydus::{FsBackendDesc, FsBackendType};
@@ -22,9 +22,6 @@ use storage::factory::BLOB_FACTORY;
 use crate::daemon::DaemonResult;
 use crate::upgrade::{self, UpgradeManager};
 use crate::DaemonError;
-
-//TODO: Try to public below type from fuse-rs thus no need to redefine it here.
-type BackFileSystem = Box<dyn BackendFileSystem<Inode = u64, Handle = u64> + Send + Sync>;
 
 /// Command to mount a filesystem.
 #[derive(Clone)]
