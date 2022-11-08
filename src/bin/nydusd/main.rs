@@ -75,9 +75,9 @@ pub struct DaemonController {
 
 impl DaemonController {
     fn new() -> Self {
-        let poller = Poll::new().expect("Failed to create `ServiceController` instance");
+        let poller = Poll::new().expect("Failed to create poller for DaemonController");
         let waker = Waker::new(poller.registry(), Token(1))
-            .expect("Failed to create waker for ServiceController");
+            .expect("Failed to create waker for DaemonController");
 
         Self {
             active: AtomicBool::new(true),
@@ -706,7 +706,7 @@ fn process_fs_service(
         DAEMON_CONTROLLER.set_daemon(daemon);
     } else {
         #[cfg(feature = "virtiofs")]
-        if !is_fuse {
+        {
             let vu_sock = args.value_of("sock").ok_or_else(|| {
                 DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
             })?;
