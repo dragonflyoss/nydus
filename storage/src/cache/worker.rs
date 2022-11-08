@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use leaky_bucket::RateLimiter;
-use nydus_api::http::BlobPrefetchConfig;
+use nydus_api::BlobPrefetchConfig;
 use nydus_utils::async_helper::with_runtime;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::mpmc::Channel;

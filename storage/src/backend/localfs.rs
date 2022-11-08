@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 
-use nydus_api::http::LocalFsConfig;
+use nydus_api::LocalFsConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};

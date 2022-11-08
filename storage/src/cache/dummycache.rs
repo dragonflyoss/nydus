@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use nydus_api::http::CacheConfig;
+use nydus_api::CacheConfig;
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};

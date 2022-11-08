@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
-use nydus_api::http::BackendConfig;
+use nydus_api::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::metadata::RafsVersion;
 use nydus_rafs::RafsIoReader;

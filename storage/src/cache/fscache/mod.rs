@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
 
-use nydus_api::http::{CacheConfig, FsCacheConfig};
+use nydus_api::{CacheConfig, FsCacheConfig};
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;

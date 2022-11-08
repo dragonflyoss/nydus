@@ -35,7 +35,7 @@ use fuse_backend_rs::api::BackendFileSystem;
 use nix::unistd::{getegid, geteuid};
 use serde::Deserialize;
 
-use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
+use nydus_api::{BlobPrefetchConfig, FactoryConfig};
 use nydus_storage::device::{BlobDevice, BlobIoVec, BlobPrefetchRequest};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
