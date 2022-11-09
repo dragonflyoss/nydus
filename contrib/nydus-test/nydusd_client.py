@@ -54,9 +54,13 @@ requests_unixsocket.monkeypatch()
 def check_resp(func):
     def wrapped(*args):
         resp = func(*args)
-        assert resp.status_code < 400 or resp.status_code == 501, resp.content.decode(
-            "utf-8"
-        )
+
+        if resp.status_code >= 400 and resp.status_code != 501:
+            ee = resp.content.decode("utf-8")
+            logging.error(
+                "error code %d, error response content %s", resp.status_code, ee
+            )
+            assert False
 
         if resp.status_code == 501:
             logging.warning("Not supported")
