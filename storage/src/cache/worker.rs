@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use leaky_bucket::RateLimiter;
-use nydus_api::BlobPrefetchConfig;
+use nydus_api::PrefetchConfigV2;
 use nydus_utils::async_helper::with_runtime;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::mpmc::Channel;
@@ -33,13 +33,13 @@ pub(crate) struct AsyncPrefetchConfig {
     pub bandwidth_rate: u32,
 }
 
-impl From<BlobPrefetchConfig> for AsyncPrefetchConfig {
-    fn from(p: BlobPrefetchConfig) -> Self {
+impl From<&PrefetchConfigV2> for AsyncPrefetchConfig {
+    fn from(p: &PrefetchConfigV2) -> Self {
         AsyncPrefetchConfig {
             enable: p.enable,
-            threads_count: p.threads_count,
-            merging_size: p.merging_size,
-            bandwidth_rate: p.bandwidth_rate,
+            threads_count: p.threads,
+            merging_size: p.batch_size,
+            bandwidth_rate: p.bandwidth_limit,
         }
     }
 }

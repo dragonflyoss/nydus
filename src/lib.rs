@@ -7,6 +7,7 @@ extern crate serde_json;
 use std::fmt::{self, Display};
 use std::str::FromStr;
 
+use nydus_api::ConfigV2;
 use serde::{Deserialize, Serialize};
 
 /// Error code related to Nydus library.
@@ -56,7 +57,7 @@ pub struct FsBackendDesc {
     pub backend_type: FsBackendType,
     pub mountpoint: String,
     pub mounted_time: time::OffsetDateTime,
-    pub config: Option<serde_json::Value>,
+    pub config: Option<ConfigV2>,
 }
 
 pub fn ensure_threads<V: AsRef<str>>(v: V) -> std::result::Result<usize, String> {

@@ -4,64 +4,242 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::fmt;
+use std::convert::{TryFrom, TryInto};
 use std::fs;
-use std::fs::File;
 use std::io::Result;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Configuration file format version 2, based on Toml.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConfigV2 {
+    /// Configuration file format version number, must be 2.
+    pub version: u32,
+    /// Identifier for the instance.
+    #[serde(default)]
+    pub id: String,
+    /// Configuration information for storage backend.
+    pub backend: Option<BackendConfigV2>,
+    /// Configuration information for local cache system.
+    pub cache: Option<CacheConfigV2>,
+    /// Configuration information for RAFS filesystem.
+    pub rafs: Option<RafsConfigV2>,
+}
+
+impl Default for ConfigV2 {
+    fn default() -> Self {
+        ConfigV2 {
+            version: 2,
+            id: String::new(),
+            backend: None,
+            cache: None,
+            rafs: None,
+        }
+    }
+}
+
+impl ConfigV2 {
+    /// Create a new instance of `ConfigV2` object.
+    pub fn new(id: &str) -> Self {
+        ConfigV2 {
+            version: 2,
+            id: id.to_string(),
+            backend: None,
+            cache: None,
+            rafs: None,
+        }
+    }
+
+    /// Read configuration information from a file.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let md = fs::metadata(path.as_ref())?;
+        if md.len() > 0x100000 {
+            return Err(eother!("configuration file size is too big"));
+        }
+        let content = fs::read_to_string(path)?;
+        Self::from_str(&content)
+    }
+
+    /// Validate the configuration object.
+    pub fn validate(&self) -> bool {
+        if self.version != 2 {
+            return false;
+        }
+        if let Some(backend_cfg) = self.backend.as_ref() {
+            if !backend_cfg.validate() {
+                return false;
+            }
+        }
+        if let Some(cache_cfg) = self.cache.as_ref() {
+            if !cache_cfg.validate() {
+                return false;
+            }
+        }
+        if let Some(rafs_cfg) = self.rafs.as_ref() {
+            if !rafs_cfg.validate() {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Get configuration information for storage backend.
+    pub fn get_backend_config(&self) -> Result<&BackendConfigV2> {
+        self.backend
+            .as_ref()
+            .ok_or_else(|| einval!("no configuration information for backend"))
+    }
+
+    /// Get configuration information for cache subsystem.
+    pub fn get_cache_config(&self) -> Result<&CacheConfigV2> {
+        self.cache
+            .as_ref()
+            .ok_or_else(|| einval!("no configuration information for cache"))
+    }
+
+    /// Get configuration information for RAFS filesystem.
+    pub fn get_rafs_config(&self) -> Result<&RafsConfigV2> {
+        self.rafs
+            .as_ref()
+            .ok_or_else(|| einval!("no configuration information for rafs"))
+    }
+
+    /// Clone the object with all secrets removed.
+    pub fn clone_without_secrets(&self) -> Self {
+        let mut cfg = self.clone();
+
+        if let Some(backend_cfg) = cfg.backend.as_mut() {
+            if let Some(oss_cfg) = backend_cfg.oss.as_mut() {
+                oss_cfg.access_key_id = String::new();
+                oss_cfg.access_key_secret = String::new();
+            }
+            if let Some(registry_cfg) = backend_cfg.registry.as_mut() {
+                registry_cfg.auth = None;
+                registry_cfg.registry_token = None;
+            }
+        }
+
+        cfg
+    }
+}
+
+impl FromStr for ConfigV2 {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> Result<ConfigV2> {
+        if let Ok(v) = serde_json::from_str::<ConfigV2>(s) {
+            return if v.validate() {
+                Ok(v)
+            } else {
+                Err(einval!("invalid configuration"))
+            };
+        }
+        if let Ok(v) = toml::from_str::<ConfigV2>(s) {
+            return if v.validate() {
+                Ok(v)
+            } else {
+                Err(einval!("invalid configuration"))
+            };
+        }
+        if let Ok(v) = serde_json::from_str::<RafsConfig>(s) {
+            if let Ok(v) = ConfigV2::try_from(v) {
+                if v.validate() {
+                    return Ok(v);
+                }
+            }
+        }
+        Err(einval!("failed to parse configuration information"))
+    }
+}
+
 /// Configuration information for storage backend.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BackendConfig {
+pub struct BackendConfigV2 {
     /// Type of storage backend.
     #[serde(rename = "type")]
     pub backend_type: String,
-    /// Configuration for storage backend.
-    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
-    #[serde(rename = "config")]
-    pub backend_config: Value,
+    /// Configuration for local filesystem backend.
+    pub localfs: Option<LocalFsConfig>,
+    /// Configuration for OSS backend.
+    pub oss: Option<OssConfig>,
+    /// Configuration for container registry backend.
+    pub registry: Option<RegistryConfig>,
 }
 
-/// Errors generated by/related to the API service, sent back through [`ApiResponse`].
-impl BackendConfig {
-    /// Create a new instance of `BackendConfig`.
-    pub fn from_str(backend_type: &str, json_str: &str) -> Result<BackendConfig> {
-        let backend_config = serde_json::from_str(json_str).map_err(|e| {
-            error!("failed to parse backend config in JSON string {:?}", e);
-            e
-        })?;
+impl BackendConfigV2 {
+    /// Validate storage backend configuration.
+    pub fn validate(&self) -> bool {
+        match self.backend_type.as_str() {
+            "localfs" => match self.localfs.as_ref() {
+                Some(v) => {
+                    if v.blob_file.is_empty() && v.dir.is_empty() {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            "oss" => match self.oss.as_ref() {
+                Some(v) => {
+                    if v.endpoint.is_empty() || v.bucket_name.is_empty() {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            "registry" => match self.registry.as_ref() {
+                Some(v) => {
+                    if v.host.is_empty() || v.repo.is_empty() {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            _ => return false,
+        }
 
-        Ok(Self {
-            backend_type: backend_type.to_string(),
-            backend_config,
-        })
+        true
     }
 
-    /// Load storage backend configuration from a configuration file.
-    pub fn from_file(backend_type: &str, file_path: &str) -> Result<BackendConfig> {
-        let file = std::fs::File::open(file_path).map_err(|e| {
-            error!("failed to open backend config file {}: {:?}", file_path, e);
-            e
-        })?;
-        let backend_config = serde_json::from_reader(file).map_err(|e| {
-            error!("failed to parse backend config file {}: {:?}", file_path, e);
-            e
-        })?;
+    /// Get configuration information for localfs
+    pub fn get_localfs_config(&self) -> Result<&LocalFsConfig> {
+        if &self.backend_type != "localfs" {
+            Err(einval!("backend type is not 'localfs'"))
+        } else {
+            self.localfs
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for localfs"))
+        }
+    }
 
-        Ok(Self {
-            backend_type: backend_type.to_string(),
-            backend_config,
-        })
+    /// Get configuration information for OSS
+    pub fn get_oss_config(&self) -> Result<&OssConfig> {
+        if &self.backend_type != "oss" {
+            Err(einval!("backend type is not 'oss'"))
+        } else {
+            self.oss
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for OSS"))
+        }
+    }
+
+    /// Get configuration information for Registry
+    pub fn get_registry_config(&self) -> Result<&RegistryConfig> {
+        if &self.backend_type != "registry" {
+            Err(einval!("backend type is not 'registry'"))
+        } else {
+            self.registry
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for registry"))
+        }
     }
 }
 
 /// Configuration information for localfs storage backend.
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LocalFsConfig {
     /// Blob file to access.
     #[serde(default)]
@@ -75,49 +253,29 @@ pub struct LocalFsConfig {
 }
 
 /// OSS configuration information to access blobs.
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OssConfig {
-    /// Enable HTTP proxy for the read request.
-    pub proxy: ProxyConfig,
-    /// Enable mirrors for the read request.
-    pub mirrors: Vec<MirrorConfig>,
-    /// Skip SSL certificate validation for HTTPS scheme.
-    pub skip_verify: bool,
-    /// Drop the read request once http request timeout, in seconds.
-    #[serde(default = "default_http_timeout")]
-    pub timeout: u32,
-    /// Drop the read request once http connection timeout, in seconds.
-    #[serde(default = "default_http_timeout")]
-    pub connect_timeout: u32,
-    /// Retry count when read request failed.
-    pub retry_limit: u8,
-    /// Oss endpoint
-    pub endpoint: String,
-    /// Oss access key
-    pub access_key_id: String,
-    /// Oss secret
-    pub access_key_secret: String,
-    /// Oss bucket name
-    pub bucket_name: String,
     /// Oss http scheme, either 'http' or 'https'
     #[serde(default = "default_http_scheme")]
     pub scheme: String,
+    /// Oss endpoint
+    pub endpoint: String,
+    /// Oss bucket name
+    pub bucket_name: String,
     /// Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
     /// - object_key: sha256:xxx
     /// - object_prefix: nydus/
     /// - object_key with object_prefix: nydus/sha256:xxx
     #[serde(default)]
     pub object_prefix: String,
-}
-
-/// Container registry configuration information to access blobs.
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct RegistryConfig {
-    /// Enable HTTP proxy for the read request.
-    pub proxy: ProxyConfig,
+    /// Oss access key
+    #[serde(default)]
+    pub access_key_id: String,
+    /// Oss secret
+    #[serde(default)]
+    pub access_key_secret: String,
     /// Skip SSL certificate validation for HTTPS scheme.
+    #[serde(default)]
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
@@ -126,22 +284,42 @@ pub struct RegistryConfig {
     #[serde(default = "default_http_timeout")]
     pub connect_timeout: u32,
     /// Retry count when read request failed.
+    #[serde(default)]
     pub retry_limit: u8,
+    /// Enable HTTP proxy for the read request.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    /// Enable mirrors for the read request.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorConfig>,
+}
+
+/// Container registry configuration information to access blobs.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RegistryConfig {
     /// Registry http scheme, either 'http' or 'https'
     #[serde(default = "default_http_scheme")]
     pub scheme: String,
     /// Registry url host
     pub host: String,
-    /// Enable mirrors for the read request.
-    pub mirrors: Vec<MirrorConfig>,
     /// Registry image name, like 'library/ubuntu'
     pub repo: String,
-    /// Base64_encoded(username:password), the field should be
-    /// sent to registry auth server to get a bearer token.
+    /// Base64_encoded(username:password), the field should be sent to registry auth server to get a bearer token.
     #[serde(default)]
     pub auth: Option<String>,
-    /// The field is a bearer token to be sent to registry
-    /// to authorize registry requests.
+    /// Skip SSL certificate validation for HTTPS scheme.
+    #[serde(default)]
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
+    pub timeout: u32,
+    /// Drop the read request once http connection timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
+    pub connect_timeout: u32,
+    /// Retry count when read request failed.
+    #[serde(default)]
+    pub retry_limit: u8,
+    /// The field is a bearer token to be sent to registry to authorize registry requests.
     #[serde(default)]
     pub registry_token: Option<String>,
     /// The http scheme to access blobs. It is used to workaround some P2P subsystem
@@ -151,84 +329,100 @@ pub struct RegistryConfig {
     /// Redirect blob access to a different host regardless of the one specified in 'host'.
     #[serde(default)]
     pub blob_redirected_host: String,
+    /// Enable HTTP proxy for the read request.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    /// Enable mirrors for the read request.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorConfig>,
 }
 
 /// Configuration information for blob cache manager.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CacheConfig {
-    /// Type of blob cache: "blobcache", "fscache" or ""
+pub struct CacheConfigV2 {
+    /// Type of blob cache: "blobcache", "fscache" or "dummy"
     #[serde(default, rename = "type")]
     pub cache_type: String,
     /// Whether the data from the cache is compressed, not used anymore.
     #[serde(default, rename = "compressed")]
     pub cache_compressed: bool,
-    /// Blob cache manager specific configuration: FileCacheConfig, FsCacheConfig.
-    #[serde(default, rename = "config")]
-    pub cache_config: Value,
     /// Whether to validate data read from the cache.
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(default, rename = "validate")]
     pub cache_validate: bool,
-    /// Configuration for blob data prefetching.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub prefetch_config: BlobPrefetchConfig,
+    /// Configuration for blob level prefetch.
+    #[serde(default)]
+    pub prefetch: PrefetchConfigV2,
+    /// Configuration information for file cache
+    #[serde(rename = "filecache")]
+    pub file_cache: Option<FileCacheConfig>,
+    #[serde(rename = "fscache")]
+    /// Configuration information for fscache
+    pub fs_cache: Option<FsCacheConfig>,
 }
 
-/// Configuration information to create blob cache manager.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FactoryConfig {
-    /// Id of the factory.
-    #[serde(default)]
-    pub id: String,
-    /// Configuration for storage backend.
-    pub backend: BackendConfig,
-    /// Configuration for blob cache manager.
-    #[serde(default)]
-    pub cache: CacheConfig,
-}
+impl CacheConfigV2 {
+    /// Validate cache configuration information.
+    pub fn validate(&self) -> bool {
+        match self.cache_type.as_str() {
+            "blobcache" | "filecache" => {
+                if let Some(c) = self.file_cache.as_ref() {
+                    if c.work_dir.is_empty() {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            "fscache" => {
+                if let Some(c) = self.fs_cache.as_ref() {
+                    if c.work_dir.is_empty() {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            "" | "dummycache" => {}
+            _ => return false,
+        }
 
-/// Configuration information for a cached blob, corresponding to `FactoryConfig`.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BlobCacheEntryConfig {
-    /// Identifier for the blob cache configuration: corresponding to `FactoryConfig::id`.
-    #[serde(default)]
-    pub id: String,
-    /// Type of storage backend, corresponding to `FactoryConfig::BackendConfig::backend_type`.
-    pub backend_type: String,
-    /// Configuration for storage backend, corresponding to `FactoryConfig::BackendConfig::backend_config`.
-    ///
-    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
-    pub backend_config: Value,
-    /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
-    ///
-    /// Possible value: "fscache", "filecache".
-    pub cache_type: String,
-    /// Configuration for blob cache, corresponding to `FactoryConfig::CacheConfig::cache_config`.
-    ///
-    /// Possible value: `FileCacheConfig`, `FsCacheConfig`.
-    pub cache_config: Value,
-    /// Configuration for data prefetch.
-    #[serde(default)]
-    pub prefetch_config: BlobPrefetchConfig,
-    /// Optional file path for metadata blobs.
-    #[serde(default)]
-    pub metadata_path: Option<String>,
-}
+        if self.prefetch.enable {
+            if self.prefetch.batch_size > 0x10000000 {
+                return false;
+            }
+            if self.prefetch.threads == 0 || self.prefetch.threads > 1024 {
+                return false;
+            }
+        }
 
-/// Configuration information for blob data prefetching.
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct BlobPrefetchConfig {
-    /// Whether to enable blob data prefetching.
-    pub enable: bool,
-    /// Number of data prefetching working threads.
-    pub threads_count: usize,
-    /// The maximum size of a merged IO request.
-    pub merging_size: usize,
-    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
-    pub bandwidth_rate: u32,
+        true
+    }
+
+    /// Get configuration information for file cache.
+    pub fn get_filecache_config(&self) -> Result<&FileCacheConfig> {
+        if self.cache_type != "blobcache" && self.cache_type != "filecache" {
+            Err(einval!("cache type is not 'filecache'"))
+        } else {
+            self.file_cache
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for filecache"))
+        }
+    }
+
+    /// Get configuration information for fscache.
+    pub fn get_fscache_config(&self) -> Result<&FsCacheConfig> {
+        if self.cache_type != "fscache" {
+            Err(einval!("cache type is not 'fscache'"))
+        } else {
+            self.fs_cache
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for fscache"))
+        }
+    }
 }
 
 /// Configuration information for file cache.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileCacheConfig {
     /// Working directory to store state and cached files.
     #[serde(default = "default_work_dir")]
@@ -265,7 +459,7 @@ impl FileCacheConfig {
 }
 
 /// Configuration information for fscache.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FsCacheConfig {
     /// Working directory to store state and cached files.
     #[serde(default = "default_work_dir")]
@@ -298,9 +492,331 @@ impl FsCacheConfig {
     }
 }
 
+/// Configuration information for RAFS filesystem.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RafsConfigV2 {
+    /// Filesystem metadata cache mode.
+    #[serde(default = "default_rafs_mode")]
+    pub mode: String,
+    /// Batch size to read data from storage cache layer.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Whether to validate data digest.
+    #[serde(default)]
+    pub validate: bool,
+    /// Enable support of extended attributes.
+    #[serde(default)]
+    pub enable_xattr: bool,
+    /// Record file operation metrics for each file.
+    ///
+    /// Better to keep it off in production environment due to possible resource consumption.
+    #[serde(default)]
+    pub iostats_files: bool,
+    /// Record filesystem access pattern.
+    #[serde(default)]
+    pub access_pattern: bool,
+    /// Record file name if file access trace log.
+    #[serde(default)]
+    pub latest_read_files: bool,
+    /// Filesystem prefetching configuration.
+    #[serde(default)]
+    pub prefetch: PrefetchConfigV2,
+}
+
+impl RafsConfigV2 {
+    /// Validate RAFS filesystem configuration information.
+    pub fn validate(&self) -> bool {
+        if self.mode != "direct" && self.mode != "cached" {
+            return false;
+        }
+        if self.batch_size > 0x10000000 {
+            return false;
+        }
+        if self.prefetch.enable {
+            if self.prefetch.batch_size > 0x10000000 {
+                return false;
+            }
+            if self.prefetch.threads == 0 || self.prefetch.threads > 1024 {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+/// Configuration information for blob data prefetching.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct PrefetchConfigV2 {
+    /// Whether to enable blob data prefetching.
+    pub enable: bool,
+    /// Number of data prefetching working threads.
+    #[serde(default = "default_prefetch_threads")]
+    pub threads: usize,
+    /// The batch size to prefetch data from backend.
+    #[serde(default = "default_prefetch_batch_size")]
+    pub batch_size: usize,
+    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
+    #[serde(default)]
+    pub bandwidth_limit: u32,
+    /// Prefetch all data from backend.
+    #[serde(default)]
+    pub prefetch_all: bool,
+}
+
+/// Configuration information for network proxy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProxyConfig {
+    /// Access remote storage backend via proxy, e.g. Dragonfly dfdaemon server URL.
+    #[serde(default)]
+    pub url: String,
+    /// Proxy health checking endpoint.
+    #[serde(default)]
+    pub ping_url: String,
+    /// Fallback to remote storage backend if proxy ping failed.
+    #[serde(default = "default_true")]
+    pub fallback: bool,
+    /// Interval for proxy health checking, in seconds.
+    #[serde(default = "default_check_interval")]
+    pub check_interval: u64,
+    /// Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
+    #[serde(default)]
+    pub use_http: bool,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            ping_url: String::new(),
+            fallback: true,
+            check_interval: 5,
+            use_http: false,
+        }
+    }
+}
+
+/// Configuration for registry mirror.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MirrorConfig {
+    /// Mirror server URL, for example http://127.0.0.1:65001.
+    pub host: String,
+    /// Ping URL to check mirror server health.
+    #[serde(default)]
+    pub ping_url: String,
+    /// HTTP request headers to be passed to mirror server.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// Whether the authorization process is through mirror, default to false.
+    /// true: authorization through mirror, e.g. Using normal registry as mirror.
+    /// false: authorization through original registry,
+    /// e.g. when using Dragonfly server as mirror, authorization through it may affect performance.
+    #[serde(default)]
+    pub auth_through: bool,
+    /// Interval for mirror health checking, in seconds.
+    #[serde(default = "default_check_interval")]
+    pub health_check_interval: u64,
+    /// Maximum number of failures before marking a mirror as unusable.
+    #[serde(default = "default_failure_limit")]
+    pub failure_limit: u8,
+}
+
+impl Default for MirrorConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            headers: HashMap::new(),
+            auth_through: false,
+            health_check_interval: 5,
+            failure_limit: 5,
+            ping_url: String::new(),
+        }
+    }
+}
+
+/// Configuration information for a cached blob`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlobCacheEntryConfigV2 {
+    /// Configuration file format version number, must be 2.
+    pub version: u32,
+    /// Identifier for the instance.
+    #[serde(default)]
+    pub id: String,
+    /// Configuration information for storage backend.
+    #[serde(default)]
+    pub backend: BackendConfigV2,
+    /// Configuration information for local cache system.
+    #[serde(default)]
+    pub cache: CacheConfigV2,
+    /// Optional file path for metadata blobs.
+    #[serde(default)]
+    pub metadata_path: Option<String>,
+}
+
+impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
+    fn from(c: &BlobCacheEntryConfigV2) -> Self {
+        ConfigV2 {
+            version: c.version,
+            id: c.id.clone(),
+            backend: Some(c.backend.clone()),
+            cache: Some(c.cache.clone()),
+            rafs: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_http_scheme() -> String {
+    "https".to_string()
+}
+
+fn default_http_timeout() -> u32 {
+    5
+}
+
+fn default_check_interval() -> u64 {
+    5
+}
+
+fn default_failure_limit() -> u8 {
+    5
+}
+
+fn default_work_dir() -> String {
+    ".".to_string()
+}
+
+pub fn default_batch_size() -> usize {
+    128 * 1024
+}
+
+fn default_prefetch_batch_size() -> usize {
+    1024 * 1024
+}
+
+fn default_prefetch_threads() -> usize {
+    8
+}
+
+fn default_prefetch_all() -> bool {
+    true
+}
+
+fn default_rafs_mode() -> String {
+    "direct".to_string()
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// For backward compatibility
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/// Configuration information for storage backend.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct BackendConfig {
+    /// Type of storage backend.
+    #[serde(rename = "type")]
+    pub backend_type: String,
+    /// Configuration for storage backend.
+    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
+    #[serde(rename = "config")]
+    pub backend_config: Value,
+}
+
+impl TryFrom<&BackendConfig> for BackendConfigV2 {
+    type Error = std::io::Error;
+
+    fn try_from(value: &BackendConfig) -> std::result::Result<Self, Self::Error> {
+        let mut config = BackendConfigV2 {
+            backend_type: value.backend_type.clone(),
+            localfs: None,
+            oss: None,
+            registry: None,
+        };
+
+        match value.backend_type.as_str() {
+            "localfs" => {
+                config.localfs = Some(serde_json::from_value(value.backend_config.clone())?);
+            }
+            "oss" => {
+                config.oss = Some(serde_json::from_value(value.backend_config.clone())?);
+            }
+            "registry" => {
+                config.registry = Some(serde_json::from_value(value.backend_config.clone())?);
+            }
+            v => return Err(einval!(format!("unsupported backend type '{}'", v))),
+        }
+
+        Ok(config)
+    }
+}
+
+/// Configuration information for blob cache manager.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct CacheConfig {
+    /// Type of blob cache: "blobcache", "fscache" or ""
+    #[serde(default, rename = "type")]
+    pub cache_type: String,
+    /// Whether the data from the cache is compressed, not used anymore.
+    #[serde(default, rename = "compressed")]
+    pub cache_compressed: bool,
+    /// Blob cache manager specific configuration: FileCacheConfig, FsCacheConfig.
+    #[serde(default, rename = "config")]
+    pub cache_config: Value,
+    /// Whether to validate data read from the cache.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub cache_validate: bool,
+    /// Configuration for blob data prefetching.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub prefetch_config: BlobPrefetchConfig,
+}
+
+impl TryFrom<&CacheConfig> for CacheConfigV2 {
+    type Error = std::io::Error;
+
+    fn try_from(v: &CacheConfig) -> std::result::Result<Self, Self::Error> {
+        let mut config = CacheConfigV2 {
+            cache_type: v.cache_type.clone(),
+            cache_compressed: v.cache_compressed,
+            cache_validate: v.cache_validate,
+            prefetch: (&v.prefetch_config).into(),
+            file_cache: None,
+            fs_cache: None,
+        };
+
+        match v.cache_type.as_str() {
+            "blobcache" | "filecache" => {
+                config.file_cache = Some(serde_json::from_value(v.cache_config.clone())?);
+            }
+            "fscache" => {
+                config.fs_cache = Some(serde_json::from_value(v.cache_config.clone())?);
+            }
+            "" => {}
+            t => return Err(einval!(format!("unsupported cache type '{}'", t))),
+        }
+
+        Ok(config)
+    }
+}
+
+/// Configuration information to create blob cache manager.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct FactoryConfig {
+    /// Id of the factory.
+    #[serde(default)]
+    pub id: String,
+    /// Configuration for storage backend.
+    pub backend: BackendConfig,
+    /// Configuration for blob cache manager.
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
 /// Rafs storage backend configuration information.
 #[derive(Clone, Default, Deserialize)]
-pub struct RafsConfig {
+struct RafsConfig {
     /// Configuration for storage subsystem.
     pub device: FactoryConfig,
     /// Filesystem working mode.
@@ -324,58 +840,48 @@ pub struct RafsConfig {
     #[serde(default)]
     pub latest_read_files: bool,
     // ZERO value means, amplifying user io is not enabled.
-    #[serde(default = "default_amplify_io")]
-    pub amplify_io: u32,
+    #[serde(default = "default_batch_size")]
+    pub amplify_io: usize,
 }
 
-impl RafsConfig {
-    /// Create a new instance of `RafsConfig`.
-    pub fn new() -> RafsConfig {
-        RafsConfig {
-            ..Default::default()
-        }
-    }
+impl TryFrom<RafsConfig> for ConfigV2 {
+    type Error = std::io::Error;
 
-    /// Load Rafs configuration information from a configuration file.
-    pub fn from_file(path: &str) -> Result<RafsConfig> {
-        let file = File::open(path)?;
-        serde_json::from_reader::<File, RafsConfig>(file)
-            .map_err(|e| einval!(format!("failed to parse RAFS configuration, {}", e)))
-    }
-}
-
-impl FromStr for RafsConfig {
-    type Err = std::io::Error;
-
-    fn from_str(s: &str) -> Result<RafsConfig> {
-        serde_json::from_str(s)
-            .map_err(|e| einval!(format!("failed to parse RAFS configuration, {}", e)))
-    }
-}
-
-impl fmt::Display for RafsConfig {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "mode={} digest_validate={} iostats_files={} latest_read_files={}",
-            self.mode, self.digest_validate, self.iostats_files, self.latest_read_files
-        )
+    fn try_from(v: RafsConfig) -> std::result::Result<Self, Self::Error> {
+        let backend = (&v.device.backend).try_into()?;
+        let cache = (&v.device.cache).try_into()?;
+        Ok(ConfigV2 {
+            version: 2,
+            id: v.device.id,
+            backend: Some(backend),
+            cache: Some(cache),
+            rafs: Some(RafsConfigV2 {
+                mode: v.mode,
+                batch_size: v.amplify_io,
+                validate: v.digest_validate,
+                enable_xattr: v.enable_xattr,
+                iostats_files: v.iostats_files,
+                access_pattern: v.access_pattern,
+                latest_read_files: v.latest_read_files,
+                prefetch: v.fs_prefetch.into(),
+            }),
+        })
     }
 }
 
 /// Configuration information for filesystem data prefetch.
 #[derive(Clone, Default, Deserialize)]
-pub struct FsPrefetchControl {
+struct FsPrefetchControl {
     /// Whether the filesystem layer data prefetch is enabled or not.
     #[serde(default)]
     pub enable: bool,
 
     /// How many working threads to prefetch data.
-    #[serde(default = "default_threads_count")]
+    #[serde(default = "default_prefetch_threads")]
     pub threads_count: usize,
 
     /// Window size in unit of bytes to merge request to backend.
-    #[serde(default = "default_merging_size")]
+    #[serde(default = "default_batch_size")]
     pub merging_size: usize,
 
     /// Network bandwidth limitation for prefetching.
@@ -394,131 +900,94 @@ pub struct FsPrefetchControl {
     pub prefetch_all: bool,
 }
 
-impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
+impl From<FsPrefetchControl> for PrefetchConfigV2 {
+    fn from(v: FsPrefetchControl) -> Self {
+        PrefetchConfigV2 {
+            enable: v.enable,
+            threads: v.threads_count,
+            batch_size: v.merging_size,
+            bandwidth_limit: v.bandwidth_rate,
+            prefetch_all: v.prefetch_all,
+        }
+    }
+}
+
+/// Configuration information for blob data prefetching.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+struct BlobPrefetchConfig {
+    /// Whether to enable blob data prefetching.
+    pub enable: bool,
+    /// Number of data prefetching working threads.
+    pub threads_count: usize,
+    /// The maximum size of a merged IO request.
+    pub merging_size: usize,
+    /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
+    pub bandwidth_rate: u32,
+}
+
+impl From<&BlobPrefetchConfig> for PrefetchConfigV2 {
+    fn from(v: &BlobPrefetchConfig) -> Self {
+        PrefetchConfigV2 {
+            enable: v.enable,
+            threads: v.threads_count,
+            batch_size: v.merging_size,
+            bandwidth_limit: v.bandwidth_rate,
+            prefetch_all: true,
+        }
+    }
+}
+
+/// Configuration information for a cached blob, corresponding to `FactoryConfig`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct BlobCacheEntryConfig {
+    /// Identifier for the blob cache configuration: corresponding to `FactoryConfig::id`.
+    #[serde(default)]
+    id: String,
+    /// Type of storage backend, corresponding to `FactoryConfig::BackendConfig::backend_type`.
+    backend_type: String,
+    /// Configuration for storage backend, corresponding to `FactoryConfig::BackendConfig::backend_config`.
+    ///
+    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
+    backend_config: Value,
+    /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
+    ///
+    /// Possible value: "fscache", "filecache".
+    cache_type: String,
+    /// Configuration for blob cache, corresponding to `FactoryConfig::CacheConfig::cache_config`.
+    ///
+    /// Possible value: `FileCacheConfig`, `FsCacheConfig`.
+    cache_config: Value,
+    /// Configuration for data prefetch.
+    #[serde(default)]
+    prefetch_config: BlobPrefetchConfig,
+    /// Optional file path for metadata blobs.
+    #[serde(default)]
+    metadata_path: Option<String>,
+}
+
+impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
     type Error = std::io::Error;
 
-    fn try_from(c: &RafsConfig) -> Result<Self> {
-        if c.fs_prefetch.merging_size as u64 > (1 << 24) {
-            return Err(einval!(
-                "merging size can't exceed max chunk size".to_string()
-            ));
-        } else if c.fs_prefetch.enable && c.fs_prefetch.threads_count == 0 {
-            return Err(einval!(
-                "try to enable fs prefetching with zero working threads".to_string()
-            ));
-        }
-
-        Ok(BlobPrefetchConfig {
-            enable: c.fs_prefetch.enable,
-            threads_count: c.fs_prefetch.threads_count,
-            merging_size: c.fs_prefetch.merging_size,
-            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
+    fn try_from(v: &BlobCacheEntryConfig) -> std::result::Result<Self, Self::Error> {
+        let backend_config = BackendConfig {
+            backend_type: v.backend_type.clone(),
+            backend_config: v.backend_config.clone(),
+        };
+        let cache_config = CacheConfig {
+            cache_type: v.cache_type.clone(),
+            cache_compressed: false,
+            cache_config: v.cache_config.clone(),
+            cache_validate: false,
+            prefetch_config: v.prefetch_config.clone(),
+        };
+        Ok(BlobCacheEntryConfigV2 {
+            version: 2,
+            id: v.id.clone(),
+            backend: (&backend_config).try_into()?,
+            cache: (&cache_config).try_into()?,
+            metadata_path: v.metadata_path.clone(),
         })
     }
-}
-
-/// Configuration information for network proxy.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ProxyConfig {
-    /// Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL.
-    pub url: String,
-    /// Endpoint of P2P proxy health checking.
-    pub ping_url: String,
-    /// Fallback to remote storage backend if P2P proxy ping failed.
-    pub fallback: bool,
-    /// Interval of P2P proxy health checking, in seconds.
-    pub check_interval: u64,
-    /// Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
-    #[serde(default)]
-    pub use_http: bool,
-}
-
-impl Default for ProxyConfig {
-    fn default() -> Self {
-        Self {
-            url: String::new(),
-            ping_url: String::new(),
-            fallback: true,
-            check_interval: 5,
-            use_http: false,
-        }
-    }
-}
-
-/// Configuration for mirror.
-#[derive(Clone, Deserialize, Serialize, Debug)]
-#[serde(default)]
-pub struct MirrorConfig {
-    /// Mirror server URL, for example http://127.0.0.1:65001.
-    pub host: String,
-    /// HTTP request headers to be passed to mirror server.
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    /// Whether the authorization process is through mirror? default false.
-    /// true: authorization through mirror, e.g. Using normal registry as mirror.
-    /// false: authorization through original registry,
-    /// e.g. when using Dragonfly server as mirror, authorization through it will affect performance.
-    #[serde(default)]
-    pub auth_through: bool,
-    /// Interval of mirror health checking, in seconds.
-    #[serde(default = "default_check_interval")]
-    pub health_check_interval: u64,
-    /// Failure count for which mirror is considered unavailable.
-    #[serde(default = "default_failure_limit")]
-    pub failure_limit: u8,
-    /// Ping URL to check mirror server health.
-    #[serde(default)]
-    pub ping_url: String,
-}
-
-impl Default for MirrorConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            headers: HashMap::new(),
-            auth_through: false,
-            health_check_interval: 5,
-            failure_limit: 5,
-            ping_url: String::new(),
-        }
-    }
-}
-
-fn default_http_scheme() -> String {
-    "https".to_string()
-}
-
-fn default_http_timeout() -> u32 {
-    5
-}
-
-fn default_check_interval() -> u64 {
-    5
-}
-
-fn default_failure_limit() -> u8 {
-    5
-}
-
-fn default_work_dir() -> String {
-    ".".to_string()
-}
-
-fn default_threads_count() -> usize {
-    8
-}
-
-pub fn default_merging_size() -> usize {
-    128 * 1024
-}
-
-fn default_prefetch_all() -> bool {
-    true
-}
-
-fn default_amplify_io() -> u32 {
-    128 * 1024
 }
 
 #[cfg(test)]
@@ -545,6 +1014,13 @@ mod tests {
         assert_eq!(config.threads_count, 2);
         assert_eq!(config.merging_size, 4);
         assert_eq!(config.bandwidth_rate, 5);
+
+        let config: PrefetchConfigV2 = (&config).into();
+        assert!(config.enable);
+        assert_eq!(config.threads, 2);
+        assert_eq!(config.batch_size, 4);
+        assert_eq!(config.bandwidth_limit, 5);
+        assert!(config.prefetch_all);
     }
 
     #[test]
@@ -604,15 +1080,30 @@ mod tests {
         assert_eq!(&config.blob_type, BLOB_CACHE_TYPE_BOOTSTRAP);
         assert_eq!(&config.blob_id, "blob1");
         assert_eq!(&config.domain_id, "domain1");
-        assert_eq!(&config.blob_config.id, "cache1");
-        assert_eq!(&config.blob_config.backend_type, "localfs");
-        assert_eq!(&config.blob_config.cache_type, "fscache");
-        assert!(config.blob_config.cache_config.is_object());
-        assert!(config.blob_config.prefetch_config.enable);
-        assert_eq!(config.blob_config.prefetch_config.threads_count, 2);
-        assert_eq!(config.blob_config.prefetch_config.merging_size, 4);
+
+        let blob_config = config.blob_config_legacy.as_ref().unwrap();
+        assert_eq!(blob_config.id, "cache1");
+        assert_eq!(blob_config.backend_type, "localfs");
+        assert_eq!(blob_config.cache_type, "fscache");
+        assert!(blob_config.cache_config.is_object());
+        assert!(blob_config.prefetch_config.enable);
+        assert_eq!(blob_config.prefetch_config.threads_count, 2);
+        assert_eq!(blob_config.prefetch_config.merging_size, 4);
         assert_eq!(
-            config.blob_config.metadata_path.as_ref().unwrap().as_str(),
+            blob_config.metadata_path.as_ref().unwrap().as_str(),
+            "/tmp/metadata1"
+        );
+
+        let blob_config: BlobCacheEntryConfigV2 = blob_config.try_into().unwrap();
+        assert_eq!(blob_config.id, "cache1");
+        assert_eq!(blob_config.backend.backend_type, "localfs");
+        assert_eq!(blob_config.cache.cache_type, "fscache");
+        assert!(blob_config.cache.fs_cache.is_some());
+        assert!(blob_config.cache.prefetch.enable);
+        assert_eq!(blob_config.cache.prefetch.threads, 2);
+        assert_eq!(blob_config.cache.prefetch.batch_size, 4);
+        assert_eq!(
+            blob_config.metadata_path.as_ref().unwrap().as_str(),
             "/tmp/metadata1"
         );
 
@@ -630,9 +1121,10 @@ mod tests {
             "domain_id": "domain1"
         }"#;
         let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
-        assert!(!config.blob_config.prefetch_config.enable);
-        assert_eq!(config.blob_config.prefetch_config.threads_count, 0);
-        assert_eq!(config.blob_config.prefetch_config.merging_size, 0);
+        let blob_config = config.blob_config_legacy.as_ref().unwrap();
+        assert!(!blob_config.prefetch_config.enable);
+        assert_eq!(blob_config.prefetch_config.threads_count, 0);
+        assert_eq!(blob_config.prefetch_config.merging_size, 0);
     }
 
     #[test]
@@ -695,30 +1187,336 @@ mod tests {
     }
 
     #[test]
-    fn test_fsprefetchcontrol_from_rafs_config() {
-        let mut config = RafsConfig {
-            fs_prefetch: FsPrefetchControl {
-                enable: false,
-                threads_count: 0,
-                merging_size: 0,
-                bandwidth_rate: 0,
-                prefetch_all: false,
-            },
-            ..Default::default()
+    fn test_backend_config() {
+        let config = BackendConfig {
+            backend_type: "localfs".to_string(),
+            backend_config: Default::default(),
         };
+        let str_val = serde_json::to_string(&config).unwrap();
+        let config2 = serde_json::from_str(&str_val).unwrap();
 
-        config.fs_prefetch.enable = true;
-        assert!(BlobPrefetchConfig::try_from(&config).is_err());
+        assert_eq!(config, config2);
+    }
 
-        config.fs_prefetch.threads_count = 1;
-        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
+    #[test]
+    fn test_v2_version() {
+        let content = "version=2";
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_none());
+    }
 
-        config.fs_prefetch.merging_size = (1usize << 24) + 1;
-        assert!(BlobPrefetchConfig::try_from(&config).is_err());
+    #[test]
+    fn test_v2_backend() {
+        let content = r#"version=2
+        [backend]
+        type = "localfs"
+        "#;
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_some());
+        assert!(config.cache.is_none());
 
-        config.fs_prefetch.merging_size = 1usize << 20;
-        config.fs_prefetch.bandwidth_rate = 1;
-        config.fs_prefetch.prefetch_all = true;
-        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
+        let backend = config.backend.as_ref().unwrap();
+        assert_eq!(&backend.backend_type, "localfs");
+        assert!(backend.localfs.is_none());
+        assert!(backend.oss.is_none());
+        assert!(backend.registry.is_none());
+    }
+
+    #[test]
+    fn test_v2_backend_localfs() {
+        let content = r#"version=2
+        [backend]
+        type = "localfs"
+        [backend.localfs]
+        blob_file = "/tmp/nydus.blob.data"
+        dir = "/tmp"
+        alt_dirs = ["/var/nydus/cache"]
+        "#;
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_some());
+
+        let backend = config.backend.as_ref().unwrap();
+        assert_eq!(&backend.backend_type, "localfs");
+        assert!(backend.localfs.is_some());
+
+        let localfs = backend.localfs.as_ref().unwrap();
+        assert_eq!(&localfs.blob_file, "/tmp/nydus.blob.data");
+        assert_eq!(&localfs.dir, "/tmp");
+        assert_eq!(&localfs.alt_dirs[0], "/var/nydus/cache");
+    }
+
+    #[test]
+    fn test_v2_backend_oss() {
+        let content = r#"version=2
+        [backend]
+        type = "oss"
+        [backend.oss]
+        endpoint = "my_endpoint"
+        bucket_name = "my_bucket_name"
+        object_prefix = "my_object_prefix"
+        access_key_id = "my_access_key_id"
+        access_key_secret = "my_access_key_secret"
+        scheme = "http"
+        skip_verify = true
+        timeout = 10
+        connect_timeout = 10
+        retry_limit = 5
+        [backend.oss.proxy]
+        url = "localhost:6789"
+        ping_url = "localhost:6789/ping"
+        fallback = true
+        check_interval = 10
+        use_http = true
+        [[backend.oss.mirrors]]
+        host = "http://127.0.0.1:65001"
+        ping_url = "http://127.0.0.1:65001/ping"
+        auth_through = true
+        health_check_interval = 10
+        failure_limit = 10
+        "#;
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_some());
+        assert!(config.rafs.is_none());
+
+        let backend = config.backend.as_ref().unwrap();
+        assert_eq!(&backend.backend_type, "oss");
+        assert!(backend.oss.is_some());
+
+        let oss = backend.oss.as_ref().unwrap();
+        assert_eq!(&oss.endpoint, "my_endpoint");
+        assert_eq!(&oss.bucket_name, "my_bucket_name");
+        assert_eq!(&oss.object_prefix, "my_object_prefix");
+        assert_eq!(&oss.access_key_id, "my_access_key_id");
+        assert_eq!(&oss.access_key_secret, "my_access_key_secret");
+        assert_eq!(&oss.scheme, "http");
+        assert!(oss.skip_verify);
+        assert_eq!(oss.timeout, 10);
+        assert_eq!(oss.connect_timeout, 10);
+        assert_eq!(oss.retry_limit, 5);
+        assert_eq!(&oss.proxy.url, "localhost:6789");
+        assert_eq!(&oss.proxy.ping_url, "localhost:6789/ping");
+        assert_eq!(oss.proxy.check_interval, 10);
+        assert!(oss.proxy.fallback);
+        assert!(oss.proxy.use_http);
+
+        assert_eq!(oss.mirrors.len(), 1);
+        let mirror = &oss.mirrors[0];
+        assert_eq!(mirror.host, "http://127.0.0.1:65001");
+        assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
+        assert!(mirror.auth_through);
+        assert!(mirror.headers.is_empty());
+        assert_eq!(mirror.health_check_interval, 10);
+        assert_eq!(mirror.failure_limit, 10);
+    }
+
+    #[test]
+    fn test_v2_backend_registry() {
+        let content = r#"version=2
+        [backend]
+        type = "registry"
+        [backend.registry]
+        scheme = "http"
+        host = "localhost"
+        repo = "nydus"
+        auth = "auth"
+        skip_verify = true
+        timeout = 10
+        connect_timeout = 10
+        retry_limit = 5
+        registry_token = "bear_token"
+        blob_url_scheme = "https"
+        blob_redirected_host = "redirect.registry.com"
+        [backend.registry.proxy]
+        url = "localhost:6789"
+        ping_url = "localhost:6789/ping"
+        fallback = true
+        check_interval = 10
+        use_http = true
+        [[backend.registry.mirrors]]
+        host = "http://127.0.0.1:65001"
+        ping_url = "http://127.0.0.1:65001/ping"
+        auth_through = true
+        health_check_interval = 10
+        failure_limit = 10
+        "#;
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_some());
+        assert!(config.rafs.is_none());
+
+        let backend = config.backend.as_ref().unwrap();
+        assert_eq!(&backend.backend_type, "registry");
+        assert!(backend.registry.is_some());
+
+        let registry = backend.registry.as_ref().unwrap();
+        assert_eq!(&registry.scheme, "http");
+        assert_eq!(&registry.host, "localhost");
+        assert_eq!(&registry.repo, "nydus");
+        assert_eq!(registry.auth.as_ref().unwrap(), "auth");
+        assert!(registry.skip_verify);
+        assert_eq!(registry.timeout, 10);
+        assert_eq!(registry.connect_timeout, 10);
+        assert_eq!(registry.retry_limit, 5);
+        assert_eq!(registry.registry_token.as_ref().unwrap(), "bear_token");
+        assert_eq!(registry.blob_url_scheme, "https");
+        assert_eq!(registry.blob_redirected_host, "redirect.registry.com");
+
+        assert_eq!(&registry.proxy.url, "localhost:6789");
+        assert_eq!(&registry.proxy.ping_url, "localhost:6789/ping");
+        assert_eq!(registry.proxy.check_interval, 10);
+        assert!(registry.proxy.fallback);
+        assert!(registry.proxy.use_http);
+
+        assert_eq!(registry.mirrors.len(), 1);
+        let mirror = &registry.mirrors[0];
+        assert_eq!(mirror.host, "http://127.0.0.1:65001");
+        assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
+        assert!(mirror.auth_through);
+        assert!(mirror.headers.is_empty());
+        assert_eq!(mirror.health_check_interval, 10);
+        assert_eq!(mirror.failure_limit, 10);
+    }
+
+    #[test]
+    fn test_v2_cache() {
+        let content = r#"version=2
+        [cache]
+        type = "filecache"
+        compressed = true
+        validate = true
+        [cache.filecache]
+        work_dir = "/tmp"
+        [cache.fscache]
+        work_dir = "./"
+        [cache.prefetch]
+        enable = true
+        threads = 8
+        batch_size = 1000000
+        bandwidth_limit = 10000000
+        "#;
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_none());
+        assert!(config.rafs.is_none());
+        assert!(config.cache.is_some());
+
+        let cache = config.cache.as_ref().unwrap();
+        assert_eq!(&cache.cache_type, "filecache");
+        assert!(cache.cache_compressed);
+        assert!(cache.cache_validate);
+        let filecache = cache.file_cache.as_ref().unwrap();
+        assert_eq!(&filecache.work_dir, "/tmp");
+        let fscache = cache.fs_cache.as_ref().unwrap();
+        assert_eq!(&fscache.work_dir, "./");
+
+        let prefetch = &cache.prefetch;
+        assert!(prefetch.enable);
+        assert_eq!(prefetch.threads, 8);
+        assert_eq!(prefetch.batch_size, 1000000);
+        assert_eq!(prefetch.bandwidth_limit, 10000000);
+    }
+
+    #[test]
+    fn test_v2_rafs() {
+        let content = r#"version=2
+        [rafs]
+        mode = "direct"
+        batch_size = 1000000
+        validate = true
+        enable_xattr = true
+        iostats_files = true
+        access_pattern = true
+        latest_read_files = true
+        [rafs.prefetch]
+        enable = true
+        threads = 4
+        batch_size = 1000000
+        bandwidth_limit = 10000000
+        prefetch_all = true
+        "#;
+        let config: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert!(config.backend.is_none());
+        assert!(config.cache.is_none());
+        assert!(config.rafs.is_some());
+
+        let rafs = config.rafs.as_ref().unwrap();
+        assert_eq!(&rafs.mode, "direct");
+        assert_eq!(rafs.batch_size, 1000000);
+        assert!(rafs.validate);
+        assert!(rafs.enable_xattr);
+        assert!(rafs.iostats_files);
+        assert!(rafs.access_pattern);
+        assert!(rafs.latest_read_files);
+        assert!(rafs.prefetch.enable);
+        assert_eq!(rafs.prefetch.threads, 4);
+        assert_eq!(rafs.prefetch.batch_size, 1000000);
+        assert_eq!(rafs.prefetch.bandwidth_limit, 10000000);
+        assert!(rafs.prefetch.prefetch_all)
+    }
+
+    #[test]
+    fn test_v2_blob_cache_entry() {
+        let content = r#"version=2
+        id = "my_id"
+        metadata_path = "meta_path"
+        [backend]
+        type = "localfs"
+        [backend.localfs]
+        blob_file = "/tmp/nydus.blob.data"
+        dir = "/tmp"
+        alt_dirs = ["/var/nydus/cache"]
+        [cache]
+        type = "filecache"
+        compressed = true
+        validate = true
+        [cache.filecache]
+        work_dir = "/tmp"
+        "#;
+        let config: BlobCacheEntryConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert_eq!(&config.id, "my_id");
+        assert_eq!(config.metadata_path.as_ref().unwrap(), "meta_path");
+
+        let backend = &config.backend;
+        assert_eq!(&backend.backend_type, "localfs");
+        assert!(backend.localfs.is_some());
+
+        let localfs = backend.localfs.as_ref().unwrap();
+        assert_eq!(&localfs.blob_file, "/tmp/nydus.blob.data");
+        assert_eq!(&localfs.dir, "/tmp");
+        assert_eq!(&localfs.alt_dirs[0], "/var/nydus/cache");
+    }
+
+    #[test]
+    fn test_sample_config_file() {
+        let content = r#"{
+            "device": {
+                "backend": {
+                    "type": "localfs",
+                    "config": {
+                        "dir": "/tmp/AM7TxD/blobs",
+                        "readahead": true
+                    }
+                },
+                "cache": {
+                    "type": "blobcache",
+                    "compressed": true,
+                    "config": {
+                        "work_dir": "/tmp/AM7TxD/cache"
+                    }
+                }
+            },
+            "mode": "cached",
+            "digest_validate": true,
+            "iostats_files": false
+        }
+        "#;
+        let config = ConfigV2::from_str(content).unwrap();
+        assert_eq!(&config.id, "");
     }
 }

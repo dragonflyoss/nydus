@@ -217,10 +217,8 @@ impl OCITarBuilderFactory {
             dir: Default::default(),
             alt_dirs: Default::default(),
         };
-        let config = serde_json::to_value(config)
-            .with_context(|| format!("fail to create local backend config for {:?}", blob_path))?;
 
-        let backend = LocalFs::new(config, Some("unpacker"))
+        let backend = LocalFs::new(&config, Some("unpacker"))
             .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
 
         let reader = backend

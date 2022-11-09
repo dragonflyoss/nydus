@@ -7,9 +7,8 @@
 //! The factory module provides methods to create
 //! [blob cache objects](../cache/trait.BlobCache.html) for blobs. Internally it caches a group
 //! of [BlobCacheMgr](../cache/trait.BlobCacheMgr.html) objects according to their
-//! [FactoryConfig](../../api/http/struct.FactoryConfig.html). Those cached blob managers may be garbage-collected
-//! by [BlobFactory::gc()](struct.BlobFactory.html#method.gc).
-//! if not used anymore.
+//! [ConfigV2](../../api/http/struct.ConfigV2.html). Those cached blob managers may be
+//! garbage-collected! by [BlobFactory::gc()](struct.BlobFactory.html#method.gc) if not used anymore.
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Result as IOResult;
@@ -18,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use nydus_api::{BackendConfig, FactoryConfig};
+use nydus_api::{BackendConfigV2, ConfigV2};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
@@ -50,16 +49,20 @@ lazy_static! {
 
 #[derive(Eq, PartialEq)]
 struct BlobCacheMgrKey {
-    config: Arc<FactoryConfig>,
+    config: Arc<ConfigV2>,
 }
 
 #[allow(clippy::derive_hash_xor_eq)]
 impl Hash for BlobCacheMgrKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.config.id.hash(state);
-        self.config.backend.backend_type.hash(state);
-        self.config.cache.cache_type.hash(state);
-        self.config.cache.prefetch_config.hash(state);
+        if let Some(backend) = self.config.backend.as_ref() {
+            backend.backend_type.hash(state);
+        }
+        if let Some(cache) = self.config.cache.as_ref() {
+            cache.cache_type.hash(state);
+            cache.prefetch.hash(state);
+        }
     }
 }
 
@@ -103,9 +106,11 @@ impl BlobFactory {
     /// Create a blob cache object for a blob with specified configuration.
     pub fn new_blob_cache(
         &self,
-        config: &Arc<FactoryConfig>,
+        config: &Arc<ConfigV2>,
         blob_info: &Arc<BlobInfo>,
     ) -> IOResult<Arc<dyn BlobCache>> {
+        let backend_cfg = config.get_backend_config()?;
+        let cache_cfg = config.get_cache_config()?;
         let key = BlobCacheMgrKey {
             config: config.clone(),
         };
@@ -114,30 +119,20 @@ impl BlobFactory {
         if let Some(mgr) = guard.get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
-        let backend = Self::new_backend(key.config.backend.clone(), blob_info.blob_id())?;
-        let mgr = match key.config.cache.cache_type.as_str() {
-            "blobcache" => {
-                let mgr = FileCacheMgr::new(
-                    config.cache.clone(),
-                    backend,
-                    ASYNC_RUNTIME.clone(),
-                    &config.id,
-                )?;
+        let backend = Self::new_backend(backend_cfg, blob_info.blob_id())?;
+        let mgr = match cache_cfg.cache_type.as_str() {
+            "blobcache" | "filecache" => {
+                let mgr = FileCacheMgr::new(cache_cfg, backend, ASYNC_RUNTIME.clone(), &config.id)?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
             "fscache" => {
-                let mgr = FsCacheMgr::new(
-                    config.cache.clone(),
-                    backend,
-                    ASYNC_RUNTIME.clone(),
-                    &config.id,
-                )?;
+                let mgr = FsCacheMgr::new(cache_cfg, backend, ASYNC_RUNTIME.clone(), &config.id)?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
             _ => {
-                let mgr = DummyCacheMgr::new(config.cache.clone(), backend, false)?;
+                let mgr = DummyCacheMgr::new(cache_cfg, backend, false)?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
@@ -149,7 +144,7 @@ impl BlobFactory {
     }
 
     /// Garbage-collect unused blob cache managers and blob caches.
-    pub fn gc(&self, victim: Option<(&Arc<FactoryConfig>, &str)>) {
+    pub fn gc(&self, victim: Option<(&Arc<ConfigV2>, &str)>) {
         let mut mgrs = Vec::new();
 
         if let Some((config, id)) = victim {
@@ -186,23 +181,23 @@ impl BlobFactory {
     /// Create a storage backend for the blob with id `blob_id`.
     #[allow(unused_variables)]
     pub fn new_backend(
-        config: BackendConfig,
+        config: &BackendConfigV2,
         blob_id: &str,
     ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
         match config.backend_type.as_str() {
             #[cfg(feature = "backend-oss")]
             "oss" => Ok(Arc::new(oss::Oss::new(
-                config.backend_config,
+                config.get_oss_config()?,
                 Some(blob_id),
             )?)),
             #[cfg(feature = "backend-registry")]
             "registry" => Ok(Arc::new(registry::Registry::new(
-                config.backend_config,
+                config.get_registry_config()?,
                 Some(blob_id),
             )?)),
             #[cfg(feature = "backend-localfs")]
             "localfs" => Ok(Arc::new(localfs::LocalFs::new(
-                config.backend_config,
+                config.get_localfs_config()?,
                 Some(blob_id),
             )?)),
             _ => Err(einval!(format!(
@@ -223,22 +218,5 @@ impl BlobFactory {
 impl Default for BlobFactory {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_backend_config() {
-        let config = BackendConfig {
-            backend_type: "localfs".to_string(),
-            backend_config: Default::default(),
-        };
-        let str_val = serde_json::to_string(&config).unwrap();
-        let config2 = serde_json::from_str(&str_val).unwrap();
-
-        assert_eq!(config, config2);
     }
 }

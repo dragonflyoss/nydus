@@ -74,7 +74,7 @@ pub const RAFS_MAX_CHUNK_SIZE: u64 = 1024 * 1024 * 16;
 /// Maximum numbers of chunk per data blob
 pub const RAFS_MAX_CHUNKS_PER_BLOB: u32 = 1u32 << 24;
 /// Generate maximum gap between chunks from merging size.
-pub const RAFS_MERGING_SIZE_TO_GAP_SHIFT: u64 = 7;
+pub const RAFS_BATCH_SIZE_TO_GAP_SHIFT: u64 = 7;
 
 /// Error codes related to storage subsystem.
 #[derive(Debug)]

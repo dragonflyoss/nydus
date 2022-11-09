@@ -218,18 +218,17 @@ pub struct Oss {
 
 impl Oss {
     /// Create a new OSS storage backend.
-    pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Oss> {
-        let oss_config: OssConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
+    pub fn new(oss_config: &OssConfig, id: Option<&str>) -> Result<Oss> {
         let con_config: ConnectionConfig = oss_config.clone().into();
         let retry_limit = con_config.retry_limit;
         let connection = Connection::new(&con_config)?;
         let state = Arc::new(OssState {
-            scheme: oss_config.scheme,
-            object_prefix: oss_config.object_prefix,
-            endpoint: oss_config.endpoint,
-            access_key_id: oss_config.access_key_id,
-            access_key_secret: oss_config.access_key_secret,
-            bucket_name: oss_config.bucket_name,
+            scheme: oss_config.scheme.clone(),
+            object_prefix: oss_config.object_prefix.clone(),
+            endpoint: oss_config.endpoint.clone(),
+            access_key_id: oss_config.access_key_id.clone(),
+            access_key_secret: oss_config.access_key_secret.clone(),
+            bucket_name: oss_config.bucket_name.clone(),
             retry_limit,
         });
         let metrics = id.map(|i| BackendMetrics::new(i, "oss"));
@@ -281,7 +280,6 @@ impl Drop for Oss {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     #[test]
     fn test_oss_state() {
@@ -315,8 +313,8 @@ mod tests {
     #[test]
     fn test_oss_new() {
         let json_str = "{\"access_key_id\":\"key\",\"access_key_secret\":\"secret\",\"bucket_name\":\"images\",\"endpoint\":\"/oss\",\"object_prefix\":\"nydus\",\"scheme\":\"\",\"proxy\":{\"url\":\"\",\"ping_url\":\"\",\"fallback\":true,\"check_interval\":5},\"timeout\":5,\"connect_timeout\":5,\"retry_limit\":5}";
-        let json: Value = serde_json::from_str(json_str).unwrap();
-        let oss = Oss::new(json, Some("test-image")).unwrap();
+        let config: OssConfig = serde_json::from_str(json_str).unwrap();
+        let oss = Oss::new(&config, Some("test-image")).unwrap();
 
         oss.metrics();
 
