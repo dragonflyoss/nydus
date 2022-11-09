@@ -553,6 +553,7 @@ impl Bootstrap {
         // get devt_slotoff
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         let blobs = blob_table.get_all();
+        let mut block_count = 0u32;
         for entry in blobs.iter() {
             let mut devslot = RafsV6Device::new();
             // blob id is String, which is processed by sha256.finalize().
@@ -567,8 +568,11 @@ impl Bootstrap {
                     entry.uncompressed_size()
                 ));
             }
+            let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
+            assert!(block_count.checked_add(cnt).is_some());
+            block_count += cnt;
             devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
-            devslot.set_blocks((entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32);
+            devslot.set_blocks(cnt);
             devslot.set_mapped_blkaddr(0);
             devtable.push(devslot);
         }
@@ -625,7 +629,7 @@ impl Bootstrap {
         // Dump superblock
         let mut sb = RafsV6SuperBlock::new();
         sb.set_inos(bootstrap_ctx.nodes.len() as u64);
-        sb.set_blocks(EROFS_BLOCK_SIZE as u32);
+        sb.set_blocks(block_count);
         sb.set_root_nid(root_nid as u16);
         sb.set_meta_addr(meta_addr);
         sb.set_extra_devices(blob_table_entries as u16);
@@ -698,7 +702,7 @@ impl Bootstrap {
         if let Some(mut pt) = prefetch_table {
             // Device slots are very close to extended super block.
             ext_sb.set_prefetch_table_offset(prefetch_table_offset);
-            ext_sb.set_prefetch_table_size(pt.len() as u32 * size_of::<u32>() as u32);
+            ext_sb.set_prefetch_table_size(prefetch_table_size);
             bootstrap_ctx
                 .writer
                 .seek_offset(prefetch_table_offset as u64)
