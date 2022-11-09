@@ -16,6 +16,7 @@ extern crate serde_json;
 extern crate lazy_static;
 
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -224,8 +225,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("blob-meta")
                         .long("blob-meta")
-                        .help("Path to store generated RAFS data blob compression information")
-                        .conflicts_with("inline-bootstrap"),
+                        .help("Path to store generated RAFS data blob compression information"),
                 )
                 .arg(
                     Arg::new("blob-offset")
@@ -617,9 +617,9 @@ impl Command {
             | ConversionType::EStargzIndexToRef
             | ConversionType::TargzToRef => {
                 Self::ensure_file(&source_path)?;
-                if inline_bootstrap || blob_stor.is_some() {
+                if blob_stor.is_some() {
                     bail!(
-                        "conversion type '{}' conflicts with '--inline-bootstrap' or '--blob'",
+                        "conversion type '{}' conflicts with '--blob'",
                         conversion_type
                     );
                 }
@@ -1147,11 +1147,12 @@ impl Command {
     }
 
     fn ensure_file<P: AsRef<Path>>(path: P) -> Result<()> {
-        let file = metadata(path.as_ref())
-            .context(format!("failed to access path {:?}", path.as_ref()))?;
+        let file_type = metadata(path.as_ref())
+            .context(format!("failed to access path {:?}", path.as_ref()))?
+            .file_type();
         ensure!(
-            file.is_file(),
-            "specified path must be a regular file: {:?}",
+            file_type.is_file() || file_type.is_fifo(),
+            "specified path must be a regular/fifo file: {:?}",
             path.as_ref()
         );
         Ok(())

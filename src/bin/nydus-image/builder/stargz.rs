@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use serde::{Deserialize, Serialize};
+
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
@@ -24,12 +26,12 @@ use nydus_utils::compact::makedev;
 use nydus_utils::compress::compute_compressed_gzip_size;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
 use nydus_utils::{try_round_up_4k, ByteSize};
-use serde::{Deserialize, Serialize};
 
 use crate::builder::{build_bootstrap, Builder};
 use crate::core::blob::Blob;
 use crate::core::context::{
-    BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
+    BuildOutput,
 };
 use crate::core::node::{ChunkSource, Node, NodeChunk, Overlay};
 use crate::core::tree::Tree;
@@ -823,7 +825,12 @@ impl Builder for StargzBuilder {
         self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
 
         // Dump blob meta
-        Blob::dump_meta_data(ctx, &mut blob_ctx, &mut None)?;
+        let mut blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
+            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
+        } else {
+            None
+        };
+        Blob::dump_meta_data(ctx, &mut blob_ctx, blob_meta_writer.as_mut())?;
         if blob_ctx.uncompressed_blob_size > 0 {
             blob_mgr.add(blob_ctx);
         }

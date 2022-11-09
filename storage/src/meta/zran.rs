@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{Read, Result, Write};
+use std::io::{Read, Result};
 use std::mem::size_of;
 use std::slice;
 
@@ -163,9 +163,9 @@ impl<R: Read> ZranContextGenerator<R> {
     }
 
     /// Save the zlib random access information to a file.
-    pub fn store<W: Write>(&self, w: &mut W) -> Result<(usize, u32)> {
+    pub fn to_vec(&self) -> Result<(Vec<u8>, u32)> {
+        let mut data = Vec::new();
         let records = self.generator.get_compression_ctx_array();
-        let mut total = records.len() * size_of::<ZranInflateContext>();
         let mut dict_off = 0;
 
         for info in records {
@@ -181,17 +181,16 @@ impl<R: Read> ZranContextGenerator<R> {
                 __reserved1: 0,
                 __reserved2: 0,
             };
-            w.write_all(ctx.as_slice())?;
+            data.extend_from_slice(ctx.as_slice());
             dict_off += info.dict.len() as u64;
         }
         for info in records {
             if !info.dict.is_empty() {
-                w.write_all(&info.dict)?;
-                total += info.dict.len();
+                data.extend_from_slice(&info.dict);
             }
         }
 
-        Ok((total, records.len() as u32))
+        Ok((data, records.len() as u32))
     }
 }
 

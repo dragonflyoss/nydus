@@ -8,6 +8,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use hex::FromHex;
+
 use nydus_rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsVersion};
 
 use crate::core::bootstrap::Bootstrap;
@@ -27,14 +29,21 @@ use crate::core::tree::{MetadataTreeBuilder, Tree};
 pub struct Merger {}
 
 impl Merger {
-    /// Merge assumes the bootstrap name as the hash of whole tar blob.
-    fn get_blob_hash(bootstrap_path: &Path) -> Result<String> {
-        let blob_hash = bootstrap_path
+    /// Merge assumes the bootstrap name is in `$blob_digest[.$ref_blob_digest]` format.
+    fn get_blob_hash(bootstrap_path: &Path) -> Result<(String, Option<[u8; 32]>)> {
+        let file_name = bootstrap_path
             .file_name()
             .ok_or_else(|| anyhow!("get file name"))?
             .to_str()
             .ok_or_else(|| anyhow!("convert to string"))?;
-        Ok(blob_hash.to_string())
+        let names: Vec<&str> = file_name.split(".").collect();
+        let blob_hash = names[0];
+        let rafs_blob_hash = if let Some(name) = names.get(1) {
+            Some(<[u8; 32]>::from_hex(name)?)
+        } else {
+            None
+        };
+        Ok((blob_hash.to_string(), rafs_blob_hash))
     }
 
     /// Generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
@@ -81,7 +90,7 @@ impl Merger {
             ctx.digester = rs.meta.get_digester();
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
 
-            let blob_hash = Self::get_blob_hash(bootstrap_path)?;
+            let (blob_hash, rafs_blob_hash) = Self::get_blob_hash(bootstrap_path)?;
             let mut blob_idx_map = Vec::new();
             let mut parent_blob_added = false;
             for blob in rs.superblock.get_blob_infos() {
@@ -95,7 +104,10 @@ impl Merger {
                     }
                     // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
                     // runtime, should change it to the hash of whole tar blob.
-                    blob_ctx.blob_id = blob_hash.to_owned();
+                    blob_ctx.blob_id = blob_hash.clone();
+                    if let Some(digest) = rafs_blob_hash {
+                        blob_ctx.rafs_blob_digest = digest;
+                    }
                     if chunk_size.is_none() {
                         chunk_size = Some(blob_ctx.chunk_size);
                     }

@@ -12,6 +12,8 @@ use crate::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
 use crate::core::tree::Tree;
+use nydus_rafs::metadata::layout::toc;
+use nydus_utils::digest::RafsDigest;
 
 pub(crate) use self::directory::DirectoryBuilder;
 pub(crate) use self::stargz::StargzBuilder;
@@ -30,9 +32,6 @@ pub(crate) trait Builder {
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput>;
 }
-
-const TAR_BLOB_NAME: &str = "image.blob";
-const TAR_BOOTSTRAP_NAME: &str = "image.boot";
 
 fn build_bootstrap(
     ctx: &mut BuildContext,
@@ -68,7 +67,7 @@ fn dump_bootstrap(
     bootstrap_ctx: &mut BootstrapContext,
     bootstrap: &mut Bootstrap,
     blob_mgr: &mut BlobManager,
-    blob_writer: &mut Option<ArtifactWriter>,
+    blob_writer: Option<&mut ArtifactWriter>,
 ) -> Result<()> {
     // Dump bootstrap file
     let blob_table = blob_mgr.to_blob_table(ctx)?;
@@ -79,19 +78,15 @@ fn dump_bootstrap(
         &blob_table,
     )?;
 
-    if let Some(blob_writer) = blob_writer.as_mut() {
+    if let Some(blob_writer) = blob_writer {
         let mut blob_hash = blob_mgr
             .get_current_blob()
             .map(|(_, blob_ctx)| blob_ctx.blob_hash.clone())
             .unwrap_or_else(Sha256::new);
         if ctx.inline_bootstrap {
-            if blob_mgr.get_current_blob().is_some() {
-                let header = blob_writer.write_tar_header(TAR_BLOB_NAME, blob_writer.pos()?)?;
-                blob_hash.update(header.as_bytes());
-            };
-
+            let bootstrap_offset = blob_writer.pos()?;
             let reader = bootstrap_ctx.writer.as_reader()?;
-            let mut size = 0;
+            let mut bootstrap_size = 0;
             let mut buf = vec![0u8; 16384];
             loop {
                 let sz = reader.read(&mut buf)?;
@@ -100,11 +95,24 @@ fn dump_bootstrap(
                 }
                 blob_writer.write_all(&buf[..sz])?;
                 blob_hash.update(&buf[..sz]);
-                size += sz;
+                bootstrap_size += sz;
             }
 
-            let header = blob_writer.write_tar_header(TAR_BOOTSTRAP_NAME, size as u64)?;
-            blob_hash.update(header.as_bytes());
+            debug!(
+                "dump rafs blob {} {} {}",
+                toc::ENTRY_BOOTSTRAP,
+                bootstrap_offset,
+                bootstrap_size
+            );
+            blob_writer.write_tar_header(toc::ENTRY_BOOTSTRAP, bootstrap_size as u64)?;
+            if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                blob_ctx.entry_list.add(
+                    toc::ENTRY_BOOTSTRAP,
+                    RafsDigest::default(),
+                    bootstrap_offset,
+                    bootstrap_size as u64,
+                )?;
+            }
 
             if ctx.blob_id.is_empty() {
                 ctx.blob_id = format!("{:x}", blob_hash.finalize());

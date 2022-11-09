@@ -215,8 +215,17 @@ impl FileCacheEntry {
             .get_reader(blob_info.blob_id())
             .map_err(|_e| eio!("failed to get blob reader"))?;
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
+        let rafs_blob_reader = if blob_info.rafs_blob_digest() != &[0u8; 32] {
+            let ref_blob_id = hex::encode(blob_info.rafs_blob_digest());
+            mgr.backend
+                .get_reader(&ref_blob_id)
+                .map_err(|_e| eio!("failed to get rafs blob reader"))?
+        } else {
+            reader.clone()
+        };
         let meta = if blob_info.meta_ci_is_valid() {
-            let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
+            let meta =
+                FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(rafs_blob_reader))?;
             Some(meta)
         } else {
             return Err(enosys!(

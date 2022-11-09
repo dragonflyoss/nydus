@@ -138,9 +138,19 @@ impl Builder for DirectoryBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
+            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer,) },
             "dump_blob"
         )?;
+
+        let mut origin_blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
+            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
+        } else {
+            None
+        };
+        let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            Blob::dump_meta_data(ctx, blob_ctx, blob_meta_writer)?;
+        }
 
         // Dump blob meta to blob file
         timing_tracer!(
@@ -151,7 +161,7 @@ impl Builder for DirectoryBuilder {
                     &mut bootstrap_ctx,
                     &mut bootstrap,
                     blob_mgr,
-                    &mut blob_writer,
+                    blob_writer.as_mut(),
                 )
             },
             "dump_bootstrap"

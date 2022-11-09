@@ -19,14 +19,17 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use tar::{Archive, Entry, EntryType, Header};
+
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
-use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::layout::{toc, RafsXAttrs};
 use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
@@ -35,7 +38,6 @@ use nydus_utils::compress::zlib_random::ZranReader;
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, ByteSize};
-use tar::{Archive, Entry, EntryType, Header};
 
 use crate::builder::{build_bootstrap, dump_bootstrap, Builder};
 use crate::core::blob::Blob;
@@ -66,7 +68,7 @@ pub(crate) struct TarballTreeBuilder<'a> {
     layer_idx: u16,
     ctx: &'a mut BuildContext,
     blob_mgr: &'a mut BlobManager,
-    writer: &'a mut Option<ArtifactWriter>,
+    blob_writer: &'a mut Option<ArtifactWriter>,
     buf: Vec<u8>,
     path_inode_map: HashMap<PathBuf, Inode>,
 }
@@ -77,7 +79,7 @@ impl<'a> TarballTreeBuilder<'a> {
         ty: ConversionType,
         ctx: &'a mut BuildContext,
         blob_mgr: &'a mut BlobManager,
-        writer: &'a mut Option<ArtifactWriter>,
+        blob_writer: &'a mut Option<ArtifactWriter>,
         layer_idx: u16,
     ) -> Self {
         Self {
@@ -86,7 +88,7 @@ impl<'a> TarballTreeBuilder<'a> {
             ctx,
             blob_mgr,
             buf: Vec::new(),
-            writer,
+            blob_writer,
             path_inode_map: HashMap::new(),
         }
     }
@@ -103,7 +105,7 @@ impl<'a> TarballTreeBuilder<'a> {
                 TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
             }
             ConversionType::EStargzToRef | ConversionType::TargzToRef => {
-                assert!(self.writer.is_none());
+                assert!(self.blob_writer.is_none());
                 let generator = ZranContextGenerator::new(file)?;
                 let reader = generator.reader();
                 self.ctx.blob_zran_generator = Some(Mutex::new(generator));
@@ -337,7 +339,7 @@ impl<'a> TarballTreeBuilder<'a> {
             node.dump_node_data_with_reader(
                 self.ctx,
                 self.blob_mgr,
-                self.writer,
+                self.blob_writer,
                 Some(entry),
                 &mut self.buf,
             )?;
@@ -507,7 +509,7 @@ impl Builder for TarballBuilder {
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
-        let mut writer = None;
+        let mut blob_writer = None;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
 
         match self.ty {
@@ -515,7 +517,7 @@ impl Builder for TarballBuilder {
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
-                    writer = Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?);
+                    blob_writer = Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?);
                 } else {
                     return Err(anyhow!("missing configuration for target path"));
                 }
@@ -525,16 +527,29 @@ impl Builder for TarballBuilder {
         };
 
         let mut tree_builder =
-            TarballTreeBuilder::new(self.ty, ctx, blob_mgr, &mut writer, layer_idx);
+            TarballTreeBuilder::new(self.ty, ctx, blob_mgr, &mut blob_writer, layer_idx);
+
         let tree = timing_tracer!({ tree_builder.build_tree() }, "build_tree")?;
         let mut bootstrap = timing_tracer!(
             { build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree) },
             "build_bootstrap"
         )?;
         timing_tracer!(
-            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut writer) },
+            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut None,) },
             "dump_blob"
         )?;
+
+        let mut origin_blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
+            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
+        } else {
+            None
+        };
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
+            Blob::dump_meta_data(ctx, blob_ctx, blob_meta_writer)?;
+        }
+
+        let bootstrap_writer = blob_writer.as_mut().or(origin_blob_meta_writer.as_mut());
         timing_tracer!(
             {
                 dump_bootstrap(
@@ -543,11 +558,31 @@ impl Builder for TarballBuilder {
                     &mut bootstrap_ctx,
                     &mut bootstrap,
                     blob_mgr,
-                    &mut writer,
+                    bootstrap_writer,
                 )
             },
             "dump_bootstrap"
         )?;
+
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
+            if let Some(blob_meta_writer) = blob_meta_writer {
+                if ctx.inline_bootstrap {
+                    let data = blob_ctx.entry_list.as_bytes();
+                    let toc_offset = blob_meta_writer.pos()?;
+                    let toc_size = data.len() as u64;
+                    debug!(
+                        "dump rafs blob: {} {} {}",
+                        toc::ENTRY_TOC,
+                        toc_offset,
+                        toc_size
+                    );
+                    blob_meta_writer.write(data)?;
+                    blob_meta_writer.write_tar_header(toc::ENTRY_TOC, toc_size)?;
+                }
+            }
+        }
+
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }
 }
