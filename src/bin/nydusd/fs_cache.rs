@@ -516,8 +516,8 @@ impl FsCacheHandler {
             .merging_size
             .checked_next_power_of_two()
         {
-            None => rafs::fs::default_merging_size() as u64,
-            Some(1) => rafs::fs::default_merging_size() as u64,
+            None => nydus_api::default_merging_size() as u64,
+            Some(1) => nydus_api::default_merging_size() as u64,
             Some(s) => s as u64,
         };
         let blob_size = blob_info.compressed_size();

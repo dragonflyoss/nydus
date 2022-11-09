@@ -4,8 +4,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::convert::TryFrom;
+use std::fmt;
 use std::fs;
+use std::fs::File;
 use std::io::Result;
+use std::str::FromStr;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -294,6 +298,125 @@ impl FsCacheConfig {
     }
 }
 
+/// Rafs storage backend configuration information.
+#[derive(Clone, Default, Deserialize)]
+pub struct RafsConfig {
+    /// Configuration for storage subsystem.
+    pub device: FactoryConfig,
+    /// Filesystem working mode.
+    pub mode: String,
+    /// Whether to validate data digest before use.
+    #[serde(default)]
+    pub digest_validate: bool,
+    /// Io statistics.
+    #[serde(default)]
+    pub iostats_files: bool,
+    /// Filesystem prefetching configuration.
+    #[serde(default)]
+    pub fs_prefetch: FsPrefetchControl,
+    /// Enable extended attributes.
+    #[serde(default)]
+    pub enable_xattr: bool,
+    /// Record filesystem access pattern.
+    #[serde(default)]
+    pub access_pattern: bool,
+    /// Record file name if file access trace log.
+    #[serde(default)]
+    pub latest_read_files: bool,
+    // ZERO value means, amplifying user io is not enabled.
+    #[serde(default = "default_amplify_io")]
+    pub amplify_io: u32,
+}
+
+impl RafsConfig {
+    /// Create a new instance of `RafsConfig`.
+    pub fn new() -> RafsConfig {
+        RafsConfig {
+            ..Default::default()
+        }
+    }
+
+    /// Load Rafs configuration information from a configuration file.
+    pub fn from_file(path: &str) -> Result<RafsConfig> {
+        let file = File::open(path)?;
+        serde_json::from_reader::<File, RafsConfig>(file)
+            .map_err(|e| einval!(format!("failed to parse RAFS configuration, {}", e)))
+    }
+}
+
+impl FromStr for RafsConfig {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> Result<RafsConfig> {
+        serde_json::from_str(s)
+            .map_err(|e| einval!(format!("failed to parse RAFS configuration, {}", e)))
+    }
+}
+
+impl fmt::Display for RafsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "mode={} digest_validate={} iostats_files={} latest_read_files={}",
+            self.mode, self.digest_validate, self.iostats_files, self.latest_read_files
+        )
+    }
+}
+
+/// Configuration information for filesystem data prefetch.
+#[derive(Clone, Default, Deserialize)]
+pub struct FsPrefetchControl {
+    /// Whether the filesystem layer data prefetch is enabled or not.
+    #[serde(default)]
+    pub enable: bool,
+
+    /// How many working threads to prefetch data.
+    #[serde(default = "default_threads_count")]
+    pub threads_count: usize,
+
+    /// Window size in unit of bytes to merge request to backend.
+    #[serde(default = "default_merging_size")]
+    pub merging_size: usize,
+
+    /// Network bandwidth limitation for prefetching.
+    ///
+    /// In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
+    /// reduce congestion with normal user IO.
+    /// bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
+    /// bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
+    ///                        Please note that if the value is less than Rafs chunk size,
+    ///                        it will be raised to the chunk size.
+    #[serde(default)]
+    pub bandwidth_rate: u32,
+
+    /// Whether to prefetch all filesystem data.
+    #[serde(default = "default_prefetch_all")]
+    pub prefetch_all: bool,
+}
+
+impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
+    type Error = std::io::Error;
+
+    fn try_from(c: &RafsConfig) -> Result<Self> {
+        if c.fs_prefetch.merging_size as u64 > (1 << 24) {
+            return Err(einval!(
+                "merging size can't exceed max chunk size".to_string()
+            ));
+        } else if c.fs_prefetch.enable && c.fs_prefetch.threads_count == 0 {
+            return Err(einval!(
+                "try to enable fs prefetching with zero working threads".to_string()
+            ));
+        }
+
+        Ok(BlobPrefetchConfig {
+            enable: c.fs_prefetch.enable,
+            threads_count: c.fs_prefetch.threads_count,
+            merging_size: c.fs_prefetch.merging_size,
+            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
+        })
+    }
+}
+
 /// Configuration information for network proxy.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -380,6 +503,22 @@ fn default_failure_limit() -> u8 {
 
 fn default_work_dir() -> String {
     ".".to_string()
+}
+
+fn default_threads_count() -> usize {
+    8
+}
+
+pub fn default_merging_size() -> usize {
+    128 * 1024
+}
+
+fn default_prefetch_all() -> bool {
+    true
+}
+
+fn default_amplify_io() -> u32 {
+    128 * 1024
 }
 
 #[cfg(test)]
@@ -553,5 +692,33 @@ mod tests {
         assert_eq!(config.blob_file, "blob_file");
         assert_eq!(config.dir, "blob_dir");
         assert_eq!(config.alt_dirs, vec!["dir1", "dir2"]);
+    }
+
+    #[test]
+    fn test_fsprefetchcontrol_from_rafs_config() {
+        let mut config = RafsConfig {
+            fs_prefetch: FsPrefetchControl {
+                enable: false,
+                threads_count: 0,
+                merging_size: 0,
+                bandwidth_rate: 0,
+                prefetch_all: false,
+            },
+            ..Default::default()
+        };
+
+        config.fs_prefetch.enable = true;
+        assert!(BlobPrefetchConfig::try_from(&config).is_err());
+
+        config.fs_prefetch.threads_count = 1;
+        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
+
+        config.fs_prefetch.merging_size = (1usize << 24) + 1;
+        assert!(BlobPrefetchConfig::try_from(&config).is_err());
+
+        config.fs_prefetch.merging_size = 1usize << 20;
+        config.fs_prefetch.bandwidth_rate = 1;
+        config.fs_prefetch.prefetch_all = true;
+        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
     }
 }

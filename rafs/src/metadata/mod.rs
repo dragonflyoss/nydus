@@ -22,6 +22,7 @@ use std::time::Duration;
 use anyhow::bail;
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::Entry;
+use nydus_api::RafsConfig;
 use nydus_storage::device::{BlobChunkInfo, BlobDevice, BlobInfo, BlobIoMerge, BlobIoVec};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
@@ -31,7 +32,7 @@ use self::layout::v5::RafsV5PrefetchTable;
 use self::layout::v6::RafsV6PrefetchTable;
 use self::layout::{XattrName, XattrValue, RAFS_SUPER_VERSION_V5, RAFS_SUPER_VERSION_V6};
 use self::noop::NoopSuperBlock;
-use crate::fs::{RafsConfig, RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
+use crate::fs::{RAFS_DEFAULT_ATTR_TIMEOUT, RAFS_DEFAULT_ENTRY_TIMEOUT};
 use crate::{RafsError, RafsIoReader, RafsIoWrite, RafsResult};
 
 mod md_v5;

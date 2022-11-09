@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nydus::{FsBackendDesc, FsBackendType};
-use rafs::fs::RafsConfig;
+use nydus_api::RafsConfig;
 
 use crate::client::NydusdClient;
 

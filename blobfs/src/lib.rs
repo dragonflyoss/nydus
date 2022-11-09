@@ -19,11 +19,9 @@ use fuse_backend_rs::{
     passthrough::Config as PassthroughConfig,
     passthrough::PassthroughFs,
 };
+use nydus_api::RafsConfig;
 use nydus_error::{einval, eother};
-use nydus_rafs::{
-    fs::{Rafs, RafsConfig},
-    RafsIoRead,
-};
+use nydus_rafs::{fs::Rafs, RafsIoRead};
 use serde::Deserialize;
 use std::any::Any;
 #[cfg(feature = "virtiofs")]

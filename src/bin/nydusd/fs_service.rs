@@ -14,7 +14,8 @@ use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use nydus::{FsBackendDesc, FsBackendType};
-use rafs::fs::{Rafs, RafsConfig};
+use nydus_api::RafsConfig;
+use rafs::fs::Rafs;
 use rafs::{trim_backend_config, RafsError, RafsIoRead};
 use serde::{self, Deserialize, Serialize};
 use storage::factory::BLOB_FACTORY;
@@ -111,7 +112,7 @@ pub trait FsService: Send + Sync {
         let rootfs = self
             .backend_from_mountpoint(&cmd.mountpoint)?
             .ok_or(DaemonError::NotFound)?;
-        let rafs_config = RafsConfig::from_str(&cmd.config)?;
+        let rafs_config = RafsConfig::from_str(&cmd.config).map_err(RafsError::LoadConfig)?;
         let mut bootstrap = <dyn RafsIoRead>::from_file(&&cmd.source)?;
         let any_fs = rootfs.deref().as_any();
         let rafs = any_fs
@@ -196,7 +197,8 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
 
     match cmd.fs_type {
         FsBackendType::Rafs => {
-            let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
+            let rafs_config =
+                RafsConfig::from_str(cmd.config.as_str()).map_err(RafsError::LoadConfig)?;
             let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
             let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
             rafs.import(bootstrap, prefetch_files)?;
