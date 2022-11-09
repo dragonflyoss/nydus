@@ -450,7 +450,32 @@ def test_passthough_fs(nydus_anchor, nydus_image, rafs_conf):
     assert wg.verify_entire_fs()
 
 
-def test_pseudo_fs(nydus_anchor, nydus_image, rafs_conf: RafsConf):
+def test_pseudo_fs(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsConf):
+    _rootfs1 = tempfile.TemporaryDirectory(dir=nydus_anchor.workspace)
+    rootfs1 = _rootfs1.name
+
+    dist1 = Distributor(rootfs1, 3, 3)
+    dist1.generate_tree()
+    dist1.put_single_file(Size(10891, Unit.KB))
+    dist1.put_multiple_files(10, Size(2, Unit.MB))
+    dist1.put_multiple_files(10, Size(4, Unit.MB))
+
+    image1 = RafsImage(nydus_anchor, rootfs1, "bootstrap1", "blob1")
+    image1.set_backend(Backend.BACKEND_PROXY).create_image()
+
+    _rootfs2 = tempfile.TemporaryDirectory(dir=nydus_anchor.workspace)
+    rootfs2 = _rootfs2.name
+
+    dist2 = Distributor(rootfs2, 4, 2)
+    dist2.generate_tree()
+    dist2.put_single_file(Size(1, Unit.MB))
+    dist2.put_single_file(Size(400, Unit.KB))
+    dist2.put_multiple_files(2, Size(2, Unit.MB))
+    dist2.put_multiple_files(10, Size(4, Unit.MB))
+
+    image2 = RafsImage(nydus_anchor, rootfs2, "bootstrap2", "blob2")
+    image2.set_backend(Backend.BACKEND_PROXY).create_image()
+
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
@@ -474,63 +499,44 @@ def test_pseudo_fs(nydus_anchor, nydus_image, rafs_conf: RafsConf):
 
     ###
     suffix = "1"
-    image = RafsImage(
-        nydus_anchor,
-        scratch_rootfs,
-        "bs" + suffix,
-        "blob" + suffix,
-    )
     conf = RafsConf(nydus_anchor)
+    conf.enable_rafs_blobcache()
     conf.enable_fs_prefetch()
-    conf.enable_validation()
     conf.set_rafs_backend(Backend.BACKEND_PROXY)
     conf.dump_rafs_conf()
 
-    image.set_backend(Backend.BACKEND_PROXY).create_image()
-    nc.pseudo_fs_mount(image.bootstrap_path, f"/pseudo{suffix}", conf.path(), None)
+    nc.pseudo_fs_mount(
+        nydus_image.bootstrap_path, f"/pseudo{suffix}", conf.path(), None
+    )
+
     ###
     suffix = "2"
-    image = RafsImage(
-        nydus_anchor,
-        scratch_rootfs,
-        "bs" + suffix,
-        "blob" + suffix,
-    )
     conf = RafsConf(nydus_anchor)
     conf.enable_rafs_blobcache()
-    conf.enable_validation()
-    conf.enable_records_readahead()
     conf.set_rafs_backend(Backend.BACKEND_PROXY)
     conf.dump_rafs_conf()
 
-    dist.put_multiple_files(20, Size(8, Unit.KB))
+    nc.pseudo_fs_mount(image1.bootstrap_path, f"/pseudo{suffix}", conf.path(), None)
 
-    image.set_backend(Backend.BACKEND_PROXY).create_image()
-    nc.pseudo_fs_mount(image.bootstrap_path, f"/pseudo{suffix}", conf.path(), None)
     ###
     suffix = "3"
-    image = RafsImage(
-        nydus_anchor,
-        scratch_rootfs,
-        "bs" + suffix,
-        "blob" + suffix,
-    )
     conf = RafsConf(nydus_anchor)
     conf.enable_rafs_blobcache()
-    conf.enable_records_readahead()
     conf.set_rafs_backend(Backend.BACKEND_PROXY)
     conf.dump_rafs_conf()
 
-    dist.put_multiple_files(20, Size(8, Unit.KB))
+    nc.pseudo_fs_mount(image2.bootstrap_path, f"/pseudo{suffix}", conf.path(), None)
 
-    image.set_backend(Backend.BACKEND_PROXY).create_image()
-    nc.pseudo_fs_mount(image.bootstrap_path, f"/pseudo{suffix}", conf.path(), None)
+    wg1 = WorkloadGen(
+        os.path.join(nydus_anchor.mountpoint, "pseudo1"), nydus_image.rootfs()
+    )
 
-    wg1 = WorkloadGen(os.path.join(nydus_anchor.mountpoint, "pseudo1"), scratch_rootfs)
-    wg2 = WorkloadGen(os.path.join(nydus_anchor.mountpoint, "pseudo2"), scratch_rootfs)
-    wg3 = WorkloadGen(os.path.join(nydus_anchor.mountpoint, "pseudo3"), scratch_rootfs)
+    rootdir1 = os.path.join(nydus_anchor.mountpoint, "pseudo2")
+    rootdir2 = os.path.join(nydus_anchor.mountpoint, "pseudo3")
 
-    time.sleep(2)
+    wg2 = WorkloadGen(rootdir1, rootfs1)
+    wg3 = WorkloadGen(rootdir2, rootfs2)
+
     wg1.setup_workload_generator()
     wg2.setup_workload_generator()
     wg3.setup_workload_generator()
@@ -544,9 +550,14 @@ def test_pseudo_fs(nydus_anchor, nydus_image, rafs_conf: RafsConf):
     wg3.finish_torture_read()
 
     # TODO: Temporarily disable the verification as hard to select `verify dir`
-    # assert wg1.verify_entire_fs()
-    # assert wg2.verify_entire_fs()
-    # assert wg3.verify_entire_fs()
+    assert wg1.verify_entire_fs()
+    assert wg2.verify_entire_fs()
+    assert wg3.verify_entire_fs()
+
+    st1 = os.stat(rootdir1)
+    st2 = os.stat(rootdir2)
+
+    assert st1.st_ino != st2.st_ino
 
     nc.umount_rafs("/pseudo1")
     nc.umount_rafs("/pseudo2")

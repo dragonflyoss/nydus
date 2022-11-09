@@ -167,7 +167,7 @@ def test_backend_swap(
 
     new_image = (
         RafsImage(nydus_anchor, nydus_scratch_image.rootfs())
-        .set_backend(Backend.LOCALFS)
+        .set_backend(Backend.BACKEND_PROXY)
         .create_image(readahead_policy="fs", readahead_files="/".encode())
     )
 
