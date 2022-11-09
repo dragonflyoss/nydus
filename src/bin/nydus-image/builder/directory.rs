@@ -126,10 +126,6 @@ impl Builder for DirectoryBuilder {
             ));
         };
 
-        if ctx.inline_bootstrap {
-            let (_, _) = blob_mgr.get_or_create_current_blob(ctx)?;
-        }
-
         // Scan source directory to build upper layer tree.
         let tree = timing_tracer!(
             { self.build_tree(ctx, &mut bootstrap_ctx, layer_idx) },
