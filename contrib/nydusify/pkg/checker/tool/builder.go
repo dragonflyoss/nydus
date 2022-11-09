@@ -36,9 +36,10 @@ func (builder *Builder) Check(option BuilderOption) error {
 		"check",
 		"--log-level",
 		"warn",
+		"--bootstrap",
+		option.BootstrapPath,
 		"--output-json",
 		option.DebugOutputPath,
-		option.BootstrapPath,
 	}
 
 	cmd := exec.Command(builder.binaryPath, args...)
