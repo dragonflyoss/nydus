@@ -143,27 +143,25 @@ impl OutputSerializer {
 fn prepare_cmd_args(bti_string: &'static str) -> App {
     let arg_chunk_dict = Arg::new("chunk-dict")
         .long("chunk-dict")
-        .short('M')
-        .help("specify a chunk dictionary for chunk deduplication");
+        .help("Set a chunk dictionary for chunk deduplication");
     let arg_prefetch_policy = Arg::new("prefetch-policy")
         .long("prefetch-policy")
-        .short('P')
-        .help("specify policy for blob data prefetch")
+        .help("Set policy for blob data prefetch")
         .required(false)
         .default_value("none")
         .value_parser(["fs", "blob", "none"]);
     let arg_output_json = Arg::new("output-json")
         .long("output-json")
         .short('J')
-        .help("output file to store result in JSON format");
+        .help("Set file path to store operation result in JSON format");
 
     App::new("")
         .version(bti_string)
         .author(crate_authors!())
-        .about("Build or inspect RAFS filesystems for Nydus accelerated container images.")
+        .about("Build, analyze, inspect or validate RAFS filesystems/Nydus accelerated container images")
         .subcommand(
             App::new("create")
-                .about("Create a RAFS filesystem from a directory, an OCI tar file or an estargz file")
+                .about("Create a RAFS filesystem from a directory or an OCI image layer")
                 .arg(
                     Arg::new("SOURCE")
                         .help("source to build the RAFS filesystem from")
@@ -193,14 +191,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("bootstrap")
                         .long("bootstrap")
                         .short('B')
-                        .help("path to store generated RAFS filesystem metadata blob")
+                        .help("Path to store generated RAFS metadata blob")
                         .required_unless_present_any(&["blob-dir", "inline-bootstrap"])
                         .conflicts_with("inline-bootstrap"),
                 )
                 .arg(
                     Arg::new("inline-bootstrap")
                         .long("inline-bootstrap")
-                        .help("append RAFS metadata to the data blob")
+                        .help("Append RAFS metadata to RAFS data blob")
                         .action(ArgAction::SetTrue)
                         .required(false),
                 )
@@ -208,50 +206,48 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("blob-dir")
                         .long("blob-dir")
                         .short('D')
-                        .help("directory to store RAFS filesystem metadata and data blobs"),
+                        .help("Directory to store generated RAFS metadata and data blobs"),
                 )
                 .arg(
                     Arg::new("blob")
                         .long("blob")
                         .short('b')
-                        .help("path to store generated RAFS filesystem data blob")
+                        .help("Path to store generated RAFS data blob")
                         .required_unless_present_any(&["type", "blob-dir"]),
                 )
                 .arg(
                     Arg::new("blob-id")
                         .long("blob-id")
                         .required_if_eq_any([("type", "estargztoc-ref"), ("type", "stargz_index")])
-                        .help("specify blob id (as object id in backend/oss)")
+                        .help("Specify RAFS data blob id (as object id in backend/oss)")
                 )
                 .arg(
                     Arg::new("blob-meta")
                         .long("blob-meta")
-                        .help("path to store generated data blob compression information")
+                        .help("Path to store generated RAFS data blob compression information")
                         .conflicts_with("inline-bootstrap"),
                 )
                 .arg(
                     Arg::new("blob-offset")
                         .long("blob-offset")
-                        .help("add an offset for compressed blob (used to put the blob in the tarball)")
+                        .help("Add an offset to RAFS data blob, to support storing the data blob into a tar file")
                         .default_value("0"),
                 )
                 .arg(
                     Arg::new("blob-data-size")
                         .long("blob-data-size")
-                        .help("specify blob data size of estargz conversion"),
+                        .help("Set data blob size for 'estargztoc-ref' conversion"),
                 )
                 .arg(
                     Arg::new("chunk-size")
                         .long("chunk-size")
-                        .short('S')
-                        .help("size of data chunk, must be power of two and between 0x1000-0x1000000:")
+                        .help("Set size of data chunk, must be power of two and between 0x1000-0x1000000:")
                         .required(false),
                 )
                 .arg(
                     Arg::new("compressor")
                         .long("compressor")
-                        .short('c')
-                        .help("algorithm to compress image data blob:")
+                        .help("Set algorithm to compress chunks:")
                         .required(false)
                         .default_value("zstd")
                         .value_parser(["none", "lz4_block", "gzip", "zstd"]),
@@ -259,8 +255,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("digester")
                         .long("digester")
-                        .short('d')
-                        .help("algorithm to digest inodes and data chunks:")
+                        .help("Set algorithm to digest inodes and chunks:")
                         .required(false)
                         .default_value("sha256")
                         .value_parser(["blake3", "sha256"]),
@@ -269,7 +264,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("fs-version")
                         .long("fs-version")
                         .short('v')
-                        .help("RAFS filesystem format version number:")
+                        .help("Set RAFS format version number:")
                         .default_value("6")
                         .value_parser(["5", "6"]),
                 )
@@ -279,37 +274,33 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("parent-bootstrap")
                         .long("parent-bootstrap")
-                        .short('p')
-                        .help("path to parent/referenced RAFS filesystem metadata blob (optional)")
+                        .help("Path to parent/referenced RAFS filesystem metadata blob (optional)")
                         .required(false),
                 )
                 .arg(
                     Arg::new("aligned-chunk")
                         .long("aligned-chunk")
-                        .short('A')
                         .help("Align uncompressed data chunk to 4K, apply to RAFS V5 only")
                         .action(ArgAction::SetTrue)
                 )
                 .arg(
                     Arg::new("repeatable")
                         .long("repeatable")
-                        .short('R')
-                        .help("generate reproducible RAFS filesystem")
+                        .help("Generate reproducible RAFS metadata")
                         .action(ArgAction::SetTrue)
                         .required(false),
                 )
                 .arg(
                     Arg::new("disable-check")
                         .long("disable-check")
-                        .help("disable validation of metadata after building")
+                        .help("Disable validation of RAFS metadata after building")
                         .action(ArgAction::SetTrue)
                         .required(false)
                 )
                 .arg(
                     Arg::new("whiteout-spec")
                         .long("whiteout-spec")
-                        .short('W')
-                        .help("type of whiteout specification:")
+                        .help("Set type of whiteout specification:")
                         .default_value("oci")
                         .value_parser(["oci", "overlayfs", "none"])
                 )
@@ -351,14 +342,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .about("Validate RAFS filesystem metadata")
                 .arg(
                     Arg::new("bootstrap")
-                        .help("path to RAFS metadata blob file (required)")
+                        .help("Path to RAFS metadata file")
                         .required(true),
                 )
                 .arg(
                     Arg::new("verbose")
                         .long("verbose")
                         .short('v')
-                        .help("verbose output")
+                        .help("Output message in verbose mode")
                         .action(ArgAction::SetTrue)
                         .required(false),
                 )
@@ -368,42 +359,42 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         )
         .subcommand(
             App::new("inspect")
-                .about("Inspect RAFS filesystem metadata")
+                .about("Inspect RAFS filesystem metadata in interactive or request mode")
                 .arg(
                     Arg::new("bootstrap")
-                        .help("path to RAFS metadata file)")
+                        .help("Path to RAFS metadata file")
                         .required(true),
                 )
                 .arg(
                     Arg::new("request")
                         .long("request")
                         .short('R')
-                        .help("inspect RAFS filesystem metadata in request mode")
+                        .help("Inspect RAFS filesystem metadata in request mode")
                         .required(false),
                 )
         )
         .subcommand(
             App::new("stat")
-                .about("Generate statistics information from a group of RAFS bootstraps")
+                .about("Generate statistics information for RAFS bootstraps")
                 .arg(
                     Arg::new("bootstrap")
                         .long("bootstrap")
                         .short('B')
-                        .help("generate statistics information from the RAFS bootstrap")
+                        .help("Generate statistics information for the RAFS bootstrap")
                         .required(false),
                 )
                 .arg(
                     Arg::new("blob-dir")
                         .long("blob-dir")
                         .short('D')
-                        .help("generate statistics information from all RAFS bootstraps in the directory")
+                        .help("Generate statistics information for all RAFS bootstraps in the directory")
                         .required(false),
                 )
                 .arg(
                     Arg::new("target")
                         .long("target")
                         .short('T')
-                        .help("generate statistics information for the target RAFS bootstrap after deduplicating data chunks available in other bootstraps")
+                        .help("Generate statistics information for the RAFS bootstrap with chunk deduplication based on chunks from other bootstraps")
                         .required(false),
                 )
                 .arg(
@@ -442,7 +433,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("chunk-dict")
                         .long("chunk-dict")
-                        .short('M')
                         .help("Specify a chunk dictionary for chunk deduplication"),
                 )
                 .arg(
@@ -482,8 +472,8 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         .arg(
             Arg::new("log-file")
                 .long("log-file")
-                .short('o')
-                .help("specify log file")
+                .short('L')
+                .help("Set log file path")
                 .required(false)
                 .global(true),
         )
@@ -491,7 +481,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             Arg::new("log-level")
                 .long("log-level")
                 .short('l')
-                .help("specify log level:")
+                .help("Set log level:")
                 .default_value("info")
                 .value_parser(["trace", "debug", "info", "warn", "error"])
                 .required(false)
