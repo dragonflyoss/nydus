@@ -216,10 +216,11 @@ def test_prefetch_with_cache(
     rafs.umount()
 
 
-@pytest.mark.parametrize("compressor", [Compressor.NONE, Compressor.LZ4_BLOCK])
-@pytest.mark.parametrize("backend", [Backend.BACKEND_PROXY, Backend.LOCALFS])
-@pytest.mark.parametrize("amplified_size", [Size(3, Unit.MB).B, Size(3, Unit.KB).B])
-def test_large_file(nydus_anchor, compressor, backend, amplified_size):
+@pytest.mark.parametrize(
+    "compressor", [Compressor.NONE, Compressor.LZ4_BLOCK, Compressor.ZSTD]
+)
+@pytest.mark.parametrize("amplified_size", [Size(3, Unit.MB).B, Size(32, Unit.KB).B])
+def test_large_file(nydus_anchor, compressor, amplified_size):
     _tmp_dir = tempfile.TemporaryDirectory(dir=nydus_anchor.workspace)
     large_file_dir = _tmp_dir.name
 
@@ -231,13 +232,13 @@ def test_large_file(nydus_anchor, compressor, backend, amplified_size):
     dist.put_multiple_files(10, Size(4, Unit.MB))
 
     image = RafsImage(nydus_anchor, large_file_dir, "bs_large", "blob_large")
-    image.set_backend(backend).create_image(compressor=compressor)
+    image.set_backend(Backend.BACKEND_PROXY).create_image(compressor=compressor)
 
     rafs_conf = (
         RafsConf(nydus_anchor, image)
         .enable_rafs_blobcache()
         .amplify_io(amplified_size)
-        .set_rafs_backend(backend, image=image)
+        .set_rafs_backend(Backend.BACKEND_PROXY, image=image)
     )
 
     rafs = NydusDaemon(nydus_anchor, image, rafs_conf)
