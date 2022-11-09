@@ -4,13 +4,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::convert::TryInto;
 use std::io;
 use std::sync::mpsc::{RecvError, SendError};
 
-use crate::BlobCacheEntryConfig;
 use nydus_error::error::MetricsError;
 use serde::Deserialize;
 use serde_json::Error as SerdeError;
+
+use crate::{BlobCacheEntryConfig, BlobCacheEntryConfigV2};
 
 /// Mount a filesystem.
 #[derive(Clone, Deserialize, Debug)]
@@ -56,11 +58,32 @@ pub struct BlobCacheEntry {
     #[serde(rename = "id")]
     pub blob_id: String,
     /// Configuration information to generate blob cache object.
-    #[serde(rename = "config")]
-    pub blob_config: BlobCacheEntryConfig,
+    #[serde(default, rename = "config")]
+    pub(crate) blob_config_legacy: Option<BlobCacheEntryConfig>,
+    /// Configuration information to generate blob cache object.
+    #[serde(default, rename = "config_v2")]
+    pub blob_config: Option<BlobCacheEntryConfigV2>,
     /// Domain id for the blob, which is used to group cached blobs into management domains.
     #[serde(default)]
     pub domain_id: String,
+}
+
+impl BlobCacheEntry {
+    pub fn prepare_configuration_info(&mut self) -> bool {
+        if self.blob_config.is_none() {
+            if let Some(legacy) = self.blob_config_legacy.as_ref() {
+                match legacy.try_into() {
+                    Err(_) => return false,
+                    Ok(v) => self.blob_config = Some(v),
+                }
+            }
+        }
+
+        match self.blob_config.as_ref() {
+            None => false,
+            Some(cfg) => cfg.cache.validate() && cfg.backend.validate(),
+        }
+    }
 }
 
 /// Configuration information for a list of cached blob objects.
@@ -130,7 +153,7 @@ pub enum ApiRequest {
     /// Get daemon information excluding filesystem backends.
     GetDaemonInfoV2,
     /// Create a blob cache entry
-    CreateBlobObject(BlobCacheEntry),
+    CreateBlobObject(Box<BlobCacheEntry>),
     /// Get information about blob cache entries
     GetBlobObject(BlobCacheObjectId),
     /// Delete a blob cache entry

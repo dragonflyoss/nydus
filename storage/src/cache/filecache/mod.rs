@@ -9,7 +9,7 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use nydus_api::{CacheConfig, FileCacheConfig};
+use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
 
@@ -42,16 +42,15 @@ pub struct FileCacheMgr {
 impl FileCacheMgr {
     /// Create a new instance of `FileCacheMgr`.
     pub fn new(
-        config: CacheConfig,
+        config: &CacheConfigV2,
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
     ) -> Result<FileCacheMgr> {
-        let blob_config: FileCacheConfig =
-            serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
-        let work_dir = blob_config.get_work_dir()?;
+        let blob_cfg = config.get_filecache_config()?;
+        let work_dir = blob_cfg.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
-        let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
+        let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new((&config.prefetch).into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         Ok(FileCacheMgr {
@@ -62,7 +61,7 @@ impl FileCacheMgr {
             runtime,
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
-            disable_indexed_map: blob_config.disable_indexed_map,
+            disable_indexed_map: blob_cfg.disable_indexed_map,
             validate: config.cache_validate,
             is_compressed: config.cache_compressed,
             closed: Arc::new(AtomicBool::new(false)),
@@ -279,33 +278,9 @@ impl FileCacheEntry {
 
 #[cfg(test)]
 pub mod blob_cache_tests {
-    /*
-    use std::alloc::{alloc_zeroed, Layout};
-    use std::slice::from_raw_parts;
-    use std::sync::Arc;
-
-    use vm_memory::{VolatileMemory, VolatileSlice};
-    use vmm_sys_util::tempdir::TempDir;
-
-    use crate::backend::{BackendResult, BlobBackend, BlobReader, BlobWrite};
-    use crate::cache::{filecache, BlobPrefetchConfig, BlobV5Cache, MergedBackendRequest};
-    use crate::compress;
-    use crate::device::v5::{BlobIoDesc, BlobV5ChunkInfo};
-    use crate::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
-    use crate::factory::CacheConfig;
-    use crate::impl_getter;
-    use crate::RAFS_DEFAULT_BLOCK_SIZE;
-
-    use nydus_utils::{
-        digest::{self, RafsDigest},
-        metrics::BackendMetrics,
-    };
-    */
-
+    use nydus_api::FileCacheConfig;
     use vmm_sys_util::tempdir::TempDir;
     use vmm_sys_util::tempfile::TempFile;
-
-    use super::*;
 
     #[test]
     fn test_blob_cache_config() {
@@ -324,12 +299,6 @@ pub mod blob_cache_tests {
         let mut blob_config: FileCacheConfig = serde_json::from_str(&s).unwrap();
         assert!(!blob_config.disable_indexed_map);
         assert_eq!(blob_config.work_dir, dir.to_str().unwrap());
-        /*
-        assert_eq!(blob_config.get_work_dir().unwrap(), dir.to_str().unwrap());
-
-        blob_config.work_dir += "/cache";
-        assert_eq!(blob_config.get_work_dir().unwrap(), dir.to_str().unwrap().to_owned() + "/cache");
-         */
 
         let tmp_file = TempFile::new().unwrap();
         let file = tmp_file.as_path().to_path_buf();

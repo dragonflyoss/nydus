@@ -1,0 +1,167 @@
+# Configuration file for Nydus Image Service
+
+# Configuration file format version number, must be 2.
+version = 2
+# Identifier for the instance.
+id = "my_id"
+
+[backend]
+# Type of storage backend, valid values: "localfs", "oss", "registry"
+type = "localfs"
+
+[backend.localfs]
+blob_file = "/tmp/nydus.blob.data"
+dir = "/tmp"
+alt_dirs = ["/var/nydus/cache"]
+
+[backend.oss]
+# Oss http scheme, either 'http' or 'https'
+scheme = "http"
+# Oss endpoint
+endpoint = "my_endpoint"
+# Oss bucket name
+bucket_name = "my_bucket_name"
+# Prefix object_prefix to OSS object key, for example the simulation of subdirectory:
+object_prefix = "my_object_prefix"
+# Oss access key
+access_key_id = "my_access_key_id"
+# Oss secret
+access_key_secret = "my_access_key_secret"
+# Skip SSL certificate validation for HTTPS scheme.
+skip_verify = true
+# Drop the read request once http request timeout, in seconds.
+timeout = 10
+# Drop the read request once http connection timeout, in seconds.
+connect_timeout = 10
+# Retry count when read request failed.
+retry_limit = 5
+
+[backend.oss.proxy]
+# Access remote storage backend via proxy, e.g. Dragonfly dfdaemon server URL.
+url = "localhost:6789"
+# Proxy health checking endpoint.
+ping_url = "localhost:6789/ping"
+# Fallback to remote storage backend if proxy ping failed.
+fallback = true
+# Interval for proxy health checking, in seconds.
+check_interval = 5
+# Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
+use_http = false
+
+[[backend.oss.mirrors]]
+# Mirror server URL, for example http://127.0.0.1:65001.
+host = "http://127.0.0.1:65001"
+# Ping URL to check mirror server health.
+ping_url = "http://127.0.0.1:65001/ping"
+# HTTP request headers to be passed to mirror server.
+# headers =
+# Whether the authorization process is through mirror, default to false.
+auth_through = true
+# Interval for mirror health checking, in seconds.
+health_check_interval = 5
+# Maximum number of failures before marking a mirror as unusable.
+failure_limit = 5
+
+[backend.registy]
+# Registry http scheme, either 'http' or 'https'
+scheme = "https"
+# Registry url host
+host = "my.registry.com"
+# Registry image name, like 'library/ubuntu'
+repo = "nydus"
+# Base64_encoded(username:password), the field should be sent to registry auth server to get a bearer token.
+auth = "base64_encoded"
+# Skip SSL certificate validation for HTTPS scheme.
+skip_verify = true
+# Drop the read request once http request timeout, in seconds.
+timeout = 10
+# Drop the read request once http connection timeout, in seconds.
+connect_timeout = 10
+# Retry count when read request failed.
+retry_limit = 5
+# The field is a bearer token to be sent to registry to authorize registry requests.
+registry_token = "bear_token"
+# The http scheme to access blobs.
+# It is used to workaround some P2P subsystem that requires a different scheme than the registry.
+blob_url_scheme = "https"
+# Redirect blob access to a different host regardless of the one specified in 'host'.
+blob_redirected_host = "redirect.registry.com"
+
+[backend.registry.proxy]
+# Access remote storage backend via proxy, e.g. Dragonfly dfdaemon server URL.
+url = "localhost:6789"
+# Proxy health checking endpoint.
+ping_url = "localhost:6789/ping"
+# Fallback to remote storage backend if proxy ping failed.
+fallback = true
+# Interval for proxy health checking, in seconds.
+check_interval = 5
+# Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
+use_http = false
+
+[[backend.registry.mirrors]]
+# Mirror server URL, for example http://127.0.0.1:65001.
+host = "http://127.0.0.1:65001"
+# Ping URL to check mirror server health.
+ping_url = "http://127.0.0.1:65001/ping"
+# HTTP request headers to be passed to mirror server.
+# headers =
+# Whether the authorization process is through mirror, default to false.
+auth_through = true
+# Interval for mirror health checking, in seconds.
+health_check_interval = 5
+# Maximum number of failures before marking a mirror as unusable.
+failure_limit = 5
+
+[cache]
+# Type of blob cache: "blobcache", "filecache", "fscache", "dummycache" or ""
+type = "filecache"
+# Whether to cache compressed or uncompressed data.
+compressed = true
+# Whether to validate data read from the cache.
+validate = true
+
+[cache.filecache]
+work_dir = "."
+
+[cache.fscache]
+work_dir = "."
+
+[cache.prefetch]
+# Whether to enable blob data prefetching.
+enable = true
+# Number of data prefetching working threads, valid values: 1-1024.
+threads = 8
+# The batch size to prefetch data from backend, valid values: 0-0x10000000.
+batch_size = 1000000
+# Network bandwidth rate limit in unit of Bytes and Zero means no limit.
+bandwidth_limit = 10000000
+
+[rafs]
+# Filesystem metadata cache mode, "direct" or "cached". "direct" is almost what you want.
+mode = "direct"
+# Batch size to read data from storage cache layer, valid values: 0-0x10000000
+batch_size = 1000000
+# Whether to validate data digest.
+validate = true
+# Enable support of extended attributes.
+enable_xattr = true
+# Enable statistics for file IOs.
+iostats_files = false
+# Record filesystem access pattern.
+access_pattern = false
+# Record file name if file access trace log.
+latest_read_files = false
+
+[rafs.prefetch]
+# Whether to enable RAFS filesystem layer prefetching.
+enable = true
+# Number of data prefetching working threads, valid values: 1-1024.
+threads = 8
+# The batch size to prefetch data from backend, valid values: 0-0x10000000.
+batch_size = 1000000
+# Network bandwidth rate limit in unit of Bytes and Zero means no limit.
+bandwidth_limit = 10000000
+# Prefetch all data from backend.
+prefetch_all = true
+

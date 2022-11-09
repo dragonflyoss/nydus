@@ -968,7 +968,12 @@ impl FileCacheEntry {
         }
         if region.chunks.len() > 1 {
             for idx in 0..region.chunks.len() - 1 {
-                assert_eq!(region.chunks[idx].id() + 1, region.chunks[idx + 1].id());
+                let end = region.chunks[idx].compressed_offset()
+                    + region.chunks[idx].compressed_size() as u64;
+                let start = region.chunks[idx + 1].compressed_offset();
+                assert!(end <= start);
+                assert!(start - end < self.ondemand_batch_size());
+                assert!(region.chunks[idx].id() < region.chunks[idx + 1].id());
             }
         }
 

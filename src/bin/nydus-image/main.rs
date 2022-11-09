@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
-use nydus_api::BackendConfig;
+use nydus_api::ConfigV2;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::metadata::RafsVersion;
 use nydus_rafs::RafsIoReader;
@@ -419,14 +419,8 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required(true),
                 )
                 .arg(
-                    Arg::new("backend-type")
-                        .long("backend-type")
-                        .help("type of backend")
-                        .required(true),
-                )
-                .arg(
-                    Arg::new("backend-config-file")
-                        .long("backend-config-file")
+                    Arg::new("backend-config")
+                        .long("backend-config")
                         .help("config file of backend")
                         .required(true),
                 )
@@ -783,16 +777,10 @@ impl Command {
             Some(args) => Some(import_chunk_dict(args)?),
         };
 
-        let backend_type = matches
-            .get_one::<String>("backend-type")
-            .map(|s| s.as_str())
-            .unwrap();
-        let backend_file = matches
-            .get_one::<String>("backend-config-file")
-            .map(|s| s.as_str())
-            .unwrap();
-        let backend_config = BackendConfig::from_file(backend_type, backend_file)?;
-        let backend = BlobFactory::new_backend(backend_config, "compactor")?;
+        let cfg_file = matches.get_one::<String>("backend-config").unwrap();
+        let cfg = ConfigV2::from_file(cfg_file)?;
+        let backend_cfg = cfg.get_backend_config()?;
+        let backend = BlobFactory::new_backend(backend_cfg, "compactor")?;
 
         let config_file_path = matches.get_one::<String>("config").unwrap();
         let file = File::open(config_file_path)

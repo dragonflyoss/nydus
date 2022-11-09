@@ -33,7 +33,7 @@ use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
-use nydus_api::FactoryConfig;
+use nydus_api::ConfigV2;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 
@@ -832,10 +832,7 @@ pub struct BlobDevice {
 
 impl BlobDevice {
     /// Create new blob device instance.
-    pub fn new(
-        config: &Arc<FactoryConfig>,
-        blob_infos: &[Arc<BlobInfo>],
-    ) -> io::Result<BlobDevice> {
+    pub fn new(config: &Arc<ConfigV2>, blob_infos: &[Arc<BlobInfo>]) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
             let blob = BLOB_FACTORY.new_blob_cache(config, blob_info, blob_infos.len())?;
@@ -854,7 +851,7 @@ impl BlobDevice {
     /// information passed in.
     pub fn update(
         &self,
-        config: &Arc<FactoryConfig>,
+        config: &Arc<ConfigV2>,
         blob_infos: &[Arc<BlobInfo>],
         fs_prefetch: bool,
     ) -> io::Result<()> {

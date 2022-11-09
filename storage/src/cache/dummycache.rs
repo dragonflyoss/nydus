@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use nydus_api::CacheConfig;
+use nydus_api::CacheConfigV2;
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
@@ -167,7 +167,7 @@ pub struct DummyCacheMgr {
 impl DummyCacheMgr {
     /// Create a new instance of `DummmyCacheMgr`.
     pub fn new(
-        config: CacheConfig,
+        config: &CacheConfigV2,
         backend: Arc<dyn BlobBackend>,
         cached: bool,
     ) -> Result<DummyCacheMgr> {

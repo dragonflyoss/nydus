@@ -597,9 +597,8 @@ pub struct Registry {
 
 impl Registry {
     #[allow(clippy::useless_let_if_seq)]
-    pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<Registry> {
+    pub fn new(config: &RegistryConfig, id: Option<&str>) -> Result<Registry> {
         let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
-        let config: RegistryConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
         let con_config: ConnectionConfig = config.clone().into();
 
         if !config.proxy.url.is_empty() && !config.mirrors.is_empty() {
@@ -610,8 +609,8 @@ impl Registry {
 
         let retry_limit = con_config.retry_limit;
         let connection = Connection::new(&con_config)?;
-        let auth = trim(config.auth);
-        let registry_token = trim(config.registry_token);
+        let auth = trim(config.auth.clone());
+        let registry_token = trim(config.registry_token.clone());
         let (username, password) = Self::get_authorization_info(&auth)?;
         let cached_auth = if let Some(registry_token) = registry_token {
             // Store the registry bearer token to cached_auth, prefer to
@@ -622,16 +621,16 @@ impl Registry {
         };
 
         let state = Arc::new(RegistryState {
-            scheme: config.scheme,
-            host: config.host,
-            repo: config.repo,
+            scheme: config.scheme.clone(),
+            host: config.host.clone(),
+            repo: config.repo.clone(),
             auth,
             cached_auth,
             username,
             password,
             retry_limit,
-            blob_url_scheme: config.blob_url_scheme,
-            blob_redirected_host: config.blob_redirected_host,
+            blob_url_scheme: config.blob_url_scheme.clone(),
+            blob_redirected_host: config.blob_redirected_host.clone(),
             cached_redirect: HashCache::new(),
             refresh_token_time: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),

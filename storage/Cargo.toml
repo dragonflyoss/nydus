@@ -37,7 +37,7 @@ tar = "0.4.38"
 
 [features]
 backend-localfs = []
-backend-oss = ["base64", "httpdate", "hmac-sha1-compact", "reqwest"]
+backend-oss = ["base64", "httpdate", "hmac-sha1-compact", "reqwest", "url"]
 backend-registry = ["base64", "reqwest", "serde", "url"]
 
 [package.metadata.docs.rs]
