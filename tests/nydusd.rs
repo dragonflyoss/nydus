@@ -32,8 +32,8 @@ pub fn new(
         r###"
         ,"cache": {{
             "type": "blobcache",
+            "compressed": {},
             "config": {{
-                "compressed": {},
                 "work_dir": {:?}
             }}
         }}
@@ -49,8 +49,7 @@ pub fn new(
                 "backend": {{
                     "type": "localfs",
                     "config": {{
-                        "dir": {:?},
-                        "readahead": true
+                        "dir": {:?}
                     }}
                 }}
                 {}
