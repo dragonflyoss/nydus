@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nydus_api::http::{CacheConfig, FileCacheConfig};
+use nydus_utils::compress;
 use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
 
@@ -188,7 +189,7 @@ impl FileCacheEntry {
         let compressor = blob_info.compressor();
         let digester = blob_info.digester();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
-        let is_compressed = mgr.is_compressed;
+        let is_compressed = mgr.is_compressed && compressor != compress::Algorithm::None;
         let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
         let need_validation = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
         trace!(
