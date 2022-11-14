@@ -33,7 +33,7 @@ type multipartStatus struct {
 	imur          *oss.InitiateMultipartUploadResult
 	parts         []oss.UploadPart
 	blobObjectKey string
-	crc64         uint64
+	crc64Chan     chan uint64
 	crc64ErrChan  chan error
 }
 
@@ -125,14 +125,17 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	}
 
 	start := time.Now()
-	var crc64 uint64
+	crc64Chan := make(chan uint64, 1)
 	crc64ErrChan := make(chan error, 1)
 	go func() {
-		var e error
-		crc64, e = calcCrc64ECMA(blobPath)
+		defer func() {
+			close(crc64Chan)
+			close(crc64ErrChan)
+		}()
+		crc64Val, e := calcCrc64ECMA(blobPath)
+		crc64Chan <- crc64Val
 		crc64ErrChan <- e
 	}()
-	defer close(crc64ErrChan)
 
 	logrus.Debugf("upload %s using multipart method", blobObjectKey)
 	chunks, err := oss.SplitFileByPartSize(blobPath, multipartChunkSize)
@@ -177,7 +180,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 		imur:          &imur,
 		parts:         parts,
 		blobObjectKey: blobObjectKey,
-		crc64:         crc64,
+		crc64Chan:     crc64Chan,
 		crc64ErrChan:  crc64ErrChan,
 	}
 	b.msMutex.Lock()
@@ -232,8 +235,8 @@ func (b *OSSBackend) Finalize(cancel bool) error {
 					return errors.Wrapf(err, "calculate crc64")
 				}
 
-				if uploadedCrc != ms.crc64 {
-					return errors.Errorf("crc64 mismatch, uploaded=%d, expected=%d", uploadedCrc, ms.crc64)
+				if crc64Val := <-ms.crc64Chan; uploadedCrc != crc64Val {
+					return errors.Errorf("crc64 mismatch, uploaded=%d, expected=%d", uploadedCrc, crc64Val)
 				}
 
 			} else {
