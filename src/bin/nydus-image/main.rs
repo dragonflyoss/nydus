@@ -341,9 +341,17 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             App::new("check")
                 .about("Validate RAFS filesystem metadata")
                 .arg(
-                    Arg::new("bootstrap")
+                    Arg::new("BOOTSTRAP")
                         .help("Path to RAFS metadata file")
-                        .required(true),
+                        .required_unless_present("bootstrap"),
+                )
+                .arg(
+                    Arg::new("bootstrap")
+                        .short('B')
+                        .long("bootstrap")
+                        .help("Path to RAFS metadata file")
+                        .conflicts_with("BOOTSTRAP")
+                        .required(false),
                 )
                 .arg(
                     Arg::new("verbose")
@@ -926,8 +934,11 @@ impl Command {
 
     fn get_bootstrap(matches: &clap::ArgMatches) -> Result<&Path> {
         match matches.get_one::<String>("bootstrap") {
-            None => bail!("missing parameter `bootstrap`"),
             Some(s) => Ok(Path::new(s)),
+            None => match matches.get_one::<String>("BOOTSTRAP") {
+                Some(s) => Ok(Path::new(s)),
+                None => bail!("missing parameter `bootstrap`"),
+            },
         }
     }
 
