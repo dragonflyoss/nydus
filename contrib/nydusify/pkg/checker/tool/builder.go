@@ -38,6 +38,7 @@ func (builder *Builder) Check(option BuilderOption) error {
 		"warn",
 		"--output-json",
 		option.DebugOutputPath,
+		"--bootstrap",
 		option.BootstrapPath,
 	}
 
