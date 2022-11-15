@@ -23,7 +23,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
 use nydus_api::http::BackendConfig;
 use nydus_app::{setup_logging, BuildTimeInfo};
-use nydus_rafs::metadata::RafsVersion;
+use nydus_rafs::metadata::{RafsMode, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_rafs::RafsIoReader;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::{
@@ -677,8 +677,14 @@ impl Command {
 
         let mut blob_mgr = BlobManager::new();
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
+            let config = RafsSuperConfig {
+                version,
+                compressor,
+                digester,
+                explicit_uidgid: !repeatable,
+            };
             blob_mgr.set_chunk_dict(timing_tracer!(
-                { import_chunk_dict(chunk_dict_arg) },
+                { import_chunk_dict(chunk_dict_arg, Some(config)) },
                 "import_chunk_dict"
             )?);
         }
@@ -778,9 +784,11 @@ impl Command {
             Some(s) => PathBuf::from(s),
         };
 
+        let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)?;
+        info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(args)?),
+            Some(args) => Some(import_chunk_dict(args, Some(rs.meta.get_config()))?),
         };
 
         let backend_type = matches
@@ -801,7 +809,7 @@ impl Command {
             .with_context(|| format!("invalid config file {}", config_file_path))?;
 
         if let Some(build_output) =
-            BlobCompactor::do_compact(bootstrap_path, dst_bootstrap, chunk_dict, backend, &config)?
+            BlobCompactor::do_compact(rs, dst_bootstrap, chunk_dict, backend, &config)?
         {
             OutputSerializer::dump(matches, build_output, build_info)?;
         }
