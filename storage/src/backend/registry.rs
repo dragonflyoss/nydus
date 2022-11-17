@@ -226,8 +226,7 @@ impl RegistryState {
             self.refresh_token_time
                 .store(Some(Arc::new(now_timestamp.as_secs() + ret.expires_in)));
             info!(
-                "cached_bearer_auth: {:?}, next time: {}",
-                auth,
+                "cached bearer auth, next time: {}",
                 now_timestamp.as_secs() + ret.expires_in
             );
         }
