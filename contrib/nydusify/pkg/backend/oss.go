@@ -187,7 +187,7 @@ func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size i
 	defer b.msMutex.Unlock()
 	b.ms = append(b.ms, ms)
 
-	logrus.Debugf("uploaded blob %s, costs %s", blobObjectKey, time.Since(start))
+	logrus.Debugf("uploaded blob %s to oss backend, costs %s", blobObjectKey, time.Since(start))
 
 	return &desc, nil
 }

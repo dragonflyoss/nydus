@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -130,8 +129,6 @@ func ParseBackendConfig(backendConfigFile string) (BackendConfig, error) {
 	if err = json.NewDecoder(cfgFile).Decode(&cfg); err != nil {
 		return BackendConfig{}, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigFile)
 	}
-	cfg.MetaPrefix = strings.TrimSuffix(cfg.MetaPrefix, "/")
-	cfg.BlobPrefix = strings.TrimSuffix(cfg.BlobPrefix, "/")
 	return cfg, nil
 }
 
@@ -140,7 +137,5 @@ func ParseBackendConfigString(backendConfigContent string) (BackendConfig, error
 	if err := json.Unmarshal([]byte(backendConfigContent), &cfg); err != nil {
 		return BackendConfig{}, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigContent)
 	}
-	cfg.MetaPrefix = strings.TrimSuffix(cfg.MetaPrefix, "/")
-	cfg.BlobPrefix = strings.TrimSuffix(cfg.BlobPrefix, "/")
 	return cfg, nil
 }

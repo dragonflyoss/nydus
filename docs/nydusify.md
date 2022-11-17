@@ -28,7 +28,7 @@ nydusify pack \
 
 Nydusify uploads Nydus blob to registry by default, change this behavior by specifying `--backend-type` option.
 
-OSS Backend:
+### OSS Backend
 
 ``` shell
 cat /path/to/backend-config.json
@@ -45,6 +45,30 @@ nydusify convert \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus \
   --backend-type oss \
+  --backend-config-file /path/to/backend-config.json
+```
+
+### S3 Backend
+
+`nydusify convert` can upload blob to the aws s3 service or other s3 compatible services (for example minio, ceph s3 gateway, etc.) by specifying `--backend-type s3` option.
+
+The `endpoint` field of the `backend-config.json` is optional when using aws s3 service.
+
+``` shell
+cat /path/to/backend-config.json
+{
+  "endpoint": "http://localhost:9000",
+  "access_key_id": "",
+  "access_key_secret": "",
+  "bucket_name": ""
+}
+```
+
+``` shell
+nydusify convert \
+  --source myregistry/repo:tag \
+  --target myregistry/repo:tag-nydus \
+  --backend-type s3 \
   --backend-config-file /path/to/backend-config.json
 ```
 
