@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::HashSet;
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
@@ -324,6 +324,50 @@ impl From<compress::Algorithm> for RafsSuperFlags {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RafsSuperConfig {
+    pub version: RafsVersion,
+    pub compressor: compress::Algorithm,
+    pub digester: digest::Algorithm,
+    pub explicit_uidgid: bool,
+}
+
+impl RafsSuperConfig {
+    pub fn check_compatibility(&self, meta: &RafsSuperMeta) -> Result<()> {
+        if self.compressor != meta.get_compressor() {
+            return Err(einval!(format!(
+                "Using inconsistent compressor {:?}, target compressor {:?}",
+                self.compressor,
+                meta.get_compressor()
+            )));
+        }
+
+        if self.digester != meta.get_digester() {
+            return Err(einval!(format!(
+                "Using inconsistent digester {:?}, target digester {:?}",
+                self.digester,
+                meta.get_digester()
+            )));
+        }
+
+        if self.explicit_uidgid != meta.explicit_uidgid() {
+            return Err(einval!(format!(
+                "Using inconsistent explicit_uidgid setting {:?}, target explicit_uidgid setting {:?}",
+                self.explicit_uidgid,
+                meta.explicit_uidgid()
+            )));
+        }
+
+        if u32::from(self.version) != meta.version {
+            return Err(einval!(format!(
+                "Using inconsistent RAFS version {:?}, target RAFS version {:?}",
+                self.version,
+                RafsVersion::try_from(meta.version)?
+            )));
+        }
+        Ok(())
+    }
+}
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
@@ -416,6 +460,15 @@ impl RafsSuperMeta {
             digest::Algorithm::Blake3
         }
     }
+
+    pub fn get_config(&self) -> RafsSuperConfig {
+        RafsSuperConfig {
+            version: self.version.try_into().unwrap_or_default(),
+            compressor: self.get_compressor(),
+            digester: self.get_digester(),
+            explicit_uidgid: self.explicit_uidgid(),
+        }
+    }
 }
 
 impl Default for RafsSuperMeta {
@@ -472,6 +525,15 @@ impl TryFrom<u32> for RafsVersion {
             return Ok(RafsVersion::V6);
         }
         Err(einval!(format!("invalid RAFS version number {}", version)))
+    }
+}
+
+impl From<RafsVersion> for u32 {
+    fn from(v: RafsVersion) -> Self {
+        match v {
+            RafsVersion::V5 => RAFS_SUPER_VERSION_V5,
+            RafsVersion::V6 => RAFS_SUPER_VERSION_V6,
+        }
     }
 }
 

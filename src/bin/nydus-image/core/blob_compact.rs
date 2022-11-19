@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::{RafsMode, RafsSuper, RafsVersion};
+use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
@@ -552,14 +552,12 @@ impl BlobCompactor {
     }
 
     pub fn do_compact(
-        s_bootstrap: PathBuf,
+        rs: RafsSuper,
         d_bootstrap: PathBuf,
         chunk_dict: Option<Arc<dyn ChunkDict>>,
         backend: Arc<dyn BlobBackend + Send + Sync>,
         cfg: &Config,
     ) -> Result<Option<BuildOutput>> {
-        let rs = RafsSuper::load_from_metadata(&s_bootstrap, RafsMode::Direct, true)?;
-        info!("load bootstrap {:?} successfully", s_bootstrap);
         let mut build_ctx = BuildContext::new(
             "".to_string(),
             false,
@@ -599,7 +597,7 @@ impl BlobCompactor {
         compactor.compact(cfg)?;
         compactor.dump_new_blobs(&build_ctx, &cfg.blobs_dir, build_ctx.aligned_chunk)?;
         if compactor.new_blob_mgr.len() == 0 {
-            info!("blobs of {:?} have already been optimized", s_bootstrap);
+            info!("blobs of source bootstrap have already been optimized");
             return Ok(None);
         }
         info!("compact blob successfully");

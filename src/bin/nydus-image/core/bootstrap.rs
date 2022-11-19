@@ -18,7 +18,7 @@ use nydus_rafs::metadata::layout::v6::{
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
 use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
-use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper};
+use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperConfig};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 
 use super::context::{
@@ -323,13 +323,13 @@ impl Bootstrap {
             return Err(Error::msg("bootstrap context's parent bootstrap is null"));
         };
 
-        let lower_compressor = rs.meta.get_compressor();
-        if ctx.compressor != lower_compressor {
-            return Err(Error::msg(format!(
-                "inconsistent compressor with the lower layer, current {}, lower: {}.",
-                ctx.compressor, lower_compressor
-            )));
-        }
+        let config = RafsSuperConfig {
+            compressor: ctx.compressor,
+            digester: ctx.digester,
+            explicit_uidgid: ctx.explicit_uidgid,
+            version: ctx.fs_version,
+        };
+        config.check_compatibility(&rs.meta)?;
 
         // Reuse lower layer blob table,
         // we need to append the blob entry of upper layer to the table

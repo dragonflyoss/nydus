@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use nydus_rafs::metadata::RafsSuper;
+use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig};
 use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::RafsDigest;
 
@@ -91,7 +91,10 @@ impl ChunkDict for HashChunkDict {
 }
 
 impl HashChunkDict {
-    fn from_bootstrap_file(path: &Path) -> Result<Self> {
+    fn from_bootstrap_file(
+        path: &Path,
+        target_rafs_config: Option<RafsSuperConfig>,
+    ) -> Result<Self> {
         let rs = RafsSuper::load_chunk_dict_from_metadata(path)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
@@ -99,6 +102,9 @@ impl HashChunkDict {
             blobs: rs.superblock.get_blob_infos(),
             blob_idx_m: Mutex::new(BTreeMap::new()),
         };
+
+        let config = target_rafs_config.unwrap_or_else(|| rs.meta.get_config());
+        config.check_compatibility(&rs.meta)?;
 
         if rs.meta.is_v5() {
             Tree::from_bootstrap(&rs, &mut d).context("failed to build tree from bootstrap")?;
@@ -165,9 +171,13 @@ pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
 }
 
 /// Load a chunk dictionary from external source.
-pub(crate) fn import_chunk_dict(arg: &str) -> Result<Arc<dyn ChunkDict>> {
+pub(crate) fn import_chunk_dict(
+    arg: &str,
+    config: Option<RafsSuperConfig>,
+) -> Result<Arc<dyn ChunkDict>> {
     let file_path = parse_chunk_dict_arg(arg)?;
-    HashChunkDict::from_bootstrap_file(&file_path).map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
+    HashChunkDict::from_bootstrap_file(&file_path, config)
+        .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
 }
 
 #[cfg(test)]
@@ -193,7 +203,7 @@ mod tests {
         let mut source_path = PathBuf::from(root_dir);
         source_path.push("tests/texture/bootstrap/rafs-v5.boot");
         let path = source_path.to_str().unwrap();
-        let dict = import_chunk_dict(path).unwrap();
+        let dict = import_chunk_dict(path, None).unwrap();
 
         assert!(dict.get_chunk(&RafsDigest::default()).is_none());
         assert_eq!(dict.get_blobs().len(), 18);

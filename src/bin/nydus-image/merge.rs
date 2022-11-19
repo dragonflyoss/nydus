@@ -8,9 +8,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsSuperMeta, RafsVersion};
-use nydus_utils::compress;
-use nydus_utils::digest;
+use nydus_rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsVersion};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
@@ -19,29 +17,6 @@ use crate::core::context::{
 };
 use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
 use crate::core::tree::{MetadataTreeBuilder, Tree};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Flags {
-    compressor: compress::Algorithm,
-    digester: digest::Algorithm,
-    explicit_uidgid: bool,
-}
-
-impl Flags {
-    fn from_meta(meta: &RafsSuperMeta) -> Self {
-        Self {
-            compressor: meta.get_compressor(),
-            digester: meta.get_digester(),
-            explicit_uidgid: meta.explicit_uidgid(),
-        }
-    }
-
-    fn set_to_ctx(&self, ctx: &mut BuildContext) {
-        ctx.compressor = self.compressor;
-        ctx.digester = self.digester;
-        ctx.explicit_uidgid = self.explicit_uidgid;
-    }
-}
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///
@@ -79,16 +54,17 @@ impl Merger {
 
         // Get the blobs come from chunk dict bootstrap.
         let mut chunk_dict_blobs = HashSet::new();
+        let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
             let rs = RafsSuper::load_from_metadata(chunk_dict_path, RafsMode::Direct, true)
                 .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            config = Some(rs.meta.get_config());
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
             }
         }
 
         let mut fs_version = None;
-        let mut flags: Option<Flags> = None;
         let mut chunk_size = None;
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
@@ -96,33 +72,14 @@ impl Merger {
             let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
 
-            match fs_version {
-                None => fs_version = Some(rs.meta.version),
-                Some(version) => {
-                    if version != rs.meta.version {
-                        bail!(
-                            "can not merge bootstraps with inconsistent RAFS version {} and {}",
-                            version,
-                            rs.meta.version
-                        );
-                    }
-                }
-            }
-
-            let current_flags = Flags::from_meta(&rs.meta);
-            if let Some(flags) = &flags {
-                if flags != &current_flags {
-                    bail!(
-                        "can not merge bootstraps with inconsistent RAFS flags, current bootstrap {:?}, flags {:?}, expected flags {:?}",
-                        bootstrap_path,
-                        current_flags,
-                        flags,
-                    );
-                }
+            if let Some(config) = &config {
+                config.check_compatibility(&rs.meta)?;
             } else {
-                // Keep final bootstrap following superblock flags of source bootstraps.
-                current_flags.set_to_ctx(ctx);
-                flags = Some(current_flags);
+                config = Some(rs.meta.get_config());
+                fs_version = Some(rs.meta.version);
+                ctx.compressor = rs.meta.get_compressor();
+                ctx.digester = rs.meta.get_digester();
+                ctx.explicit_uidgid = rs.meta.explicit_uidgid();
             }
 
             let blob_hash = Self::get_blob_hash(bootstrap_path)?;
