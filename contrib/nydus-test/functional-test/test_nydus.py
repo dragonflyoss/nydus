@@ -209,6 +209,7 @@ def test_prefetch_with_cache(
     assert NydusAnchor.check_nydusd_health()
 
     workload_gen.finish_torture_read()
+
     assert not workload_gen.io_error
 
     # In this way, we can check if nydusd is crashed.

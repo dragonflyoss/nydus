@@ -635,6 +635,7 @@ impl RafsSuper {
     ///
     /// Each inode passed into should correspond to directory. And it already does the file type
     /// check inside.
+    /// Return Ok(true) means root inode is found during performing prefetching and all files should be prefetched.
     pub fn prefetch_files(
         &self,
         r: &mut RafsIoReader,

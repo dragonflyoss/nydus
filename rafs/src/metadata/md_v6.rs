@@ -68,6 +68,53 @@ impl RafsSuper {
         }
     }
 
+    pub(crate) fn is_inlay_prefetch_all(&self, r: &mut RafsIoReader) -> RafsResult<bool> {
+        if self.meta.is_v6() {
+            let hint_entries = self.meta.prefetch_table_entries as usize;
+            if hint_entries != 1 {
+                return Ok(false);
+            }
+
+            let mut prefetch_table = RafsV6PrefetchTable::new();
+            prefetch_table
+                .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .map_err(|e| {
+                    RafsError::Prefetch(format!(
+                        "Failed in loading hint prefetch table at offset {}. {:?}",
+                        self.meta.prefetch_table_offset, e
+                    ))
+                })?;
+
+            if prefetch_table.inodes[0] as u64 == self.superblock.root_ino() {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            let hint_entries = self.meta.prefetch_table_entries as usize;
+            if hint_entries != 1 {
+                return Ok(false);
+            }
+
+            let mut prefetch_table = RafsV5PrefetchTable::new();
+            prefetch_table
+                .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .map_err(|e| {
+                    RafsError::Prefetch(format!(
+                        "Failed in loading hint prefetch table at offset {}. {:?}",
+                        self.meta.prefetch_table_offset, e
+                    ))
+                })?;
+
+            // TODO: Is u64 large enough for rafs v6?
+            if prefetch_table.inodes[0] as u64 == self.superblock.root_ino() {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
     pub(crate) fn prefetch_data_v6<F>(
         &self,
         r: &mut RafsIoReader,

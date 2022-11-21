@@ -530,7 +530,10 @@ impl Rafs {
             }
         }
 
-        let mut ignore_prefetch_all = prefetch_files
+        let inlay_prefetch_all = sb.is_inlay_prefetch_all(&mut reader).unwrap();
+        let mut ignore_prefetch_all = false;
+
+        let startup_prefetch_all = prefetch_files
             .as_ref()
             .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
             .unwrap_or(false);
@@ -538,37 +541,71 @@ impl Rafs {
         // Then do file based prefetch based on:
         // - prefetch listed passed in by user
         // - or file prefetch list in metadata
-        let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-        let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
-            if desc.bi_size > 0 {
-                device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
-                    warn!("Prefetch error, {:?}", e);
-                });
-            }
-        });
-        match res {
-            Ok(true) => ignore_prefetch_all = true,
-            Ok(false) => {}
-            Err(e) => info!("No file to be prefetched {:?}", e),
-        }
-
-        // Last optionally prefetch all data
-        if prefetch_all && !ignore_prefetch_all {
-            let root = vec![root_ino];
-            let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
+        if !inlay_prefetch_all {
+            let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
+            let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
                 if desc.bi_size > 0 {
                     device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                         warn!("Prefetch error, {:?}", e);
                     });
                 }
             });
-            if let Err(e) = res {
-                info!("No file to be prefetched {:?}", e);
+            match res {
+                Ok(true) => {
+                    ignore_prefetch_all = true;
+                    warn!("Root inode is found, but it should not prefetch all files!")
+                }
+                Ok(false) => {}
+                Err(e) => info!("No file to be prefetched {:?}", e),
+            }
+        }
+
+        // Perform different policy for v5 format and v6 format
+        if !ignore_prefetch_all && (inlay_prefetch_all || prefetch_all || startup_prefetch_all) {
+            if sb.meta.is_v6() {
+                let batch_size = 1024 * 1024 * 2;
+
+                for blob in sb.superblock.get_blob_infos() {
+                    let blob_size = blob.compressed_size();
+                    let count = (blob_size + batch_size - 1) / (batch_size);
+
+                    let mut blob_req = Vec::with_capacity(count as usize);
+                    let mut pre_offset = 0u64;
+
+                    for _i in 0..count {
+                        blob_req.push(BlobPrefetchRequest {
+                            blob_id: blob.blob_id().to_owned(),
+                            offset: pre_offset,
+                            len: cmp::min(batch_size, blob_size - pre_offset),
+                        });
+                        pre_offset += batch_size;
+                        if pre_offset > blob_size {
+                            break;
+                        }
+                    }
+
+                    info!("prefetch all data for rafs v6");
+                    if let Err(e) = device.prefetch(&[], &blob_req) {
+                        warn!("failed to prefetch blob data, {}", e);
+                    }
+                }
+            } else {
+                let root = vec![root_ino];
+                let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
+                    if desc.bi_size > 0 {
+                        device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
+                            warn!("Prefetch error, {:?}", e);
+                        });
+                    }
+                });
+                if let Err(e) = res {
+                    info!("No file to be prefetched {:?}", e);
+                }
             }
         }
     }
 
-    fn convert_file_list(files: &[PathBuf], sb: &Arc<RafsSuper>) -> Vec<Inode> {
+    pub fn convert_file_list(files: &[PathBuf], sb: &Arc<RafsSuper>) -> Vec<Inode> {
         let mut inodes = Vec::<Inode>::with_capacity(files.len());
 
         for f in files {

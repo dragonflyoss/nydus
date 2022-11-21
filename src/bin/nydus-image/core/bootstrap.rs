@@ -144,7 +144,7 @@ impl Bootstrap {
         // Sort children list by name, so that we can improve performance in fs read_dir using
         // binary search.
         tree.children
-            .sort_by_key(|child| child.node.name().to_os_string());
+            .sort_unstable_by_key(|child| child.node.name().to_os_string());
 
         // Maybe the parent is not a directory in multi-layers build scenario, so we check here.
         if parent.is_dir() {

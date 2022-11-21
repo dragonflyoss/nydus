@@ -196,7 +196,7 @@ class RafsConf:
         threads_count=8,
         merging_size=128 * 1024,
         bandwidth_rate=0,
-        prefetch_all=False,
+        prefetch_all=True,
     ):
         self._configure_rafs("fs_prefetch.enable", True)
         self._configure_rafs("fs_prefetch.threads_count", threads_count)

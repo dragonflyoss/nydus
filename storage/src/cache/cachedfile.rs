@@ -214,7 +214,7 @@ impl BlobCache for FileCacheEntry {
         if fail {
             bios = vec![];
         } else {
-            bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
+            bios.sort_unstable_by_key(|entry| entry.chunkinfo.compressed_offset());
             self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         }
 
