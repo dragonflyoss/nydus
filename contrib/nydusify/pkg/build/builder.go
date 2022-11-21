@@ -26,6 +26,7 @@ type BuilderOption struct {
 	// A regular file or fifo into which commands nydus-image to dump contents.
 	BlobPath     string
 	AlignedChunk bool
+	Compressor   string
 	FsVersion    string
 }
 
@@ -124,6 +125,10 @@ func (builder *Builder) Run(option BuilderOption) error {
 		"--fs-version",
 		option.FsVersion,
 	)
+
+	if option.Compressor != "" {
+		args = append(args, "--compressor", option.Compressor)
+	}
 
 	if len(option.PrefetchPatterns) > 0 {
 		args = append(args, "--prefetch-policy", "fs")
