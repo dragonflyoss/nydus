@@ -32,8 +32,12 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/viewer"
 )
 
-var versionGitCommit string
-var versionBuildTime string
+var (
+	revision   string
+	buildTime  string
+	gitVersion string
+)
+
 var maxCacheMaxRecords uint = 50
 
 const defaultLogLevel = logrus.InfoLevel
@@ -175,7 +179,7 @@ func main() {
 		FullTimestamp: true,
 	})
 
-	version := fmt.Sprintf("%s.%s", versionGitCommit, versionBuildTime)
+	version := fmt.Sprintf("\nVersion		: %s\nRevision	: %s\nGo version	: %s\nBuild time	: %s", gitVersion, revision, runtime.Version(), buildTime)
 
 	app := &cli.App{
 		Name:    "Nydusify",
