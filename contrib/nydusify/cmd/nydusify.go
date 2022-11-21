@@ -33,7 +33,7 @@ import (
 )
 
 var (
-	reversion  string
+	revision   string
 	buildTime  string
 	gitVersion string
 )
@@ -179,7 +179,7 @@ func main() {
 		FullTimestamp: true,
 	})
 
-	version := fmt.Sprintf("\nVersion		: %s\nReversion	: %s\nGo version	: %s\nBuild time	: %s", gitVersion, reversion, runtime.Version(), buildTime)
+	version := fmt.Sprintf("\nVersion		: %s\nRevision	: %s\nGo version	: %s\nBuild time	: %s", gitVersion, revision, runtime.Version(), buildTime)
 
 	app := &cli.App{
 		Name:    "Nydusify",
