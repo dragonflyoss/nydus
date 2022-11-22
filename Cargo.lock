@@ -382,23 +382,19 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.9.6"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "994a3bfb694ee52bf8f3bca80d784b723f150810998219337e429cc5dbe92717"
+checksum = "5c08ddbac4da11f5de5bd1e7d66f360312dcc9dd8834d47fedabc6a9d4057b5c"
 dependencies = [
  "arc-swap",
  "bitflags",
  "caps",
  "core-foundation-sys",
- "io-uring",
  "lazy_static",
  "libc",
  "log",
  "mio",
  "nix",
- "scoped-tls",
- "slab",
- "socket2",
  "tokio-uring",
  "vhost",
  "virtio-queue",
@@ -702,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "io-uring"
-version = "0.5.3"
+version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "427496d698429d86ff947537dff68facb83fe753b7abea4fab4ac1c4b7a4b94b"
+checksum = "7ba34abb5175052fc1a2227a10d2275b7386c9990167de9786c0b88d8b062330"
 dependencies = [
  "bitflags",
  "libc",
@@ -1737,9 +1733,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-uring"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3ad494f39874984d990ade7f6319dafbcd3301ff0b1841f8a55a1ebb3e742c8"
+checksum = "0d5e02bb137e030b3a547c65a3bd2f1836d66a97369fdcc69034002b10e155ef"
 dependencies = [
  "io-uring",
  "libc",
@@ -1860,9 +1856,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "vhost"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53567fd9ab820e4f3cc156f24146882fee3c365194c3e1dea74723265f27fc88"
+checksum = "79243657c76e5c90dcbf60187c842614f6dfc7123972c55bb3bcc446792aca93"
 dependencies = [
  "bitflags",
  "libc",
@@ -1872,9 +1868,9 @@ dependencies = [
 
 [[package]]
 name = "vhost-user-backend"
-version = "0.5.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ded8a9f15b09e61bb8a501d0a7a38056f4c1bd7f51cedcd41081c0e4233d5aa6"
+checksum = "6a0fc7d5f8e2943cd9f2ecd58be3f2078add863a49573d14dd9d64e1ab26544c"
 dependencies = [
  "libc",
  "log",
@@ -1893,11 +1889,12 @@ checksum = "3ff512178285488516ed85f15b5d0113a7cdb89e9e8a760b269ae4f02b84bd6b"
 
 [[package]]
 name = "virtio-queue"
-version = "0.4.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "519c0a333c871650269cba303bc108075d52a0c0d64f9b91fae61829b53725af"
+checksum = "435dd49c7b38419729afd43675850c7b5dc4728f2fabd70c7a9079a331e4f8c6"
 dependencies = [
  "log",
+ "virtio-bindings",
  "vm-memory",
  "vmm-sys-util",
 ]
