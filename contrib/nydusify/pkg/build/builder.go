@@ -27,6 +27,7 @@ type BuilderOption struct {
 	BlobPath     string
 	AlignedChunk bool
 	Compressor   string
+	ChunkSize    string
 	FsVersion    string
 }
 
@@ -132,6 +133,10 @@ func (builder *Builder) Run(option BuilderOption) error {
 
 	if len(option.PrefetchPatterns) > 0 {
 		args = append(args, "--prefetch-policy", "fs")
+	}
+
+	if option.ChunkSize != "" {
+		args = append(args, "--chunk-size", option.ChunkSize)
 	}
 
 	args = append(args, option.RootfsPath)

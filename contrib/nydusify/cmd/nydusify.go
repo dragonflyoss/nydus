@@ -371,6 +371,12 @@ func main() {
 					EnvVars: []string{"COMPRESSOR"},
 				},
 				&cli.StringFlag{
+					Name:    "chunk-size",
+					Value:   "0x100000",
+					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x100000, [default: 0x100000]",
+					EnvVars: []string{"CHUNK_SIZE"},
+				},
+				&cli.StringFlag{
 					Name:    "work-dir",
 					Value:   "./tmp",
 					Usage:   "Working directory for image conversion",
@@ -472,6 +478,7 @@ func main() {
 					FsVersion:       fsVersion,
 					FsAlignChunk:    c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 					Compressor:      c.String("compressor"),
+					ChunkSize:       c.String("chunk-size"),
 
 					ChunkDict: converter.ChunkDictOpt{
 						Args:     c.String("chunk-dict"),
@@ -788,6 +795,12 @@ func main() {
 					Value:   "zstd",
 					Usage:   "Algorithm to compress image data blob, possible values: none, lz4_block, zstd",
 					EnvVars: []string{"COMPRESSOR"},
+				},
+				&cli.StringFlag{
+					Name:    "chunk-size",
+					Value:   "0x100000",
+					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x100000, [default: 0x100000]",
+					EnvVars: []string{"CHUNK_SIZE"},
 				},
 
 				&cli.StringFlag{
