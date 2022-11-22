@@ -335,8 +335,8 @@ func main() {
 				&cli.StringFlag{
 					Name:        "fs-version",
 					Required:    false,
-					Value:       "5",
-					DefaultText: "V5 format",
+					Value:       "6",
+					DefaultText: "V6 nydus image format",
 					Usage:       "Nydus image format version number, possible values: 5, 6",
 					EnvVars:     []string{"FS_VERSION"},
 				},
@@ -355,7 +355,7 @@ func main() {
 				&cli.StringFlag{
 					Name:    "prefetch-dir",
 					Value:   "",
-					Usage:   "Specify an ansolute path within the image for prefetch",
+					Usage:   "Specify an absolute path within the image for prefetch",
 					EnvVars: []string{"PREFETCH_DIR"},
 				},
 				&cli.BoolFlag{
@@ -774,8 +774,8 @@ func main() {
 					Required:    false,
 					Usage:       "Nydus image format version number, possible values: 5, 6",
 					EnvVars:     []string{"FS_VERSION"},
-					Value:       "5",
-					DefaultText: "V5 format",
+					Value:       "6",
+					DefaultText: "V6 nydus image format",
 				},
 
 				&cli.StringFlag{
