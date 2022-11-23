@@ -210,7 +210,6 @@ struct FsCacheBlobCache {
     cache: Option<Arc<dyn BlobCache>>,
     config: Arc<BlobCacheConfigDataBlob>,
     file: Arc<File>,
-    blobs_need: usize,
 }
 
 impl FsCacheBlobCache {
@@ -433,7 +432,7 @@ impl FsCacheHandler {
             }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
-                    self.handle_open_data_blob(hdr, msg, config, domain_id)
+                    self.handle_open_data_blob(hdr, msg, config)
                 }
                 BlobCacheObjectConfig::Bootstrap(config) => {
                     self.handle_open_bootstrap(hdr, msg, config)
@@ -448,16 +447,13 @@ impl FsCacheHandler {
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
         config: Arc<BlobCacheConfigDataBlob>,
-        domain_id: &str,
     ) -> String {
         let mut state = self.state.lock().unwrap();
-        let blobs_need = state.blob_cache_mgr.get_blobs_num(domain_id);
         if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
             let fsblob = Arc::new(RwLock::new(FsCacheBlobCache {
                 cache: None,
                 config: config.clone(),
                 file: Arc::new(unsafe { File::from_raw_fd(msg.fd as RawFd) }),
-                blobs_need,
             }));
             e.insert((FsCacheObject::DataBlob(fsblob.clone()), msg.fd));
             state.id_to_config_map.insert(hdr.object_id, config.clone());
@@ -480,11 +476,7 @@ impl FsCacheHandler {
             //for now FsCacheBlobCache only init once, should not have blobcache associated with it
             assert!(guard.get_blobcache().is_none());
             for _ in 0..BLOBCACHE_INIT_RETRY {
-                match Self::create_data_blob_object(
-                    &guard.config,
-                    guard.file.clone(),
-                    guard.blobs_need,
-                ) {
+                match Self::create_data_blob_object(&guard.config, guard.file.clone()) {
                     Err(e) => {
                         warn!("fscache: create_data_blob_object failed {}", e);
                         thread::sleep(time::Duration::from_millis(BLOBCACHE_INIT_INTERVAL_MS));
@@ -549,12 +541,11 @@ impl FsCacheHandler {
     fn create_data_blob_object(
         config: &BlobCacheConfigDataBlob,
         file: Arc<File>,
-        blobs_need: usize,
     ) -> Result<Arc<dyn BlobCache>> {
         let mut blob_info = config.blob_info().deref().clone();
         blob_info.set_fscache_file(Some(file));
         let blob_ref = Arc::new(blob_info);
-        BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref, blobs_need)
+        BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref)
     }
 
     fn fill_bootstrap_cache(bootstrap_fd: RawFd, cachefile_fd: RawFd, size: usize) -> Result<()> {

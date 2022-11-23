@@ -105,7 +105,6 @@ impl BlobFactory {
         &self,
         config: &Arc<FactoryConfig>,
         blob_info: &Arc<BlobInfo>,
-        blobs_need: usize,
     ) -> IOResult<Arc<dyn BlobCache>> {
         let key = BlobCacheMgrKey {
             config: config.clone(),
@@ -133,7 +132,6 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
-                    blobs_need,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>

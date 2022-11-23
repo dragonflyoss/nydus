@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::Result;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
@@ -22,12 +22,13 @@ use crate::factory::BLOB_FACTORY;
 use crate::meta::BLOB_META_FEATURE_ZRAN;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
+pub const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
+
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with Linux fscache subsystem.
 #[derive(Clone)]
 pub struct FsCacheMgr {
     blobs: Arc<RwLock<HashMap<String, Arc<FileCacheEntry>>>>,
-    blobs_need: usize,
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -35,6 +36,7 @@ pub struct FsCacheMgr {
     worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
     need_validation: bool,
+    blobs_check_count: Arc<AtomicU8>,
     closed: Arc<AtomicBool>,
 }
 
@@ -45,7 +47,6 @@ impl FsCacheMgr {
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
-        blobs_need: usize,
     ) -> Result<FsCacheMgr> {
         if config.cache_compressed {
             return Err(enosys!("fscache doesn't support compressed cache mode"));
@@ -62,7 +63,6 @@ impl FsCacheMgr {
 
         Ok(FsCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
-            blobs_need,
             backend,
             metrics,
             prefetch_config,
@@ -70,6 +70,7 @@ impl FsCacheMgr {
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             need_validation: config.cache_validate,
+            blobs_check_count: Arc::new(AtomicU8::new(0)),
             closed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -160,14 +161,6 @@ impl BlobCacheMgr for FsCacheMgr {
 
     fn check_stat(&self) {
         let guard = self.blobs.read().unwrap();
-        if guard.len() != self.blobs_need {
-            info!(
-                "blob mgr not ready to check stat, need blobs {} have {} entries",
-                self.blobs_need,
-                guard.len()
-            );
-            return;
-        }
 
         let mut all_ready = true;
         for (_id, entry) in guard.iter() {
@@ -177,9 +170,16 @@ impl BlobCacheMgr for FsCacheMgr {
             }
         }
 
+        // we should double check blobs stat, in case some blobs hadn't been created when we checked.
         if all_ready {
-            self.worker_mgr.stop();
-            self.metrics.data_all_ready.store(true, Ordering::Release);
+            if self.blobs_check_count.load(Ordering::Acquire) == FSCACHE_BLOBS_CHECK_NUM {
+                self.worker_mgr.stop();
+                self.metrics.data_all_ready.store(true, Ordering::Release);
+            } else {
+                self.blobs_check_count.fetch_add(1, Ordering::Acquire);
+            }
+        } else {
+            self.blobs_check_count.store(0, Ordering::Release);
         }
     }
 }
