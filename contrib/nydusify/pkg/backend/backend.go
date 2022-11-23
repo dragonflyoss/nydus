@@ -34,6 +34,7 @@ type Type = int
 const (
 	OssBackend Type = iota
 	RegistryBackend
+	S3backend
 )
 
 func blobDesc(size int64, blobID string) ocispec.Descriptor {
@@ -66,6 +67,8 @@ func NewBackend(bt string, config []byte, remote *remote.Remote) (Backend, error
 		return newOSSBackend(config)
 	case "registry":
 		return newRegistryBackend(config, remote)
+	case "s3":
+		return newS3Backend(config)
 	default:
 		return nil, fmt.Errorf("unsupported backend type %s", bt)
 	}

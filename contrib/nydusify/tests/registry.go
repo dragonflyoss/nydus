@@ -77,7 +77,7 @@ func NewAuthRegistry(t *testing.T) *Registry {
 }
 
 func NewRegistry(t *testing.T) *Registry {
-	containerID := runWithOutput(t, fmt.Sprintf("docker run -p %d:5000 --rm -d registry:2", registryPort))
+	containerID := runWithOutput(t, fmt.Sprintf("docker run -p %d:5000 -d registry:2", registryPort))
 	time.Sleep(time.Second * 2)
 	return &Registry{
 		id:   containerID,

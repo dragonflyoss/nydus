@@ -44,7 +44,7 @@ func Test_parseBackendConfig(t *testing.T) {
 		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
 		BucketName:      "testbucket",
-		MetaPrefix:      "test",
+		MetaPrefix:      "test/",
 		BlobPrefix:      "",
 	}, cfg)
 }
@@ -64,7 +64,7 @@ func Test_parseBackendConfigString(t *testing.T) {
 		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
 		BucketName:      "testbucket",
-		MetaPrefix:      "test",
+		MetaPrefix:      "test/",
 		BlobPrefix:      "",
 	}, cfg)
 }

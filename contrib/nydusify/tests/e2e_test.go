@@ -5,11 +5,19 @@
 package tests
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -110,6 +118,87 @@ func testConvertWithChunkDict(t *testing.T, fsVersion string) {
 	nydusify5.Check(t)
 }
 
+func testConvertWithS3Backend(t *testing.T, fsVersion string) {
+	registry := NewRegistry(t)
+	defer registry.Destroy(t)
+	registry.Build(t, "image-basic")
+
+	// set up a minio server to mock s3 service
+	accessKey := "minio"
+	accessSecret := "minio123"
+	region := "us-east-1"
+	bucketName := "nydus"
+	minioPort := 9000
+	minioContainerName := "minio"
+	minioDataDir := "/tmp/minio-data"
+	endpoint := fmt.Sprintf("http://localhost:%d", minioPort)
+	createMinioContainerCmd := fmt.Sprintf(`
+		docker run -p %d:9000 -d -v %s:/data \
+	    	-e "MINIO_ACCESS_KEY=%s" \
+	    	-e "MINIO_SECRET_KEY=%s" \
+	  		-e "MINIO_REGION=%s" \
+			--name %s minio/minio server /data`,
+		minioPort, minioDataDir, accessKey, accessSecret, region, minioContainerName)
+	if err := os.MkdirAll(minioDataDir, 0755); err != nil {
+		t.Fatalf("failed to create minio data dir: %s", err)
+	}
+	defer os.RemoveAll(minioDataDir)
+	run(t, createMinioContainerCmd, false)
+	defer run(t, fmt.Sprintf("docker rm -f %s", minioContainerName), false)
+
+	// wait for the minio container to be up
+	time.Sleep(5 * time.Second)
+
+	// create bucket
+	s3Client := s3.NewFromConfig(aws.Config{}, func(o *s3.Options) {
+		o.EndpointResolver = s3.EndpointResolverFromURL(endpoint)
+		o.Region = region
+		o.UsePathStyle = true
+		o.Credentials = credentials.NewStaticCredentialsProvider(accessKey, accessSecret, "")
+		o.UsePathStyle = true
+	})
+	createBucketInput := s3.CreateBucketInput{Bucket: &bucketName}
+	_, err := s3Client.CreateBucket(context.TODO(), &createBucketInput)
+	if err != nil {
+		t.Fatalf(err.Error())
+
+	}
+	logrus.Infof("create s3 backend bucket %s", bucketName)
+
+	s3Config := &backend.S3Config{
+		AccessKeyID:     accessKey,
+		AccessKeySecret: accessSecret,
+		Endpoint:        endpoint,
+		BucketName:      bucketName,
+		Region:          region,
+		ObjectPrefix:    "path/to/registry",
+	}
+	s3ConfigBytes, err := json.Marshal(s3Config)
+	if err != nil {
+		t.Fatalf("marshal s3 config failed: %v", err)
+	}
+
+	originalBackendConfig := os.Getenv("BACKEND_CONFIG")
+	backendConfig := string(s3ConfigBytes)
+	if err := os.Setenv("BACKEND_CONFIG", backendConfig); err != nil {
+		t.Fatalf("set env BACKEND_CONFIG failed: %v", err)
+	}
+	defer os.Setenv("BACKEND_CONFIG", originalBackendConfig)
+
+	originalBackendType := os.Getenv("BACKEND_TYPE")
+	if err := os.Setenv("BACKEND_TYPE", "s3"); err != nil {
+		t.Fatalf("set env BACKEND_TYPE failed: %v", err)
+	}
+	defer os.Setenv("BACKEND_TYPE", originalBackendType)
+
+	logrus.Infof("use s3 backend config: %s", backendConfig)
+
+	nydusify := NewNydusify(registry, "image-basic", "image-basic-nydus", "", "", fsVersion)
+	nydusify.Convert(t)
+	// TODO nydusd doesn't support s3 backend for now, skip the checker
+	// nydusify.Check(t)
+}
+
 func TestSmoke(t *testing.T) {
 	fsVersions := [2]string{"5", "6"}
 	for _, v := range fsVersions {
@@ -118,5 +207,6 @@ func TestSmoke(t *testing.T) {
 		testReproducableBuild(t, v)
 		testConvertWithCache(t, v)
 		testConvertWithChunkDict(t, v)
+		testConvertWithS3Backend(t, v)
 	}
 }

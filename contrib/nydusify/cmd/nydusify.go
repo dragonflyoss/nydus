@@ -76,7 +76,7 @@ func getBackendConfig(c *cli.Context, required bool) (string, string, error) {
 		}
 		return "", "", nil
 	}
-	possibleBackendTypes := []string{"registry", "oss"}
+	possibleBackendTypes := []string{"registry", "oss", "s3"}
 	if !isPossibleValue(possibleBackendTypes, backendType) {
 		return "", "", fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
 	}
@@ -244,7 +244,7 @@ func main() {
 				&cli.StringFlag{
 					Name:    "backend-type",
 					Value:   "registry",
-					Usage:   "Type of storage backend, possible values: 'registry', 'oss'",
+					Usage:   "Type of storage backend, possible values: 'registry', 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
