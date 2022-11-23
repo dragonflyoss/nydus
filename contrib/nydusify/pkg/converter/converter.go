@@ -84,6 +84,8 @@ type Opt struct {
 	DockerV2Format   bool
 	FsVersion        string
 	FsAlignChunk     bool
+	Compressor       string
+	ChunkSize        string
 	PrefetchPatterns string
 }
 
@@ -110,6 +112,8 @@ type Converter struct {
 	DockerV2Format   bool
 	FsVersion        string
 	FsAlignChunk     bool
+	Compressor       string
+	ChunkSize        string
 	PrefetchPatterns string
 }
 
@@ -154,6 +158,8 @@ func New(opt Opt) (*Converter, error) {
 		DockerV2Format:   opt.DockerV2Format,
 		BackendForcePush: opt.BackendForcePush,
 		FsAlignChunk:     opt.FsAlignChunk,
+		Compressor:       opt.Compressor,
+		ChunkSize:        opt.ChunkSize,
 		NydusifyVersion:  opt.NydusifyVersion,
 
 		storageBackend: backend,
@@ -218,6 +224,8 @@ func (cvt *Converter) convert(ctx context.Context) (retErr error) {
 		PrefetchPatterns: cvt.PrefetchPatterns,
 		TargetDir:        cvt.WorkDir,
 		FsVersion:        cvt.FsVersion,
+		Compressor:       cvt.Compressor,
+		ChunkSize:        cvt.ChunkSize,
 	})
 	if err != nil {
 		return errors.Wrap(err, "Create build flow")
