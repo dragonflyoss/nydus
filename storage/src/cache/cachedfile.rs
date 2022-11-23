@@ -603,7 +603,7 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<()> {
-        let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
+        let meta = self.meta.as_ref().ok_or_else(|| enoent!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let mut chunks = meta.get_chunks_compressed(offset, size, self.prefetch_batch_size())?;
         if let Some(meta) = self.get_blob_meta_info()? {

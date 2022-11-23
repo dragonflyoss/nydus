@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Result;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -16,7 +16,6 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::mpmc::Channel;
 use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
-use tokio::time::interval;
 
 use crate::cache::{BlobCache, BlobIoRange};
 use crate::factory::ASYNC_RUNTIME;
@@ -77,6 +76,9 @@ pub(crate) struct AsyncWorkerMgr {
     workers: AtomicU32,
     active: AtomicBool,
 
+    // Limit the total retry times to avoid unnecessary resource consumption.
+    retry_times: AtomicI32,
+
     prefetch_sema: Arc<Semaphore>,
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
@@ -113,6 +115,8 @@ impl AsyncWorkerMgr {
             ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
             active: AtomicBool::new(false),
+
+            retry_times: AtomicI32::new(32),
 
             prefetch_sema: Arc::new(Semaphore::new(0)),
             prefetch_channel: Arc::new(Channel::new()),
@@ -330,12 +334,15 @@ impl AsyncWorkerMgr {
                     e
                 );
 
-                ASYNC_RUNTIME.spawn(async move {
-                    let mut interval = interval(Duration::from_secs(1));
-                    interval.tick().await;
-                    let msg = AsyncPrefetchMessage::new_blob_prefetch(cache.clone(), offset, size);
-                    let _ = mgr.send_prefetch_message(msg);
-                });
+                if mgr.retry_times.load(Ordering::Relaxed) > 0 {
+                    mgr.retry_times.fetch_sub(1, Ordering::Relaxed);
+                    ASYNC_RUNTIME.spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let msg =
+                            AsyncPrefetchMessage::new_blob_prefetch(cache.clone(), offset, size);
+                        let _ = mgr.send_prefetch_message(msg);
+                    });
+                }
             }
         } else {
             warn!("prefetch blob range is not supported");
