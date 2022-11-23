@@ -205,26 +205,11 @@ impl BlobCacheState {
     fn get(&self, key: &str) -> Option<BlobCacheObjectConfig> {
         self.id_to_config_map.get(key).cloned()
     }
-
-    /// get DataBlob number for a domain_id
-    fn get_blobs_num(&self, domain_id: &str) -> usize {
-        let scoped_blob_prefix = format!("{}{}", domain_id, ID_SPLITTER);
-        return self
-            .id_to_config_map
-            .values()
-            .filter(|v| {
-                if let BlobCacheObjectConfig::DataBlob(o) = v {
-                    o.scoped_blob_id.starts_with(&scoped_blob_prefix)
-                } else {
-                    false
-                }
-            })
-            .count();
-    }
 }
 
 /// Manager for cached file objects.
 #[derive(Default)]
+
 pub struct BlobCacheMgr {
     state: Mutex<BlobCacheState>,
 }
@@ -280,10 +265,6 @@ impl BlobCacheMgr {
     /// Get configuration information for the blob with `key`.
     pub fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
         self.get_state().get(key)
-    }
-
-    pub fn get_blobs_num(&self, domain_id: &str) -> usize {
-        self.get_state().get_blobs_num(domain_id)
     }
 
     #[inline]
