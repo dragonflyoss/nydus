@@ -117,6 +117,8 @@ pub enum DaemonError {
     Epoll(io::Error),
     /// Daemon related error
     DaemonFailure(String),
+    /// Missing virtqueue memory
+    QueueMemoryUnset,
 
     // Fuse session has been shutdown.
     SessionShutdown(FuseTransportError),

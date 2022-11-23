@@ -21,7 +21,8 @@ use virtio_bindings::bindings::virtio_ring::{
     VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
 };
 use virtio_queue::DescriptorChain;
-use vm_memory::{GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
+use virtio_queue::QueueOwnedT;
+use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -62,10 +63,14 @@ impl VhostUserFsBackend {
     // to handle it.
     fn process_queue(&mut self, vring_state: &mut MutexGuard<VringState>) -> Result<bool> {
         let mut used_any = false;
+        let guest_mem = match &self.mem {
+            Some(m) => m,
+            None => return Err(DaemonError::QueueMemoryUnset.into()),
+        };
 
         let avail_chains: Vec<DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>> = vring_state
             .get_queue_mut()
-            .iter()
+            .iter(guest_mem.memory())
             .map_err(|_| DaemonError::IterateQueue)?
             .collect();
 
