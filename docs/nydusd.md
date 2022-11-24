@@ -181,8 +181,8 @@ We are working on enabling cloud-hypervisor support for nydus.
       "type": "registry",
       "config": {
         ...
-        // Registry url scheme, https or http
-        "scheme": "http",
+        // Registry url scheme, leave empty to automatically detect, otherwise specify to https or http.
+        "scheme": "",
         // Registry hostname with format `$host:$port`
         "host": "my-registry:5000",
         // Skip SSL certificate validation for HTTPS scheme
