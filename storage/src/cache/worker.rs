@@ -6,9 +6,9 @@
 use std::io::Result;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
@@ -51,9 +51,9 @@ impl From<BlobPrefetchConfig> for AsyncPrefetchConfig {
 /// Asynchronous service request message.
 pub(crate) enum AsyncPrefetchMessage {
     /// Asynchronous blob layer prefetch request with (offset, size) of blob on storage backend.
-    BlobPrefetch(Arc<dyn BlobCache>, u64, u64),
+    BlobPrefetch(Arc<dyn BlobCache>, u64, u64, SystemTime),
     /// Asynchronous file-system layer prefetch request.
-    FsPrefetch(Arc<dyn BlobCache>, BlobIoRange),
+    FsPrefetch(Arc<dyn BlobCache>, BlobIoRange, SystemTime),
     #[cfg_attr(not(test), allow(unused))]
     /// Ping for test.
     Ping,
@@ -64,12 +64,12 @@ pub(crate) enum AsyncPrefetchMessage {
 impl AsyncPrefetchMessage {
     /// Create a new asynchronous filesystem prefetch request message.
     pub fn new_fs_prefetch(blob_cache: Arc<dyn BlobCache>, req: BlobIoRange) -> Self {
-        AsyncPrefetchMessage::FsPrefetch(blob_cache, req)
+        AsyncPrefetchMessage::FsPrefetch(blob_cache, req, SystemTime::now())
     }
 
     /// Create a new asynchronous blob prefetch request message.
     pub fn new_blob_prefetch(blob_cache: Arc<dyn BlobCache>, offset: u64, size: u64) -> Self {
-        AsyncPrefetchMessage::BlobPrefetch(blob_cache, offset, size)
+        AsyncPrefetchMessage::BlobPrefetch(blob_cache, offset, size, SystemTime::now())
     }
 }
 
@@ -79,6 +79,7 @@ pub(crate) struct AsyncWorkerMgr {
     ping_requests: AtomicU32,
     workers: AtomicU32,
     active: AtomicBool,
+    begin_timing_once: Once,
 
     // Limit the total retry times to avoid unnecessary resource consumption.
     retry_times: AtomicI32,
@@ -118,6 +119,7 @@ impl AsyncWorkerMgr {
             ping_requests: AtomicU32::new(0),
             workers: AtomicU32::new(0),
             active: AtomicBool::new(false),
+            begin_timing_once: Once::new(),
 
             retry_times: AtomicI32::new(32),
 
@@ -173,10 +175,10 @@ impl AsyncWorkerMgr {
     pub fn flush_pending_prefetch_requests(&self, blob_id: &str) {
         self.prefetch_channel
             .flush_pending_prefetch_requests(|t| match t {
-                AsyncPrefetchMessage::BlobPrefetch(blob, _, _) => {
+                AsyncPrefetchMessage::BlobPrefetch(blob, _, _, _) => {
                     blob_id == blob.blob_id() && !blob.is_prefetch_active()
                 }
-                AsyncPrefetchMessage::FsPrefetch(blob, _) => {
+                AsyncPrefetchMessage::FsPrefetch(blob, _, _) => {
                     blob_id == blob.blob_id() && !blob.is_prefetch_active()
                 }
                 _ => false,
@@ -232,6 +234,17 @@ impl AsyncWorkerMgr {
     }
 
     async fn handle_prefetch_requests(mgr: Arc<AsyncWorkerMgr>, rt: &Runtime) {
+        mgr.begin_timing_once.call_once(|| {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap();
+
+            mgr.metrics.prefetch_begin_time_secs.set(now.as_secs());
+            mgr.metrics
+                .prefetch_begin_time_millis
+                .set(now.subsec_millis() as u64);
+        });
+
         // Max 1 active requests per thread.
         mgr.prefetch_sema.add_permits(1);
 
@@ -240,7 +253,7 @@ impl AsyncWorkerMgr {
             let mgr2 = mgr.clone();
 
             match msg {
-                AsyncPrefetchMessage::BlobPrefetch(blob_cache, offset, size) => {
+                AsyncPrefetchMessage::BlobPrefetch(blob_cache, offset, size, begin_time) => {
                     let token = Semaphore::acquire_owned(mgr2.prefetch_sema.clone())
                         .await
                         .unwrap();
@@ -251,19 +264,25 @@ impl AsyncWorkerMgr {
                                 blob_cache,
                                 offset,
                                 size,
+                                begin_time,
                             );
                             drop(token);
                         });
                     }
                 }
-                AsyncPrefetchMessage::FsPrefetch(blob_cache, req) => {
+                AsyncPrefetchMessage::FsPrefetch(blob_cache, req, begin_time) => {
                     let token = Semaphore::acquire_owned(mgr2.prefetch_sema.clone())
                         .await
                         .unwrap();
 
                     if blob_cache.is_prefetch_active() {
                         rt.spawn_blocking(move || {
-                            let _ = Self::handle_fs_prefetch_request(mgr2.clone(), blob_cache, req);
+                            let _ = Self::handle_fs_prefetch_request(
+                                mgr2.clone(),
+                                blob_cache,
+                                req,
+                                begin_time,
+                            );
                             drop(token)
                         });
                     }
@@ -282,14 +301,14 @@ impl AsyncWorkerMgr {
         // Allocate network bandwidth budget
         if let Some(limiter) = &self.prefetch_limiter {
             let size = match msg {
-                AsyncPrefetchMessage::BlobPrefetch(blob_cache, _offset, size) => {
+                AsyncPrefetchMessage::BlobPrefetch(blob_cache, _offset, size, _) => {
                     if blob_cache.is_prefetch_active() {
                         *size
                     } else {
                         0
                     }
                 }
-                AsyncPrefetchMessage::FsPrefetch(blob_cache, req) => {
+                AsyncPrefetchMessage::FsPrefetch(blob_cache, req, _) => {
                     if blob_cache.is_prefetch_active() {
                         req.blob_size
                     } else {
@@ -321,6 +340,7 @@ impl AsyncWorkerMgr {
         cache: Arc<dyn BlobCache>,
         offset: u64,
         size: u64,
+        begin_time: SystemTime,
     ) -> Result<()> {
         trace!(
             "storage: prefetch blob {} offset {} size {}",
@@ -331,6 +351,13 @@ impl AsyncWorkerMgr {
         if size == 0 {
             return Ok(());
         }
+
+        // Record how much prefetch data is requested from storage backend.
+        // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
+        // We can measure merging possibility by this.
+        let metrics = mgr.metrics.clone();
+        metrics.prefetch_mr_count.inc();
+        metrics.prefetch_data_amount.add(size);
 
         if let Some(obj) = cache.get_blob_object() {
             if let Err(e) = obj.fetch_range_compressed(offset, size) {
@@ -356,6 +383,8 @@ impl AsyncWorkerMgr {
             warn!("prefetch blob range is not supported");
         }
 
+        metrics.calculate_prefetch_metrics(begin_time);
+
         Ok(())
     }
 
@@ -368,6 +397,7 @@ impl AsyncWorkerMgr {
         mgr: Arc<AsyncWorkerMgr>,
         cache: Arc<dyn BlobCache>,
         req: BlobIoRange,
+        begin_time: SystemTime,
     ) -> Result<()> {
         let blob_offset = req.blob_offset;
         let blob_size = req.blob_size;
@@ -392,6 +422,8 @@ impl AsyncWorkerMgr {
         } else {
             cache.prefetch_range(&req)?;
         }
+
+        mgr.metrics.calculate_prefetch_metrics(begin_time);
 
         Ok(())
     }

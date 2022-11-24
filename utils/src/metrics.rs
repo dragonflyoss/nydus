@@ -742,6 +742,11 @@ pub struct BlobcacheMetrics {
     pub prefetch_mr_count: BasicMetric,
     pub prefetch_workers: AtomicUsize,
     pub prefetch_unmerged_chunks: BasicMetric,
+    pub prefetch_cumulative_time_millis: BasicMetric,
+    pub prefetch_begin_time_secs: BasicMetric,
+    pub prefetch_begin_time_millis: BasicMetric,
+    pub prefetch_end_time_secs: BasicMetric,
+    pub prefetch_end_time_millis: BasicMetric,
     pub buffered_backend_size: BasicMetric,
     pub data_all_ready: AtomicBool,
 }
@@ -779,6 +784,18 @@ impl BlobcacheMetrics {
     /// Export blobcache metric information.
     pub fn export_metrics(&self) -> IoStatsResult<String> {
         serde_json::to_string(self).map_err(IoStatsError::Serialize)
+    }
+
+    pub fn calculate_prefetch_metrics(&self, begin_time: SystemTime) {
+        let now = SystemTime::now();
+        if let Ok(ref t) = now.duration_since(SystemTime::UNIX_EPOCH) {
+            self.prefetch_end_time_secs.set(t.as_secs());
+            self.prefetch_end_time_millis.set(t.subsec_millis() as u64);
+        }
+        if let Ok(ref t) = now.duration_since(begin_time) {
+            let elapsed = saturating_duration_millis(t);
+            self.prefetch_cumulative_time_millis.add(elapsed);
+        }
     }
 }
 
