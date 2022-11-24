@@ -580,6 +580,8 @@ pub trait Metric {
     fn dec(&self) {
         self.sub(1);
     }
+
+    fn set(&self, value: u64);
 }
 
 /// Basic 64-bit metric counter.
@@ -597,6 +599,10 @@ impl Metric for BasicMetric {
 
     fn sub(&self, value: u64) {
         self.0.fetch_sub(value, Ordering::Relaxed);
+    }
+
+    fn set(&self, value: u64) {
+        self.0.store(value, Ordering::Relaxed);
     }
 }
 
