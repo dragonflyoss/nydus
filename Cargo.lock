@@ -755,9 +755,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.126"
+version = "0.2.137"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
+checksum = "fc7fcc620a3bff7cdd7a365be3376c97191aeaccc2a603e600951e452615bf89"
 
 [[package]]
 name = "libz-sys"
@@ -965,6 +965,17 @@ dependencies = [
  "serde",
  "serde_json",
  "vm-memory",
+]
+
+[[package]]
+name = "nydus-clib"
+version = "0.1.0"
+dependencies = [
+ "fuse-backend-rs",
+ "libc",
+ "log",
+ "nydus-api",
+ "nydus-rafs",
 ]
 
 [[package]]
