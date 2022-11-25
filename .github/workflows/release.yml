@@ -193,8 +193,7 @@ jobs:
     - name: prepare release env
       run: |
         echo "tarballs<<EOF" >> $GITHUB_ENV
-        cnt=0
-        for I in $(ls nydus-tarball);do cnt=$((cnt+1)); echo "nydus-tarball/${I}" >> $GITHUB_ENV; done
+        for I in $(ls nydus-tarball);do echo "nydus-tarball/${I}" >> $GITHUB_ENV; done
         echo "EOF" >> $GITHUB_ENV
         tag=$(echo $GITHUB_REF | cut -d/ -f3-)
         echo "tag=${tag}" >> $GITHUB_ENV
