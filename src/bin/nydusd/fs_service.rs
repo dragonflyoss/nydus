@@ -14,8 +14,9 @@ use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use nydus::{FsBackendDesc, FsBackendType};
-use rafs::fs::{Rafs, RafsConfig};
-use rafs::{trim_backend_config, RafsError, RafsIoRead};
+use nydus_api::ConfigV2;
+use rafs::fs::Rafs;
+use rafs::{RafsError, RafsIoRead};
 use serde::{self, Deserialize, Serialize};
 use storage::factory::BLOB_FACTORY;
 
@@ -48,16 +49,10 @@ impl FsBackendCollection {
         // We only wash Rafs backend now.
         let fs_config = match cmd.fs_type {
             FsBackendType::Rafs => {
-                let mut config: serde_json::Value =
-                    serde_json::from_str(&cmd.config).map_err(DaemonError::Serde)?;
-                trim_backend_config!(
-                    config,
-                    "access_key_id",
-                    "access_key_secret",
-                    "auth",
-                    "token"
-                );
-                Some(config)
+                let cfg = ConfigV2::from_str(&cmd.config)
+                    .map_err(|e| DaemonError::InvalidConfig(format!("{}", e)))?;
+                let cfg = cfg.clone_without_secrets();
+                Some(cfg)
             }
             FsBackendType::PassthroughFs => {
                 // Passthrough Fs has no config ever input.
@@ -111,14 +106,15 @@ pub trait FsService: Send + Sync {
         let rootfs = self
             .backend_from_mountpoint(&cmd.mountpoint)?
             .ok_or(DaemonError::NotFound)?;
-        let rafs_config = RafsConfig::from_str(&cmd.config)?;
         let mut bootstrap = <dyn RafsIoRead>::from_file(&&cmd.source)?;
         let any_fs = rootfs.deref().as_any();
         let rafs = any_fs
             .downcast_ref::<Rafs>()
             .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
+        let rafs_cfg = ConfigV2::from_str(&cmd.config).map_err(RafsError::LoadConfig)?;
+        let rafs_cfg = Arc::new(rafs_cfg);
 
-        rafs.update(&mut bootstrap, rafs_config)
+        rafs.update(&mut bootstrap, &rafs_cfg)
             .map_err(|e| match e {
                 RafsError::Unsupported => DaemonError::Unsupported,
                 e => DaemonError::Rafs(e),
@@ -196,9 +192,11 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
 
     match cmd.fs_type {
         FsBackendType::Rafs => {
-            let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
+            let rafs_cfg =
+                ConfigV2::from_str(cmd.config.as_str()).map_err(RafsError::LoadConfig)?;
+            let rafs_cfg = Arc::new(rafs_cfg);
             let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
-            let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
+            let mut rafs = Rafs::new(&rafs_cfg, &cmd.mountpoint, &mut bootstrap)?;
             rafs.import(bootstrap, prefetch_files)?;
             info!("RAFS filesystem imported");
             Ok(Box::new(rafs))
@@ -242,11 +240,28 @@ mod tests {
     #[test]
     fn it_should_add_new_backend() {
         let mut col: FsBackendCollection = Default::default();
+        let config = r#"{
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": {
+                        "dir": "/tmp/nydus"
+                    }
+                },
+                "cache": {
+                    "type": "fscache",
+                    "fscache": {
+                        "work_dir": "/tmp/nydus"
+                    }
+                },
+                "metadata_path": "/tmp/nydus/bootstrap1"
+            }"#;
         let r = col.add(
             "test",
             &FsBackendMountCmd {
                 fs_type: FsBackendType::Rafs,
-                config: "{\"config\": \"test\"}".to_string(),
+                config: config.to_string(),
                 mountpoint: "testmonutount".to_string(),
                 source: "testsource".to_string(),
                 prefetch_files: Some(vec!["testfile".to_string()]),

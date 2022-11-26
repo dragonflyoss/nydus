@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nydus::{FsBackendDesc, FsBackendType};
-use rafs::fs::RafsConfig;
 
 use crate::client::NydusdClient;
 
@@ -399,17 +398,17 @@ Commit:                 {git_commit}
                             match backend.backend_type {
                                 FsBackendType::PassthroughFs => {}
                                 FsBackendType::Rafs => {
-                                    let fs: RafsConfig =
-                                        serde_json::from_value(backend.config.unwrap().clone())
-                                            .unwrap();
+                                    let cfg = backend.config.unwrap();
+                                    let cache_cfg = cfg.get_cache_config()?;
+                                    let rafs_cfg = cfg.get_rafs_config()?;
                                     print!(
                                         r#"    Mode:                   {meta_mode}
             Prefetch:               {enabled}
             Prefetch Merging Size:  {merging_size}
         "#,
-                                        meta_mode = fs.mode,
-                                        enabled = fs.fs_prefetch.enable,
-                                        merging_size = fs.fs_prefetch.merging_size,
+                                        meta_mode = rafs_cfg.mode,
+                                        enabled = cache_cfg.prefetch.enable,
+                                        merging_size = cache_cfg.prefetch.batch_size,
                                     );
                                 }
                             }

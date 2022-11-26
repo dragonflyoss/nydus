@@ -483,7 +483,9 @@ impl FsCacheHandler {
                     }
                     Ok(blob) => {
                         guard.set_blobcache(Some(blob.clone()));
-                        Self::do_prefetch(&guard.config, blob);
+                        if let Err(e) = Self::do_prefetch(&guard.config, blob) {
+                            warn!("failed to prefetch filesystem data, {}", e);
+                        }
                         break;
                     }
                 }
@@ -491,25 +493,18 @@ impl FsCacheHandler {
         });
     }
 
-    fn do_prefetch(config: &BlobCacheConfigDataBlob, blob: Arc<dyn BlobCache>) {
-        let blob_info = config.blob_info().deref();
-        let factory_config = config.factory_config().deref();
-        if !factory_config.cache.prefetch_config.enable {
-            return;
+    fn do_prefetch(cfg: &BlobCacheConfigDataBlob, blob: Arc<dyn BlobCache>) -> Result<()> {
+        let blob_info = cfg.blob_info().deref();
+        let cache_cfg = cfg.config_v2().get_cache_config()?;
+        if !cache_cfg.prefetch.enable {
+            return Ok(());
         }
-        if blob.start_prefetch().is_err() {
-            warn!("fscache: failed to enable data prefetch");
-            return;
-        }
+        blob.start_prefetch()
+            .map_err(|e| eother!(format!("failed to start prefetch worker, {}", e)))?;
 
-        let size = match factory_config
-            .cache
-            .prefetch_config
-            .merging_size
-            .checked_next_power_of_two()
-        {
-            None => rafs::fs::default_merging_size() as u64,
-            Some(1) => rafs::fs::default_merging_size() as u64,
+        let size = match cache_cfg.prefetch.batch_size.checked_next_power_of_two() {
+            None => nydus_api::default_batch_size() as u64,
+            Some(1) => nydus_api::default_batch_size() as u64,
             Some(s) => s as u64,
         };
         let blob_size = blob_info.compressed_size();
@@ -532,6 +527,8 @@ impl FsCacheHandler {
         if let Err(e) = blob.prefetch(blob.clone(), &blob_req, &[]) {
             warn!("fscache: failed to prefetch blob data, {}", e);
         }
+
+        Ok(())
     }
 
     /// The `fscache` factory essentially creates a namespace for blob objects cached by the
@@ -545,7 +542,7 @@ impl FsCacheHandler {
         let mut blob_info = config.blob_info().deref().clone();
         blob_info.set_fscache_file(Some(file));
         let blob_ref = Arc::new(blob_info);
-        BLOB_FACTORY.new_blob_cache(config.factory_config(), &blob_ref)
+        BLOB_FACTORY.new_blob_cache(config.config_v2(), &blob_ref)
     }
 
     fn fill_bootstrap_cache(bootstrap_fd: RawFd, cachefile_fd: RawFd, size: usize) -> Result<()> {
@@ -651,12 +648,14 @@ impl FsCacheHandler {
             // Safe to unwrap() because `id_to_config_map` and `id_to_object_map` is kept
             // in consistence.
             let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
-            let factory_config = config.factory_config();
+            let factory_config = config.config_v2();
             let guard = fsblob.read().unwrap();
             match guard.get_blobcache() {
                 Some(blob) => {
-                    if factory_config.cache.prefetch_config.enable {
-                        let _ = blob.stop_prefetch();
+                    if let Ok(cache_cfg) = factory_config.get_cache_config() {
+                        if cache_cfg.prefetch.enable {
+                            let _ = blob.stop_prefetch();
+                        }
                     }
                     let id = blob.blob_id().to_string();
                     drop(blob);

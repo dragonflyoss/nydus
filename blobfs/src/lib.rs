@@ -19,11 +19,9 @@ use fuse_backend_rs::{
     passthrough::Config as PassthroughConfig,
     passthrough::PassthroughFs,
 };
+use nydus_api::ConfigV2;
 use nydus_error::{einval, eother};
-use nydus_rafs::{
-    fs::{Rafs, RafsConfig},
-    RafsIoRead,
-};
+use nydus_rafs::{fs::Rafs, RafsIoRead};
 use serde::Deserialize;
 use std::any::Any;
 #[cfg(feature = "virtiofs")]
@@ -71,7 +69,7 @@ unsafe impl ByteValued for LinuxDirent64 {}
 pub struct BlobOndemandConfig {
     /// The rafs config used to set up rafs device for the purpose of
     /// `on demand read`.
-    pub rafs_conf: RafsConfig,
+    pub rafs_conf: ConfigV2,
 
     /// THe path of bootstrap of an container image (for rafs in
     /// kernel).
@@ -193,6 +191,14 @@ impl BlobFs {
 
     fn load_bootstrap(cfg: &Config) -> io::Result<BootstrapArgs> {
         let blob_ondemand_conf = BlobOndemandConfig::from_str(&cfg.blob_ondemand_cfg)?;
+        if !blob_ondemand_conf.rafs_conf.validate() {
+            return Err(einval!("invlidate configuration for blobfs"));
+        }
+        let rafs_cfg = blob_ondemand_conf.rafs_conf.get_rafs_config()?;
+        if rafs_cfg.mode != "direct" {
+            return Err(einval!("blobfs only supports RAFS 'direct' mode"));
+        }
+
         // check if blob cache dir exists.
         let path = Path::new(blob_ondemand_conf.blob_cache_dir.as_str());
         Self::ensure_path_exist(path).map_err(|e| {
@@ -205,15 +211,13 @@ impl BlobFs {
             return Err(einval!("no valid bootstrap"));
         }
 
-        let mut rafs_conf = blob_ondemand_conf.rafs_conf.clone();
-        // we must use direct mode to get mmap'd bootstrap.
-        rafs_conf.mode = "direct".to_string();
+        let rafs_conf = Arc::new(blob_ondemand_conf.rafs_conf.clone());
         let mut bootstrap =
             <dyn RafsIoRead>::from_file(path.to_str().unwrap()).map_err(|e| eother!(e))?;
 
         trace!("blobfs: async create Rafs start!");
         let rafs_join_handle = std::thread::spawn(move || {
-            let mut rafs = match Rafs::new(rafs_conf, "blobfs", &mut bootstrap) {
+            let mut rafs = match Rafs::new(&rafs_conf, "blobfs", &mut bootstrap) {
                 Ok(rafs) => rafs,
                 Err(e) => {
                     error!("blobfs: new rafs failed {:?}.", e);

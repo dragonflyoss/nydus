@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use nydus_storage::device::BlobChunkFlags;
-use nydus_storage::RAFS_MERGING_SIZE_TO_GAP_SHIFT;
+use nydus_storage::RAFS_BATCH_SIZE_TO_GAP_SHIFT;
 
 use super::cached_v5::CachedSuperBlockV5;
 use super::direct_v5::DirectSuperBlockV5;
@@ -158,7 +158,7 @@ impl RafsSuper {
                     Self::merge_chunks_io(
                         last_desc,
                         vec,
-                        (max_uncomp_size as u64) >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+                        (max_uncomp_size as u64) >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
                     );
                 }
             }
@@ -195,7 +195,7 @@ impl RafsSuper {
                             Self::merge_chunks_io(
                                 last_desc,
                                 vec,
-                                (max_uncomp_size as u64) >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+                                (max_uncomp_size as u64) >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
                             );
                         }
                     }

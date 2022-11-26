@@ -930,6 +930,7 @@ dependencies = [
  "nydus-error",
  "serde",
  "serde_json",
+ "toml",
  "url",
  "vmm-sys-util",
 ]
@@ -956,6 +957,7 @@ dependencies = [
  "fuse-backend-rs",
  "libc",
  "log",
+ "nydus-api",
  "nydus-app",
  "nydus-error",
  "nydus-rafs",
@@ -1757,6 +1759,15 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "toml"
+version = "0.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d82e1a7758622a465f8cee077614c73484dac5b836c02ff6a40d5d1010324d7"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -16,15 +16,11 @@
 
 use std::any::Any;
 use std::cmp;
-use std::convert::TryFrom;
 use std::ffi::{CStr, OsStr, OsString};
-use std::fmt;
-use std::fs::File;
 use std::io::Result;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -33,9 +29,8 @@ use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
 use nix::unistd::{getegid, geteuid};
-use serde::Deserialize;
 
-use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
+use nydus_api::ConfigV2;
 use nydus_storage::device::{BlobDevice, BlobIoVec, BlobPrefetchRequest};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
@@ -52,151 +47,6 @@ pub type Handle = u64;
 pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
-
-fn default_threads_count() -> usize {
-    8
-}
-
-pub fn default_merging_size() -> usize {
-    128 * 1024
-}
-
-fn default_prefetch_all() -> bool {
-    true
-}
-
-fn default_amplify_io() -> u32 {
-    128 * 1024
-}
-
-/// Configuration information for filesystem data prefetch.
-#[derive(Clone, Default, Deserialize)]
-pub struct FsPrefetchControl {
-    /// Whether the filesystem layer data prefetch is enabled or not.
-    #[serde(default)]
-    pub enable: bool,
-
-    /// How many working threads to prefetch data.
-    #[serde(default = "default_threads_count")]
-    pub threads_count: usize,
-
-    /// Window size in unit of bytes to merge request to backend.
-    #[serde(default = "default_merging_size")]
-    pub merging_size: usize,
-
-    /// Network bandwidth limitation for prefetching.
-    ///
-    /// In unit of Bytes. It sets a limit to prefetch bandwidth usage in order to
-    /// reduce congestion with normal user IO.
-    /// bandwidth_rate == 0 -- prefetch bandwidth ratelimit disabled
-    /// bandwidth_rate > 0  -- prefetch bandwidth ratelimit enabled.
-    ///                        Please note that if the value is less than Rafs chunk size,
-    ///                        it will be raised to the chunk size.
-    #[serde(default)]
-    pub bandwidth_rate: u32,
-
-    /// Whether to prefetch all filesystem data.
-    #[serde(default = "default_prefetch_all")]
-    pub prefetch_all: bool,
-}
-
-impl TryFrom<&RafsConfig> for BlobPrefetchConfig {
-    type Error = RafsError;
-
-    fn try_from(c: &RafsConfig) -> RafsResult<Self> {
-        if c.fs_prefetch.merging_size as u64 > RAFS_MAX_CHUNK_SIZE {
-            return Err(RafsError::Configure(
-                "merging size can't exceed max chunk size".to_string(),
-            ));
-        } else if c.fs_prefetch.enable && c.fs_prefetch.threads_count == 0 {
-            return Err(RafsError::Configure(
-                "try to enable fs prefetching with zero working threads".to_string(),
-            ));
-        }
-
-        Ok(BlobPrefetchConfig {
-            enable: c.fs_prefetch.enable,
-            threads_count: c.fs_prefetch.threads_count,
-            merging_size: c.fs_prefetch.merging_size,
-            bandwidth_rate: c.fs_prefetch.bandwidth_rate,
-        })
-    }
-}
-
-/// Not everything can be safely exported from configuration.
-/// We trim the unneeded info from here.
-#[macro_export]
-macro_rules! trim_backend_config {
-    ($config:expr, $($i:expr),*) => {
-        let mut _n :&mut serde_json::Value = &mut $config["device"]["backend"]["config"];
-        if let serde_json::Value::Object(ref mut m) = _n {
-            $(if m.contains_key($i) { m[$i].take();} )*
-        }
-    }
-}
-
-/// Rafs storage backend configuration information.
-#[derive(Clone, Default, Deserialize)]
-pub struct RafsConfig {
-    /// Configuration for storage subsystem.
-    pub device: FactoryConfig,
-    /// Filesystem working mode.
-    pub mode: String,
-    /// Whether to validate data digest before use.
-    #[serde(default)]
-    pub digest_validate: bool,
-    /// Io statistics.
-    #[serde(default)]
-    pub iostats_files: bool,
-    /// Filesystem prefetching configuration.
-    #[serde(default)]
-    pub fs_prefetch: FsPrefetchControl,
-    /// Enable extended attributes.
-    #[serde(default)]
-    pub enable_xattr: bool,
-    /// Record filesystem access pattern.
-    #[serde(default)]
-    pub access_pattern: bool,
-    /// Record file name if file access trace log.
-    #[serde(default)]
-    pub latest_read_files: bool,
-    // ZERO value means, amplifying user io is not enabled.
-    #[serde(default = "default_amplify_io")]
-    pub amplify_io: u32,
-}
-
-impl RafsConfig {
-    /// Create a new instance of `RafsConfig`.
-    pub fn new() -> RafsConfig {
-        RafsConfig {
-            ..Default::default()
-        }
-    }
-
-    /// Load Rafs configuration information from a configuration file.
-    pub fn from_file(path: &str) -> RafsResult<RafsConfig> {
-        let file = File::open(path).map_err(RafsError::LoadConfig)?;
-        serde_json::from_reader::<File, RafsConfig>(file).map_err(RafsError::ParseConfig)
-    }
-}
-
-impl FromStr for RafsConfig {
-    type Err = RafsError;
-
-    fn from_str(s: &str) -> RafsResult<RafsConfig> {
-        serde_json::from_str(s).map_err(RafsError::ParseConfig)
-    }
-}
-
-impl fmt::Display for RafsConfig {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "mode={} digest_validate={} iostats_files={} latest_read_files={}",
-            self.mode, self.digest_validate, self.iostats_files, self.latest_read_files
-        )
-    }
-}
 
 /// Struct to glue fuse, storage backend and filesystem metadata together.
 ///
@@ -225,14 +75,14 @@ pub struct Rafs {
 
 impl Rafs {
     /// Create a new instance of `Rafs`.
-    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
-        let storage_conf = Self::prepare_storage_conf(&conf)?;
-        let mut sb = RafsSuper::new(&conf).map_err(RafsError::FillSuperblock)?;
+    pub fn new(cfg: &Arc<ConfigV2>, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
+        let cache_cfg = cfg.get_cache_config().map_err(RafsError::LoadConfig)?;
+        let rafs_cfg = cfg.get_rafs_config().map_err(RafsError::LoadConfig)?;
+        let mut sb = RafsSuper::new(rafs_cfg).map_err(RafsError::FillSuperblock)?;
         sb.load(r).map_err(RafsError::FillSuperblock)?;
 
         let blob_infos = sb.superblock.get_blob_infos();
-        let device =
-            BlobDevice::new(&storage_conf, &blob_infos).map_err(RafsError::CreateDevice)?;
+        let device = BlobDevice::new(cfg, &blob_infos).map_err(RafsError::CreateDevice)?;
 
         let rafs = Rafs {
             id: id.to_string(),
@@ -241,11 +91,11 @@ impl Rafs {
             sb: Arc::new(sb),
 
             initialized: false,
-            digest_validate: conf.digest_validate,
-            fs_prefetch: conf.fs_prefetch.enable,
-            amplify_io: conf.amplify_io,
-            prefetch_all: conf.fs_prefetch.prefetch_all,
-            xattr_enabled: conf.enable_xattr,
+            digest_validate: rafs_cfg.validate,
+            fs_prefetch: rafs_cfg.prefetch.enable,
+            amplify_io: rafs_cfg.prefetch.batch_size as u32,
+            prefetch_all: rafs_cfg.prefetch.prefetch_all,
+            xattr_enabled: rafs_cfg.enable_xattr,
 
             i_uid: geteuid().into(),
             i_gid: getegid().into(),
@@ -257,29 +107,29 @@ impl Rafs {
 
         // Rafs v6 does must store chunk info into local file cache. So blob cache is required
         if rafs.metadata().is_v6() {
-            if conf.device.cache.cache_type != "blobcache" {
+            if cache_cfg.cache_type != "blobcache" && cache_cfg.cache_type != "filecache" {
                 return Err(RafsError::Configure(
                     "Rafs v6 must have local blobcache configured".to_string(),
                 ));
             }
 
-            if conf.digest_validate {
+            if rafs_cfg.validate {
                 return Err(RafsError::Configure(
                     "Rafs v6 doesn't support integrity validation yet".to_string(),
                 ));
             }
         }
 
-        rafs.ios.toggle_files_recording(conf.iostats_files);
-        rafs.ios.toggle_access_pattern(conf.access_pattern);
+        rafs.ios.toggle_files_recording(rafs_cfg.iostats_files);
+        rafs.ios.toggle_access_pattern(rafs_cfg.access_pattern);
         rafs.ios
-            .toggle_latest_read_files_recording(conf.latest_read_files);
+            .toggle_latest_read_files_recording(rafs_cfg.latest_read_files);
 
         Ok(rafs)
     }
 
     /// Update storage backend for blobs.
-    pub fn update(&self, r: &mut RafsIoReader, conf: RafsConfig) -> RafsResult<()> {
+    pub fn update(&self, r: &mut RafsIoReader, conf: &Arc<ConfigV2>) -> RafsResult<()> {
         info!("update");
         if !self.initialized {
             warn!("Rafs is not yet initialized");
@@ -295,12 +145,10 @@ impl Rafs {
         })?;
         info!("update sb is successful");
 
-        let storage_conf = Self::prepare_storage_conf(&conf)?;
-        let blob_infos = self.sb.superblock.get_blob_infos();
-
         // step 2: update device (only localfs is supported)
+        let blob_infos = self.sb.superblock.get_blob_infos();
         self.device
-            .update(&storage_conf, &blob_infos, self.fs_prefetch)
+            .update(conf, &blob_infos, self.fs_prefetch)
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
@@ -352,13 +200,6 @@ impl Rafs {
     /// Get the cached file system super block metadata.
     pub fn metadata(&self) -> &RafsSuperMeta {
         &self.sb.meta
-    }
-
-    fn prepare_storage_conf(conf: &RafsConfig) -> RafsResult<Arc<FactoryConfig>> {
-        let mut storage_conf = conf.device.clone();
-        storage_conf.cache.cache_validate = conf.digest_validate;
-        storage_conf.cache.prefetch_config = TryFrom::try_from(conf)?;
-        Ok(Arc::new(storage_conf))
     }
 
     fn xattr_supported(&self) -> bool {
@@ -977,46 +818,46 @@ impl FileSystem for Rafs {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     #[cfg(feature = "backend-oss")]
     use crate::RafsIoRead;
+    use std::str::FromStr;
 
     #[cfg(feature = "backend-oss")]
     pub fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
-        {
-            "device": {
-              "id": "test",
-              "backend": {
-                "type": "oss",
-                "config": {
-                  "endpoint": "test",
-                  "access_key_id": "test",
-                  "access_key_secret": "test",
-                  "bucket_name": "antsys-nydus",
-                  "object_prefix":"nydus_v2/",
-                  "scheme": "http"
-                }
-              }
-            },
-            "mode": "direct",
-            "digest_validate": false,
-            "enable_xattr": true,
-            "fs_prefetch": {
-              "enable": true,
-              "threads_count": 10,
-              "merging_size": 131072,
-              "bandwidth_rate": 10485760
-            }
-          }"#;
+        version = 2
+        id = "test"
+        [backend]
+        type = "oss"
+        [backend.oss]
+        endpoint = "test"
+        access_key_id = "test"
+        access_key_secret = "test"
+        bucket_name = "antsys-nydus"
+        object_prefix = "nydus_v2/"
+        scheme = "http"
+        [cache]
+        type = "filecache"
+        [cache.filecache]
+        work_dir = "."
+        [rafs]
+        mode = "direct"
+        validate = false
+        enable_xattr = true
+        [rafs.prefetch]
+        enable = true
+        threads = 10
+        batch_size = 131072
+        bandwidth_limit = 10485760
+        "#;
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
         source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
         let mountpoint = "/mnt";
-        let rafs_config = RafsConfig::from_str(config).unwrap();
+        let rafs_config = Arc::new(ConfigV2::from_str(config).unwrap());
         let bootstrapfile = source_path.to_str().unwrap();
         let mut bootstrap = <dyn RafsIoRead>::from_file(bootstrapfile).unwrap();
-        let mut rafs = Rafs::new(rafs_config, mountpoint, &mut bootstrap).unwrap();
+        let mut rafs = Rafs::new(&rafs_config, mountpoint, &mut bootstrap).unwrap();
         rafs.import(bootstrap, Some(vec![std::path::PathBuf::new()]))
             .unwrap();
         Box::new(rafs)
@@ -1112,33 +953,5 @@ pub(crate) mod tests {
                 assert_eq!(e.inode, 0);
             }
         }
-    }
-
-    #[test]
-    fn test_fsprefetchcontrol_from_rafs_config() {
-        let mut config = RafsConfig {
-            fs_prefetch: FsPrefetchControl {
-                enable: false,
-                threads_count: 0,
-                merging_size: 0,
-                bandwidth_rate: 0,
-                prefetch_all: false,
-            },
-            ..Default::default()
-        };
-
-        config.fs_prefetch.enable = true;
-        assert!(BlobPrefetchConfig::try_from(&config).is_err());
-
-        config.fs_prefetch.threads_count = 1;
-        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
-
-        config.fs_prefetch.merging_size = RAFS_MAX_CHUNK_SIZE as usize + 1;
-        assert!(BlobPrefetchConfig::try_from(&config).is_err());
-
-        config.fs_prefetch.merging_size = RAFS_DEFAULT_CHUNK_SIZE as usize;
-        config.fs_prefetch.bandwidth_rate = 1;
-        config.fs_prefetch.prefetch_all = true;
-        assert!(BlobPrefetchConfig::try_from(&config).is_ok());
     }
 }

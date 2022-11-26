@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
 
-use nydus_api::http::{CacheConfig, FsCacheConfig};
+use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
@@ -43,7 +43,7 @@ pub struct FsCacheMgr {
 impl FsCacheMgr {
     /// Create a new instance of `FileCacheMgr`.
     pub fn new(
-        config: CacheConfig,
+        config: &CacheConfigV2,
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
@@ -52,11 +52,10 @@ impl FsCacheMgr {
             return Err(enosys!("fscache doesn't support compressed cache mode"));
         }
 
-        let blob_config: FsCacheConfig =
-            serde_json::from_value(config.cache_config).map_err(|e| einval!(e))?;
-        let work_dir = blob_config.get_work_dir()?;
+        let blob_cfg = config.get_fscache_config()?;
+        let work_dir = blob_cfg.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
-        let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new(config.prefetch_config.into());
+        let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new((&config.prefetch).into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         BLOB_FACTORY.start_mgr_checker();

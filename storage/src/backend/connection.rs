@@ -23,7 +23,7 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use nydus_api::http::{MirrorConfig, OssConfig, ProxyConfig, RegistryConfig};
+use nydus_api::{MirrorConfig, OssConfig, ProxyConfig, RegistryConfig};
 use url::ParseError;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";

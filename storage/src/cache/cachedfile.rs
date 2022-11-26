@@ -35,7 +35,7 @@ use crate::device::{
 };
 use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::{StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE, RAFS_MERGING_SIZE_TO_GAP_SHIFT};
+use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFAULT_CHUNK_SIZE};
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 20;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 500;
@@ -461,7 +461,7 @@ impl BlobCache for FileCacheEntry {
         BlobIoMergeState::merge_and_issue(
             &bios,
             max_comp_size,
-            max_comp_size as u64 >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+            max_comp_size as u64 >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
             |req: BlobIoRange| {
                 let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
                 let _ = self.workers.send_prefetch_message(msg);
@@ -968,7 +968,12 @@ impl FileCacheEntry {
         }
         if region.chunks.len() > 1 {
             for idx in 0..region.chunks.len() - 1 {
-                assert_eq!(region.chunks[idx].id() + 1, region.chunks[idx + 1].id());
+                let end = region.chunks[idx].compressed_offset()
+                    + region.chunks[idx].compressed_size() as u64;
+                let start = region.chunks[idx + 1].compressed_offset();
+                assert!(end <= start);
+                assert!(start - end <= self.ondemand_batch_size() >> RAFS_BATCH_SIZE_TO_GAP_SHIFT);
+                assert!(region.chunks[idx].id() < region.chunks[idx + 1].id());
             }
         }
 
@@ -1187,7 +1192,7 @@ impl FileCacheEntry {
         BlobIoMergeState::merge_and_issue(
             bios,
             max_comp_size,
-            max_comp_size >> RAFS_MERGING_SIZE_TO_GAP_SHIFT,
+            max_comp_size >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
             |mr: BlobIoRange| {
                 requests.push(mr);
             },

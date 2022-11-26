@@ -6,6 +6,7 @@
 
 //! Nydus API v2.
 
+use crate::BlobCacheEntry;
 use dbs_uhttp::{Method, Request, Response};
 
 use crate::http::{
@@ -85,7 +86,10 @@ impl EndpointHandler for BlobObjectListHandlerV2 {
                 Err(HttpError::BadRequest)
             }
             (Method::Put, Some(body)) => {
-                let conf = parse_body(body)?;
+                let mut conf: Box<BlobCacheEntry> = parse_body(body)?;
+                if !conf.prepare_configuration_info() {
+                    return Err(HttpError::BadRequest);
+                }
                 let r = kicker(ApiRequest::CreateBlobObject(conf));
                 Ok(convert_to_response(r, HttpError::CreateBlobObject))
             }

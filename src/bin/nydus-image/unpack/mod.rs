@@ -10,7 +10,7 @@ use std::str;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_api::http::LocalFsConfig;
+use nydus_api::LocalFsConfig;
 use nydus_rafs::{
     metadata::{RafsInodeExt, RafsMode, RafsSuper},
     RafsIoReader, RafsIterator,
@@ -217,10 +217,8 @@ impl OCITarBuilderFactory {
             dir: Default::default(),
             alt_dirs: Default::default(),
         };
-        let config = serde_json::to_value(config)
-            .with_context(|| format!("fail to create local backend config for {:?}", blob_path))?;
 
-        let backend = LocalFs::new(config, Some("unpacker"))
+        let backend = LocalFs::new(&config, Some("unpacker"))
             .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
 
         let reader = backend

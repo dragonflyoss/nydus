@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 
-use nydus_api::http::LocalFsConfig;
+use nydus_api::LocalFsConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
@@ -100,8 +100,7 @@ pub struct LocalFs {
 }
 
 impl LocalFs {
-    pub fn new(config: serde_json::value::Value, id: Option<&str>) -> Result<LocalFs> {
-        let config: LocalFsConfig = serde_json::from_value(config).map_err(|e| einval!(e))?;
+    pub fn new(config: &LocalFsConfig, id: Option<&str>) -> Result<LocalFs> {
         let id = id.ok_or_else(|| einval!("LocalFs requires blob_id"))?;
 
         if config.blob_file.is_empty() && config.dir.is_empty() {
@@ -109,9 +108,9 @@ impl LocalFs {
         }
 
         Ok(LocalFs {
-            blob_file: config.blob_file,
-            dir: config.dir,
-            alt_dirs: config.alt_dirs,
+            blob_file: config.blob_file.clone(),
+            dir: config.dir.clone(),
+            alt_dirs: config.alt_dirs.clone(),
             metrics: BackendMetrics::new(id, "localfs"),
             entries: RwLock::new(HashMap::new()),
         })
@@ -211,16 +210,14 @@ mod tests {
             dir: "".to_string(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        assert!(LocalFs::new(json, Some("test")).is_err());
+        assert!(LocalFs::new(&config, Some("test")).is_err());
 
         let config = LocalFsConfig {
             blob_file: "/a/b/c".to_string(),
             dir: "/a/b".to_string(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        assert!(LocalFs::new(json, None).is_err());
+        assert!(LocalFs::new(&config, None).is_err());
     }
 
     #[test]
@@ -230,8 +227,7 @@ mod tests {
             dir: "/a/b".to_string(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        let fs = LocalFs::new(json, Some("test")).unwrap();
+        let fs = LocalFs::new(&config, Some("test")).unwrap();
         assert!(fs.get_blob_path("test").is_err());
 
         let tempfile = TempFile::new().unwrap();
@@ -243,8 +239,7 @@ mod tests {
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        let fs = LocalFs::new(json, Some("test")).unwrap();
+        let fs = LocalFs::new(&config, Some("test")).unwrap();
         assert_eq!(fs.get_blob_path("test").unwrap().to_str(), path.to_str());
 
         let config = LocalFsConfig {
@@ -252,8 +247,7 @@ mod tests {
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        let fs = LocalFs::new(&config, Some(filename)).unwrap();
         assert_eq!(fs.get_blob_path(filename).unwrap().to_str(), path.to_str());
 
         let config = LocalFsConfig {
@@ -264,8 +258,7 @@ mod tests {
                 path.parent().unwrap().to_str().unwrap().to_owned(),
             ],
         };
-        let json = serde_json::to_value(&config).unwrap();
-        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        let fs = LocalFs::new(&config, Some(filename)).unwrap();
         assert_eq!(fs.get_blob_path(filename).unwrap().to_str(), path.to_str());
     }
 
@@ -279,8 +272,7 @@ mod tests {
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        let fs = LocalFs::new(&config, Some(filename)).unwrap();
         let blob1 = fs.get_blob(filename).unwrap();
         let blob2 = fs.get_blob(filename).unwrap();
         assert_eq!(Arc::strong_count(&blob1), 3);
@@ -304,8 +296,7 @@ mod tests {
             dir: path.parent().unwrap().to_str().unwrap().to_owned(),
             alt_dirs: Vec::new(),
         };
-        let json = serde_json::to_value(&config).unwrap();
-        let fs = LocalFs::new(json, Some(filename)).unwrap();
+        let fs = LocalFs::new(&config, Some(filename)).unwrap();
         let blob1 = fs.get_reader(filename).unwrap();
         let blob2 = fs.get_reader(filename).unwrap();
         assert_eq!(Arc::strong_count(&blob1), 3);
