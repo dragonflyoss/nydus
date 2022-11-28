@@ -353,7 +353,7 @@ impl AsyncWorkerMgr {
         }
 
         // Record how much prefetch data is requested from storage backend.
-        // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
+        // So the average backend merged request size will be prefetch_data_amount/prefetch_requests_count.
         // We can measure merging possibility by this.
         let metrics = mgr.metrics.clone();
         metrics.prefetch_requests_count.inc();
@@ -412,7 +412,7 @@ impl AsyncWorkerMgr {
         }
 
         // Record how much prefetch data is requested from storage backend.
-        // So the average backend merged request size will be prefetch_data_amount/prefetch_mr_count.
+        // So the average backend merged request size will be prefetch_data_amount/prefetch_requests_count.
         // We can measure merging possibility by this.
         mgr.metrics.prefetch_requests_count.inc();
         mgr.metrics.prefetch_data_amount.add(blob_size);
