@@ -107,4 +107,4 @@ jobs:
           cd /home/runner/work/image-service/image-service/contrib/nydus-test
           sudo mkdir -p /blobdir
           sudo python3 nydus_test_config.py --dist fs_structure.yaml
-          sudo pytest -vs -x --durations=0 functional-test/test_api.py functional-test/test_nydus.py functional-test/test_layered_image.py
+          sudo pytest -vs -x --durations=0 functional-test/test_api.py functional-test/test_nydus.py functional-test/test_layered_image.py functional-test/test_nydusify.py
