@@ -739,13 +739,24 @@ pub struct BlobcacheMetrics {
     // to estimate the possibility to merge backend IOs.
     // In unit of Bytes
     pub prefetch_data_amount: BasicMetric,
-    pub prefetch_mr_count: BasicMetric,
+    // Total prefetch requests issued from storage/blobs or rafs filesystem layer for each file that needs prefetch
+    pub prefetch_requests_count: BasicMetric,
     pub prefetch_workers: AtomicUsize,
     pub prefetch_unmerged_chunks: BasicMetric,
+    // Cumulative time latencies of each prefetch request which can be handled in parallel.
+    // It starts when the request is born including nydusd processing and schedule and end when the chunk is downloaded and stored.
+    // Then the average prefetch latency can be calculated by
+    // `prefetch_cumulative_time_millis / prefetch_requests_count`
     pub prefetch_cumulative_time_millis: BasicMetric,
+    // The time seconds part when nydusd begins to prefetch
+    // We can calculate prefetch average bandwidth by
+    // `prefetch_data_amount / (prefetch_end_time_secs - prefetch_begin_time_secs)`. Note, it does not take milliseconds into account yet.s
     pub prefetch_begin_time_secs: BasicMetric,
+    // The time milliseconds part when nydusd begins to prefetch
     pub prefetch_begin_time_millis: BasicMetric,
+    // The time seconds part when nydusd ends prefetching
     pub prefetch_end_time_secs: BasicMetric,
+    // The time milliseconds part when nydusd ends prefetching
     pub prefetch_end_time_millis: BasicMetric,
     pub buffered_backend_size: BasicMetric,
     pub data_all_ready: AtomicBool,
