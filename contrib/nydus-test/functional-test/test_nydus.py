@@ -600,7 +600,6 @@ def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: Raf
         case[0].umount()
 
 
-# @pytest.mark.skip(reason="ECS can't pass this case!")
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 def test_signal_handling(
     nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, rafs_conf: RafsConf, sig
