@@ -72,15 +72,14 @@ impl Merger {
             let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
 
-            if let Some(config) = &config {
-                config.check_compatibility(&rs.meta)?;
-            } else {
-                config = Some(rs.meta.get_config());
-                fs_version = Some(rs.meta.version);
-                ctx.compressor = rs.meta.get_compressor();
-                ctx.digester = rs.meta.get_digester();
-                ctx.explicit_uidgid = rs.meta.explicit_uidgid();
-            }
+            config
+                .get_or_insert_with(|| rs.meta.get_config())
+                .check_compatibility(&rs.meta)?;
+
+            fs_version = Some(rs.meta.version);
+            ctx.compressor = rs.meta.get_compressor();
+            ctx.digester = rs.meta.get_digester();
+            ctx.explicit_uidgid = rs.meta.explicit_uidgid();
 
             let blob_hash = Self::get_blob_hash(bootstrap_path)?;
             let mut blob_idx_map = Vec::new();
