@@ -699,12 +699,7 @@ impl Command {
         };
 
         let mut builder: Box<dyn Builder> = match conversion_type {
-            ConversionType::DirectoryToRafs => {
-                if version.is_v6() {
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
-                }
-                Box::new(DirectoryBuilder::new())
-            }
+            ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
             ConversionType::DirectoryToStargz => unimplemented!(),
             ConversionType::DirectoryToTargz => unimplemented!(),
             ConversionType::EStargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
