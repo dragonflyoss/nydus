@@ -235,6 +235,10 @@ impl FsService for FusedevFsService {
             Ok(Some(resp))
         }
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 pub struct FusedevDaemon {
@@ -271,6 +275,14 @@ impl FusedevDaemon {
         self.fuse_service_threads.lock().unwrap().push(thread);
 
         Ok(())
+    }
+
+    pub fn get_fusedev_fsservice(&self) -> &FusedevFsService {
+        self.service
+            .as_ref()
+            .as_any()
+            .downcast_ref::<FusedevFsService>()
+            .unwrap()
     }
 }
 

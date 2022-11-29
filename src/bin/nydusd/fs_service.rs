@@ -4,6 +4,7 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -164,7 +165,11 @@ pub trait FsService: Send + Sync {
         let resp = serde_json::to_string(rafs.metadata()).map_err(DaemonError::Serde)?;
         Ok(resp)
     }
+
     fn export_inflight_ops(&self) -> DaemonResult<Option<String>>;
+
+    /// Provides a reference to the Any trait. This is useful to let the call access the underlying fs service.
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Validate prefetch file list from user input.
@@ -187,7 +192,7 @@ fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> DaemonResult<Opti
     }
 }
 
-fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
+pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
     let prefetch_files = validate_prefetch_file_list(&cmd.prefetch_files)?;
 
     match cmd.fs_type {
