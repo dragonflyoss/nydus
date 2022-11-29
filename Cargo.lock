@@ -1343,6 +1343,7 @@ dependencies = [
  "lz4-sys",
  "nix",
  "nydus-error",
+ "openssl",
  "serde",
  "serde_json",
  "sha2",
