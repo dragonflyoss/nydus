@@ -68,6 +68,38 @@ impl RafsSuper {
         }
     }
 
+    pub(crate) fn is_inlay_prefetch_all(&self, r: &mut RafsIoReader) -> RafsResult<bool> {
+        let hint_entries = self.meta.prefetch_table_entries as usize;
+        if hint_entries != 1 {
+            return Ok(false);
+        }
+        let unique = if self.meta.is_v6() {
+            let mut prefetch_table = RafsV6PrefetchTable::new();
+            prefetch_table
+                .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .map_err(|e| {
+                    RafsError::Prefetch(format!(
+                        "Failed in loading hint prefetch table at offset {}. {:?}",
+                        self.meta.prefetch_table_offset, e
+                    ))
+                })?;
+            prefetch_table.inodes[0] as u64
+        } else {
+            let mut prefetch_table = RafsV5PrefetchTable::new();
+            prefetch_table
+                .load_prefetch_table_from(r, self.meta.prefetch_table_offset, hint_entries)
+                .map_err(|e| {
+                    RafsError::Prefetch(format!(
+                        "Failed in loading hint prefetch table at offset {}. {:?}",
+                        self.meta.prefetch_table_offset, e
+                    ))
+                })?;
+            prefetch_table.inodes[0] as u64
+        };
+
+        Ok(unique == self.superblock.root_ino())
+    }
+
     pub(crate) fn prefetch_data_v6<F>(
         &self,
         r: &mut RafsIoReader,
