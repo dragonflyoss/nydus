@@ -1160,7 +1160,9 @@ impl FileCacheEntry {
                 chunk.compressed_size() as u64
             };
             let mut reader = FileRangeReader::new(&self.file, offset, size);
-            if self.compressor() == compress::Algorithm::Lz4Block {
+            if !chunk.is_compressed() {
+                reader.read_exact(buffer)?;
+            } else if self.compressor() == compress::Algorithm::Lz4Block {
                 let mut buf = alloc_buf(size as usize);
                 reader.read_exact(&mut buf)?;
                 let size = compress::decompress(&buf, buffer, self.compressor)?;
