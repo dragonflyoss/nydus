@@ -26,6 +26,7 @@ use crate::core::context::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
     BuildOutput, ConversionType,
 };
+use crate::core::feature::Features;
 use crate::core::node::{Node, WhiteoutSpec};
 use crate::core::tree::Tree;
 
@@ -573,6 +574,7 @@ impl BlobCompactor {
             None,
             None,
             false,
+            Features::new(),
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);

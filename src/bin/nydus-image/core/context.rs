@@ -36,6 +36,7 @@ use nydus_storage::meta::{
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
+use super::feature::Features;
 use super::node::{ChunkSource, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
@@ -891,6 +892,8 @@ pub struct BuildContext {
     pub blob_meta_features: u32,
     pub inline_bootstrap: bool,
     pub has_xattr: bool,
+
+    pub features: Features,
 }
 
 impl BuildContext {
@@ -909,6 +912,7 @@ impl BuildContext {
         blob_storage: Option<ArtifactStorage>,
         blob_meta_storage: Option<ArtifactStorage>,
         inline_bootstrap: bool,
+        features: Features,
     ) -> Self {
         BuildContext {
             blob_id,
@@ -932,6 +936,8 @@ impl BuildContext {
             blob_meta_features: 0,
             inline_bootstrap,
             has_xattr: false,
+
+            features,
         }
     }
 
@@ -968,6 +974,7 @@ impl Default for BuildContext {
             blob_meta_features: 0,
             has_xattr: true,
             inline_bootstrap: false,
+            features: Features::new(),
         }
     }
 }

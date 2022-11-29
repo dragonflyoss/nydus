@@ -41,6 +41,7 @@ use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
+use crate::core::feature::Features;
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::{Prefetch, PrefetchPolicy};
 use crate::core::tree;
@@ -303,6 +304,11 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("Set type of whiteout specification:")
                         .default_value("oci")
                         .value_parser(["oci", "overlayfs", "none"])
+                )
+                .arg(
+                    Arg::new("features")
+                    .long("features")
+                        .help("Set features for conversion")
                 )
                 .arg(
                     arg_prefetch_policy.clone(),
@@ -659,6 +665,12 @@ impl Command {
             }
         }
 
+        let features = Features::from(
+            matches
+                .get_one::<String>("features")
+                .map(|s| s.as_str())
+                .unwrap_or_default(),
+        )?;
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -673,6 +685,7 @@ impl Command {
             blob_stor,
             blob_meta_stor,
             inline_bootstrap,
+            features,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
