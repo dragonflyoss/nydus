@@ -9,4 +9,6 @@ RUN apt update && apt install -y tree
 
 WORKDIR /nydus-rs
 
+VOLUME /tmp
+
 CMD make release smoke
