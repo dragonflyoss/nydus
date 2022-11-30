@@ -382,16 +382,9 @@ impl Bootstrap {
         }
 
         if let Some(ArtifactStorage::FileDir(p)) = bootstrap_storage {
-            let reader = bootstrap_ctx.writer.as_reader()?;
+            let bootstrap_data = bootstrap_ctx.writer.as_bytes()?;
             let mut digester = RafsDigest::hasher(ctx.digester);
-            let mut buf = vec![0u8; 16384];
-            loop {
-                let sz = reader.read(&mut buf)?;
-                if sz == 0 {
-                    break;
-                }
-                digester.digest_update(&buf[..sz]);
-            }
+            digester.digest_update(&bootstrap_data);
             let name = digester.digest_finalize().to_string();
             bootstrap_ctx.writer.finalize(Some(name.clone()))?;
             *bootstrap_storage = Some(ArtifactStorage::SingleFile(p.join(name)));

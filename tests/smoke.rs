@@ -341,7 +341,7 @@ fn test_inline(rafs_version: &str) {
     let mut builder = builder::new(&work_dir, "oci");
     builder.make_lower();
     builder.build_inline_lower(rafs_version);
-    builder.check_inline_layout();
+    builder.check_inline_layout(rafs_version);
 }
 
 #[test]

@@ -253,7 +253,7 @@ impl BlobMetaHeaderOndisk {
     }
 
     /// Set flag indicating whether the blob compression information data is stored in a separate
-    /// file or embedded in the blob itserlf.
+    /// file or embedded in the blob itself.
     pub fn set_ci_separate(&mut self, enable: bool) {
         if enable {
             self.s_features |= BLOB_META_FEATURE_SEPARATE;
@@ -340,7 +340,7 @@ impl BlobMetaInfo {
             .open(&meta_path)
             .map_err(|err| {
                 einval!(format!(
-                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    "failed to open/create blob meta file {:?}: {:?}",
                     meta_path, err
                 ))
             })?;
@@ -1526,7 +1526,6 @@ pub(crate) mod tests {
             0xa1290,
             compress::Algorithm::None as u32,
         );
-        // blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
@@ -1586,7 +1585,6 @@ pub(crate) mod tests {
             0xa1290,
             compress::Algorithm::None as u32,
         );
-        // blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
@@ -1650,7 +1648,6 @@ pub(crate) mod tests {
             0xa1290,
             compress::Algorithm::None as u32,
         );
-        // blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);

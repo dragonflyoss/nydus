@@ -5,6 +5,7 @@
 //! Struct to maintain context information for the image builder.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
@@ -154,9 +155,9 @@ impl RafsIoWrite for ArtifactMemoryWriter {
         &self.0
     }
 
-    fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
         self.0.set_position(0);
-        Ok(&mut self.0)
+        Ok(Cow::Borrowed(self.0.get_ref().as_slice()))
     }
 }
 
@@ -187,10 +188,14 @@ impl RafsIoWrite for ArtifactFileWriter {
         self.0.finalize(name)
     }
 
-    fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
         self.0.file.flush()?;
         self.0.reader.seek_offset(0)?;
-        Ok(&mut self.0.reader)
+
+        let mut buf = Vec::new();
+        self.0.reader.read_to_end(&mut buf)?;
+
+        Ok(Cow::Owned(buf))
     }
 }
 
@@ -298,7 +303,7 @@ impl ArtifactWriter {
     // data. The advantage is that we do not need to determine the size of the data
     // first, so that we can write the blob data by stream without seek to improve
     // the performance of the blob dump by using fifo.
-    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<()> {
+    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<Header> {
         debug!("dump rafs blob tar header {} {}", name, size);
         let mut header = Header::new_gnu();
         header.set_path(Path::new(name))?;
@@ -308,7 +313,7 @@ impl ArtifactWriter {
         // in golang can correctly parse the header.
         header.set_cksum();
         self.write_all(header.as_bytes())?;
-        Ok(())
+        Ok(header)
     }
 
     /// Finalize the metadata/data blob.
@@ -738,6 +743,8 @@ impl BlobManager {
                         blob_features,
                         flags,
                         ctx.rafs_blob_digest,
+                        ctx.rafs_blob_toc_digest,
+                        ctx.rafs_blob_size,
                         ctx.blob_meta_header,
                     );
                 }

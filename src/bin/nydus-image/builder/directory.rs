@@ -7,7 +7,7 @@ use std::fs::DirEntry;
 
 use anyhow::{Context, Result};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, Builder};
+use crate::builder::{build_bootstrap, dump_bootstrap, dump_toc, Builder};
 use crate::core::blob::Blob;
 use crate::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
@@ -166,6 +166,11 @@ impl Builder for DirectoryBuilder {
             },
             "dump_bootstrap"
         )?;
+
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
+            dump_toc(ctx, blob_ctx, blob_meta_writer)?;
+        }
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }

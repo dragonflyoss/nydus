@@ -1466,14 +1466,6 @@ impl RafsV6Blob {
             return false;
         }
 
-        if self.rafs_blob_toc_digest != [0u8; 32] {
-            error!(
-                "RafsV6Blob: idx {} invalid rafs_blob_toc_digest",
-                blob_index
-            );
-            return false;
-        }
-
         let meta_features = u32::from_le(self.meta_features);
         if meta_features & !BLOB_META_FEATURE_MASK != 0 {
             error!(
@@ -1602,6 +1594,8 @@ impl RafsV6BlobTable {
         blob_features: BlobFeatures,
         flags: RafsSuperFlags,
         rafs_blob_digest: [u8; 32],
+        rafs_blob_toc_digest: [u8; 32],
+        rafs_blob_size: u64,
         header: BlobMetaHeaderOndisk,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
@@ -1626,6 +1620,8 @@ impl RafsV6BlobTable {
             header.ci_compressor() as u32,
         );
         blob_info.set_rafs_blob_digest(rafs_blob_digest);
+        blob_info.set_rafs_blob_toc_digest(rafs_blob_toc_digest);
+        blob_info.set_rafs_blob_size(rafs_blob_size);
 
         self.entries.push(Arc::new(blob_info));
 

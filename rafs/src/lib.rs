@@ -38,6 +38,7 @@ extern crate nydus_error;
 extern crate nydus_storage as storage;
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::File;
 use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
@@ -155,10 +156,10 @@ pub trait RafsIoWrite: Write + Seek + 'static {
         Ok(())
     }
 
-    /// Get a reader to fetch all data written.
+    /// Return a slice to get all data written.
     ///
-    /// No more data should be written after calling as_reader().
-    fn as_reader(&mut self) -> Result<&mut dyn Read> {
+    /// No more data should be written after calling as_bytes().
+    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
         unimplemented!()
     }
 }

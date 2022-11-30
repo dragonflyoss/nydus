@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -29,7 +28,7 @@ use tar::{Archive, Entry, EntryType, Header};
 
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
-use nydus_rafs::metadata::layout::{toc, RafsXAttrs};
+use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
@@ -39,12 +38,11 @@ use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, ByteSize};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, Builder};
+use crate::builder::{build_bootstrap, dump_bootstrap, dump_toc, Builder};
 use crate::core::blob::Blob;
 use crate::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
-use crate::core::feature::Feature;
 use crate::core::node::{Node, Overlay};
 use crate::core::tree::Tree;
 
@@ -567,21 +565,7 @@ impl Builder for TarballBuilder {
 
         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
             let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
-            if let Some(blob_meta_writer) = blob_meta_writer {
-                if ctx.inline_bootstrap && ctx.features.enable(Feature::BlobToc) {
-                    let data = blob_ctx.entry_list.as_bytes();
-                    let toc_offset = blob_meta_writer.pos()?;
-                    let toc_size = data.len() as u64;
-                    debug!(
-                        "dump rafs blob: {} {} {}",
-                        toc::ENTRY_TOC,
-                        toc_offset,
-                        toc_size
-                    );
-                    blob_meta_writer.write(data)?;
-                    blob_meta_writer.write_tar_header(toc::ENTRY_TOC, toc_size)?;
-                }
-            }
+            dump_toc(ctx, blob_ctx, blob_meta_writer)?;
         }
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
