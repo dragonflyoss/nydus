@@ -29,7 +29,6 @@ $ sudo tee /etc/nydusd-config.json > /dev/null << EOF
     "backend": {
       "type": "registry",
       "config": {
-        // Registry url scheme, leave empty to automatically detect, otherwise specify to https or http.
         "scheme": "",
         "skip_verify": false,
         "timeout": 5,
@@ -59,7 +58,7 @@ EOF
 
 Note:
 
-- You might have to change the scheme from `http` to `https` according to you registry configuration.
+- The `scheme` is registry url scheme, leave empty to automatically detect, otherwise specify to `https` or `http` according to your registry server configuration.
 - The `auth` is base64 encoded `username:password`. It is required by `nydusd` to lazily pull image data from registry which is authentication enabled.
 - `containerd-nydus-grpc` will automatically read docker login auth from the configuration `$HOME/.docker/config.json`, otherwise please copy it to replace `YOUR_LOGIN_AUTH=`.
 
