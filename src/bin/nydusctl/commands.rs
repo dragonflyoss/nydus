@@ -58,39 +58,55 @@ impl CommandCache {
         let metrics = client.get("v1/metrics/blobcache").await?;
         let m = metrics.as_object().unwrap();
 
+        let prefetch_duration = m["prefetch_end_time_secs"].as_f64().unwrap()
+            + m["prefetch_end_time_millis"].as_f64().unwrap() / 1000.0
+            - (m["prefetch_begin_time_secs"].as_f64().unwrap()
+                + m["prefetch_begin_time_millis"].as_f64().unwrap() / 1000.0);
+
+        let prefetch_data_amount = m["prefetch_data_amount"].as_f64().unwrap();
+
         if raw {
             println!("{}", metrics);
         } else {
             print!(
                 r#"
-Partial Hits:           {partial_hits}
-Whole Hits:             {whole_hits}
-Total Read:             {total_read}
-Directory:              {directory}
-Files:                  {files}
-Prefetch Workers:       {workers}
-Prefetch Amount:        {prefetch_amount} = {prefetch_amount_kb} KB
-Prefetch Requests:      {requests}
-Prefetch Average Size:  {avg_prefetch_size} Bytes
-Prefetch Unmerged:      {unmerged_blocks}
-Persister Buffer:       {buffered}
+Partial Hits:               {partial_hits}
+Whole Hits:                 {whole_hits}
+Total Read:                 {total_read}
+Directory:                  {directory}
+Files:                      {files}
+Persister Buffer:           {buffered}
+
+Prefetch Workers:           {workers}
+Prefetch Amount:            {prefetch_amount} = {prefetch_amount_kb} KB
+Prefetch Requests:          {requests}
+Prefetch Average Size:      {avg_prefetch_size} Bytes
+Prefetch Duration:          {prefetch_duration} Seconds
+Prefetch Bandwidth:         {prefetch_bandwidth} MB/S
+Prefetch Request Latency:   {prefetch_request_latency} Seconds
+Prefetch Unmerged:          {unmerged_blocks}
 "#,
                 partial_hits = m["partial_hits"],
                 whole_hits = m["whole_hits"],
                 total_read = m["total"],
-                prefetch_amount = m["prefetch_data_amount"],
-                prefetch_amount_kb = m["prefetch_data_amount"].as_u64().unwrap() / 1024,
+                prefetch_amount = prefetch_data_amount,
+                prefetch_amount_kb = prefetch_data_amount / 1024.0,
                 files = m["underlying_files"],
                 directory = m["store_path"],
-                requests = m["prefetch_mr_count"],
+                requests = m["prefetch_requests_count"],
                 avg_prefetch_size = m["prefetch_data_amount"]
                     .as_u64()
                     .unwrap()
-                    .checked_div(m["prefetch_mr_count"].as_u64().unwrap())
+                    .checked_div(m["prefetch_requests_count"].as_u64().unwrap())
                     .unwrap_or_default(),
                 workers = m["prefetch_workers"],
                 unmerged_blocks = m["prefetch_unmerged_chunks"],
                 buffered = m["buffered_backend_size"],
+                prefetch_duration = prefetch_duration,
+                prefetch_bandwidth = prefetch_data_amount / 1024.0 / 1024.0 / prefetch_duration,
+                prefetch_request_latency = m["prefetch_cumulative_time_millis"].as_f64().unwrap()
+                    / m["prefetch_requests_count"].as_f64().unwrap()
+                    / 1000.0
             );
         }
 
