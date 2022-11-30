@@ -29,7 +29,8 @@ $ sudo tee /etc/nydusd-config.json > /dev/null << EOF
     "backend": {
       "type": "registry",
       "config": {
-        "scheme": "http",
+        // Registry url scheme, leave empty to automatically detect, otherwise specify to https or http.
+        "scheme": "",
         "skip_verify": false,
         "timeout": 5,
         "connect_timeout": 5,
