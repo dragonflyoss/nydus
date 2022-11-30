@@ -186,16 +186,6 @@ struct RegistryState {
     cached_bearer_auth: ArcSwapOption<BearerAuth>,
 }
 
-fn needs_fallback_http(e: &dyn Error) -> bool {
-    match e.source() {
-        Some(err) => match err.source() {
-            Some(err) => err.to_string().contains("error:1408F10B"),
-            None => false,
-        },
-        None => false,
-    }
-}
-
 impl RegistryState {
     fn url(&self, path: &str, query: &[&str]) -> std::result::Result<String, ParseError> {
         let path = if query.is_empty() {
@@ -208,6 +198,29 @@ impl RegistryState {
         let url = url.join(path.as_str())?;
 
         Ok(url.to_string())
+    }
+
+    fn needs_fallback_http(&self, e: &dyn Error) -> bool {
+        match e.source() {
+            Some(err) => match err.source() {
+                Some(err) => {
+                    if !self.scheme.0.load(Ordering::Relaxed) {
+                        return false;
+                    }
+                    let msg = err.to_string().to_lowercase();
+                    // As far as we can observe, if we try to establish a tls connection
+                    // with the http registry server, we will encounter this type of error:
+                    // https://github.com/openssl/openssl/blob/6b3d28757620e0781bb1556032bb6961ee39af63/crypto/err/openssl.txt#L1574
+                    let fallback = msg.contains("wrong version number");
+                    if fallback {
+                        warn!("fallback to http due to tls connection error: {}", err);
+                    }
+                    fallback
+                }
+                None => false,
+            },
+            None => false,
+        }
     }
 
     /// Request registry authentication server to get bearer token
@@ -336,9 +349,7 @@ impl RegistryState {
     }
 
     fn fallback_http(&self) {
-        if self.scheme.0.load(Ordering::Relaxed) {
-            self.scheme.0.store(false, Ordering::Relaxed);
-        }
+        self.scheme.0.store(false, Ordering::Relaxed);
     }
 }
 
@@ -532,7 +543,7 @@ impl RegistryReader {
             ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
-                    if needs_fallback_http(&e) =>
+                    if self.state.needs_fallback_http(&e) =>
                 {
                     self.state.fallback_http();
                     let url = self
@@ -620,7 +631,7 @@ impl BlobReader for RegistryReader {
             match self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
-                    if needs_fallback_http(&e) =>
+                    if self.state.needs_fallback_http(&e) =>
                 {
                     self.state.fallback_http();
                     let url = self
