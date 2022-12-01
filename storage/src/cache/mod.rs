@@ -145,10 +145,10 @@ pub trait BlobCache: Send + Sync {
     fn blob_compressed_size(&self) -> Result<u64>;
 
     /// Get data compression algorithm to handle chunks in the blob.
-    fn compressor(&self) -> compress::Algorithm;
+    fn blob_compressor(&self) -> compress::Algorithm;
 
     /// Get message digest algorithm to handle chunks in the blob.
-    fn digester(&self) -> digest::Algorithm;
+    fn blob_digester(&self) -> digest::Algorithm;
 
     /// Check whether the cache object is for an stargz image with legacy chunk format.
     fn is_legacy_stargz(&self) -> bool;
@@ -325,7 +325,8 @@ pub trait BlobCache: Send + Sync {
         is_compressed: bool,
     ) -> Result<()> {
         if is_compressed {
-            let ret = compress::decompress(raw_buffer, buffer, self.compressor()).map_err(|e| {
+            let compressor = self.blob_compressor();
+            let ret = compress::decompress(raw_buffer, buffer, compressor).map_err(|e| {
                 error!("failed to decompress chunk: {}", e);
                 e
             })?;
@@ -351,7 +352,7 @@ pub trait BlobCache: Send + Sync {
             Err(eio!("uncompressed size and buffer size doesn't match"))
         } else if (self.need_validation() || force_validation)
             && !self.is_legacy_stargz()
-            && !check_digest(buffer, chunk.chunk_id(), self.digester())
+            && !check_digest(buffer, chunk.chunk_id(), self.blob_digester())
         {
             Err(eio!("data digest value doesn't match"))
         } else {

@@ -58,11 +58,11 @@ impl BlobCache for DummyCache {
         self.reader.blob_size().map_err(|e| eother!(e))
     }
 
-    fn compressor(&self) -> compress::Algorithm {
+    fn blob_compressor(&self) -> compress::Algorithm {
         self.compressor
     }
 
-    fn digester(&self) -> digest::Algorithm {
+    fn blob_digester(&self) -> digest::Algorithm {
         self.digester
     }
 

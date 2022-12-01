@@ -12,7 +12,6 @@ use std::sync::{Arc, RwLock};
 use tokio::runtime::Runtime;
 
 use nydus_api::CacheConfigV2;
-use nydus_utils::compress;
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
@@ -36,7 +35,7 @@ pub struct FileCacheMgr {
     work_dir: String,
     validate: bool,
     disable_indexed_map: bool,
-    is_compressed: bool,
+    cache_raw_data: bool,
     closed: Arc<AtomicBool>,
 }
 
@@ -64,7 +63,7 @@ impl FileCacheMgr {
             work_dir: work_dir.to_owned(),
             disable_indexed_map: blob_cfg.disable_indexed_map,
             validate: config.cache_validate,
-            is_compressed: config.cache_compressed,
+            cache_raw_data: config.cache_compressed,
             closed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -193,15 +192,12 @@ impl FileCacheEntry {
 
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let blob_uncompressed_size = blob_info.uncompressed_size();
-        let compressor = blob_info.compressor();
-        let digester = blob_info.digester();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
-        let is_compressed = mgr.is_compressed && compressor != compress::Algorithm::None;
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let need_validation = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
         trace!(
-            "filecache entry: compressed {}, direct {}, legacy_stargz {}, zran {}",
-            mgr.is_compressed,
+            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, zran {}",
+            mgr.cache_raw_data,
             is_direct_chunkmap,
             is_legacy_stargz,
             is_zran,
@@ -209,7 +205,7 @@ impl FileCacheEntry {
 
         // Set cache file to its expected size.
         let file_size = file.metadata()?.len();
-        let cached_file_size = if is_compressed {
+        let cached_file_size = if mgr.cache_raw_data {
             blob_info.compressed_size()
         } else {
             blob_info.uncompressed_size()
@@ -245,10 +241,8 @@ impl FileCacheEntry {
 
             blob_compressed_size,
             blob_uncompressed_size,
-            compressor,
-            digester,
             is_get_blob_object_supported,
-            is_compressed,
+            is_raw_data: mgr.cache_raw_data,
             is_direct_chunkmap,
             is_legacy_stargz,
             is_zran,
