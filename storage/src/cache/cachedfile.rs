@@ -132,7 +132,7 @@ impl FileCacheEntry {
         let size = if blob_info.is_legacy_stargz() {
             reader.blob_size().map_err(|e| einval!(e))?
         } else {
-            0
+            blob_info.compressed_size()
         };
 
         Ok(size)
