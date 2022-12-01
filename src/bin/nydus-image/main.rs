@@ -337,6 +337,24 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     arg_output_json.clone(),
                 )
                 .arg(
+                    Arg::new("blob-digests")
+                    .long("blob-digests")
+                        .required(false)
+                        .help("rafs blob digest list separated by comma"),
+                )
+                .arg(
+                    Arg::new("blob-toc-digests")
+                    .long("blob-toc-digests")
+                        .required(false)
+                        .help("rafs blob toc digest list separated by comma"),
+                )
+                .arg(
+                    Arg::new("blob-sizes")
+                    .long("blob-sizes")
+                        .required(false)
+                        .help("rafs blob size list separated by comma"),
+                )
+                .arg(
                     Arg::new("SOURCE")
                         .help("bootstrap paths (allow one or more)")
                         .required(true)
@@ -768,6 +786,27 @@ impl Command {
             .get_many::<String>("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
+        let blob_digests: Option<Vec<String>> =
+            matches.get_one::<String>("blob-digests").map(|list| {
+                list.split(",")
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
+        let blob_toc_digests: Option<Vec<String>> =
+            matches.get_one::<String>("blob-toc-digests").map(|list| {
+                list.split(",")
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
+        let blob_sizes: Option<Vec<u64>> = matches.get_one::<String>("blob-sizes").map(|list| {
+            list.split(",")
+                .map(|item| {
+                    item.trim()
+                        .parse::<u64>()
+                        .expect(&format!("invalid number {} in --blob-sizes option", item))
+                })
+                .collect()
+        });
         let target_bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let chunk_dict_path = if let Some(arg) = matches.get_one::<String>("chunk-dict") {
             Some(parse_chunk_dict_arg(arg)?)
@@ -781,6 +820,9 @@ impl Command {
         let output = Merger::merge(
             &mut ctx,
             source_bootstrap_paths,
+            blob_digests,
+            blob_toc_digests,
+            blob_sizes,
             target_bootstrap_path,
             chunk_dict_path,
         )?;

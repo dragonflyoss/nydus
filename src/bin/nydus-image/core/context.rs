@@ -378,8 +378,8 @@ pub struct BlobContext {
     /// Whether the blob is from chunk dict.
     pub chunk_source: ChunkSource,
 
-    // SHA256 digest of the blob meta header (only valid in merged bootstrap).
-    pub rafs_blob_header_digest: [u8; 32],
+    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    pub rafs_blob_toc_digest: [u8; 32],
     // SHA256 digest of the rafs blob (only valid in merged bootstrap).
     pub rafs_blob_digest: [u8; 32],
     // Size of the rafs blob (only valid in merged bootstrap).
@@ -413,7 +413,7 @@ impl BlobContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_source: ChunkSource::Build,
 
-            rafs_blob_header_digest: [0u8; 32],
+            rafs_blob_toc_digest: [0u8; 32],
             rafs_blob_digest: [0u8; 32],
             rafs_blob_size: 0,
 

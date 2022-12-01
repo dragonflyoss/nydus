@@ -1348,7 +1348,9 @@ impl RafsV6Blob {
             u64::from_le(self.ci_uncompressed_size),
             u32::from_le(self.ci_compressor),
         );
+        blob_info.set_rafs_blob_toc_digest(self.rafs_blob_toc_digest);
         blob_info.set_rafs_blob_digest(self.rafs_blob_digest);
+        blob_info.set_rafs_blob_size(self.rafs_blob_size);
 
         Ok(blob_info)
     }
@@ -1378,9 +1380,9 @@ impl RafsV6Blob {
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
             ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
 
-            rafs_blob_toc_digest: [0u8; 32],
+            rafs_blob_toc_digest: blob_info.rafs_blob_toc_digest().clone(),
             rafs_blob_digest: blob_info.rafs_blob_digest().clone(),
-            rafs_blob_size: 0,
+            rafs_blob_size: blob_info.rafs_blob_size(),
 
             reserved2: [0u8; 48],
         })
