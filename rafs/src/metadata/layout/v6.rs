@@ -1380,8 +1380,8 @@ impl RafsV6Blob {
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
             ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
 
-            rafs_blob_toc_digest: blob_info.rafs_blob_toc_digest().clone(),
-            rafs_blob_digest: blob_info.rafs_blob_digest().clone(),
+            rafs_blob_toc_digest: *blob_info.rafs_blob_toc_digest(),
+            rafs_blob_digest: *blob_info.rafs_blob_digest(),
             rafs_blob_size: blob_info.rafs_blob_size(),
 
             reserved2: [0u8; 48],
@@ -1494,14 +1494,12 @@ impl RafsV6Blob {
             return false;
         }
 
-        if meta_features & BLOB_META_FEATURE_SEPARATE != 0 {
-            if ci_offset != 0 {
-                error!(
-                    "RafsV6Blob: idx {} invalid fields for separate CI, ci_offset {:x}",
-                    blob_index, ci_offset
-                );
-                return false;
-            }
+        if meta_features & BLOB_META_FEATURE_SEPARATE != 0 && ci_offset != 0 {
+            error!(
+                "RafsV6Blob: idx {} invalid fields for separate CI, ci_offset {:x}",
+                blob_index, ci_offset
+            );
+            return false;
         }
 
         let count = chunk_count as u64;

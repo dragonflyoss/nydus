@@ -107,13 +107,13 @@ impl fmt::Display for ConversionType {
 }
 
 impl ConversionType {
-    pub fn to_ref(&self) -> bool {
-        match self {
+    pub fn is_to_ref(&self) -> bool {
+        matches!(
+            self,
             ConversionType::EStargzToRef
-            | ConversionType::EStargzIndexToRef
-            | ConversionType::TargzToRef => true,
-            _ => false,
-        }
+                | ConversionType::EStargzIndexToRef
+                | ConversionType::TargzToRef
+        )
     }
 }
 
@@ -445,7 +445,7 @@ impl BlobContext {
         blob_ctx.compressed_blob_size = blob.compressed_size();
         blob_ctx.chunk_size = blob.chunk_size();
         blob_ctx.chunk_source = chunk_source;
-        blob_ctx.rafs_blob_digest = blob.rafs_blob_digest().clone();
+        blob_ctx.rafs_blob_digest = *blob.rafs_blob_digest();
         blob_ctx.blob_meta_header.set_4k_aligned(ctx.aligned_chunk);
 
         if blob.meta_ci_is_valid() {

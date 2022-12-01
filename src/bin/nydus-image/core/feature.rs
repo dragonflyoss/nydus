@@ -26,7 +26,7 @@ impl Features {
         if features.is_empty() {
             return Ok(list);
         }
-        for feat in features.split(",") {
+        for feat in features.split(',') {
             let feature = Feature::try_from(feat.trim())?;
             list.0.insert(feature);
         }

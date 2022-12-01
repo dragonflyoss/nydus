@@ -788,22 +788,22 @@ impl Command {
             .unwrap();
         let blob_digests: Option<Vec<String>> =
             matches.get_one::<String>("blob-digests").map(|list| {
-                list.split(",")
+                list.split(',')
                     .map(|item| item.trim().to_string())
                     .collect()
             });
         let blob_toc_digests: Option<Vec<String>> =
             matches.get_one::<String>("blob-toc-digests").map(|list| {
-                list.split(",")
+                list.split(',')
                     .map(|item| item.trim().to_string())
                     .collect()
             });
         let blob_sizes: Option<Vec<u64>> = matches.get_one::<String>("blob-sizes").map(|list| {
-            list.split(",")
+            list.split(',')
                 .map(|item| {
                     item.trim()
                         .parse::<u64>()
-                        .expect(&format!("invalid number {} in --blob-sizes option", item))
+                        .expect("invalid number in --blob-sizes option")
                 })
                 .collect()
         });

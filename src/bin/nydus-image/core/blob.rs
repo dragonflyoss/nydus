@@ -119,7 +119,7 @@ impl Blob {
         // Write blob metadata to the data blob itself.
         let compressor = if ctx.blob_meta_storage.is_some() {
             // FIXME: we still need to support compressed blob meta for estargztoc-ref conversion.
-            if ctx.conversion_type.to_ref()
+            if ctx.conversion_type.is_to_ref()
                 && ctx.conversion_type != ConversionType::EStargzIndexToRef
             {
                 // Forcibly use zstd for better compression ratio.
@@ -132,7 +132,7 @@ impl Blob {
             ctx.compressor
         };
 
-        let mut header = blob_ctx.blob_meta_header.clone();
+        let mut header = blob_ctx.blob_meta_header;
         let blob_meta_info = &blob_ctx.blob_meta_info;
         let ci_data = blob_meta_info.as_byte_slice();
         let uncompressed_data = if ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0 {

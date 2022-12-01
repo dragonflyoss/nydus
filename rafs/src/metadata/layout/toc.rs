@@ -82,6 +82,12 @@ pub struct EntryList {
     entries: Vec<Entry>,
 }
 
+impl Default for EntryList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EntryList {
     pub fn new() -> Self {
         Self {
