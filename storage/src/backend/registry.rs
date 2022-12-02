@@ -4,8 +4,10 @@
 
 //! Storage backend driver to access blobs on container image registry.
 use std::collections::HashMap;
-use std::io::{Error, Read, Result};
-use std::sync::atomic::Ordering;
+use std::error::Error;
+use std::fmt::Display;
+use std::io::{Read, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,7 +45,7 @@ pub enum RegistryError {
     Scheme(String),
     Auth(String),
     ResponseHead(String),
-    Response(Error),
+    Response(std::io::Error),
     Transport(reqwest::Error),
 }
 
@@ -134,9 +136,27 @@ enum Auth {
     Bearer(BearerAuth),
 }
 
+pub struct Scheme(AtomicBool);
+
+impl Scheme {
+    fn new(value: bool) -> Self {
+        Scheme(AtomicBool::new(value))
+    }
+}
+
+impl Display for Scheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.load(Ordering::Relaxed) {
+            write!(f, "https")
+        } else {
+            write!(f, "http")
+        }
+    }
+}
+
 struct RegistryState {
     // HTTP scheme like: https, http
-    scheme: String,
+    scheme: Scheme,
     host: String,
     // Image repo name like: library/ubuntu
     repo: String,
@@ -178,6 +198,29 @@ impl RegistryState {
         let url = url.join(path.as_str())?;
 
         Ok(url.to_string())
+    }
+
+    fn needs_fallback_http(&self, e: &dyn Error) -> bool {
+        match e.source() {
+            Some(err) => match err.source() {
+                Some(err) => {
+                    if !self.scheme.0.load(Ordering::Relaxed) {
+                        return false;
+                    }
+                    let msg = err.to_string().to_lowercase();
+                    // As far as we can observe, if we try to establish a tls connection
+                    // with the http registry server, we will encounter this type of error:
+                    // https://github.com/openssl/openssl/blob/6b3d28757620e0781bb1556032bb6961ee39af63/crypto/err/openssl.txt#L1574
+                    let fallback = msg.contains("wrong version number");
+                    if fallback {
+                        warn!("fallback to http due to tls connection error: {}", err);
+                    }
+                    fallback
+                }
+                None => false,
+            },
+            None => false,
+        }
     }
 
     /// Request registry authentication server to get bearer token
@@ -303,6 +346,10 @@ impl RegistryState {
             }
             _ => None,
         }
+    }
+
+    fn fallback_http(&self) {
+        self.scheme.0.store(false, Ordering::Relaxed);
     }
 }
 
@@ -487,8 +534,28 @@ impl RegistryReader {
                 return self._try_read(buf, offset, false);
             }
         } else {
-            resp =
-                self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?;
+            resp = match self.request::<&[u8]>(
+                Method::GET,
+                url.as_str(),
+                None,
+                headers.clone(),
+                false,
+            ) {
+                Ok(res) => res,
+                Err(RegistryError::Request(ConnectionError::Common(e)))
+                    if self.state.needs_fallback_http(&e) =>
+                {
+                    self.state.fallback_http();
+                    let url = self
+                        .state
+                        .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
+                        .map_err(RegistryError::Url)?;
+                    self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
             let status = resp.status();
 
             // Handle redirect request and cache redirect url
@@ -559,8 +626,24 @@ impl BlobReader for RegistryReader {
             .state
             .url(&format!("/blobs/sha256:{}", self.blob_id), &[])
             .map_err(RegistryError::Url)?;
+
         let resp =
-            self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?;
+            match self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true) {
+                Ok(res) => res,
+                Err(RegistryError::Request(ConnectionError::Common(e)))
+                    if self.state.needs_fallback_http(&e) =>
+                {
+                    self.state.fallback_http();
+                    let url = self
+                        .state
+                        .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
+                        .map_err(RegistryError::Url)?;
+                    self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?
+                }
+                Err(e) => {
+                    return Err(BackendError::Registry(e));
+                }
+            };
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)
@@ -620,8 +703,14 @@ impl Registry {
             Cache::new(String::new())
         };
 
+        let scheme = if !config.scheme.is_empty() && config.scheme == "http" {
+            Scheme::new(false)
+        } else {
+            Scheme::new(true)
+        };
+
         let state = Arc::new(RegistryState {
-            scheme: config.scheme,
+            scheme,
             host: config.host,
             repo: config.repo,
             auth,
@@ -796,8 +885,8 @@ mod tests {
 
     #[test]
     fn test_state_url() {
-        let mut state = RegistryState {
-            scheme: "http".to_string(),
+        let state = RegistryState {
+            scheme: Scheme::new(false),
             host: "alibaba-inc.com".to_string(),
             repo: "nydus".to_string(),
             auth: None,
@@ -820,9 +909,6 @@ mod tests {
             state.url("image", &[]).unwrap(),
             "http://alibaba-inc.com/v2/nydusimage".to_owned()
         );
-
-        state.scheme = "unknown_schema".to_owned();
-        assert!(state.url("image", &[]).is_err());
     }
 
     #[test]
