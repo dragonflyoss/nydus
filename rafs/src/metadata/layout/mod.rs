@@ -34,6 +34,7 @@ pub type XattrName = Vec<u8>;
 /// Type for filesystem xattr attribute value.
 pub type XattrValue = Vec<u8>;
 
+pub mod toc;
 pub mod v5;
 pub mod v6;
 

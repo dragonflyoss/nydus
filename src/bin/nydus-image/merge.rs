@@ -8,6 +8,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use hex::FromHex;
+
 use nydus_rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsVersion};
 
 use crate::core::bootstrap::Bootstrap;
@@ -27,14 +29,36 @@ use crate::core::tree::{MetadataTreeBuilder, Tree};
 pub struct Merger {}
 
 impl Merger {
-    /// Merge assumes the bootstrap name as the hash of whole tar blob.
-    fn get_blob_hash(bootstrap_path: &Path) -> Result<String> {
-        let blob_hash = bootstrap_path
+    /// Merge assumes the bootstrap name is in `$blob_digest` format.
+    fn get_raw_blob_digest(bootstrap_path: &Path) -> Result<String> {
+        let file_name = bootstrap_path
             .file_name()
             .ok_or_else(|| anyhow!("get file name"))?
             .to_str()
             .ok_or_else(|| anyhow!("convert to string"))?;
-        Ok(blob_hash.to_string())
+        Ok(file_name.to_string())
+    }
+
+    fn get_digest_from_list(digests: &Option<Vec<String>>, idx: usize) -> Result<Option<[u8; 32]>> {
+        Ok(if let Some(digests) = &digests {
+            let digest = digests
+                .get(idx)
+                .ok_or_else(|| anyhow!("unmatched digest index {}", idx))?;
+            Some(<[u8; 32]>::from_hex(digest)?)
+        } else {
+            None
+        })
+    }
+
+    fn get_size_from_list(sizes: &Option<Vec<u64>>, idx: usize) -> Result<Option<u64>> {
+        Ok(if let Some(sizes) = &sizes {
+            let size = sizes
+                .get(idx)
+                .ok_or_else(|| anyhow!("unmatched size index {}", idx))?;
+            Some(*size)
+        } else {
+            None
+        })
     }
 
     /// Generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
@@ -45,11 +69,44 @@ impl Merger {
     pub fn merge(
         ctx: &mut BuildContext,
         sources: Vec<PathBuf>,
+        blob_digests: Option<Vec<String>>,
+        blob_toc_digests: Option<Vec<String>>,
+        blob_sizes: Option<Vec<u64>>,
         target: ArtifactStorage,
         chunk_dict: Option<PathBuf>,
     ) -> Result<BuildOutput> {
         if sources.is_empty() {
             bail!("source bootstrap list is empty , at least one bootstrap is required");
+        }
+
+        if blob_digests.is_some() || blob_toc_digests.is_some() || blob_sizes.is_some() {
+            ensure!(
+                blob_digests
+                    .as_ref()
+                    .map(|items| items.len())
+                    .unwrap_or_default()
+                    == sources.len(),
+                "blob digests count is not enough, expected {}",
+                sources.len(),
+            );
+            ensure!(
+                blob_toc_digests
+                    .as_ref()
+                    .map(|items| items.len())
+                    .unwrap_or_default()
+                    == sources.len(),
+                "blob toc digests count is not enough, expected {}",
+                sources.len(),
+            );
+            ensure!(
+                blob_sizes
+                    .as_ref()
+                    .map(|items| items.len())
+                    .unwrap_or_default()
+                    == sources.len(),
+                "blob sizes count is not enough, expected {}",
+                sources.len(),
+            );
         }
 
         // Get the blobs come from chunk dict bootstrap.
@@ -81,7 +138,11 @@ impl Merger {
             ctx.digester = rs.meta.get_digester();
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
 
-            let blob_hash = Self::get_blob_hash(bootstrap_path)?;
+            let raw_blob_digest = Self::get_raw_blob_digest(bootstrap_path)?;
+            let rafs_blob_digest = Self::get_digest_from_list(&blob_digests, layer_idx)?;
+            let rafs_blob_toc_digest = Self::get_digest_from_list(&blob_toc_digests, layer_idx)?;
+            let rafs_blob_size = Self::get_size_from_list(&blob_sizes, layer_idx)?;
+
             let mut blob_idx_map = Vec::new();
             let mut parent_blob_added = false;
             for blob in rs.superblock.get_blob_infos() {
@@ -95,7 +156,16 @@ impl Merger {
                     }
                     // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
                     // runtime, should change it to the hash of whole tar blob.
-                    blob_ctx.blob_id = blob_hash.to_owned();
+                    blob_ctx.blob_id = raw_blob_digest.clone();
+                    if let Some(digest) = rafs_blob_digest {
+                        blob_ctx.rafs_blob_digest = digest;
+                    }
+                    if let Some(digest) = rafs_blob_toc_digest {
+                        blob_ctx.rafs_blob_toc_digest = digest;
+                    }
+                    if let Some(size) = rafs_blob_size {
+                        blob_ctx.rafs_blob_size = size;
+                    }
                     if chunk_size.is_none() {
                         chunk_size = Some(blob_ctx.chunk_size);
                     }

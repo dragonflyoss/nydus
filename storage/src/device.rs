@@ -98,12 +98,13 @@ pub struct BlobInfo {
     meta_ci_compressed_size: u64,
     /// V6: Size of the uncompressed chunk information array.
     meta_ci_uncompressed_size: u64,
-    /// V6: offset of zran context data.
-    meta_ci_zran_offset: u64,
-    /// V6: size of zran context data.
-    meta_ci_zran_size: u64,
-    /// V6: count of Zran context entries
-    meta_ci_zran_count: u32,
+
+    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    rafs_blob_toc_digest: [u8; 32],
+    // SHA256 digest of the rafs blob (only valid in merged bootstrap).
+    rafs_blob_digest: [u8; 32],
+    // Size of the rafs blob (only valid in merged bootstrap).
+    rafs_blob_size: u64,
 
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
@@ -139,9 +140,10 @@ impl BlobInfo {
             meta_ci_offset: 0,
             meta_ci_compressed_size: 0,
             meta_ci_uncompressed_size: 0,
-            meta_ci_zran_count: 0,
-            meta_ci_zran_offset: 0,
-            meta_ci_zran_size: 0,
+
+            rafs_blob_toc_digest: [0u8; 32],
+            rafs_blob_digest: [0u8; 32],
+            rafs_blob_size: 0,
 
             fs_cache_file: None,
         };
@@ -245,13 +247,6 @@ impl BlobInfo {
         self.meta_ci_uncompressed_size = uncompressed_size;
     }
 
-    /// Set ZRan information.
-    pub fn set_blob_meta_zran_info(&mut self, count: u32, offset: u64, size: u64) {
-        self.meta_ci_zran_count = count;
-        self.meta_ci_zran_offset = offset;
-        self.meta_ci_zran_size = size;
-    }
-
     /// Get blob metadata flags.
     pub fn meta_flags(&self) -> u32 {
         self.meta_flags
@@ -285,21 +280,6 @@ impl BlobInfo {
         self.meta_ci_uncompressed_size
     }
 
-    /// Get number of Zran context entries.
-    pub fn meta_ci_zran_count(&self) -> u32 {
-        self.meta_ci_zran_count
-    }
-
-    /// Get offset of Zran context data.
-    pub fn meta_ci_zran_offset(&self) -> u64 {
-        self.meta_ci_zran_offset
-    }
-
-    /// Get size of Zran context data.
-    pub fn meta_ci_zran_size(&self) -> u64 {
-        self.meta_ci_zran_size
-    }
-
     /// Check whether compression metadata is available.
     pub fn meta_ci_is_valid(&self) -> bool {
         self.meta_ci_compressed_size != 0 && self.meta_ci_uncompressed_size != 0
@@ -330,6 +310,30 @@ impl BlobInfo {
         {
             self.is_legacy_stargz = true;
         }
+    }
+
+    pub fn rafs_blob_toc_digest(&self) -> &[u8; 32] {
+        &self.rafs_blob_toc_digest
+    }
+
+    pub fn set_rafs_blob_toc_digest(&mut self, digest: [u8; 32]) {
+        self.rafs_blob_toc_digest = digest;
+    }
+
+    pub fn rafs_blob_digest(&self) -> &[u8; 32] {
+        &self.rafs_blob_digest
+    }
+
+    pub fn set_rafs_blob_digest(&mut self, digest: [u8; 32]) {
+        self.rafs_blob_digest = digest;
+    }
+
+    pub fn rafs_blob_size(&self) -> u64 {
+        self.rafs_blob_size
+    }
+
+    pub fn set_rafs_blob_size(&mut self, size: u64) {
+        self.rafs_blob_size = size;
     }
 }
 

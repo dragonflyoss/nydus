@@ -15,7 +15,7 @@ use std::sync::Arc;
 use lazy_static::lazy_static;
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
-    BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobMetaHeaderOndisk, ZranInflateContext,
+    BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobMetaHeaderOndisk,
     BLOB_META_FEATURE_4K_ALIGNED, BLOB_META_FEATURE_CHUNK_INFO_V2, BLOB_META_FEATURE_MASK,
     BLOB_META_FEATURE_SEPARATE, BLOB_META_FEATURE_ZRAN,
 };
@@ -1249,7 +1249,7 @@ pub fn calculate_nid(offset: u64, meta_size: u64) -> u64 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct RafsV6Blob {
-    // SHA256 blob id in string form.
+    // SHA256 of raw data blob in string form.
     blob_id: [u8; BLOB_SHA256_LEN],
     // Index in the blob table.
     blob_index: u32,
@@ -1277,17 +1277,15 @@ struct RafsV6Blob {
     ci_compressed_size: u64,
     // Size of the uncompressed compression information array.
     ci_uncompressed_size: u64,
-    // SHA256 digest of the compression information array in binary form.
-    ci_digest: [u8; 32],
 
-    // Offset of the ZRan context information array.
-    ci_zran_offset: u64,
-    // Size of the ZRan context information array.
-    ci_zran_size: u64,
-    // Number of the ZRan context information entries.
-    ci_zran_count: u32,
+    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    rafs_blob_toc_digest: [u8; 32],
+    // SHA256 digest of the rafs blob (only valid in merged bootstrap).
+    rafs_blob_digest: [u8; 32],
+    // Size of the rafs blob (only valid in merged bootstrap).
+    rafs_blob_size: u64,
 
-    reserved2: [u8; 68],
+    reserved2: [u8; 48],
 }
 
 impl Default for RafsV6Blob {
@@ -1307,11 +1305,12 @@ impl Default for RafsV6Blob {
             ci_offset: 0u64,
             ci_compressed_size: 0u64,
             ci_uncompressed_size: 0u64,
-            ci_digest: [0u8; 32],
-            ci_zran_offset: 0,
-            ci_zran_size: 0,
-            ci_zran_count: 0,
-            reserved2: [0u8; 68],
+
+            rafs_blob_toc_digest: [0u8; 32],
+            rafs_blob_digest: [0u8; 32],
+            rafs_blob_size: 0,
+
+            reserved2: [0u8; 48],
         }
     }
 }
@@ -1349,13 +1348,9 @@ impl RafsV6Blob {
             u64::from_le(self.ci_uncompressed_size),
             u32::from_le(self.ci_compressor),
         );
-        if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
-            blob_info.set_blob_meta_zran_info(
-                u32::from_le(self.ci_zran_count),
-                u64::from_le(self.ci_zran_offset),
-                u64::from_le(self.ci_zran_size),
-            );
-        }
+        blob_info.set_rafs_blob_toc_digest(self.rafs_blob_toc_digest);
+        blob_info.set_rafs_blob_digest(self.rafs_blob_digest);
+        blob_info.set_rafs_blob_size(self.rafs_blob_size);
 
         Ok(blob_info)
     }
@@ -1384,11 +1379,12 @@ impl RafsV6Blob {
             ci_offset: blob_info.meta_ci_offset().to_le(),
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
             ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
-            ci_digest: [0u8; 32],
-            ci_zran_count: u32::to_le(blob_info.meta_ci_zran_count()),
-            ci_zran_offset: u64::to_le(blob_info.meta_ci_zran_offset()),
-            ci_zran_size: u64::to_le(blob_info.meta_ci_zran_size()),
-            reserved2: [0u8; 68],
+
+            rafs_blob_toc_digest: *blob_info.rafs_blob_toc_digest(),
+            rafs_blob_digest: *blob_info.rafs_blob_digest(),
+            rafs_blob_size: blob_info.rafs_blob_size(),
+
+            reserved2: [0u8; 48],
         })
     }
 
@@ -1472,11 +1468,6 @@ impl RafsV6Blob {
             return false;
         }
 
-        if self.ci_digest != [0u8; 32] {
-            error!("RafsV6Blob: idx {} invalid ci_digest", blob_index);
-            return false;
-        }
-
         let meta_features = u32::from_le(self.meta_features);
         if meta_features & !BLOB_META_FEATURE_MASK != 0 {
             error!(
@@ -1503,15 +1494,11 @@ impl RafsV6Blob {
             return false;
         }
 
-        if meta_features & BLOB_META_FEATURE_SEPARATE != 0 {
-            if ci_offset != 0 || ci_compr_size != ci_uncompr_size {
-                error!("RafsV6Blob: idx {} invalid fields for separate CI, ci_compressed_size {:x},  ci_uncompressed_size {:x}, ci_offset {:x}", blob_index, ci_compr_size, ci_uncompr_size,ci_offset);
-                return false;
-            }
-        } else if ci_offset != compressed_blob_size
-            && ci_offset + ci_compr_size > compressed_blob_size
-        {
-            error!("RafsV6Blob: idx {} invalid fields for embedded CI, ci_compressed_size {:x} + ci_offset {:x} is bigger than blob size {:x}", blob_index, ci_compr_size, ci_offset, compressed_blob_size);
+        if meta_features & BLOB_META_FEATURE_SEPARATE != 0 && ci_offset != 0 {
+            error!(
+                "RafsV6Blob: idx {} invalid fields for separate CI, ci_offset {:x}",
+                blob_index, ci_offset
+            );
             return false;
         }
 
@@ -1523,31 +1510,6 @@ impl RafsV6Blob {
                     error!(
                         "RafsV6Blob: idx {} invalid ci_d_size {}",
                         blob_index, ci_uncompr_size
-                    );
-                    return false;
-                }
-                let zran_count = u32::from_le(self.ci_zran_count);
-                let zran_offset = u64::from_le(self.ci_zran_offset);
-                let zran_size = u64::from_le(self.ci_zran_size);
-                if zran_offset != chunk_count as u64 * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
-                    error!(
-                        "RafsV6Blob: idx {} invalid ci_zran_offset {:x}, should be {:x}",
-                        blob_index,
-                        zran_offset,
-                        chunk_count as u64 * size_of::<BlobChunkInfoV2Ondisk>() as u64
-                    );
-                    return false;
-                }
-                if zran_count as u64 * size_of::<ZranInflateContext>() as u64 > zran_size {
-                    error!(
-                        "RafsV6Blob: idx {} invalid ci_zran_count {:x} and ci_zran_size {:x}",
-                        blob_index, zran_count, zran_size
-                    );
-                    return false;
-                } else if zran_count > RAFS_MAX_CHUNKS_PER_BLOB {
-                    error!(
-                        "RafsV6Blob: idx {} invalid ci_zran_count {:x} is too big",
-                        blob_index, zran_count
                     );
                     return false;
                 }
@@ -1631,6 +1593,9 @@ impl RafsV6BlobTable {
         compressed_size: u64,
         blob_features: BlobFeatures,
         flags: RafsSuperFlags,
+        rafs_blob_digest: [u8; 32],
+        rafs_blob_toc_digest: [u8; 32],
+        rafs_blob_size: u64,
         header: BlobMetaHeaderOndisk,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
@@ -1654,13 +1619,9 @@ impl RafsV6BlobTable {
             header.ci_uncompressed_size(),
             header.ci_compressor() as u32,
         );
-        if header.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
-            blob_info.set_blob_meta_zran_info(
-                header.ci_zran_count(),
-                header.ci_zran_offset(),
-                header.ci_zran_size(),
-            );
-        }
+        blob_info.set_rafs_blob_digest(rafs_blob_digest);
+        blob_info.set_rafs_blob_toc_digest(rafs_blob_toc_digest);
+        blob_info.set_rafs_blob_size(rafs_blob_size);
 
         self.entries.push(Arc::new(blob_info));
 

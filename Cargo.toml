@@ -48,6 +48,7 @@ hyper = "0.14.11"
 rand_core = "0.6.2"
 tar = "0.4.38"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
+hex = "0.4.3"
 
 fuse-backend-rs = "0.10"
 vhost = { version = "0.5.0", features = ["vhost-user-slave"], optional = true }

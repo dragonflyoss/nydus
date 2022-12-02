@@ -87,7 +87,7 @@ pub const BLOB_META_FEATURE_MASK: u32 = 0xf;
 
 /// On disk format for blob meta data header, containing meta information for a data blob.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct BlobMetaHeaderOndisk {
     /// Magic number to identify the blob meta data header.
     s_magic: u32,
@@ -115,6 +115,7 @@ pub struct BlobMetaHeaderOndisk {
     s_ci_zran_size: u64,
     /// Number of entries in the ZRan context information table.
     s_ci_zran_count: u32,
+
     s_reserved: [u8; BLOB_METADATA_V2_RESERVED_SIZE as usize],
     /// Second magic number to identify the blob meta data header.
     s_magic2: u32,
@@ -252,7 +253,7 @@ impl BlobMetaHeaderOndisk {
     }
 
     /// Set flag indicating whether the blob compression information data is stored in a separate
-    /// file or embedded in the blob itserlf.
+    /// file or embedded in the blob itself.
     pub fn set_ci_separate(&mut self, enable: bool) {
         if enable {
             self.s_features |= BLOB_META_FEATURE_SEPARATE;
@@ -323,12 +324,12 @@ impl BlobMetaInfo {
             return Err(einval!("invalid chunk count in blob meta header"));
         }
 
-        let info_size = blob_info.meta_ci_uncompressed_size() as usize;
+        let uncompressed_size = blob_info.meta_ci_uncompressed_size() as usize;
         let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
         trace!(
-            "try to open blob meta file: path {:?} info_size {} chunk_count {}",
+            "try to open blob meta file: path {:?} uncompressed_size {} chunk_count {}",
             meta_path,
-            info_size,
+            uncompressed_size,
             chunk_count
         );
         let enable_write = reader.is_some();
@@ -339,13 +340,13 @@ impl BlobMetaInfo {
             .open(&meta_path)
             .map_err(|err| {
                 einval!(format!(
-                    "failed to open/create blob chunk_map file {:?}: {:?}",
+                    "failed to open/create blob meta file {:?}: {:?}",
                     meta_path, err
                 ))
             })?;
 
-        let aligned_info_size = round_up_4k(info_size);
-        let expected_size = BLOB_METADATA_HEADER_SIZE as usize + aligned_info_size;
+        let aligned_uncompressed_size = round_up_4k(uncompressed_size);
+        let expected_size = BLOB_METADATA_HEADER_SIZE as usize + aligned_uncompressed_size;
         let mut file_size = file.metadata()?.len();
         if file_size == 0 && enable_write {
             file.set_len(expected_size as u64)?;
@@ -360,7 +361,7 @@ impl BlobMetaInfo {
 
         let mut filemap = FileMapState::new(file, 0, expected_size, enable_write)?;
         let base = filemap.validate_range(0, expected_size)?;
-        let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
+        let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_uncompressed_size as usize)?;
         if !Self::validate_header(blob_info, header)? {
             if !enable_write {
                 return Err(enoent!(format!(
@@ -370,29 +371,9 @@ impl BlobMetaInfo {
             }
 
             let buffer = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
-            buffer[info_size..].fill(0);
-            Self::read_metadata(
-                blob_info,
-                reader.as_ref().unwrap(),
-                &mut buffer[..info_size],
-            )?;
+            buffer[0..].fill(0);
+            Self::read_metadata(blob_info, reader.as_ref().unwrap(), buffer)?;
 
-            header.s_features = u32::to_le(blob_info.meta_flags());
-            header.s_ci_compressor = u32::to_le(blob_info.meta_ci_compressor() as u32);
-            header.s_ci_entries = u32::to_le(blob_info.chunk_count());
-            header.s_ci_offset = u64::to_le(blob_info.meta_ci_offset());
-            header.s_ci_compressed_size = u64::to_le(blob_info.meta_ci_compressed_size());
-            header.s_ci_uncompressed_size = u64::to_le(blob_info.meta_ci_uncompressed_size());
-            if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
-                header.s_ci_zran_count = u32::to_le(blob_info.meta_ci_zran_count());
-                header.s_ci_zran_offset = u64::to_le(blob_info.meta_ci_zran_offset());
-                header.s_ci_zran_size = u64::to_le(blob_info.meta_ci_zran_size());
-            }
-            filemap.sync_data()?;
-
-            let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_info_size as usize)?;
-            header.s_magic = u32::to_le(BLOB_METADATA_MAGIC);
-            header.s_magic2 = u32::to_le(BLOB_METADATA_MAGIC);
             assert!(Self::validate_header(blob_info, header).is_ok());
             filemap.sync_data()?;
         }
@@ -411,9 +392,13 @@ impl BlobMetaInfo {
         };
 
         if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
-            let zran_offset = blob_info.meta_ci_zran_offset() as usize;
-            let zran_count = blob_info.meta_ci_zran_count() as usize;
-            let zran_size = zran_count * size_of::<ZranInflateContext>();
+            let header = state
+                .filemap
+                .get_mut::<BlobMetaHeaderOndisk>(aligned_uncompressed_size as usize)?;
+            let zran_offset = header.s_ci_zran_offset as usize;
+            let zran_count = header.s_ci_zran_count as usize;
+            let ci_zran_size = header.s_ci_zran_size as usize;
+            let zran_size = header.s_ci_zran_count as usize * size_of::<ZranInflateContext>();
             let ptr = state.filemap.validate_range(zran_offset, zran_size)?;
             let array = unsafe {
                 Vec::from_raw_parts(
@@ -424,7 +409,7 @@ impl BlobMetaInfo {
             };
             state.zran_info_array = ManuallyDrop::new(array);
 
-            let zran_dict_size = blob_info.meta_ci_zran_size() as usize - zran_size;
+            let zran_dict_size = ci_zran_size - zran_size;
             let ptr = state
                 .filemap
                 .validate_range(zran_offset + zran_size, zran_dict_size)?;
@@ -562,18 +547,20 @@ impl BlobMetaInfo {
                         e
                     ))
                 })?;
-            if size as u64 != blob_info.meta_ci_uncompressed_size() {
+            if size != buffer.len() {
                 return Err(eio!(
                     "failed to read blob metadata from backend(compressor is None)"
                 ));
             }
         } else {
             let compressed_size = blob_info.meta_ci_compressed_size();
-            let mut buf = alloc_buf(compressed_size as usize);
-            let size = reader
+            let uncompressed_size = blob_info.meta_ci_uncompressed_size();
+            let expected_size = (compressed_size + BLOB_METADATA_HEADER_SIZE) as usize;
+            let mut buf = alloc_buf(expected_size);
+            let read_size = reader
                 .read(&mut buf, blob_info.meta_ci_offset())
                 .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
-            if size as u64 != compressed_size {
+            if read_size != expected_size {
                 return Err(eio!("failed to read blob metadata from backend"));
             }
 
@@ -589,14 +576,25 @@ impl BlobMetaInfo {
             // execute the process once when the blob.meta is created for the first
             // time, the memory consumption and performance impact are relatively
             // small.
-            let mut uncom_buf = vec![0u8; buffer.len()];
-            compress::decompress(&buf, &mut uncom_buf, blob_info.meta_ci_compressor()).map_err(
-                |e| {
-                    error!("failed to decompress blob meta data: {}", e);
-                    e
-                },
-            )?;
-            buffer.copy_from_slice(&uncom_buf);
+            let mut uncom_buf = vec![0u8; uncompressed_size as usize];
+            compress::decompress(
+                &buf[0..compressed_size as usize],
+                &mut uncom_buf,
+                blob_info.meta_ci_compressor(),
+            )
+            .map_err(|e| {
+                error!("failed to decompress blob meta data: {}", e);
+                e
+            })?;
+            uncom_buf.resize(round_up_4k(uncompressed_size) as usize, 0);
+            buffer.copy_from_slice(
+                &[
+                    &uncom_buf,
+                    &buf[compressed_size as usize
+                        ..(compressed_size + BLOB_METADATA_HEADER_SIZE) as usize],
+                ]
+                .concat(),
+            );
         }
 
         Ok(())
@@ -629,22 +627,6 @@ impl BlobMetaInfo {
             || u64::from_le(header.s_ci_uncompressed_size) != blob_info.meta_ci_uncompressed_size()
         {
             return Ok(false);
-        } else if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
-            trace!(
-                "blob meta header zran: count {:x}/{:x}, offset {:x}/{:x}, size {:x}/{:x}",
-                u32::from_le(header.s_ci_zran_count),
-                blob_info.meta_ci_zran_count(),
-                u64::from_le(header.s_ci_zran_offset),
-                blob_info.meta_ci_zran_offset(),
-                u64::from_le(header.s_ci_zran_size),
-                blob_info.meta_ci_zran_size()
-            );
-            if u32::from_le(header.s_ci_zran_count) != blob_info.meta_ci_zran_count()
-                || u64::from_le(header.s_ci_zran_offset) != blob_info.meta_ci_zran_offset()
-                || u64::from_le(header.s_ci_zran_size) != blob_info.meta_ci_zran_size()
-            {
-                return Ok(false);
-            }
         }
 
         let chunk_count = blob_info.chunk_count();
@@ -682,20 +664,20 @@ impl BlobMetaInfo {
         }
 
         if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
-            let offset = blob_info.meta_ci_zran_offset();
+            let offset = header.s_ci_zran_offset;
             if offset != (chunk_count as u64) * (size_of::<BlobChunkInfoV2Ondisk>() as u64) {
-                return Err(einval!("ZRan information in blob meta header is invalid!"));
+                return Ok(false);
             }
-            if offset + blob_info.meta_ci_zran_size() > info_size as u64 {
-                return Err(einval!("ZRan information in blob meta header is invalid!"));
+            if offset + header.s_ci_zran_size > info_size as u64 {
+                return Ok(false);
             }
-            let zran_count = blob_info.meta_ci_zran_count() as u64;
+            let zran_count = header.s_ci_zran_count as u64;
             let size = zran_count * size_of::<ZranInflateContext>() as u64;
             if zran_count > chunk_count as u64 {
-                return Err(einval!("count of ZRan context entries is too big!"));
+                return Ok(false);
             }
-            if size > blob_info.meta_ci_zran_size() {
-                return Err(einval!("ZRan information in blob meta header is invalid!"));
+            if size > header.s_ci_zran_size {
+                return Ok(false);
             }
         }
 
@@ -1544,7 +1526,6 @@ pub(crate) mod tests {
             0xa1290,
             compress::Algorithm::None as u32,
         );
-        blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
@@ -1604,7 +1585,6 @@ pub(crate) mod tests {
             0xa1290,
             compress::Algorithm::None as u32,
         );
-        blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
@@ -1668,7 +1648,6 @@ pub(crate) mod tests {
             0xa1290,
             compress::Algorithm::None as u32,
         );
-        blob_info.set_blob_meta_zran_info(0x15, 0xf48, 0xa0348);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);

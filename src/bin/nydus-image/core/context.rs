@@ -5,6 +5,7 @@
 //! Struct to maintain context information for the image builder.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
@@ -20,6 +21,7 @@ use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::toc;
 use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
 use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use nydus_rafs::metadata::layout::RafsBlobTable;
@@ -35,6 +37,7 @@ use nydus_storage::meta::{
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
+use super::feature::Features;
 use super::node::{ChunkSource, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
@@ -103,6 +106,17 @@ impl fmt::Display for ConversionType {
     }
 }
 
+impl ConversionType {
+    pub fn is_to_ref(&self) -> bool {
+        matches!(
+            self,
+            ConversionType::EStargzToRef
+                | ConversionType::EStargzIndexToRef
+                | ConversionType::TargzToRef
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ArtifactStorage {
     // Won't rename user's specification
@@ -130,14 +144,20 @@ impl Default for ArtifactStorage {
 /// data to a byte slice in memory.
 pub struct ArtifactMemoryWriter(Cursor<Vec<u8>>);
 
+impl Default for ArtifactMemoryWriter {
+    fn default() -> Self {
+        Self(Cursor::new(Vec::new()))
+    }
+}
+
 impl RafsIoWrite for ArtifactMemoryWriter {
     fn as_any(&self) -> &dyn Any {
         &self.0
     }
 
-    fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
         self.0.set_position(0);
-        Ok(&mut self.0)
+        Ok(Cow::Borrowed(self.0.get_ref().as_slice()))
     }
 }
 
@@ -168,10 +188,14 @@ impl RafsIoWrite for ArtifactFileWriter {
         self.0.finalize(name)
     }
 
-    fn as_reader(&mut self) -> std::io::Result<&mut dyn Read> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
         self.0.file.flush()?;
         self.0.reader.seek_offset(0)?;
-        Ok(&mut self.0.reader)
+
+        let mut buf = Vec::new();
+        self.0.reader.read_to_end(&mut buf)?;
+
+        Ok(Cow::Owned(buf))
     }
 }
 
@@ -272,14 +296,15 @@ impl ArtifactWriter {
     // The `inline-bootstrap` option merges the blob and bootstrap into one
     // file. We need some header to index the location of the blob and bootstrap,
     // write_tar_header uses tar header that arranges the data as follows:
-    //      blob_data | blob_tar_header | bootstrap_data | bootstrap_tar_header
+
+    // data | tar_header | data | tar_header
+
     // This is a tar-like structure, except that we put the tar header after the
     // data. The advantage is that we do not need to determine the size of the data
     // first, so that we can write the blob data by stream without seek to improve
-    // the performance of the blob dump by using fifo, if we need to read the bootstrap
-    // data quickly, first need to read the 512 bytes tar header from the end of blob
-    // file first, and then seek offset to read bootstrap data.
+    // the performance of the blob dump by using fifo.
     pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<Header> {
+        debug!("dump rafs blob tar header {} {}", name, size);
         let mut header = Header::new_gnu();
         header.set_path(Path::new(name))?;
         header.set_entry_type(EntryType::Regular);
@@ -352,6 +377,15 @@ pub struct BlobContext {
     pub chunk_size: u32,
     /// Whether the blob is from chunk dict.
     pub chunk_source: ChunkSource,
+
+    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    pub rafs_blob_toc_digest: [u8; 32],
+    // SHA256 digest of the rafs blob (only valid in merged bootstrap).
+    pub rafs_blob_digest: [u8; 32],
+    // Size of the rafs blob (only valid in merged bootstrap).
+    pub rafs_blob_size: u64,
+
+    pub entry_list: toc::EntryList,
 }
 
 impl BlobContext {
@@ -378,6 +412,12 @@ impl BlobContext {
             chunk_count: 0,
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_source: ChunkSource::Build,
+
+            rafs_blob_toc_digest: [0u8; 32],
+            rafs_blob_digest: [0u8; 32],
+            rafs_blob_size: 0,
+
+            entry_list: toc::EntryList::new(),
         };
 
         if features & BLOB_META_FEATURE_4K_ALIGNED != 0 {
@@ -405,6 +445,7 @@ impl BlobContext {
         blob_ctx.compressed_blob_size = blob.compressed_size();
         blob_ctx.chunk_size = blob.chunk_size();
         blob_ctx.chunk_source = chunk_source;
+        blob_ctx.rafs_blob_digest = *blob.rafs_blob_digest();
         blob_ctx.blob_meta_header.set_4k_aligned(ctx.aligned_chunk);
 
         if blob.meta_ci_is_valid() {
@@ -421,6 +462,7 @@ impl BlobContext {
             blob_ctx
                 .blob_meta_header
                 .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
+
             blob_ctx.blob_meta_header.set_4k_aligned(true);
             blob_ctx
                 .blob_meta_header
@@ -700,6 +742,9 @@ impl BlobManager {
                         compressed_blob_size,
                         blob_features,
                         flags,
+                        ctx.rafs_blob_digest,
+                        ctx.rafs_blob_toc_digest,
+                        ctx.rafs_blob_size,
                         ctx.blob_meta_header,
                     );
                 }
@@ -731,7 +776,7 @@ impl BootstrapContext {
             Box::new(ArtifactFileWriter(ArtifactWriter::new(storage, fifo)?))
                 as Box<dyn RafsIoWrite>
         } else {
-            Box::new(ArtifactMemoryWriter(Cursor::new(Vec::new()))) as Box<dyn RafsIoWrite>
+            Box::new(ArtifactMemoryWriter::default()) as Box<dyn RafsIoWrite>
         };
         Ok(Self {
             layered,
@@ -854,6 +899,8 @@ pub struct BuildContext {
     pub blob_meta_features: u32,
     pub inline_bootstrap: bool,
     pub has_xattr: bool,
+
+    pub features: Features,
 }
 
 impl BuildContext {
@@ -872,6 +919,7 @@ impl BuildContext {
         blob_storage: Option<ArtifactStorage>,
         blob_meta_storage: Option<ArtifactStorage>,
         inline_bootstrap: bool,
+        features: Features,
     ) -> Self {
         BuildContext {
             blob_id,
@@ -895,6 +943,8 @@ impl BuildContext {
             blob_meta_features: 0,
             inline_bootstrap,
             has_xattr: false,
+
+            features,
         }
     }
 
@@ -931,6 +981,7 @@ impl Default for BuildContext {
             blob_meta_features: 0,
             has_xattr: true,
             inline_bootstrap: false,
+            features: Features::new(),
         }
     }
 }

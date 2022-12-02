@@ -16,6 +16,7 @@ extern crate serde_json;
 extern crate lazy_static;
 
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -40,6 +41,7 @@ use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
+use crate::core::feature::Features;
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::{Prefetch, PrefetchPolicy};
 use crate::core::tree;
@@ -224,8 +226,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("blob-meta")
                         .long("blob-meta")
-                        .help("Path to store generated RAFS data blob compression information")
-                        .conflicts_with("inline-bootstrap"),
+                        .help("Path to store generated RAFS data blob compression information"),
                 )
                 .arg(
                     Arg::new("blob-offset")
@@ -305,6 +306,11 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .value_parser(["oci", "overlayfs", "none"])
                 )
                 .arg(
+                    Arg::new("features")
+                    .long("features")
+                        .help("Set features for conversion")
+                )
+                .arg(
                     arg_prefetch_policy.clone(),
                 )
                 .arg(
@@ -329,6 +335,24 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 )
                 .arg(
                     arg_output_json.clone(),
+                )
+                .arg(
+                    Arg::new("blob-digests")
+                    .long("blob-digests")
+                        .required(false)
+                        .help("rafs blob digest list separated by comma"),
+                )
+                .arg(
+                    Arg::new("blob-toc-digests")
+                    .long("blob-toc-digests")
+                        .required(false)
+                        .help("rafs blob toc digest list separated by comma"),
+                )
+                .arg(
+                    Arg::new("blob-sizes")
+                    .long("blob-sizes")
+                        .required(false)
+                        .help("rafs blob size list separated by comma"),
                 )
                 .arg(
                     Arg::new("SOURCE")
@@ -617,9 +641,9 @@ impl Command {
             | ConversionType::EStargzIndexToRef
             | ConversionType::TargzToRef => {
                 Self::ensure_file(&source_path)?;
-                if inline_bootstrap || blob_stor.is_some() {
+                if blob_stor.is_some() {
                     bail!(
-                        "conversion type '{}' conflicts with '--inline-bootstrap' or '--blob'",
+                        "conversion type '{}' conflicts with '--blob'",
                         conversion_type
                     );
                 }
@@ -659,6 +683,12 @@ impl Command {
             }
         }
 
+        let features = Features::from(
+            matches
+                .get_one::<String>("features")
+                .map(|s| s.as_str())
+                .unwrap_or_default(),
+        )?;
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -673,6 +703,7 @@ impl Command {
             blob_stor,
             blob_meta_stor,
             inline_bootstrap,
+            features,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -755,6 +786,27 @@ impl Command {
             .get_many::<String>("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
+        let blob_digests: Option<Vec<String>> =
+            matches.get_one::<String>("blob-digests").map(|list| {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
+        let blob_toc_digests: Option<Vec<String>> =
+            matches.get_one::<String>("blob-toc-digests").map(|list| {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
+        let blob_sizes: Option<Vec<u64>> = matches.get_one::<String>("blob-sizes").map(|list| {
+            list.split(',')
+                .map(|item| {
+                    item.trim()
+                        .parse::<u64>()
+                        .expect("invalid number in --blob-sizes option")
+                })
+                .collect()
+        });
         let target_bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let chunk_dict_path = if let Some(arg) = matches.get_one::<String>("chunk-dict") {
             Some(parse_chunk_dict_arg(arg)?)
@@ -768,6 +820,9 @@ impl Command {
         let output = Merger::merge(
             &mut ctx,
             source_bootstrap_paths,
+            blob_digests,
+            blob_toc_digests,
+            blob_sizes,
             target_bootstrap_path,
             chunk_dict_path,
         )?;
@@ -1147,11 +1202,12 @@ impl Command {
     }
 
     fn ensure_file<P: AsRef<Path>>(path: P) -> Result<()> {
-        let file = metadata(path.as_ref())
-            .context(format!("failed to access path {:?}", path.as_ref()))?;
+        let file_type = metadata(path.as_ref())
+            .context(format!("failed to access path {:?}", path.as_ref()))?
+            .file_type();
         ensure!(
-            file.is_file(),
-            "specified path must be a regular file: {:?}",
+            file_type.is_file() || file_type.is_fifo(),
+            "specified path must be a regular/fifo file: {:?}",
             path.as_ref()
         );
         Ok(())

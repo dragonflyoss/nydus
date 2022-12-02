@@ -7,6 +7,7 @@ pub(crate) mod blob_compact;
 pub(crate) mod bootstrap;
 pub(crate) mod chunk_dict;
 pub(crate) mod context;
+pub(crate) mod feature;
 pub(crate) mod layout;
 pub(crate) mod node;
 pub(crate) mod prefetch;

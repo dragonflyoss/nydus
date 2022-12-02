@@ -140,7 +140,9 @@ mod tests {
     use crate::backend::BlobReader;
     use crate::device::{BlobFeatures, BlobInfo};
     use crate::meta::tests::DummyBlobReader;
-    use crate::meta::{BlobMetaChunkArray, BlobMetaInfo, BlobMetaState};
+    use crate::meta::{
+        round_up_4k, BlobMetaChunkArray, BlobMetaHeaderOndisk, BlobMetaInfo, BlobMetaState,
+    };
     use crate::utils::alloc_buf;
     use crate::RAFS_MAX_CHUNK_SIZE;
 
@@ -426,6 +428,8 @@ mod tests {
 
         let pos = 0;
         w.write_all(&buf).unwrap();
+        let header = BlobMetaHeaderOndisk::default();
+        w.write_all(header.as_bytes()).unwrap();
 
         let compressed_size = buf.len();
         let uncompressed_size = data.len();
@@ -446,13 +450,14 @@ mod tests {
             compress::Algorithm::Lz4Block as u32,
         );
 
-        let mut buffer = alloc_buf(uncompressed_size);
+        let mut buffer =
+            alloc_buf(round_up_4k(uncompressed_size) + std::mem::size_of::<BlobMetaHeaderOndisk>());
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
         BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
 
-        assert_eq!(buffer, data);
+        assert_eq!(&buffer[0..uncompressed_size], data);
     }
 }

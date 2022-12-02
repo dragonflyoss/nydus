@@ -26,6 +26,7 @@ use crate::core::context::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
     BuildOutput, ConversionType,
 };
+use crate::core::feature::Features;
 use crate::core::node::{Node, WhiteoutSpec};
 use crate::core::tree::Tree;
 
@@ -183,7 +184,7 @@ impl ChunkSet {
         }
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
-        Blob::dump_meta_data(build_ctx, new_blob_ctx, &mut blob_writer)?;
+        Blob::dump_meta_data(build_ctx, new_blob_ctx, blob_writer.as_mut())?;
         let blob_id = new_blob_ctx.blob_id();
         if let Some(writer) = &mut blob_writer {
             writer.finalize(blob_id)?;
@@ -573,6 +574,7 @@ impl BlobCompactor {
             None,
             None,
             false,
+            Features::new(),
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);

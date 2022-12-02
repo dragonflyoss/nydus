@@ -8,9 +8,10 @@ use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
 use nix::sys::stat::{dev_t, mknod, Mode, SFlag};
+use tar::Header;
+
 use nydus_utils::compact::makedev;
 use nydus_utils::exec;
-use tar::Header;
 
 pub struct Builder<'a> {
     builder: String,
@@ -421,34 +422,33 @@ impl<'a> Builder<'a> {
         ).unwrap();
     }
 
-    pub fn check_inline_layout(&self) {
-        let header_size = 512;
+    pub fn check_inline_layout(&self, rafs_version: &str) {
+        let header_size = 512u64;
+
+        let files = if rafs_version == "5" {
+            vec!["image.boot", "image.blob"]
+        } else {
+            vec!["image.boot", "blob.meta", "image.blob"]
+        };
 
         let mut f = File::open(self.work_dir.join("inline.nydus")).unwrap();
-
-        assert!(f.metadata().unwrap().len() > header_size);
-        let mut cur = f.seek(SeekFrom::End(0 - header_size as i64)).unwrap();
-
-        let mut header = Header::new_old();
-        let bs = header.as_mut_bytes();
-
-        f.read_exact(bs).unwrap();
-        assert_eq!(&header.path_bytes().as_ref(), b"image.boot");
-
-        assert!(cur > header.size().unwrap());
-        cur = f
-            .seek(SeekFrom::Start(cur - header.size().unwrap()))
-            .unwrap();
-
-        assert!(cur > header_size);
-        cur = f.seek(SeekFrom::Start(cur - header_size)).unwrap();
-
-        let mut header = Header::new_old();
-        let bs = header.as_mut_bytes();
-
-        f.read_exact(bs).unwrap();
-        assert_eq!(&header.path_bytes().as_ref(), b"image.blob");
-        assert_eq!(cur, header.size().unwrap());
+        let mut cur = f.metadata().unwrap().len();
+        let mut idx = 0;
+        loop {
+            cur = f.seek(SeekFrom::Start(cur - header_size)).unwrap();
+            let mut header = Header::new_old();
+            let bs = header.as_mut_bytes();
+            f.read_exact(bs).unwrap();
+            assert_eq!(
+                &header.path().unwrap().as_os_str().to_str().unwrap(),
+                &files[idx]
+            );
+            cur -= header.size().unwrap();
+            idx += 1;
+            if cur == 0 {
+                break;
+            }
+        }
     }
 
     pub fn unpack(&self, blob: &str, output: &str) {

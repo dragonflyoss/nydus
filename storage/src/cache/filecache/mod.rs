@@ -9,10 +9,11 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
+use tokio::runtime::Runtime;
+
 use nydus_api::CacheConfigV2;
 use nydus_utils::compress;
 use nydus_utils::metrics::BlobcacheMetrics;
-use tokio::runtime::Runtime;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
@@ -182,6 +183,14 @@ impl FileCacheEntry {
             .backend
             .get_reader(blob_info.blob_id())
             .map_err(|_e| eio!("failed to get blob reader"))?;
+        let rafs_blob_reader = if blob_info.rafs_blob_digest() != &[0u8; 32] {
+            let rafs_blob_id = hex::encode(blob_info.rafs_blob_digest());
+            mgr.backend
+                .get_reader(&rafs_blob_id)
+                .map_err(|_e| eio!("failed to get rafs blob reader"))?
+        } else {
+            reader.clone()
+        };
 
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let blob_uncompressed_size = blob_info.uncompressed_size();
@@ -216,7 +225,8 @@ impl FileCacheEntry {
             return Err(einval!(msg));
         }
         let meta = if blob_info.meta_ci_is_valid() {
-            let meta = FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(reader.clone()))?;
+            let meta =
+                FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(rafs_blob_reader))?;
             Some(meta)
         } else {
             None
