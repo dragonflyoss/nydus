@@ -258,7 +258,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("digester")
                         .help("Set algorithm to digest inodes and chunks:")
                         .required(false)
-                        .default_value("sha256")
+                        .default_value("blake3")
                         .value_parser(["blake3", "sha256"]),
                 )
                 .arg(
