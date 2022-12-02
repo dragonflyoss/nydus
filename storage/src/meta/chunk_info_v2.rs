@@ -2,11 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::device::BlobFeatures;
 use std::fmt::{Display, Formatter};
 
-use crate::meta::{
-    BlobMetaChunkInfo, BlobMetaState, BLOB_METADATA_CHUNK_SIZE_MASK, BLOB_META_FEATURE_ZRAN,
-};
+use crate::meta::{BlobMetaChunkInfo, BlobMetaState, BLOB_METADATA_CHUNK_SIZE_MASK};
 
 const CHUNK_V2_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const CHUNK_V2_COMP_SIZE_SHIFT: u64 = 40;
@@ -166,7 +165,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
             return Err(einval!(format!("unknown chunk flags {:x}", invalid_flags)));
         }
 
-        if state.meta_flags & BLOB_META_FEATURE_ZRAN == 0 && self.is_zran() {
+        if state.blob_features & BlobFeatures::ZRAN.bits() == 0 && self.is_zran() {
             return Err(einval!("invalid chunk flag ZRan for non-ZRan blob"));
         } else if self.is_zran() {
             let index = self.get_zran_index() as usize;
@@ -272,7 +271,7 @@ mod tests {
     fn test_get_chunk_index_with_hole() {
         let state = BlobMetaState {
             blob_index: 0,
-            meta_flags: 0,
+            blob_features: 0,
             compressed_size: 0,
             uncompressed_size: 0,
             chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V2(vec![

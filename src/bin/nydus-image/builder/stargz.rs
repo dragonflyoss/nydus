@@ -821,7 +821,7 @@ impl Builder for StargzBuilder {
             build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
 
         // Generate node chunks and digest
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0, ctx.blob_meta_features);
+        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0, ctx.blob_features);
         self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
 
         // Dump blob meta

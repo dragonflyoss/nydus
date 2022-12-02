@@ -31,7 +31,8 @@ use nydus_rafs::metadata::layout::v6::{
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsStore, RafsVersion};
 use nydus_rafs::RafsIoWrite;
-use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo, BLOB_META_FEATURE_ZRAN};
+use nydus_storage::device::BlobFeatures;
+use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::compress;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, round_down_4k, round_up, try_round_up_4k, ByteSize};
@@ -580,7 +581,7 @@ impl Node {
         chunk.set_uncompressed_offset(pre_uncompressed_offset);
         chunk.set_uncompressed_size(uncompressed_size);
 
-        let compressed_size = if ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0 {
+        let compressed_size = if ctx.blob_features.contains(BlobFeatures::ZRAN) {
             chunk.compressed_size()
         } else {
             let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)

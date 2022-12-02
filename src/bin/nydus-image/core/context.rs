@@ -31,8 +31,7 @@ use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
     BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
-    ZranContextGenerator, BLOB_META_FEATURE_4K_ALIGNED, BLOB_META_FEATURE_CHUNK_INFO_V2,
-    BLOB_META_FEATURE_SEPARATE, BLOB_META_FEATURE_ZRAN,
+    ZranContextGenerator,
 };
 use nydus_utils::{compress, digest, div_round_up, round_down_4k};
 
@@ -389,8 +388,8 @@ pub struct BlobContext {
 }
 
 impl BlobContext {
-    pub fn new(blob_id: String, blob_offset: u64, features: u32) -> Self {
-        let blob_meta_info = if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+    pub fn new(blob_id: String, blob_offset: u64, features: BlobFeatures) -> Self {
+        let blob_meta_info = if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             BlobMetaChunkArray::new_v2()
         } else {
             BlobMetaChunkArray::new_v1()
@@ -420,16 +419,16 @@ impl BlobContext {
             entry_list: toc::EntryList::new(),
         };
 
-        if features & BLOB_META_FEATURE_4K_ALIGNED != 0 {
+        if features.contains(BlobFeatures::ALIGNED) {
             blob_ctx.blob_meta_header.set_4k_aligned(true);
         }
-        if features & BLOB_META_FEATURE_SEPARATE != 0 {
+        if features.contains(BlobFeatures::SEPARATE_BLOB_META) {
             blob_ctx.blob_meta_header.set_ci_separate(true);
         }
-        if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+        if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             blob_ctx.blob_meta_header.set_chunk_info_v2(true);
         }
-        if features & BLOB_META_FEATURE_ZRAN != 0 {
+        if features.contains(BlobFeatures::ZRAN) {
             blob_ctx.blob_meta_header.set_ci_zran(true);
         }
 
@@ -437,7 +436,7 @@ impl BlobContext {
     }
 
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0, blob.meta_flags());
+        let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0, blob.features());
 
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
@@ -466,7 +465,7 @@ impl BlobContext {
             blob_ctx.blob_meta_header.set_4k_aligned(true);
             blob_ctx
                 .blob_meta_header
-                .set_chunk_info_v2(blob.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0);
+                .set_chunk_info_v2(blob.has_feature(BlobFeatures::CHUNK_INFO_V2));
             blob_ctx.blob_meta_info_enabled = true;
         }
 
@@ -583,7 +582,7 @@ impl BlobManager {
 
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
         let mut blob_ctx =
-            BlobContext::new(ctx.blob_id.clone(), ctx.blob_offset, ctx.blob_meta_features);
+            BlobContext::new(ctx.blob_id.clone(), ctx.blob_offset, ctx.blob_features);
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
 
@@ -711,7 +710,6 @@ impl BlobManager {
             let chunk_count = ctx.chunk_count;
             let decompressed_blob_size = ctx.uncompressed_blob_size;
             let compressed_blob_size = ctx.compressed_blob_size;
-            let blob_features = BlobFeatures::empty();
             let mut flags = RafsSuperFlags::empty();
             match &mut blob_table {
                 RafsBlobTable::V5(table) => {
@@ -725,7 +723,7 @@ impl BlobManager {
                         chunk_count,
                         decompressed_blob_size,
                         compressed_blob_size,
-                        blob_features,
+                        BlobFeatures::empty(),
                         flags,
                     );
                 }
@@ -740,7 +738,6 @@ impl BlobManager {
                         chunk_count,
                         decompressed_blob_size,
                         compressed_blob_size,
-                        blob_features,
                         flags,
                         ctx.rafs_blob_digest,
                         ctx.rafs_blob_toc_digest,
@@ -896,7 +893,7 @@ pub struct BuildContext {
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_meta_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
-    pub blob_meta_features: u32,
+    pub blob_features: BlobFeatures,
     pub inline_bootstrap: bool,
     pub has_xattr: bool,
 
@@ -940,7 +937,7 @@ impl BuildContext {
             blob_storage,
             blob_meta_storage,
             blob_zran_generator: None,
-            blob_meta_features: 0,
+            blob_features: BlobFeatures::empty(),
             inline_bootstrap,
             has_xattr: false,
 
@@ -978,7 +975,7 @@ impl Default for BuildContext {
             blob_storage: None,
             blob_meta_storage: None,
             blob_zran_generator: None,
-            blob_meta_features: 0,
+            blob_features: BlobFeatures::empty(),
             has_xattr: true,
             inline_bootstrap: false,
             features: Features::new(),

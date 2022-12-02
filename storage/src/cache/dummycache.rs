@@ -29,8 +29,9 @@ use nydus_utils::{compress, digest};
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::device::{BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest};
-use crate::meta::BLOB_META_FEATURE_ZRAN;
+use crate::device::{
+    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest,
+};
 use crate::utils::{alloc_buf, copyv};
 use crate::{StorageError, StorageResult};
 
@@ -201,7 +202,7 @@ impl BlobCacheMgr for DummyCacheMgr {
     }
 
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>> {
-        if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
+        if blob_info.has_feature(BlobFeatures::ZRAN) {
             return Err(einval!(
                 "BlobCacheMgr doesn't support ZRan based RAFS data blobs"
             ));

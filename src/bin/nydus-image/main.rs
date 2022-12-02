@@ -26,11 +26,9 @@ use nydus_api::ConfigV2;
 use nydus_app::{setup_logging, BuildTimeInfo};
 use nydus_rafs::metadata::{RafsMode, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_rafs::RafsIoReader;
+use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
-use nydus_storage::meta::{
-    format_blob_meta_features, BLOB_META_FEATURE_CHUNK_INFO_V2, BLOB_META_FEATURE_SEPARATE,
-    BLOB_META_FEATURE_ZRAN,
-};
+use nydus_storage::meta::format_blob_features;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest};
 use serde::{Deserialize, Serialize};
@@ -737,16 +735,20 @@ impl Command {
                     /*
                     build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
                      */
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_SEPARATE;
+                    build_ctx
+                        .blob_features
+                        .insert(BlobFeatures::SEPARATE_BLOB_META);
                 }
                 Box::new(StargzBuilder::new(blob_data_size))
             }
             ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TargzToRef | ConversionType::TargzToStargz => {
                 if version.is_v6() {
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_SEPARATE;
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_ZRAN;
+                    build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
+                    build_ctx
+                        .blob_features
+                        .insert(BlobFeatures::SEPARATE_BLOB_META);
+                    build_ctx.blob_features.insert(BlobFeatures::ZRAN);
                 }
                 Box::new(TarballBuilder::new(conversion_type))
             }
@@ -896,7 +898,7 @@ impl Command {
                 blob.blob_id(),
                 blob.compressed_size(),
                 blob.uncompressed_size(),
-                format_blob_meta_features(blob.meta_flags()),
+                format_blob_features(blob.features()),
             );
             blob_ids.push(blob.blob_id().to_string());
         }

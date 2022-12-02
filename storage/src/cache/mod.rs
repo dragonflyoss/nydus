@@ -538,7 +538,7 @@ mod tests {
             0x100000,
             0x100000,
             512,
-            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
         ));
         let chunk1 = Arc::new(MockChunkInfo {
             block_id: Default::default(),

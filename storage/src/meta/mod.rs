@@ -50,7 +50,7 @@ use nydus_utils::digest::RafsDigest;
 use nydus_utils::filemap::FileMapState;
 
 use crate::backend::BlobReader;
-use crate::device::{BlobChunkInfo, BlobInfo};
+use crate::device::{BlobChunkInfo, BlobFeatures, BlobInfo};
 use crate::utils::alloc_buf;
 use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 
@@ -74,16 +74,6 @@ const BLOB_METADATA_V2_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 64;
 
 /// File suffix for blob meta file.
 pub const FILE_SUFFIX: &str = "blob.meta";
-/// Uncompressed chunk data is 4K aligned.
-pub const BLOB_META_FEATURE_4K_ALIGNED: u32 = 0x1;
-/// Blob meta information data is stored in a separate file.
-pub const BLOB_META_FEATURE_SEPARATE: u32 = 0x2;
-/// Blob chunk information format v2.
-pub const BLOB_META_FEATURE_CHUNK_INFO_V2: u32 = 0x4;
-/// Blob compression information data include context data for zlib random access.
-pub const BLOB_META_FEATURE_ZRAN: u32 = 0x8;
-/// All valid blob feature bits.
-pub const BLOB_META_FEATURE_MASK: u32 = 0xf;
 
 /// On disk format for blob meta data header, containing meta information for a data blob.
 #[repr(C)]
@@ -141,6 +131,11 @@ impl Default for BlobMetaHeaderOndisk {
 }
 
 impl BlobMetaHeaderOndisk {
+    /// Check whether the blob feature is available or not.
+    pub fn has_feature(&self, feature: BlobFeatures) -> bool {
+        self.s_features & feature.bits() != 0
+    }
+
     /// Get compression algorithm to compress chunk information array.
     pub fn ci_compressor(&self) -> compress::Algorithm {
         if self.s_ci_compressor == compress::Algorithm::Lz4Block as u32 {
@@ -231,24 +226,24 @@ impl BlobMetaHeaderOndisk {
 
     /// Check whether the uncompressed data chunk is 4k aligned.
     pub fn is_4k_aligned(&self) -> bool {
-        self.s_features & BLOB_META_FEATURE_4K_ALIGNED != 0
+        self.has_feature(BlobFeatures::ALIGNED)
     }
 
     /// Set flag indicating whether the uncompressed data chunk is 4k aligned.
     pub fn set_4k_aligned(&mut self, aligned: bool) {
         if aligned {
-            self.s_features |= BLOB_META_FEATURE_4K_ALIGNED;
+            self.s_features |= BlobFeatures::ALIGNED.bits();
         } else {
-            self.s_features &= !BLOB_META_FEATURE_4K_ALIGNED;
+            self.s_features &= !BlobFeatures::ALIGNED.bits();
         }
     }
 
     /// Set flag indicating whether to chunk information format v2 is used or not.
     pub fn set_chunk_info_v2(&mut self, enable: bool) {
         if enable {
-            self.s_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
+            self.s_features |= BlobFeatures::CHUNK_INFO_V2.bits();
         } else {
-            self.s_features &= !BLOB_META_FEATURE_CHUNK_INFO_V2;
+            self.s_features &= !BlobFeatures::CHUNK_INFO_V2.bits();
         }
     }
 
@@ -256,23 +251,23 @@ impl BlobMetaHeaderOndisk {
     /// file or embedded in the blob itself.
     pub fn set_ci_separate(&mut self, enable: bool) {
         if enable {
-            self.s_features |= BLOB_META_FEATURE_SEPARATE;
+            self.s_features |= BlobFeatures::SEPARATE_BLOB_META.bits();
         } else {
-            self.s_features &= !BLOB_META_FEATURE_SEPARATE;
+            self.s_features &= !BlobFeatures::SEPARATE_BLOB_META.bits();
         }
     }
 
     /// Set flag indicating whether the blob meta contains data for ZRan or not.
     pub fn set_ci_zran(&mut self, enable: bool) {
         if enable {
-            self.s_features |= BLOB_META_FEATURE_ZRAN;
+            self.s_features |= BlobFeatures::ZRAN.bits();
         } else {
-            self.s_features &= !BLOB_META_FEATURE_ZRAN;
+            self.s_features &= !BlobFeatures::ZRAN.bits();
         }
     }
 
     /// Get blob meta feature flags.
-    pub fn meta_flags(&self) -> u32 {
+    pub fn features(&self) -> u32 {
         self.s_features
     }
 
@@ -382,7 +377,7 @@ impl BlobMetaInfo {
         let chunk_infos = ManuallyDrop::new(chunk_infos);
         let mut state = BlobMetaState {
             blob_index: blob_info.blob_index(),
-            meta_flags: blob_info.meta_flags(),
+            blob_features: blob_info.features().bits(),
             compressed_size: blob_info.compressed_size(),
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_info_array: chunk_infos,
@@ -391,7 +386,7 @@ impl BlobMetaInfo {
             filemap,
         };
 
-        if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
+        if blob_info.has_feature(BlobFeatures::ZRAN) {
             let header = state
                 .filemap
                 .get_mut::<BlobMetaHeaderOndisk>(aligned_uncompressed_size as usize)?;
@@ -607,7 +602,7 @@ impl BlobMetaInfo {
                 u32::from_le(header.s_ci_entries),
                 blob_info.chunk_count(),
                 u32::from_le(header.s_features),
-                blob_info.meta_flags(),
+                blob_info.features().bits(),
                 u32::from_le(header.s_ci_compressor),
                 blob_info.meta_ci_compressor() as u32,
                 u64::from_le(header.s_ci_offset),
@@ -620,7 +615,7 @@ impl BlobMetaInfo {
         if u32::from_le(header.s_magic) != BLOB_METADATA_MAGIC
             || u32::from_le(header.s_magic2) != BLOB_METADATA_MAGIC
             || u32::from_le(header.s_ci_entries) != blob_info.chunk_count()
-            || u32::from_le(header.s_features) != blob_info.meta_flags()
+            || u32::from_le(header.s_features) != blob_info.features().bits()
             || u32::from_le(header.s_ci_compressor) != blob_info.meta_ci_compressor() as u32
             || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
             || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
@@ -639,31 +634,27 @@ impl BlobMetaInfo {
 
         let info_size = u64::from_le(header.s_ci_uncompressed_size) as usize;
         let aligned_info_size = round_up_4k(info_size);
-        const ZRAN: u32 = BLOB_META_FEATURE_CHUNK_INFO_V2 | BLOB_META_FEATURE_ZRAN;
-        match blob_info.meta_flags() & ZRAN {
-            ZRAN => {
-                if info_size < (chunk_count as usize) * (size_of::<BlobChunkInfoV2Ondisk>()) {
-                    return Err(einval!("uncompressed size in blob meta header is invalid!"));
-                }
+        if blob_info.has_feature(BlobFeatures::CHUNK_INFO_V2)
+            && blob_info.has_feature(BlobFeatures::ZRAN)
+        {
+            if info_size < (chunk_count as usize) * (size_of::<BlobChunkInfoV2Ondisk>()) {
+                return Err(einval!("uncompressed size in blob meta header is invalid!"));
             }
-            BLOB_META_FEATURE_CHUNK_INFO_V2 => {
-                if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV2Ondisk>())
-                    || (aligned_info_size as u64) > BLOB_METADATA_V2_MAX_SIZE
-                {
-                    return Err(einval!("uncompressed size in blob meta header is invalid!"));
-                }
+        } else if blob_info.has_feature(BlobFeatures::CHUNK_INFO_V2) {
+            if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV2Ondisk>())
+                || (aligned_info_size as u64) > BLOB_METADATA_V2_MAX_SIZE
+            {
+                return Err(einval!("uncompressed size in blob meta header is invalid!"));
             }
-            0 => {
-                if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
-                    || (aligned_info_size as u64) > BLOB_METADATA_V1_MAX_SIZE
-                {
-                    return Err(einval!("uncompressed size in blob meta header is invalid!"));
-                }
-            }
-            _ => return Err(einval!("invalid feature flags in blob meta header!")),
+        } else if blob_info.has_feature(BlobFeatures::ZRAN) {
+            return Err(einval!("invalid feature flags in blob meta header!"));
+        } else if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
+            || (aligned_info_size as u64) > BLOB_METADATA_V1_MAX_SIZE
+        {
+            return Err(einval!("uncompressed size in blob meta header is invalid!"));
         }
 
-        if blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0 {
+        if blob_info.has_feature(BlobFeatures::ZRAN) {
             let offset = header.s_ci_zran_offset;
             if offset != (chunk_count as u64) * (size_of::<BlobChunkInfoV2Ondisk>() as u64) {
                 return Ok(false);
@@ -688,7 +679,7 @@ impl BlobMetaInfo {
 /// Struct to maintain state and provide accessors to blob meta information.
 pub struct BlobMetaState {
     pub(crate) blob_index: u32,
-    pub(crate) meta_flags: u32,
+    pub(crate) blob_features: u32,
     pub(crate) compressed_size: u64,
     pub(crate) uncompressed_size: u64,
     pub(crate) chunk_info_array: ManuallyDrop<BlobMetaChunkArray>,
@@ -869,7 +860,7 @@ impl BlobMetaChunkArray {
 impl BlobMetaChunkArray {
     fn from_file_map(filemap: &FileMapState, blob_info: &BlobInfo) -> Result<Self> {
         let chunk_count = blob_info.chunk_count();
-        if blob_info.meta_flags() & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+        if blob_info.has_feature(BlobFeatures::CHUNK_INFO_V2) {
             let chunk_size = chunk_count as usize * size_of::<BlobChunkInfoV2Ondisk>();
             let base = filemap.validate_range(0, chunk_size)?;
             let v = unsafe {
@@ -1438,18 +1429,18 @@ pub trait BlobMetaChunkInfo {
 }
 
 /// Generate description string for blob meta features.
-pub fn format_blob_meta_features(features: u32) -> String {
+pub fn format_blob_features(features: BlobFeatures) -> String {
     let mut output = String::new();
-    if features & BLOB_META_FEATURE_4K_ALIGNED != 0 {
+    if features.contains(BlobFeatures::ALIGNED) {
         output += "4K-align ";
     }
-    if features & BLOB_META_FEATURE_SEPARATE != 0 {
+    if features.contains(BlobFeatures::SEPARATE_BLOB_META) {
         output += "separate ";
     }
-    if features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0 {
+    if features.contains(BlobFeatures::CHUNK_INFO_V2) {
         output += "chunk-v2 ";
     }
-    if features & BLOB_META_FEATURE_ZRAN != 0 {
+    if features.contains(BlobFeatures::ZRAN) {
         output += "zran ";
     }
     output.trim_end().to_string()
@@ -1506,6 +1497,10 @@ pub(crate) mod tests {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
+        let features = BlobFeatures::ALIGNED
+            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::CHUNK_INFO_V2
+            | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
             0,
             "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
@@ -1513,19 +1508,9 @@ pub(crate) mod tests {
             9839040,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
             0xa3,
-            BlobFeatures::empty(),
-        );
-        let features = BLOB_META_FEATURE_4K_ALIGNED
-            | BLOB_META_FEATURE_SEPARATE
-            | BLOB_META_FEATURE_CHUNK_INFO_V2
-            | BLOB_META_FEATURE_ZRAN;
-        blob_info.set_blob_meta_info(
             features,
-            0,
-            0xa1290,
-            0xa1290,
-            compress::Algorithm::None as u32,
         );
+        blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
@@ -1565,6 +1550,10 @@ pub(crate) mod tests {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
+        let features = BlobFeatures::ALIGNED
+            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::CHUNK_INFO_V2
+            | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
             0,
             "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
@@ -1572,19 +1561,9 @@ pub(crate) mod tests {
             9839040,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
             0xa3,
-            BlobFeatures::empty(),
-        );
-        let features = BLOB_META_FEATURE_4K_ALIGNED
-            | BLOB_META_FEATURE_SEPARATE
-            | BLOB_META_FEATURE_CHUNK_INFO_V2
-            | BLOB_META_FEATURE_ZRAN;
-        blob_info.set_blob_meta_info(
             features,
-            0,
-            0xa1290,
-            0xa1290,
-            compress::Algorithm::None as u32,
         );
+        blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
@@ -1628,6 +1607,10 @@ pub(crate) mod tests {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
+        let features = BlobFeatures::ALIGNED
+            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::CHUNK_INFO_V2
+            | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
             0,
             "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
@@ -1635,19 +1618,9 @@ pub(crate) mod tests {
             9839040,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
             0xa3,
-            BlobFeatures::empty(),
-        );
-        let features = BLOB_META_FEATURE_4K_ALIGNED
-            | BLOB_META_FEATURE_SEPARATE
-            | BLOB_META_FEATURE_CHUNK_INFO_V2
-            | BLOB_META_FEATURE_ZRAN;
-        blob_info.set_blob_meta_info(
             features,
-            0,
-            0xa1290,
-            0xa1290,
-            compress::Algorithm::None as u32,
         );
+        blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
         let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);

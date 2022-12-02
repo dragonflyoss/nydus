@@ -19,7 +19,6 @@ use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
-use crate::meta::BLOB_META_FEATURE_ZRAN;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 pub const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
@@ -197,7 +196,7 @@ impl FileCacheEntry {
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
-        if blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE) {
+        if blob_info.has_feature(BlobFeatures::_V5_NO_EXT_BLOB_TABLE) {
             return Err(einval!("fscache does not support Rafs v5 blobs"));
         }
         let file = blob_info
@@ -232,7 +231,7 @@ impl FileCacheEntry {
                 "fscache doesn't support blobs without blob meta information"
             ));
         };
-        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
+        let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
 
         Ok(FileCacheEntry {
             blob_info: blob_info.clone(),
