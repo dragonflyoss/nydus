@@ -33,7 +33,10 @@ use nix::unistd::{getegid, geteuid};
 use nydus_api::ConfigV2;
 use nydus_storage::device::{BlobDevice, BlobIoVec, BlobPrefetchRequest};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
-use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
+use nydus_utils::{
+    div_round_up,
+    metrics::{self, FopRecorder, StatsFop::*},
+};
 
 use crate::metadata::{
     Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
@@ -346,11 +349,13 @@ impl Rafs {
         sb: Arc<RafsSuper>,
         device: BlobDevice,
     ) {
+        let blob_infos = sb.superblock.get_blob_infos();
+
         // First do range based prefetch for rafs v6.
         if sb.meta.is_v6() {
             let mut prefetches = Vec::new();
 
-            for blob in sb.superblock.get_blob_infos() {
+            for blob in &blob_infos {
                 let sz = blob.prefetch_size();
                 if sz > 0 {
                     let mut offset = 0;
@@ -389,28 +394,75 @@ impl Rafs {
             }
         };
 
-        let mut ignore_prefetch_all = prefetch_files
+        // Bootstrap has non-empty prefetch table indicating a full prefetch
+        let inlay_prefetch_all = sb
+            .is_inlay_prefetch_all(&mut reader)
+            .map_err(|e| error!("Detect prefetch table error {}", e))
+            .unwrap_or_default();
+
+        // Nydusd has a CLI option indicating a full prefetch
+        let startup_prefetch_all = prefetch_files
             .as_ref()
             .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
             .unwrap_or(false);
 
-        // Then do file based prefetch based on:
-        // - prefetch listed passed in by user
-        // - or file prefetch list in metadata
-        let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-        let res = sb.prefetch_files(&device, &mut reader, root_ino, inodes, &fetcher);
-        match res {
-            Ok(true) => ignore_prefetch_all = true,
-            Ok(false) => {}
-            Err(e) => info!("No file to be prefetched {:?}", e),
+        let mut ignore_prefetch_all = false;
+
+        // User specified prefetch files have high priority to be prefetched.
+        // Moreover, user specified prefetch files list will override those on-disk prefetch table.
+        if !startup_prefetch_all && !inlay_prefetch_all {
+            // Then do file based prefetch based on:
+            // - prefetch listed passed in by user
+            // - or file prefetch list in metadata
+            let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
+            let res = sb.prefetch_files(&device, &mut reader, root_ino, inodes, &fetcher);
+            match res {
+                Ok(true) => {
+                    ignore_prefetch_all = true;
+                    warn!("Root inode was found, but it should not prefetch all files!")
+                }
+                Ok(false) => {}
+                Err(e) => info!("No file to be prefetched {:?}", e),
+            }
         }
 
-        // Last optionally prefetch all data
-        if prefetch_all && !ignore_prefetch_all {
-            let root = vec![root_ino];
-            let res = sb.prefetch_files(&device, &mut reader, root_ino, Some(root), &fetcher);
-            if let Err(e) = res {
-                info!("No file to be prefetched {:?}", e);
+        // Perform different policy for v5 format and v6 format as rafs v6's blobs are capable to
+        // to download chunks and decompress them all by themselves. For rafs v6, directly perform
+        // chunk based full prefetch
+        if !ignore_prefetch_all && (inlay_prefetch_all || prefetch_all || startup_prefetch_all) {
+            if sb.meta.is_v6() {
+                // The larger batch size, the fewer requests to registry
+                let batch_size = 1024 * 1024 * 2;
+
+                for blob in &blob_infos {
+                    let blob_size = blob.compressed_size();
+                    let count = div_round_up(blob_size, batch_size);
+
+                    let mut pre_offset = 0u64;
+
+                    for _i in 0..count {
+                        let req = BlobPrefetchRequest {
+                            blob_id: blob.blob_id().to_owned(),
+                            offset: pre_offset,
+                            len: cmp::min(batch_size, blob_size - pre_offset),
+                        };
+                        pre_offset += batch_size;
+                        if pre_offset > blob_size {
+                            break;
+                        }
+
+                        device
+                            .prefetch(&[], &[req])
+                            .map_err(|e| warn!("failed to prefetch blob data, {}", e))
+                            .unwrap_or_default();
+                    }
+                }
+            } else {
+                let root = vec![root_ino];
+                let res = sb.prefetch_files(&device, &mut reader, root_ino, Some(root), &fetcher);
+                if let Err(e) = res {
+                    info!("No file to be prefetched {:?}", e);
+                }
             }
         }
     }
