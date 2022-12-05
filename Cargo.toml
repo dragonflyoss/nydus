@@ -75,4 +75,4 @@ default = ["fuse-backend-rs/fusedev"]
 virtiofs = ["fuse-backend-rs/vhost-user-fs", "vm-memory", "vhost", "vhost-user-backend", "virtio-queue", "virtio-bindings"]
 
 [workspace]
-members = ["api", "app", "error", "rafs", "storage", "utils", "blobfs"]
+members = ["api", "app", "blobfs", "clib", "error", "rafs", "storage", "utils"]
