@@ -540,12 +540,32 @@ impl BlobContext {
         }
     }
 
+    /// Get blob id if the blob has some chunks.
     pub fn blob_id(&mut self) -> Option<String> {
         if self.compressed_blob_size > 0 {
             Some(self.blob_id.to_string())
         } else {
             None
         }
+    }
+
+    /// Helper to write data to blob and update blob hash.
+    pub fn write_data(&mut self, blob_writer: &mut ArtifactWriter, data: &[u8]) -> Result<()> {
+        blob_writer.write_all(data)?;
+        self.blob_hash.update(data);
+        Ok(())
+    }
+
+    /// Helper to write a tar header to blob and update blob hash.
+    pub fn write_tar_header(
+        &mut self,
+        blob_writer: &mut ArtifactWriter,
+        name: &str,
+        size: u64,
+    ) -> Result<Header> {
+        let header = blob_writer.write_tar_header(name, size)?;
+        self.blob_hash.update(header.as_bytes());
+        Ok(header)
     }
 }
 
@@ -888,7 +908,6 @@ pub struct BuildContext {
 
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
-    pub blob_meta_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
@@ -911,7 +930,6 @@ impl BuildContext {
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
-        blob_meta_storage: Option<ArtifactStorage>,
         blob_inline_meta: bool,
         features: Features,
     ) -> Self {
@@ -932,7 +950,6 @@ impl BuildContext {
 
             prefetch,
             blob_storage,
-            blob_meta_storage,
             blob_zran_generator: None,
             blob_features: BlobFeatures::empty(),
             blob_inline_meta,
@@ -970,7 +987,6 @@ impl Default for BuildContext {
 
             prefetch: Prefetch::default(),
             blob_storage: None,
-            blob_meta_storage: None,
             blob_zran_generator: None,
             blob_features: BlobFeatures::empty(),
             has_xattr: true,

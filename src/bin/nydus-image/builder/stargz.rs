@@ -811,9 +811,13 @@ impl Builder for StargzBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        assert!(!ctx.blob_inline_meta);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
+        let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
+            Some(ArtifactWriter::new(blob_stor, ctx.blob_inline_meta)?)
+        } else {
+            return Err(anyhow!("missing configuration for target path"));
+        };
 
         // Build filesystem tree from the stargz TOC.
         let tree = timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
@@ -825,12 +829,7 @@ impl Builder for StargzBuilder {
         self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
 
         // Dump blob meta
-        let mut blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
-            Some(ArtifactWriter::new(stor.clone(), ctx.blob_inline_meta)?)
-        } else {
-            None
-        };
-        Blob::dump_meta_data(ctx, &mut blob_ctx, blob_meta_writer.as_mut())?;
+        Blob::dump_meta_data(ctx, &mut blob_ctx, blob_writer.as_mut().unwrap())?;
         if blob_ctx.uncompressed_blob_size > 0 {
             blob_mgr.add(blob_ctx);
         }

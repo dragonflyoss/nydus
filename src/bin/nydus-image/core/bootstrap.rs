@@ -3,8 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::convert::TryFrom;
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::mem::size_of;
@@ -19,6 +18,7 @@ use nydus_rafs::metadata::layout::v6::{
 };
 use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
 use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperConfig};
+use nydus_utils::digest;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 
 use super::context::{
@@ -383,9 +383,8 @@ impl Bootstrap {
 
         if let Some(ArtifactStorage::FileDir(p)) = bootstrap_storage {
             let bootstrap_data = bootstrap_ctx.writer.as_bytes()?;
-            let mut digester = RafsDigest::hasher(ctx.digester);
-            digester.digest_update(&bootstrap_data);
-            let name = digester.digest_finalize().to_string();
+            let digest = RafsDigest::from_buf(&bootstrap_data, digest::Algorithm::Sha256);
+            let name = digest.to_string();
             bootstrap_ctx.writer.finalize(Some(name.clone()))?;
             *bootstrap_storage = Some(ArtifactStorage::SingleFile(p.join(name)));
             Ok(())

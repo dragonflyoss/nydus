@@ -129,10 +129,7 @@ impl ChunkSet {
         aligned_chunk: bool,
         backend: &Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<Vec<(ChunkWrapper, ChunkWrapper)>> {
-        let mut blob_writer = Some(ArtifactWriter::new(
-            blob_storage,
-            build_ctx.blob_inline_meta,
-        )?);
+        let mut blob_writer = ArtifactWriter::new(blob_storage, build_ctx.blob_inline_meta)?;
 
         // sort chunks first, don't break order in original blobs
         let mut chunks = self.chunks.values().collect::<Vec<&ChunkWrapper>>();
@@ -155,9 +152,7 @@ impl ChunkSet {
             reader
                 .read(&mut buf, chunk.compressed_offset())
                 .expect("read blob data err");
-            if let Some(w) = blob_writer.as_mut() {
-                w.write_all(&buf)?;
-            }
+            blob_writer.write_all(&buf)?;
 
             let mut new_chunk = chunk.clone();
             // file offset field is useless
@@ -184,11 +179,9 @@ impl ChunkSet {
         }
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
         // dump blob meta for v6
-        Blob::dump_meta_data(build_ctx, new_blob_ctx, blob_writer.as_mut())?;
+        Blob::dump_meta_data(build_ctx, new_blob_ctx, &mut blob_writer)?;
         let blob_id = new_blob_ctx.blob_id();
-        if let Some(writer) = &mut blob_writer {
-            writer.finalize(blob_id)?;
-        }
+        blob_writer.finalize(blob_id)?;
         Ok(chunks_change)
     }
 }
@@ -571,7 +564,6 @@ impl BlobCompactor {
             ConversionType::DirectoryToRafs,
             PathBuf::from(""),
             Default::default(),
-            None,
             None,
             false,
             Features::new(),
