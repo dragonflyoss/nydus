@@ -22,6 +22,7 @@
 use std::any::Any;
 use std::collections::hash_map::Drain;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{self, Error};
@@ -39,19 +40,44 @@ use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
-use crate::meta::BLOB_META_FEATURE_CHUNK_INFO_V2;
+
+pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
+pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_000f;
 
 bitflags! {
     /// Features bits for blob management.
     pub struct BlobFeatures: u32 {
-        /// Rafs V5 image without extended blob table.
-        const V5_NO_EXT_BLOB_TABLE = 0x0000_0001;
+        /// Uncompressed chunk data is 4K aligned.
+        const ALIGNED = 0x0000_0001;
+        /// Blob meta information data is stored in a separate file.
+        const SEPARATE_BLOB_META = 0x0000_0002;
+        /// Blob chunk information format v2.
+        const CHUNK_INFO_V2 = 0x0000_0004;
+        /// Blob compression information data include context data for zlib random access.
+        const ZRAN = 0x0000_0008;
+        /// Rafs V5 image without extended blob table, this is an internal flag.
+        const _V5_NO_EXT_BLOB_TABLE = 0x1000_0000;
     }
 }
 
 impl Default for BlobFeatures {
     fn default() -> Self {
         BlobFeatures::empty()
+    }
+}
+
+impl TryFrom<u32> for BlobFeatures {
+    type Error = Error;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value & BLOB_FEATURE_INCOMPAT_MASK & !BLOB_FEATURE_INCOMPAT_VALUE != 0
+            || value & BlobFeatures::_V5_NO_EXT_BLOB_TABLE.bits() != 0
+        {
+            Err(einval!(format!("invalid blob features: 0x{:x}", value)))
+        } else {
+            // Safe because we have just validated feature flags.
+            Ok(unsafe { BlobFeatures::from_bits_unchecked(value) })
+        }
     }
 }
 
@@ -88,8 +114,6 @@ pub struct BlobInfo {
     /// The blob is for a legacy estargz image.
     is_legacy_stargz: bool,
 
-    /// V6: Version number of the blob metadata.
-    meta_flags: u32,
     /// V6: compressor that is used for compressing chunk info array.
     meta_ci_compressor: u32,
     /// V6: Offset of the chunk information array in the compressed blob.
@@ -136,7 +160,6 @@ impl BlobInfo {
             prefetch_size: 0,
             is_legacy_stargz: false,
             meta_ci_compressor: 0,
-            meta_flags: 0,
             meta_ci_offset: 0,
             meta_ci_compressed_size: 0,
             meta_ci_uncompressed_size: 0,
@@ -234,22 +257,15 @@ impl BlobInfo {
     /// `[compressed chunk data], [compressed metadata], [uncompressed header]`.
     pub fn set_blob_meta_info(
         &mut self,
-        flags: u32,
         offset: u64,
         compressed_size: u64,
         uncompressed_size: u64,
         compressor: u32,
     ) {
-        self.meta_flags = flags;
         self.meta_ci_compressor = compressor;
         self.meta_ci_offset = offset;
         self.meta_ci_compressed_size = compressed_size;
         self.meta_ci_uncompressed_size = uncompressed_size;
-    }
-
-    /// Get blob metadata flags.
-    pub fn meta_flags(&self) -> u32 {
-        self.meta_flags
     }
 
     /// Get compression algorithm for chunk information array.
@@ -295,18 +311,23 @@ impl BlobInfo {
         self.fs_cache_file.clone()
     }
 
+    /// Get blob features.
+    pub fn features(&self) -> BlobFeatures {
+        self.blob_features
+    }
+
     /// Check whether the requested features are available.
-    pub(crate) fn has_feature(&self, features: BlobFeatures) -> bool {
+    pub fn has_feature(&self, features: BlobFeatures) -> bool {
         self.blob_features.bits() & features.bits() == features.bits()
     }
 
     /// Generate feature flags according to blob configuration.
     fn compute_features(&mut self) {
         if self.chunk_count == 0 {
-            self.blob_features |= BlobFeatures::V5_NO_EXT_BLOB_TABLE;
+            self.blob_features |= BlobFeatures::_V5_NO_EXT_BLOB_TABLE;
         }
         if self.compressor == compress::Algorithm::GZip
-            && self.meta_flags & BLOB_META_FEATURE_CHUNK_INFO_V2 == 0
+            && self.has_feature(BlobFeatures::CHUNK_INFO_V2)
         {
             self.is_legacy_stargz = true;
         }
@@ -1173,7 +1194,7 @@ mod tests {
             0x100000,
             0x100000,
             512,
-            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
         ));
         let chunk1 = Arc::new(MockChunkInfo {
             block_id: Default::default(),

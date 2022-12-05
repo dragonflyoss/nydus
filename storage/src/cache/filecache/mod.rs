@@ -21,7 +21,6 @@ use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunk
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
-use crate::meta::BLOB_META_FEATURE_ZRAN;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -198,7 +197,7 @@ impl FileCacheEntry {
         let digester = blob_info.digester();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
         let is_compressed = mgr.is_compressed && compressor != compress::Algorithm::None;
-        let is_zran = blob_info.meta_flags() & BLOB_META_FEATURE_ZRAN != 0;
+        let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let need_validation = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
         trace!(
             "filecache entry: compressed {}, direct {}, legacy_stargz {}, zran {}",
@@ -271,7 +270,7 @@ impl FileCacheEntry {
         let is_v5 = !blob_info.meta_ci_is_valid();
         let mut direct_chunkmap = true;
         let chunk_map: Arc<dyn ChunkMap> = if (is_v5 && mgr.disable_indexed_map)
-            || blob_info.has_feature(BlobFeatures::V5_NO_EXT_BLOB_TABLE)
+            || blob_info.has_feature(BlobFeatures::_V5_NO_EXT_BLOB_TABLE)
         {
             direct_chunkmap = false;
             Arc::new(BlobStateMap::from(DigestedChunkMap::new()))

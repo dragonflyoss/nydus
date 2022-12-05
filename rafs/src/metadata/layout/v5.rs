@@ -638,7 +638,7 @@ impl RafsV5BlobTable {
                     let entry = &self.extended.entries[index];
                     (entry.chunk_count, entry.uncompressed_size, entry.compressed_size, BlobFeatures::empty())
                 } else {
-                    (0, 0, 0, BlobFeatures::V5_NO_EXT_BLOB_TABLE)
+                    (0, 0, 0, BlobFeatures::_V5_NO_EXT_BLOB_TABLE)
                 };
 
             let mut blob_info = BlobInfo::new(
@@ -1653,7 +1653,7 @@ pub mod tests {
                 0,
                 0,
                 0,
-                BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+                BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
             ));
             let mut desc = BlobIoVec::new(blob.clone());
             let res = add_chunk_to_bio_desc(&mut desc, *offset, *end, Arc::new(chunk), blob, true);

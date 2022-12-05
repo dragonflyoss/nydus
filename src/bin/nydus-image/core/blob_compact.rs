@@ -522,7 +522,7 @@ impl BlobCompactor {
                 State::Rebuild(cs) => {
                     let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
                     let mut blob_ctx =
-                        BlobContext::new(String::from(""), 0, build_ctx.blob_meta_features);
+                        BlobContext::new(String::from(""), 0, build_ctx.blob_features);
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
                     let new_chunks = cs.dump(

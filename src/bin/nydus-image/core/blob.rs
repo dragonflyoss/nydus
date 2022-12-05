@@ -10,7 +10,8 @@ use sha2::digest::Digest;
 
 use nydus_rafs::metadata::layout::toc;
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
-use nydus_storage::meta::{BlobMetaChunkArray, BLOB_META_FEATURE_ZRAN};
+use nydus_storage::device::BlobFeatures;
+use nydus_storage::meta::BlobMetaChunkArray;
 use nydus_utils::{compress, digest, try_round_up_4k};
 
 use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
@@ -135,7 +136,7 @@ impl Blob {
         let mut header = blob_ctx.blob_meta_header;
         let blob_meta_info = &blob_ctx.blob_meta_info;
         let ci_data = blob_meta_info.as_byte_slice();
-        let uncompressed_data = if ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0 {
+        let uncompressed_data = if ctx.blob_features.contains(BlobFeatures::ZRAN) {
             let zran = ctx.blob_zran_generator.as_ref().unwrap();
             let (zran_data, zran_count) = zran.lock().unwrap().to_vec()?;
             header.set_ci_zran_count(zran_count);

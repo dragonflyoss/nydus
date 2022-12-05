@@ -946,7 +946,7 @@ mod cached_tests {
             0,
             0,
             0,
-            BlobFeatures::V5_NO_EXT_BLOB_TABLE,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
             meta.flags,
         );
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());

@@ -192,7 +192,7 @@ mod tests {
     fn test_get_chunk_index_with_hole() {
         let state = BlobMetaState {
             blob_index: 0,
-            meta_flags: 0,
+            blob_features: 0,
             compressed_size: 0,
             uncompressed_size: 0,
             chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
@@ -256,7 +256,7 @@ mod tests {
     fn test_get_chunks() {
         let state = BlobMetaState {
             blob_index: 1,
-            meta_flags: 0,
+            blob_features: 0,
             compressed_size: 0x6001,
             uncompressed_size: 0x102001,
             chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
@@ -374,7 +374,6 @@ mod tests {
             BlobFeatures::default(),
         );
         blob_info.set_blob_meta_info(
-            0,
             pos,
             data.len() as u64,
             data.len() as u64,
@@ -443,7 +442,6 @@ mod tests {
             BlobFeatures::default(),
         );
         blob_info.set_blob_meta_info(
-            0,
             pos,
             compressed_size as u64,
             uncompressed_size as u64,
