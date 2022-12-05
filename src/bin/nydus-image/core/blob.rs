@@ -175,29 +175,16 @@ impl Blob {
 
         blob_meta_writer.write_all(&compressed_data)?;
 
-        let aligned_uncompressed_size: usize = try_round_up_4k(uncompressed_size).unwrap();
-        let padding = &vec![0u8; aligned_uncompressed_size - uncompressed_size as usize];
-        let padding_size = padding.len() as u64;
-        let written_padding_size = if !compressed {
-            // For uncompressed blob meta, keeping 4k alignment to make compatible
-            // with nydusd runtime, allowing runtime to use the blob meta in blob
-            // cache directory directly.
-            blob_meta_writer.write_all(padding)?;
-            padding_size
-        } else {
-            0u64
-        };
+        let aligned_uncompressed_size: u64 = try_round_up_4k(uncompressed_size).unwrap();
         if ctx.blob_meta_storage.is_some() {
             header.set_ci_separate(true);
         } else {
             header.set_ci_separate(false);
             blob_ctx.blob_hash.update(&compressed_data);
-            if !compressed {
-                blob_ctx.blob_hash.update(padding);
-            }
             blob_ctx.blob_hash.update(header.as_bytes());
         }
         blob_ctx.blob_meta_header = header;
+        let padding = &vec![0u8; (aligned_uncompressed_size - uncompressed_size) as usize];
         hasher.digest_update(padding);
 
         let header_size = header.as_bytes().len();
@@ -205,10 +192,8 @@ impl Blob {
         hasher.digest_update(header.as_bytes());
 
         if ctx.inline_bootstrap {
-            let header = blob_meta_writer.write_tar_header(
-                toc::ENTRY_BLOB_META,
-                compressed_size + written_padding_size + header_size as u64,
-            )?;
+            let header = blob_meta_writer
+                .write_tar_header(toc::ENTRY_BLOB_META, compressed_size + header_size as u64)?;
             blob_ctx.blob_hash.update(header.as_bytes());
             blob_ctx.entry_list.add(
                 toc::ENTRY_BLOB_META,
@@ -216,8 +201,8 @@ impl Blob {
                 // Ths digest is sha256(uncompressed data + 4k aligned padding + header data).
                 hasher.digest_finalize(),
                 compressed_offset,
-                compressed_size + written_padding_size + header_size as u64,
-                uncompressed_size + padding_size + header_size as u64,
+                compressed_size + header_size as u64,
+                aligned_uncompressed_size + header_size as u64,
             )?;
         }
 
