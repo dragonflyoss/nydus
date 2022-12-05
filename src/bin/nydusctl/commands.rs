@@ -416,13 +416,13 @@ Commit:                 {git_commit}
                                     let cfg = backend.config.unwrap();
                                     let cache_cfg = cfg.get_cache_config()?;
                                     let rafs_cfg = cfg.get_rafs_config()?;
-                                    print!("\tMode:  {}", rafs_cfg.mode);
-                                    print!("\tPrefetch:  {}", cache_cfg.prefetch.enable);
-                                    print!(
+                                    println!("\tMode:  {}", rafs_cfg.mode);
+                                    println!("\tPrefetch:  {}", cache_cfg.prefetch.enable);
+                                    println!(
                                         "\tPrefetch Merging Size:  {}",
                                         cache_cfg.prefetch.batch_size
                                     );
-                                    print!("")
+                                    println!();
                                 }
                             }
                         }
