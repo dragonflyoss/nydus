@@ -894,7 +894,7 @@ pub struct BuildContext {
     pub blob_meta_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
     pub blob_features: BlobFeatures,
-    pub inline_bootstrap: bool,
+    pub blob_inline_meta: bool,
     pub has_xattr: bool,
 
     pub features: Features,
@@ -915,7 +915,7 @@ impl BuildContext {
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
         blob_meta_storage: Option<ArtifactStorage>,
-        inline_bootstrap: bool,
+        blob_inline_meta: bool,
         features: Features,
     ) -> Self {
         BuildContext {
@@ -938,7 +938,7 @@ impl BuildContext {
             blob_meta_storage,
             blob_zran_generator: None,
             blob_features: BlobFeatures::empty(),
-            inline_bootstrap,
+            blob_inline_meta,
             has_xattr: false,
 
             features,
@@ -977,7 +977,7 @@ impl Default for BuildContext {
             blob_zran_generator: None,
             blob_features: BlobFeatures::empty(),
             has_xattr: true,
-            inline_bootstrap: false,
+            blob_inline_meta: false,
             features: Features::new(),
         }
     }

@@ -70,7 +70,7 @@ fn dump_toc(
     blob_writer: Option<&mut ArtifactWriter>,
 ) -> Result<()> {
     if let Some(blob_writer) = blob_writer {
-        if ctx.inline_bootstrap && ctx.features.enable(Feature::BlobToc) {
+        if ctx.blob_inline_meta && ctx.features.enable(Feature::BlobToc) {
             let data = blob_ctx.entry_list.as_bytes();
             let toc_size = data.len() as u64;
             blob_writer.write_all(data)?;
@@ -106,7 +106,7 @@ fn dump_bootstrap(
     )?;
 
     if let Some(blob_writer) = blob_writer {
-        if ctx.inline_bootstrap {
+        if ctx.blob_inline_meta {
             let bootstrap_offset = blob_writer.pos()?;
             let uncompressed_bootstrap = bootstrap_ctx.writer.as_bytes()?;
             let uncompressed_digest =

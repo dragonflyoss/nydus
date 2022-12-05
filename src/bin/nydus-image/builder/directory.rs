@@ -116,10 +116,10 @@ impl Builder for DirectoryBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?)
+            Some(ArtifactWriter::new(blob_stor, ctx.blob_inline_meta)?)
         } else {
             return Err(anyhow!(
                 "the target blob path should always be valid for directory builder"
@@ -143,7 +143,7 @@ impl Builder for DirectoryBuilder {
         )?;
 
         let mut origin_blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
-            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
+            Some(ArtifactWriter::new(stor.clone(), ctx.blob_inline_meta)?)
         } else {
             None
         };

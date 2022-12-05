@@ -811,8 +811,8 @@ impl Builder for StargzBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        assert!(!ctx.inline_bootstrap);
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
+        assert!(!ctx.blob_inline_meta);
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
 
         // Build filesystem tree from the stargz TOC.
@@ -826,7 +826,7 @@ impl Builder for StargzBuilder {
 
         // Dump blob meta
         let mut blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
-            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
+            Some(ArtifactWriter::new(stor.clone(), ctx.blob_inline_meta)?)
         } else {
             None
         };

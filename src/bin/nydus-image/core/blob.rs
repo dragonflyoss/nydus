@@ -46,7 +46,7 @@ impl Blob {
                 }
                 if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                     if let Some(blob_writer) = blob_writer {
-                        if ctx.inline_bootstrap {
+                        if ctx.blob_inline_meta {
                             let header = blob_writer.write_tar_header(
                                 toc::ENTRY_BLOB_RAW,
                                 blob_ctx.compressed_blob_size,
@@ -191,7 +191,7 @@ impl Blob {
         blob_meta_writer.write_all(header.as_bytes())?;
         hasher.digest_update(header.as_bytes());
 
-        if ctx.inline_bootstrap {
+        if ctx.blob_inline_meta {
             let header = blob_meta_writer
                 .write_tar_header(toc::ENTRY_BLOB_META, compressed_size + header_size as u64)?;
             blob_ctx.blob_hash.update(header.as_bytes());

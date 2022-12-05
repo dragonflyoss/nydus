@@ -192,15 +192,8 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("bootstrap")
                         .short('B')
                         .help("File path to save the generated RAFS metadata blob")
-                        .required_unless_present_any(&["blob-dir", "inline-bootstrap"])
-                        .conflicts_with("inline-bootstrap"),
-                )
-                .arg(
-                    Arg::new("inline-bootstrap")
-                        .long("inline-bootstrap")
-                        .help("Inline RAFS metadata into the data blob")
-                        .action(ArgAction::SetTrue)
-                        .required(false),
+                        .required_unless_present_any(&["blob-dir", "blob-inline-meta"])
+                        .conflicts_with("blob-inline-meta"),
                 )
                 .arg(
                     Arg::new("blob-dir")
@@ -216,15 +209,23 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required_unless_present_any(&["type", "blob-dir"]),
                 )
                 .arg(
-                    Arg::new("blob-id")
-                        .long("blob-id")
-                        .required_if_eq_any([("type", "estargztoc-ref"), ("type", "stargz_index")])
-                        .help("OSS object id for the generated RAFS data blob")
+                    Arg::new("blob-inline-meta")
+                        .long("blob-inline-meta")
+                        .alias("inline-bootstrap")
+                        .help("Inline RAFS metadata and blob metadata into the data blob")
+                        .action(ArgAction::SetTrue)
+                        .required(false),
                 )
                 .arg(
                     Arg::new("blob-meta")
                         .long("blob-meta")
                         .help("File path to save RAFS chunk meta information"),
+                )
+                .arg(
+                    Arg::new("blob-id")
+                        .long("blob-id")
+                        .required_if_eq_any([("type", "estargztoc-ref"), ("type", "stargz_index")])
+                        .help("OSS object id for the generated RAFS data blob")
                 )
                 .arg(
                     Arg::new("blob-offset")
@@ -268,6 +269,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .value_parser(["5", "6"]),
                 )
                 .arg(
+                    Arg::new("features")
+                        .long("features")
+                        .value_parser(["blob_toc"])
+                        .help("Enable/disable features")
+                )
+                .arg(
                     arg_chunk_dict.clone(),
                 )
                 .arg(
@@ -302,12 +309,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("Set the type of whiteout specification:")
                         .default_value("oci")
                         .value_parser(["oci", "overlayfs", "none"])
-                )
-                .arg(
-                    Arg::new("features")
-                    .long("features")
-                        .value_parser(["blob_toc"])
-                        .help("Enable/disable features")
                 )
                 .arg(
                     arg_prefetch_policy.clone(),
@@ -575,7 +576,7 @@ impl Command {
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
         let blob_stor = Self::get_blob_storage(matches, conversion_type)?;
         let blob_meta_stor = Self::get_blob_meta_storage(matches, conversion_type)?;
-        let inline_bootstrap = matches.get_flag("inline-bootstrap");
+        let blob_inline_meta = matches.get_flag("blob-inline-meta");
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
@@ -697,7 +698,7 @@ impl Command {
             prefetch,
             blob_stor,
             blob_meta_stor,
-            inline_bootstrap,
+            blob_inline_meta,
             features,
         );
         build_ctx.set_fs_version(version);
@@ -717,7 +718,7 @@ impl Command {
             )?);
         }
 
-        let mut bootstrap_mgr = if inline_bootstrap {
+        let mut bootstrap_mgr = if blob_inline_meta {
             BootstrapManager::new(None, parent_bootstrap)
         } else {
             let bootstrap_path = Self::get_bootstrap_storage(matches)?;
@@ -770,7 +771,7 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
-        if !inline_bootstrap {
+        if !blob_inline_meta {
             if let Some(ArtifactStorage::SingleFile(p)) = &bootstrap_mgr.bootstrap_storage {
                 Self::validate_image(matches, p).context("failed to validate bootstrap")?;
             }

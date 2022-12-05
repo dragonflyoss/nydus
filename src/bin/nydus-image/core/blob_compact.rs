@@ -131,7 +131,7 @@ impl ChunkSet {
     ) -> Result<Vec<(ChunkWrapper, ChunkWrapper)>> {
         let mut blob_writer = Some(ArtifactWriter::new(
             blob_storage,
-            build_ctx.inline_bootstrap,
+            build_ctx.blob_inline_meta,
         )?);
 
         // sort chunks first, don't break order in original blobs
