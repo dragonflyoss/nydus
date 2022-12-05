@@ -220,8 +220,12 @@ impl FileCacheEntry {
             return Err(einval!(msg));
         }
         let meta = if blob_info.meta_ci_is_valid() {
-            let meta =
-                FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(rafs_blob_reader))?;
+            let meta = FileCacheMeta::new(
+                blob_file_path,
+                blob_info.clone(),
+                Some(rafs_blob_reader),
+                false,
+            )?;
             Some(meta)
         } else {
             None

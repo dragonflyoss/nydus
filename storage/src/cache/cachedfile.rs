@@ -51,33 +51,44 @@ impl FileCacheMeta {
         blob_file: String,
         blob_info: Arc<BlobInfo>,
         reader: Option<Arc<dyn BlobReader>>,
+        sync: bool,
     ) -> Result<Self> {
-        let meta = FileCacheMeta {
-            has_error: Arc::new(AtomicBool::new(false)),
-            meta: Arc::new(Mutex::new(None)),
-        };
-        let meta1 = meta.clone();
+        if sync {
+            match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
+                Ok(m) => Ok(FileCacheMeta {
+                    has_error: Arc::new(AtomicBool::new(false)),
+                    meta: Arc::new(Mutex::new(Some(Arc::new(m)))),
+                }),
+                Err(e) => Err(e),
+            }
+        } else {
+            let meta = FileCacheMeta {
+                has_error: Arc::new(AtomicBool::new(false)),
+                meta: Arc::new(Mutex::new(None)),
+            };
+            let meta1 = meta.clone();
 
-        std::thread::spawn(move || {
-            let mut retry = 0;
-            while retry < DOWNLOAD_META_RETRY_COUNT {
-                match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
-                    Ok(m) => {
-                        *meta1.meta.lock().unwrap() = Some(Arc::new(m));
-                        return;
-                    }
-                    Err(e) => {
-                        info!("temporarily failed to get blob.meta, {}", e);
-                        std::thread::sleep(Duration::from_millis(DOWNLOAD_META_RETRY_DELAY));
-                        retry += 1;
+            std::thread::spawn(move || {
+                let mut retry = 0;
+                while retry < DOWNLOAD_META_RETRY_COUNT {
+                    match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
+                        Ok(m) => {
+                            *meta1.meta.lock().unwrap() = Some(Arc::new(m));
+                            return;
+                        }
+                        Err(e) => {
+                            info!("temporarily failed to get blob.meta, {}", e);
+                            std::thread::sleep(Duration::from_millis(DOWNLOAD_META_RETRY_DELAY));
+                            retry += 1;
+                        }
                     }
                 }
-            }
-            warn!("failed to get blob.meta");
-            meta1.has_error.store(true, Ordering::Release);
-        });
+                warn!("failed to get blob.meta");
+                meta1.has_error.store(true, Ordering::Release);
+            });
 
-        Ok(meta)
+            Ok(meta)
+        }
     }
 
     pub(crate) fn get_blob_meta(&self) -> Option<Arc<BlobMetaInfo>> {

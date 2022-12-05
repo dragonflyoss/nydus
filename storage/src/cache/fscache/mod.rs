@@ -223,9 +223,12 @@ impl FileCacheEntry {
             reader.clone()
         };
         let meta = if blob_info.meta_ci_is_valid() {
-            let meta =
-                FileCacheMeta::new(blob_file_path, blob_info.clone(), Some(rafs_blob_reader))?;
-            Some(meta)
+            FileCacheMeta::new(
+                blob_file_path,
+                blob_info.clone(),
+                Some(rafs_blob_reader),
+                true,
+            )?
         } else {
             return Err(enosys!(
                 "fscache doesn't support blobs without blob meta information"
@@ -237,7 +240,7 @@ impl FileCacheEntry {
             blob_info: blob_info.clone(),
             chunk_map,
             file,
-            meta,
+            meta: Some(meta),
             metrics: mgr.metrics.clone(),
             prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
