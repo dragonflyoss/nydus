@@ -13,10 +13,13 @@
 //!   The [LocalFs](localfs/struct.LocalFs.html) storage backend supports backend level data
 //!   prefetching, which is to load data into page cache.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
+use nydus_utils::{
+    metrics::{BackendMetrics, ERROR_HOLDER},
+    DelayType, Delayer,
+};
 
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
@@ -75,6 +78,8 @@ pub trait BlobReader: Send + Sync {
         let mut retry_count = self.retry_limit();
         let begin_time = self.metrics().begin();
 
+        let mut delayer = Delayer::new(DelayType::BackOff, Duration::from_millis(500));
+
         loop {
             match self.try_read(buf, offset) {
                 Ok(size) => {
@@ -88,6 +93,7 @@ pub trait BlobReader: Send + Sync {
                             err, retry_count
                         );
                         retry_count -= 1;
+                        delayer.delay();
                     } else {
                         self.metrics().end(&begin_time, buf.len(), true);
                         ERROR_HOLDER
