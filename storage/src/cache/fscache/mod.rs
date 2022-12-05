@@ -3,7 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::io::Error;
 use std::io::Result;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -12,6 +18,8 @@ use tokio::runtime::Runtime;
 use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
 
+#[cfg(target_os = "linux")]
+use super::state::RangeMap;
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{BlobStateMap, IndexedChunkMap};
@@ -19,6 +27,8 @@ use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
+#[cfg(target_os = "linux")]
+use crate::meta::BlobMetaInfo;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 pub const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
@@ -234,6 +244,11 @@ impl FileCacheEntry {
                 "fscache doesn't support blobs without blob meta information"
             ));
         };
+        #[cfg(target_os = "linux")]
+        {
+            let blob_meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
+            Self::restore_chunkmap(blob_info.clone(), file.clone(), blob_meta, &chunk_map);
+        }
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
 
         Ok(FileCacheEntry {
@@ -259,5 +274,70 @@ impl FileCacheEntry {
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })
+    }
+
+    //restore index_map from blob file via seek_hole
+    #[cfg(target_os = "linux")]
+    fn restore_chunkmap(
+        blob_info: Arc<BlobInfo>,
+        file: Arc<File>,
+        blob_meta: Arc<BlobMetaInfo>,
+        chunk_map: &BlobStateMap<IndexedChunkMap, u32>,
+    ) {
+        let mut i = 0;
+        while i < blob_info.chunk_count() {
+            let hole_offset = unsafe {
+                libc::lseek64(
+                    file.as_raw_fd(),
+                    blob_meta.get_uncompressed_offset(i as usize) as i64,
+                    libc::SEEK_HOLE,
+                )
+            };
+
+            if hole_offset < 0 {
+                warn!(
+                    "seek hole err {} for blob {}",
+                    Error::last_os_error(),
+                    blob_info.blob_id()
+                );
+                break;
+            }
+
+            if hole_offset as u64 == blob_info.uncompressed_size() {
+                debug!(
+                    "seek hole to file end, blob {} rest chunks {} - {} all ready",
+                    blob_info.blob_id(),
+                    i,
+                    blob_info.chunk_count() - 1,
+                );
+                if let Err(e) =
+                    chunk_map.set_range_ready_and_clear_pending(i, blob_info.chunk_count() - i)
+                {
+                    warn!("set range ready err {}", e);
+                }
+                break;
+            }
+
+            let hole_index = match blob_meta.get_chunk_index(hole_offset as u64) {
+                Ok(h) => h as u32,
+                Err(e) => {
+                    warn!("get offset chunk index err {}", e);
+                    break;
+                }
+            };
+            if hole_index > i {
+                debug!(
+                    "set blob {} rang {}-{} ready",
+                    blob_info.blob_id(),
+                    i,
+                    hole_index - 1,
+                );
+                if let Err(e) = chunk_map.set_range_ready_and_clear_pending(i, hole_index - i) {
+                    warn!("set range ready err {}", e);
+                    break;
+                }
+            }
+            i = hole_index + 1;
+        }
     }
 }

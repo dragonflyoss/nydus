@@ -505,6 +505,14 @@ impl BlobMetaInfo {
         self.state.add_more_chunks(chunks, max_size)
     }
 
+    pub fn get_uncompressed_offset(&self, chunk_index: usize) -> u64 {
+        self.state.get_uncompressed_offset(chunk_index)
+    }
+
+    pub fn get_chunk_index(&self, addr: u64) -> Result<usize> {
+        self.state.get_chunk_index(addr)
+    }
+
     /// Get ZRan index associated with the chunk.
     pub fn get_zran_index(&self, chunk_index: u32) -> u32 {
         self.state.get_zran_index(chunk_index as usize)
@@ -720,6 +728,14 @@ impl BlobMetaState {
             .add_more_chunks(self, chunks, max_size)
     }
 
+    fn get_uncompressed_offset(&self, chunk_index: usize) -> u64 {
+        self.chunk_info_array.uncompressed_offset(chunk_index)
+    }
+
+    fn get_chunk_index(&self, addr: u64) -> Result<usize> {
+        self.chunk_info_array.get_chunk_index_nocheck(addr, false)
+    }
+
     fn get_zran_index(&self, chunk_index: usize) -> u32 {
         self.chunk_info_array.zran_index(chunk_index)
     }
@@ -885,7 +901,6 @@ impl BlobMetaChunkArray {
         }
     }
 
-    #[cfg(test)]
     fn get_chunk_index_nocheck(&self, addr: u64, compressed: bool) -> Result<usize> {
         match self {
             BlobMetaChunkArray::V1(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
