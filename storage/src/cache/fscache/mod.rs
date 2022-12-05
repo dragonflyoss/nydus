@@ -246,10 +246,8 @@ impl FileCacheEntry {
 
             blob_compressed_size,
             blob_uncompressed_size: blob_info.uncompressed_size(),
-            compressor: blob_info.compressor(),
-            digester: blob_info.digester(),
             is_get_blob_object_supported: true,
-            is_compressed: false,
+            is_raw_data: false,
             is_direct_chunkmap: true,
             is_legacy_stargz: blob_info.is_legacy_stargz(),
             is_zran,

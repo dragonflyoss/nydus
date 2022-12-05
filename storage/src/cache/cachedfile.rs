@@ -108,12 +108,10 @@ pub(crate) struct FileCacheEntry {
 
     pub(crate) blob_compressed_size: u64,
     pub(crate) blob_uncompressed_size: u64,
-    pub(crate) compressor: compress::Algorithm,
-    pub(crate) digester: digest::Algorithm,
     // Whether `get_blob_object()` is supported.
     pub(crate) is_get_blob_object_supported: bool,
-    // The compressed data instead of uncompressed data is cached if `compressed` is true.
-    pub(crate) is_compressed: bool,
+    // Cache raw data from backend instead of decompressed/decrypted plaintext.
+    pub(crate) is_raw_data: bool,
     // Whether direct chunkmap is used.
     pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
@@ -144,9 +142,9 @@ impl FileCacheEntry {
         &self,
         chunk: Arc<dyn BlobChunkInfo>,
         buffer: Arc<DataBuffer>,
-        compressed: bool,
+        is_raw_data: bool,
     ) {
-        assert_eq!(self.is_compressed, compressed);
+        assert_eq!(self.is_raw_data, is_raw_data);
         let delayed_chunk_map = self.chunk_map.clone();
         let file = self.file.clone();
         let metrics = self.metrics.clone();
@@ -154,7 +152,7 @@ impl FileCacheEntry {
         metrics.buffered_backend_size.add(buffer.size() as u64);
         self.runtime.spawn_blocking(move || {
             metrics.buffered_backend_size.sub(buffer.size() as u64);
-            let offset = if compressed {
+            let offset = if is_raw_data {
                 chunk.compressed_offset()
             } else {
                 chunk.uncompressed_offset()
@@ -362,12 +360,12 @@ impl BlobCache for FileCacheEntry {
         Ok(self.blob_compressed_size)
     }
 
-    fn compressor(&self) -> compress::Algorithm {
-        self.compressor
+    fn blob_compressor(&self) -> compress::Algorithm {
+        self.blob_info.compressor()
     }
 
-    fn digester(&self) -> digest::Algorithm {
-        self.digester
+    fn blob_digester(&self) -> digest::Algorithm {
+        self.blob_info.digester()
     }
 
     fn is_legacy_stargz(&self) -> bool {
@@ -521,7 +519,7 @@ impl BlobCache for FileCacheEntry {
             {
                 Ok(mut bufs) => {
                     total_size += blob_size;
-                    if self.is_compressed {
+                    if self.is_raw_data {
                         let res = Self::persist_cached_data(
                             &self.file,
                             blob_offset,
@@ -715,7 +713,7 @@ impl FileCacheEntry {
             prefetch,
         ) {
             Ok(mut bufs) => {
-                if self.is_compressed {
+                if self.is_raw_data {
                     let res =
                         Self::persist_cached_data(&self.file, blob_offset, bufs.compressed_buf());
                     for idx in start_idx..=end_idx {
@@ -853,11 +851,11 @@ impl FileCacheEntry {
                 Err(e) => return Err(einval!(e)),
             };
 
-            // Directly read data from the file cache into the user buffer iff:
+            // Directly read chunk data from file cache into user buffer iff:
             // - the chunk is ready in the file cache
-            // - the data in the file cache is uncompressed.
+            // - data in the file cache is plaintext.
             // - data validation is disabled
-            if is_ready && !self.is_compressed && !self.need_validation() {
+            if is_ready && !self.is_raw_data && !self.need_validation() {
                 // Internal IO should not be committed to local cache region, just
                 // commit this region without pushing any chunk to avoid discontinuous
                 // chunks in a region.
@@ -1028,7 +1026,7 @@ impl FileCacheEntry {
                 e
             })?;
 
-        if self.is_compressed {
+        if self.is_raw_data {
             let res =
                 Self::persist_cached_data(&self.file, region.blob_address, bufs.compressed_buf());
             for chunk in region.chunks.iter() {
@@ -1044,7 +1042,7 @@ impl FileCacheEntry {
             if region.tags[i] {
                 buffer_holder.push(d.clone());
             }
-            if !self.is_compressed {
+            if !self.is_raw_data {
                 self.delay_persist_chunk_data(region.chunks[i].clone(), d, false);
             }
         }
@@ -1112,7 +1110,7 @@ impl FileCacheEntry {
                     self.chunk_map.clear_pending(chunk.as_ref());
                     e
                 })?;
-            if self.is_compressed {
+            if self.is_raw_data {
                 match c {
                     Some(v) => {
                         let buf = Arc::new(DataBuffer::Allocated(v));
@@ -1152,7 +1150,7 @@ impl FileCacheEntry {
     }
 
     fn read_file_cache(&self, chunk: &dyn BlobChunkInfo, buffer: &mut [u8]) -> Result<()> {
-        if self.is_compressed {
+        if self.is_raw_data {
             let offset = chunk.compressed_offset();
             let size = if self.is_legacy_stargz() {
                 self.get_legacy_stargz_size(offset, chunk.uncompressed_size() as usize)? as u64
@@ -1162,17 +1160,17 @@ impl FileCacheEntry {
             let mut reader = FileRangeReader::new(&self.file, offset, size);
             if !chunk.is_compressed() {
                 reader.read_exact(buffer)?;
-            } else if self.compressor() == compress::Algorithm::Lz4Block {
+            } else if self.blob_compressor() == compress::Algorithm::Lz4Block {
                 let mut buf = alloc_buf(size as usize);
                 reader.read_exact(&mut buf)?;
-                let size = compress::decompress(&buf, buffer, self.compressor)?;
+                let size = compress::decompress(&buf, buffer, self.blob_compressor())?;
                 if size != buffer.len() {
                     return Err(einval!(
                         "data size decoded by lz4_block doesn't match expected"
                     ));
                 }
             } else {
-                let mut decoder = Decoder::new(reader, self.compressor())?;
+                let mut decoder = Decoder::new(reader, self.blob_compressor())?;
                 decoder.read_exact(buffer)?;
             }
         } else {
