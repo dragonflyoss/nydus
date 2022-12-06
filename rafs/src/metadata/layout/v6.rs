@@ -1487,14 +1487,6 @@ impl RafsV6Blob {
             return false;
         }
 
-        if blob_features.contains(BlobFeatures::SEPARATE_BLOB_META) && ci_offset != 0 {
-            error!(
-                "RafsV6Blob: idx {} invalid fields for separate CI, ci_offset {:x}",
-                blob_index, ci_offset
-            );
-            return false;
-        }
-
         let count = chunk_count as u64;
         if blob_features.contains(BlobFeatures::CHUNK_INFO_V2)
             && blob_features.contains(BlobFeatures::ZRAN)

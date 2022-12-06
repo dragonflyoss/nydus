@@ -422,9 +422,6 @@ impl BlobContext {
         if features.contains(BlobFeatures::ALIGNED) {
             blob_ctx.blob_meta_header.set_4k_aligned(true);
         }
-        if features.contains(BlobFeatures::SEPARATE_BLOB_META) {
-            blob_ctx.blob_meta_header.set_ci_separate(true);
-        }
         if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             blob_ctx.blob_meta_header.set_chunk_info_v2(true);
         }

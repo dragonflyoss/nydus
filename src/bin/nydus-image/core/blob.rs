@@ -176,10 +176,7 @@ impl Blob {
         blob_meta_writer.write_all(&compressed_data)?;
 
         let aligned_uncompressed_size: u64 = try_round_up_4k(uncompressed_size).unwrap();
-        if ctx.blob_meta_storage.is_some() {
-            header.set_ci_separate(true);
-        } else {
-            header.set_ci_separate(false);
+        if !ctx.blob_meta_storage.is_some() {
             blob_ctx.blob_hash.update(&compressed_data);
             blob_ctx.blob_hash.update(header.as_bytes());
         }

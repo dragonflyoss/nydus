@@ -731,24 +731,11 @@ impl Command {
             ConversionType::DirectoryToTargz => unimplemented!(),
             ConversionType::EStargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::EStargzToRef => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::EStargzIndexToRef => {
-                if version.is_v6() {
-                    /*
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
-                     */
-                    build_ctx
-                        .blob_features
-                        .insert(BlobFeatures::SEPARATE_BLOB_META);
-                }
-                Box::new(StargzBuilder::new(blob_data_size))
-            }
+            ConversionType::EStargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
             ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::TargzToRef | ConversionType::TargzToStargz => {
                 if version.is_v6() {
                     build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
-                    build_ctx
-                        .blob_features
-                        .insert(BlobFeatures::SEPARATE_BLOB_META);
                     build_ctx.blob_features.insert(BlobFeatures::ZRAN);
                 }
                 Box::new(TarballBuilder::new(conversion_type))
