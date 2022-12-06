@@ -6,12 +6,13 @@ package tests
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
@@ -46,19 +47,25 @@ type Nydusify struct {
 	workDir       string
 }
 
-func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string) *Nydusify {
-	host := registry.Host()
+func buildRegistryBackendConfig(registry *Registry, repo string) string {
+	config := make(map[string]string)
+	config["host"] = registry.host
+	config["repo"] = repo
+	config["scheme"] = "http"
+	if registry.authString != "" {
+		config["auth"] = registry.authString
+	}
+	configBytes, _ := json.Marshal(config)
+	return string(configBytes)
+}
 
+func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string) *Nydusify {
 	backendType := "registry"
 	if os.Getenv("BACKEND_TYPE") != "" {
 		backendType = os.Getenv("BACKEND_TYPE")
 	}
 	repoTag := strings.Split(target, ":")
-	backendConfig := fmt.Sprintf(`{
-		"host": "%s",
-		"repo": "%s",
-		"scheme": "http"
-	}`, host, repoTag[0])
+	backendConfig := buildRegistryBackendConfig(registry, repoTag[0])
 	if os.Getenv("BACKEND_CONFIG") != "" {
 		backendConfig = os.Getenv("BACKEND_CONFIG")
 	}
@@ -148,6 +155,8 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 
 func (nydusify *Nydusify) Check(t *testing.T) {
 	host := nydusify.Registry.Host()
+	logrus.Infof("the backend type used by 'nydusify check': %s", nydusify.backendType)
+	logrus.Infof("the backend config used by 'nydusify check': %s", nydusify.backendConfig)
 	checker, err := checker.New(checker.Opt{
 		WorkDir:        filepath.Join(nydusify.workDir, nydusify.Target),
 		Source:         host + "/" + nydusify.Source,
@@ -157,6 +166,8 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 		NydusImagePath: nydusImagePath,
 		NydusdPath:     nydusdPath,
 		ExpectedArch:   "amd64",
+		BackendType:    nydusify.backendType,
+		BackendConfig:  nydusify.backendConfig,
 	})
 	assert.Nil(t, err)
 

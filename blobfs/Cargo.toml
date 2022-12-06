@@ -19,13 +19,16 @@ vm-memory = { version = "0.9" }
 nydus-error = { version = "0.2", path = "../error" }
 nydus-api = { version = "0.1", path = "../api" }
 nydus-rafs = { version = "0.1", path = "../rafs" }
-nydus-storage = { version = "0.5", path = "../storage", features = ["backend-localfs"] }
+nydus-storage = { version = "0.5", path = "../storage", features = [
+    "backend-localfs",
+] }
 
 [dev-dependencies]
 nydus-app = { version = "0.3", path = "../app" }
 
 [features]
-virtiofs = [ "fuse-backend-rs/virtiofs", "nydus-rafs/virtio-fs" ]
+virtiofs = ["fuse-backend-rs/virtiofs", "nydus-rafs/virtio-fs"]
+baekend-s3 = ["nydus-rafs/backend-s3"]
 backend-oss = ["nydus-rafs/backend-oss"]
 backend-registry = ["nydus-rafs/backend-registry"]
 

@@ -131,7 +131,7 @@ func testConvertWithS3Backend(t *testing.T, fsVersion string) {
 	minioPort := 9000
 	minioContainerName := "minio"
 	minioDataDir := "/tmp/minio-data"
-	endpoint := fmt.Sprintf("http://localhost:%d", minioPort)
+	endpoint := fmt.Sprintf("localhost:%d", minioPort)
 	createMinioContainerCmd := fmt.Sprintf(`
 		docker run -p %d:9000 -d -v %s:/data \
 	    	-e "MINIO_ACCESS_KEY=%s" \
@@ -151,7 +151,7 @@ func testConvertWithS3Backend(t *testing.T, fsVersion string) {
 
 	// create bucket
 	s3Client := s3.NewFromConfig(aws.Config{}, func(o *s3.Options) {
-		o.EndpointResolver = s3.EndpointResolverFromURL(endpoint)
+		o.EndpointResolver = s3.EndpointResolverFromURL("http://" + endpoint)
 		o.Region = region
 		o.UsePathStyle = true
 		o.Credentials = credentials.NewStaticCredentialsProvider(accessKey, accessSecret, "")
@@ -169,6 +169,7 @@ func testConvertWithS3Backend(t *testing.T, fsVersion string) {
 		AccessKeyID:     accessKey,
 		AccessKeySecret: accessSecret,
 		Endpoint:        endpoint,
+		Scheme:          "http",
 		BucketName:      bucketName,
 		Region:          region,
 		ObjectPrefix:    "path/to/registry",
@@ -195,15 +196,14 @@ func testConvertWithS3Backend(t *testing.T, fsVersion string) {
 
 	nydusify := NewNydusify(registry, "image-basic", "image-basic-nydus", "", "", fsVersion)
 	nydusify.Convert(t)
-	// TODO nydusd doesn't support s3 backend for now, skip the checker
-	// nydusify.Check(t)
+	nydusify.Check(t)
 }
 
 func TestSmoke(t *testing.T) {
 	fsVersions := [2]string{"5", "6"}
 	for _, v := range fsVersions {
-		testBasicAuth(t, v)
 		testBasicConvert(t, v)
+		testBasicAuth(t, v)
 		testReproducableBuild(t, v)
 		testConvertWithCache(t, v)
 		testConvertWithChunkDict(t, v)

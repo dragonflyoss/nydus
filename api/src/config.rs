@@ -166,6 +166,8 @@ pub struct BackendConfigV2 {
     pub localfs: Option<LocalFsConfig>,
     /// Configuration for OSS backend.
     pub oss: Option<OssConfig>,
+    /// Configuration for S3 backend.
+    pub s3: Option<S3Config>,
     /// Configuration for container registry backend.
     pub registry: Option<RegistryConfig>,
 }
@@ -185,6 +187,14 @@ impl BackendConfigV2 {
             "oss" => match self.oss.as_ref() {
                 Some(v) => {
                     if v.endpoint.is_empty() || v.bucket_name.is_empty() {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            "s3" => match self.s3.as_ref() {
+                Some(v) => {
+                    if v.region.is_empty() || v.bucket_name.is_empty() {
                         return false;
                     }
                 }
@@ -223,6 +233,17 @@ impl BackendConfigV2 {
             self.oss
                 .as_ref()
                 .ok_or_else(|| einval!("no configuration information for OSS"))
+        }
+    }
+
+    /// Get configuration information for S3
+    pub fn get_s3_config(&self) -> Result<&S3Config> {
+        if &self.backend_type != "s3" {
+            Err(einval!("backend type is not 's3'"))
+        } else {
+            self.s3
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for s3"))
         }
     }
 
@@ -272,6 +293,50 @@ pub struct OssConfig {
     #[serde(default)]
     pub access_key_id: String,
     /// Oss secret
+    #[serde(default)]
+    pub access_key_secret: String,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    #[serde(default)]
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
+    pub timeout: u32,
+    /// Drop the read request once http connection timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
+    pub connect_timeout: u32,
+    /// Retry count when read request failed.
+    #[serde(default)]
+    pub retry_limit: u8,
+    /// Enable HTTP proxy for the read request.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    /// Enable mirrors for the read request.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorConfig>,
+}
+
+/// S3 configuration information to access blobs.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct S3Config {
+    /// S3 http scheme, either 'http' or 'https'
+    #[serde(default = "default_http_scheme")]
+    pub scheme: String,
+    /// S3 endpoint
+    pub endpoint: String,
+    /// S3 region
+    pub region: String,
+    /// S3 bucket name
+    pub bucket_name: String,
+    /// Prefix object_prefix to S3 object key, for example the simulation of subdirectory:
+    /// - object_key: sha256:xxx
+    /// - object_prefix: nydus/
+    /// - object_key with object_prefix: nydus/sha256:xxx
+    #[serde(default)]
+    pub object_prefix: String,
+    /// S3 access key
+    #[serde(default)]
+    pub access_key_id: String,
+    /// S3 secret
     #[serde(default)]
     pub access_key_secret: String,
     /// Skip SSL certificate validation for HTTPS scheme.
@@ -733,6 +798,7 @@ impl TryFrom<&BackendConfig> for BackendConfigV2 {
             backend_type: value.backend_type.clone(),
             localfs: None,
             oss: None,
+            s3: None,
             registry: None,
         };
 
@@ -742,6 +808,9 @@ impl TryFrom<&BackendConfig> for BackendConfigV2 {
             }
             "oss" => {
                 config.oss = Some(serde_json::from_value(value.backend_config.clone())?);
+            }
+            "s3" => {
+                config.s3 = Some(serde_json::from_value(value.backend_config.clone())?);
             }
             "registry" => {
                 config.registry = Some(serde_json::from_value(value.backend_config.clone())?);
@@ -1145,6 +1214,23 @@ mod tests {
     fn test_oss_config() {
         let content = r#"{
             "endpoint": "test",
+            "access_key_id": "test",
+            "access_key_secret": "test",
+            "bucket_name": "antsys-nydus",
+            "object_prefix":"nydus_v2/"
+        }"#;
+        let config: OssConfig = serde_json::from_str(content).unwrap();
+        assert_eq!(config.scheme, "https");
+        assert!(!config.skip_verify);
+        assert_eq!(config.timeout, 5);
+        assert_eq!(config.connect_timeout, 5);
+    }
+
+    #[test]
+    fn test_s3_config() {
+        let content = r#"{
+            "endpoint": "test",
+            "region": "us-east-1",
             "access_key_id": "test",
             "access_key_secret": "test",
             "bucket_name": "antsys-nydus",

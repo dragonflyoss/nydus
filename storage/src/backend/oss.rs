@@ -4,43 +4,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Storage backend driver to access blobs on Oss(Object Storage System).
-use std::io::{Error, Result};
+use std::io::Result;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use hmac_sha1_compact::HMAC;
-use reqwest::header::{HeaderMap, CONTENT_LENGTH};
+use reqwest::header::HeaderMap;
 use reqwest::Method;
 
 use nydus_api::OssConfig;
 use nydus_utils::metrics::BackendMetrics;
 
-use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError};
-use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
+use crate::backend::connection::{Connection, ConnectionConfig};
+use crate::backend::object_storage::{ObjectStorage, ObjectStorageState};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
-/// Error codes related to OSS storage backend.
-#[derive(Debug)]
-pub enum OssError {
-    Auth(Error),
-    Url(String),
-    Request(ConnectionError),
-    ConstructHeader(String),
-    Transport(reqwest::Error),
-    Response(String),
-}
-
-impl From<OssError> for BackendError {
-    fn from(error: OssError) -> Self {
-        BackendError::Oss(error)
-    }
-}
-
 // `OssState` is almost identical to `OssConfig`, but let's keep them separated.
 #[derive(Debug)]
-struct OssState {
+pub struct OssState {
     access_key_id: String,
     access_key_secret: String,
     scheme: String,
@@ -54,7 +37,9 @@ impl OssState {
     fn resource(&self, object_key: &str, query_str: &str) -> String {
         format!("/{}/{}{}", self.bucket_name, object_key, query_str)
     }
+}
 
+impl ObjectStorageState for OssState {
     fn url(&self, object_key: &str, query: &[&str]) -> (String, String) {
         let object_key = &format!("{}{}", self.object_prefix, object_key);
         let url = format!(
@@ -78,6 +63,7 @@ impl OssState {
         verb: Method,
         headers: &mut HeaderMap,
         canonicalized_resource: &str,
+        _: &str,
     ) -> Result<()> {
         let content_md5 = "";
         let content_type = "";
@@ -118,103 +104,14 @@ impl OssState {
 
         Ok(())
     }
-}
-
-struct OssReader {
-    blob_id: String,
-    connection: Arc<Connection>,
-    state: Arc<OssState>,
-    metrics: Arc<BackendMetrics>,
-}
-
-impl BlobReader for OssReader {
-    fn blob_size(&self) -> BackendResult<u64> {
-        let (resource, url) = self.state.url(&self.blob_id, &[]);
-        let mut headers = HeaderMap::new();
-
-        self.state
-            .sign(Method::HEAD, &mut headers, resource.as_str())
-            .map_err(OssError::Auth)?;
-
-        let resp = self
-            .connection
-            .call::<&[u8]>(
-                Method::HEAD,
-                url.as_str(),
-                None,
-                None,
-                &mut headers,
-                true,
-                false,
-            )
-            .map_err(OssError::Request)?;
-        let content_length = resp
-            .headers()
-            .get(CONTENT_LENGTH)
-            .ok_or_else(|| OssError::Response("invalid content length".to_string()))?;
-
-        Ok(content_length
-            .to_str()
-            .map_err(|err| OssError::Response(format!("invalid content length: {:?}", err)))?
-            .parse::<u64>()
-            .map_err(|err| OssError::Response(format!("invalid content length: {:?}", err)))?)
-    }
-
-    fn try_read(&self, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        let query = &[];
-        let (resource, url) = self.state.url(&self.blob_id, query);
-        let mut headers = HeaderMap::new();
-        let end_at = offset + buf.len() as u64 - 1;
-        let range = format!("bytes={}-{}", offset, end_at);
-
-        headers.insert(
-            "Range",
-            range
-                .as_str()
-                .parse()
-                .map_err(|e| OssError::ConstructHeader(format!("{}", e)))?,
-        );
-        self.state
-            .sign(Method::GET, &mut headers, resource.as_str())
-            .map_err(OssError::Auth)?;
-
-        // Safe because the the call() is a synchronous operation.
-        let mut resp = self
-            .connection
-            .call::<&[u8]>(
-                Method::GET,
-                url.as_str(),
-                None,
-                None,
-                &mut headers,
-                true,
-                false,
-            )
-            .map_err(OssError::Request)?;
-        Ok(resp
-            .copy_to(&mut buf)
-            .map_err(OssError::Transport)
-            .map(|size| size as usize)?)
-    }
-
-    fn metrics(&self) -> &BackendMetrics {
-        &self.metrics
-    }
 
     fn retry_limit(&self) -> u8 {
-        self.state.retry_limit
+        self.retry_limit
     }
 }
 
 /// Storage backend to access data stored in OSS.
-#[derive(Debug)]
-pub struct Oss {
-    connection: Arc<Connection>,
-    state: Arc<OssState>,
-    metrics: Option<Arc<BackendMetrics>>,
-    #[allow(unused)]
-    id: Option<String>,
-}
+pub type Oss = ObjectStorage<OssState>;
 
 impl Oss {
     /// Create a new OSS storage backend.
@@ -233,52 +130,19 @@ impl Oss {
         });
         let metrics = id.map(|i| BackendMetrics::new(i, "oss"));
 
-        Ok(Oss {
-            state,
+        Ok(ObjectStorage::new_object_storage(
             connection,
+            state,
             metrics,
-            id: id.map(|i| i.to_string()),
-        })
-    }
-}
-
-impl BlobBackend for Oss {
-    fn shutdown(&self) {
-        self.connection.shutdown();
-    }
-
-    fn metrics(&self) -> &BackendMetrics {
-        // `metrics()` is only used for nydusd, which will always provide valid `blob_id`, thus
-        // `self.metrics` has valid value.
-        self.metrics.as_ref().unwrap()
-    }
-
-    fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
-        if let Some(metrics) = self.metrics.as_ref() {
-            Ok(Arc::new(OssReader {
-                blob_id: blob_id.to_string(),
-                state: self.state.clone(),
-                connection: self.connection.clone(),
-                metrics: metrics.clone(),
-            }))
-        } else {
-            Err(BackendError::Unsupported(
-                "no metrics object available for OssReader".to_string(),
-            ))
-        }
-    }
-}
-
-impl Drop for Oss {
-    fn drop(&mut self) {
-        if let Some(metrics) = self.metrics.as_ref() {
-            metrics.release().unwrap_or_else(|e| error!("{:?}", e));
-        }
+            id.map(|i| i.to_string()),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::backend::BlobBackend;
+
     use super::*;
 
     #[test]
@@ -304,7 +168,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         state
-            .sign(Method::HEAD, &mut headers, resource.as_str())
+            .sign(Method::HEAD, &mut headers, resource.as_str(), "")
             .unwrap();
         let signature = headers.get(HEADER_AUTHORIZATION).unwrap();
         assert!(signature.to_str().unwrap().contains("OSS key:"));

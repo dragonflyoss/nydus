@@ -40,6 +40,7 @@ fusedev = ["fuse-backend-rs/fusedev"]
 virtio-fs = ["fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]
 vhost-user-fs = ["fuse-backend-rs/vhost-user-fs"]
 backend-oss = ["nydus-storage/backend-oss"]
+backend-s3 = ["nydus-storage/backend-s3"]
 backend-registry = ["nydus-storage/backend-registry"]
 
 [package.metadata.docs.rs]
