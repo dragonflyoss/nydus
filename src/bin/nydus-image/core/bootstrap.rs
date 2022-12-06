@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::mem::size_of;
@@ -549,9 +549,11 @@ impl Bootstrap {
         for entry in blobs.iter() {
             let mut devslot = RafsV6Device::new();
             // blob id is String, which is processed by sha256.finalize().
-            if entry.blob_id().len() != 64 {
+            if entry.blob_id().is_empty() {
+                bail!(" blob id is empty");
+            } else if entry.blob_id().len() > 64 {
                 bail!(format!(
-                    "only blob id of length 64 is supported, blob id {:?}",
+                    "blob id length is bigger than 64 bytes, blob id {:?}",
                     entry.blob_id()
                 ));
             } else if entry.uncompressed_size() / EROFS_BLOCK_SIZE > u32::MAX as u64 {
@@ -563,7 +565,10 @@ impl Bootstrap {
             let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
             assert!(block_count.checked_add(cnt).is_some());
             block_count += cnt;
-            devslot.set_blob_id(entry.blob_id().as_bytes()[0..64].try_into().unwrap());
+            let id = entry.blob_id().as_bytes();
+            let mut blob_id = [0u8; 64];
+            blob_id[..id.len()].copy_from_slice(id);
+            devslot.set_blob_id(&blob_id);
             devslot.set_blocks(cnt);
             devslot.set_mapped_blkaddr(0);
             devtable.push(devslot);

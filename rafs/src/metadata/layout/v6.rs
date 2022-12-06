@@ -1352,13 +1352,14 @@ impl RafsV6Blob {
     }
 
     fn from_blob_info(blob_info: &BlobInfo) -> Result<Self> {
-        if blob_info.blob_id().len() != BLOB_SHA256_LEN {
+        if blob_info.blob_id().len() > BLOB_SHA256_LEN || blob_info.blob_id().is_empty() {
             let msg = format!("invalid blob id in blob info, {}", blob_info.blob_id());
             return Err(einval!(msg));
         }
 
+        let id = blob_info.blob_id().as_bytes();
         let mut blob_id = [0u8; BLOB_SHA256_LEN];
-        blob_id.copy_from_slice(blob_info.blob_id().as_bytes());
+        blob_id[..id.len()].copy_from_slice(id);
 
         Ok(RafsV6Blob {
             blob_id,
