@@ -1264,7 +1264,7 @@ struct RafsV6Blob {
     // Size of the uncompressed blob, not including CI array and header.
     uncompressed_size: u64,
 
-    reserved1: u32,
+    rafs_blob_toc_size: u32,
     // Compression algorithm for the compression information array.
     ci_compressor: u32,
     // Offset into the compressed blob for the compression information array.
@@ -1296,7 +1296,6 @@ impl Default for RafsV6Blob {
             features: 0u32,
             compressed_size: 0u64,
             uncompressed_size: 0u64,
-            reserved1: 0u32,
             ci_compressor: (compress::Algorithm::None as u32).to_le(),
             ci_offset: 0u64,
             ci_compressed_size: 0u64,
@@ -1305,6 +1304,7 @@ impl Default for RafsV6Blob {
             rafs_blob_toc_digest: [0u8; 32],
             rafs_blob_digest: [0u8; 32],
             rafs_blob_size: 0,
+            rafs_blob_toc_size: 0u32,
 
             reserved2: [0u8; 48],
         }
@@ -1347,6 +1347,7 @@ impl RafsV6Blob {
         blob_info.set_rafs_blob_toc_digest(self.rafs_blob_toc_digest);
         blob_info.set_rafs_blob_digest(self.rafs_blob_digest);
         blob_info.set_rafs_blob_size(self.rafs_blob_size);
+        blob_info.set_rafs_blob_toc_size(self.rafs_blob_toc_size);
 
         Ok(blob_info)
     }
@@ -1368,7 +1369,6 @@ impl RafsV6Blob {
             chunk_count: blob_info.chunk_count().to_le(),
             compression_algo: (blob_info.compressor() as u32).to_le(),
             digest_algo: (blob_info.digester() as u32).to_le(),
-            reserved1: 0u32.to_le(),
             compressed_size: blob_info.compressed_size().to_le(),
             uncompressed_size: blob_info.uncompressed_size().to_le(),
             features: blob_info.features().bits().to_le(),
@@ -1380,6 +1380,7 @@ impl RafsV6Blob {
             rafs_blob_toc_digest: *blob_info.rafs_blob_toc_digest(),
             rafs_blob_digest: *blob_info.rafs_blob_digest(),
             rafs_blob_size: blob_info.rafs_blob_size(),
+            rafs_blob_toc_size: blob_info.rafs_blob_toc_size(),
 
             reserved2: [0u8; 48],
         })
@@ -1576,6 +1577,7 @@ impl RafsV6BlobTable {
         rafs_blob_digest: [u8; 32],
         rafs_blob_toc_digest: [u8; 32],
         rafs_blob_size: u64,
+        rafs_blob_toc_size: u32,
         header: BlobMetaHeaderOndisk,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
@@ -1602,6 +1604,7 @@ impl RafsV6BlobTable {
         blob_info.set_rafs_blob_digest(rafs_blob_digest);
         blob_info.set_rafs_blob_toc_digest(rafs_blob_toc_digest);
         blob_info.set_rafs_blob_size(rafs_blob_size);
+        blob_info.set_rafs_blob_toc_size(rafs_blob_toc_size);
 
         self.entries.push(Arc::new(blob_info));
 

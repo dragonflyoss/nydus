@@ -129,6 +129,7 @@ pub struct BlobInfo {
     rafs_blob_digest: [u8; 32],
     // Size of the rafs blob (only valid in merged bootstrap).
     rafs_blob_size: u64,
+    rafs_blob_toc_size: u32,
 
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
@@ -167,6 +168,7 @@ impl BlobInfo {
             rafs_blob_toc_digest: [0u8; 32],
             rafs_blob_digest: [0u8; 32],
             rafs_blob_size: 0,
+            rafs_blob_toc_size: 0,
 
             fs_cache_file: None,
         };
@@ -339,6 +341,16 @@ impl BlobInfo {
 
     pub fn set_rafs_blob_toc_digest(&mut self, digest: [u8; 32]) {
         self.rafs_blob_toc_digest = digest;
+    }
+
+    /// Get size of blob `Table of Content`.
+    pub fn rafs_blob_toc_size(&self) -> u32 {
+        self.rafs_blob_toc_size
+    }
+
+    /// Get size of blob `Table of Content`.
+    pub fn set_rafs_blob_toc_size(&mut self, sz: u32) {
+        self.rafs_blob_toc_size = sz;
     }
 
     pub fn rafs_blob_digest(&self) -> &[u8; 32] {
