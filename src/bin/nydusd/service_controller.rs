@@ -198,6 +198,18 @@ impl NydusDaemon for ServiceController {
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
         None
     }
+
+    fn delete_blob(&self, _blob_id: String) -> DaemonResult<()> {
+        #[cfg(target_os = "linux")]
+        if self.fscache_enabled.load(Ordering::Acquire) {
+            if let Some(fscache) = self.fscache.lock().unwrap().clone() {
+                return fscache
+                    .cull_cache(_blob_id)
+                    .map_err(|e| DaemonError::StartService(format!("{}", e)));
+            }
+        }
+        Err(DaemonError::Unsupported)
+    }
 }
 
 impl DaemonStateMachineSubscriber for ServiceController {

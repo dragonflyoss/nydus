@@ -243,6 +243,10 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
 
     // For backward compatibility.
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>>;
+
+    fn delete_blob(&self, _blob_id: String) -> DaemonResult<()> {
+        Ok(())
+    }
 }
 
 // State machine for Nydus daemon workflow.

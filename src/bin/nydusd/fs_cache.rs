@@ -8,10 +8,12 @@ use std::cmp;
 use std::collections::hash_map::Entry::Vacant;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::fs::{File, OpenOptions};
+use std::env;
+use std::fs::{self, DirEntry, File, OpenOptions};
 use std::io::{Error, ErrorKind, Result, Write};
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,6 +250,7 @@ pub struct FsCacheHandler {
     state: Arc<Mutex<FsCacheState>>,
     poller: Mutex<Poll>,
     waker: Arc<Waker>,
+    cache_dir: PathBuf,
 }
 
 impl FsCacheHandler {
@@ -303,7 +306,7 @@ impl FsCacheHandler {
             id_to_config_map: Default::default(),
             blob_cache_mgr,
         };
-
+        let cache_dir = PathBuf::new().join(dir).join("cache");
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
             barrier: Barrier::new(threads + 1),
@@ -312,6 +315,7 @@ impl FsCacheHandler {
             state: Arc::new(Mutex::new(state)),
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
+            cache_dir,
         })
     }
 
@@ -740,6 +744,171 @@ impl FsCacheHandler {
         }
 
         unsafe { fscache_cread(fd as i32, hdr.msg_id as u64).unwrap() };
+    }
+
+    pub fn cull_cache(&self, blob_id: String) -> Result<()> {
+        let children = fs::read_dir(self.cache_dir.clone())?;
+        let children = children.collect::<Result<Vec<DirEntry>>>()?;
+        let mut res = true;
+        // This is safe, because only api server which is a single thread server will call this func,
+        // and no other func will change cwd.
+        let cwd_old = env::current_dir()?;
+
+        info!("try to cull blob {}", blob_id);
+
+        // calc blob path in all volumes then try to cull them
+        for child in children {
+            let path = child.path();
+            let file_name = match child.file_name().to_str() {
+                Some(n) => n.to_string(),
+                None => {
+                    env::set_current_dir(&cwd_old)?;
+                    return Err(eother!("get file name failed"));
+                }
+            };
+            if !path.is_dir() || !file_name.starts_with("Ierofs,") {
+                continue;
+            }
+
+            // get volume_key form volume dir name e.g. Ierofs,SharedDomain
+            let volume_key = &file_name[1..];
+            let (cookie_dir, cookie_name) = self.generate_cookie_path(&path, volume_key, &blob_id);
+            let cookie_path = cookie_dir.join(&cookie_name);
+            if cookie_path.is_file() {
+                match self.inuse(&cookie_dir, &cookie_name) {
+                    Err(e) => {
+                        warn!(
+                            "blob {} call inuse err {}, cull failed!",
+                            cookie_path.display(),
+                            e
+                        );
+                        res = false;
+                    }
+                    Ok(true) => {
+                        warn!("blob {} in use, cull failed!", cookie_path.display());
+                        res = false;
+                    }
+                    Ok(false) => {
+                        if let Err(e) = self.cull(&cookie_dir, &cookie_name) {
+                            warn!(
+                                "blob {} call cull err {}, cull failed!",
+                                cookie_path.display(),
+                                e
+                            );
+                            res = false;
+                        }
+                    }
+                }
+            }
+        }
+        env::set_current_dir(&cwd_old)?;
+        if res {
+            Ok(())
+        } else {
+            Err(eother!("cull blob failed"))
+        }
+    }
+
+    #[inline]
+    fn hash_32(&self, val: u32) -> u32 {
+        val * 0x61C88647
+    }
+
+    #[inline]
+    fn rol32(&self, word: u32, shift: i32) -> u32 {
+        word << (shift & 31) | (word >> ((-shift) & 31))
+    }
+
+    #[inline]
+    fn round_up_u32(&self, size: usize) -> usize {
+        (size + 3) / 4 * 4
+    }
+
+    //address from kernel fscache_hash()
+    fn fscache_hash(&self, salt: u32, data: &[u8]) -> u32 {
+        assert_eq!(data.len() % 4, 0);
+
+        let mut x = 0;
+        let mut y = salt;
+        let mut buf_le32: [u8; 4] = [0; 4];
+        let n = data.len() / 4;
+
+        for i in 0..n {
+            buf_le32.clone_from_slice(&data[i * 4..i * 4 + 4]);
+            let a = unsafe { std::mem::transmute::<[u8; 4], u32>(buf_le32) }.to_le();
+            x ^= a;
+            y ^= x;
+            x = self.rol32(x, 7);
+            x += y;
+            y = self.rol32(y, 20);
+            y *= 9;
+        }
+        self.hash_32(y ^ self.hash_32(x))
+    }
+
+    fn generate_cookie_path(
+        &self,
+        volume_path: &Path,
+        volume_key: &str,
+        cookie_key: &str,
+    ) -> (PathBuf, String) {
+        //calc volume hash
+        let mut volume_hash_key: Vec<u8> =
+            Vec::with_capacity(self.round_up_u32(volume_key.len() + 2));
+        volume_hash_key.push(volume_key.len() as u8);
+        volume_hash_key.append(&mut volume_key.as_bytes().to_vec());
+        volume_hash_key.resize(volume_hash_key.capacity(), 0);
+        let volume_hash = self.fscache_hash(0, volume_hash_key.as_slice());
+
+        //calc cookie hash
+        let mut cookie_hash_key: Vec<u8> = Vec::with_capacity(self.round_up_u32(cookie_key.len()));
+        cookie_hash_key.append(&mut cookie_key.as_bytes().to_vec());
+        cookie_hash_key.resize(cookie_hash_key.capacity(), 0);
+        let dir_hash = self.fscache_hash(volume_hash, cookie_hash_key.as_slice());
+
+        let dir = format!("@{:02x}", dir_hash as u8);
+        let cookie = format!("D{}", cookie_key);
+        (volume_path.join(dir), cookie)
+    }
+
+    fn inuse(&self, cookie_dir: &Path, cookie_name: &str) -> Result<bool> {
+        env::set_current_dir(&cookie_dir)?;
+        let msg = format!("inuse {}", cookie_name);
+        let ret = unsafe {
+            libc::write(
+                self.file.as_raw_fd(),
+                msg.as_bytes().as_ptr() as *const u8 as *const libc::c_void,
+                msg.len(),
+            )
+        };
+        if ret < 0 {
+            let err = Error::last_os_error();
+            if let Some(e) = err.raw_os_error() {
+                if e == libc::EBUSY {
+                    return Ok(true);
+                }
+            }
+            Err(err)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn cull(&self, cookie_dir: &Path, cookie_name: &str) -> Result<()> {
+        env::set_current_dir(&cookie_dir)?;
+        let msg = format!("cull {}", cookie_name);
+        let ret = unsafe {
+            libc::write(
+                self.file.as_raw_fd(),
+                msg.as_bytes().as_ptr() as *const u8 as *const libc::c_void,
+                msg.len(),
+            )
+        };
+        if ret as usize != msg.len() {
+            Err(Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
