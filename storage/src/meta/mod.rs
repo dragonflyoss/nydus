@@ -248,16 +248,6 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
-    /// Set flag indicating whether the blob compression information data is stored in a separate
-    /// file or embedded in the blob itself.
-    pub fn set_ci_separate(&mut self, enable: bool) {
-        if enable {
-            self.s_features |= BlobFeatures::SEPARATE_BLOB_META.bits();
-        } else {
-            self.s_features &= !BlobFeatures::SEPARATE_BLOB_META.bits();
-        }
-    }
-
     /// Set flag indicating whether the blob meta contains data for ZRan or not.
     pub fn set_ci_zran(&mut self, enable: bool) {
         if enable {
@@ -1429,9 +1419,6 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     if features.contains(BlobFeatures::ALIGNED) {
         output += "4K-align ";
     }
-    if features.contains(BlobFeatures::SEPARATE_BLOB_META) {
-        output += "separate ";
-    }
     if features.contains(BlobFeatures::CHUNK_INFO_V2) {
         output += "chunk-v2 ";
     }
@@ -1493,7 +1480,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::INLINED_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
@@ -1546,7 +1533,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::INLINED_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
@@ -1603,7 +1590,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::INLINED_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(

@@ -1352,13 +1352,14 @@ impl RafsV6Blob {
     }
 
     fn from_blob_info(blob_info: &BlobInfo) -> Result<Self> {
-        if blob_info.blob_id().len() != BLOB_SHA256_LEN {
+        if blob_info.blob_id().len() > BLOB_SHA256_LEN || blob_info.blob_id().is_empty() {
             let msg = format!("invalid blob id in blob info, {}", blob_info.blob_id());
             return Err(einval!(msg));
         }
 
+        let id = blob_info.blob_id().as_bytes();
         let mut blob_id = [0u8; BLOB_SHA256_LEN];
-        blob_id.copy_from_slice(blob_info.blob_id().as_bytes());
+        blob_id[..id.len()].copy_from_slice(id);
 
         Ok(RafsV6Blob {
             blob_id,
@@ -1484,14 +1485,6 @@ impl RafsV6Blob {
             return false;
         } else if ci_compr_size > ci_uncompr_size {
             error!("RafsV6Blob: idx {} invalid fields, ci_compressed_size {:x} is greater than ci_uncompressed_size {:x}", blob_index, ci_compr_size, ci_uncompr_size);
-            return false;
-        }
-
-        if blob_features.contains(BlobFeatures::SEPARATE_BLOB_META) && ci_offset != 0 {
-            error!(
-                "RafsV6Blob: idx {} invalid fields for separate CI, ci_offset {:x}",
-                blob_index, ci_offset
-            );
             return false;
         }
 

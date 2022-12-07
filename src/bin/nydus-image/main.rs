@@ -192,15 +192,8 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("bootstrap")
                         .short('B')
                         .help("File path to save the generated RAFS metadata blob")
-                        .required_unless_present_any(&["blob-dir", "inline-bootstrap"])
-                        .conflicts_with("inline-bootstrap"),
-                )
-                .arg(
-                    Arg::new("inline-bootstrap")
-                        .long("inline-bootstrap")
-                        .help("Inline RAFS metadata into the data blob")
-                        .action(ArgAction::SetTrue)
-                        .required(false),
+                        .required_unless_present_any(&["blob-dir", "blob-inline-meta"])
+                        .conflicts_with("blob-inline-meta"),
                 )
                 .arg(
                     Arg::new("blob-dir")
@@ -216,15 +209,18 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required_unless_present_any(&["type", "blob-dir"]),
                 )
                 .arg(
+                    Arg::new("blob-inline-meta")
+                        .long("blob-inline-meta")
+                        .alias("inline-bootstrap")
+                        .help("Inline RAFS metadata and blob metadata into the data blob")
+                        .action(ArgAction::SetTrue)
+                        .required(false),
+                )
+                .arg(
                     Arg::new("blob-id")
                         .long("blob-id")
                         .required_if_eq_any([("type", "estargztoc-ref"), ("type", "stargz_index")])
                         .help("OSS object id for the generated RAFS data blob")
-                )
-                .arg(
-                    Arg::new("blob-meta")
-                        .long("blob-meta")
-                        .help("File path to save RAFS chunk meta information"),
                 )
                 .arg(
                     Arg::new("blob-offset")
@@ -268,6 +264,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .value_parser(["5", "6"]),
                 )
                 .arg(
+                    Arg::new("features")
+                        .long("features")
+                        .value_parser(["blob_toc"])
+                        .help("Enable/disable features")
+                )
+                .arg(
                     arg_chunk_dict.clone(),
                 )
                 .arg(
@@ -302,12 +304,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("Set the type of whiteout specification:")
                         .default_value("oci")
                         .value_parser(["oci", "overlayfs", "none"])
-                )
-                .arg(
-                    Arg::new("features")
-                    .long("features")
-                        .value_parser(["blob_toc"])
-                        .help("Enable/disable features")
                 )
                 .arg(
                     arg_prefetch_policy.clone(),
@@ -574,8 +570,7 @@ impl Command {
         let source_path = PathBuf::from(matches.get_one::<String>("SOURCE").unwrap());
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
         let blob_stor = Self::get_blob_storage(matches, conversion_type)?;
-        let blob_meta_stor = Self::get_blob_meta_storage(matches, conversion_type)?;
-        let inline_bootstrap = matches.get_flag("inline-bootstrap");
+        let blob_inline_meta = matches.get_flag("blob-inline-meta");
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
@@ -607,24 +602,16 @@ impl Command {
                 Self::ensure_directory(&source_path)?;
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
-                } else if blob_meta_stor.is_some() {
-                    bail!(
-                        "conversion type {} conflicts with '--blob-meta'",
-                        conversion_type
-                    );
                 }
             }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
-            | ConversionType::TarToRafs => {
+            | ConversionType::TarToRafs
+            | ConversionType::TargzToRef
+            | ConversionType::EStargzToRef => {
                 Self::ensure_file(&source_path)?;
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
-                } else if blob_meta_stor.is_some() {
-                    bail!(
-                        "conversion type {} conflicts with '--blob-meta'",
-                        conversion_type
-                    );
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
@@ -632,19 +619,11 @@ impl Command {
                     );
                 }
             }
-            ConversionType::EStargzToRef
-            | ConversionType::EStargzIndexToRef
-            | ConversionType::TargzToRef => {
+            ConversionType::EStargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
                 if blob_stor.is_some() {
                     bail!(
                         "conversion type '{}' conflicts with '--blob'",
-                        conversion_type
-                    );
-                }
-                if !version.is_v5() && blob_meta_stor.is_none() {
-                    bail!(
-                        "please specify '--blob-meta' or '--blob-dir' for conversion type '{}'",
                         conversion_type
                     );
                 }
@@ -696,8 +675,7 @@ impl Command {
             source_path,
             prefetch,
             blob_stor,
-            blob_meta_stor,
-            inline_bootstrap,
+            blob_inline_meta,
             features,
         );
         build_ctx.set_fs_version(version);
@@ -717,7 +695,7 @@ impl Command {
             )?);
         }
 
-        let mut bootstrap_mgr = if inline_bootstrap {
+        let mut bootstrap_mgr = if blob_inline_meta {
             BootstrapManager::new(None, parent_bootstrap)
         } else {
             let bootstrap_path = Self::get_bootstrap_storage(matches)?;
@@ -730,30 +708,17 @@ impl Command {
             ConversionType::DirectoryToTargz => unimplemented!(),
             ConversionType::EStargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::EStargzToRef => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::EStargzIndexToRef => {
-                if version.is_v6() {
-                    /*
-                    build_ctx.blob_meta_features |= BLOB_META_FEATURE_CHUNK_INFO_V2;
-                     */
-                    build_ctx
-                        .blob_features
-                        .insert(BlobFeatures::SEPARATE_BLOB_META);
-                }
-                Box::new(StargzBuilder::new(blob_data_size))
-            }
+            ConversionType::EStargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
             ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::TargzToRef | ConversionType::TargzToStargz => {
+            ConversionType::TargzToRef => {
                 if version.is_v6() {
                     build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
-                    build_ctx
-                        .blob_features
-                        .insert(BlobFeatures::SEPARATE_BLOB_META);
                     build_ctx.blob_features.insert(BlobFeatures::ZRAN);
                 }
                 Box::new(TarballBuilder::new(conversion_type))
             }
             ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::TarToStargz => unimplemented!(),
+            ConversionType::TarToStargz | ConversionType::TargzToStargz => unimplemented!(),
         };
         let build_output = timing_tracer!(
             {
@@ -770,7 +735,7 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
 
         // Validate output bootstrap file
-        if !inline_bootstrap {
+        if !blob_inline_meta {
             if let Some(ArtifactStorage::SingleFile(p)) = &bootstrap_mgr.bootstrap_storage {
                 Self::validate_image(matches, p).context("failed to validate bootstrap")?;
             }
@@ -1010,10 +975,7 @@ impl Command {
         // Must specify a path to blob file.
         // For cli/binary interface compatibility sake, keep option `backend-config`, but
         // it only receives "localfs" backend type and it will be REMOVED in the future
-        if conversion_type == ConversionType::EStargzIndexToRef
-            || conversion_type == ConversionType::TargzToRef
-            || conversion_type == ConversionType::EStargzToRef
-        {
+        if conversion_type == ConversionType::EStargzIndexToRef {
             Ok(None)
         } else if let Some(p) = matches
             .get_one::<String>("blob")
@@ -1043,35 +1005,6 @@ impl Command {
         } else {
             bail!("both --blob and --blob-dir are missing, please specify one to store the generated data blob file");
         }
-    }
-
-    fn get_blob_meta_storage(
-        matches: &clap::ArgMatches,
-        conversion_type: ConversionType,
-    ) -> Result<Option<ArtifactStorage>> {
-        if let Some(b) = matches.get_one::<String>("blob-meta") {
-            let b = PathBuf::from(b);
-            let s = if b.is_dir() {
-                ArtifactStorage::FileDir(b)
-            } else {
-                ArtifactStorage::SingleFile(b)
-            };
-            return Ok(Some(s));
-        }
-        match conversion_type {
-            ConversionType::TargzToRef
-            | ConversionType::EStargzIndexToRef
-            | ConversionType::EStargzToRef => {
-                if let Some(d) = matches.get_one::<String>("blob-dir").map(PathBuf::from) {
-                    if !d.exists() {
-                        bail!("Directory to store generated files does not exist")
-                    }
-                    return Ok(Some(ArtifactStorage::FileDir(d)));
-                }
-            }
-            _ => {}
-        }
-        Ok(None)
     }
 
     fn get_parent_bootstrap(matches: &clap::ArgMatches) -> Result<Option<RafsIoReader>> {

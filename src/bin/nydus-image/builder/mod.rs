@@ -2,9 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Write;
-
 use anyhow::{Context, Result};
+use nydus_rafs::metadata::layout::toc;
+use nydus_utils::digest::{DigestHasher, RafsDigest};
+use nydus_utils::{compress, digest};
 use sha2::Digest;
 
 use crate::core::bootstrap::Bootstrap;
@@ -14,9 +15,6 @@ use crate::core::context::{
 };
 use crate::core::feature::Feature;
 use crate::core::tree::Tree;
-use nydus_rafs::metadata::layout::toc;
-use nydus_utils::digest::RafsDigest;
-use nydus_utils::{compress, digest};
 
 pub(crate) use self::directory::DirectoryBuilder;
 pub(crate) use self::stargz::StargzBuilder;
@@ -64,30 +62,13 @@ fn build_bootstrap(
     Ok(bootstrap)
 }
 
-fn dump_toc(
-    ctx: &mut BuildContext,
-    blob_ctx: &mut BlobContext,
-    blob_writer: Option<&mut ArtifactWriter>,
-) -> Result<()> {
-    if let Some(blob_writer) = blob_writer {
-        if ctx.inline_bootstrap && ctx.features.enable(Feature::BlobToc) {
-            let data = blob_ctx.entry_list.as_bytes();
-            let toc_size = data.len() as u64;
-            blob_writer.write_all(data)?;
-            let header = blob_writer.write_tar_header(toc::ENTRY_TOC, toc_size)?;
-            blob_ctx.blob_hash.update(header.as_bytes());
-        }
-    }
-    Ok(())
-}
-
 fn dump_bootstrap(
     ctx: &mut BuildContext,
     bootstrap_mgr: &mut BootstrapManager,
     bootstrap_ctx: &mut BootstrapContext,
     bootstrap: &mut Bootstrap,
     blob_mgr: &mut BlobManager,
-    blob_writer: Option<&mut ArtifactWriter>,
+    blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
         if blob_ctx.blob_id.is_empty() {
@@ -105,52 +86,87 @@ fn dump_bootstrap(
         &blob_table,
     )?;
 
-    if let Some(blob_writer) = blob_writer {
-        if ctx.inline_bootstrap {
-            let bootstrap_offset = blob_writer.pos()?;
-            let uncompressed_bootstrap = bootstrap_ctx.writer.as_bytes()?;
-            let uncompressed_digest =
-                RafsDigest::from_buf(&uncompressed_bootstrap, digest::Algorithm::Sha256);
-            let uncomprssed_size = uncompressed_bootstrap.len();
+    if ctx.blob_inline_meta {
+        // Ensure the blob object is created in case of no chunks generated for the blob.
+        let (_, blob_ctx) = blob_mgr
+            .get_or_create_current_blob(ctx)
+            .map_err(|_e| anyhow!("failed to get current blob object"))?;
+        let bootstrap_offset = blob_writer.pos()?;
+        let uncompressed_bootstrap = bootstrap_ctx.writer.as_bytes()?;
+        let uncompressed_size = uncompressed_bootstrap.len();
+        let uncompressed_digest =
+            RafsDigest::from_buf(&uncompressed_bootstrap, digest::Algorithm::Sha256);
 
-            let (bootstrap_data, compressor) = if ctx.features.enable(Feature::BlobToc) {
-                let (compressed_data, compressed) =
-                    compress::compress(&uncompressed_bootstrap, compress::Algorithm::Zstd)
-                        .with_context(|| "failed to compress bootstrap".to_string())?;
-                blob_writer.write_all(&compressed_data)?;
-                let compressor = if compressed {
-                    compress::Algorithm::Zstd
-                } else {
-                    compress::Algorithm::None
-                };
-                (compressed_data, compressor)
+        // Output uncompressed data for backward compatibility and compressed data for new format.
+        let (bootstrap_data, compressor) = if ctx.features.is_enabled(Feature::BlobToc) {
+            let mut compressor = if ctx.conversion_type.is_to_ref() {
+                compress::Algorithm::Zstd
             } else {
-                blob_writer.write_all(&uncompressed_bootstrap)?;
-                (uncompressed_bootstrap, compress::Algorithm::None)
+                ctx.compressor
             };
-
-            let compressed_size = bootstrap_data.len();
-            let header =
-                blob_writer.write_tar_header(toc::ENTRY_BOOTSTRAP, compressed_size as u64)?;
-            if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-                blob_ctx.blob_hash.update(bootstrap_data);
-                blob_ctx.blob_hash.update(header.as_bytes());
-                blob_ctx.entry_list.add(
-                    toc::ENTRY_BOOTSTRAP,
-                    compressor,
-                    uncompressed_digest,
-                    bootstrap_offset,
-                    compressed_size as u64,
-                    uncomprssed_size as u64,
-                )?;
+            let (compressed_data, compressed) =
+                compress::compress(&uncompressed_bootstrap, compressor)
+                    .with_context(|| "failed to compress bootstrap".to_string())?;
+            blob_ctx.write_data(blob_writer, &compressed_data)?;
+            if !compressed {
+                compressor = compress::Algorithm::None;
             }
+            (compressed_data, compressor)
         } else {
-            let blob_id = blob_mgr
-                .get_current_blob()
-                .map(|(_, blob_ctx)| blob_ctx.blob_id().unwrap_or_default());
-            blob_writer.finalize(blob_id)?;
+            blob_ctx.write_data(blob_writer, &uncompressed_bootstrap)?;
+            (uncompressed_bootstrap, compress::Algorithm::None)
+        };
+
+        let compressed_size = bootstrap_data.len();
+        blob_ctx.write_tar_header(blob_writer, toc::ENTRY_BOOTSTRAP, compressed_size as u64)?;
+
+        if ctx.features.is_enabled(Feature::BlobToc) {
+            blob_ctx.entry_list.add(
+                toc::ENTRY_BOOTSTRAP,
+                compressor,
+                uncompressed_digest,
+                bootstrap_offset,
+                compressed_size as u64,
+                uncompressed_size as u64,
+            )?;
         }
     }
 
+    Ok(())
+}
+
+fn dump_toc(
+    ctx: &mut BuildContext,
+    blob_ctx: &mut BlobContext,
+    blob_writer: &mut ArtifactWriter,
+) -> Result<()> {
+    if ctx.features.is_enabled(Feature::BlobToc) {
+        let data = blob_ctx.entry_list.as_bytes().to_vec();
+        let toc_size = data.len() as u64;
+        blob_ctx.write_data(blob_writer, &data)?;
+        let header = blob_ctx.write_tar_header(blob_writer, toc::ENTRY_TOC, toc_size)?;
+        let mut hasher = RafsDigest::hasher(ctx.digester);
+        hasher.digest_update(&data);
+        hasher.digest_update(header.as_bytes());
+        blob_ctx.rafs_blob_toc_digest = hasher.digest_finalize().data;
+    }
+    Ok(())
+}
+
+fn finalize_blob(
+    ctx: &mut BuildContext,
+    blob_mgr: &mut BlobManager,
+    blob_writer: &mut ArtifactWriter,
+) -> Result<()> {
+    if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+        dump_toc(ctx, blob_ctx, blob_writer)?;
+        let hash = blob_ctx.blob_hash.clone().finalize();
+        if ctx.blob_id.is_empty() {
+            blob_ctx.blob_id = format!("{:x}", hash);
+        }
+        blob_ctx.rafs_blob_digest = hash.into();
+        blob_ctx.rafs_blob_size = blob_ctx.compressed_blob_size;
+        blob_writer.finalize(blob_ctx.blob_id())?;
+    }
     Ok(())
 }
