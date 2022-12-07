@@ -386,7 +386,7 @@ pub struct BlobContext {
     // Size of the ToC section in RAFS data blob.
     pub rafs_blob_toc_size: u32,
 
-    pub entry_list: toc::EntryList,
+    pub entry_list: toc::TocEntryList,
 }
 
 impl BlobContext {
@@ -419,7 +419,7 @@ impl BlobContext {
             rafs_blob_size: 0,
             rafs_blob_toc_size: 0,
 
-            entry_list: toc::EntryList::new(),
+            entry_list: toc::TocEntryList::new(),
         };
 
         if features.contains(BlobFeatures::ALIGNED) {

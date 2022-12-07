@@ -1023,6 +1023,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spmc",
+ "tar",
  "vm-memory",
  "vmm-sys-util",
 ]

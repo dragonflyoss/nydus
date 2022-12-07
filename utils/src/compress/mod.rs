@@ -150,6 +150,7 @@ pub enum Decoder<'a, R: Read> {
 }
 
 impl<'a, R: Read> Decoder<'a, R> {
+    /// Create a new instance of `Decoder`.
     pub fn new(reader: R, algorithm: Algorithm) -> Result<Self> {
         let decoder = match algorithm {
             Algorithm::None => Decoder::None(reader),
@@ -179,6 +180,7 @@ pub struct ZlibDecoder<R> {
 }
 
 impl<R: Read> ZlibDecoder<R> {
+    /// Create a new instance of `ZlibDecoder`.
     pub fn new(reader: R) -> Self {
         ZlibDecoder {
             stream: flate2::bufread::GzDecoder::new(BufReader::new(reader)),

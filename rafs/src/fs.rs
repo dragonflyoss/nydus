@@ -867,14 +867,12 @@ impl FileSystem for Rafs {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "backend-oss"))]
 pub(crate) mod tests {
     use super::*;
-    #[cfg(feature = "backend-oss")]
     use crate::RafsIoRead;
     use std::str::FromStr;
 
-    #[cfg(feature = "backend-oss")]
     pub fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
         version = 2
@@ -915,7 +913,6 @@ pub(crate) mod tests {
         Box::new(rafs)
     }
 
-    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_create_new_rafs_fs() {
         let rafs = new_rafs_backend();
@@ -927,7 +924,6 @@ pub(crate) mod tests {
         assert_eq!(attr.mode & 0o777, 0o755);
     }
 
-    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_access() {
         let rafs = new_rafs_backend();
@@ -941,7 +937,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_listxattr() {
         let rafs = new_rafs_backend();
@@ -959,7 +954,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_get_statfs() {
         let rafs = new_rafs_backend();
@@ -980,7 +974,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_enable_xattr() {
         let rafs = new_rafs_backend();
@@ -988,7 +981,6 @@ pub(crate) mod tests {
         assert!(rafs.xattr_supported());
     }
 
-    #[cfg(feature = "backend-oss")]
     #[test]
     fn it_should_lookup_entry() {
         let rafs = new_rafs_backend();

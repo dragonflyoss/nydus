@@ -99,11 +99,7 @@ fn dump_bootstrap(
 
         // Output uncompressed data for backward compatibility and compressed data for new format.
         let (bootstrap_data, compressor) = if ctx.features.is_enabled(Feature::BlobToc) {
-            let mut compressor = if ctx.conversion_type.is_to_ref() {
-                compress::Algorithm::Zstd
-            } else {
-                ctx.compressor
-            };
+            let mut compressor = compress::Algorithm::Zstd;
             let (compressed_data, compressed) =
                 compress::compress(&uncompressed_bootstrap, compressor)
                     .with_context(|| "failed to compress bootstrap".to_string())?;
@@ -141,7 +137,7 @@ fn dump_toc(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if ctx.features.is_enabled(Feature::BlobToc) {
-        let mut hasher = RafsDigest::hasher(ctx.digester);
+        let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
         let data = blob_ctx.entry_list.as_bytes().to_vec();
         let toc_size = data.len() as u64;
         blob_ctx.write_data(blob_writer, &data)?;

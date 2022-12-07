@@ -13,6 +13,7 @@
 //!   The [LocalFs](localfs/struct.LocalFs.html) storage backend supports backend level data
 //!   prefetching, which is to load data into page cache.
 
+use std::io::Read;
 use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -165,4 +166,62 @@ pub trait BlobBackend: Send + Sync {
 
     /// Get a blob reader object to access blod `blob_id`.
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>>;
+}
+
+/// A buffered reader for `BlobReader` object.
+pub struct BlobBufReader {
+    buf: Vec<u8>,
+    pos: usize,
+    len: usize,
+    start: u64,
+    size: u64,
+    reader: Arc<dyn BlobReader>,
+}
+
+impl BlobBufReader {
+    /// Create a new instance of `BlobBufReader`.
+    pub fn new(buf_size: usize, reader: Arc<dyn BlobReader>, start: u64, size: u64) -> Self {
+        Self {
+            buf: alloc_buf(buf_size),
+            pos: 0,
+            len: 0,
+            start,
+            size,
+            reader,
+        }
+    }
+}
+
+impl Read for BlobBufReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut sz = self.len;
+        if sz == 0 && self.size == 0 {
+            // No more data.
+            return Ok(0);
+        }
+
+        // Refill the buffer.
+        if sz == 0 && self.size > 0 {
+            let cnt = std::cmp::min(self.buf.len() as u64, self.size) as usize;
+            let ret = self
+                .reader
+                .read(&mut self.buf[..cnt], self.start)
+                .map_err(|e| eio!(format!("failed to read data from backend, {:?}", e)))?;
+            self.start += ret as u64;
+            self.size -= ret as u64;
+            self.pos = 0;
+            self.len = ret;
+            sz = ret;
+        }
+        if self.size != 0 && sz == 0 {
+            return Err(eio!("unexpected EOF when reading data from backend"));
+        }
+
+        let sz = std::cmp::min(sz, buf.len());
+        buf[..sz].copy_from_slice(&self.buf[self.pos..self.pos + sz]);
+        self.pos += sz;
+        self.len -= sz;
+
+        Ok(sz)
+    }
 }
