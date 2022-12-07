@@ -109,6 +109,10 @@ Guide to running Nydus with fscache: [Nydus-fscache](./docs/nydus-fscache.md)
 
 Nydus is deeply integrated with [Dragonfly](https://d7y.io/) P2P system, which can greatly reduce the network latency and the single point of network pressure for registry server, testing in the production environment shows that using Dragonfly can reduce network latency by more than 80%, to understand the performance test data and how to configure Nydus to use Dragonfly, please refer to the [doc](https://d7y.io/docs/setup/integration/nydus).
 
+## Accelerate OCI image directly with Nydus
+
+Nydus is able to generate a tiny artifact called a `nydus zran` from an existing OCI image in the short time. This artifact can be used to accelerate the container boot time without the need for a full image conversion. For more information, please see the [documentation](./docs/nydus-zran.md).
+
 ## Build Images via Harbor
 
 Nydus cooperates with Harbor community to develop [acceleration-service](https://github.com/goharbor/acceleration-service) which provides a general service for Harbor to support image acceleration based on kinds of accelerators like Nydus, eStargz, etc.
