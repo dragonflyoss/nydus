@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"strconv"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
@@ -446,7 +445,7 @@ func (cache *Cache) Import(ctx context.Context) error {
 	}
 	defer manifestReader.Close()
 
-	manifestBytes, err := ioutil.ReadAll(manifestReader)
+	manifestBytes, err := io.ReadAll(manifestReader)
 	if err != nil {
 		return errors.Wrap(err, "Read cache manifest")
 	}

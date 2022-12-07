@@ -5,7 +5,6 @@
 package utils
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -13,11 +12,11 @@ import (
 )
 
 func TestPackTargzInfo(t *testing.T) {
-	file, err := ioutil.TempFile("", "nydusify-archive-test")
+	file, err := os.CreateTemp("", "nydusify-archive-test")
 	assert.Nil(t, err)
 	defer os.RemoveAll(file.Name())
 
-	err = ioutil.WriteFile(file.Name(), make([]byte, 1024*200), 0666)
+	err = os.WriteFile(file.Name(), make([]byte, 1024*200), 0666)
 	assert.Nil(t, err)
 
 	digest, size, err := PackTargzInfo(file.Name(), "test", true)

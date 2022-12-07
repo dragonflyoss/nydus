@@ -7,7 +7,7 @@ package rule
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -64,7 +64,7 @@ func (rule *BootstrapRule) Validate() error {
 
 	// Parse blob list from blob table of bootstrap
 	var bootstrap bootstrapDebug
-	bootstrapBytes, err := ioutil.ReadFile(rule.DebugOutputPath)
+	bootstrapBytes, err := os.ReadFile(rule.DebugOutputPath)
 	if err != nil {
 		return errors.Wrap(err, "read bootstrap debug json")
 	}

@@ -3,7 +3,6 @@ package packer
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,7 +180,7 @@ func (p *Packer) getNewBlobsHash(exists []string) (string, error) {
 	for _, blob := range exists {
 		m[blob] = true
 	}
-	content, err := ioutil.ReadFile(p.outputJSONPath())
+	content, err := os.ReadFile(p.outputJSONPath())
 	if err != nil {
 		return "", err
 	}

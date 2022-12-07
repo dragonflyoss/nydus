@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
@@ -54,7 +54,7 @@ func (mm *manifestManager) getExistsManifests(ctx context.Context) ([]ocispec.De
 		}
 		defer reader.Close()
 
-		indexBytes, err := ioutil.ReadAll(reader)
+		indexBytes, err := io.ReadAll(reader)
 		if err != nil {
 			return nil, errors.Wrap(err, "Read image manifest index")
 		}
