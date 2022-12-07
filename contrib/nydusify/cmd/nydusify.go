@@ -10,7 +10,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,7 +58,7 @@ func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, er
 	}
 
 	if backendConfigFile != "" {
-		_backendConfigJSON, err := ioutil.ReadFile(backendConfigFile)
+		_backendConfigJSON, err := os.ReadFile(backendConfigFile)
 		if err != nil {
 			return "", errors.Wrap(err, "parse backend config file")
 		}
@@ -156,7 +156,7 @@ func getPrefetchPatterns(c *cli.Context) (string, error) {
 	var patterns string
 
 	if prefetchPatterns {
-		bytes, err := ioutil.ReadAll(os.Stdin)
+		bytes, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return "", errors.Wrap(err, "read prefetch patterns from STDIN")
 		}

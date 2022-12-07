@@ -7,7 +7,6 @@ package build
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -51,7 +50,7 @@ func (workflow *Workflow) buildOutputJSONPath() string {
 // Get latest built blob from blobs directory
 func (workflow *Workflow) getLatestBlobPath() (string, error) {
 	var data debugJSON
-	jsonBytes, err := ioutil.ReadFile(workflow.buildOutputJSONPath())
+	jsonBytes, err := os.ReadFile(workflow.buildOutputJSONPath())
 	if err != nil {
 		return "", err
 	}
