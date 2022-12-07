@@ -31,16 +31,17 @@ type S3Backend struct {
 	// For example, if the blobID which should be uploaded is "abc",
 	// and the objectPrefix is "path/to/my-registry/", then the object key will be
 	// "path/to/my-registry/abc".
-	objectPrefix string
-	bucketName   string
-	endpoint     string
-	client       *s3.Client
+	objectPrefix       string
+	bucketName         string
+	endpointWithScheme string
+	client             *s3.Client
 }
 
 type S3Config struct {
 	AccessKeyID     string `json:"access_key_id,omitempty"`
 	AccessKeySecret string `json:"access_key_secret,omitempty"`
 	Endpoint        string `json:"endpoint,omitempty"`
+	Scheme          string `json:"scheme,omitempty"`
 	BucketName      string `json:"bucket_name,omitempty"`
 	Region          string `json:"region,omitempty"`
 	ObjectPrefix    string `json:"object_prefix,omitempty"`
@@ -52,8 +53,12 @@ func newS3Backend(rawConfig []byte) (*S3Backend, error) {
 		return nil, errors.Wrap(err, "parse S3 storage backend configuration")
 	}
 	if cfg.Endpoint == "" {
-		cfg.Endpoint = "https://s3.amazonaws.com"
+		cfg.Endpoint = "s3.amazonaws.com"
 	}
+	if cfg.Scheme == "" {
+		cfg.Scheme = "https"
+	}
+	endpointWithScheme := fmt.Sprintf("%s://%s", cfg.Scheme, cfg.Endpoint)
 
 	if cfg.BucketName == "" || cfg.Region == "" {
 		return nil, fmt.Errorf("invalid S3 configuration: missing 'bucket_name' or 'region'")
@@ -65,7 +70,7 @@ func newS3Backend(rawConfig []byte) (*S3Backend, error) {
 	}
 
 	client := s3.NewFromConfig(s3AWSConfig, func(o *s3.Options) {
-		o.EndpointResolver = s3.EndpointResolverFromURL(cfg.Endpoint)
+		o.EndpointResolver = s3.EndpointResolverFromURL(endpointWithScheme)
 		o.Region = cfg.Region
 		o.UsePathStyle = true
 		if len(cfg.AccessKeySecret) > 0 && len(cfg.AccessKeyID) > 0 {
@@ -75,10 +80,10 @@ func newS3Backend(rawConfig []byte) (*S3Backend, error) {
 	})
 
 	return &S3Backend{
-		objectPrefix: cfg.ObjectPrefix,
-		bucketName:   cfg.BucketName,
-		endpoint:     cfg.Endpoint,
-		client:       client,
+		objectPrefix:       cfg.ObjectPrefix,
+		bucketName:         cfg.BucketName,
+		endpointWithScheme: endpointWithScheme,
+		client:             client,
 	}, nil
 }
 
@@ -155,7 +160,7 @@ func (b *S3Backend) blobObjectKey(blobID string) string {
 }
 
 func (b *S3Backend) remoteID(blobObjectKey string) string {
-	remoteURL, _ := url.Parse(b.endpoint)
+	remoteURL, _ := url.Parse(b.endpointWithScheme)
 	remoteURL.Path = path.Join(remoteURL.Path, b.bucketName, blobObjectKey)
 	return remoteURL.String()
 }

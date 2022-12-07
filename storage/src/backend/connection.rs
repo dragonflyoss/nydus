@@ -23,7 +23,7 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use nydus_api::{MirrorConfig, OssConfig, ProxyConfig, RegistryConfig};
+use nydus_api::{MirrorConfig, OssConfig, ProxyConfig, RegistryConfig, S3Config};
 use url::ParseError;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -76,6 +76,19 @@ impl Default for ConnectionConfig {
 
 impl From<OssConfig> for ConnectionConfig {
     fn from(c: OssConfig) -> ConnectionConfig {
+        ConnectionConfig {
+            proxy: c.proxy,
+            mirrors: c.mirrors,
+            skip_verify: c.skip_verify,
+            timeout: c.timeout,
+            connect_timeout: c.connect_timeout,
+            retry_limit: c.retry_limit,
+        }
+    }
+}
+
+impl From<S3Config> for ConnectionConfig {
+    fn from(c: S3Config) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
             mirrors: c.mirrors,

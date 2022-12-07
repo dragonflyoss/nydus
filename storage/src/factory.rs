@@ -27,6 +27,8 @@ use crate::backend::localfs;
 use crate::backend::oss;
 #[cfg(feature = "backend-registry")]
 use crate::backend::registry;
+#[cfg(feature = "backend-s3")]
+use crate::backend::s3;
 use crate::backend::BlobBackend;
 use crate::cache::{BlobCache, BlobCacheMgr, DummyCacheMgr, FileCacheMgr, FsCacheMgr};
 use crate::device::BlobInfo;
@@ -188,6 +190,11 @@ impl BlobFactory {
             #[cfg(feature = "backend-oss")]
             "oss" => Ok(Arc::new(oss::Oss::new(
                 config.get_oss_config()?,
+                Some(blob_id),
+            )?)),
+            #[cfg(feature = "backend-s3")]
+            "s3" => Ok(Arc::new(s3::S3::new(
+                config.get_s3_config()?,
                 Some(blob_id),
             )?)),
             #[cfg(feature = "backend-registry")]
