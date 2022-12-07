@@ -86,7 +86,7 @@ func getBackendConfig(c *cli.Context, required bool) (string, string, error) {
 	)
 	if err != nil {
 		return "", "", err
-	} else if backendType == "oss" && strings.TrimSpace(backendConfig) == "" {
+	} else if (backendType == "oss" || backendType == "s3") && strings.TrimSpace(backendConfig) == "" {
 		return "", "", errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
 	}
 
@@ -527,7 +527,7 @@ func main() {
 				&cli.StringFlag{
 					Name:    "backend-type",
 					Value:   "",
-					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'registry', 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -630,7 +630,7 @@ func main() {
 					Name:     "backend-type",
 					Value:    "",
 					Required: true,
-					Usage:    "Type of storage backend, possible values: 'registry', 'oss'",
+					Usage:    "Type of storage backend, possible values: 'registry', 'oss', 's3'",
 					EnvVars:  []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -742,7 +742,7 @@ func main() {
 					Name:        "backend-type",
 					Value:       "oss",
 					DefaultText: "oss",
-					Usage:       "Type of storage backend, possible values: 'registry', 'oss'",
+					Usage:       "Type of storage backend, possible values: 'registry', 'oss', 's3'",
 					EnvVars:     []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -827,7 +827,7 @@ func main() {
 				var (
 					p             *packer.Packer
 					res           packer.PackResult
-					backendConfig *packer.BackendConfig
+					backendConfig packer.BackendConfig
 					err           error
 				)
 
@@ -836,14 +836,13 @@ func main() {
 					_backendType, _backendConfig, err := getBackendConfig(c, true)
 					if err != nil {
 						return err
-					} else if _backendType != "oss" {
-						return errors.Errorf("only --backend-type=oss is supported")
 					}
-					cfg, err := packer.ParseBackendConfigString(_backendConfig)
+					// we can verify the _backendType in the `packer.ParseBackendConfigString` function
+					cfg, err := packer.ParseBackendConfigString(_backendType, _backendConfig)
 					if err != nil {
 						return errors.Errorf("failed to parse backend-config '%s', err = %v", _backendConfig, err)
 					}
-					backendConfig = &cfg
+					backendConfig = cfg
 				}
 
 				if p, err = packer.New(packer.Opt{

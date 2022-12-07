@@ -36,9 +36,9 @@ func (m *mockBackend) Type() backend.Type {
 }
 
 func Test_parseBackendConfig(t *testing.T) {
-	cfg, err := ParseBackendConfig(filepath.Join("testdata", "backend-config.json"))
+	cfg, err := ParseBackendConfig("oss", filepath.Join("testdata", "backend-config.json"))
 	assert.Nil(t, err)
-	assert.Equal(t, BackendConfig{
+	assert.Equal(t, &OssBackendConfig{
 		Endpoint:        "mock.aliyuncs.com",
 		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
@@ -49,7 +49,7 @@ func Test_parseBackendConfig(t *testing.T) {
 }
 
 func Test_parseBackendConfigString(t *testing.T) {
-	cfg, err := ParseBackendConfigString(`{
+	cfg, err := ParseBackendConfigString("oss", `{
   "endpoint": "mock.aliyuncs.com",
   "access_key_id": "testid",
   "access_key_secret": "testkey",
@@ -58,7 +58,7 @@ func Test_parseBackendConfigString(t *testing.T) {
   "blob_prefix": ""
 }`)
 	assert.Nil(t, err)
-	assert.Equal(t, BackendConfig{
+	assert.Equal(t, &OssBackendConfig{
 		Endpoint:        "mock.aliyuncs.com",
 		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
@@ -82,7 +82,7 @@ func TestPusher_Push(t *testing.T) {
 	mp := &mockBackend{}
 	pusher := Pusher{
 		Artifact: artifact,
-		cfg: BackendConfig{
+		cfg: &OssBackendConfig{
 			BucketName: "testbucket",
 			BlobPrefix: "testblobprefix",
 			MetaPrefix: "testmetaprefix",

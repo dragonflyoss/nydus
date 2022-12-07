@@ -31,7 +31,7 @@ type Opt struct {
 	LogLevel       logrus.Level
 	NydusImagePath string
 	OutputDir      string
-	BackendConfig  *BackendConfig
+	BackendConfig  BackendConfig
 }
 
 type Builder interface {
@@ -41,7 +41,7 @@ type Builder interface {
 type Packer struct {
 	logger         *logrus.Logger
 	nydusImagePath string
-	BackendConfig  *BackendConfig
+	BackendConfig  BackendConfig
 	pusher         *Pusher
 	builder        Builder
 	Artifact
@@ -49,39 +49,6 @@ type Packer struct {
 
 type BlobManifest struct {
 	Blobs []string `json:"blobs,omitempty"`
-}
-
-type BackendConfig struct {
-	Endpoint        string `json:"endpoint"`
-	AccessKeyID     string `json:"access_key_id"`
-	AccessKeySecret string `json:"access_key_secret"`
-	BucketName      string `json:"bucket_name"`
-	MetaPrefix      string `json:"meta_prefix"`
-	BlobPrefix      string `json:"blob_prefix"`
-}
-
-func (cfg *BackendConfig) rawMetaBackendCfg() []byte {
-	configMap := map[string]string{
-		"endpoint":          cfg.Endpoint,
-		"access_key_id":     cfg.AccessKeyID,
-		"access_key_secret": cfg.AccessKeySecret,
-		"bucket_name":       cfg.BucketName,
-		"object_prefix":     cfg.MetaPrefix,
-	}
-	b, _ := json.Marshal(configMap)
-	return b
-}
-
-func (cfg *BackendConfig) rawBlobBackendCfg() []byte {
-	configMap := map[string]string{
-		"endpoint":          cfg.Endpoint,
-		"access_key_id":     cfg.AccessKeyID,
-		"access_key_secret": cfg.AccessKeySecret,
-		"bucket_name":       cfg.BucketName,
-		"object_prefix":     cfg.BlobPrefix,
-	}
-	b, _ := json.Marshal(configMap)
-	return b
 }
 
 type PackRequest struct {
@@ -123,7 +90,7 @@ func New(opt Opt) (*Packer, error) {
 	if p.BackendConfig != nil {
 		p.pusher, err = NewPusher(NewPusherOpt{
 			Artifact:      artifact,
-			BackendConfig: *opt.BackendConfig,
+			BackendConfig: opt.BackendConfig,
 			Logger:        p.logger,
 		})
 		if err != nil {
@@ -240,8 +207,7 @@ func (p *Packer) tryCompactParent(req *PackRequest) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to new compactor")
 	}
-	// only support oss now
-	outputBootstrap, err := c.Compact(req.Parent, req.ChunkDict, "oss", backendConfigPath)
+	outputBootstrap, err := c.Compact(req.Parent, req.ChunkDict, p.BackendConfig.backendType(), backendConfigPath)
 	if err != nil {
 		return errors.Wrap(err, "failed to compact parent")
 	}
