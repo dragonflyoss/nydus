@@ -44,7 +44,6 @@ endif
 RUST_TARGET_STATIC ?= $(STATIC_TARGET)
 
 CTR-REMOTE_PATH = contrib/ctr-remote
-DOCKER-GRAPHDRIVER_PATH = contrib/docker-nydus-graphdriver
 NYDUSIFY_PATH = contrib/nydusify
 NYDUS-OVERLAYFS_PATH = contrib/nydus-overlayfs
 
@@ -142,21 +141,20 @@ docker-nydusify-image-test: docker-static
 # refer to `misc/example/README.md` for details.
 docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 
-contrib-build: nydusify ctr-remote nydus-overlayfs docker-nydus-graphdriver
+contrib-build: nydusify ctr-remote nydus-overlayfs
 
 contrib-release: nydusify-release ctr-remote-release \
-			    nydus-overlayfs-release docker-nydus-graphdriver-release
+			    nydus-overlayfs-release
 
 contrib-test: nydusify-test ctr-remote-test \
-				nydus-overlayfs-test docker-nydus-graphdriver-test
+				nydus-overlayfs-test
 
 contrib-clean: nydusify-clean ctr-remote-clean \
-				nydus-overlayfs-clean docker-nydus-graphdriver-clean
+				nydus-overlayfs-clean
 
 contrib-install:
 	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIX)
 	@sudo install -m 755 contrib/ctr-remote/bin/ctr-remote $(INSTALL_DIR_PREFIX)/ctr-remote
-	@sudo install -m 755 contrib/docker-nydus-graphdriver/bin/nydus-graphdriver $(INSTALL_DIR_PREFIX)/nydus-overlayfs
 	@sudo install -m 755 contrib/nydus-overlayfs/bin/nydus-overlayfs $(INSTALL_DIR_PREFIX)/nydus-overlayfs
 	@sudo install -m 755 contrib/nydusify/cmd/nydusify $(INSTALL_DIR_PREFIX)/nydusify
 
@@ -195,18 +193,6 @@ nydus-overlayfs-test:
 
 nydus-overlayfs-clean:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make clean)
-
-docker-nydus-graphdriver:
-	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make)
-
-docker-nydus-graphdriver-release:
-	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make release)
-
-docker-nydus-graphdriver-test:
-	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make test)
-
-docker-nydus-graphdriver-clean:
-	$(call build_golang,${DOCKER-GRAPHDRIVER_PATH},make clean)
 
 docker-static:
 	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/musl-static
