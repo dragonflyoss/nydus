@@ -16,6 +16,7 @@ use std::fs::File;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::time::Duration;
 
 pub use self::exec::*;
 pub use self::inode_bitmap::InodeBitmap;
@@ -89,6 +90,38 @@ impl<'a> Read for FileRangeReader<'a> {
         self.offset += nr_read as u64;
         self.size -= nr_read as u64;
         Ok(nr_read)
+    }
+}
+
+pub enum DelayType {
+    Fixed,
+    // an exponential delay between each attempts
+    BackOff,
+}
+
+pub struct Delayer {
+    r#type: DelayType,
+    attempts: u32,
+    time: Duration,
+}
+
+impl Delayer {
+    pub fn new(t: DelayType, time: Duration) -> Self {
+        Delayer {
+            r#type: t,
+            attempts: 0,
+            time,
+        }
+    }
+
+    pub fn delay(&mut self) {
+        use std::thread::sleep;
+
+        match self.r#type {
+            DelayType::Fixed => sleep(self.time),
+            DelayType::BackOff => sleep((1 << self.attempts) * self.time),
+        }
+        self.attempts += 1;
     }
 }
 
