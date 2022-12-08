@@ -229,7 +229,6 @@ pub trait BlobCache: Send + Sync {
             let size = chunk.compressed_size();
             let d_size = chunk.uncompressed_size() as usize;
             if offset != last
-                || offset - blob_offset > usize::MAX as u64
                 || offset.checked_add(size as u64).is_none()
                 || ((!self.is_stargz() && d_size as u64 > RAFS_MAX_CHUNK_SIZE)
                     || (self.is_stargz() && d_size > 4 << 20))
