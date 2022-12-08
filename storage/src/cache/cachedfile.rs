@@ -86,6 +86,7 @@ impl FileCacheMeta {
 
     pub(crate) fn get_blob_meta(&self) -> Option<Arc<BlobMetaInfo>> {
         loop {
+            // TODO: rwlock
             let meta = self.meta.lock().unwrap();
             if meta.is_some() {
                 return meta.clone();
@@ -333,25 +334,34 @@ impl BlobCache for FileCacheEntry {
             let blob_end = pending[end].compressed_offset() + pending[end].compressed_size() as u64;
             let blob_size = (blob_end - blob_offset) as usize;
 
-            match self.read_chunks(blob_offset, blob_size, &pending[start..=end], true) {
-                Ok(v) => {
-                    total_size += blob_size;
-                    for idx in start..=end {
-                        let offset = if self.is_compressed {
-                            pending[idx].compressed_offset()
+            match self.read_chunks(
+                blob_offset,
+                blob_size,
+                &pending[start..=end],
+                true,
+                !self.is_compressed,
+                Some(
+                    &|ck: Arc<dyn BlobChunkInfo>, raw: &[u8], processed: Option<&[u8]>| {
+                        let (offset, buf) = if self.is_compressed {
+                            (ck.compressed_offset(), raw)
                         } else {
-                            pending[idx].uncompressed_offset()
+                            (ck.uncompressed_offset(), processed.unwrap())
                         };
-                        match Self::persist_chunk(&self.file, offset, &v[idx - start]) {
+
+                        match Self::persist_chunk(&self.file, offset, buf) {
                             Ok(_) => {
-                                let _ = self
-                                    .chunk_map
-                                    .set_ready_and_clear_pending(pending[idx].as_ref());
+                                let _ = self.chunk_map.set_ready_and_clear_pending(ck.as_ref());
+                                Ok(())
                             }
-                            Err(_) => self.chunk_map.clear_pending(pending[idx].as_ref()),
+                            Err(e) => {
+                                self.chunk_map.clear_pending(ck.as_ref());
+                                Err(e)
+                            }
                         }
-                    }
-                }
+                    },
+                ),
+            ) {
+                Ok(_) => total_size += blob_size,
                 Err(_e) => {
                     // Clear the pending flag for all chunks in processing.
                     for chunk in &mut pending[start..=end] {
@@ -506,7 +516,7 @@ impl FileCacheEntry {
             return Ok(0);
         }
 
-        debug_assert!(!chunks.is_empty());
+        assert!(!chunks.is_empty());
         let bitmap = self
             .chunk_map
             .as_range_map()
@@ -540,8 +550,37 @@ impl FileCacheEntry {
                 blob_size,
                 &chunks[start_idx..=end_idx],
                 prefetch,
+                !self.is_compressed,
+                Some(
+                    &|ck: Arc<dyn BlobChunkInfo>, raw: &[u8], processed: Option<&[u8]>| {
+                        let (offset, buf) = if self.is_compressed {
+                            (ck.compressed_offset(), raw)
+                        } else {
+                            (ck.uncompressed_offset(), processed.unwrap())
+                        };
+
+                        let mut data = buf;
+                        let mut b: Vec<u8>;
+                        if self.dio_enabled {
+                            // DIO only applies uncompressed cache.
+                            b = alloc_buf(ck.uncompressed_size() as usize);
+                            b.copy_from_slice(buf);
+                            self.adjust_buffer_for_dio(&mut b);
+                            data = &b;
+                        }
+                        if let Err(e) = Self::persist_chunk(&self.file, offset, data) {
+                            bitmap.clear_range_pending(pending[start], (end - start) as u32);
+                            return Err(eio!(format!(
+                                "do_fetch_chunk failed to persist data, {:?}",
+                                e
+                            )));
+                        }
+
+                        Ok(())
+                    },
+                ),
             ) {
-                Ok(mut v) => {
+                Ok(_) => {
                     total_size += blob_size;
                     trace!(
                         "range persist chunk start {} {} pending {} {}",
@@ -550,25 +589,6 @@ impl FileCacheEntry {
                         start_idx,
                         end_idx
                     );
-                    for idx in start_idx..=end_idx {
-                        let offset = if self.is_compressed {
-                            chunks[idx].compressed_offset()
-                        } else {
-                            chunks[idx].uncompressed_offset()
-                        };
-                        let buf = &mut v[idx - start_idx];
-                        if self.dio_enabled {
-                            self.adjust_buffer_for_dio(buf)
-                        }
-                        trace!("persist_chunk idx {}", idx);
-                        if let Err(e) = Self::persist_chunk(&self.file, offset, buf) {
-                            bitmap.clear_range_pending(pending[start], (end - start) as u32);
-                            return Err(eio!(format!(
-                                "do_fetch_chunk failed to persist data, {:?}",
-                                e
-                            )));
-                        }
-                    }
 
                     bitmap
                         .set_range_ready_and_clear_pending(pending[start], (end - start) as u32)?;
@@ -777,24 +797,48 @@ impl FileCacheEntry {
             region.chunks.len()
         );
 
-        let mut chunks = self.read_chunks(region.blob_address, blob_size, &region.chunks, false)?;
+        let mut chunks = self.read_chunks(
+            region.blob_address,
+            blob_size,
+            &region.chunks,
+            false,
+            true,
+            Some(
+                &|ck: Arc<dyn BlobChunkInfo>, raw: &[u8], _processed: Option<&[u8]>| {
+                    if !self.is_compressed {
+                        return Ok(());
+                    }
+
+                    let d = Arc::new(DataBuffer::Allocated(raw.to_vec()));
+                    self.delay_persist(ck, d);
+
+                    Ok(())
+                },
+            ),
+        )?;
+
         assert_eq!(region.chunks.len(), chunks.len());
 
-        let mut chunk_buffers = Vec::with_capacity(region.chunks.len());
-        let mut buffer_holder = Vec::with_capacity(region.chunks.len());
-        for (i, v) in chunks.drain(..).enumerate() {
-            let d = Arc::new(DataBuffer::Allocated(v));
+        let mut user_chunks = Vec::with_capacity(region.chunks.len());
+
+        // Extract out user chunks data as some chunks are amplified by upper rafs layer (only V5).
+        for (i, d) in chunks.iter().enumerate() {
+            // True means the chunk is user IO.
             if region.tags[i] {
-                buffer_holder.push(d.clone());
+                user_chunks.push(d.to_vec());
             }
-            self.delay_persist(region.chunks[i].clone(), d);
         }
-        for d in buffer_holder.iter() {
-            chunk_buffers.push(d.as_ref().slice());
+
+        if !self.is_compressed {
+            for (i, v) in chunks.drain(..).enumerate() {
+                let d = Arc::new(DataBuffer::Allocated(v));
+                // Amplified io chunks should also be persisted.
+                self.delay_persist(region.chunks[i].clone(), d);
+            }
         }
 
         let total_read = copyv(
-            &chunk_buffers,
+            &user_chunks,
             mem_cursor.mem_slice,
             region.seg.offset as usize,
             region.seg.len as usize,
@@ -803,9 +847,10 @@ impl FileCacheEntry {
         )
         .map(|(n, _)| n)
         .map_err(|e| {
-            error!("failed to copy from chunk buf to buf: {:?}", e);
+            error!("failed to copy to user data buffer: {}", e);
             eio!(e)
         })?;
+
         mem_cursor.move_cursor(total_read);
 
         Ok(total_read)
@@ -829,7 +874,7 @@ impl FileCacheEntry {
                     .set_ready_and_clear_pending(chunk_info.as_ref())
                     .unwrap_or_else(|e| {
                         error!(
-                            "Failed change caching state for chunk of offset {}, {:?}",
+                            "Failed to change cache state for chunk of offset {}, {:?}",
                             chunk_info.compressed_offset(),
                             e
                         )
@@ -1002,7 +1047,7 @@ impl FileCacheEntry {
             raw_buffer,
             raw_stream,
             buffer,
-            self.is_compressed,
+            self.is_compressed && chunk.is_compressed(),
             false,
         )?;
 
