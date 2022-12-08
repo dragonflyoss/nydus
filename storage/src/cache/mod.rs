@@ -49,6 +49,8 @@ pub use fscache::FsCacheMgr;
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
+type ChunkHook<'a> = &'a dyn Fn(Arc<dyn BlobChunkInfo>, &[u8], Option<&[u8]>) -> Result<()>;
+
 struct BlobIoMergeState<'a, F: FnMut(BlobIoRange)> {
     cb: F,
     size: u32,
@@ -188,7 +190,9 @@ pub trait BlobCache: Send + Sync {
     /// chunks into one backend request. Callers must ensure that chunks in `chunks` covers a
     /// continuous range, and the range exactly matches [`blob_offset`..`blob_offset` + `blob_size`].
     /// Function `read_chunks()` returns one buffer containing decompressed chunk data for each
-    /// entry in the `chunks` array in corresponding order.
+    /// entry in the `chunks` array in corresponding order. `chunk_hook` provides caller a hook point to receive
+    /// and process raw chunks data. `output` indicates that raw chunks read from backend should be decompressed
+    /// and passed to caller
     ///
     /// This method returns success only if all requested data are successfully fetched.
     fn read_chunks(
@@ -197,6 +201,8 @@ pub trait BlobCache: Send + Sync {
         blob_size: usize,
         chunks: &[Arc<dyn BlobChunkInfo>],
         prefetch: bool,
+        output: bool,
+        chunk_hook: Option<ChunkHook>,
     ) -> Result<Vec<Vec<u8>>> {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
@@ -222,7 +228,13 @@ pub trait BlobCache: Send + Sync {
         );
 
         let mut last = blob_offset;
-        let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(chunks.len());
+
+        let mut buffers = if output {
+            Vec::with_capacity(chunks.len())
+        } else {
+            Default::default()
+        };
+
         for chunk in chunks {
             // Ensure BlobIoChunk is valid and continuous.
             let offset = chunk.compressed_offset();
@@ -242,16 +254,31 @@ pub trait BlobCache: Send + Sync {
             let buf = &c_buf[offset_merged..end_merged];
             let mut buffer = alloc_buf(d_size);
 
-            self.process_raw_chunk(
-                chunk.as_ref(),
-                buf,
-                None,
-                &mut buffer,
-                chunk.is_compressed(),
-                false,
-            )?;
-            buffers.push(buffer);
+            if output {
+                self.process_raw_chunk(
+                    chunk.as_ref(),
+                    buf,
+                    None,
+                    &mut buffer,
+                    chunk.is_compressed(),
+                    false,
+                )?;
+                buffers.push(buffer);
+            }
+
             last = offset + size as u64;
+
+            if let Some(f) = chunk_hook {
+                f(
+                    chunk.clone(),
+                    buf,
+                    if output {
+                        Some(buffers.last().unwrap().as_slice())
+                    } else {
+                        None
+                    },
+                )?;
+            }
         }
 
         Ok(buffers)
