@@ -194,7 +194,7 @@ impl FileCacheEntry {
         let is_stargz = blob_info.is_stargz();
         let is_compressed = mgr.is_compressed || is_stargz;
         let need_validate = (mgr.validate || !is_direct_chunkmap) && !is_stargz;
-        let is_get_blob_object_supported = !mgr.is_compressed && is_direct_chunkmap;
+        let is_get_blob_object_supported = is_direct_chunkmap;
 
         trace!(
             "comp {} direct {} stargz {}",
@@ -202,7 +202,7 @@ impl FileCacheEntry {
             is_direct_chunkmap,
             is_stargz
         );
-        let meta = if is_get_blob_object_supported && blob_info.meta_ci_is_valid() {
+        let meta = if blob_info.meta_ci_is_valid() {
             // Set cache file to its expected size.
             let file_size = file.metadata()?.len();
             if file_size == 0 {
