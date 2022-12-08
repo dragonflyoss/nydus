@@ -95,14 +95,13 @@ jobs:
       uses: actions/cache@v2
       with:
         path: /go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/docker-nydus-graphdriver/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
+        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go
     - name: build contrib go components
       run: |
         make -e GOARCH=${{ matrix.arch }} contrib-release
         sudo mv contrib/ctr-remote/bin/ctr-remote .
-        sudo mv contrib/docker-nydus-graphdriver/bin/nydus_graphdriver .
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
     - name: store-artifacts
@@ -111,7 +110,6 @@ jobs:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
           ctr-remote
-          nydus_graphdriver
           nydusify
           nydus-overlayfs
           containerd-nydus-grpc
