@@ -99,11 +99,7 @@ fn dump_bootstrap(
 
         // Output uncompressed data for backward compatibility and compressed data for new format.
         let (bootstrap_data, compressor) = if ctx.features.is_enabled(Feature::BlobToc) {
-            let mut compressor = if ctx.conversion_type.is_to_ref() {
-                compress::Algorithm::Zstd
-            } else {
-                ctx.compressor
-            };
+            let mut compressor = compress::Algorithm::Zstd;
             let (compressed_data, compressed) =
                 compress::compress(&uncompressed_bootstrap, compressor)
                     .with_context(|| "failed to compress bootstrap".to_string())?;
@@ -141,14 +137,15 @@ fn dump_toc(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if ctx.features.is_enabled(Feature::BlobToc) {
+        let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
         let data = blob_ctx.entry_list.as_bytes().to_vec();
         let toc_size = data.len() as u64;
         blob_ctx.write_data(blob_writer, &data)?;
-        let header = blob_ctx.write_tar_header(blob_writer, toc::ENTRY_TOC, toc_size)?;
-        let mut hasher = RafsDigest::hasher(ctx.digester);
         hasher.digest_update(&data);
+        let header = blob_ctx.write_tar_header(blob_writer, toc::ENTRY_TOC, toc_size)?;
         hasher.digest_update(header.as_bytes());
         blob_ctx.rafs_blob_toc_digest = hasher.digest_finalize().data;
+        blob_ctx.rafs_blob_toc_size = toc_size as u32 + header.as_bytes().len() as u32;
     }
     Ok(())
 }

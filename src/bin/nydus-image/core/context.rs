@@ -383,8 +383,10 @@ pub struct BlobContext {
     pub rafs_blob_digest: [u8; 32],
     // Size of the rafs blob (only valid in merged bootstrap).
     pub rafs_blob_size: u64,
+    // Size of the ToC section in RAFS data blob.
+    pub rafs_blob_toc_size: u32,
 
-    pub entry_list: toc::EntryList,
+    pub entry_list: toc::TocEntryList,
 }
 
 impl BlobContext {
@@ -415,8 +417,9 @@ impl BlobContext {
             rafs_blob_toc_digest: [0u8; 32],
             rafs_blob_digest: [0u8; 32],
             rafs_blob_size: 0,
+            rafs_blob_toc_size: 0,
 
-            entry_list: toc::EntryList::new(),
+            entry_list: toc::TocEntryList::new(),
         };
 
         if features.contains(BlobFeatures::ALIGNED) {
@@ -759,6 +762,7 @@ impl BlobManager {
                         ctx.rafs_blob_digest,
                         ctx.rafs_blob_toc_digest,
                         ctx.rafs_blob_size,
+                        ctx.rafs_blob_toc_size,
                         ctx.blob_meta_header,
                     );
                 }

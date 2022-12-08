@@ -9,8 +9,8 @@ use nydus_rafs::metadata::layout::toc;
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::BlobMetaChunkArray;
-use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{compress, digest, try_round_up_4k};
+use nydus_utils::compress;
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use sha2::digest::Digest;
 
 use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
@@ -139,11 +139,7 @@ impl Blob {
             header.set_ci_zran(false);
         };
 
-        let mut compressor = if ctx.conversion_type.is_to_ref() {
-            compress::Algorithm::Zstd
-        } else {
-            ctx.compressor
-        };
+        let mut compressor = compress::Algorithm::Zstd;
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
         if !compressed {
@@ -195,20 +191,24 @@ impl Blob {
                 blob_ctx.blob_meta_info.as_byte_slice()
             };
             hasher.digest_update(ci_data);
-            let aligned_uncompressed_size: u64 = try_round_up_4k(uncompressed_size).unwrap();
-            let padding = &vec![0u8; (aligned_uncompressed_size - uncompressed_size) as usize];
-            if !padding.is_empty() {
-                hasher.digest_update(padding);
-            }
-            hasher.digest_update(header.as_bytes());
             blob_ctx.entry_list.add(
                 toc::ENTRY_BLOB_META,
                 compressor,
-                // Ths digest is sha256(uncompressed data + 4k aligned padding + header data).
                 hasher.digest_finalize(),
                 compressed_offset,
-                compressed_size + header_size as u64,
-                aligned_uncompressed_size + header_size as u64,
+                compressed_size as u64,
+                uncompressed_size as u64,
+            )?;
+
+            let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+            hasher.digest_update(header.as_bytes());
+            blob_ctx.entry_list.add(
+                toc::ENTRY_BLOB_META_HEADER,
+                compress::Algorithm::None,
+                hasher.digest_finalize(),
+                compressed_offset + compressed_size,
+                header_size as u64,
+                header_size as u64,
             )?;
         }
 

@@ -325,15 +325,21 @@ impl From<compress::Algorithm> for RafsSuperFlags {
     }
 }
 
+/// Configuration information to check compatibility between RAFS filesystems.
 #[derive(Clone, Copy, Debug)]
 pub struct RafsSuperConfig {
+    /// RAFS filesystem version.
     pub version: RafsVersion,
+    /// Compression algorithm.
     pub compressor: compress::Algorithm,
+    /// Digest algorithm.
     pub digester: digest::Algorithm,
+    /// Whether `explicit_uidgid` enabled or not.
     pub explicit_uidgid: bool,
 }
 
 impl RafsSuperConfig {
+    /// Check compatibility for two RAFS filesystems.
     pub fn check_compatibility(&self, meta: &RafsSuperMeta) -> Result<()> {
         if self.compressor != meta.get_compressor() {
             return Err(einval!(format!(
@@ -366,9 +372,11 @@ impl RafsSuperConfig {
                 RafsVersion::try_from(meta.version)?
             )));
         }
+
         Ok(())
     }
 }
+
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct RafsSuperMeta {
