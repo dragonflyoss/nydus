@@ -44,7 +44,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorMsg"
-  /blob_objects:
+  /blobs:
     summary: Manage cached blob objects
     ####################################################################
     get:
@@ -92,6 +92,21 @@ paths:
           description: "Successfully deleted the blob object!"
         "500":
           description: "Can't delete the blob object!"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMsg"
+      operationId: deleteBlobFile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BlobId"
+      responses:
+        "204":
+          description: "Successfully deleted the blob file!"
+        "500":
+          description: "Can't delete the blob file!"
           content:
             application/json:
               schema:

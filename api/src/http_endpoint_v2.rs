@@ -100,6 +100,10 @@ impl EndpointHandler for BlobObjectListHandlerV2 {
                     let r = kicker(ApiRequest::DeleteBlobObject(param));
                     return Ok(convert_to_response(r, HttpError::DeleteBlobObject));
                 }
+                if let Some(blob_id) = extract_query_part(req, "blob_id") {
+                    let r = kicker(ApiRequest::DeleteBlobFile(blob_id));
+                    return Ok(convert_to_response(r, HttpError::DeleteBlobFile));
+                }
                 Err(HttpError::BadRequest)
             }
             _ => Err(HttpError::BadRequest),

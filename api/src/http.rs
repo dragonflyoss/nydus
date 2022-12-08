@@ -158,6 +158,8 @@ pub enum ApiRequest {
     GetBlobObject(BlobCacheObjectId),
     /// Delete a blob cache entry
     DeleteBlobObject(BlobCacheObjectId),
+    /// Delete a blob cache file
+    DeleteBlobFile(String),
 }
 
 /// Kinds for daemon related error messages.
@@ -291,6 +293,8 @@ pub enum HttpError {
     CreateBlobObject(ApiError),
     /// Failed to delete blob object
     DeleteBlobObject(ApiError),
+    /// Failed to delete blob file
+    DeleteBlobFile(ApiError),
     /// Failed to list existing blob objects
     GetBlobObjects(ApiError),
 }

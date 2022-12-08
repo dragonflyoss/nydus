@@ -87,6 +87,7 @@ impl ApiServer {
             ApiRequest::GetBlobObject(_param) => todo!(),
             ApiRequest::CreateBlobObject(entry) => self.create_blob_cache_entry(&entry),
             ApiRequest::DeleteBlobObject(param) => self.remove_blob_cache_entry(&param),
+            ApiRequest::DeleteBlobFile(blob_id) => self.blob_cache_gc(blob_id),
         };
 
         self.respond(resp);
@@ -324,6 +325,13 @@ impl ApiServer {
                 }
             }
         }
+    }
+
+    fn blob_cache_gc(&self, blob_id: String) -> ApiResponse {
+        self.get_daemon_object()?
+            .delete_blob(blob_id)
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
+            .map(|_| ApiResponsePayload::Empty)
     }
 
     fn do_start(&self) -> ApiResponse {
