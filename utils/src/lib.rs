@@ -12,6 +12,7 @@ extern crate serde;
 extern crate lazy_static;
 
 use std::convert::{Into, TryFrom, TryInto};
+use std::time::Duration;
 
 pub use self::exec::*;
 pub use self::inode_bitmap::InodeBitmap;
@@ -54,6 +55,38 @@ pub fn try_round_up_4k<U: TryFrom<u64>, T: Into<u64>>(x: T) -> Option<U> {
 
 pub fn round_down_4k(x: u64) -> u64 {
     x & (!4095u64)
+}
+
+pub enum DelayType {
+    Fixed,
+    // an exponential delay between each attempts
+    BackOff,
+}
+
+pub struct Delayer {
+    r#type: DelayType,
+    attempts: u32,
+    time: Duration,
+}
+
+impl Delayer {
+    pub fn new(t: DelayType, time: Duration) -> Self {
+        Delayer {
+            r#type: t,
+            attempts: 0,
+            time,
+        }
+    }
+
+    pub fn delay(&mut self) {
+        use std::thread::sleep;
+
+        match self.r#type {
+            DelayType::Fixed => sleep(self.time),
+            DelayType::BackOff => sleep((1 << self.attempts) * self.time),
+        }
+        self.attempts += 1;
+    }
 }
 
 #[cfg(test)]
