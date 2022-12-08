@@ -564,7 +564,7 @@ impl Rafs {
             match res {
                 Ok(true) => {
                     ignore_prefetch_all = true;
-                    warn!("Root inode was found, but it should not prefetch all files!")
+                    info!("Root inode was found, but it should not prefetch all files!")
                 }
                 Ok(false) => {}
                 Err(e) => info!("No file to be prefetched {:?}", e),
@@ -591,15 +591,14 @@ impl Rafs {
                             offset: pre_offset,
                             len: cmp::min(batch_size, blob_size - pre_offset),
                         };
-                        pre_offset += batch_size;
-                        if pre_offset > blob_size {
-                            break;
-                        }
-
                         device
                             .prefetch(&[], &[req])
                             .map_err(|e| warn!("failed to prefetch blob data, {}", e))
                             .unwrap_or_default();
+                        pre_offset += batch_size;
+                        if pre_offset > blob_size {
+                            break;
+                        }
                     }
                 }
             } else {
