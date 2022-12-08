@@ -21,11 +21,9 @@ import tempfile
 import pytest
 
 from nydus_anchor import NydusAnchor
-from linux_command import LinuxCommand
 from utils import Size, Unit
 from whiteout import WhiteoutSpec
 from oss import OssHelper
-from backend_proxy import BackendProxy
 
 
 class Backend(enum.Enum):
@@ -91,6 +89,13 @@ class RafsConf:
         self._device_conf = json.loads(
             json.dumps(self._rafs_conf_default), object_hook=lambda d: Namespace(**d)
         )
+
+        if self.anchor.fs_version == 6:
+            self._device_conf.device.cache = Namespace(
+                type="blobcache",
+                config=Namespace(work_dir=self.anchor.blobcache_dir),
+            )
+
         self.device_conf = utils.object_to_dict(copy.deepcopy(self._device_conf))
 
     def path(self):
@@ -231,11 +236,6 @@ class RafsConf:
 
     def dump_rafs_conf(self):
         # In case the conf is dumped more than once
-
-        if int(self.anchor.fs_version) == 6:
-            logging.warning("Rafs v6 must enable blobcache")
-            self.enable_rafs_blobcache()
-
         self.__conf_file_wrapper.truncate(0)
         self.__conf_file_wrapper.seek(0)
         logging.info("Current rafs metadata mode *%s*", self._rafs_conf_default["mode"])

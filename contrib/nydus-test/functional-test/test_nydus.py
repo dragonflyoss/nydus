@@ -156,8 +156,10 @@ def test_prefetch_without_cache(
 
 
 @pytest.mark.parametrize("thread_cnt", [3])
-@pytest.mark.parametrize("compressor", [Compressor.LZ4_BLOCK, Compressor.NONE])
-@pytest.mark.parametrize("is_cache_compressed", [False])
+@pytest.mark.parametrize(
+    "compressor", [Compressor.LZ4_BLOCK, Compressor.ZSTD, Compressor.NONE]
+)
+@pytest.mark.parametrize("is_cache_compressed", [True, False])
 def test_prefetch_with_cache(
     nydus_anchor: NydusAnchor,
     nydus_scratch_image: RafsImage,
@@ -175,7 +177,7 @@ def test_prefetch_with_cache(
       - Rafs can be unmounted.
     """
     rafs_conf.enable_rafs_blobcache(is_compressed=is_cache_compressed)
-    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY, prefix="object_prefix/")
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.enable_fs_prefetch(threads_count=4, bandwidth_rate=Size(40, Unit.MB).B)
     rafs_conf.dump_rafs_conf()
 
@@ -186,9 +188,7 @@ def test_prefetch_with_cache(
     dist.put_hardlinks(6)
     dist.put_multiple_chinese_files(random.randint(20, 28), Size(20, Unit.KB))
 
-    nydus_scratch_image.set_backend(
-        Backend.BACKEND_PROXY, prefix="object_prefix/"
-    ).create_image(
+    nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image(
         compressor=compressor,
         readahead_policy="fs",
         readahead_files="/".encode(),
