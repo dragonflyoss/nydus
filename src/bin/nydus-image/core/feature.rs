@@ -33,7 +33,8 @@ impl Features {
         Ok(list)
     }
 
-    pub fn enable(&self, feature: Feature) -> bool {
+    /// Check whether feature is enabled or not.
+    pub fn is_enabled(&self, feature: Feature) -> bool {
         self.0.contains(&feature)
     }
 }

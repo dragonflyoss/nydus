@@ -7,7 +7,7 @@ use std::fs::DirEntry;
 
 use anyhow::{Context, Result};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, dump_toc, Builder};
+use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 use crate::core::blob::Blob;
 use crate::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
@@ -116,13 +116,13 @@ impl Builder for DirectoryBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
         let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?)
+            ArtifactWriter::new(blob_stor, ctx.blob_inline_meta)?
         } else {
             return Err(anyhow!(
-                "the target blob path should always be valid for directory builder"
+                "target blob path should always be valid for directory builder"
             ));
         };
 
@@ -131,6 +131,8 @@ impl Builder for DirectoryBuilder {
             { self.build_tree(ctx, &mut bootstrap_ctx, layer_idx) },
             "build_tree"
         )?;
+
+        // Build bootstrap
         let mut bootstrap = timing_tracer!(
             { build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree) },
             "build_bootstrap"
@@ -142,34 +144,42 @@ impl Builder for DirectoryBuilder {
             "dump_blob"
         )?;
 
-        let mut origin_blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
-            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
-        } else {
-            None
-        };
-        let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
+        // Dump blob meta information
         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            Blob::dump_meta_data(ctx, blob_ctx, blob_meta_writer)?;
+            Blob::dump_meta_data(ctx, blob_ctx, &mut blob_writer)?;
         }
 
-        // Dump blob meta to blob file
-        timing_tracer!(
-            {
-                dump_bootstrap(
-                    ctx,
-                    bootstrap_mgr,
-                    &mut bootstrap_ctx,
-                    &mut bootstrap,
-                    blob_mgr,
-                    blob_writer.as_mut(),
-                )
-            },
-            "dump_bootstrap"
-        )?;
-
-        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
-            dump_toc(ctx, blob_ctx, blob_meta_writer)?;
+        // Dump RAFS meta/bootstrap and finalize the data blob.
+        if ctx.blob_inline_meta {
+            timing_tracer!(
+                {
+                    dump_bootstrap(
+                        ctx,
+                        bootstrap_mgr,
+                        &mut bootstrap_ctx,
+                        &mut bootstrap,
+                        blob_mgr,
+                        &mut blob_writer,
+                    )
+                },
+                "dump_bootstrap"
+            )?;
+            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+        } else {
+            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            timing_tracer!(
+                {
+                    dump_bootstrap(
+                        ctx,
+                        bootstrap_mgr,
+                        &mut bootstrap_ctx,
+                        &mut bootstrap,
+                        blob_mgr,
+                        &mut blob_writer,
+                    )
+                },
+                "dump_bootstrap"
+            )?;
         }
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)

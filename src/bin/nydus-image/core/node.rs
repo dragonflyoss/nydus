@@ -328,7 +328,7 @@ impl Node {
         self: &mut Node,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
-        blob_writer: &mut Option<ArtifactWriter>,
+        blob_writer: &mut ArtifactWriter,
         chunk_data_buf: &mut [u8],
     ) -> Result<u64> {
         let mut reader = if self.is_reg() {
@@ -352,7 +352,7 @@ impl Node {
         &mut self,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
-        blob_writer: &mut Option<ArtifactWriter>,
+        blob_writer: &mut ArtifactWriter,
         reader: Option<&mut R>,
         data_buf: &mut [u8],
     ) -> Result<u64> {
@@ -563,7 +563,7 @@ impl Node {
         &self,
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
-        blob_writer: &mut Option<ArtifactWriter>,
+        blob_writer: &mut ArtifactWriter,
         chunk_data: &[u8],
         chunk: &mut ChunkWrapper,
     ) -> Result<()> {
@@ -587,8 +587,8 @@ impl Node {
             let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
                 .with_context(|| format!("failed to compress node file {:?}", self.path))?;
             // Dump compressed chunk data to blob
-            if let Some(writer) = blob_writer {
-                writer
+            if !ctx.conversion_type.is_to_ref() {
+                blob_writer
                     .write_all(&compressed)
                     .context("failed to write blob")?;
             }

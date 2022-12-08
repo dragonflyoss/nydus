@@ -49,8 +49,8 @@ bitflags! {
     pub struct BlobFeatures: u32 {
         /// Uncompressed chunk data is 4K aligned.
         const ALIGNED = 0x0000_0001;
-        /// Blob meta information data is stored in a separate file.
-        const SEPARATE_BLOB_META = 0x0000_0002;
+        /// RAFS meta data is inlined in the data blob.
+        const INLINED_META = 0x0000_0002;
         /// Blob chunk information format v2.
         const CHUNK_INFO_V2 = 0x0000_0004;
         /// Blob compression information data include context data for zlib random access.

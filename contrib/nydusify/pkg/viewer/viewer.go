@@ -3,7 +3,6 @@ package viewer
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,7 +22,7 @@ func prettyDump(obj interface{}, name string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(name, bytes, 0644)
+	return os.WriteFile(name, bytes, 0644)
 }
 
 // Opt defines fsViewer options, Target is the Nydus image reference

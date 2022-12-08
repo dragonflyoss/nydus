@@ -7,7 +7,6 @@ package tests
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -42,6 +41,7 @@ type Registry struct {
 	id         string
 	host       string
 	authFile   string
+	authString string // base64(username:password)
 	configFile string
 }
 
@@ -50,17 +50,18 @@ func NewAuthRegistry(t *testing.T) *Registry {
 	assert.Nil(t, err)
 	authString := runWithOutput(t, "docker run --rm --entrypoint htpasswd httpd:2 -Bbn testuser testpassword")
 	authFile, _ := filepath.Abs(filepath.Join("auth", "htpasswd"))
-	err = ioutil.WriteFile(authFile, []byte(authString), 0644)
+	err = os.WriteFile(authFile, []byte(authString), 0644)
 	assert.Nil(t, err)
 
 	err = os.Mkdir(".docker", 0755)
 	assert.Nil(t, err)
+	base64AuthString := base64.StdEncoding.EncodeToString([]byte("testuser:testpassword"))
 	configString := fmt.Sprintf(`{"auths": { "localhost:%d": { "auth": "%s" }}}`,
-		registryPort, base64.StdEncoding.EncodeToString([]byte("testuser:testpassword")))
+		registryPort, base64AuthString)
 	configFile, _ := filepath.Abs(filepath.Join(".docker", "config.json"))
 	err = os.Setenv("DOCKER_CONFIG", path.Dir(configFile))
 	assert.Nil(t, err)
-	err = ioutil.WriteFile(configFile, []byte(configString), 0644)
+	err = os.WriteFile(configFile, []byte(configString), 0644)
 	assert.Nil(t, err)
 
 	containerID := runWithOutput(t, fmt.Sprintf("docker run -p %d:5000 --rm -d  -v %s:/auth "+
@@ -72,6 +73,7 @@ func NewAuthRegistry(t *testing.T) *Registry {
 		id:         containerID,
 		host:       fmt.Sprintf("localhost:%d", registryPort),
 		authFile:   authFile,
+		authString: base64AuthString,
 		configFile: configFile,
 	}
 }

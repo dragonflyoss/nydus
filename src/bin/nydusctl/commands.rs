@@ -401,31 +401,28 @@ Commit:                 {git_commit}
                 if let Some(b) = i.get("backend_collection") {
                     if let Some(fs_backends) = b.as_object() {
                         if !fs_backends.is_empty() {
-                            println!("Backend list:")
+                            println!("Instances:")
                         }
 
                         for (mount_point, backend_obj) in fs_backends {
                             let backend: FsBackendDesc =
                                 serde_json::from_value(backend_obj.clone()).unwrap();
-                            println!("  {}", mount_point);
-                            println!("    type:                   {}", backend.backend_type);
-                            println!("    mountpoint:             {}", backend.mountpoint);
-                            println!("    mounted_time:           {}", backend.mounted_time);
+                            println!("\tInstance Mountpoint:  {}", mount_point);
+                            println!("\tType:  {}", backend.backend_type);
+                            println!("\tMounted Time:  {}", backend.mounted_time);
                             match backend.backend_type {
                                 FsBackendType::PassthroughFs => {}
                                 FsBackendType::Rafs => {
                                     let cfg = backend.config.unwrap();
                                     let cache_cfg = cfg.get_cache_config()?;
                                     let rafs_cfg = cfg.get_rafs_config()?;
+                                    print!("\tMode:  {}", rafs_cfg.mode);
+                                    print!("\tPrefetch:  {}", cache_cfg.prefetch.enable);
                                     print!(
-                                        r#"    Mode:                   {meta_mode}
-            Prefetch:               {enabled}
-            Prefetch Merging Size:  {merging_size}
-        "#,
-                                        meta_mode = rafs_cfg.mode,
-                                        enabled = cache_cfg.prefetch.enable,
-                                        merging_size = cache_cfg.prefetch.batch_size,
+                                        "\tPrefetch Merging Size:  {}",
+                                        cache_cfg.prefetch.batch_size
                                     );
+                                    print!("")
                                 }
                             }
                         }

@@ -38,6 +38,7 @@
 //! -- targz/stargz (unchanged): |tar header|tar header|file data|tar header|
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
@@ -244,16 +245,6 @@ impl BlobMetaHeaderOndisk {
             self.s_features |= BlobFeatures::CHUNK_INFO_V2.bits();
         } else {
             self.s_features &= !BlobFeatures::CHUNK_INFO_V2.bits();
-        }
-    }
-
-    /// Set flag indicating whether the blob compression information data is stored in a separate
-    /// file or embedded in the blob itself.
-    pub fn set_ci_separate(&mut self, enable: bool) {
-        if enable {
-            self.s_features |= BlobFeatures::SEPARATE_BLOB_META.bits();
-        } else {
-            self.s_features &= !BlobFeatures::SEPARATE_BLOB_META.bits();
         }
     }
 
@@ -541,32 +532,28 @@ impl BlobMetaInfo {
             blob_info.meta_ci_uncompressed_size(),
         );
 
-        if blob_info.meta_ci_compressor() == compress::Algorithm::None {
-            let size = reader
-                .read(buffer, blob_info.meta_ci_offset())
-                .map_err(|e| {
-                    eio!(format!(
-                        "failed to read metadata from backend(compressor is None), {:?}",
-                        e
-                    ))
-                })?;
-            if size != buffer.len() {
-                return Err(eio!(
-                    "failed to read blob metadata from backend(compressor is None)"
-                ));
-            }
-        } else {
-            let compressed_size = blob_info.meta_ci_compressed_size();
-            let uncompressed_size = blob_info.meta_ci_uncompressed_size();
-            let expected_size = (compressed_size + BLOB_METADATA_HEADER_SIZE) as usize;
-            let mut buf = alloc_buf(expected_size);
-            let read_size = reader
-                .read(&mut buf, blob_info.meta_ci_offset())
-                .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
-            if read_size != expected_size {
-                return Err(eio!("failed to read blob metadata from backend"));
-            }
+        let compressed_size = blob_info.meta_ci_compressed_size();
+        let uncompressed_size = blob_info.meta_ci_uncompressed_size();
+        let aligned_uncompressed_size = round_up_4k(uncompressed_size);
+        let expected_raw_size = (compressed_size + BLOB_METADATA_HEADER_SIZE) as usize;
+        let mut raw_data = alloc_buf(expected_raw_size);
 
+        let read_size = reader
+            .read(&mut raw_data, blob_info.meta_ci_offset())
+            .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
+        if read_size != expected_raw_size {
+            return Err(eio!(format!(
+                "failed to read blob metadata from backend, compressor {}",
+                blob_info.meta_ci_compressor()
+            )));
+        }
+
+        let (uncompressed, header) = if blob_info.meta_ci_compressor() == compress::Algorithm::None
+        {
+            let uncompressed = &raw_data[0..uncompressed_size as usize];
+            let header = &raw_data[uncompressed_size as usize..expected_raw_size];
+            (Cow::Borrowed(uncompressed), header)
+        } else {
             // Lz4 does not support concurrent decompression of the same data into
             // the same piece of memory. There will be multiple containers mmap the
             // same file, causing the buffer to be shared between different
@@ -579,26 +566,24 @@ impl BlobMetaInfo {
             // execute the process once when the blob.meta is created for the first
             // time, the memory consumption and performance impact are relatively
             // small.
-            let mut uncom_buf = vec![0u8; uncompressed_size as usize];
+            let mut uncompressed = vec![0u8; uncompressed_size as usize];
+            let header = &raw_data[compressed_size as usize..expected_raw_size];
             compress::decompress(
-                &buf[0..compressed_size as usize],
-                &mut uncom_buf,
+                &raw_data[0..compressed_size as usize],
+                &mut uncompressed,
                 blob_info.meta_ci_compressor(),
             )
             .map_err(|e| {
                 error!("failed to decompress blob meta data: {}", e);
                 e
             })?;
-            uncom_buf.resize(round_up_4k(uncompressed_size) as usize, 0);
-            buffer.copy_from_slice(
-                &[
-                    &uncom_buf,
-                    &buf[compressed_size as usize
-                        ..(compressed_size + BLOB_METADATA_HEADER_SIZE) as usize],
-                ]
-                .concat(),
-            );
-        }
+            (Cow::Owned(uncompressed), header)
+        };
+
+        buffer[0..uncompressed_size as usize].copy_from_slice(&uncompressed);
+        buffer[aligned_uncompressed_size as usize
+            ..(aligned_uncompressed_size + BLOB_METADATA_HEADER_SIZE) as usize]
+            .copy_from_slice(header);
 
         Ok(())
     }
@@ -1449,9 +1434,6 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     if features.contains(BlobFeatures::ALIGNED) {
         output += "4K-align ";
     }
-    if features.contains(BlobFeatures::SEPARATE_BLOB_META) {
-        output += "separate ";
-    }
     if features.contains(BlobFeatures::CHUNK_INFO_V2) {
         output += "chunk-v2 ";
     }
@@ -1513,7 +1495,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::INLINED_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
@@ -1566,7 +1548,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::INLINED_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
@@ -1623,7 +1605,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::SEPARATE_BLOB_META
+            | BlobFeatures::INLINED_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(

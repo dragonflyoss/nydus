@@ -7,7 +7,7 @@ package checker
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	"github.com/pkg/errors"
@@ -22,7 +22,7 @@ func prettyDump(obj interface{}, name string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(name, bytes, 0644)
+	return os.WriteFile(name, bytes, 0644)
 }
 
 // Output outputs OCI and Nydus image manifest, index, config to JSON file.

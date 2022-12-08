@@ -13,22 +13,33 @@
 //!   The [LocalFs](localfs/struct.LocalFs.html) storage backend supports backend level data
 //!   prefetching, which is to load data into page cache.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
+use nydus_utils::{
+    metrics::{BackendMetrics, ERROR_HOLDER},
+    DelayType, Delayer,
+};
 
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
 
-#[cfg(any(feature = "backend-oss", feature = "backend-registry"))]
+#[cfg(any(
+    feature = "backend-oss",
+    feature = "backend-registry",
+    feature = "backend-s3"
+))]
 pub mod connection;
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
+#[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
+pub mod object_storage;
 #[cfg(feature = "backend-oss")]
 pub mod oss;
 #[cfg(feature = "backend-registry")]
 pub mod registry;
+#[cfg(feature = "backend-s3")]
+pub mod s3;
 
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
@@ -43,9 +54,9 @@ pub enum BackendError {
     #[cfg(feature = "backend-localfs")]
     /// Error from LocalFs storage backend.
     LocalFs(self::localfs::LocalFsError),
-    #[cfg(feature = "backend-oss")]
-    /// Error from OSS storage backend.
-    Oss(self::oss::OssError),
+    #[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
+    /// Error from object storage backend.
+    ObjectStorage(self::object_storage::ObjectStorageError),
 }
 
 /// Specialized `Result` for storage backends.
@@ -75,6 +86,8 @@ pub trait BlobReader: Send + Sync {
         let mut retry_count = self.retry_limit();
         let begin_time = self.metrics().begin();
 
+        let mut delayer = Delayer::new(DelayType::BackOff, Duration::from_millis(500));
+
         loop {
             match self.try_read(buf, offset) {
                 Ok(size) => {
@@ -88,6 +101,7 @@ pub trait BlobReader: Send + Sync {
                             err, retry_count
                         );
                         retry_count -= 1;
+                        delayer.delay();
                     } else {
                         self.metrics().end(&begin_time, buf.len(), true);
                         ERROR_HOLDER

@@ -57,7 +57,8 @@ The `endpoint` field of the `backend-config.json` is optional when using aws s3 
 ``` shell
 cat /path/to/backend-config.json
 {
-  "endpoint": "http://localhost:9000",
+  "endpoint": "localhost:9000",
+  "scheme": "http",
   "access_key_id": "",
   "access_key_secret": "",
   "bucket_name": ""

@@ -22,7 +22,7 @@ use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nydus_utils::compress::Decoder;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use nydus_utils::{compress, digest, FileRangeReader};
+use nydus_utils::{compress, digest, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
@@ -37,8 +37,8 @@ use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFAULT_CHUNK_SIZE};
 
-const DOWNLOAD_META_RETRY_COUNT: u32 = 20;
-const DOWNLOAD_META_RETRY_DELAY: u64 = 500;
+const DOWNLOAD_META_RETRY_COUNT: u32 = 5;
+const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
 
 #[derive(Default, Clone)]
 pub(crate) struct FileCacheMeta {
@@ -70,6 +70,10 @@ impl FileCacheMeta {
 
             std::thread::spawn(move || {
                 let mut retry = 0;
+                let mut delayer = Delayer::new(
+                    DelayType::BackOff,
+                    Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
+                );
                 while retry < DOWNLOAD_META_RETRY_COUNT {
                     match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
                         Ok(m) => {
@@ -78,7 +82,7 @@ impl FileCacheMeta {
                         }
                         Err(e) => {
                             info!("temporarily failed to get blob.meta, {}", e);
-                            std::thread::sleep(Duration::from_millis(DOWNLOAD_META_RETRY_DELAY));
+                            delayer.delay();
                             retry += 1;
                         }
                     }
@@ -143,7 +147,7 @@ impl FileCacheEntry {
         let size = if blob_info.is_legacy_stargz() {
             reader.blob_size().map_err(|e| einval!(e))?
         } else {
-            0
+            blob_info.compressed_size()
         };
 
         Ok(size)

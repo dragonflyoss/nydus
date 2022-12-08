@@ -38,7 +38,7 @@ use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, ByteSize};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, dump_toc, Builder};
+use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 use crate::core::blob::Blob;
 use crate::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
@@ -67,7 +67,7 @@ pub(crate) struct TarballTreeBuilder<'a> {
     layer_idx: u16,
     ctx: &'a mut BuildContext,
     blob_mgr: &'a mut BlobManager,
-    blob_writer: &'a mut Option<ArtifactWriter>,
+    blob_writer: &'a mut ArtifactWriter,
     buf: Vec<u8>,
     path_inode_map: HashMap<PathBuf, Inode>,
 }
@@ -78,7 +78,7 @@ impl<'a> TarballTreeBuilder<'a> {
         ty: ConversionType,
         ctx: &'a mut BuildContext,
         blob_mgr: &'a mut BlobManager,
-        blob_writer: &'a mut Option<ArtifactWriter>,
+        blob_writer: &'a mut ArtifactWriter,
         layer_idx: u16,
     ) -> Self {
         Self {
@@ -104,7 +104,6 @@ impl<'a> TarballTreeBuilder<'a> {
                 TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
             }
             ConversionType::EStargzToRef | ConversionType::TargzToRef => {
-                assert!(self.blob_writer.is_none());
                 let generator = ZranContextGenerator::new(file)?;
                 let reader = generator.reader();
                 self.ctx.blob_zran_generator = Some(Mutex::new(generator));
@@ -507,65 +506,75 @@ impl Builder for TarballBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.inline_bootstrap)?;
-        let mut blob_writer = None;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
         let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
-
-        match self.ty {
+        let mut blob_writer = match self.ty {
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
-            | ConversionType::TarToRafs => {
+            | ConversionType::TarToRafs
+            | ConversionType::EStargzToRef
+            | ConversionType::TargzToRef => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
-                    blob_writer = Some(ArtifactWriter::new(blob_stor, ctx.inline_bootstrap)?);
+                    ArtifactWriter::new(blob_stor, ctx.blob_inline_meta)?
                 } else {
                     return Err(anyhow!("missing configuration for target path"));
                 }
             }
-            ConversionType::EStargzToRef | ConversionType::TargzToRef => {}
             _ => return Err(anyhow!("unsupported image conversion type '{}'", self.ty)),
         };
 
         let mut tree_builder =
             TarballTreeBuilder::new(self.ty, ctx, blob_mgr, &mut blob_writer, layer_idx);
-
         let tree = timing_tracer!({ tree_builder.build_tree() }, "build_tree")?;
+
+        // Build bootstrap
         let mut bootstrap = timing_tracer!(
             { build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree) },
             "build_bootstrap"
         )?;
+
+        // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut None,) },
+            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
             "dump_blob"
         )?;
 
-        let mut origin_blob_meta_writer = if let Some(stor) = &ctx.blob_meta_storage {
-            Some(ArtifactWriter::new(stor.clone(), ctx.inline_bootstrap)?)
-        } else {
-            None
-        };
+        // Dump blob meta information
         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
-            Blob::dump_meta_data(ctx, blob_ctx, blob_meta_writer)?;
+            Blob::dump_meta_data(ctx, blob_ctx, &mut blob_writer)?;
         }
 
-        let bootstrap_writer = blob_writer.as_mut().or(origin_blob_meta_writer.as_mut());
-        timing_tracer!(
-            {
-                dump_bootstrap(
-                    ctx,
-                    bootstrap_mgr,
-                    &mut bootstrap_ctx,
-                    &mut bootstrap,
-                    blob_mgr,
-                    bootstrap_writer,
-                )
-            },
-            "dump_bootstrap"
-        )?;
-
-        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            let blob_meta_writer = origin_blob_meta_writer.as_mut().or(blob_writer.as_mut());
-            dump_toc(ctx, blob_ctx, blob_meta_writer)?;
+        // Dump RAFS meta/bootstrap and finalize the data blob.
+        if ctx.blob_inline_meta {
+            timing_tracer!(
+                {
+                    dump_bootstrap(
+                        ctx,
+                        bootstrap_mgr,
+                        &mut bootstrap_ctx,
+                        &mut bootstrap,
+                        blob_mgr,
+                        &mut blob_writer,
+                    )
+                },
+                "dump_bootstrap"
+            )?;
+            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+        } else {
+            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            timing_tracer!(
+                {
+                    dump_bootstrap(
+                        ctx,
+                        bootstrap_mgr,
+                        &mut bootstrap_ctx,
+                        &mut bootstrap,
+                        blob_mgr,
+                        &mut blob_writer,
+                    )
+                },
+                "dump_bootstrap"
+            )?;
         }
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)

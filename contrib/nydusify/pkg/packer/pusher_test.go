@@ -2,7 +2,6 @@ package packer
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,8 +74,8 @@ func TestPusher_Push(t *testing.T) {
 
 	os.Create(filepath.Join(tmpDir, "mock.meta"))
 	os.Create(filepath.Join(tmpDir, "mock.blob"))
-	content, _ := ioutil.ReadFile(filepath.Join("testdata", "output.json"))
-	ioutil.WriteFile(filepath.Join(tmpDir, "output.json"), content, 0755)
+	content, _ := os.ReadFile(filepath.Join("testdata", "output.json"))
+	os.WriteFile(filepath.Join(tmpDir, "output.json"), content, 0755)
 
 	artifact, err := NewArtifact(tmpDir)
 	assert.Nil(t, err)
