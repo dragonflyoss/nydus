@@ -21,7 +21,7 @@ Nydus' key features include:
 - E2E image data integrity check. So security issues like "Supply Chain Attach" can be avoided and detected at runtime
 - Compatible with the OCI artifacts spec and distribution spec, so nydus image can be stored in a regular container registry
 - Native [eStargz](https://github.com/containerd/stargz-snapshotter) image support with remote snapshotter plugin `nydus-snapshotter` for containerd runtime.
-- Various container image storage backends are supported. For example, Registry, NAS, Aliyun/OSS.
+- Various container image storage backends are supported. For example, Registry, NAS, Aliyun/OSS, S3.
 - Integrated with CNCF incubating project Dragonfly to distribute container images in P2P fashion and mitigate the pressure on container registries
 - Capable to prefetch data block before user IO hits the block thus to reduce read latency
 - Record files access pattern during runtime gathering access trace/log, by which user abnormal behaviors are easily caught
@@ -45,7 +45,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 
 | Type          | Platform                                                                                                        | Description                                                                                                                                                  | Status |
 | ------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| Storage       | Registry/OSS/NAS                                                                                                | Support for OCI-compatible distribution implementations such as Docker Hub, Harbor, Github GHCR, Aliyun ACR, NAS, and Aliyun OSS-like object storage service | ✅      |
+| Storage       | Registry/OSS/S3/NAS                                                                                                | Support for OCI-compatible distribution implementations such as Docker Hub, Harbor, Github GHCR, Aliyun ACR, NAS, and Aliyun OSS-like object storage service | ✅      |
 | Storage/Build | [Harbor](https://github.com/goharbor/acceleration-service)                                                      | Provides a general service for Harbor to support acceleration image conversion based on kinds of accelerator like Nydus and eStargz etc                      | ✅      |
 | Distribution  | [Dragonfly](https://github.com/dragonflyoss/Dragonfly2)                                                         | Improve the runtime performance of Nydus image even further with the Dragonfly P2P data distribution system                                                  | ✅      |
 | Build         | [Buildkit](https://github.com/moby/buildkit/blob/master/docs/nydus.md)                                          | Provides the ability to build and export Nydus images directly from Dockerfile                                                                               | ✅     |
@@ -59,7 +59,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 
 To try nydus image service:
 
-1. Convert an original OCI image to nydus image and store it somewhere like Docker/Registry, NAS or Aliyun/OSS. This can be directly done by `nydusify`. Normal users don't have to get involved with `nydus-image`.
+1. Convert an original OCI image to nydus image and store it somewhere like Docker/Registry, NAS, Aliyun/OSS or S3. This can be directly done by `nydusify`. Normal users don't have to get involved with `nydus-image`.
 2. Get `nydus-snapshotter`(`containerd-nydus-grpc`) installed locally and configured properly. Or install `nydus-docker-graphdriver` plugin.
 3. Operate container in legacy approaches. For example, `docker`, `nerdctl`, `crictl` and `ctr`.
 

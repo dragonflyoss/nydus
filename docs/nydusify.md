@@ -65,6 +65,8 @@ cat /path/to/backend-config.json
 }
 ```
 
+Note: the `endpoint` in the s3 `backend-config.json` **should not** contains the scheme prefix.
+
 ``` shell
 nydusify convert \
   --source myregistry/repo:tag \
@@ -73,24 +75,53 @@ nydusify convert \
   --backend-config-file /path/to/backend-config.json
 ```
 
-## Push Nydus Image to OSS with subcommand pack
+## Push Nydus Image to storage backend with subcommand pack
+
+### OSS
+
 ``` shell
 # meta_prefix:
-#  push bootstrap into oss://$bucket_name/$meta_prefix/$bootstrap_name
+#  push bootstrap into oss://$bucket_name/$meta_prefix$bootstrap_name
 # blob_prefix:
-#  push blobs into oss://$bucket_name/$blob_prefix/$blob_id
+#  push blobs into oss://$bucket_name/$blob_prefix$blob_id
 cat /path/to/backend-config.json
 {
   "bucket_name": "",
   "endpoint": "region.aliyuncs.com",
   "access_key_id": "",
   "access_key_secret": "",
-  "meta_prefix": "meta",
-  "blob_prefix": "blob"
+  "meta_prefix": "meta/",
+  "blob_prefix": "blob/"
 }
 
 nydusify pack --bootstrap target.bootstrap \
   --backend-push \
+  --backend-type oss \
+  --backend-config-file /path/to/backend-config.json \
+  --target-dir /path/to/target \
+  --output-dir /path/to/output
+```
+
+### S3
+
+``` shell
+# meta_prefix:
+#  push bootstrap into s3://$bucket_name/$meta_prefix$bootstrap_name
+# blob_prefix:
+#  push blobs into s3://$bucket_name/$blob_prefix$blob_id
+cat /path/to/backend-config.json
+{
+  "bucket_name": "",
+  "endpoint": "my-s3-service.net",
+  "access_key_id": "",
+  "access_key_secret": "",
+  "meta_prefix": "meta/",
+  "blob_prefix": "blob/"
+}
+
+nydusify pack --bootstrap target.bootstrap \
+  --backend-push \
+  --backend-type s3 \
   --backend-config-file /path/to/backend-config.json \
   --target-dir /path/to/target \
   --output-dir /path/to/output

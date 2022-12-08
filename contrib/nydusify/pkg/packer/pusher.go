@@ -3,7 +3,9 @@ package packer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -45,12 +47,13 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 	if !utils.IsPathExists(opt.OutputDir) {
 		return nil, errors.Errorf("outputDir %q does not exists", opt.OutputDir)
 	}
+	backendConfig := opt.BackendConfig
 
-	metaBackend, err := backend.NewBackend("oss", opt.BackendConfig.rawMetaBackendCfg(), nil)
+	metaBackend, err := backend.NewBackend(backendConfig.backendType(), backendConfig.rawMetaBackendCfg(), nil)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to init backend for bootstrap blob")
 	}
-	blobBackend, err := backend.NewBackend("oss", opt.BackendConfig.rawBlobBackendCfg(), nil)
+	blobBackend, err := backend.NewBackend(backendConfig.backendType(), backendConfig.rawBlobBackendCfg(), nil)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to init backend for data blob")
 	}
@@ -65,7 +68,7 @@ func NewPusher(opt NewPusherOpt) (*Pusher, error) {
 }
 
 // Push will push the meta and blob file to remote backend
-// at this moment, oss is the only possible backend, the meta file name is user defined
+// at this moment, only oss and s3 are the possible backends, the meta file name is user defined
 // and blob file name is the hash of the blobfile that is extracted from output.json
 func (p *Pusher) Push(req PushRequest) (pushResult PushResult, retErr error) {
 	p.logger.Info("start to push meta and blob to remote backend")
@@ -119,23 +122,47 @@ func (p *Pusher) Push(req PushRequest) (pushResult PushResult, retErr error) {
 	return
 }
 
-func ParseBackendConfig(backendConfigFile string) (BackendConfig, error) {
-	var cfg BackendConfig
+func ParseBackendConfig(backendType, backendConfigFile string) (BackendConfig, error) {
+
 	cfgFile, err := os.Open(backendConfigFile)
 	if err != nil {
-		return BackendConfig{}, errors.Wrapf(err, "failed to open backend-config %s", backendConfigFile)
+		return nil, errors.Wrapf(err, "failed to open backend-config %s", backendConfigFile)
 	}
 	defer cfgFile.Close()
-	if err = json.NewDecoder(cfgFile).Decode(&cfg); err != nil {
-		return BackendConfig{}, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigFile)
+	switch strings.ToLower(backendType) {
+	case "oss":
+		var cfg OssBackendConfig
+		if err = json.NewDecoder(cfgFile).Decode(&cfg); err != nil {
+			return nil, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigFile)
+		}
+		return &cfg, nil
+	case "s3":
+		var cfg S3BackendConfig
+		if err = json.NewDecoder(cfgFile).Decode(&cfg); err != nil {
+			return nil, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigFile)
+		}
+		return &cfg, nil
+	default:
+		return nil, fmt.Errorf("unsupported backend type %s", backendType)
 	}
-	return cfg, nil
 }
 
-func ParseBackendConfigString(backendConfigContent string) (BackendConfig, error) {
-	var cfg BackendConfig
-	if err := json.Unmarshal([]byte(backendConfigContent), &cfg); err != nil {
-		return BackendConfig{}, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigContent)
+func ParseBackendConfigString(backendType, backendConfigContent string) (BackendConfig, error) {
+	switch strings.ToLower(backendType) {
+	case "oss":
+		var cfg OssBackendConfig
+		if err := json.Unmarshal([]byte(backendConfigContent), &cfg); err != nil {
+			return nil, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigContent)
+		}
+		return &cfg, nil
+
+	case "s3":
+		var cfg S3BackendConfig
+		if err := json.Unmarshal([]byte(backendConfigContent), &cfg); err != nil {
+			return nil, errors.Wrapf(err, "failed to decode backend-config %s", backendConfigContent)
+		}
+		return &cfg, nil
+	default:
+		return nil, fmt.Errorf("unsupported backend type %s", backendType)
 	}
-	return cfg, nil
 }
