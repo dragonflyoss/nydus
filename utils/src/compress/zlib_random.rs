@@ -12,7 +12,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
 
-use libz_sys::{
+use libz_ng_sys::{
     inflate, inflateEnd, inflateInit2_, inflatePrime, inflateReset, inflateSetDictionary, uInt,
     z_stream, Z_BLOCK, Z_BUF_ERROR, Z_OK, Z_STREAM_END,
 };
@@ -28,7 +28,10 @@ const ZRAN_MIN_COMP_SIZE: u64 = 768 * 1024;
 const ZRAN_MAX_COMP_SIZE: u64 = 2048 * 1024;
 const ZRAN_MAX_UNCOMP_SIZE: u64 = 2048 * 1024;
 const ZLIB_ALIGN: usize = std::mem::align_of::<usize>();
-const ZLIB_VERSION: &str = "1.2.8\0";
+// For libz-sys
+//const ZLIB_VERSION: &str = "1.2.8\0";
+// For libz-ng-sys
+const ZLIB_VERSION: &str = "2.1.0\0";
 
 /// Information to retrieve a data chunk from an associated random access slice.
 #[derive(Debug, Eq, PartialEq)]
@@ -547,7 +550,7 @@ impl ZranStream {
         let mut len: uInt = 0;
         assert_eq!(buf.len(), ZRAN_DICT_WIN_SIZE);
         let ret = unsafe {
-            inflateGetDictionary(
+            zng_inflateGetDictionary(
                 self.stream.deref_mut() as *mut z_stream,
                 buf.as_mut_ptr(),
                 &mut len as *mut uInt,
@@ -668,7 +671,7 @@ extern "C" fn zfree(_ptr: *mut c_void, address: *mut c_void) {
 }
 
 extern "system" {
-    pub fn inflateGetDictionary(
+    pub fn zng_inflateGetDictionary(
         strm: *mut z_stream,
         dictionary: *mut u8,
         dictLength: *mut uInt,

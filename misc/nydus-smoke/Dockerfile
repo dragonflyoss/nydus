@@ -5,7 +5,7 @@ RUN mkdir /root/.cargo/
 RUN rustup component add rustfmt && rustup component add clippy
 
 ENV CARGO_HOME=/root/.cargo
-RUN apt update && apt install -y tree
+RUN apt update && apt install -y cmake tree
 
 WORKDIR /nydus-rs
 

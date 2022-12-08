@@ -207,6 +207,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db34956e100b30725f2eb215f90d4871051239535632f84fea3bc92722c66b7c"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -327,7 +336,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f82b0f4c27ad9f8bfd1f3208d882da2b09c301bc1c828fd3a00d0216d2fbbff6"
 dependencies = [
  "crc32fast",
- "libz-sys",
+ "libz-ng-sys",
  "miniz_oxide",
 ]
 
@@ -769,15 +778,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7fcc620a3bff7cdd7a365be3376c97191aeaccc2a603e600951e452615bf89"
 
 [[package]]
-name = "libz-sys"
+name = "libz-ng-sys"
 version = "1.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9702761c3935f8cc2f101793272e202c72b99da8f4224a19ddcf1279a6450bbf"
+checksum = "4399ae96a9966bf581e726de86969f803a81b7ce795fcd5480e640589457e0f2"
 dependencies = [
- "cc",
+ "cmake",
  "libc",
- "pkg-config",
- "vcpkg",
 ]
 
 [[package]]
@@ -1117,7 +1124,7 @@ dependencies = [
  "flate2",
  "lazy_static",
  "libc",
- "libz-sys",
+ "libz-ng-sys",
  "log",
  "lz4",
  "lz4-sys",
