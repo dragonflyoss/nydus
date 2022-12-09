@@ -617,7 +617,9 @@ impl Command {
                     );
                 }
             }
-            ConversionType::TargzToRef | ConversionType::EStargzToRef => {
+            ConversionType::TarToRef
+            | ConversionType::TargzToRef
+            | ConversionType::EStargzToRef => {
                 Self::ensure_file(&source_path)?;
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
@@ -719,21 +721,24 @@ impl Command {
 
         let mut builder: Box<dyn Builder> = match conversion_type {
             ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
-            ConversionType::DirectoryToStargz => unimplemented!(),
-            ConversionType::DirectoryToTargz => unimplemented!(),
-            ConversionType::EStargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::EStargzToRef => Box::new(TarballBuilder::new(conversion_type)),
             ConversionType::EStargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
-            ConversionType::TargzToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::TargzToRef => {
-                if version.is_v6() {
-                    build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
-                    build_ctx.blob_features.insert(BlobFeatures::ZRAN);
+            ConversionType::EStargzToRafs
+            | ConversionType::TargzToRafs
+            | ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
+            ConversionType::EStargzToRef
+            | ConversionType::TargzToRef
+            | ConversionType::TarToRef => {
+                if version.is_v5() {
+                    bail!("conversion type {} conflicts with RAFS v5", conversion_type);
                 }
+                build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
+                build_ctx.blob_features.insert(BlobFeatures::ZRAN);
                 Box::new(TarballBuilder::new(conversion_type))
             }
-            ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
-            ConversionType::TarToStargz | ConversionType::TargzToStargz => unimplemented!(),
+            ConversionType::DirectoryToStargz
+            | ConversionType::DirectoryToTargz
+            | ConversionType::TarToStargz
+            | ConversionType::TargzToStargz => unimplemented!(),
         };
         let build_output = timing_tracer!(
             {

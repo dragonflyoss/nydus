@@ -11,11 +11,14 @@ extern crate serde;
 #[macro_use]
 extern crate lazy_static;
 
+use crate::digest::DigestHasher;
+use sha2::Sha256;
 use std::convert::{Into, TryFrom, TryInto};
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use self::exec::*;
@@ -90,6 +93,62 @@ impl<'a> Read for FileRangeReader<'a> {
         self.offset += nr_read as u64;
         self.size -= nr_read as u64;
         Ok(nr_read)
+    }
+}
+
+struct BufReaderState<R: Read> {
+    reader: BufReader<R>,
+    pos: u64,
+    hash: Sha256,
+}
+
+/// A wrapper over `BufReader` to track current position.
+pub struct BufReaderPos<R: Read> {
+    state: Arc<Mutex<BufReaderState<R>>>,
+}
+
+impl<R: Read> BufReaderPos<R> {
+    /// Create a new instance of `BufReaderPos` from a `BufReader`.
+    pub fn from_buf_reader(buf_reader: BufReader<R>) -> Self {
+        let state = BufReaderState {
+            reader: buf_reader,
+            pos: 0,
+            hash: Sha256::default(),
+        };
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    /// Get current position of the reader.
+    pub fn position(&self) -> u64 {
+        self.state.lock().unwrap().pos
+    }
+
+    /// Get the hash object.
+    pub fn get_hash_object(&self) -> Sha256 {
+        self.state.lock().unwrap().hash.clone()
+    }
+}
+
+impl<R: Read> Read for BufReaderPos<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut state = self.state.lock().unwrap();
+        state.reader.read(buf).map(|v| {
+            state.pos += v as u64;
+            if v > 0 {
+                state.hash.digest_update(&buf[..v]);
+            }
+            v
+        })
+    }
+}
+
+impl<R: Read> Clone for BufReaderPos<R> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
     }
 }
 
