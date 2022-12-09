@@ -670,11 +670,6 @@ impl FileCacheEntry {
     fn do_fetch_chunks(&self, chunks: &[Arc<dyn BlobChunkInfo>], prefetch: bool) -> Result<()> {
         // Validate input parameters.
         assert!(!chunks.is_empty());
-        if chunks.len() > 1 {
-            for idx in 0..chunks.len() - 1 {
-                assert_eq!(chunks[idx].id() + 1, chunks[idx + 1].id());
-            }
-        }
 
         // Get chunks not ready yet, also marking them as in-flight.
         let bitmap = self
