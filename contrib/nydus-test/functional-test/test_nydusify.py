@@ -161,7 +161,6 @@ def test_build_cache(
     workload_gen.finish_torture_read()
 
 
-@pytest.mark.skip(reason="Get rid of OSS dependency!")
 @pytest.mark.parametrize(
     "source",
     [
