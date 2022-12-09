@@ -145,14 +145,6 @@ impl DaemonController {
 
         let daemon = self.daemon.lock().unwrap().take();
         if let Some(d) = daemon {
-            /*
-            // TODO: fix the behavior
-            if cfg!(feature = "virtiofs") {
-                // In case of virtiofs, mechanism to unblock recvmsg() from VMM is lacked.
-                // Given the fact that we have nothing to clean up, directly exit seems fine.
-                process::exit(0);
-            }
-             */
             if let Err(e) = d.stop() {
                 error!("failed to stop daemon: {}", e);
             }
@@ -721,6 +713,10 @@ fn main() -> Result<()> {
 
     setup_logging(logging_file, level, rotation_size)?;
 
+    // Initialize and run the daemon controller event loop.
+    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
+    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+
     dump_program_info();
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
 
@@ -757,10 +753,6 @@ fn main() -> Result<()> {
     // Start the HTTP Administration API server
     let mut api_controller = ApiServerController::new(apisock);
     api_controller.start()?;
-
-    // Initialize and run the daemon controller event loop.
-    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
-    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
 
     // Run the main event loop
     if DAEMON_CONTROLLER.is_active() {
