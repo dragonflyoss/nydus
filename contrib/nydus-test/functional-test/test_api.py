@@ -1,5 +1,4 @@
 import pytest
-import tempfile
 from distributor import Distributor
 from rafs import Backend, NydusDaemon, RafsConf, RafsImage
 from workload_gen import WorkloadGen
@@ -25,6 +24,7 @@ def test_daemon_info(nydus_anchor, nydus_image, rafs_conf: RafsConf):
     nc.get_wait_daemon()
 
 
+@pytest.mark.skip(reason="The files metrics json body is too large")
 def test_iostats(
     nydus_anchor: NydusAnchor, nydus_image: RafsImage, rafs_conf: RafsConf
 ):
