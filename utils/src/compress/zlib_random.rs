@@ -450,8 +450,11 @@ impl<R: Read> Read for ZranReaderState<R> {
                         return Err(eio!("failed to decode data from compressed data stream"));
                     }
                 }
-                _ => {
-                    return Err(eio!("failed to decode data from compressed data stream"));
+                e => {
+                    return Err(eio!(format!(
+                        "failed to decode data from compressed data stream, error code {}",
+                        e
+                    )));
                 }
             }
         }
