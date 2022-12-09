@@ -45,7 +45,7 @@ Currently Nydus is supporting the following platforms in container ecosystem:
 
 | Type          | Platform                                                                                                        | Description                                                                                                                                                  | Status |
 | ------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| Storage       | Registry/OSS/S3/NAS                                                                                                | Support for OCI-compatible distribution implementations such as Docker Hub, Harbor, Github GHCR, Aliyun ACR, NAS, and Aliyun OSS-like object storage service | ✅      |
+| Storage       | Registry/OSS/S3/NAS                                                                                             | Support for OCI-compatible distribution implementations such as Docker Hub, Harbor, Github GHCR, Aliyun ACR, NAS, and Aliyun OSS-like object storage service | ✅      |
 | Storage/Build | [Harbor](https://github.com/goharbor/acceleration-service)                                                      | Provides a general service for Harbor to support acceleration image conversion based on kinds of accelerator like Nydus and eStargz etc                      | ✅      |
 | Distribution  | [Dragonfly](https://github.com/dragonflyoss/Dragonfly2)                                                         | Improve the runtime performance of Nydus image even further with the Dragonfly P2P data distribution system                                                  | ✅      |
 | Build         | [Buildkit](https://github.com/moby/buildkit/blob/master/docs/nydus.md)                                          | Provides the ability to build and export Nydus images directly from Dockerfile                                                                               | ✅      |
@@ -117,7 +117,7 @@ Nydus cooperates with Harbor community to develop [acceleration-service](https:/
 
 A **experimental** plugin helps to start docker container from nydus image. For more particular instructions, please refer to
 
-- [Docker Nydus Graph Driver]([./contrib/docker-nydus-graphdriver/README.md](https://github.com/nydusaccelerator/docker-nydus-graphdriver))
+- [Docker Nydus Graph Driver](https://github.com/nydusaccelerator/docker-nydus-graphdriver)
 
 ## Learn Concepts and Commands
 
