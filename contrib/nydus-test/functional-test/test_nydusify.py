@@ -252,6 +252,90 @@ def test_upload_oss(
 
 
 @pytest.mark.parametrize(
+    "fs_version,source,chunk_dict_arg",
+    [
+        (
+            5,
+            "memcached:latest",
+            "bootstrap:registry:ghcr.io/dragonflyoss/image-service/nydus-build-cache:memcached-v5"
+        ),
+        (
+            6,
+            "memcached:latest",
+            "bootstrap:registry:ghcr.io/dragonflyoss/image-service/nydus-build-cache:memcached-v6"
+        )
+    ]
+)
+def test_chunk_dict(
+    nydus_anchor: NydusAnchor,
+    rafs_conf: RafsConf,
+    source,
+    chunk_dict_arg,
+    local_registry,
+    nydusify_converter,
+):
+    '''
+    only support oss backend now
+    - convert image with chunk-dict
+    - check new image
+    '''
+    converter = Nydusify(nydus_anchor)
+
+    time.sleep(1)
+
+    oss_prefix = "nydus_v2/"
+
+    converter.docker_v2().backend_type(
+        "oss", oss_object_prefix=oss_prefix
+    ).build_cache_ref(
+        "localhost:5000/build_cache:000"
+    ).force_push().chunk_dict(chunk_dict_arg).convert(source, fs_version=fs_version)
+
+    rafs_conf.set_rafs_backend(Backend.OSS, prefix=oss_prefix)
+    rafs_conf.enable_fs_prefetch()
+    rafs_conf.enable_rafs_blobcache()
+    rafs_conf.dump_rafs_conf()
+
+    bootstrap = converter.locate_bootstrap()
+
+    checker = Nydusify(nydus_anchor)
+    checker.backend_type(
+        "oss", oss_object_prefix=oss_prefix
+    ).with_new_work_dir(
+        nydus_anchor.nydusify_work_dir+'-check'
+    ).check(source)
+
+    converted_layers = converter.extract_converted_layers_names()
+
+    # With oss backend, ant useage, `layers` only has one member
+    records = converter.get_build_cache_records("localhost:5000/build_cache:000")
+    assert len(records) != 0
+    cached_layers = [c["digest"] for c in records]
+    assert cached_layers.sort() == converted_layers.sort()
+
+    pulled_bootstrap = converter.pull_bootstrap(
+        tempfile.TemporaryDirectory(
+            dir=nydus_anchor.workspace, suffix="bootstrap"
+        ).name,
+        "pulled_bootstrap",
+    )
+
+    # Mount source rootfs (ociv1)
+    layers, base = converter.extract_source_layers_names_and_download()
+    nydus_anchor.mount_overlayfs(layers, base)
+    # Mount rafs rootfs
+    rafs = RafsMount(nydus_anchor, None, rafs_conf)
+
+    workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+
+    assert workload_gen.verify_entire_fs()
+    workload_gen.setup_workload_generator()
+    workload_gen.torture_read(8, 12, verify=True)
+    workload_gen.finish_torture_read()
+
+
+@pytest.mark.parametrize(
     "source",
     [
         "busybox:latest",  # From DockerHub, manifest list image format, image config includes os/arch
