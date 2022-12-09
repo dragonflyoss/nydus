@@ -917,23 +917,28 @@ impl TryFrom<RafsConfig> for ConfigV2 {
     type Error = std::io::Error;
 
     fn try_from(v: RafsConfig) -> std::result::Result<Self, Self::Error> {
-        let backend = (&v.device.backend).try_into()?;
-        let cache = (&v.device.cache).try_into()?;
+        let backend: BackendConfigV2 = (&v.device.backend).try_into()?;
+        let mut cache: CacheConfigV2 = (&v.device.cache).try_into()?;
+        let rafs = RafsConfigV2 {
+            mode: v.mode,
+            batch_size: v.amplify_io,
+            validate: v.digest_validate,
+            enable_xattr: v.enable_xattr,
+            iostats_files: v.iostats_files,
+            access_pattern: v.access_pattern,
+            latest_read_files: v.latest_read_files,
+            prefetch: v.fs_prefetch.into(),
+        };
+        if !cache.prefetch.enable && rafs.prefetch.enable {
+            cache.prefetch = rafs.prefetch.clone();
+        }
+
         Ok(ConfigV2 {
             version: 2,
             id: v.device.id,
             backend: Some(backend),
             cache: Some(cache),
-            rafs: Some(RafsConfigV2 {
-                mode: v.mode,
-                batch_size: v.amplify_io,
-                validate: v.digest_validate,
-                enable_xattr: v.enable_xattr,
-                iostats_files: v.iostats_files,
-                access_pattern: v.access_pattern,
-                latest_read_files: v.latest_read_files,
-                prefetch: v.fs_prefetch.into(),
-            }),
+            rafs: Some(rafs),
         })
     }
 }
