@@ -321,18 +321,8 @@ class RafsImage(LinuxCommand):
                 self.anchor.localfs_workdir, self.blob_name
             )
 
-            if "blob_dir" in kwargs:
-                self.set_param("blob-dir", self.anchor.localfs_workdir)
-                return self
-
-            local_fs_config = {
-                "blob_file": self.blob_abs_path,
-            }
-
-            # For compatibility
-            self.set_param("backend-config", "'" + json.dumps(local_fs_config) + "'")
-            self.set_param("backend-type", "localfs")
-
+            self.set_param("blob-dir", self.anchor.localfs_workdir)
+            return self
         elif type == Backend.OSS:
             self.set_param("blob", self.blob_abs_path)
             prefix = kwargs.pop("prefix", None)
