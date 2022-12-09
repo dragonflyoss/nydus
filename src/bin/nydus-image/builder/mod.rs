@@ -72,6 +72,7 @@ fn dump_bootstrap(
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
         if blob_ctx.blob_id.is_empty() {
+            assert!(!ctx.conversion_type.is_to_ref());
             // Make sure blob id is updated according to blob hash if user not specified.
             blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
         }
@@ -158,12 +159,27 @@ fn finalize_blob(
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
         dump_toc(ctx, blob_ctx, blob_writer)?;
         let hash = blob_ctx.blob_hash.clone().finalize();
-        if ctx.blob_id.is_empty() {
-            blob_ctx.blob_id = format!("{:x}", hash);
+
+        let rafs_blob_id = if ctx.blob_id.is_empty() {
+            format!("{:x}", hash)
+        } else {
+            assert!(!ctx.conversion_type.is_to_ref());
+            ctx.blob_id.clone()
+        };
+        if ctx.conversion_type.is_to_ref() {
+            // `blob_ctx.blob_id` should be OCI image blob id.
+            assert!(!blob_ctx.blob_id.is_empty());
+        } else {
+            // `blob_ctx.blob_id` should be RAFS blob id.
+            blob_ctx.blob_id = rafs_blob_id.clone();
         }
-        blob_ctx.rafs_blob_digest = hash.into();
+        if ctx.blob_id.is_empty() {
+            // Keep `rafs_blob_digest` as zero if `blob_id` is specified by user.
+            blob_ctx.rafs_blob_digest = hash.into();
+        }
         blob_ctx.rafs_blob_size = blob_ctx.compressed_blob_size;
-        blob_writer.finalize(blob_ctx.blob_id())?;
+
+        blob_writer.finalize(Some(rafs_blob_id))?;
     }
     Ok(())
 }

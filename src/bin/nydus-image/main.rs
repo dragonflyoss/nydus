@@ -606,15 +606,30 @@ impl Command {
             }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
-            | ConversionType::TarToRafs
-            | ConversionType::TargzToRef
-            | ConversionType::EStargzToRef => {
+            | ConversionType::TarToRafs => {
                 Self::ensure_file(&source_path)?;
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
+                        conversion_type
+                    );
+                }
+            }
+            ConversionType::TargzToRef | ConversionType::EStargzToRef => {
+                Self::ensure_file(&source_path)?;
+                if blob_stor.is_none() {
+                    bail!("both --blob and --blob-dir are not provided");
+                } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
+                    bail!(
+                        "conversion type {} conflicts with '--prefetch-policy blob'",
+                        conversion_type
+                    );
+                }
+                if blob_id.trim() != "" {
+                    bail!(
+                        "conversion type '{}' conflicts with '--blob-id'",
                         conversion_type
                     );
                 }

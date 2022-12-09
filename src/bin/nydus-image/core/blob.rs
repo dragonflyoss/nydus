@@ -55,11 +55,11 @@ impl Blob {
                 if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                     if let Some(zran) = &ctx.blob_zran_generator {
                         let reader = zran.lock().unwrap().reader();
-                        blob_ctx.blob_hash = reader.get_data_digest();
                         blob_ctx.compressed_blob_size = reader.get_data_size();
-                    }
-                    if blob_ctx.blob_id.is_empty() {
-                        blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
+                        if blob_ctx.blob_id.is_empty() {
+                            let hash = reader.get_data_digest();
+                            blob_ctx.blob_id = format!("{:x}", hash.finalize());
+                        }
                     }
                 }
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
