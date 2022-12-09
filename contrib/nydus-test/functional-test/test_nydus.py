@@ -311,7 +311,7 @@ def test_meta(
     workload_gen.torture_read(10, 3)
     workload_gen.finish_torture_read()
 
-    assert workload_gen.io_error == False
+    assert not workload_gen.io_error
     assert anchor.check_nydusd_health()
 
 
@@ -352,7 +352,7 @@ def test_file_tail(nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, ba
     nydus_scratch_image.set_backend(backend).create_image()
 
     rafs_conf = RafsConf(nydus_anchor, nydus_scratch_image)
-    rafs_conf.set_rafs_backend(backend, image=nydus_scratch_image)
+    rafs_conf.set_rafs_backend(backend)
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
     rafs.mount()
@@ -369,7 +369,7 @@ def test_file_tail(nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, ba
     for f in file_list:
         wg.verify_single_file(os.path.join(nydus_anchor.mountpoint, f))
 
-    assert wg.io_error == False
+    assert not wg.io_error
 
 
 def test_deep_directory(
