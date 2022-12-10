@@ -21,7 +21,6 @@ use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::layout::toc;
 use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
 use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use nydus_rafs::metadata::layout::RafsBlobTable;
@@ -30,7 +29,7 @@ use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
 use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{
-    BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
+    toc, BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
     ZranContextGenerator,
 };
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};

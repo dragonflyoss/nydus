@@ -5,10 +5,9 @@
 use std::borrow::Cow;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::layout::toc;
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
-use nydus_storage::meta::BlobMetaChunkArray;
+use nydus_storage::meta::{toc, BlobMetaChunkArray};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use sha2::digest::Digest;
