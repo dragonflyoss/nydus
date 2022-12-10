@@ -36,7 +36,7 @@ use nydus_utils::compact::makedev;
 use nydus_utils::compress::zlib_random::ZranReader;
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::{div_round_up, BufReaderPos, ByteSize};
+use nydus_utils::{div_round_up, BufReaderInfo, ByteSize};
 
 use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 use crate::core::blob::Blob;
@@ -48,7 +48,7 @@ use crate::core::tree::Tree;
 
 enum TarReader {
     File(File),
-    Buf(BufReaderPos<File>),
+    Buf(BufReaderInfo<File>),
     TarGz(Box<ZlibDecoder<File>>),
     Zran(ZranReader<File>),
 }
@@ -114,6 +114,7 @@ impl<'a> TarballTreeBuilder<'a> {
                     && buf[1] == 0x8b
                     && buf[2] == 0x08
                 {
+                    buf_reader.seek_relative(-3).unwrap();
                     let generator = ZranContextGenerator::from_buf_reader(buf_reader)?;
                     let reader = generator.reader();
                     self.ctx.blob_zran_generator = Some(Mutex::new(generator));
@@ -121,13 +122,13 @@ impl<'a> TarballTreeBuilder<'a> {
                 } else {
                     buf_reader.seek_relative(-3).unwrap();
                     self.ty = ConversionType::TarToRef;
-                    let reader = BufReaderPos::from_buf_reader(buf_reader);
+                    let reader = BufReaderInfo::from_buf_reader(buf_reader);
                     self.ctx.blob_tar_reader = Some(reader.clone());
                     TarReader::Buf(reader)
                 }
             }
             ConversionType::TarToRef => {
-                let reader = BufReaderPos::from_buf_reader(BufReader::new(file));
+                let reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
                 self.ctx.blob_tar_reader = Some(reader.clone());
                 TarReader::Buf(reader)
             }

@@ -311,7 +311,7 @@ impl<R> ZranReader<R> {
     pub fn set_initial_data(&self, buf: &[u8]) {
         let mut state = self.inner.lock().unwrap();
         assert_eq!(state.stream.avail_in(), 0);
-        assert!(buf.len() < state.input.len());
+        assert!(buf.len() <= state.input.len());
         let ptr = state.input.as_mut_ptr();
         assert_eq!(state.stream.stream.next_in, ptr);
 

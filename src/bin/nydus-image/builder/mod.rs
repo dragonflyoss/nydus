@@ -167,8 +167,23 @@ fn finalize_blob(
             ctx.blob_id.clone()
         };
         if ctx.conversion_type.is_to_ref() {
-            // `blob_ctx.blob_id` should be OCI image blob id.
-            assert!(!blob_ctx.blob_id.is_empty());
+            if blob_ctx.blob_id.is_empty() {
+                // A tarball without file will fall through this path
+                if let Some(zran) = &ctx.blob_zran_generator {
+                    let reader = zran.lock().unwrap().reader();
+                    blob_ctx.compressed_blob_size = reader.get_data_size();
+                    if blob_ctx.blob_id.is_empty() {
+                        let hash = reader.get_data_digest();
+                        blob_ctx.blob_id = format!("{:x}", hash.finalize());
+                    }
+                } else if let Some(tar_reader) = &ctx.blob_tar_reader {
+                    blob_ctx.compressed_blob_size = tar_reader.position();
+                    if blob_ctx.blob_id.is_empty() {
+                        let hash = tar_reader.get_hash_object();
+                        blob_ctx.blob_id = format!("{:x}", hash.finalize());
+                    }
+                }
+            }
         } else {
             // `blob_ctx.blob_id` should be RAFS blob id.
             blob_ctx.blob_id = rafs_blob_id.clone();

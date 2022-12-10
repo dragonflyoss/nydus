@@ -33,7 +33,7 @@ use nydus_storage::meta::{
     BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
     ZranContextGenerator,
 };
-use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderPos};
+use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::feature::Features;
@@ -916,7 +916,7 @@ pub struct BuildContext {
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
-    pub blob_tar_reader: Option<BufReaderPos<File>>,
+    pub blob_tar_reader: Option<BufReaderInfo<File>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
     pub has_xattr: bool,
