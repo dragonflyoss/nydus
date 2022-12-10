@@ -44,7 +44,7 @@ impl TryFrom<&str> for Feature {
 
     fn try_from(f: &str) -> std::result::Result<Self, Self::Error> {
         match f {
-            "blob_toc" => Ok(Self::BlobToc),
+            "blob-toc" => Ok(Self::BlobToc),
             _ => bail!(
                 "{} `{}`, please try upgrading to the latest nydus-image",
                 ERR_UNSUPPORTED_FEATURE,

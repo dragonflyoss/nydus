@@ -266,7 +266,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("features")
                         .long("features")
-                        .value_parser(["blob_toc"])
+                        .value_parser(["blob-toc"])
                         .help("Enable/disable features")
                 )
                 .arg(
