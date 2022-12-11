@@ -1610,4 +1610,50 @@ mod tests {
         let config = ConfigV2::from_str(content).unwrap();
         assert_eq!(&config.id, "");
     }
+
+    #[test]
+    fn test_snapshotter_sample_config() {
+        let content = r#"
+        {
+            "device": {
+                "backend": {
+                    "type": "registry",
+                    "config": {
+                        "readahead": false,
+                        "host": "localhost",
+                        "repo": "vke/golang",
+                        "auth": "",
+                        "scheme": "https",
+                        "proxy": {
+                            "fallback": false
+                        },
+                        "timeout": 5,
+                        "connect_timeout": 5,
+                        "retry_limit": 2
+                    }
+                },
+                "cache": {
+                    "type": "blobcache",
+                    "compressed": true,
+                    "config": {
+                        "work_dir": "/var/lib/containerd-nydus/cache",
+                        "disable_indexed_map": false
+                    }
+                }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+                "enable": true,
+                "prefetch_all": true,
+                "threads_count": 8,
+                "merging_size": 1048576,
+                "bandwidth_rate": 0
+            }
+        }
+        "#;
+        let config = ConfigV2::from_str(content).unwrap();
+        assert_eq!(&config.id, "");
+    }
 }
