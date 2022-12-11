@@ -37,6 +37,7 @@ use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 mod cachedfile;
 mod dummycache;
 mod filecache;
+#[cfg(target_os = "linux")]
 mod fscache;
 mod worker;
 
@@ -44,6 +45,7 @@ pub mod state;
 
 pub use dummycache::DummyCacheMgr;
 pub use filecache::FileCacheMgr;
+#[cfg(target_os = "linux")]
 pub use fscache::FsCacheMgr;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.

@@ -30,7 +30,7 @@ pub fn generate_blob_key(domain_id: &str, blob_id: &str) -> String {
 
 /// Configuration information for cached meta blob objects.
 pub struct BlobCacheConfigMetaBlob {
-    blob_id: String,
+    _blob_id: String,
     scoped_blob_id: String,
     path: PathBuf,
     config: Arc<ConfigV2>,
@@ -111,7 +111,7 @@ impl BlobCacheObjectConfig {
         let scoped_blob_id = generate_blob_key(&domain_id, &blob_id);
 
         BlobCacheObjectConfig::MetaBlob(Arc::new(BlobCacheConfigMetaBlob {
-            blob_id,
+            _blob_id: blob_id,
             scoped_blob_id,
             path,
             config,
@@ -351,10 +351,8 @@ impl BlobCacheMgr {
             factory_config,
         );
         let meta_obj = meta.meta_config().unwrap();
-
         let mut state = self.get_state();
-        state.try_add(meta.clone())?;
-        // Safe to unwrap() because it's a meta blob.
+        state.try_add(meta)?;
 
         // Try to add the referenced data blob object if it doesn't exist yet.
         for bi in rs.superblock.get_blob_infos() {
@@ -456,7 +454,7 @@ mod tests {
         assert_eq!(&cache_cfg.cache_type, "fscache");
 
         let blob = BlobCacheConfigMetaBlob {
-            blob_id: "123456789-123".to_string(),
+            _blob_id: "123456789-123".to_string(),
             scoped_blob_id: "domain1".to_string(),
             path: path.clone(),
             config,

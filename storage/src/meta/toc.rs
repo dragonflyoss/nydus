@@ -414,8 +414,8 @@ impl TocEntryList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factory::BlobFactory;
     use nydus_api::{BackendConfigV2, LocalFsConfig};
-    use storage::factory::BlobFactory;
 
     #[test]
     fn test_read_toc_list() {

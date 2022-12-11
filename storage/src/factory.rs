@@ -30,7 +30,7 @@ use crate::backend::registry;
 #[cfg(feature = "backend-s3")]
 use crate::backend::s3;
 use crate::backend::BlobBackend;
-use crate::cache::{BlobCache, BlobCacheMgr, DummyCacheMgr, FileCacheMgr, FsCacheMgr};
+use crate::cache::{BlobCache, BlobCacheMgr, DummyCacheMgr, FileCacheMgr};
 use crate::device::BlobInfo;
 
 lazy_static! {
@@ -128,8 +128,14 @@ impl BlobFactory {
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
+            #[cfg(target_os = "linux")]
             "fscache" => {
-                let mgr = FsCacheMgr::new(cache_cfg, backend, ASYNC_RUNTIME.clone(), &config.id)?;
+                let mgr = crate::cache::FsCacheMgr::new(
+                    cache_cfg,
+                    backend,
+                    ASYNC_RUNTIME.clone(),
+                    &config.id,
+                )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }

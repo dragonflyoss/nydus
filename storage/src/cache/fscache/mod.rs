@@ -3,35 +3,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
 use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::io::Error;
-use std::io::Result;
-#[cfg(target_os = "linux")]
+use std::io::{Error, Result};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
-use tokio::runtime::Runtime;
-
 use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
+use tokio::runtime::Runtime;
 
-#[cfg(target_os = "linux")]
-use super::state::RangeMap;
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
-use crate::cache::state::{BlobStateMap, IndexedChunkMap};
+use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
-#[cfg(target_os = "linux")]
-use crate::meta::BlobMetaInfo;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
-pub const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
+const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with Linux fscache subsystem.
@@ -209,10 +200,10 @@ impl FileCacheEntry {
         if blob_info.has_feature(BlobFeatures::_V5_NO_EXT_BLOB_TABLE) {
             return Err(einval!("fscache does not support Rafs v5 blobs"));
         }
+
         let file = blob_info
             .get_fscache_file()
             .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
-
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
         let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
             &blob_file_path,
@@ -244,12 +235,9 @@ impl FileCacheEntry {
                 "fscache doesn't support blobs without blob meta information"
             ));
         };
-        #[cfg(target_os = "linux")]
-        {
-            let blob_meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-            Self::restore_chunkmap(blob_info.clone(), file.clone(), blob_meta, &chunk_map);
-        }
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
+
+        Self::restore_chunk_map(blob_info.clone(), file.clone(), &meta, &chunk_map);
 
         Ok(FileCacheEntry {
             blob_info: blob_info.clone(),
@@ -276,14 +264,20 @@ impl FileCacheEntry {
         })
     }
 
-    //restore index_map from blob file via seek_hole
-    #[cfg(target_os = "linux")]
-    fn restore_chunkmap(
+    fn restore_chunk_map(
         blob_info: Arc<BlobInfo>,
         file: Arc<File>,
-        blob_meta: Arc<BlobMetaInfo>,
+        meta: &FileCacheMeta,
         chunk_map: &BlobStateMap<IndexedChunkMap, u32>,
     ) {
+        let blob_meta = match meta.get_blob_meta() {
+            Some(v) => v,
+            None => {
+                warn!("failed to get blob meta object for blob, skip chunkmap recover");
+                return;
+            }
+        };
+
         let mut i = 0;
         while i < blob_info.chunk_count() {
             let hole_offset = unsafe {
