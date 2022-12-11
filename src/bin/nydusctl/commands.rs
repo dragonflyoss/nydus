@@ -7,7 +7,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use anyhow::Result;
-use nydus::{FsBackendDesc, FsBackendType};
+use nydus::{FsBackendDescriptor, FsBackendType};
 
 use crate::client::NydusdClient;
 
@@ -405,7 +405,7 @@ Commit:                 {git_commit}
                         }
 
                         for (mount_point, backend_obj) in fs_backends {
-                            let backend: FsBackendDesc =
+                            let backend: FsBackendDescriptor =
                                 serde_json::from_value(backend_obj.clone()).unwrap();
                             println!("\tInstance Mountpoint:  {}", mount_point);
                             println!("\tType:  {}", backend.backend_type);

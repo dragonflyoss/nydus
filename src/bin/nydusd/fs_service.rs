@@ -14,7 +14,7 @@ use std::sync::{Arc, MutexGuard};
 use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
-use nydus::{FsBackendDesc, FsBackendType};
+use nydus::{FsBackendDescriptor, FsBackendType};
 use nydus_api::ConfigV2;
 use rafs::fs::Rafs;
 use rafs::{RafsError, RafsIoRead};
@@ -43,7 +43,7 @@ pub struct FsBackendUmountCmd {
 
 /// List of filesystem backend information.
 #[derive(Default, Serialize, Clone)]
-pub struct FsBackendCollection(HashMap<String, FsBackendDesc>);
+pub struct FsBackendCollection(HashMap<String, FsBackendDescriptor>);
 
 impl FsBackendCollection {
     pub fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> DaemonResult<()> {
@@ -61,7 +61,7 @@ impl FsBackendCollection {
             }
         };
 
-        let desc = FsBackendDesc {
+        let desc = FsBackendDescriptor {
             backend_type: cmd.fs_type.clone(),
             mountpoint: cmd.mountpoint.clone(),
             mounted_time: time::OffsetDateTime::now_utc(),

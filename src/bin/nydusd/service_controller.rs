@@ -20,7 +20,7 @@ use crate::daemon::{
 };
 use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
 #[cfg(target_os = "linux")]
-use nydus::ensure_threads;
+use nydus::validate_threads_configuration;
 
 pub struct ServiceController {
     bti: BuildTimeInfo,
@@ -123,7 +123,7 @@ impl ServiceController {
         let tag = subargs.value_of("fscache-tag").map(|s| s.as_str());
 
         let threads = if let Some(threads_value) = subargs.value_of("fscache-threads") {
-            ensure_threads(threads_value).map_err(|err| einval!(err))?
+            validate_threads_configuration(threads_value).map_err(|err| einval!(err))?
         } else {
             1usize
         };
