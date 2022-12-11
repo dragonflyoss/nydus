@@ -170,11 +170,16 @@ impl FileCacheEntry {
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
+        let suffix = if mgr.cache_raw_data {
+            ".blob.raw"
+        } else {
+            ".blob.data"
+        };
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
-            .open(blob_file_path.clone() + ".blob.data")?;
+            .open(blob_file_path.clone() + suffix)?;
         let (chunk_map, is_direct_chunkmap) =
             Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
         let reader = mgr
