@@ -2,11 +2,18 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate nydus_error;
+
 use std::fmt::{self, Display};
 use std::str::FromStr;
 
 use nydus_api::ConfigV2;
 use serde::{Deserialize, Serialize};
+
+pub mod blob_cache;
 
 /// Error code related to Nydus library.
 #[derive(Debug)]

@@ -29,10 +29,10 @@ use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::Resource;
 
+use nydus::blob_cache::BlobCacheMgr;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
-use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{DaemonError, NydusDaemon};
 use crate::fs_service::{FsBackendMountCmd, FsService};
 use crate::service_controller::create_daemon;
@@ -44,7 +44,6 @@ mod fusedev;
 mod virtiofs;
 
 mod api_server_glue;
-mod blob_cache;
 mod daemon;
 #[cfg(target_os = "linux")]
 mod fs_cache;

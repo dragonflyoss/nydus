@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-// Blob cache manager to manage all cached blob objects.
+//! Blob cache manager to cache RAFS meta/data blob objects.
+
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
@@ -10,14 +11,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nydus_api::{
-    BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_BOOTSTRAP,
+    BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB,
+    BLOB_CACHE_TYPE_META_BLOB,
 };
-use rafs::metadata::{RafsMode, RafsSuper};
-use storage::device::BlobInfo;
+use nydus_rafs::metadata::{RafsMode, RafsSuper};
+use nydus_storage::device::BlobInfo;
 
 const ID_SPLITTER: &str = "/";
 
-/// Generate blob key from domain and blob ids.
+/// Generate keys for cached blob objects from domain identifiers and blob identifiers.
 pub fn generate_blob_key(domain_id: &str, blob_id: &str) -> String {
     if domain_id.is_empty() {
         blob_id.to_string()
@@ -26,8 +28,8 @@ pub fn generate_blob_key(domain_id: &str, blob_id: &str) -> String {
     }
 }
 
-/// Configuration information for cached bootstrap blob objects.
-pub struct BlobCacheConfigBootstrap {
+/// Configuration information for cached meta blob objects.
+pub struct BlobCacheConfigMetaBlob {
     blob_id: String,
     scoped_blob_id: String,
     path: PathBuf,
@@ -35,10 +37,15 @@ pub struct BlobCacheConfigBootstrap {
     data_blobs: Mutex<Vec<Arc<BlobCacheConfigDataBlob>>>,
 }
 
-impl BlobCacheConfigBootstrap {
-    /// Get file path of the bootstrap blob file.
+impl BlobCacheConfigMetaBlob {
+    /// Get file path to access the meta blob.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Get the ['ConfigV2'] object associated with the cached data blob.
+    pub fn config_v2(&self) -> &Arc<ConfigV2> {
+        &self.config
     }
 
     fn add_data_blob(&self, blob: Arc<BlobCacheConfigDataBlob>) {
@@ -55,12 +62,12 @@ pub struct BlobCacheConfigDataBlob {
 }
 
 impl BlobCacheConfigDataBlob {
-    /// Get [`BlobInfo`] of the data blob.
+    /// Get the [`BlobInfo`](https://docs.rs/nydus-storage/latest/nydus_storage/device/struct.BlobInfo.html) object associated with the cached data blob.
     pub fn blob_info(&self) -> &Arc<BlobInfo> {
         &self.blob_info
     }
 
-    /// Get ['ConfigV2'] of the data blob.
+    /// Get the ['ConfigV2'] object associated with the cached data blob.
     pub fn config_v2(&self) -> &Arc<ConfigV2> {
         &self.config
     }
@@ -69,13 +76,21 @@ impl BlobCacheConfigDataBlob {
 /// Configuration information for cached blob objects.
 #[derive(Clone)]
 pub enum BlobCacheObjectConfig {
-    /// Configuration information for cached bootstrap blob objects.
-    Bootstrap(Arc<BlobCacheConfigBootstrap>),
+    /// Configuration information for cached meta blob objects.
+    MetaBlob(Arc<BlobCacheConfigMetaBlob>),
     /// Configuration information for cached data blob objects.
     DataBlob(Arc<BlobCacheConfigDataBlob>),
 }
 
 impl BlobCacheObjectConfig {
+    /// Get the ['ConfigV2'] object associated with the cached data blob.
+    pub fn config_v2(&self) -> &Arc<ConfigV2> {
+        match self {
+            BlobCacheObjectConfig::MetaBlob(v) => v.config_v2(),
+            BlobCacheObjectConfig::DataBlob(v) => v.config_v2(),
+        }
+    }
+
     fn new_data_blob(domain_id: String, blob_info: Arc<BlobInfo>, config: Arc<ConfigV2>) -> Self {
         let scoped_blob_id = generate_blob_key(&domain_id, blob_info.blob_id());
 
@@ -87,7 +102,7 @@ impl BlobCacheObjectConfig {
         }))
     }
 
-    fn new_bootstrap_blob(
+    fn new_meta_blob(
         domain_id: String,
         blob_id: String,
         path: PathBuf,
@@ -95,7 +110,7 @@ impl BlobCacheObjectConfig {
     ) -> Self {
         let scoped_blob_id = generate_blob_key(&domain_id, &blob_id);
 
-        BlobCacheObjectConfig::Bootstrap(Arc::new(BlobCacheConfigBootstrap {
+        BlobCacheObjectConfig::MetaBlob(Arc::new(BlobCacheConfigMetaBlob {
             blob_id,
             scoped_blob_id,
             path,
@@ -104,16 +119,16 @@ impl BlobCacheObjectConfig {
         }))
     }
 
-    fn get_key(&self) -> &str {
+    fn key(&self) -> &str {
         match self {
-            BlobCacheObjectConfig::Bootstrap(o) => &o.scoped_blob_id,
+            BlobCacheObjectConfig::MetaBlob(o) => &o.scoped_blob_id,
             BlobCacheObjectConfig::DataBlob(o) => &o.scoped_blob_id,
         }
     }
 
-    fn bootstrap_config(&self) -> Option<Arc<BlobCacheConfigBootstrap>> {
+    fn meta_config(&self) -> Option<Arc<BlobCacheConfigMetaBlob>> {
         match self {
-            BlobCacheObjectConfig::Bootstrap(o) => Some(o.clone()),
+            BlobCacheObjectConfig::MetaBlob(o) => Some(o.clone()),
             BlobCacheObjectConfig::DataBlob(_o) => None,
         }
     }
@@ -132,12 +147,12 @@ impl BlobCacheState {
     }
 
     fn try_add(&mut self, config: BlobCacheObjectConfig) -> Result<()> {
-        let key = config.get_key();
+        let key = config.key();
 
         if let Some(entry) = self.id_to_config_map.get(key) {
             match entry {
-                BlobCacheObjectConfig::Bootstrap(_o) => {
-                    // Bootstrap blob must be unique.
+                BlobCacheObjectConfig::MetaBlob(_o) => {
+                    // Meta blob must be unique.
                     return Err(Error::new(
                         ErrorKind::AlreadyExists,
                         "blob_cache: bootstrap blob already exists",
@@ -160,7 +175,7 @@ impl BlobCacheState {
             // Remove all blobs associated with the domain.
             let scoped_blob_prefix = format!("{}{}", param.domain_id, ID_SPLITTER);
             self.id_to_config_map.retain(|_k, v| match v {
-                BlobCacheObjectConfig::Bootstrap(o) => {
+                BlobCacheObjectConfig::MetaBlob(o) => {
                     !o.scoped_blob_id.starts_with(&scoped_blob_prefix)
                 }
                 BlobCacheObjectConfig::DataBlob(o) => {
@@ -169,13 +184,13 @@ impl BlobCacheState {
             });
         } else {
             let mut data_blobs = Vec::new();
-            let mut is_bootstrap = false;
+            let mut is_meta = false;
             let scoped_blob_prefix = generate_blob_key(&param.domain_id, &param.blob_id);
 
             match self.id_to_config_map.get(&scoped_blob_prefix) {
                 None => return Err(enoent!("blob_cache: cache entry not found")),
-                Some(BlobCacheObjectConfig::Bootstrap(o)) => {
-                    is_bootstrap = true;
+                Some(BlobCacheObjectConfig::MetaBlob(o)) => {
+                    is_meta = true;
                     data_blobs = o.data_blobs.lock().unwrap().clone();
                 }
                 Some(BlobCacheObjectConfig::DataBlob(o)) => {
@@ -189,7 +204,7 @@ impl BlobCacheState {
                 }
             }
 
-            if is_bootstrap {
+            if is_meta {
                 self.id_to_config_map.remove(&scoped_blob_prefix);
             }
         }
@@ -202,9 +217,8 @@ impl BlobCacheState {
     }
 }
 
-/// Manager for cached file objects.
+/// Structure to manage and cache RAFS meta/data blob objects.
 #[derive(Default)]
-
 pub struct BlobCacheMgr {
     state: Mutex<BlobCacheState>,
 }
@@ -217,33 +231,40 @@ impl BlobCacheMgr {
         }
     }
 
-    /// Add a bootstrap/data blob to be managed by the cache manager.
+    /// Add a meta/data blob to be managed by the cache manager.
     ///
-    /// When adding a rafs bootstrap blob to the cache manager, all data blobs referenced by the
-    /// bootstrap blob will also be added to the cache manager too. It may be used to add a rafs
+    /// When adding a RAFS meta blob to the cache manager, all data blobs referenced by the
+    /// bootstrap blob will also be added to the cache manager too. It may be used to add a RAFS
     /// container image to the cache manager.
     ///
-    /// Domains are used to control the blob sharing scope. All bootstrap and data blobs associated
+    /// Domains are used to control the blob sharing scope. All meta and data blobs associated
     /// with the same domain will be shared/reused, but blobs associated with different domains are
     /// isolated. The `domain_id` is used to identify the associated domain.
     pub fn add_blob_entry(&self, entry: &BlobCacheEntry) -> Result<()> {
-        if entry.blob_type == BLOB_CACHE_TYPE_BOOTSTRAP {
-            let (path, config) = self.get_bootstrap_info(entry)?;
-            self.add_bootstrap_object(&entry.domain_id, &entry.blob_id, path, config)
-                .map_err(|e| {
-                    warn!(
-                        "blob_cache: failed to add cache entry for bootstrap blob: {:?}",
-                        entry
-                    );
-                    e
-                })
-        } else {
-            warn!("blob_cache: invalid blob cache entry: {:?}", entry);
-            Err(einval!("blob_cache: invalid blob cache entry"))
+        match entry.blob_type.as_str() {
+            BLOB_CACHE_TYPE_META_BLOB => {
+                let (path, config) = self.get_meta_info(entry)?;
+                self.add_meta_object(&entry.domain_id, &entry.blob_id, path, config)
+                    .map_err(|e| {
+                        warn!(
+                            "blob_cache: failed to add cache entry for meta blob: {:?}",
+                            entry
+                        );
+                        e
+                    })
+            }
+            BLOB_CACHE_TYPE_DATA_BLOB => {
+                warn!("blob_cache: invalid data blob cache entry: {:?}", entry);
+                Err(einval!("blob_cache: invalid data blob cache entry"))
+            }
+            _ => {
+                warn!("blob_cache: invalid blob cache entry: {:?}", entry);
+                Err(einval!("blob_cache: invalid blob cache entry"))
+            }
         }
     }
 
-    /// Add a list of bootstrap and/or data blobs.
+    /// Add a list of meta/data blobs to be cached by the cache manager.
     pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
         for entry in blobs.blobs.iter() {
             self.add_blob_entry(entry)?;
@@ -252,12 +273,12 @@ impl BlobCacheMgr {
         Ok(())
     }
 
-    /// Remove a blob object from the cache manager.
+    /// Remove a meta/data blob object from the cache manager.
     pub fn remove_blob_entry(&self, param: &BlobCacheObjectId) -> Result<()> {
         self.get_state().remove(param)
     }
 
-    /// Get configuration information for the blob with `key`.
+    /// Get configuration information of the cached blob with specified `key`.
     pub fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
         self.get_state().get(key)
     }
@@ -267,7 +288,7 @@ impl BlobCacheMgr {
         self.state.lock().unwrap()
     }
 
-    fn get_bootstrap_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<ConfigV2>)> {
+    fn get_meta_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<ConfigV2>)> {
         // Validate type of backend and cache.
         let config = entry
             .blob_config
@@ -275,33 +296,29 @@ impl BlobCacheMgr {
             .ok_or_else(|| einval!("missing blob cache configuration information"))?;
         if config.cache.cache_type != "fscache" {
             return Err(einval!(
-                "blob_cache: `config.cache_type` for bootstrap blob is invalid"
+                "blob_cache: `config.cache_type` for meta blob is invalid"
             ));
         }
         let cache_config = config.cache.get_fscache_config()?;
 
         if entry.blob_id.contains(ID_SPLITTER) {
-            return Err(einval!(
-                "blob_cache: `blob_id` for bootstrap blob is invalid"
-            ));
+            return Err(einval!("blob_cache: `blob_id` for meta blob is invalid"));
         } else if entry.domain_id.contains(ID_SPLITTER) {
-            return Err(einval!(
-                "blob_cache: `domain_id` for bootstrap blob is invalid"
-            ));
+            return Err(einval!("blob_cache: `domain_id` for meta blob is invalid"));
         }
 
         let path = config.metadata_path.clone().unwrap_or_default();
         if path.is_empty() {
             return Err(einval!(
-                "blob_cache: `config.metadata_path` for bootstrap blob is empty"
+                "blob_cache: `config.metadata_path` for meta blob is empty"
             ));
         }
-        let path = Path::new(&path).canonicalize().map_err(|_e| {
-            einval!("blob_cache: `config.metadata_path` for bootstrap blob is invalid")
-        })?;
+        let path = Path::new(&path)
+            .canonicalize()
+            .map_err(|_e| einval!("blob_cache: `config.metadata_path` for meta blob is invalid"))?;
         if !path.is_file() {
             return Err(einval!(
-                "blob_cache: `config.metadata_path` for bootstrap blob is not a file"
+                "blob_cache: `config.metadata_path` for meta blob is not a file"
             ));
         }
 
@@ -319,7 +336,7 @@ impl BlobCacheMgr {
         Ok((path, Arc::new(config.into())))
     }
 
-    fn add_bootstrap_object(
+    fn add_meta_object(
         &self,
         domain_id: &str,
         id: &str,
@@ -327,17 +344,17 @@ impl BlobCacheMgr {
         factory_config: Arc<ConfigV2>,
     ) -> Result<()> {
         let rs = RafsSuper::load_from_metadata(&path, RafsMode::Direct, true)?;
-        let bootstrap = BlobCacheObjectConfig::new_bootstrap_blob(
+        let meta = BlobCacheObjectConfig::new_meta_blob(
             domain_id.to_string(),
             id.to_string(),
             path,
-            factory_config.clone(),
+            factory_config,
         );
+        let meta_obj = meta.meta_config().unwrap();
 
         let mut state = self.get_state();
-        state.try_add(bootstrap.clone())?;
-        // Safe to unwrap() because it's a bootstrap.
-        let bs_obj = bootstrap.bootstrap_config().unwrap();
+        state.try_add(meta.clone())?;
+        // Safe to unwrap() because it's a meta blob.
 
         // Try to add the referenced data blob object if it doesn't exist yet.
         for bi in rs.superblock.get_blob_infos() {
@@ -349,7 +366,7 @@ impl BlobCacheMgr {
             let data_blob = BlobCacheObjectConfig::new_data_blob(
                 domain_id.to_string(),
                 bi,
-                factory_config.clone(),
+                meta_obj.config.clone(),
             );
             let data_blob_config = match &data_blob {
                 BlobCacheObjectConfig::DataBlob(entry) => entry.clone(),
@@ -367,7 +384,7 @@ impl BlobCacheMgr {
             }
 
             // Associate the data blob with the bootstrap blob.
-            bs_obj.add_data_blob(data_blob_config);
+            meta_obj.add_data_blob(data_blob_config);
         }
 
         Ok(())
@@ -403,6 +420,12 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_blob_key() {
+        assert_eq!(&generate_blob_key("", "blob1"), "blob1");
+        assert_eq!(&generate_blob_key("domain1", "blob1"), "domain1/blob1");
+    }
+
+    #[test]
     fn test_blob_cache_entry() {
         let tmpdir = TempDir::new().unwrap();
         let path = tmpdir.as_path().join("bootstrap1");
@@ -424,7 +447,7 @@ mod tests {
         assert!(blob_config.cache.fs_cache.is_some());
 
         let mgr = BlobCacheMgr::new();
-        let (path, config) = mgr.get_bootstrap_info(&entry).unwrap();
+        let (path, config) = mgr.get_meta_info(&entry).unwrap();
         let backend_cfg = config.get_backend_config().unwrap();
         let cache_cfg = config.get_cache_config().unwrap();
         assert_eq!(path, tmpdir.as_path().join("bootstrap1"));
@@ -432,7 +455,7 @@ mod tests {
         assert_eq!(&backend_cfg.backend_type, "localfs");
         assert_eq!(&cache_cfg.cache_type, "fscache");
 
-        let blob = BlobCacheConfigBootstrap {
+        let blob = BlobCacheConfigMetaBlob {
             blob_id: "123456789-123".to_string(),
             scoped_blob_id: "domain1".to_string(),
             path: path.clone(),
@@ -453,7 +476,7 @@ mod tests {
         let mgr = BlobCacheMgr::new();
 
         entry.blob_id = "domain2/blob1".to_string();
-        mgr.get_bootstrap_info(&entry).unwrap_err();
+        mgr.get_meta_info(&entry).unwrap_err();
     }
 
     #[test]

@@ -22,14 +22,13 @@ use std::{thread, time};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use nydus::blob_cache::{
+    generate_blob_key, BlobCacheConfigDataBlob, BlobCacheConfigMetaBlob, BlobCacheMgr,
+    BlobCacheObjectConfig,
+};
 use storage::cache::BlobCache;
 use storage::device::BlobPrefetchRequest;
 use storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
-
-use crate::blob_cache::{
-    generate_blob_key, BlobCacheConfigBootstrap, BlobCacheConfigDataBlob, BlobCacheMgr,
-    BlobCacheObjectConfig,
-};
 
 ioctl_write_int!(fscache_cread, 0x98, 1);
 
@@ -438,7 +437,7 @@ impl FsCacheHandler {
                 BlobCacheObjectConfig::DataBlob(config) => {
                     self.handle_open_data_blob(hdr, msg, config)
                 }
-                BlobCacheObjectConfig::Bootstrap(config) => {
+                BlobCacheObjectConfig::MetaBlob(config) => {
                     self.handle_open_bootstrap(hdr, msg, config)
                 }
             },
@@ -585,7 +584,7 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        config: Arc<BlobCacheConfigBootstrap>,
+        config: Arc<BlobCacheConfigMetaBlob>,
     ) -> String {
         let mut state = self.get_state();
         let ret: i64 = if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {

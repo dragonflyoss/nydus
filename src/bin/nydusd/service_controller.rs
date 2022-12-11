@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use nydus::blob_cache::BlobCacheMgr;
 use nydus_api::http::BlobCacheList;
 use nydus_app::BuildTimeInfo;
 
-use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,

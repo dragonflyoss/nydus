@@ -1067,7 +1067,7 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BlobCacheEntry, BLOB_CACHE_TYPE_BOOTSTRAP};
+    use crate::{BlobCacheEntry, BLOB_CACHE_TYPE_META_BLOB};
 
     #[test]
     fn test_blob_prefetch_config() {
@@ -1151,7 +1151,7 @@ mod tests {
             "domain_id": "domain1"
         }"#;
         let config: BlobCacheEntry = serde_json::from_str(content).unwrap();
-        assert_eq!(&config.blob_type, BLOB_CACHE_TYPE_BOOTSTRAP);
+        assert_eq!(&config.blob_type, BLOB_CACHE_TYPE_META_BLOB);
         assert_eq!(&config.blob_id, "blob1");
         assert_eq!(&config.domain_id, "domain1");
 
