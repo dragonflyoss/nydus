@@ -552,6 +552,12 @@ impl RegistryReader {
                         .map_err(RegistryError::Url)?;
                     self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
                 }
+                Err(RegistryError::Request(ConnectionError::Common(e))) => {
+                    if e.to_string().contains("self signed certificate") {
+                        warn!("try to enable \"skip_verify: true\" option");
+                    }
+                    return Err(RegistryError::Request(ConnectionError::Common(e)));
+                }
                 Err(e) => {
                     return Err(e);
                 }
