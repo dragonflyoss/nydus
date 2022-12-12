@@ -71,7 +71,7 @@ pub(crate) struct TarballTreeBuilder<'a> {
     blob_mgr: &'a mut BlobManager,
     blob_writer: &'a mut ArtifactWriter,
     buf: Vec<u8>,
-    path_inode_map: HashMap<PathBuf, Inode>,
+    path_inode_map: HashMap<PathBuf, (Inode, usize)>,
 }
 
 impl<'a> TarballTreeBuilder<'a> {
@@ -146,8 +146,8 @@ impl<'a> TarballTreeBuilder<'a> {
         }
 
         // Generate the root node in advance, it may be overwritten by entries from the tar stream.
-        let root = self.create_directory(Path::new("/"))?;
         let mut nodes = Vec::with_capacity(10240);
+        let root = self.create_directory(Path::new("/"), &nodes)?;
         nodes.push(root.clone());
 
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
@@ -252,6 +252,7 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Handle hardlink ino
         let mut ino = (self.path_inode_map.len() + 1) as Inode;
+        let mut index = 0;
         if entry_type.is_hard_link() {
             let link_path = entry
                 .link_name()
@@ -259,8 +260,9 @@ impl<'a> TarballTreeBuilder<'a> {
                 .ok_or_else(|| anyhow!("failed to get symlink target tor tar entry"))?;
             let link_path = PathBuf::from("/").join(link_path);
             let link_path = link_path.components().as_path();
-            if let Some(_ino) = self.path_inode_map.get(link_path) {
+            if let Some((_ino, _index)) = self.path_inode_map.get(link_path) {
                 ino = *_ino;
+                index = *_index;
             } else {
                 bail!(
                     "unknown target {} for hardlink {}",
@@ -270,7 +272,8 @@ impl<'a> TarballTreeBuilder<'a> {
             }
             flags |= RafsV5InodeFlags::HARDLINK;
         } else {
-            self.path_inode_map.insert(path.as_ref().to_path_buf(), ino);
+            self.path_inode_map
+                .insert(path.as_ref().to_path_buf(), (ino, nodes.len()));
         }
 
         // Parse xattrs
@@ -349,8 +352,7 @@ impl<'a> TarballTreeBuilder<'a> {
         // Tar hardlink header has zero file size and no file data associated, so copy value from
         // the associated regular file.
         if entry_type.is_hard_link() {
-            let idx = (node.inode.ino() - 1) as usize;
-            let n = &nodes[idx];
+            let n = &nodes[index];
             node.inode.set_digest(*n.inode.digest());
             node.inode.set_size(n.inode.size());
             node.inode.set_child_count(n.inode.child_count());
@@ -436,7 +438,7 @@ impl<'a> TarballTreeBuilder<'a> {
         if let Some(parent_path) = path.as_ref().parent() {
             if !self.path_inode_map.contains_key(parent_path) {
                 self.make_lost_dirs(parent_path, nodes)?;
-                let node = self.create_directory(parent_path)?;
+                let node = self.create_directory(parent_path, nodes)?;
                 nodes.push(node);
             }
         }
@@ -444,7 +446,7 @@ impl<'a> TarballTreeBuilder<'a> {
         Ok(())
     }
 
-    fn create_directory(&mut self, path: &Path) -> Result<Node> {
+    fn create_directory(&mut self, path: &Path, nodes: &[Node]) -> Result<Node> {
         let ino = (self.path_inode_map.len() + 1) as Inode;
         let name = Self::get_file_name(path)?;
         let mut inode = InodeWrapper::new(self.ctx.fs_version);
@@ -482,7 +484,8 @@ impl<'a> TarballTreeBuilder<'a> {
             v6_dirents_offset: 0,
         };
 
-        self.path_inode_map.insert(path.to_path_buf(), ino);
+        self.path_inode_map
+            .insert(path.to_path_buf(), (ino, nodes.len()));
 
         Ok(node)
     }
