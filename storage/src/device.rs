@@ -123,12 +123,15 @@ pub struct BlobInfo {
     /// V6: Size of the uncompressed chunk information array.
     meta_ci_uncompressed_size: u64,
 
-    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    // SHA256 digest of blob ToC content, including the toc tar header.
+    // It's all zero for inlined bootstrap.
     rafs_blob_toc_digest: [u8; 32],
-    // SHA256 digest of the rafs blob (only valid in merged bootstrap).
+    // SHA256 digest of RAFS blob containing `blob.meta`, `blob.digest` `blob.toc` and optionally
+    // 'image.boot`. Default to `self.blob_id` when it's all zero.
     rafs_blob_digest: [u8; 32],
-    // Size of the rafs blob (only valid in merged bootstrap).
+    // Size of RAFS blob, zero for inlined bootstrap.
     rafs_blob_size: u64,
+    // Size of blob ToC content, it's zero for inlined bootstrap.
     rafs_blob_toc_size: u32,
 
     /// V6: support fs-cache mode
@@ -335,36 +338,48 @@ impl BlobInfo {
         }
     }
 
+    /// Get SHA256 digest of the ToC content, including the toc tar header.
+    ///
+    /// It's all zero for inlined bootstrap.
     pub fn rafs_blob_toc_digest(&self) -> &[u8; 32] {
         &self.rafs_blob_toc_digest
     }
 
+    /// Set SHA256 digest of the ToC content, including the toc tar header.
     pub fn set_rafs_blob_toc_digest(&mut self, digest: [u8; 32]) {
         self.rafs_blob_toc_digest = digest;
     }
 
-    /// Get size of blob `Table of Content`.
+    /// Get size of the ToC content. It's all zero for inlined bootstrap.
     pub fn rafs_blob_toc_size(&self) -> u32 {
         self.rafs_blob_toc_size
     }
 
-    /// Get size of blob `Table of Content`.
+    /// Set size of the ToC content.
     pub fn set_rafs_blob_toc_size(&mut self, sz: u32) {
         self.rafs_blob_toc_size = sz;
     }
 
+    /// The RAFS blob contains `blob.meta`, `blob.digest`, `image.boot`, `ToC` etc.
+    /// Get SHA256 digest of RAFS blob containing `blob.meta`, `blob.digest` `blob.toc` and
+    /// optionally 'image.boot`.
+    ///
+    /// Default to `self.blob_id` when it's all zero.
     pub fn rafs_blob_digest(&self) -> &[u8; 32] {
         &self.rafs_blob_digest
     }
 
+    /// Set SHA256 digest of the RAFS blob.
     pub fn set_rafs_blob_digest(&mut self, digest: [u8; 32]) {
         self.rafs_blob_digest = digest;
     }
 
+    /// Get size of the RAFS blob.
     pub fn rafs_blob_size(&self) -> u64 {
         self.rafs_blob_size
     }
 
+    /// Set size of the RAFS blob.
     pub fn set_rafs_blob_size(&mut self, size: u64) {
         self.rafs_blob_size = size;
     }

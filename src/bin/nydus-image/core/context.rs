@@ -33,7 +33,7 @@ use nydus_storage::meta::{
     BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
     ZranContextGenerator,
 };
-use nydus_utils::{compress, digest, div_round_up, round_down_4k};
+use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::feature::Features;
@@ -56,6 +56,7 @@ pub enum ConversionType {
     TargzToRef,
     TarToStargz,
     TarToRafs,
+    TarToRef,
 }
 
 impl Default for ConversionType {
@@ -101,6 +102,7 @@ impl fmt::Display for ConversionType {
             ConversionType::TargzToRef => write!(f, "targz-ref"),
             ConversionType::TarToRafs => write!(f, "tar-rafs"),
             ConversionType::TarToStargz => write!(f, "tar-stargz"),
+            ConversionType::TarToRef => write!(f, "tar-ref"),
         }
     }
 }
@@ -112,6 +114,7 @@ impl ConversionType {
             ConversionType::EStargzToRef
                 | ConversionType::EStargzIndexToRef
                 | ConversionType::TargzToRef
+                | ConversionType::TarToRef
         )
     }
 }
@@ -913,6 +916,7 @@ pub struct BuildContext {
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
+    pub blob_tar_reader: Option<BufReaderInfo<File>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
     pub has_xattr: bool,
@@ -955,6 +959,7 @@ impl BuildContext {
             prefetch,
             blob_storage,
             blob_zran_generator: None,
+            blob_tar_reader: None,
             blob_features: BlobFeatures::empty(),
             blob_inline_meta,
             has_xattr: false,
@@ -992,6 +997,7 @@ impl Default for BuildContext {
             prefetch: Prefetch::default(),
             blob_storage: None,
             blob_zran_generator: None,
+            blob_tar_reader: None,
             blob_features: BlobFeatures::empty(),
             has_xattr: true,
             blob_inline_meta: false,

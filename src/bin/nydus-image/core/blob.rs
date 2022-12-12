@@ -51,15 +51,23 @@ impl Blob {
             | ConversionType::EStargzToRafs => {
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
-            ConversionType::TargzToRef | ConversionType::EStargzToRef => {
+            ConversionType::TarToRef
+            | ConversionType::TargzToRef
+            | ConversionType::EStargzToRef => {
                 if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                     if let Some(zran) = &ctx.blob_zran_generator {
                         let reader = zran.lock().unwrap().reader();
-                        blob_ctx.blob_hash = reader.get_data_digest();
                         blob_ctx.compressed_blob_size = reader.get_data_size();
-                    }
-                    if blob_ctx.blob_id.is_empty() {
-                        blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
+                        if blob_ctx.blob_id.is_empty() {
+                            let hash = reader.get_data_digest();
+                            blob_ctx.blob_id = format!("{:x}", hash.finalize());
+                        }
+                    } else if let Some(tar_reader) = &ctx.blob_tar_reader {
+                        blob_ctx.compressed_blob_size = tar_reader.position();
+                        if blob_ctx.blob_id.is_empty() {
+                            let hash = tar_reader.get_hash_object();
+                            blob_ctx.blob_id = format!("{:x}", hash.finalize());
+                        }
                     }
                 }
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
@@ -126,8 +134,7 @@ impl Blob {
         let mut ci_data = blob_meta_info.as_byte_slice();
         let mut zran_buf = Vec::new();
         let mut header = blob_ctx.blob_meta_header;
-        if ctx.blob_features.contains(BlobFeatures::ZRAN) {
-            let zran = ctx.blob_zran_generator.as_ref().unwrap();
+        if let Some(ref zran) = ctx.blob_zran_generator {
             let (zran_data, zran_count) = zran.lock().unwrap().to_vec()?;
             header.set_ci_zran_count(zran_count);
             header.set_ci_zran_offset(ci_data.len() as u64);

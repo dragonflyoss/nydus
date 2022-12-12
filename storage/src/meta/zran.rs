@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{Read, Result};
+use std::io::{BufReader, Read, Result};
 use std::mem::size_of;
 use std::slice;
 
@@ -113,6 +113,26 @@ impl<R: Read> ZranContextGenerator<R> {
         let reader = ZranReader::new(file)?;
         let mut generator = ZranGenerator::new(reader.clone());
 
+        generator.set_min_compressed_size(RAFS_DEFAULT_CHUNK_SIZE / 2);
+        generator.set_max_compressed_size(RAFS_DEFAULT_CHUNK_SIZE);
+        generator.set_max_uncompressed_size(RAFS_DEFAULT_CHUNK_SIZE * 2);
+
+        Ok(Self {
+            generator,
+            reader,
+            uncomp_pos: 0,
+        })
+    }
+
+    /// Create a new instance of `ZranContextGenerator` from a `BufReader`.
+    pub fn from_buf_reader(buf_reader: BufReader<R>) -> Result<Self> {
+        let buf = buf_reader.buffer().to_vec();
+        let file = buf_reader.into_inner();
+
+        let reader = ZranReader::new(file)?;
+        reader.set_initial_data(&buf);
+
+        let mut generator = ZranGenerator::new(reader.clone());
         generator.set_min_compressed_size(RAFS_DEFAULT_CHUNK_SIZE / 2);
         generator.set_max_compressed_size(RAFS_DEFAULT_CHUNK_SIZE);
         generator.set_max_uncompressed_size(RAFS_DEFAULT_CHUNK_SIZE * 2);

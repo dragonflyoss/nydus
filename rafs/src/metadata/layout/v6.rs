@@ -1245,7 +1245,7 @@ pub fn calculate_nid(offset: u64, meta_size: u64) -> u64 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct RafsV6Blob {
-    // SHA256 of raw data blob in string form.
+    // SHA256 digest of the blob containing chunk data.
     blob_id: [u8; BLOB_SHA256_LEN],
     // Index in the blob table.
     blob_index: u32,
@@ -1264,6 +1264,7 @@ struct RafsV6Blob {
     // Size of the uncompressed blob, not including CI array and header.
     uncompressed_size: u64,
 
+    // Size of blob ToC content, it's zero for inlined bootstrap.
     rafs_blob_toc_size: u32,
     // Compression algorithm for the compression information array.
     ci_compressor: u32,
@@ -1274,11 +1275,13 @@ struct RafsV6Blob {
     // Size of the uncompressed compression information array.
     ci_uncompressed_size: u64,
 
-    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    // SHA256 digest of blob ToC content, including the toc tar header.
+    // It's all zero for inlined bootstrap.
     rafs_blob_toc_digest: [u8; 32],
-    // SHA256 digest of the rafs blob (only valid in merged bootstrap).
+    // SHA256 digest of RAFS blob containing `blob.meta`, `blob.digest` `blob.toc` and optionally
+    // 'image.boot`. Default to `self.blob_id` when it's all zero.
     rafs_blob_digest: [u8; 32],
-    // Size of the rafs blob (only valid in merged bootstrap).
+    // Size of RAFS blob, zero for inlined bootstrap.
     rafs_blob_size: u64,
 
     reserved2: [u8; 48],

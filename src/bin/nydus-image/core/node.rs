@@ -548,6 +548,15 @@ impl Node {
             chunk.set_compressed_size(info.compressed_size());
             chunk.set_compressed(true);
             chunk_info = Some(info);
+        } else if let Some(ref tar_reader) = ctx.blob_tar_reader {
+            // For `tar-ref` case
+            let pos = tar_reader.position();
+            chunk.set_compressed_offset(pos);
+            chunk.set_compressed_size(buf.len() as u32);
+            chunk.set_compressed(false);
+            reader
+                .read_exact(buf)
+                .with_context(|| format!("failed to read node file {:?}", self.path))?;
         } else {
             reader
                 .read_exact(buf)
@@ -574,7 +583,6 @@ impl Node {
         } else {
             uncompressed_size
         };
-        let pre_compressed_offset = blob_ctx.compressed_offset;
         let pre_uncompressed_offset = blob_ctx.uncompressed_offset;
         blob_ctx.uncompressed_blob_size = pre_uncompressed_offset + aligned_chunk_size as u64;
         blob_ctx.uncompressed_offset += aligned_chunk_size as u64;
@@ -582,21 +590,21 @@ impl Node {
         chunk.set_uncompressed_size(uncompressed_size);
 
         let compressed_size = if ctx.blob_features.contains(BlobFeatures::ZRAN) {
+            // For `tar-ref`, `targz-ref`, `estargz-ref` and `estargzindex-ref`.
             chunk.compressed_size()
         } else {
+            // For other case which needs to write chunk data to data blobs.
             let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
                 .with_context(|| format!("failed to compress node file {:?}", self.path))?;
-            // Dump compressed chunk data to blob
-            if !ctx.conversion_type.is_to_ref() {
-                blob_writer
-                    .write_all(&compressed)
-                    .context("failed to write blob")?;
-            }
-
             let compressed_size = compressed.len() as u32;
+            let pre_compressed_offset = blob_ctx.compressed_offset;
+            blob_writer
+                .write_all(&compressed)
+                .context("failed to write blob")?;
             blob_ctx.blob_hash.update(&compressed);
             blob_ctx.compressed_offset += compressed_size as u64;
             blob_ctx.compressed_blob_size += compressed_size as u64;
+
             chunk.set_compressed_offset(pre_compressed_offset);
             chunk.set_compressed_size(compressed_size);
             chunk.set_compressed(is_compressed);

@@ -307,6 +307,20 @@ impl<R> ZranReader<R> {
         })
     }
 
+    /// Copy data from the buffer into the internal input buffer.
+    pub fn set_initial_data(&self, buf: &[u8]) {
+        let mut state = self.inner.lock().unwrap();
+        assert_eq!(state.stream.avail_in(), 0);
+        assert!(buf.len() <= state.input.len());
+        let ptr = state.input.as_mut_ptr();
+        assert_eq!(state.stream.stream.next_in, ptr);
+
+        state.input[..buf.len()].copy_from_slice(buf);
+        state.reader_hash.update(buf);
+        state.reader_size += buf.len() as u64;
+        state.stream.set_avail_in(buf.len() as u32);
+    }
+
     /// Get size of data read from the reader.
     pub fn get_data_size(&self) -> u64 {
         self.inner.lock().unwrap().reader_size
