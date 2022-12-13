@@ -179,7 +179,7 @@ impl Write for ArtifactMemoryWriter {
     }
 }
 
-pub struct ArtifactFileWriter(ArtifactWriter);
+pub struct ArtifactFileWriter(pub ArtifactWriter);
 
 impl RafsIoWrite for ArtifactFileWriter {
     fn as_any(&self) -> &dyn Any {
@@ -694,6 +694,13 @@ impl BlobManager {
             }
         }
         None
+    }
+
+    pub fn get_blob_id_by_idx(&mut self, idx: usize) -> Option<String> {
+        if idx >= self.len() {
+            return None;
+        }
+        self.blobs[idx].blob_id()
     }
 
     pub fn get_blob_ids(&self) -> Vec<String> {

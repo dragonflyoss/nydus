@@ -19,6 +19,7 @@
 //! - [BlobIoVec](struct.BlobIoVec.html): a scatter/gather list for blob IO operation, containing
 //!   one or more blob IO descriptors
 //! - [BlobPrefetchRequest](struct.BlobPrefetchRequest.html): a blob data prefetching request.
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::hash_map::Drain;
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
 pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_000f;
 
 bitflags! {
+    #[derive(Deserialize, Serialize)]
     /// Features bits for blob management.
     pub struct BlobFeatures: u32 {
         /// Uncompressed chunk data is 4K aligned.
@@ -85,7 +87,7 @@ impl TryFrom<u32> for BlobFeatures {
 ///
 /// The `BlobInfo` structure provides information for the storage subsystem to manage a blob file
 /// and serve blob IO requests for clients.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlobInfo {
     /// The index of blob in RAFS blob table.
     blob_index: u32,
@@ -134,6 +136,7 @@ pub struct BlobInfo {
     // Size of blob ToC content, it's zero for inlined bootstrap.
     rafs_blob_toc_size: u32,
 
+    #[serde(skip_deserializing, skip_serializing)]
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
 }
@@ -186,6 +189,10 @@ impl BlobInfo {
         self.blob_index
     }
 
+    /// Set the blob index.
+    pub fn set_blob_index(&mut self, index: u32) {
+        self.blob_index = index;
+    }
     /// Get the id of the blob.
     pub fn blob_id(&self) -> &str {
         &self.blob_id
@@ -386,6 +393,7 @@ impl BlobInfo {
 }
 
 bitflags! {
+    #[derive(Deserialize, Serialize)]
     /// Blob chunk flags.
     pub struct BlobChunkFlags: u32 {
         /// Chunk data is compressed.

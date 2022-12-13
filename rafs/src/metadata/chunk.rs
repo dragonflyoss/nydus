@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
 use anyhow::{Context, Result};
@@ -18,7 +19,7 @@ use crate::metadata::{RafsStore, RafsVersion};
 use crate::RafsIoWrite;
 
 /// A ChunkInfo object wrapper for different RAFS versions.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ChunkWrapper {
     /// Chunk info structure for RAFS v5.
     V5(RafsV5ChunkInfo),

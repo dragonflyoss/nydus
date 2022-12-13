@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builder::{Builder, DirectoryBuilder, StargzBuilder, TarballBuilder};
 use crate::core::blob_compact::BlobCompactor;
+use crate::core::bootstrap_dedup::BootstrapDedup;
 use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
@@ -486,6 +487,30 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .required(true),
                 )
         )
+        .subcommand(
+            App::new("dedup")
+            .about("(experimental)Rebuild the given bootstrap, remap duplicate blocks to those that already exist locally.")
+            .arg(
+                Arg::new("bootstrap")
+                    .long("bootstrap")
+                    .short('B')
+                    .help("Path to nydus image's metadata blob (required)")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("work-dir")
+                    .long("work-dir")
+                    .help("Working directory for debup")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("output-bootstrap")
+                    .long("output")
+                    .short('O')
+                    .help("Bootstrap to output, default is source bootstrap add suffix .debup")
+                    .required(false),
+            )
+        )
         .arg(
             Arg::new("log-file")
                 .long("log-file")
@@ -553,6 +578,8 @@ fn main() -> Result<()> {
         Command::compact(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("unpack") {
         Command::unpack(matches)
+    } else if let Some(matches) = cmd.subcommand_matches("dedup") {
+        Command::dedup(matches)
     } else {
         println!("{}", usage);
         Ok(())
@@ -959,6 +986,19 @@ impl Command {
             stat.dump();
         }
 
+        Ok(())
+    }
+
+    fn dedup(matches: &clap::ArgMatches) -> Result<()> {
+        let work_dir = PathBuf::from(matches.get_one::<String>("work-dir").unwrap());
+        let bootstrap_path = PathBuf::from(Self::get_bootstrap(matches)?);
+        let output_path = match matches.get_one::<String>("output-bootstrap") {
+            None => bootstrap_path.with_extension("boot.dedup"),
+            Some(s) => PathBuf::from(s),
+        };
+
+        let mut dedup = BootstrapDedup::new(bootstrap_path, output_path, work_dir)?;
+        dedup.do_dedup()?;
         Ok(())
     }
 

@@ -2,15 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::mem::size_of;
 
 use anyhow::{Context, Error, Result};
+use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::layout::v5::{
-    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
+    rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5ExtBlobEntry, RafsV5InodeTable,
+    RafsV5SuperBlock, RafsV5XAttrsTable,
 };
 use nydus_rafs::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
@@ -18,6 +20,7 @@ use nydus_rafs::metadata::layout::v6::{
 };
 use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
 use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperConfig};
+use nydus_rafs::{RafsIoReader, RafsIoWrite};
 use nydus_utils::digest;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 
@@ -764,6 +767,173 @@ impl Bootstrap {
             .writer
             .flush()
             .context("failed to flush bootstrap")?;
+
+        Ok(())
+    }
+
+    pub fn dedup(
+        &mut self,
+        rs: &RafsSuper,
+        reader: &mut RafsIoReader,
+        writer: &mut dyn RafsIoWrite,
+        blob_table: &RafsBlobTable,
+        cache_chunks: &HashMap<RafsDigest, ChunkWrapper>,
+    ) -> Result<()> {
+        match blob_table {
+            RafsBlobTable::V5(table) => {
+                self.rafsv5_dedup(rs, reader, writer, table, cache_chunks)?
+            }
+            RafsBlobTable::V6(table) => {
+                self.rafsv6_dedup(rs, reader, writer, table, cache_chunks)?
+            }
+        }
+
+        Ok(())
+    }
+
+    fn rafsv5_dedup(
+        &mut self,
+        _rs: &RafsSuper,
+        reader: &mut RafsIoReader,
+        writer: &mut dyn RafsIoWrite,
+        blob_table: &RafsV5BlobTable,
+        _cache_chunks: &HashMap<RafsDigest, ChunkWrapper>,
+    ) -> Result<()> {
+        reader.seek_to_offset(0)?;
+        let mut sb = RafsV5SuperBlock::new();
+        reader.read_exact(sb.as_mut())?;
+
+        let old_blob_table_offset = sb.blob_table_offset();
+        let old_table_size = sb.blob_table_size()
+            + rafsv5_align(
+                size_of::<RafsV5ExtBlobEntry>() * sb.extended_blob_table_entries() as usize,
+            ) as u32;
+        let blob_table_size = blob_table.size() as u32;
+        let bootstrap_end = writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for devtable")?;
+
+        let (blob_table_offset, ext_blob_table_offset) = if blob_table_size > old_table_size {
+            (bootstrap_end, bootstrap_end + blob_table_size as u64)
+        } else {
+            (old_blob_table_offset, bootstrap_end)
+        };
+        //write rs
+        sb.set_blob_table_offset(blob_table_offset as u64);
+        sb.set_blob_table_size(blob_table_size as u32);
+        sb.set_extended_blob_table_offset(ext_blob_table_offset as u64);
+        sb.set_extended_blob_table_entries(u32::try_from(blob_table.extended.entries())?);
+        writer.seek(SeekFrom::Start(0))?;
+        sb.store(writer).context("failed to store superblock")?;
+        //rewrite blob table
+        writer
+            .seek_offset(blob_table_offset)
+            .context("failed seek for extended blob table offset")?;
+        blob_table
+            .store(writer)
+            .context("failed to store blob table")?;
+        writer
+            .seek_offset(ext_blob_table_offset)
+            .context("failed seek for extended blob table offset")?;
+        blob_table
+            .store_extended(writer)
+            .context("failed to store extended blob table")?;
+        writer.finalize(Some(String::default()))?;
+
+        Ok(())
+    }
+
+    fn rafsv6_dedup(
+        &mut self,
+        rs: &RafsSuper,
+        reader: &mut RafsIoReader,
+        writer: &mut dyn RafsIoWrite,
+        blob_table: &RafsV6BlobTable,
+        _cache_chunks: &HashMap<RafsDigest, ChunkWrapper>,
+    ) -> Result<()> {
+        let mut sb = RafsV6SuperBlock::new();
+        sb.load(reader)?;
+        let mut ext_sb = RafsV6SuperBlockExt::new();
+        ext_sb.load(reader)?;
+
+        let mut devtable: Vec<RafsV6Device> = Vec::new();
+        let blobs = blob_table.get_all();
+        for entry in blobs.iter() {
+            let mut devslot = RafsV6Device::new();
+            // blob id is String, which is processed by sha256.finalize().
+            if entry.blob_id().is_empty() {
+                bail!(" blob id is empty");
+            } else if entry.blob_id().len() > 64 {
+                bail!(format!(
+                    "blob id length is bigger than 64 bytes, blob id {:?}",
+                    entry.blob_id()
+                ));
+            } else if entry.uncompressed_size() / EROFS_BLOCK_SIZE > u32::MAX as u64 {
+                bail!(format!(
+                    "uncompressed blob size (0x:{:x}) is too big",
+                    entry.uncompressed_size()
+                ));
+            }
+            let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
+            let id = entry.blob_id().as_bytes();
+            let mut blob_id = [0u8; 64];
+            blob_id[..id.len()].copy_from_slice(id);
+            devslot.set_blob_id(&blob_id);
+            devslot.set_blocks(cnt);
+            devslot.set_mapped_blkaddr(0);
+            devtable.push(devslot);
+        }
+
+        let devtable_len = (devtable.len() * size_of::<RafsV6Device>()) as u64;
+        let blob_table_size = blob_table.size() as u64;
+        let old_devtable_offset = sb.s_devt_slotoff as u64 * size_of::<RafsV6Device>() as u64;
+        let old_table_size =
+            rs.meta.blob_table_offset + rs.meta.blob_table_size as u64 - old_devtable_offset;
+        let bootstrap_end = writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for devtable")?;
+
+        let (dev_table_offset, blob_table_offset) = if devtable_len > old_table_size {
+            (
+                bootstrap_end,
+                align_offset(bootstrap_end + devtable_len, EROFS_BLOCK_SIZE as u64),
+            )
+        } else {
+            (old_devtable_offset, bootstrap_end)
+        };
+
+        writer.seek(SeekFrom::Start(0))?;
+        sb.set_devt_slotoff(dev_table_offset);
+        sb.store(writer).context("failed to store rs")?;
+        ext_sb.set_blob_table_offset(blob_table_offset);
+        ext_sb.set_blob_table_size(blob_table_size as u32);
+        ext_sb
+            .store(writer)
+            .context("failed to store extended rs")?;
+
+        // Dump table
+        writer
+            .seek_offset(dev_table_offset)
+            .context("failed to seek devtslot")?;
+        for slot in devtable.iter() {
+            slot.store(writer).context("failed to store device slot")?;
+        }
+        writer
+            .seek_offset(blob_table_offset)
+            .context("failed seek for extended blob table offset")?;
+        blob_table
+            .store(writer)
+            .context("failed to store extended blob table")?;
+
+        let pos = writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end")?;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        let padding_data: [u8; 4096] = [0u8; 4096];
+        writer
+            .write_all(&padding_data[0..padding as usize])
+            .context("failed to write 0 to padding of bootstrap's end")?;
+        writer.flush().context("failed to flush bootstrap")?;
 
         Ok(())
     }

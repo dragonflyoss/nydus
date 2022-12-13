@@ -17,7 +17,7 @@ pub mod zlib_random;
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 /// Supported compression algorithms.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub enum Algorithm {
     None,
     Lz4Block,
