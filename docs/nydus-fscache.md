@@ -67,7 +67,7 @@ make
   make
   ```
 
-3. Prepare a configuration json like below, named as `/path/nydus-erofs-config.json`:
+3. Prepare a configuration json like below, named as `/etc/nydus/nydusd-config.fscache.json`:
 
 ```json
 {
@@ -86,16 +86,15 @@ make
 
 ```
 # make sure the directory exists.
-mkdir -p /var/lib/containerd/io.containerd.snapshotter.v1.nydus
+mkdir -p /var/lib/containerd-nydus
 
 ./bin/containerd-nydus-grpc \
- --config-path /path/nydus-erofs-config.json \
+ --config-path /etc/nydus/nydusd-config.fscache.json \
  --daemon-mode shared \
  --fs-driver fscache \
  --log-level info \
- --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
+ --root /var/lib/containerd-nydus \
  --cache-dir /var/lib/nydus/cache \
- --address /run/containerd/containerd-nydus-grpc.sock \
  --nydusd-path /path/to/nydusd \
  --log-to-stdout
 ```
@@ -117,7 +116,7 @@ version = 2
 [proxy_plugins]
   [proxy_plugins.nydus]
     type = "snapshot"
-    address = "/run/containerd/containerd-nydus-grpc.sock"
+    address = "/run/containerd-nydus/containerd-nydus-grpc.sock"
 
 [plugins."io.containerd.grpc.v1.cri".containerd]
    snapshotter = "nydus"

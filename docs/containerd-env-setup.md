@@ -20,10 +20,10 @@ sudo install -D -m 755 containerd-nydus-grpc /usr/local/bin
 
 Nydus provides a containerd remote snapshotter `containerd-nydus-grpc` (nydus snapshotter) to prepare container rootfs with nydus formatted images.
 
-1. Prepare a `nydusd` configuration to `/etc/nydusd-config.json`:
+1. Prepare a `nydusd` configuration to `/etc/nydus/nydusd-config.fusedev.json`:
 
 ```bash
-$ sudo tee /etc/nydusd-config.json > /dev/null << EOF
+$ sudo tee /etc/nydus/nydusd-config.fusedev.json > /dev/null << EOF
 {
   "device": {
     "backend": {
@@ -77,7 +77,7 @@ sudo rm -rf /var/lib/containerd-nydus
 
 ```bash
 sudo /usr/local/bin/containerd-nydus-grpc \
-    --config-path /etc/nydusd-config.json \
+    --config-path /etc/nydus/nydusd-config.fusedev.json \
     --log-to-stdout
 ```
 
