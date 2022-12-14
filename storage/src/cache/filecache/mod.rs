@@ -224,6 +224,7 @@ impl FileCacheEntry {
                 blob_file_path,
                 blob_info.clone(),
                 Some(rafs_blob_reader),
+                Some(runtime.clone()),
                 false,
             )?;
             Some(meta)
