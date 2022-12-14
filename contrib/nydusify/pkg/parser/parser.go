@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
@@ -188,6 +189,9 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 
 	imageDesc, err := parser.Remote.Resolve(ctx)
 	if err != nil {
+		if strings.Contains(err.Error(), "x509: certificate signed by unknown authority") {
+			logrus.Warningln("try to enable \"--source-insecure\" / \"--target-insecure\" option")
+		}
 		return nil, errors.Wrap(err, "resolve image")
 	}
 
