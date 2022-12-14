@@ -20,6 +20,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
 use nydus_api::ConfigV2;
@@ -245,7 +246,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("Algorithm to compress data chunks:")
                         .required(false)
                         .default_value("zstd")
-                        .value_parser(["none", "lz4_block", "gzip", "zstd"]),
+                        .value_parser(["none", "lz4_block", "zstd"]),
                 )
                 .arg(
                     Arg::new("digester")
@@ -621,11 +622,27 @@ impl Command {
             | ConversionType::TargzToRef
             | ConversionType::EStargzToRef => {
                 Self::ensure_file(&source_path)?;
+                if matches.value_source("compressor") != Some(ValueSource::DefaultValue)
+                    && compressor != compress::Algorithm::GZip
+                {
+                    info!(
+                        "only GZip is supported for conversion type {}, use GZip instead of {}",
+                        conversion_type, compressor
+                    );
+                }
+                compressor = compress::Algorithm::GZip;
+                digester = digest::Algorithm::Sha256;
                 if blob_stor.is_none() {
                     bail!("both --blob and --blob-dir are not provided");
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
+                        conversion_type
+                    );
+                }
+                if version != RafsVersion::V6 {
+                    bail!(
+                        "'--fs-version 5' conflicts with conversion type '{}', only V6 is supported",
                         conversion_type
                     );
                 }
@@ -638,29 +655,29 @@ impl Command {
             }
             ConversionType::EStargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
+                if matches.value_source("compressor") != Some(ValueSource::DefaultValue)
+                    && compressor != compress::Algorithm::GZip
+                {
+                    info!(
+                        "only GZip is supported for conversion type {}, use GZip instead of {}",
+                        conversion_type, compressor
+                    );
+                }
+                compressor = compress::Algorithm::GZip;
+                digester = digest::Algorithm::Sha256;
                 if blob_stor.is_some() {
                     bail!(
                         "conversion type '{}' conflicts with '--blob'",
                         conversion_type
                     );
                 }
-                if compressor != compress::Algorithm::GZip {
-                    info!(
-                        "only gzip is supported by the conversion type, use gzip for compression"
-                    );
-                }
-                compressor = compress::Algorithm::GZip;
-                if digester != digest::Algorithm::Sha256 {
-                    info!("only sha256 is supported by the conversion type, use sha256 for digest");
-                }
-                digester = digest::Algorithm::Sha256;
                 if version != RafsVersion::V6 {
                     bail!(
                         "'--fs-version 5' conflicts with conversion type '{}', only V6 is supported",
                         conversion_type
                     );
                 }
-                if conversion_type == ConversionType::EStargzIndexToRef && blob_id.trim() == "" {
+                if blob_id.trim() == "" {
                     bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
             }
