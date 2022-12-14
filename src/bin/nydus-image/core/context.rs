@@ -356,6 +356,8 @@ pub struct BlobContext {
     /// Blob id (user specified or sha256(blob)).
     pub blob_id: String,
     pub blob_hash: Sha256,
+    pub blob_compressor: compress::Algorithm,
+    pub blob_digester: digest::Algorithm,
     pub blob_prefetch_size: u64,
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
@@ -393,7 +395,13 @@ pub struct BlobContext {
 }
 
 impl BlobContext {
-    pub fn new(blob_id: String, blob_offset: u64, features: BlobFeatures) -> Self {
+    pub fn new(
+        blob_id: String,
+        blob_offset: u64,
+        features: BlobFeatures,
+        compressor: compress::Algorithm,
+        digester: digest::Algorithm,
+    ) -> Self {
         let blob_meta_info = if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             BlobMetaChunkArray::new_v2()
         } else {
@@ -402,6 +410,8 @@ impl BlobContext {
         let mut blob_ctx = Self {
             blob_id,
             blob_hash: Sha256::new(),
+            blob_compressor: compressor,
+            blob_digester: digester,
             blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
             blob_meta_info,
@@ -439,7 +449,13 @@ impl BlobContext {
     }
 
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut blob_ctx = Self::new(blob.blob_id().to_owned(), 0, blob.features());
+        let mut blob_ctx = Self::new(
+            blob.blob_id().to_owned(),
+            0,
+            blob.features(),
+            blob.compressor(),
+            blob.digester(),
+        );
 
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
@@ -604,8 +620,13 @@ impl BlobManager {
     }
 
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
-        let mut blob_ctx =
-            BlobContext::new(ctx.blob_id.clone(), ctx.blob_offset, ctx.blob_features);
+        let mut blob_ctx = BlobContext::new(
+            ctx.blob_id.clone(),
+            ctx.blob_offset,
+            ctx.blob_features,
+            ctx.compressor,
+            ctx.digester,
+        );
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
 
@@ -736,8 +757,8 @@ impl BlobManager {
             let mut flags = RafsSuperFlags::empty();
             match &mut blob_table {
                 RafsBlobTable::V5(table) => {
-                    flags |= RafsSuperFlags::from(build_ctx.compressor);
-                    flags |= RafsSuperFlags::from(build_ctx.digester);
+                    flags |= RafsSuperFlags::from(ctx.blob_compressor);
+                    flags |= RafsSuperFlags::from(ctx.blob_digester);
                     table.add(
                         blob_id,
                         0,
@@ -751,8 +772,8 @@ impl BlobManager {
                     );
                 }
                 RafsBlobTable::V6(table) => {
-                    flags |= RafsSuperFlags::from(build_ctx.compressor);
-                    flags |= RafsSuperFlags::from(build_ctx.digester);
+                    flags |= RafsSuperFlags::from(ctx.blob_compressor);
+                    flags |= RafsSuperFlags::from(ctx.blob_digester);
                     table.add(
                         blob_id,
                         0,

@@ -334,6 +334,8 @@ pub struct RafsSuperConfig {
     pub compressor: compress::Algorithm,
     /// Digest algorithm.
     pub digester: digest::Algorithm,
+    /// Size of data chunks.
+    pub chunk_size: u32,
     /// Whether `explicit_uidgid` enabled or not.
     pub explicit_uidgid: bool,
 }
@@ -341,19 +343,10 @@ pub struct RafsSuperConfig {
 impl RafsSuperConfig {
     /// Check compatibility for two RAFS filesystems.
     pub fn check_compatibility(&self, meta: &RafsSuperMeta) -> Result<()> {
-        if self.compressor != meta.get_compressor() {
+        if self.chunk_size != meta.chunk_size {
             return Err(einval!(format!(
-                "Using inconsistent compressor {:?}, target compressor {:?}",
-                self.compressor,
-                meta.get_compressor()
-            )));
-        }
-
-        if self.digester != meta.get_digester() {
-            return Err(einval!(format!(
-                "Using inconsistent digester {:?}, target digester {:?}",
-                self.digester,
-                meta.get_digester()
+                "Inconsistent configuration of chunk_size: {} vs {}",
+                self.chunk_size, meta.chunk_size
             )));
         }
 
@@ -370,6 +363,14 @@ impl RafsSuperConfig {
                 "Using inconsistent RAFS version {:?}, target RAFS version {:?}",
                 self.version,
                 RafsVersion::try_from(meta.version)?
+            )));
+        }
+
+        if self.version == RafsVersion::V5 && self.digester != meta.get_digester() {
+            return Err(einval!(format!(
+                "RAFS v5 can not support different digest algorithm due to inode digest, {} vs {}",
+                self.digester,
+                meta.get_digester()
             )));
         }
 
@@ -470,11 +471,13 @@ impl RafsSuperMeta {
         }
     }
 
+    /// Get `RafsSuperConfig` object to check compatibility.
     pub fn get_config(&self) -> RafsSuperConfig {
         RafsSuperConfig {
             version: self.version.try_into().unwrap_or_default(),
             compressor: self.get_compressor(),
             digester: self.get_digester(),
+            chunk_size: self.chunk_size,
             explicit_uidgid: self.explicit_uidgid(),
         }
     }

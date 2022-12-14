@@ -326,6 +326,7 @@ impl Bootstrap {
         let config = RafsSuperConfig {
             compressor: ctx.compressor,
             digester: ctx.digester,
+            chunk_size: ctx.chunk_size,
             explicit_uidgid: ctx.explicit_uidgid,
             version: ctx.fs_version,
         };
