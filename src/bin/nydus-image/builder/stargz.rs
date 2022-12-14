@@ -25,7 +25,7 @@ use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
 use nydus_utils::compress::compute_compressed_gzip_size;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
-use nydus_utils::{try_round_up_4k, ByteSize};
+use nydus_utils::{compress, try_round_up_4k, ByteSize};
 
 use crate::builder::{build_bootstrap, Builder};
 use crate::core::blob::Blob;
@@ -825,7 +825,13 @@ impl Builder for StargzBuilder {
             build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
 
         // Generate node chunks and digest
-        let mut blob_ctx = BlobContext::new(ctx.blob_id.clone(), 0, ctx.blob_features);
+        let mut blob_ctx = BlobContext::new(
+            ctx.blob_id.clone(),
+            0,
+            ctx.blob_features,
+            compress::Algorithm::GZip,
+            digest::Algorithm::Sha256,
+        );
         self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
 
         // Dump blob meta

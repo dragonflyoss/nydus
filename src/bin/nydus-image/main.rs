@@ -704,6 +704,7 @@ impl Command {
                 version,
                 compressor,
                 digester,
+                chunk_size,
                 explicit_uidgid: !repeatable,
             };
             blob_mgr.set_chunk_dict(timing_tracer!(
