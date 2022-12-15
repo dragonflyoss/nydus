@@ -191,7 +191,7 @@ fn integration_test_directory_2() {
 
 #[test]
 fn integration_test_directory_3() {
-    test("gzip", false, false, "direct", "oci", "5")
+    test("zstd", false, false, "direct", "oci", "5")
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn integration_test_directory_4() {
 
 #[test]
 fn integration_test_directory_5() {
-    test("gzip", true, true, "cached", "oci", "5")
+    test("zstd", true, true, "cached", "oci", "5")
 }
 
 #[test]
@@ -212,18 +212,18 @@ fn integration_test_directory_6() {
 
 #[test]
 fn integration_test_directory_7() {
-    test("lz4_block", false, true, "cached", "oci", "5")
+    test("zstd", false, true, "cached", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_8() {
-    test("lz4_block", true, true, "cached", "oci", "5")
+    test("zstd", true, true, "cached", "oci", "5")
 }
 
 #[test]
 fn integration_test_directory_9() {
-    test("lz4_block", true, false, "direct", "overlayfs", "5");
-    test("lz4_block", true, false, "direct", "overlayfs", "6")
+    test("zstd", true, false, "direct", "overlayfs", "5");
+    test("zstd", true, false, "direct", "overlayfs", "6")
 }
 
 #[test]
