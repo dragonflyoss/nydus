@@ -443,7 +443,11 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
         if end > self.d_buf.len() {
             return Err(einval!("invalid ZRan decompression status"));
         }
-        Ok(self.d_buf[offset as usize..end].to_vec())
+        // Use alloc_buf here to ensure 4k alignment for later use
+        // in adjust_buffer_for_dio.
+        let mut buffer = alloc_buf(chunk.uncompressed_size() as usize);
+        buffer.copy_from_slice(&self.d_buf[offset as usize..end]);
+        Ok(buffer)
     }
 
     fn next_buf(&mut self, chunk: &dyn BlobChunkInfo) -> Result<Vec<u8>> {

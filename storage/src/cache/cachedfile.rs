@@ -688,7 +688,7 @@ impl FileCacheEntry {
             for chunk_id in pending.iter() {
                 status[(*chunk_id - chunk_index) as usize] = true;
             }
-            (0, pending.len())
+            (0, pending.len() - 1)
         } else {
             let mut start = u32::MAX;
             let mut end = 0;

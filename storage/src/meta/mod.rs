@@ -1091,6 +1091,7 @@ impl BlobMetaChunkArray {
                     zran_last = entry.get_zran_index();
                 }
                 vec.push(BlobMetaChunk::new(index, state));
+                index += 1;
             }
             return Ok(vec);
         }
@@ -1181,6 +1182,7 @@ impl BlobMetaChunkArray {
                     zran_last = entry.get_zran_index();
                 }
                 vec.push(BlobMetaChunk::new(index, state));
+                index += 1;
             }
             return Ok(vec);
         }
