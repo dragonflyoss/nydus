@@ -647,22 +647,24 @@ impl OndiskInodeWrapper {
         }
         let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         // find target block
-        let mut first = 0usize;
-        let mut last = (blocks_count - 1) as usize;
+        let mut first = 0;
+        let mut last = (blocks_count - 1) as i64;
         let mut target_block = 0usize;
         while first <= last {
             let pivot = first + ((last - first) >> 1);
-            let head_entry = self.get_entry(pivot, 0).map_err(err_invalidate_data)?;
+            let head_entry = self
+                .get_entry(pivot as usize, 0)
+                .map_err(err_invalidate_data)?;
             let head_name_offset = head_entry.e_nameoff as usize;
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>();
             let h_name = self
-                .entry_name(pivot, 0, entries_count)
+                .entry_name(pivot as usize, 0, entries_count)
                 .map_err(err_invalidate_data)?;
             let t_name = self
-                .entry_name(pivot, entries_count - 1, entries_count)
+                .entry_name(pivot as usize, entries_count - 1, entries_count)
                 .map_err(err_invalidate_data)?;
             if h_name <= name && t_name >= name {
-                target_block = pivot;
+                target_block = pivot as usize;
                 break;
             } else if h_name > name {
                 last = pivot - 1;
@@ -791,14 +793,14 @@ impl RafsInode for OndiskInodeWrapper {
             let entries_count = head_name_offset / size_of::<RafsV6Dirent>();
 
             let mut first = 0;
-            let mut last = entries_count - 1;
+            let mut last = (entries_count - 1) as i64;
             while first <= last {
                 let pivot = first + ((last - first) >> 1);
                 let de = self
-                    .get_entry(target_block, pivot)
+                    .get_entry(target_block, pivot as usize)
                     .map_err(err_invalidate_data)?;
                 let d_name = self
-                    .entry_name(target_block, pivot, entries_count)
+                    .entry_name(target_block, pivot as usize, entries_count)
                     .map_err(err_invalidate_data)?;
                 match d_name.cmp(name) {
                     Ordering::Equal => {
